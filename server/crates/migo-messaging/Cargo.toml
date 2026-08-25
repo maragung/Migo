@@ -1,0 +1,24 @@
+[package]
+name = "migo-messaging"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Conversations, sequencing, dedup, receipts, sync, and the delivery plan."
+
+[dependencies]
+migo-cache.workspace = true
+migo-core.workspace = true
+migo-protocol.workspace = true
+migo-ratelimit.workspace = true
+migo-store.workspace = true
+migo-wire.workspace = true
+
+async-trait.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }

@@ -1,0 +1,23 @@
+[package]
+name = "migo-cache"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Ephemeral, reconstructible state: cache traits with an in-memory and a Redis backend."
+
+[dependencies]
+migo-core.workspace = true
+migo-protocol.workspace = true
+migo-wire.workspace = true
+
+async-trait.workspace = true
+parking_lot.workspace = true
+redis.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time"] }

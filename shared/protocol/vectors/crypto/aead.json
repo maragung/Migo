@@ -1,0 +1,137 @@
+{
+  "$comment": "XChaCha20-Poly1305 sealed envelopes: nonce || ciphertext || tag, plus the tampering a receiver must reject.",
+  "provenance": "computed by tools/vectors/generate_crypto_vectors.py: HChaCha20 written from draft-irtf-cfrg-xchacha and checked against its test vector, over cryptography's ChaCha20Poly1305",
+  "note": "`sealed` is the whole output of seal_with_nonce, so a runner can compare it to one value instead of reassembling three. Every rejection case is a one-bit or one-field edit of a valid message from `cases`.",
+  "cases": [
+    {
+      "name": "empty_plaintext_empty_aad",
+      "key": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "nonce": "101112131415161718191a1b1c1d1e1f2021222324252627",
+      "aad": "",
+      "plaintext": "",
+      "sealed": "101112131415161718191a1b1c1d1e1f202122232425262730524c3b8a00cd203bcf65d6d87fbe8a",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "empty_plaintext_with_aad",
+      "key": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "nonce": "101112131415161718191a1b1c1d1e1f2021222324252627",
+      "aad": "6d69676f2d656e76656c6f70652d7631",
+      "plaintext": "",
+      "sealed": "101112131415161718191a1b1c1d1e1f202122232425262741e50277ddd8ea5702d966ce4b1c44e4",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "short_plaintext_no_aad",
+      "key": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "nonce": "101112131415161718191a1b1c1d1e1f2021222324252627",
+      "aad": "",
+      "plaintext": "68656c6c6f",
+      "sealed": "101112131415161718191a1b1c1d1e1f2021222324252627fae5fbaee518ac361e6a52c266344cf844d8d9f68a",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "short_plaintext_with_aad",
+      "key": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "nonce": "101112131415161718191a1b1c1d1e1f2021222324252627",
+      "aad": "636f6e766572736174696f6e3a3432",
+      "plaintext": "68656c6c6f",
+      "sealed": "101112131415161718191a1b1c1d1e1f2021222324252627fae5fbaee5f2a6ea5c4aa3a97637d38a6f8fa26874",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "exactly_one_chacha_block",
+      "key": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "nonce": "101112131415161718191a1b1c1d1e1f2021222324252627",
+      "aad": "616164",
+      "plaintext": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "sealed": "101112131415161718191a1b1c1d1e1f2021222324252627928195c18e1e9a44e96a42a61d63bece85423a0c594f9501ad545a6adc1e822ef3233aa45e480092e47f5f62a7a3c9a3e2d704f9b2b58490831fae1fba6edcf5b03178a555008bbee42997a61a769194",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "one_block_plus_one_byte",
+      "key": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "nonce": "101112131415161718191a1b1c1d1e1f2021222324252627",
+      "aad": "616164",
+      "plaintext": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40",
+      "sealed": "101112131415161718191a1b1c1d1e1f2021222324252627928195c18e1e9a44e96a42a61d63bece85423a0c594f9501ad545a6adc1e822ef3233aa45e480092e47f5f62a7a3c9a3e2d704f9b2b58490831fae1fba6edcf59cd9e9897827b758ff0fe837cbdf9987a8",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "all_zero_key_and_nonce",
+      "key": "0000000000000000000000000000000000000000000000000000000000000000",
+      "nonce": "000000000000000000000000000000000000000000000000",
+      "aad": "",
+      "plaintext": "7a65726f",
+      "sealed": "00000000000000000000000000000000000000000000000002fbe4e6e8e532bc5a18f13b4a6b04aa1741fcc2",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "utf8_plaintext",
+      "key": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "nonce": "101112131415161718191a1b1c1d1e1f2021222324252627",
+      "aad": "",
+      "plaintext": "68616c6f2064756e696120e2809420e4b896e7958c",
+      "sealed": "101112131415161718191a1b1c1d1e1f2021222324252627fae1fbadaa7fe92d8802684f91fa90252dc5cf8ac1db0c5333ce4cd83ccf6c9a873d7eee28",
+      "provenance": "independent-python"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "flipped_tag_bit",
+      "key": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "aad": "636f6e766572736174696f6e3a3432",
+      "sealed": "101112131415161718191a1b1c1d1e1f2021222324252627fae5fbaee5f2a6ea5c4aa3a97637d38a6f8fa26875",
+      "error": "DecryptionFailed",
+      "why": "the tag is what makes the ciphertext unforgeable"
+    },
+    {
+      "name": "flipped_ciphertext_bit",
+      "key": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "aad": "636f6e766572736174696f6e3a3432",
+      "sealed": "101112131415161718191a1b1c1d1e1f2021222324252627fbe5fbaee5f2a6ea5c4aa3a97637d38a6f8fa26874",
+      "error": "DecryptionFailed",
+      "why": "AEAD is not malleable: one bit changes the tag"
+    },
+    {
+      "name": "flipped_nonce_bit",
+      "key": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "aad": "636f6e766572736174696f6e3a3432",
+      "sealed": "111112131415161718191a1b1c1d1e1f2021222324252627fae5fbaee5f2a6ea5c4aa3a97637d38a6f8fa26874",
+      "error": "DecryptionFailed",
+      "why": "the nonce is authenticated by being an input to the subkey"
+    },
+    {
+      "name": "wrong_associated_data",
+      "key": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "aad": "636f6e766572736174696f6e3a3433",
+      "sealed": "101112131415161718191a1b1c1d1e1f2021222324252627fae5fbaee5f2a6ea5c4aa3a97637d38a6f8fa26874",
+      "error": "DecryptionFailed",
+      "why": "an envelope must not open in a conversation it was not sealed for"
+    },
+    {
+      "name": "wrong_key",
+      "key": "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+      "aad": "636f6e766572736174696f6e3a3432",
+      "sealed": "101112131415161718191a1b1c1d1e1f2021222324252627fae5fbaee5f2a6ea5c4aa3a97637d38a6f8fa26874",
+      "error": "DecryptionFailed",
+      "why": "the obvious case, stated so the file cannot be read as only testing subtle ones"
+    },
+    {
+      "name": "truncated_below_nonce_and_tag",
+      "key": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "aad": "636f6e766572736174696f6e3a3432",
+      "sealed": "101112131415161718191a1b1c1d1e1f2021222324252627fae5fbaee5f2a6ea5c4aa3a97637d3",
+      "error": "BadLength",
+      "why": "rejected by length before any slicing, not by a panic"
+    },
+    {
+      "name": "empty_input",
+      "key": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "aad": "636f6e766572736174696f6e3a3432",
+      "sealed": "",
+      "error": "BadLength",
+      "why": "zero bytes cannot contain a nonce"
+    }
+  ]
+}

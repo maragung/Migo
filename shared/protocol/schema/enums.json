@@ -1,0 +1,447 @@
+{
+  "$comment": "Wire enums. Discriminants are frozen once released; value 0 is always Unknown so an old peer can decode a new variant without failing.",
+  "enums": [
+    {
+      "name": "Platform",
+      "doc": "Client platform reported in HELLO",
+      "variants": [
+        {
+          "name": "Unknown",
+          "value": 0
+        },
+        {
+          "name": "Web",
+          "value": 1
+        },
+        {
+          "name": "Android",
+          "value": 2
+        },
+        {
+          "name": "Ios",
+          "value": 3
+        },
+        {
+          "name": "Desktop",
+          "value": 4
+        },
+        {
+          "name": "Bot",
+          "value": 5
+        },
+        {
+          "name": "LoadTest",
+          "value": 6
+        }
+      ]
+    },
+    {
+      "name": "BandwidthMode",
+      "doc": "Negotiated in HELLO so the server stops sending what the client will not render",
+      "variants": [
+        {
+          "name": "Unknown",
+          "value": 0
+        },
+        {
+          "name": "Auto",
+          "value": 1
+        },
+        {
+          "name": "Normal",
+          "value": 2
+        },
+        {
+          "name": "LowData",
+          "value": 3
+        },
+        {
+          "name": "UltraLowData",
+          "value": 4
+        }
+      ]
+    },
+    {
+      "name": "PresenceState",
+      "variants": [
+        {
+          "name": "Unknown",
+          "value": 0
+        },
+        {
+          "name": "Offline",
+          "value": 1
+        },
+        {
+          "name": "Online",
+          "value": 2
+        },
+        {
+          "name": "Away",
+          "value": 3
+        },
+        {
+          "name": "Busy",
+          "value": 4
+        },
+        {
+          "name": "Invisible",
+          "value": 5
+        }
+      ]
+    },
+    {
+      "name": "MessageKind",
+      "variants": [
+        {
+          "name": "Unknown",
+          "value": 0
+        },
+        {
+          "name": "Text",
+          "value": 1
+        },
+        {
+          "name": "Media",
+          "value": 2
+        },
+        {
+          "name": "System",
+          "value": 3
+        },
+        {
+          "name": "Game",
+          "value": 4
+        },
+        {
+          "name": "Gift",
+          "value": 5
+        },
+        {
+          "name": "Sticker",
+          "value": 6
+        },
+        {
+          "name": "Voice",
+          "value": 7
+        },
+        {
+          "name": "KeyExchange",
+          "value": 8
+        }
+      ]
+    },
+    {
+      "name": "ConversationKind",
+      "variants": [
+        {
+          "name": "Unknown",
+          "value": 0
+        },
+        {
+          "name": "Direct",
+          "value": 1
+        },
+        {
+          "name": "Group",
+          "value": 2
+        },
+        {
+          "name": "Room",
+          "value": 3
+        }
+      ]
+    },
+    {
+      "name": "EncryptionMode",
+      "doc": "What the UI is allowed to claim for this conversation",
+      "variants": [
+        {
+          "name": "Unknown",
+          "value": 0
+        },
+        {
+          "name": "None",
+          "value": 1
+        },
+        {
+          "name": "Transport",
+          "value": 2
+        },
+        {
+          "name": "EndToEnd",
+          "value": 3
+        }
+      ]
+    },
+    {
+      "name": "ReceiptKind",
+      "variants": [
+        {
+          "name": "Unknown",
+          "value": 0
+        },
+        {
+          "name": "Delivered",
+          "value": 1
+        },
+        {
+          "name": "Read",
+          "value": 2
+        }
+      ]
+    },
+    {
+      "name": "TypingState",
+      "variants": [
+        {
+          "name": "Unknown",
+          "value": 0
+        },
+        {
+          "name": "Start",
+          "value": 1
+        },
+        {
+          "name": "Stop",
+          "value": 2
+        }
+      ]
+    },
+    {
+      "name": "SyncStatus",
+      "doc": "Truncated tells the client to render a history boundary instead of silently missing messages",
+      "variants": [
+        {
+          "name": "Unknown",
+          "value": 0
+        },
+        {
+          "name": "Ok",
+          "value": 1
+        },
+        {
+          "name": "Truncated",
+          "value": 2
+        }
+      ]
+    },
+    {
+      "name": "TopicKind",
+      "doc": "Subscription scope",
+      "variants": [
+        {
+          "name": "Unknown",
+          "value": 0
+        },
+        {
+          "name": "Conversation",
+          "value": 1
+        },
+        {
+          "name": "Room",
+          "value": 2
+        },
+        {
+          "name": "User",
+          "value": 3
+        },
+        {
+          "name": "Game",
+          "value": 4
+        }
+      ]
+    },
+    {
+      "name": "RoomKind",
+      "variants": [
+        {
+          "name": "Unknown",
+          "value": 0
+        },
+        {
+          "name": "Public",
+          "value": 1
+        },
+        {
+          "name": "Managed",
+          "value": 2
+        }
+      ]
+    },
+    {
+      "name": "RoomRole",
+      "doc": "Ordered: a numerically higher role outranks a lower one",
+      "variants": [
+        {
+          "name": "Unknown",
+          "value": 0
+        },
+        {
+          "name": "Member",
+          "value": 1
+        },
+        {
+          "name": "Helper",
+          "value": 2
+        },
+        {
+          "name": "Moderator",
+          "value": 3
+        },
+        {
+          "name": "Admin",
+          "value": 4
+        },
+        {
+          "name": "Manager",
+          "value": 5
+        },
+        {
+          "name": "Owner",
+          "value": 6
+        }
+      ]
+    },
+    {
+      "name": "NotificationKind",
+      "variants": [
+        {
+          "name": "Unknown",
+          "value": 0
+        },
+        {
+          "name": "Message",
+          "value": 1
+        },
+        {
+          "name": "Mention",
+          "value": 2
+        },
+        {
+          "name": "Reply",
+          "value": 3
+        },
+        {
+          "name": "FriendRequest",
+          "value": 4
+        },
+        {
+          "name": "Gift",
+          "value": 5
+        },
+        {
+          "name": "LevelUp",
+          "value": 6
+        },
+        {
+          "name": "Achievement",
+          "value": 7
+        },
+        {
+          "name": "RoomInvite",
+          "value": 8
+        },
+        {
+          "name": "RoomAnnouncement",
+          "value": 9
+        },
+        {
+          "name": "Event",
+          "value": 10
+        },
+        {
+          "name": "GameChallenge",
+          "value": 11
+        },
+        {
+          "name": "VoiceNote",
+          "value": 12
+        },
+        {
+          "name": "MissedCall",
+          "value": 13
+        },
+        {
+          "name": "IncomingCall",
+          "value": 14
+        }
+      ]
+    },
+    {
+      "name": "RelationshipKind",
+      "variants": [
+        {
+          "name": "Unknown",
+          "value": 0
+        },
+        {
+          "name": "Friend",
+          "value": 1
+        },
+        {
+          "name": "PendingOutgoing",
+          "value": 2
+        },
+        {
+          "name": "PendingIncoming",
+          "value": 3
+        },
+        {
+          "name": "Follow",
+          "value": 4
+        },
+        {
+          "name": "Block",
+          "value": 5
+        },
+        {
+          "name": "Favorite",
+          "value": 6
+        }
+      ]
+    },
+    {
+      "name": "CloseReason",
+      "doc": "Sent in RECONNECT_HINT / close frames so the client can pick the right recovery path",
+      "variants": [
+        {
+          "name": "Unknown",
+          "value": 0
+        },
+        {
+          "name": "ClientRequest",
+          "value": 1
+        },
+        {
+          "name": "ServerShutdown",
+          "value": 2
+        },
+        {
+          "name": "NodeDraining",
+          "value": 3
+        },
+        {
+          "name": "SessionLagging",
+          "value": 4
+        },
+        {
+          "name": "ResumeRequired",
+          "value": 5
+        },
+        {
+          "name": "AuthExpired",
+          "value": 6
+        },
+        {
+          "name": "Rebalance",
+          "value": 7
+        },
+        {
+          "name": "ProtocolViolation",
+          "value": 8
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  // Solution file. It compiles nothing itself; it tells `tsc --build` what exists and
+  // in what order, which is how a change in @migo/wire type-checks its consumers
+  // without every package pinning a published version of its sibling.
+  "files": [],
+  "references": [
+    { "path": "./packages/wire" },
+    { "path": "./packages/protocol" },
+    { "path": "./packages/crypto" },
+    { "path": "./packages/sdk" },
+    { "path": "./tools/loadgen" }
+  ]
+}

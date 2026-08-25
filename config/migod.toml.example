@@ -1,0 +1,65 @@
+# =============================================================================
+# migod configuration — file form.
+#
+# Copy to config/migod.toml to activate it (migod loads that path automatically
+# when MIGO_CONFIG is unset), or point MIGO_CONFIG at a copy elsewhere:
+#
+#   cp config/migod.toml.example config/migod.toml
+#
+# Precedence, lowest to highest: built-in defaults -> this file -> environment
+# (MIGO_* with __ for nesting) -> CLI flags. Anything omitted here keeps its
+# built-in default. Values below reproduce the development defaults.
+#
+# This template must never carry a real secret: keep token_key on the documented
+# development placeholder and generate real keys straight into the environment of
+# the process that needs them.
+# =============================================================================
+
+[node]
+id = "migo-local-1"
+region = "local"
+country = "ID"
+# Do not add "federation" unless [federation].enabled is true with an allow-list:
+# the node refuses to start on a federation role while federation is off.
+roles = ["api", "gateway", "room", "game"]
+environment = "development"           # development | staging | production
+# signing_key = "base64-32-bytes"     # required only when federation is enabled;
+                                       # generate with: openssl rand -base64 32
+
+[http]
+bind = "0.0.0.0:8080"
+public_url = "http://localhost:8080"
+cors_origins = ["http://localhost:3000"]
+
+[store]
+backend = "memory"                    # memory | postgres
+# For durable storage, switch the backend and set the URL. migod migrates the
+# schema on boot; nothing else is required.
+# backend = "postgres"
+# url = "postgres://migo:migo@127.0.0.1:5432/migo"
+max_connections = 16
+
+[cache]
+backend = "memory"                    # memory | redis
+# backend = "redis"
+# url = "redis://127.0.0.1:6379/0"
+
+[media]
+backend = "filesystem"                # filesystem | s3
+local_dir = "./var/media"             # filesystem backend only
+# endpoint = "http://127.0.0.1:9000"  # s3 backend
+# bucket = "migo-media"
+
+[auth]
+# The well-known development placeholder: it boots a local node and is refused
+# outside development. Generate a real key with: openssl rand -base64 32
+token_key = "development-only-insecure-token-key"
+access_ttl_seconds = 900
+refresh_ttl_seconds = 2592000
+allow_registration = true
+
+[telemetry]
+log_level = "info"
+log_format = "pretty"                 # pretty | json
+trace_sample_ratio = 0.01
+# otlp_endpoint = "http://127.0.0.1:4317"

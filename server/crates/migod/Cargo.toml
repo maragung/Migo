@@ -1,0 +1,59 @@
+[package]
+name = "migod"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The Migo server daemon: the composition root that wires every layer into one running process."
+
+# The daemon is a thin binary over a library. `migod::run_blocking` and `App` live in the lib so
+# the integration test harness can build an `App` against in-memory backends and drive it without a
+# socket; `main.rs` only parses the environment and calls in.
+[lib]
+name = "migod"
+path = "src/lib.rs"
+
+[[bin]]
+name = "migod"
+path = "src/main.rs"
+
+[dependencies]
+# --- the whole system, layer by layer ---
+# Layer 1: kernel.
+migo-core       = { workspace = true }
+migo-protocol   = { workspace = true }
+# Layer 2: platform.
+migo-store      = { workspace = true }
+migo-cache      = { workspace = true }
+migo-ratelimit  = { workspace = true }
+# Layer 3: domain.
+migo-auth       = { workspace = true }
+migo-messaging  = { workspace = true }
+migo-presence   = { workspace = true }
+migo-rooms      = { workspace = true }
+migo-social     = { workspace = true }
+migo-media      = { workspace = true }
+migo-moderation = { workspace = true }
+migo-notify     = { workspace = true }
+migo-economy    = { workspace = true }
+migo-games      = { workspace = true }
+migo-bots       = { workspace = true }
+# Layer 4: transports. The two front doors, mounted side by side; they never see each other.
+migo-gateway    = { workspace = true }
+migo-api        = { workspace = true }
+
+# --- runtime, transport, and glue ---
+tokio        = { workspace = true }
+axum         = { workspace = true }
+tower-http   = { workspace = true }
+async-trait  = { workspace = true }
+bytes        = { workspace = true }
+anyhow       = { workspace = true }
+tracing      = { workspace = true }
+# The binary chooses how logs are formatted and filtered; the library stays subscriber-agnostic.
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

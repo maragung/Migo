@@ -1,0 +1,232 @@
+# Migo — cut a release from a version tag.
+#
+# ci.yml and android.yml prove that main is green on every push and pull request. This
+# workflow is what turns a green commit into artifacts people can run, and it fires only
+# when a version tag is pushed (v1.2.3). The tag is the trigger and the single source of
+# the version number: nothing here reads a version out of a file, so the tag and the
+# artifacts can never disagree.
+#
+# Why the binaries are built here and not committed: the development sandbox has no
+# Android or JVM toolchain and does not build release artifacts, so "the release binary"
+# is, by construction, whatever a clean runner produces from the tagged source. That is
+# the honest provenance — every asset below is compiled in this workflow from the commit
+# the tag points at, not uploaded from a laptop.
+#
+# What a release produces:
+#   * migod, a stripped Linux x86_64 binary, as a .tar.gz with a SHA-256 sidecar
+#     (attached to the GitHub Release).
+#   * Two container images pushed to GHCR: migo-migod and migo-web.
+#   * The Android app APK (debug variant — the repository holds no release-signing key,
+#     so a signed release build is not something CI can honestly produce yet).
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # Lets a maintainer re-run the release for an existing tag from the Actions tab if a
+  # single asset job failed — the create step is idempotent and every upload clobbers.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)build the release for, e.g. v0.1.0'
+        required: true
+
+# A release must never be cancelled halfway, which would leave a release with some assets
+# and not others. Group by the tag so two pushes of the same tag serialise, and never
+# cancel an in-flight run.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Least privilege by default; the jobs that need to write a release or push a package widen
+# it for themselves and nothing else.
+permissions:
+  contents: read
+
+env:
+  # The tag name drives everything. On a tag push GITHUB_REF_NAME is the tag; on a manual
+  # dispatch it comes from the input. Both land in this one variable so every job below
+  # reads the same thing.
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  # ---------------------------------------------------------------- release shell
+  # Creates the (empty) GitHub Release first, so the asset jobs have somewhere to upload
+  # to and can run in parallel. Idempotent: re-running for a tag that already has a
+  # release reuses it rather than failing, which is what makes workflow_dispatch re-runs
+  # safe.
+  create-release:
+    name: Create the GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gh resolves the target repository from the origin remote this checkout sets.
+          fetch-depth: 0
+
+      - name: Create or reuse the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; reusing it."
+            exit 0
+          fi
+          # A tag with a pre-release suffix (v1.2.3-rc1) is marked pre-release so it does
+          # not show up as the latest stable release.
+          prerelease=""
+          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$TAG" $prerelease \
+            --title "Migo $TAG" \
+            --generate-notes \
+            --verify-tag
+
+  # ---------------------------------------------------------------- migod binary
+  migod-binary:
+    name: migod — Linux x86_64 binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: create-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Stable, matching ci.yml — the MSRV promise is verified there, so the release build
+      # uses the same toolchain developers do.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          key: release-migod
+
+      - name: Build the release binary
+        run: cargo build --release --manifest-path server/Cargo.toml --bin migod
+
+      - name: Package the tarball and checksum
+        run: |
+          version="${TAG#v}"
+          triple="x86_64-unknown-linux-gnu"
+          name="migod-${version}-${triple}"
+          bin="server/target/release/migod"
+          # strip mirrors the Docker image build, so the tarball and the container carry
+          # the same size binary rather than one with debug symbols and one without.
+          strip "$bin"
+          mkdir -p "dist/${name}"
+          cp "$bin" "dist/${name}/migod"
+          # LICENSE if the repository carries one at the root; harmless if it does not.
+          cp LICENSE "dist/${name}/" 2>/dev/null || true
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          ( cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+          ls -l dist
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber
+
+  # ---------------------------------------------------------------- container images
+  images:
+    name: Container images to GHCR
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Independent of the release: the images live in the container registry, not as
+    # release assets, so they do not need the release to exist first.
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The built-in token has packages:write from the job permissions above — no personal
+      # access token is used or needed to publish to this repository's GHCR namespace.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive version and owner
+        id: meta
+        run: |
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          # GHCR namespaces must be lowercase; the owner login may not be.
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      # Both images build from the repository root as their context (see the header of
+      # each Dockerfile), pushed twice: the exact version and a moving :latest.
+      - name: Build and push migo-migod
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.migod
+          push: true
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.owner }}/migo-migod:${{ steps.meta.outputs.version }}
+            ghcr.io/${{ steps.meta.outputs.owner }}/migo-migod:latest
+          # The GitHub Actions cache backend keeps the cargo-chef dependency layer warm
+          # between releases, so only changed crates recompile.
+          cache-from: type=gha,scope=migod
+          cache-to: type=gha,scope=migod,mode=max
+
+      - name: Build and push migo-web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.web
+          push: true
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.version }}
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.owner }}/migo-web:${{ steps.meta.outputs.version }}
+            ghcr.io/${{ steps.meta.outputs.owner }}/migo-web:latest
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,scope=web,mode=max
+
+  # ---------------------------------------------------------------- android apk
+  android-apk:
+    name: Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: create-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install the SDK packages the build needs
+        run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Assemble the APK
+        working-directory: clients/android
+        run: gradle --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${TAG#v}"
+          apk="clients/android/app/build/outputs/apk/debug/app-debug.apk"
+          out="migo-${version}-debug.apk"
+          cp "$apk" "$out"
+          gh release upload "$TAG" "$out" --clobber

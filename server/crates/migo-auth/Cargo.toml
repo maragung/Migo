@@ -1,0 +1,26 @@
+[package]
+name = "migo-auth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Registration, sign-in, session tokens, and device revocation."
+
+[dependencies]
+migo-core.workspace = true
+migo-crypto.workspace = true
+migo-protocol.workspace = true
+migo-ratelimit.workspace = true
+migo-store.workspace = true
+
+async-trait.workspace = true
+base64.workspace = true
+parking_lot.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+
+[dev-dependencies]
+migo-cache.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }

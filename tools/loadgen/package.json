@@ -1,0 +1,26 @@
+{
+  "name": "@migo/loadgen",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Migo load generator: drives many virtual clients through the real @migo/sdk path — REST bootstrap, gateway handshake, and end-to-end sends — then reports throughput, latency percentiles, and errors by class.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "migo-loadgen": "./dist/main.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "clean": "tsc --build --clean",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@migo/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

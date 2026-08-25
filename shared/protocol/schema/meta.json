@@ -1,0 +1,63 @@
+{
+  "$comment": "Migo Wire Protocol metadata. Normative. See docs/02-protocol.md.",
+  "protocol": { "name": "MWP", "version": 1 },
+  "epoch_ms": 1704067200000,
+  "limits": {
+    "MAX_FRAME_BYTES": 262144,
+    "MAX_STRING_BYTES": 65536,
+    "MAX_BYTES_LEN": 131072,
+    "MAX_LIST_ITEMS": 4096,
+    "MAX_MAP_ITEMS": 1024,
+    "MAX_NESTING_DEPTH": 16,
+    "MAX_BATCH_ITEMS": 256,
+    "MAX_VARINT_BYTES": 10,
+    "COMPRESS_MIN_BYTES": 512,
+    "COMPRESS_MIN_GAIN_PERCENT": 10,
+    "MAX_SUBSCRIPTIONS": 512,
+    "DEFAULT_HEARTBEAT_MS": 30000,
+    "SESSION_QUEUE_CAPACITY": 256,
+    "LAGGING_DEADLINE_MS": 5000,
+    "BATCH_LINGER_MS": 15,
+    "RESUME_BUFFER_FRAMES": 512,
+    "RESUME_WINDOW_MS": 120000
+  },
+  "flags": [
+    { "name": "COMPRESSED",   "bit": 0, "description": "Payload is deflate-raw compressed" },
+    { "name": "TRACED",       "bit": 1, "description": "16-byte trace id + 8-byte span id precede the payload" },
+    { "name": "BATCH",        "bit": 2, "description": "Payload is varint count then count x (varint len, sub-frame)" },
+    { "name": "ERROR",        "bit": 3, "description": "Payload is Error instead of the opcode response type" },
+    { "name": "ACK_REQUIRED", "bit": 4, "description": "Receiver must acknowledge by cumulative watermark" },
+    { "name": "FRAGMENT",     "bit": 5, "description": "varint index, varint total follow; payload is a slice" },
+    { "name": "RESERVED_6",   "bit": 6, "description": "Must be zero in MWP/1" },
+    { "name": "FLAGS_EXT",    "bit": 7, "description": "A second flags byte follows (reserved for MWP/2)" }
+  ],
+  "features": [
+    { "name": "COMPRESSION",   "bit": 0,  "description": "deflate-raw frame compression" },
+    { "name": "BATCHING",      "bit": 1,  "description": "BATCH frames" },
+    { "name": "E2E_V1",        "bit": 2,  "description": "X3DH + Double Ratchet private messaging" },
+    { "name": "GROUP_E2E_V1",  "bit": 3,  "description": "Sender-key group encryption" },
+    { "name": "PRESENCE",       "bit": 4,  "description": "Presence events" },
+    { "name": "TYPING",         "bit": 5,  "description": "Typing indicators" },
+    { "name": "ROOMS",          "bit": 6,  "description": "Public and Managed rooms" },
+    { "name": "MEDIA_UPLOAD",   "bit": 7,  "description": "Signed-URL media upload" },
+    { "name": "GAMES",          "bit": 8,  "description": "Server-authoritative mini games" },
+    { "name": "BOTS",           "bit": 9,  "description": "Bot actors in rooms" },
+    { "name": "TRANSLATION",    "bit": 10, "description": "On-demand message translation" },
+    { "name": "VOICE_MESSAGE",  "bit": 11, "description": "Voice message attachments" },
+    { "name": "QUIC",           "bit": 12, "description": "QUIC transport upgrade offer" },
+    { "name": "TRACING",        "bit": 13, "description": "Accepts TRACED frames" },
+    { "name": "RESUME",         "bit": 14, "description": "Session resume by frame watermark" },
+    { "name": "ECONOMY",        "bit": 15, "description": "Gifts and currency events" }
+  ],
+  "delivery_classes": [
+    { "name": "Critical",    "description": "Never dropped. Lagging session is closed with RESUME_REQUIRED instead" },
+    { "name": "Coalescable", "description": "Newest replaces oldest for the same coalescing key" },
+    { "name": "Droppable",   "description": "Dropped silently under pressure, counted in metrics" }
+  ],
+  "auth_levels": [
+    { "name": "None",   "description": "Allowed on an unauthenticated session" },
+    { "name": "User",   "description": "Requires an authenticated user session" },
+    { "name": "Bot",    "description": "Requires a bot session with the matching capability" },
+    { "name": "Server", "description": "Mesh-internal only. Never accepted from a client socket" }
+  ]
+}

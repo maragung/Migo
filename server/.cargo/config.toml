@@ -1,0 +1,9 @@
+# Faster incremental builds on developer machines; CI overrides with --release.
+[build]
+incremental = true
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=native"]
+
+[net]
+retry = 3

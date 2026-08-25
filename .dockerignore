@@ -1,0 +1,42 @@
+# Build-context excludes for the images under infra/docker.
+#
+# Both images take the repository root as their context. Keeping generated trees,
+# secrets, and host-only state out of the context makes the upload small and the
+# builds reproducible — nothing host-specific leaks into a layer.
+
+# --- version control & tooling state ---
+.git
+.github
+.tmp
+.claude
+
+# --- dependency & build outputs (rebuilt inside the image) ---
+node_modules
+**/node_modules
+server/target
+**/target
+**/dist
+clients/web/.next
+clients/web/next-env.d.ts
+
+# --- local runtime state ---
+.pgdata
+var
+**/var/media
+
+# --- secrets & local env (never bake these into an image) ---
+.env
+.env.*
+!.env.example
+
+# --- editor & OS noise ---
+.vscode
+.idea
+**/*.log
+.DS_Store
+
+# --- docs & specs not needed to compile anything ---
+migo.md
+docs
+*.md
+!README.md

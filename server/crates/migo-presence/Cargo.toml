@@ -1,0 +1,22 @@
+[package]
+name = "migo-presence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Who is online, per device, with invisibility enforced on the server."
+
+[dependencies]
+migo-cache.workspace = true
+migo-core.workspace = true
+migo-protocol.workspace = true
+migo-ratelimit.workspace = true
+migo-store.workspace = true
+
+async-trait.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }

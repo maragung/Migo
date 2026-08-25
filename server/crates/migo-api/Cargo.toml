@@ -1,0 +1,22 @@
+[package]
+name = "migo-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The REST/JSON surface: auth bootstrap, health, readiness, metrics, and the runtime config document — everything deliberately not realtime, exposed as an axum Router that migod mounts."
+
+[dependencies]
+migo-core.workspace = true
+migo-protocol.workspace = true
+migo-auth.workspace = true
+migo-ratelimit.workspace = true
+
+axum.workspace = true
+tower-http.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }

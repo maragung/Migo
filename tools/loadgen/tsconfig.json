@@ -1,0 +1,16 @@
+{
+  // Same one-project-per-package layout as the workspace libraries: `extends` the shared strict
+  // base, emits declarations, and `references` @migo/sdk so `tsc --build` compiles the SDK (and,
+  // transitively, wire/protocol/crypto) first and type-checks this tool against their real `.d.ts` —
+  // the exact module graph a real SDK consumer sees.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    // A Node CLI, not a browser bundle: Node globals only (process, fetch, WebSocket, performance).
+    "types": ["node"],
+    "lib": ["ES2022"]
+  },
+  "include": ["src/**/*.ts"],
+  "references": [{ "path": "../../packages/sdk" }]
+}

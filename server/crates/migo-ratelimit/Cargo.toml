@@ -1,0 +1,21 @@
+[package]
+name = "migo-ratelimit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Cost-based abuse control: one token-bucket engine over every rate-limited surface."
+
+[dependencies]
+migo-cache.workspace = true
+migo-core.workspace = true
+migo-protocol.workspace = true
+
+async-trait.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

@@ -1,0 +1,144 @@
+[workspace]
+resolver = "2"
+# Explicit list rather than a glob: a crate appears here when it is real, so
+# `cargo check` at the workspace root always means something.
+members = [
+    "crates/migo-core",
+    "crates/migo-wire",
+    "crates/migo-protocol",
+    "crates/migo-crypto",
+    "crates/migo-store",
+    "crates/migo-cache",
+    "crates/migo-ratelimit",
+    "crates/migo-auth",
+    "crates/migo-messaging",
+    "crates/migo-presence",
+    "crates/migo-rooms",
+    "crates/migo-social",
+    "crates/migo-media",
+    "crates/migo-moderation",
+    "crates/migo-notify",
+    "crates/migo-economy",
+    "crates/migo-games",
+    "crates/migo-bots",
+    "crates/migo-federation",
+    "crates/migo-gateway",
+    "crates/migo-api",
+    "crates/migod",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+license = "Apache-2.0"
+repository = "https://github.com/migo/migo"
+authors = ["Migo Contributors"]
+
+[workspace.dependencies]
+# --- internal ---
+migo-core       = { path = "crates/migo-core" }
+migo-wire       = { path = "crates/migo-wire" }
+migo-protocol   = { path = "crates/migo-protocol" }
+migo-crypto     = { path = "crates/migo-crypto" }
+migo-store      = { path = "crates/migo-store" }
+migo-cache      = { path = "crates/migo-cache" }
+migo-ratelimit  = { path = "crates/migo-ratelimit" }
+migo-auth       = { path = "crates/migo-auth" }
+migo-messaging  = { path = "crates/migo-messaging" }
+migo-presence   = { path = "crates/migo-presence" }
+migo-rooms      = { path = "crates/migo-rooms" }
+migo-social     = { path = "crates/migo-social" }
+migo-media      = { path = "crates/migo-media" }
+migo-moderation = { path = "crates/migo-moderation" }
+migo-notify     = { path = "crates/migo-notify" }
+migo-economy    = { path = "crates/migo-economy" }
+migo-games      = { path = "crates/migo-games" }
+migo-bots       = { path = "crates/migo-bots" }
+migo-federation = { path = "crates/migo-federation" }
+migo-gateway    = { path = "crates/migo-gateway" }
+migo-api        = { path = "crates/migo-api" }
+migod           = { path = "crates/migod" }
+
+# --- async runtime & net ---
+tokio       = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "fs", "io-util"] }
+tokio-util  = { version = "0.7", features = ["time"] }
+axum        = { version = "0.8", features = ["ws", "macros"] }
+tower       = "0.5"
+tower-http  = { version = "0.6", features = ["cors", "trace", "limit", "request-id"] }
+http        = "1"
+futures-util = "0.3"
+async-trait  = "0.1"
+
+# --- serialization ---
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+toml        = "0.8"
+bytes       = "1"
+
+# --- errors & logging ---
+thiserror   = "2"
+anyhow      = "1"
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+
+# --- ids & time ---
+uuid        = { version = "1", features = ["v4", "v7", "serde"] }
+time        = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+
+# --- crypto (audited libraries only, ADR-0003) ---
+ed25519-dalek     = { version = "2", features = ["rand_core", "zeroize"] }
+x25519-dalek      = { version = "2", features = ["static_secrets", "zeroize"] }
+chacha20poly1305  = "0.10"
+hkdf              = "0.12"
+hmac              = "0.12"
+sha2              = "0.10"
+argon2            = { version = "0.5", features = ["std"] }
+rand              = "0.8"
+rand_core         = "0.6"
+subtle            = "2"
+zeroize           = { version = "1", features = ["derive"] }
+base64            = "0.22"
+hex               = "0.4"
+
+# --- storage ---
+# SeaORM rather than hand-written SQL: every table in this schema gets a typed entity, so
+# a renamed column is a compile error in all of migo-store at once instead of a runtime
+# "column not found" in whichever query nobody happened to exercise. `default-features =
+# false` drops the JSON, chrono and decimal converters — no column in
+# server/migrations/0001_initial.sql has any of those types, and a converter that is
+# compiled but never called is still something an auditor has to read.
+sea-orm = { version = "2.0.2", default-features = false, features = ["macros", "sqlx-postgres", "runtime-tokio-rustls", "with-uuid", "with-time"] }
+# Without `default-features = false` this pulls the `cli` feature, and with it clap,
+# dotenvy and sea-orm-cli, into the server binary. Migrations run from migod and from the
+# test harness, never from a shell, so the CLI half has no caller here.
+sea-orm-migration = { version = "2.0.2", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls"] }
+# `script` carries `Script`, which is how a read-modify-write becomes atomic without
+# WATCH/MULTI round trips; `keep-alive` matters because the connection manager holds
+# an idle socket through quiet periods and a middlebox will otherwise drop it.
+redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager", "script", "keep-alive"] }
+
+# --- misc ---
+flate2      = "1"
+parking_lot = "0.12"
+dashmap     = "6"
+clap        = { version = "4", features = ["derive", "env"] }
+
+# --- dev ---
+proptest    = "1"
+tokio-test  = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+panic = "unwind"
+strip = "debuginfo"
+
+[profile.dev]
+opt-level = 0
+debug = 1
+
+# Tests exercise crypto and the codec heavily; unoptimised dependencies make them crawl.
+[profile.dev.package."*"]
+opt-level = 2

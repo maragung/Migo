@@ -1,0 +1,86 @@
+# syntax=docker/dockerfile:1.7
+# =============================================================================
+# Migo web client — a Next.js standalone PWA over @migo/sdk.
+#
+# The workspace SDK chain (@migo/wire -> @migo/protocol -> @migo/crypto ->
+# @migo/sdk) ships as compiled ESM whose package `exports` resolve to dist/, so
+# those packages are built with tsc before `next build`. `output: 'standalone'`
+# then traces exactly the files the server needs into .next/standalone, and the
+# final stage runs that alone — no pnpm, no workspace node_modules, no source.
+#
+# NEXT_PUBLIC_* values are inlined into the client bundle at BUILD time, so the
+# API and gateway URLs are build arguments, not runtime environment: rebuild to
+# change them. The defaults target a stack reachable at localhost.
+#
+# Context is the repository ROOT:
+#   docker build -f infra/docker/Dockerfile.web -t migo/web .
+# =============================================================================
+
+ARG NODE_VERSION=22
+ARG DEBIAN_RELEASE=bookworm
+
+# --- install + build ---------------------------------------------------------
+FROM node:${NODE_VERSION}-${DEBIAN_RELEASE}-slim AS builder
+# corepack ships with Node; it pins pnpm to the version in the root package.json
+# `packageManager` field, so the image installs with the same pnpm the repo uses.
+RUN corepack enable
+WORKDIR /app
+
+# Resolve dependencies against the lockfile from the manifests alone first, so the
+# install layer is cached until a package.json or the lockfile changes — not on
+# every source edit. These are exactly the workspace members that carry a manifest
+# (packages/*, clients/web, and tools/loadgen); the other tools/* and tests/* dirs
+# have no package.json and so are not pnpm workspace members.
+COPY pnpm-lock.yaml pnpm-workspace.yaml .npmrc package.json ./
+COPY packages/wire/package.json      packages/wire/package.json
+COPY packages/protocol/package.json  packages/protocol/package.json
+COPY packages/crypto/package.json    packages/crypto/package.json
+COPY packages/sdk/package.json       packages/sdk/package.json
+COPY clients/web/package.json        clients/web/package.json
+COPY tools/loadgen/package.json      tools/loadgen/package.json
+RUN --mount=type=cache,id=migo-pnpm-store,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
+
+# Bring in the TypeScript project config and sources, then build.
+COPY tsconfig.base.json tsconfig.json ./
+COPY packages/ packages/
+COPY clients/web/ clients/web/
+# Build the four SDK packages in dependency order so their dist/ exists before the
+# web app resolves @migo/sdk. A path filter keeps `next build` out of this step.
+RUN pnpm --filter "./packages/*" build
+
+# NEXT_PUBLIC_* are compiled into the bundle here. Override via --build-arg (or
+# compose `build.args`) to point the client at a non-local server.
+ARG NEXT_PUBLIC_MIGO_API_URL=http://localhost:8080
+ARG NEXT_PUBLIC_MIGO_GATEWAY_URL=ws://localhost:8080/ws
+ARG NEXT_PUBLIC_MIGO_APP_VERSION=0.1.0
+ENV NEXT_PUBLIC_MIGO_API_URL=${NEXT_PUBLIC_MIGO_API_URL} \
+    NEXT_PUBLIC_MIGO_GATEWAY_URL=${NEXT_PUBLIC_MIGO_GATEWAY_URL} \
+    NEXT_PUBLIC_MIGO_APP_VERSION=${NEXT_PUBLIC_MIGO_APP_VERSION} \
+    NEXT_TELEMETRY_DISABLED=1
+RUN pnpm --filter @migo/web build
+
+# --- runtime -----------------------------------------------------------------
+FROM node:${NODE_VERSION}-${DEBIAN_RELEASE}-slim AS runtime
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+RUN useradd --system --create-home --uid 10001 nextjs
+WORKDIR /app
+
+# The standalone bundle preserves the workspace layout, so server.js lives under
+# clients/web/. Next does not fold static assets or public/ into the trace, so both
+# are copied alongside it at the paths the server expects.
+COPY --from=builder --chown=nextjs:nextjs /app/clients/web/.next/standalone ./
+COPY --from=builder --chown=nextjs:nextjs /app/clients/web/.next/static ./clients/web/.next/static
+COPY --from=builder --chown=nextjs:nextjs /app/clients/web/public ./clients/web/public
+
+USER nextjs
+EXPOSE 3000
+
+# Node 22 has a global fetch, so the readiness probe needs no extra tool in the image.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=5 \
+    CMD node -e "fetch('http://localhost:'+(process.env.PORT||3000)+'/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+CMD ["node", "clients/web/server.js"]

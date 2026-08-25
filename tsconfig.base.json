@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    // ES2022 is what every browser Migo supports has had for years, and what Node 22
+    // runs natively. Targeting lower would only add downlevel helpers nobody needs.
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+
+    // Every strictness switch, on purpose. This codebase parses bytes off a socket
+    // from an untrusted peer; a decoder written under `strictNullChecks: false` will
+    // eventually hand `undefined` to something that dereferences it.
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "useUnknownInCatchVariables": true,
+
+    // `import type` must say so. Without this, a type-only import can survive into
+    // the emitted JavaScript and pull a package into the runtime graph that was only
+    // ever needed by the type checker.
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+
+    // Composite projects: `tsc --build` at the root builds packages in dependency
+    // order and skips the ones whose inputs have not changed.
+    "composite": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  }
+}

@@ -1,0 +1,159 @@
+{
+  "$comment": "LEB128 varints: canonical encodings, and the non-canonical ones that must be rejected.",
+  "provenance": "case list hand-chosen; bytes computed by tools/vectors/generate_wire_vectors.py from docs/02-protocol.md section 4",
+  "cases": [
+    {
+      "name": "zero",
+      "value": "0",
+      "hex": "00"
+    },
+    {
+      "name": "one",
+      "value": "1",
+      "hex": "01"
+    },
+    {
+      "name": "largest_single_byte",
+      "value": "127",
+      "hex": "7f"
+    },
+    {
+      "name": "smallest_two_byte",
+      "value": "128",
+      "hex": "8001"
+    },
+    {
+      "name": "one_hundred_fifty",
+      "value": "150",
+      "hex": "9601"
+    },
+    {
+      "name": "byte_max",
+      "value": "255",
+      "hex": "ff01"
+    },
+    {
+      "name": "three_hundred",
+      "value": "300",
+      "hex": "ac02"
+    },
+    {
+      "name": "largest_two_byte",
+      "value": "16383",
+      "hex": "ff7f"
+    },
+    {
+      "name": "smallest_three_byte",
+      "value": "16384",
+      "hex": "808001"
+    },
+    {
+      "name": "u16_max",
+      "value": "65535",
+      "hex": "ffff03"
+    },
+    {
+      "name": "u32_max",
+      "value": "4294967295",
+      "hex": "ffffffff0f"
+    },
+    {
+      "name": "smallest_ten_byte",
+      "value": "9223372036854775808",
+      "hex": "80808080808080808001"
+    },
+    {
+      "name": "u64_max",
+      "value": "18446744073709551615",
+      "hex": "ffffffffffffffffff01"
+    }
+  ],
+  "zigzag": [
+    {
+      "name": "zero",
+      "value": "0",
+      "encoded": "0",
+      "hex": "00"
+    },
+    {
+      "name": "minus_one",
+      "value": "-1",
+      "encoded": "1",
+      "hex": "01"
+    },
+    {
+      "name": "one",
+      "value": "1",
+      "encoded": "2",
+      "hex": "02"
+    },
+    {
+      "name": "minus_two",
+      "value": "-2",
+      "encoded": "3",
+      "hex": "03"
+    },
+    {
+      "name": "two",
+      "value": "2",
+      "encoded": "4",
+      "hex": "04"
+    },
+    {
+      "name": "i32_min",
+      "value": "-2147483648",
+      "encoded": "4294967295",
+      "hex": "ffffffff0f"
+    },
+    {
+      "name": "i64_max",
+      "value": "9223372036854775807",
+      "encoded": "18446744073709551614",
+      "hex": "feffffffffffffffff01"
+    },
+    {
+      "name": "i64_min",
+      "value": "-9223372036854775808",
+      "encoded": "18446744073709551615",
+      "hex": "ffffffffffffffffff01"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "empty_input",
+      "hex": "",
+      "error": "UnexpectedEnd",
+      "why": "a varint needs at least one byte"
+    },
+    {
+      "name": "continuation_bit_with_nothing_after_it",
+      "hex": "80",
+      "error": "UnexpectedEnd",
+      "why": "the high bit promises another byte"
+    },
+    {
+      "name": "two_byte_encoding_of_zero",
+      "hex": "8000",
+      "error": "NonMinimalVarint",
+      "why": "zero has exactly one canonical encoding, 0x00"
+    },
+    {
+      "name": "padded_encoding_of_one",
+      "hex": "818000",
+      "error": "NonMinimalVarint",
+      "why": "a final group of zero means the value was padded"
+    },
+    {
+      "name": "eleven_bytes",
+      "hex": "8080808080808080808000",
+      "error": "VarintTooLong",
+      "why": "MAX_VARINT_BYTES is 10; a longer run is a decoder spin"
+    },
+    {
+      "name": "tenth_byte_carries_more_than_one_bit",
+      "hex": "ffffffffffffffffff7f",
+      "error": "VarintTooLong",
+      "why": "the tenth byte may only supply bit 63 of a u64"
+    }
+  ]
+}

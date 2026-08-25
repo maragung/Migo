@@ -1,0 +1,26 @@
+[package]
+name = "migo-gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The realtime transport core: WebSocket-shaped sessions, the connection lifecycle state machine, the subscription hub with encode-once fanout, and the three-class backpressure queue with resume and cumulative ACK."
+
+[dependencies]
+migo-core.workspace = true
+migo-wire.workspace = true
+migo-protocol.workspace = true
+migo-auth.workspace = true
+migo-ratelimit.workspace = true
+
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+bytes.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread", "time", "sync"] }

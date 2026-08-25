@@ -1,0 +1,7 @@
+# Globs rather than a literal list: a directory with no package.json is skipped, so
+# packages/sdk and clients/web can exist as empty scaffolding without breaking install.
+packages:
+  - 'packages/*'
+  - 'clients/*'
+  - 'tests/*'
+  - 'tools/*'

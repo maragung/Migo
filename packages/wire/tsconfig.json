@@ -1,0 +1,14 @@
+{
+  // One project per package, covering `src` and `test` together. The alternative — a
+  // second project for the tests — would need either a self-referencing import or a
+  // `paths` mapping, and both make the compiled test resolve `@migo/wire` differently
+  // from the way a real consumer resolves it. Tests that exercise a different module
+  // graph than production are worth less than they cost.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist",
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

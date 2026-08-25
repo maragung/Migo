@@ -1,0 +1,30 @@
+# Build output and dependencies.
+node_modules/
+dist/
+.next/
+coverage/
+**/target/
+
+# Generated sources. Two formatters fighting over one file is a diff that never settles:
+# the generator owns the layout, and `make protocol-check` is what enforces it.
+packages/protocol/src/generated.ts
+server/crates/migo-protocol/src/generated.rs
+
+# Generated conformance vectors. The byte-for-byte comparison in `make vector-check`
+# includes the file's own formatting, so a reformat here would read as vector drift.
+shared/protocol/vectors/
+
+# The IDL. Its entries are hand-aligned into columns so that a review of, say, the flag
+# bits reads as a table instead of as eight paragraphs; Prettier cannot preserve that and
+# would triple the file's length. The schema is validated by the code generator instead,
+# which checks the things that actually matter about it.
+shared/protocol/schema/
+
+# pnpm owns this file. Formatting it would be reverted by the next install.
+pnpm-lock.yaml
+
+# Not ours to format.
+migo.md
+LICENSE
+.pgdata/
+.tmp/

@@ -1,0 +1,177 @@
+{
+  "$comment": "HKDF-SHA256 derivations: every Migo label, several output lengths, and RFC 5869's own vectors.",
+  "provenance": "computed by tools/vectors/generate_crypto_vectors.py, an independent HKDF written from RFC 5869",
+  "note": "`salt: null` means an absent salt, which RFC 5869 defines as HashLen zero bytes. `label_hex` appears instead of `label` when the info string is not printable text. A pair is one extract and one expand, split at `first_length` — not two derivations.",
+  "cases": [
+    {
+      "name": "x3dh_thirty_two_bytes",
+      "secret": "0101010101010101010101010101010101010101010101010101010101010101",
+      "salt": "0202020202020202020202020202020202020202020202020202020202020202",
+      "label": "migo-x3dh-v1",
+      "length": 32,
+      "okm": "b2116add57fe580d1d0c1cd7936f588c31ae84853bda1f70f54f05aa3a090a0d",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "label_migo_x3dh_v1",
+      "secret": "0101010101010101010101010101010101010101010101010101010101010101",
+      "salt": null,
+      "label": "migo-x3dh-v1",
+      "length": 32,
+      "okm": "796d6a3b862d11a094cfe1b406d312a9fa6e49f1312d7d23c78025f68d0255d6",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "label_migo_ratchet_root_v1",
+      "secret": "0101010101010101010101010101010101010101010101010101010101010101",
+      "salt": null,
+      "label": "migo-ratchet-root-v1",
+      "length": 32,
+      "okm": "55fa55fec3a505a88987a5f26ee2241291241b62adb289354ca2a16ee3485bee",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "label_migo_ratchet_chain_v1",
+      "secret": "0101010101010101010101010101010101010101010101010101010101010101",
+      "salt": null,
+      "label": "migo-ratchet-chain-v1",
+      "length": 32,
+      "okm": "d6da15c82574f7407cb735886ea91e63973311824817504b6ddf1949484544a6",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "label_migo_message_key_v1",
+      "secret": "0101010101010101010101010101010101010101010101010101010101010101",
+      "salt": null,
+      "label": "migo-message-key-v1",
+      "length": 32,
+      "okm": "4e711b3eadc046f232733adda9fb82019e1783888354a6a80b76425c44303f5d",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "label_migo_sender_chain_v1",
+      "secret": "0101010101010101010101010101010101010101010101010101010101010101",
+      "salt": null,
+      "label": "migo-sender-chain-v1",
+      "length": 32,
+      "okm": "3c6b95e7627ec989f48e364b27e2c96c56b7778da86247be2d7be674cd48148f",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "label_migo_sender_message_v1",
+      "secret": "0101010101010101010101010101010101010101010101010101010101010101",
+      "salt": null,
+      "label": "migo-sender-message-v1",
+      "length": 32,
+      "okm": "5a2401012efdee7a3a210ce9d6f95e7b479833250d56a4c07912d5a2255e129e",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "label_migo_backup_v1",
+      "secret": "0101010101010101010101010101010101010101010101010101010101010101",
+      "salt": null,
+      "label": "migo-backup-v1",
+      "length": 32,
+      "okm": "859774fb41a6673507515b5ff8311b6f99ad28e1b4da500ba318437112dfc298",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "label_migo_recovery_v1",
+      "secret": "0101010101010101010101010101010101010101010101010101010101010101",
+      "salt": null,
+      "label": "migo-recovery-v1",
+      "length": 32,
+      "okm": "a7960b7134afdb0ef5160d126945c6e2e4e213c03b15bf28b69fa5c7ee7eabac",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "backup_16_bytes",
+      "secret": "0101010101010101010101010101010101010101010101010101010101010101",
+      "salt": "0202020202020202020202020202020202020202020202020202020202020202",
+      "label": "migo-backup-v1",
+      "length": 16,
+      "okm": "cfba155ba1ffa5d27676fe905fb09997",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "backup_64_bytes",
+      "secret": "0101010101010101010101010101010101010101010101010101010101010101",
+      "salt": "0202020202020202020202020202020202020202020202020202020202020202",
+      "label": "migo-backup-v1",
+      "length": 64,
+      "okm": "cfba155ba1ffa5d27676fe905fb09997724a0e049396b9740f5bcb5435469b7707191bfa8608cd107a9642d5e267eb994318af17313c7876440bede0be1b112b",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "ratchet_root_with_absent_salt",
+      "secret": "0303030303030303030303030303030303030303030303030303030303030303",
+      "salt": null,
+      "label": "migo-ratchet-root-v1",
+      "length": 32,
+      "okm": "8fd20c16a613fad8b4ba7b3c5b37151ae0c5834bbcfd34e24fae42ff56af2555",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "ratchet_root_with_empty_salt",
+      "secret": "0303030303030303030303030303030303030303030303030303030303030303",
+      "salt": "",
+      "label": "migo-ratchet-root-v1",
+      "length": 32,
+      "okm": "8fd20c16a613fad8b4ba7b3c5b37151ae0c5834bbcfd34e24fae42ff56af2555",
+      "provenance": "independent-python"
+    }
+  ],
+  "rfc": [
+    {
+      "name": "rfc_5869_a1",
+      "secret": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "salt": "000102030405060708090a0b0c",
+      "label_hex": "f0f1f2f3f4f5f6f7f8f9",
+      "length": 42,
+      "okm": "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865",
+      "provenance": "rfc-5869"
+    },
+    {
+      "name": "rfc_5869_a2",
+      "secret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+      "salt": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+      "label_hex": "b0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "length": 82,
+      "okm": "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71cc30c58179ec3e87c14c01d5c1f3434f1d87",
+      "provenance": "rfc-5869"
+    },
+    {
+      "name": "rfc_5869_a3",
+      "secret": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "salt": "",
+      "label_hex": "",
+      "length": 42,
+      "okm": "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8",
+      "provenance": "rfc-5869"
+    }
+  ],
+  "pairs": [
+    {
+      "name": "ratchet_root_and_chain",
+      "secret": "0303030303030303030303030303030303030303030303030303030303030303",
+      "salt": "0202020202020202020202020202020202020202020202020202020202020202",
+      "label": "migo-ratchet-root-v1",
+      "first_length": 32,
+      "second_length": 32,
+      "first": "d7067df0b85a01913472dc175815ef345b1b48eb8d74ab2ce13867212cb96354",
+      "second": "96e3c74e563b173894e2c9083c55e79adb5aaab09b332bbc50e19f5480e0954f",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "root_and_short_second",
+      "secret": "0303030303030303030303030303030303030303030303030303030303030303",
+      "salt": "0202020202020202020202020202020202020202020202020202020202020202",
+      "label": "migo-ratchet-chain-v1",
+      "first_length": 32,
+      "second_length": 16,
+      "first": "8ac0b2c72dda2b3d04139acc010eec819f3ef817645332de7cb244af462b77db",
+      "second": "95475856ebf936996f28a8788402a720",
+      "provenance": "independent-python"
+    }
+  ]
+}

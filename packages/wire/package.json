@@ -1,0 +1,28 @@
+{
+  "name": "@migo/wire",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MWP/1 framing and Migo Struct Encoding: the binary codec, with every limit enforced before allocation.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    }
+  },
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "clean": "tsc --build --clean",
+    "test": "node --test dist/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

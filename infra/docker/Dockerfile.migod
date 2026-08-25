@@ -1,0 +1,79 @@
+# syntax=docker/dockerfile:1.7
+# =============================================================================
+# migod — the Migo server daemon (REST under /v1, realtime gateway at /ws).
+#
+# Multi-stage: a Rust toolchain compiles a release binary, which is then copied
+# onto a minimal Debian runtime that carries no compiler and no source. cargo-chef
+# caches the dependency compile as its own layer, so editing application code
+# recompiles only the crates that changed — this workspace has twenty-one of them,
+# and a cold dependency build is by far the slowest part.
+#
+# The data layer is rustls end to end (sea-orm `runtime-tokio-rustls`; the redis
+# client carries no native-tls feature), so no stage links OpenSSL. The builder
+# still needs a C toolchain and cmake because the rustls crypto backend
+# (aws-lc-rs / ring) compiles C at build time.
+#
+# Context is the repository ROOT:
+#   docker build -f infra/docker/Dockerfile.migod -t migo/migod .
+# =============================================================================
+
+ARG RUST_VERSION=1.94
+ARG DEBIAN_RELEASE=bookworm
+
+# --- toolchain base (shared by planner and builder) --------------------------
+FROM rust:${RUST_VERSION}-slim-${DEBIAN_RELEASE} AS chef
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential cmake pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+RUN cargo install cargo-chef --locked
+WORKDIR /build
+
+# --- plan: distil the dependency graph into a recipe -------------------------
+FROM chef AS planner
+COPY server/ ./
+RUN cargo chef prepare --recipe-path recipe.json
+
+# --- build: cook dependencies (cached layer), then the workspace -------------
+FROM chef AS builder
+COPY --from=planner /build/recipe.json recipe.json
+# Compiles every dependency named in the recipe. Reused until the recipe — i.e.
+# the set of dependencies — changes, regardless of edits to our own crates.
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY server/ ./
+# Only the workspace crates recompile from here. strip drops debug symbols so the
+# runtime layer stays small.
+RUN cargo build --release --bin migod \
+    && strip target/release/migod
+
+# --- runtime: the binary on a minimal base -----------------------------------
+FROM debian:${DEBIAN_RELEASE}-slim AS runtime
+# ca-certificates: outbound TLS trust for OTLP export and object storage.
+# curl: the HEALTHCHECK client (the base has no HTTP tool otherwise).
+# tini: PID 1 that forwards signals and reaps — a process running as PID 1 does
+# not receive default signal actions, so this guarantees `docker stop` is graceful.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --uid 10001 migo \
+    && mkdir -p /var/lib/migo/media \
+    && chown -R migo:migo /var/lib/migo
+COPY --from=builder /build/target/release/migod /usr/local/bin/migod
+
+USER migo
+WORKDIR /var/lib/migo
+
+# The one TCP listener: REST under /v1, the gateway upgrade at /ws, and the
+# operational probes (/health, /ready, /metrics) at the root.
+EXPOSE 8080
+
+# Sensible image defaults; every value is overridable by the orchestrator.
+ENV MIGO_HTTP__BIND=0.0.0.0:8080 \
+    MIGO_MEDIA__LOCAL_DIR=/var/lib/migo/media \
+    RUST_LOG=info
+
+# Liveness: /health answers as long as the process can serve a request at all.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=5 \
+    CMD curl -fsS http://localhost:8080/health || exit 1
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["migod"]

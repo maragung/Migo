@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The window theme, named by the manifest. Compose draws the whole UI and supplies its
+      own Material 3 colors (see MigoTheme in MainActivity.kt), so this exists only to paint
+      the window before the first frame and to drop the action bar. It is parented on the
+      platform Material theme, which is present from API 26 (the app's minSdk), so naming a
+      window theme costs no AppCompat or Material Components dependency.
+    -->
+    <style name="Theme.Migo" parent="@android:style/Theme.Material.Light.NoActionBar" />
+</resources>

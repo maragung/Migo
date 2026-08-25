@@ -1,0 +1,13 @@
+{
+  // Same one-project-per-package layout as `@migo/wire`; the reasoning is recorded there.
+  // The `references` entry is what makes `tsc --build` compile `@migo/wire` first and read
+  // its `.d.ts` instead of its source, which is also how a published consumer would see it.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist",
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "references": [{ "path": "../wire" }]
+}

@@ -1,0 +1,12 @@
+[package]
+name = "migo-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MWP/1 message types, opcodes, and error codes, generated from the protocol schema."
+
+[dependencies]
+migo-core.workspace = true
+migo-wire.workspace = true

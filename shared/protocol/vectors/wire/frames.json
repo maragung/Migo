@@ -1,0 +1,249 @@
+{
+  "$comment": "MWP/1 frame headers: every flag combination that changes the layout, and the malformed headers a receiver must reject.",
+  "provenance": "case list hand-chosen; bytes computed by tools/vectors/generate_wire_vectors.py from docs/02-protocol.md section 3",
+  "note": "A COMPRESSED frame is carried opaquely here: raw DEFLATE output is not byte-stable across implementations, so only the header is pinned.",
+  "cases": [
+    {
+      "name": "minimal",
+      "frame": {
+        "version": 1,
+        "flags": 0,
+        "opcode": 1,
+        "correlation": 0,
+        "trace": null,
+        "fragment": null,
+        "payload": ""
+      },
+      "hex": "01000100"
+    },
+    {
+      "name": "multi_byte_opcode_and_correlation",
+      "frame": {
+        "version": 1,
+        "flags": 0,
+        "opcode": 129,
+        "correlation": 300,
+        "trace": null,
+        "fragment": null,
+        "payload": "deadbeef"
+      },
+      "hex": "01008101ac02deadbeef"
+    },
+    {
+      "name": "error_flag",
+      "frame": {
+        "version": 1,
+        "flags": 8,
+        "opcode": 2,
+        "correlation": 7,
+        "trace": null,
+        "fragment": null,
+        "payload": ""
+      },
+      "hex": "01080207"
+    },
+    {
+      "name": "ack_required_flag",
+      "frame": {
+        "version": 1,
+        "flags": 16,
+        "opcode": 16,
+        "correlation": 1,
+        "trace": null,
+        "fragment": null,
+        "payload": "01"
+      },
+      "hex": "0110100101"
+    },
+    {
+      "name": "compressed_flag_with_opaque_payload",
+      "frame": {
+        "version": 1,
+        "flags": 1,
+        "opcode": 20,
+        "correlation": 2,
+        "trace": null,
+        "fragment": null,
+        "payload": "cafebabe"
+      },
+      "hex": "01011402cafebabe"
+    },
+    {
+      "name": "traced",
+      "frame": {
+        "version": 1,
+        "flags": 2,
+        "opcode": 1,
+        "correlation": 0,
+        "trace": {
+          "trace_id": "000102030405060708090a0b0c0d0e0f",
+          "span_id": "1011121314151617"
+        },
+        "fragment": null,
+        "payload": ""
+      },
+      "hex": "01020100000102030405060708090a0b0c0d0e0f1011121314151617"
+    },
+    {
+      "name": "fragmented",
+      "frame": {
+        "version": 1,
+        "flags": 32,
+        "opcode": 5,
+        "correlation": 9,
+        "trace": null,
+        "fragment": {
+          "index": 1,
+          "total": 3
+        },
+        "payload": "aa"
+      },
+      "hex": "012005090103aa"
+    },
+    {
+      "name": "traced_and_fragmented",
+      "frame": {
+        "version": 1,
+        "flags": 34,
+        "opcode": 5,
+        "correlation": 0,
+        "trace": {
+          "trace_id": "000102030405060708090a0b0c0d0e0f",
+          "span_id": "1011121314151617"
+        },
+        "fragment": {
+          "index": 0,
+          "total": 2
+        },
+        "payload": ""
+      },
+      "hex": "01220500000102030405060708090a0b0c0d0e0f10111213141516170002"
+    },
+    {
+      "name": "last_fragment",
+      "frame": {
+        "version": 1,
+        "flags": 32,
+        "opcode": 5,
+        "correlation": 9,
+        "trace": null,
+        "fragment": {
+          "index": 199,
+          "total": 200
+        },
+        "payload": "bb"
+      },
+      "hex": "01200509c701c801bb"
+    },
+    {
+      "name": "opcode_at_u32_max",
+      "frame": {
+        "version": 1,
+        "flags": 0,
+        "opcode": 4294967295,
+        "correlation": 0,
+        "trace": null,
+        "fragment": null,
+        "payload": ""
+      },
+      "hex": "0100ffffffff0f00"
+    }
+  ],
+  "length_prefixed": [
+    {
+      "name": "minimal",
+      "frame_hex": "01000100",
+      "hex": "0000000401000100"
+    },
+    {
+      "name": "multi_byte_opcode_and_correlation",
+      "frame_hex": "01008101ac02deadbeef",
+      "hex": "0000000a01008101ac02deadbeef"
+    },
+    {
+      "name": "traced",
+      "frame_hex": "01020100000102030405060708090a0b0c0d0e0f1011121314151617",
+      "hex": "0000001c01020100000102030405060708090a0b0c0d0e0f1011121314151617"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "empty",
+      "hex": "",
+      "error": "UnexpectedEnd",
+      "why": "a header is at least 2 bytes"
+    },
+    {
+      "name": "version_byte_only",
+      "hex": "01",
+      "error": "UnexpectedEnd",
+      "why": "the flags byte is missing"
+    },
+    {
+      "name": "future_version",
+      "hex": "02000100",
+      "error": "UnsupportedVersion",
+      "why": "a MWP/2 frame is not decoded as MWP/1 on a guess"
+    },
+    {
+      "name": "version_zero",
+      "hex": "00000100",
+      "error": "UnsupportedVersion",
+      "why": "there is no version 0"
+    },
+    {
+      "name": "reserved_bit_6",
+      "hex": "01400100",
+      "error": "ReservedFlags",
+      "why": "ignoring the bit now makes it unusable forever"
+    },
+    {
+      "name": "flags_ext_bit",
+      "hex": "01800100",
+      "error": "ReservedFlags",
+      "why": "the second flags byte is a MWP/2 feature"
+    },
+    {
+      "name": "both_reserved_bits",
+      "hex": "01c00100",
+      "error": "ReservedFlags",
+      "why": "reported as a mask, not one bit at a time"
+    },
+    {
+      "name": "traced_but_trace_block_truncated",
+      "hex": "010201000102",
+      "error": "UnexpectedEnd",
+      "why": "the flag promises 24 bytes and 2 are present"
+    },
+    {
+      "name": "fragment_total_zero",
+      "hex": "012005090000",
+      "error": "InvalidFragment",
+      "why": "nothing can be reassembled from zero fragments"
+    },
+    {
+      "name": "fragment_index_equals_total",
+      "hex": "012005090303",
+      "error": "InvalidFragment",
+      "why": "indices are zero-based, so index 3 of 3 does not exist"
+    },
+    {
+      "name": "fragment_index_past_total",
+      "hex": "012005090a02",
+      "error": "InvalidFragment",
+      "why": "a reassembly buffer must not be held open by a lie"
+    },
+    {
+      "name": "opcode_past_u32",
+      "hex": "0100808080801000",
+      "error": "FieldOverflow",
+      "why": "varints decode as u64 and are then narrowed"
+    },
+    {
+      "name": "non_minimal_opcode",
+      "hex": "0100800000",
+      "error": "NonMinimalVarint",
+      "why": "canonicality applies to the header, not only to the payload"
+    }
+  ]
+}

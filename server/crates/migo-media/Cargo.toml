@@ -1,0 +1,24 @@
+[package]
+name = "migo-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Media uploads, signed URLs, and the authorization checked before one is issued."
+
+[dependencies]
+migo-core.workspace = true
+migo-crypto.workspace = true
+migo-protocol.workspace = true
+migo-ratelimit.workspace = true
+migo-store.workspace = true
+
+async-trait.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+migo-cache.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }

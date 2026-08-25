@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive launcher icon. minSdk is 26, and adaptive icons landed in API 26, so every
+  supported device uses this and there is no need for per-density PNG fallbacks: the icon
+  is pure vector XML and carries no binary assets into the tree.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>

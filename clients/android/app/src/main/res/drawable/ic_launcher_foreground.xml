@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A white "M" inside the 72x72 safe zone (the launcher may clip anything outside it).
+     Filled rather than stroked so it renders identically on every mask shape. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,72 L38,36 L48,36 L54,52 L60,36 L70,36 L70,72 L62,72 L62,50 L56,64 L52,64 L46,50 L46,72 Z" />
+</vector>

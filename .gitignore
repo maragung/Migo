@@ -1,0 +1,65 @@
+# --- Rust ---
+/server/target/
+**/target/
+*.rs.bk
+Cargo.lock.bak
+
+# --- Node / Next.js ---
+node_modules/
+.pnpm-store/
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+.turbo/
+
+# --- Generated protocol code (regenerate with `make protocol`) ---
+# Generated sources ARE committed on purpose (reproducible builds, reviewable diffs).
+# Only local codegen scratch is ignored:
+/tools/protocol-codegen/.cache/
+
+# --- Secrets & local config: NEVER commit (spec 102/103) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!*.pub.key
+secrets/
+/var/
+/data/
+
+# --- Logs / coverage / profiling ---
+*.log
+logs/
+coverage/
+lcov.info
+*.profraw
+perf.data*
+flamegraph.svg
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json.example
+*.swp
+
+# --- Android ---
+/clients/android/.gradle/
+/clients/android/local.properties
+/clients/android/**/build/
+
+# Local scratch: /tmp on some dev boxes is a small tmpfs, and rustdoc needs room.
+.tmp/
+
+# Claude Code local settings: machine and session specific (permission mode, output
+# style). Never committed; each contributor keeps their own.
+.claude/settings.local.json
+
+# The throwaway Postgres cluster from docs/10-testing-strategy.md §3. Half a gigabyte
+# of binary data under the name the docs tell people to use, so it is ignored here
+# rather than left to be noticed in a diff.
+.pgdata/

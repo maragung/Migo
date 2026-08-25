@@ -1,0 +1,22 @@
+[package]
+name = "migo-federation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The mesh layer: the peer allow-list, the node-to-node handshake, per-link replay and sequence defences, and the durable outbox that carries events between regions."
+
+[dependencies]
+migo-core.workspace = true
+migo-protocol.workspace = true
+migo-store.workspace = true
+migo-crypto.workspace = true
+
+async-trait.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }

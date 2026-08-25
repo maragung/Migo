@@ -1,0 +1,270 @@
+# Migo — the gate every pull request has to get through.
+#
+# The rule this file exists to enforce is in docs/10-testing-strategy.md section 9:
+# nothing merges red. So the jobs are ordered by how fast they can say no. A brief that
+# contradicts the schema is caught in under a minute and never waits for a Rust build.
+#
+# Every step below is a Makefile target, and that is the point: `make ci` is the single
+# source of truth for what "green" means, so a gate cannot exist in CI without existing on
+# a developer's laptop too. The jobs run the targets in pieces only so that the Rust half
+# lands in the job with a warm `target/` and the JavaScript half in the job with pnpm —
+# `make ci` runs the same set in one go, and a target added to one and not the other is
+# the bug this arrangement is meant to prevent.
+#
+# What this file adds on top is the *services* that turn a laptop run into a real one:
+# with the variables set, the contract suites exercise PostgreSQL and Redis, and with
+# MIGO_TEST_REQUIRE_BACKENDS set they fail rather than skip if a service ever goes missing
+# from this file.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A pull request that gets three pushes in five minutes should burn one runner, not
+# three. `main` is excluded from cancellation: a cancelled push build leaves no record
+# of whether the merged commit was ever green.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # A CI runner is thrown away after the build, so there is nobody left to read an
+  # incremental cache — and building without it is both faster and smaller.
+  CARGO_INCREMENTAL: 0
+  # Debug info is the largest thing in `target/`, it is never opened here, and dropping
+  # it roughly halves what the cache has to carry between runs.
+  CARGO_PROFILE_TEST_DEBUG: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ------------------------------------------------------------------ fast gates
+  # Node only. No Rust toolchain, no database, no cache to warm: this job's whole
+  # purpose is to fail in a minute when it is going to fail at all.
+  gates:
+    name: Brief and protocol gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Generated protocol code is not stale
+        run: make protocol-check
+
+      - name: Generated entities match the migrations
+        run: make entity-check
+
+      - name: The brief does not contradict the schema or the docs
+        run: make brief-check
+
+      - name: Conformance vectors are not stale
+        # Python only, two seconds, no Rust. If a generator's output moved, that is
+        # the failure worth reading — the runner assertions downstream of it would
+        # all report the same thing at ten minutes' notice instead of one.
+        run: make vector-check
+
+  # ------------------------------------------------------------------ rust
+  # One job for formatting, lints and the whole test suite, because all three want the
+  # same warm `target/` directory and splitting them means building the workspace three
+  # times to save nothing.
+  server:
+    name: Rust — fmt, clippy, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: gates
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: migo
+          POSTGRES_PASSWORD: migo
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        # Without a health check the first test connects before the server is listening
+        # and the whole suite fails on a race that reproduces one run in ten.
+        options: >-
+          --health-cmd "pg_isready -U migo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # The contract suites read these. Set here rather than per-step so that every
+      # `cargo test` in this job sees them — a suite that runs in one step and skips in
+      # the next is worse than one that never runs.
+      MIGO_TEST_DATABASE_URL: postgres://migo:migo@127.0.0.1:5432/postgres
+      MIGO_TEST_REDIS_URL: redis://127.0.0.1:6379/15
+      # Turns "the backend was not configured" from a silent skip into a failure. This
+      # is the line that makes the two variables above load-bearing.
+      MIGO_TEST_REQUIRE_BACKENDS: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Stable, because that is what server/rust-toolchain.toml declares and therefore
+      # what every developer's `make ci` uses. The `rust-version = 1.94` promise is
+      # verified by the `msrv` job below instead of by pinning this one, so a lint that
+      # only stable knows about is still caught here.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          # Lints and tests build different artefacts; sharing one cache key between
+          # jobs that build different things means neither of them ever hits.
+          key: server-tests
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The -rust half only. This job has a Rust toolchain and no pnpm, so the Prettier
+      # half of the same gate runs in `web` — see the note above `fmt-check-rust`.
+      - name: Formatting
+        run: make fmt-check-rust
+
+      - name: Clippy, warnings denied
+        run: make lint-rust
+
+      - name: Documentation has no broken intra-doc links
+        run: make doc-check
+
+      - name: Tests, with PostgreSQL and Redis behind the contract suites
+        run: make test-server
+
+      - name: Cross-language conformance vectors, Rust side
+        # Redundant with test-server today, because the runners are ordinary test
+        # binaries in the workspace. Named separately anyway: a reviewer looking for
+        # "do the bindings still agree" should find a step called that rather than
+        # have to know it hides inside another. The TypeScript side of the same files
+        # is the last step of the `web` job; both must pass for the claim to hold.
+        run: make test-vectors-rust
+
+  # ------------------------------------------------------------------ msrv
+  # `rust-version = "1.94"` in server/Cargo.toml is a promise to anyone who depends on
+  # these crates, and a promise nothing verifies is a comment. It gates, because breaking
+  # it is a breaking change; it only runs `cargo check`, because compiling is what the
+  # promise is about — the behaviour is already covered by the job above.
+  #
+  # 1.94 is not a number this project chose: it is what sea-orm 2.0 declares, so the floor
+  # is set by a dependency and can move without anyone here editing a file. That is the
+  # concrete thing this job catches — a `cargo update` that pulls a sea-orm patch with a
+  # higher `rust-version` compiles fine on stable and fails only here, which is where a
+  # floor moving under us should be discovered rather than in a downstream build.
+  msrv:
+    name: Compiles on Rust 1.94, as declared
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: gates
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.94
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          key: msrv
+
+      # --all-targets so tests and examples are held to the same version as the library.
+      # A test that only builds on stable is a test nobody can run on the declared
+      # minimum, which makes the minimum untestable.
+      - name: cargo check on the declared minimum
+        run: |
+          cargo check --manifest-path server/Cargo.toml \
+            --workspace --all-targets --all-features
+
+  # ------------------------------------------------------------------ typescript
+  # The mirror of `server`: this job has pnpm and no Rust toolchain, so it runs the -js
+  # halves of the shared gates. It used to probe for a root package.json and skip itself
+  # with a notice; the workspace exists now, and a job that can skip itself is a job that
+  # can go quiet the day someone moves that file.
+  web:
+    name: TypeScript — build, lint, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: gates
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # --frozen-lockfile so a lockfile that disagrees with the manifests fails here
+      # rather than resolving to something nobody has ever run.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Before the lints, and before the tests, for two different reasons: the typed
+      # ESLint rules need type information from the referenced projects, and every
+      # package's `test` script runs `node --test` over dist/, where an absent build is
+      # not an error but an empty glob — a suite that passes by not existing.
+      - name: Build
+        run: make build-ts
+
+      - name: Formatting
+        run: make fmt-check-js
+
+      - name: Lint
+        run: make lint-js
+
+      - name: Test
+        run: pnpm -r --if-present test
+
+      - name: Cross-language conformance vectors, TypeScript side
+        run: make test-vectors-ts
+
+  # ------------------------------------------------------------------ audit
+  # Advisories are news, not a reason to block an unrelated change: a CVE published
+  # this morning against a transitive dependency would otherwise stop every pull
+  # request in the repository until somebody upgrades. So this job reports and does not
+  # gate — nothing `needs:` it — which is the same call the Makefile's `|| true` makes,
+  # made once and in the open instead of buried in a recipe.
+  audit:
+    name: Dependency advisories (reports, does not gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          key: audit
+
+      - name: cargo-audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit --file server/Cargo.lock

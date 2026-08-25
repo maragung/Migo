@@ -1,0 +1,16 @@
+{
+  // Same one-project-per-package layout as the sibling packages; the reasoning is recorded
+  // in `@migo/wire`. The `references` are what make `tsc --build` compile the three
+  // dependencies first and read their `.d.ts` — the same module graph a real consumer sees.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist",
+    "types": ["node"],
+    // The SDK runs in the browser and in Node. `DOM` brings `WebSocket`, `fetch`, and the
+    // Web Streams the wire codec's compression uses; without it those globals are untyped.
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "references": [{ "path": "../wire" }, { "path": "../protocol" }, { "path": "../crypto" }]
+}

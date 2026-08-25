@@ -1,0 +1,228 @@
+{
+  "$comment": "HMAC-SHA256 token MACs: the per-purpose subkey, the tag, the length-prefixed multi-part tag, and truncation policy.",
+  "provenance": "computed by tools/vectors/generate_crypto_vectors.py, an independent HKDF and HMAC written from RFC 5869 and RFC 2104",
+  "note": "`key` is included as well as `tag` so a failure says which half is wrong: the derivation or the MAC. `rfc` cases bypass the derivation via MacKey::from_bytes, with keys padded to 32 bytes because that is the width this type takes.",
+  "cases": [
+    {
+      "name": "session_token_over_migo",
+      "root": "726f6f74",
+      "label": "migo-session-token-v1",
+      "key": "499f456e3e5c5615a1253cd1786854d8aafeb2baa35fe545280c8722b06e09ad",
+      "message": "6d69676f",
+      "tag": "147a4974742829d6e7561c6f20e0fbd693f2f645d141511fb198fdff880b7cd0",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "label_migo_session_token_v1",
+      "root": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "label": "migo-session-token-v1",
+      "key": "1a349face1eda75f3f556b275fb0783adbc41f10ab23268ddec5eab6d8876e05",
+      "message": "7375626a6563742d31",
+      "tag": "7b11534e55392b91dace2489ff832fb4892678b8d4ef8e5f5259c9ce97562ee5",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "label_migo_refresh_token_v1",
+      "root": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "label": "migo-refresh-token-v1",
+      "key": "d5718e5bb15417cab4d588a07f103e3e19394734a2aef708f3243086fef659cb",
+      "message": "7375626a6563742d31",
+      "tag": "ace0a2154ec0479e83c5c72ab9efa2f194198ac129090c973e0503a35c95d260",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "label_migo_resume_cursor_v1",
+      "root": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "label": "migo-resume-cursor-v1",
+      "key": "add07947e114384cd22e17a127e228fa0ec0d2fde06e567c8080a235e23ab547",
+      "message": "7375626a6563742d31",
+      "tag": "e842f30e6188f5064f725bd647894b432bcd66402ea46daaacbf3e958edb7799",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "label_migo_media_url_v1",
+      "root": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "label": "migo-media-url-v1",
+      "key": "da093c6bb2b969f4bd5652dd574d0e72c12125cf81cf2a46b2091696d2b89fde",
+      "message": "7375626a6563742d31",
+      "tag": "80d3a26bf272023c5c529a171417a80e63ea942f545b92d3328e6798acfecf9f",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "label_migo_pagination_v1",
+      "root": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "label": "migo-pagination-v1",
+      "key": "6dc141ae3a203a77d729d87d4dbeb1f6d2ed858b249495f437c660677358077c",
+      "message": "7375626a6563742d31",
+      "tag": "272c8cde2aff1d915823a8e645d5e50e07b09ee85381f41097d9bd6f08e85ce3",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "label_migo_verification_v1",
+      "root": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "label": "migo-verification-v1",
+      "key": "8b62aec4cb8bcdfa4e7edec69899915f1115002f4b4c0acda0eaccfed1c31fde",
+      "message": "7375626a6563742d31",
+      "tag": "ab8a6bebbc9940a271a859ef44c46b82f394823a41b09c010f595186fe7c3d61",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "label_migo_webhook_v1",
+      "root": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "label": "migo-webhook-v1",
+      "key": "8fe6bc9c47c4deb6dc6dc9fb3dddfdb769331304173b9a6a50fdf7327f2b3808",
+      "message": "7375626a6563742d31",
+      "tag": "13d805769bbabab703de24c2368b5262747d1a734b2344834860083ee063b099",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "empty_message",
+      "root": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "label": "migo-media-url-v1",
+      "key": "da093c6bb2b969f4bd5652dd574d0e72c12125cf81cf2a46b2091696d2b89fde",
+      "message": "",
+      "tag": "f7c3dc19a518fe10ce06150c3d9396c22d4adfa97e49965d29b470ab73651f0f",
+      "provenance": "independent-python"
+    }
+  ],
+  "parts": [
+    {
+      "name": "parts_ab_then_c",
+      "root": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "label": "migo-pagination-v1",
+      "key": "6dc141ae3a203a77d729d87d4dbeb1f6d2ed858b249495f437c660677358077c",
+      "parts": [
+        "6162",
+        "63"
+      ],
+      "tag": "1d9c75a9163663d0d70540103d5d0ccd230981ccadf6844d4153328a45c3ccb7",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "parts_a_then_bc",
+      "root": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "label": "migo-pagination-v1",
+      "key": "6dc141ae3a203a77d729d87d4dbeb1f6d2ed858b249495f437c660677358077c",
+      "parts": [
+        "61",
+        "6263"
+      ],
+      "tag": "76e2fbbbe1c37de6d33abaa1a1c48347f29361cb58394c2d42d12ca0afcb09f7",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "parts_single",
+      "root": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "label": "migo-pagination-v1",
+      "key": "6dc141ae3a203a77d729d87d4dbeb1f6d2ed858b249495f437c660677358077c",
+      "parts": [
+        "616263"
+      ],
+      "tag": "3c403a65c35ed12045b91ea95aad652b8da659b8366bdc4e39e6d47338d5dc97",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "parts_empty_list",
+      "root": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "label": "migo-pagination-v1",
+      "key": "6dc141ae3a203a77d729d87d4dbeb1f6d2ed858b249495f437c660677358077c",
+      "parts": [],
+      "tag": "528e503e079540158ff6dd6de57ff71b691294a38cf650d4c396a3f05b4891f6",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "parts_with_an_empty_member",
+      "root": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "label": "migo-pagination-v1",
+      "key": "6dc141ae3a203a77d729d87d4dbeb1f6d2ed858b249495f437c660677358077c",
+      "parts": [
+        "61",
+        "",
+        "6263"
+      ],
+      "tag": "fd0090c97c85a9b26eb91e9cb73f115904a63479a311b17095bf0b7dec3cf843",
+      "provenance": "independent-python"
+    },
+    {
+      "name": "parts_user_and_device",
+      "root": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "label": "migo-pagination-v1",
+      "key": "6dc141ae3a203a77d729d87d4dbeb1f6d2ed858b249495f437c660677358077c",
+      "parts": [
+        "757365722d31",
+        "6465766963652d3233"
+      ],
+      "tag": "6516d61b7f2f6b47d4124ec7654dfea8958bec50d487ed6fa6b3695eef1a4496",
+      "provenance": "independent-python"
+    }
+  ],
+  "distinct_pairs": [
+    {
+      "left": "parts_ab_then_c",
+      "right": "parts_a_then_bc",
+      "why": "the same concatenation with a different split must not share a tag"
+    },
+    {
+      "left": "parts_ab_then_c",
+      "right": "parts_single",
+      "why": "two parts and one part are different messages"
+    },
+    {
+      "left": "parts_single",
+      "right": "parts_with_an_empty_member",
+      "why": "an empty member is a member, and its length prefix says so"
+    }
+  ],
+  "rfc": [
+    {
+      "name": "rfc_4231_case_1",
+      "key": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b000000000000000000000000",
+      "message": "4869205468657265",
+      "tag": "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+      "provenance": "rfc-4231-construction"
+    },
+    {
+      "name": "rfc_4231_case_2",
+      "key": "4a65666500000000000000000000000000000000000000000000000000000000",
+      "message": "7768617420646f2079612077616e7420666f72206e6f7468696e673f",
+      "tag": "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+      "provenance": "rfc-4231-construction"
+    },
+    {
+      "name": "rfc_4231_case_3",
+      "key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "message": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "tag": "cdcb1220d1ecccea91e53aba3092f962e549fe6ce9ed7fdc43191fbde45c30b0",
+      "provenance": "rfc-4231-construction"
+    }
+  ],
+  "truncation": [
+    {
+      "name": "sixteen_byte_prefix_verifies",
+      "root": "726f6f74",
+      "label": "migo-session-token-v1",
+      "message": "6d69676f",
+      "tag_len": 16,
+      "accepted": true,
+      "why": "MIN_TAG_LEN is 16: the same 128-bit margin as the AEAD tag"
+    },
+    {
+      "name": "full_width_verifies",
+      "root": "726f6f74",
+      "label": "migo-session-token-v1",
+      "message": "6d69676f",
+      "tag_len": 32,
+      "accepted": true,
+      "why": "the default"
+    },
+    {
+      "name": "fifteen_byte_prefix_is_refused",
+      "root": "726f6f74",
+      "label": "migo-session-token-v1",
+      "message": "6d69676f",
+      "tag_len": 15,
+      "accepted": false,
+      "why": "a shorter tag is refused rather than quietly weakened"
+    }
+  ]
+}

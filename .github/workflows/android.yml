@@ -1,0 +1,108 @@
+# Migo — the Android client gate.
+#
+# The Kotlin SDK in clients/android/core has to agree with the Rust server and the
+# @migo/sdk chain byte-for-byte: its protocol layer (core/.../protocol/Generated.kt) is
+# emitted from the same shared/protocol/schema the other two are, and the staleness of
+# that generated file is already gated in the main CI's `make protocol-check`. What that
+# check cannot do is prove the generated Kotlin, and the hand-written wire codec around
+# it, actually compile — the sandbox that generates them has no JVM or Android toolchain.
+# That is this workflow's one job: compile :core and :app on a runner that does, and run
+# the SDK's unit tests.
+#
+# It is a separate file from ci.yml because it provisions a completely different toolchain
+# (a JDK, the Android SDK, and Gradle) that the Rust/TypeScript gates neither have nor
+# want, and because the Android build is heavier and slower than the fast gates — keeping
+# it out of ci.yml means a brief-versus-schema mistake still fails in a minute.
+#
+# No Gradle wrapper is committed to the repository. gradle/actions/setup-gradle downloads
+# a pinned Gradle for us instead (see the `gradle-version` input), so the version that
+# builds here is declared in one place and a stray checked-in wrapper jar can never drift
+# from it.
+
+name: Android
+
+on:
+  push:
+    branches: [main]
+    # Only when something the Android build reads actually changes. A docs-only or
+    # server-only push has nothing to prove here and should not spend a JDK build.
+    paths:
+      - 'clients/android/**'
+      - 'shared/protocol/**'
+      - '.github/workflows/android.yml'
+  pull_request:
+    paths:
+      - 'clients/android/**'
+      - 'shared/protocol/**'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+# Same rule as ci.yml: a burst of pushes to a branch burns one runner, not all of them;
+# main is never cancelled so the merged commit keeps a record of whether it was green.
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Kotlin SDK — assemble and unit-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Temurin 17. The modules compile against Java 17 bytecode (see the compileOptions /
+      # kotlinOptions blocks in both build.gradle.kts files); AGP 8.7 will not run on an
+      # older JDK, and running on a newer one only risks a toolchain the build has never
+      # been configured for.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # The Android SDK command-line tools, with the licenses accepted. The runner image
+      # ships an SDK already, but pinning the components we need here rather than trusting
+      # whatever the image happens to carry is what stops "works this week, fails next
+      # week when the image rolls" — see the explicit sdkmanager step below.
+      - uses: android-actions/setup-android@v3
+
+      - name: Install the SDK packages the build needs
+        # compileSdk = 35 across both modules, so platform 35 and a matching build-tools
+        # are the floor. platform-tools carries adb and friends that AGP resolves against.
+        run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      # Provisions Gradle (there is no wrapper) and configures the build cache. The
+      # version has to satisfy AGP 8.7.3's Gradle floor of 8.9; 8.11.1 is the tested
+      # version above it. Read-only caching off main is the action's default, which is
+      # what we want: feature branches read the cache main writes, and cannot poison it.
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      # assembleDebug for both modules is the compile proof; the unit-test tasks run the
+      # SDK's JUnit suites (core carries them; app has none yet, so its task is a no-op
+      # that still fails loudly if that ever changes and a test breaks). --no-daemon
+      # because a CI runner is discarded after the build and a resident daemon buys
+      # nothing across a single invocation.
+      - name: Assemble and unit-test
+        working-directory: clients/android
+        run: >-
+          gradle --no-daemon --stacktrace
+          :core:assembleDebug
+          :app:assembleDebug
+          :core:testDebugUnitTest
+          :app:testDebugUnitTest
+
+      # The debug APK, kept as a downloadable artifact of every build. It is unsigned and
+      # not a release (that is release.yml's job on a version tag), but it is the thing a
+      # reviewer wants to sideload to see a change on a device without building locally.
+      - name: Upload the debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migo-app-debug
+          path: clients/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

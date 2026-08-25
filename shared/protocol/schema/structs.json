@@ -1,0 +1,403 @@
+{
+  "$comment": "MSE structs. RULES: (1) required fields are positional and frozen for the life of MWP/1; (2) optional fields carry a stable id, may be added any time, and are skippable by old peers; (3) never reuse an optional id.",
+  "structs": [
+    { "name": "ClientInfo", "doc": "Who is connecting. Used for feature gating and abuse triage, never for tracking.",
+      "fields": [
+        { "name": "platform", "type": "Platform" },
+        { "name": "app_version", "type": "string" },
+        { "name": "os_version", "type": "string", "optional": true, "id": 1 },
+        { "name": "device_model", "type": "string", "optional": true, "id": 2 }
+      ] },
+
+    { "name": "ResumeRequest", "doc": "Resume an existing session instead of a full re-sync.",
+      "fields": [
+        { "name": "session_id", "type": "id" },
+        { "name": "last_frame_seq", "type": "u64" }
+      ] },
+
+    { "name": "Hello", "doc": "First frame on every connection.",
+      "fields": [
+        { "name": "protocol_version", "type": "u32" },
+        { "name": "client", "type": "ClientInfo" },
+        { "name": "features", "type": "bitmask64", "doc": "Client feature bitmask; the session uses the intersection with the server's" },
+        { "name": "locale", "type": "string" },
+        { "name": "bandwidth_mode", "type": "BandwidthMode" },
+        { "name": "access_token", "type": "string", "optional": true, "id": 1, "doc": "Saves a round trip: authenticate inside HELLO" },
+        { "name": "device_id", "type": "id", "optional": true, "id": 2 },
+        { "name": "resume", "type": "ResumeRequest", "optional": true, "id": 3 }
+      ] },
+
+    { "name": "Limits", "doc": "Server-dictated limits. The client must respect these, not its own constants.",
+      "fields": [
+        { "name": "max_frame_bytes", "type": "u32" },
+        { "name": "max_batch_items", "type": "u32" },
+        { "name": "max_subscriptions", "type": "u32" },
+        { "name": "heartbeat_ms", "type": "u32" }
+      ] },
+
+    { "name": "NodeInfo",
+      "fields": [
+        { "name": "node_id", "type": "string" },
+        { "name": "region", "type": "string" },
+        { "name": "country", "type": "string" }
+      ] },
+
+    { "name": "Welcome",
+      "fields": [
+        { "name": "session_id", "type": "id" },
+        { "name": "node", "type": "NodeInfo" },
+        { "name": "features", "type": "bitmask64" },
+        { "name": "server_time", "type": "timestamp" },
+        { "name": "limits", "type": "Limits" },
+        { "name": "resumed", "type": "bool", "optional": true, "id": 1 },
+        { "name": "resume_from_seq", "type": "u64", "optional": true, "id": 2 },
+        { "name": "authenticated_user", "type": "id", "optional": true, "id": 3, "doc": "Present when HELLO carried a valid access token" }
+      ] },
+
+    { "name": "Authenticate",
+      "fields": [
+        { "name": "access_token", "type": "string" },
+        { "name": "device_id", "type": "id" }
+      ] },
+
+    { "name": "UserProfile",
+      "fields": [
+        { "name": "user_id", "type": "id" },
+        { "name": "public_id", "type": "string", "doc": "MGO-XXXXXXXX, immutable, shareable" },
+        { "name": "username", "type": "string" },
+        { "name": "display_name", "type": "string" },
+        { "name": "avatar_url", "type": "string", "optional": true, "id": 1 },
+        { "name": "bio", "type": "string", "optional": true, "id": 2 },
+        { "name": "country", "type": "string", "optional": true, "id": 3 },
+        { "name": "language", "type": "string", "optional": true, "id": 4 },
+        { "name": "level", "type": "u32", "optional": true, "id": 5 },
+        { "name": "presence", "type": "PresenceState", "optional": true, "id": 6 },
+        { "name": "badges", "type": "list<string>", "optional": true, "id": 7 },
+        { "name": "verified", "type": "bool", "optional": true, "id": 8 },
+        { "name": "custom_status", "type": "string", "optional": true, "id": 9 }
+      ] },
+
+    { "name": "Authenticated",
+      "fields": [
+        { "name": "user_id", "type": "id" },
+        { "name": "device_id", "type": "id" },
+        { "name": "capabilities", "type": "bitmask64", "doc": "Capability bitmask for this session" },
+        { "name": "profile", "type": "UserProfile", "optional": true, "id": 1 }
+      ] },
+
+    { "name": "Error", "doc": "Carried with the ERROR flag on any opcode, or standalone.",
+      "fields": [
+        { "name": "code", "type": "u32" },
+        { "name": "symbol", "type": "string", "doc": "Stable machine-readable symbol; clients localise from this, never from message" },
+        { "name": "message", "type": "string", "optional": true, "id": 1, "doc": "Developer-facing detail. Never shown verbatim to users" },
+        { "name": "retry_after_ms", "type": "u32", "optional": true, "id": 2 },
+        { "name": "field", "type": "string", "optional": true, "id": 3, "doc": "Offending field for validation errors" }
+      ] },
+
+    { "name": "Acknowledged", "fields": [ { "name": "ok", "type": "bool" } ] },
+
+    { "name": "Ping", "fields": [ { "name": "client_time", "type": "timestamp" } ] },
+
+    { "name": "Pong",
+      "fields": [
+        { "name": "client_time", "type": "timestamp", "doc": "Echoed so the client can compute RTT without keeping state" },
+        { "name": "server_time", "type": "timestamp" }
+      ] },
+
+    { "name": "Ack", "doc": "Cumulative watermark. One ACK retires every held frame at or below it.",
+      "fields": [ { "name": "frame_seq", "type": "u64" } ] },
+
+    { "name": "ReconnectHint", "doc": "Planned drain. after_ms is randomised per session to avoid a thundering herd.",
+      "fields": [
+        { "name": "reason", "type": "CloseReason" },
+        { "name": "after_ms", "type": "u32" },
+        { "name": "endpoint", "type": "string", "optional": true, "id": 1 }
+      ] },
+
+    { "name": "Topic",
+      "fields": [
+        { "name": "kind", "type": "TopicKind" },
+        { "name": "id", "type": "id" }
+      ] },
+
+    { "name": "SubscribeRequest", "fields": [ { "name": "topics", "type": "list<Topic>" } ] },
+
+    { "name": "SubscribeResponse",
+      "fields": [
+        { "name": "accepted", "type": "list<Topic>" },
+        { "name": "rejected", "type": "list<Topic>", "optional": true, "id": 1 }
+      ] },
+
+    { "name": "MessageSend",
+      "fields": [
+        { "name": "message_id", "type": "id", "doc": "Client-generated ULID. Makes retry idempotent" },
+        { "name": "conversation_id", "type": "id" },
+        { "name": "kind", "type": "MessageKind" },
+        { "name": "envelope", "type": "bytes", "doc": "E2E ciphertext for private conversations; MSE room payload for rooms" },
+        { "name": "reply_to", "type": "id", "optional": true, "id": 1 },
+        { "name": "expires_in_ms", "type": "u32", "optional": true, "id": 2, "doc": "Disappearing messages" },
+        { "name": "sender_key_id", "type": "u32", "optional": true, "id": 3 }
+      ] },
+
+    { "name": "MessageAccepted",
+      "fields": [
+        { "name": "message_id", "type": "id" },
+        { "name": "conversation_id", "type": "id" },
+        { "name": "seq", "type": "u64" },
+        { "name": "created_at", "type": "timestamp" },
+        { "name": "duplicate", "type": "bool", "optional": true, "id": 1, "doc": "True when dedup matched an earlier send. Success, not an error" }
+      ] },
+
+    { "name": "MessageEvent",
+      "fields": [
+        { "name": "message_id", "type": "id" },
+        { "name": "conversation_id", "type": "id" },
+        { "name": "seq", "type": "u64" },
+        { "name": "sender_id", "type": "id" },
+        { "name": "sender_device", "type": "id" },
+        { "name": "kind", "type": "MessageKind" },
+        { "name": "envelope", "type": "bytes" },
+        { "name": "created_at", "type": "timestamp" },
+        { "name": "reply_to", "type": "id", "optional": true, "id": 1 },
+        { "name": "edited_at", "type": "timestamp", "optional": true, "id": 2 },
+        { "name": "deleted", "type": "bool", "optional": true, "id": 3, "doc": "Tombstone, so offline clients converge instead of keeping ghosts" },
+        { "name": "sender_key_id", "type": "u32", "optional": true, "id": 4 }
+      ] },
+
+    { "name": "MessageDelete",
+      "fields": [
+        { "name": "message_id", "type": "id" },
+        { "name": "conversation_id", "type": "id" },
+        { "name": "for_everyone", "type": "bool" }
+      ] },
+
+    { "name": "MessageReceipt",
+      "fields": [
+        { "name": "conversation_id", "type": "id" },
+        { "name": "kind", "type": "ReceiptKind" },
+        { "name": "seq", "type": "u64", "doc": "Cumulative: everything up to seq is delivered/read" },
+        { "name": "user_id", "type": "id", "optional": true, "id": 1 },
+        { "name": "at", "type": "timestamp", "optional": true, "id": 2 }
+      ] },
+
+    { "name": "SyncRequest",
+      "fields": [
+        { "name": "conversation_id", "type": "id" },
+        { "name": "have_seq", "type": "u64", "doc": "Highest contiguous seq the client holds" },
+        { "name": "limit", "type": "u32" },
+        { "name": "to_seq", "type": "u64", "optional": true, "id": 1, "doc": "Ranged fetch for a detected gap" },
+        { "name": "backwards", "type": "bool", "optional": true, "id": 2, "doc": "Paging older history" }
+      ] },
+
+    { "name": "SyncResponse",
+      "fields": [
+        { "name": "conversation_id", "type": "id" },
+        { "name": "status", "type": "SyncStatus" },
+        { "name": "from_seq", "type": "u64" },
+        { "name": "to_seq", "type": "u64" },
+        { "name": "more", "type": "bool" },
+        { "name": "messages", "type": "list<MessageEvent>" }
+      ] },
+
+    { "name": "ConversationSummary",
+      "fields": [
+        { "name": "conversation_id", "type": "id" },
+        { "name": "kind", "type": "ConversationKind" },
+        { "name": "encryption", "type": "EncryptionMode" },
+        { "name": "last_seq", "type": "u64" },
+        { "name": "read_seq", "type": "u64" },
+        { "name": "title", "type": "string", "optional": true, "id": 1 },
+        { "name": "avatar_url", "type": "string", "optional": true, "id": 2 },
+        { "name": "members", "type": "list<id>", "optional": true, "id": 3 },
+        { "name": "last_message", "type": "MessageEvent", "optional": true, "id": 4 },
+        { "name": "muted_until", "type": "timestamp", "optional": true, "id": 5 },
+        { "name": "pinned", "type": "bool", "optional": true, "id": 6 },
+        { "name": "archived", "type": "bool", "optional": true, "id": 7 }
+      ] },
+
+    { "name": "ConversationListRequest",
+      "fields": [
+        { "name": "limit", "type": "u32" },
+        { "name": "cursor", "type": "string", "optional": true, "id": 1 }
+      ] },
+
+    { "name": "ConversationListResponse",
+      "fields": [
+        { "name": "conversations", "type": "list<ConversationSummary>" },
+        { "name": "next_cursor", "type": "string", "optional": true, "id": 1 }
+      ] },
+
+    { "name": "ConversationCreateRequest", "doc": "Direct conversations are deterministic in their member set, so creation is idempotent.",
+      "fields": [
+        { "name": "kind", "type": "ConversationKind" },
+        { "name": "members", "type": "list<id>" },
+        { "name": "title", "type": "string", "optional": true, "id": 1 }
+      ] },
+
+    { "name": "TypingEvent",
+      "fields": [
+        { "name": "conversation_id", "type": "id" },
+        { "name": "state", "type": "TypingState" },
+        { "name": "user_id", "type": "id", "optional": true, "id": 1 }
+      ] },
+
+    { "name": "PresenceUpdate",
+      "fields": [
+        { "name": "state", "type": "PresenceState" },
+        { "name": "custom_status", "type": "string", "optional": true, "id": 1 }
+      ] },
+
+    { "name": "PresenceEvent",
+      "fields": [
+        { "name": "user_id", "type": "id" },
+        { "name": "state", "type": "PresenceState" },
+        { "name": "custom_status", "type": "string", "optional": true, "id": 1 },
+        { "name": "last_seen", "type": "timestamp", "optional": true, "id": 2 }
+      ] },
+
+    { "name": "PrekeyEntry",
+      "fields": [
+        { "name": "key_id", "type": "u32" },
+        { "name": "public_key", "type": "bytes" }
+      ] },
+
+    { "name": "KeyPublish", "doc": "Public halves only. The server never receives private key material.",
+      "fields": [
+        { "name": "identity_key", "type": "bytes" },
+        { "name": "signed_prekey_id", "type": "u32" },
+        { "name": "signed_prekey", "type": "bytes" },
+        { "name": "signed_prekey_signature", "type": "bytes" },
+        { "name": "one_time_prekeys", "type": "list<PrekeyEntry>" }
+      ] },
+
+    { "name": "KeyPublishResult",
+      "fields": [
+        { "name": "accepted_prekeys", "type": "u32" },
+        { "name": "identity_fingerprint", "type": "string", "doc": "Shown in the UI for out-of-band verification" }
+      ] },
+
+    { "name": "KeyBundleRequest",
+      "fields": [
+        { "name": "user_id", "type": "id" },
+        { "name": "device_id", "type": "id", "optional": true, "id": 1, "doc": "Omit to fetch a bundle for every device of the user" }
+      ] },
+
+    { "name": "KeyBundle",
+      "fields": [
+        { "name": "user_id", "type": "id" },
+        { "name": "device_id", "type": "id" },
+        { "name": "identity_key", "type": "bytes" },
+        { "name": "signed_prekey_id", "type": "u32" },
+        { "name": "signed_prekey", "type": "bytes" },
+        { "name": "signed_prekey_signature", "type": "bytes" },
+        { "name": "one_time_prekey_id", "type": "u32", "optional": true, "id": 1 },
+        { "name": "one_time_prekey", "type": "bytes", "optional": true, "id": 2 }
+      ] },
+
+    { "name": "KeyBundleResponse", "fields": [ { "name": "bundles", "type": "list<KeyBundle>" } ] },
+
+    { "name": "ProfileRequest", "fields": [ { "name": "user_ids", "type": "list<id>" } ] },
+
+    { "name": "ProfileResponse", "fields": [ { "name": "profiles", "type": "list<UserProfile>" } ] },
+
+    { "name": "RoomSummary",
+      "fields": [
+        { "name": "room_id", "type": "id" },
+        { "name": "public_id", "type": "string" },
+        { "name": "kind", "type": "RoomKind" },
+        { "name": "name", "type": "string" },
+        { "name": "member_count", "type": "u32" },
+        { "name": "online_count", "type": "u32" },
+        { "name": "topic", "type": "string", "optional": true, "id": 1 },
+        { "name": "description", "type": "string", "optional": true, "id": 2 },
+        { "name": "avatar_url", "type": "string", "optional": true, "id": 3 },
+        { "name": "category", "type": "string", "optional": true, "id": 4 },
+        { "name": "language", "type": "string", "optional": true, "id": 5 },
+        { "name": "country", "type": "string", "optional": true, "id": 6 },
+        { "name": "verified", "type": "bool", "optional": true, "id": 7 },
+        { "name": "my_role", "type": "RoomRole", "optional": true, "id": 8 },
+        { "name": "slow_mode_ms", "type": "u32", "optional": true, "id": 9 }
+      ] },
+
+    { "name": "RoomJoinRequest",
+      "fields": [
+        { "name": "room_id", "type": "id" },
+        { "name": "invite_code", "type": "string", "optional": true, "id": 1 }
+      ] },
+
+    { "name": "RoomJoinResponse",
+      "fields": [
+        { "name": "room", "type": "RoomSummary" },
+        { "name": "conversation_id", "type": "id" },
+        { "name": "encryption", "type": "EncryptionMode" },
+        { "name": "last_seq", "type": "u64" }
+      ] },
+
+    { "name": "RoomLeaveRequest", "fields": [ { "name": "room_id", "type": "id" } ] },
+
+    { "name": "RoomListRequest",
+      "fields": [
+        { "name": "limit", "type": "u32" },
+        { "name": "query", "type": "string", "optional": true, "id": 1 },
+        { "name": "category", "type": "string", "optional": true, "id": 2 },
+        { "name": "language", "type": "string", "optional": true, "id": 3 },
+        { "name": "country", "type": "string", "optional": true, "id": 4 },
+        { "name": "cursor", "type": "string", "optional": true, "id": 5 }
+      ] },
+
+    { "name": "RoomListResponse",
+      "fields": [
+        { "name": "rooms", "type": "list<RoomSummary>" },
+        { "name": "next_cursor", "type": "string", "optional": true, "id": 1 }
+      ] },
+
+    { "name": "RoomMemberEvent",
+      "fields": [
+        { "name": "room_id", "type": "id" },
+        { "name": "user_id", "type": "id" },
+        { "name": "joined", "type": "bool" },
+        { "name": "role", "type": "RoomRole", "optional": true, "id": 1 },
+        { "name": "member_count", "type": "u32", "optional": true, "id": 2 }
+      ] },
+
+    { "name": "RoomStateEvent", "doc": "Coalesced room counters and metadata. Deltas only.",
+      "fields": [
+        { "name": "room_id", "type": "id" },
+        { "name": "online_count", "type": "u32", "optional": true, "id": 1 },
+        { "name": "member_count", "type": "u32", "optional": true, "id": 2 },
+        { "name": "topic", "type": "string", "optional": true, "id": 3 },
+        { "name": "slow_mode_ms", "type": "u32", "optional": true, "id": 4 }
+      ] },
+
+    { "name": "NotificationEvent", "doc": "Never carries private plaintext. Push payloads are generic (brief 77).",
+      "fields": [
+        { "name": "kind", "type": "NotificationKind" },
+        { "name": "at", "type": "timestamp" },
+        { "name": "title", "type": "string", "optional": true, "id": 1 },
+        { "name": "body", "type": "string", "optional": true, "id": 2 },
+        { "name": "conversation_id", "type": "id", "optional": true, "id": 3 },
+        { "name": "room_id", "type": "id", "optional": true, "id": 4 },
+        { "name": "actor_id", "type": "id", "optional": true, "id": 5 }
+      ] },
+
+    { "name": "GameAction", "doc": "An intent. The server decides the outcome (brief 89).",
+      "fields": [
+        { "name": "game_id", "type": "id" },
+        { "name": "room_id", "type": "id" },
+        { "name": "action_id", "type": "u64", "doc": "Monotonic per game per player; replays are detected" },
+        { "name": "action", "type": "string" },
+        { "name": "args", "type": "list<string>", "optional": true, "id": 1 }
+      ] },
+
+    { "name": "GameEvent",
+      "fields": [
+        { "name": "game_id", "type": "id" },
+        { "name": "room_id", "type": "id" },
+        { "name": "state_version", "type": "u64" },
+        { "name": "event", "type": "string" },
+        { "name": "payload", "type": "bytes", "optional": true, "id": 1, "doc": "Delta, never a full state snapshot" },
+        { "name": "actor_id", "type": "id", "optional": true, "id": 2 },
+        { "name": "text", "type": "string", "optional": true, "id": 3, "doc": "Pre-rendered bot line for thin clients" }
+      ] }
+  ]
+}

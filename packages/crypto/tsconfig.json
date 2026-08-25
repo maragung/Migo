@@ -1,0 +1,12 @@
+{
+  // No project reference to `@migo/wire`: nothing here needs the codec, and keeping the
+  // dependency out means a client can be audited for its cryptography without reading the
+  // framing layer, and the framing layer cannot grow a dependency on a key type.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist",
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

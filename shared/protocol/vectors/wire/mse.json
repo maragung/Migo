@@ -1,0 +1,755 @@
+{
+  "$comment": "Migo Struct Encoding: every primitive, optional-field layout, nesting, and unknown-field skipping.",
+  "provenance": "case list hand-chosen; bytes computed by tools/vectors/generate_wire_vectors.py from docs/02-protocol.md section 4",
+  "note": "A case is a writer program. The runner replays it through the encoder and compares bytes, then replays it through the decoder over those bytes and compares values. An op marked \"unknown\" is written like any other field but must be skipped, not read, on the way back. In `invalid`, an op with no \"value\" means read and discard, and `optional` with no \"id\" means read the field header only.",
+  "cases": [
+    {
+      "name": "bool_false",
+      "ops": [
+        {
+          "op": "bool",
+          "value": false
+        }
+      ],
+      "hex": "00"
+    },
+    {
+      "name": "bool_true",
+      "ops": [
+        {
+          "op": "bool",
+          "value": true
+        }
+      ],
+      "hex": "01"
+    },
+    {
+      "name": "u32_zero",
+      "ops": [
+        {
+          "op": "u32",
+          "value": "0"
+        }
+      ],
+      "hex": "00"
+    },
+    {
+      "name": "u32_multi_byte",
+      "ops": [
+        {
+          "op": "u32",
+          "value": "300"
+        }
+      ],
+      "hex": "ac02"
+    },
+    {
+      "name": "u64_max",
+      "ops": [
+        {
+          "op": "u64",
+          "value": "18446744073709551615"
+        }
+      ],
+      "hex": "ffffffffffffffffff01"
+    },
+    {
+      "name": "timestamp_epoch",
+      "ops": [
+        {
+          "op": "timestamp",
+          "value": "0"
+        }
+      ],
+      "hex": "00"
+    },
+    {
+      "name": "timestamp_one_day",
+      "ops": [
+        {
+          "op": "timestamp",
+          "value": "86400000"
+        }
+      ],
+      "hex": "80b89929"
+    },
+    {
+      "name": "id_is_sixteen_raw_bytes",
+      "ops": [
+        {
+          "op": "id",
+          "value": "0102030405060708090a0b0c0d0e0f10"
+        }
+      ],
+      "hex": "0102030405060708090a0b0c0d0e0f10"
+    },
+    {
+      "name": "id_all_zero",
+      "ops": [
+        {
+          "op": "id",
+          "value": "00000000000000000000000000000000"
+        }
+      ],
+      "hex": "00000000000000000000000000000000"
+    },
+    {
+      "name": "string_empty",
+      "ops": [
+        {
+          "op": "string",
+          "value": ""
+        }
+      ],
+      "hex": "00"
+    },
+    {
+      "name": "string_ascii",
+      "ops": [
+        {
+          "op": "string",
+          "value": "hello"
+        }
+      ],
+      "hex": "0568656c6c6f"
+    },
+    {
+      "name": "string_utf8_multibyte",
+      "ops": [
+        {
+          "op": "string",
+          "value": "halo — 世界 🌏"
+        }
+      ],
+      "hex": "1468616c6f20e2809420e4b896e7958c20f09f8c8f"
+    },
+    {
+      "name": "bytes_empty",
+      "ops": [
+        {
+          "op": "bytes",
+          "value": ""
+        }
+      ],
+      "hex": "00"
+    },
+    {
+      "name": "bytes_short",
+      "ops": [
+        {
+          "op": "bytes",
+          "value": "010203"
+        }
+      ],
+      "hex": "03010203"
+    },
+    {
+      "name": "list_len_zero",
+      "ops": [
+        {
+          "op": "list_len",
+          "value": "0"
+        }
+      ],
+      "hex": "00"
+    },
+    {
+      "name": "list_of_three_strings",
+      "ops": [
+        {
+          "op": "list_len",
+          "value": "3"
+        },
+        {
+          "op": "string",
+          "value": "a"
+        },
+        {
+          "op": "string",
+          "value": "bb"
+        },
+        {
+          "op": "string",
+          "value": "ccc"
+        }
+      ],
+      "hex": "03016102626203636363"
+    },
+    {
+      "name": "struct_with_no_optionals",
+      "ops": [
+        {
+          "op": "enter"
+        },
+        {
+          "op": "u64",
+          "value": "42"
+        },
+        {
+          "op": "u32",
+          "value": "0"
+        },
+        {
+          "op": "leave"
+        }
+      ],
+      "hex": "2a00"
+    },
+    {
+      "name": "struct_with_one_optional",
+      "ops": [
+        {
+          "op": "enter"
+        },
+        {
+          "op": "u64",
+          "value": "42"
+        },
+        {
+          "op": "u32",
+          "value": "1"
+        },
+        {
+          "op": "optional",
+          "id": 1,
+          "ops": [
+            {
+              "op": "string",
+              "value": "hello"
+            }
+          ]
+        },
+        {
+          "op": "leave"
+        }
+      ],
+      "hex": "2a0101060568656c6c6f"
+    },
+    {
+      "name": "struct_with_two_optionals",
+      "ops": [
+        {
+          "op": "enter"
+        },
+        {
+          "op": "id",
+          "value": "0102030405060708090a0b0c0d0e0f10"
+        },
+        {
+          "op": "u32",
+          "value": "2"
+        },
+        {
+          "op": "optional",
+          "id": 1,
+          "ops": [
+            {
+              "op": "bool",
+              "value": true
+            }
+          ]
+        },
+        {
+          "op": "optional",
+          "id": 4,
+          "ops": [
+            {
+              "op": "u32",
+              "value": "7"
+            }
+          ]
+        },
+        {
+          "op": "leave"
+        }
+      ],
+      "hex": "0102030405060708090a0b0c0d0e0f1002010101040107"
+    },
+    {
+      "name": "optional_id_needing_two_varint_bytes",
+      "ops": [
+        {
+          "op": "enter"
+        },
+        {
+          "op": "u32",
+          "value": "1"
+        },
+        {
+          "op": "optional",
+          "id": 200,
+          "ops": [
+            {
+              "op": "u32",
+              "value": "1"
+            }
+          ]
+        },
+        {
+          "op": "leave"
+        }
+      ],
+      "hex": "01c8010101"
+    },
+    {
+      "name": "nested_struct_in_an_optional",
+      "ops": [
+        {
+          "op": "enter"
+        },
+        {
+          "op": "u32",
+          "value": "1"
+        },
+        {
+          "op": "optional",
+          "id": 1,
+          "ops": [
+            {
+              "op": "enter"
+            },
+            {
+              "op": "string",
+              "value": "inner"
+            },
+            {
+              "op": "u32",
+              "value": "0"
+            },
+            {
+              "op": "leave"
+            }
+          ]
+        },
+        {
+          "op": "leave"
+        }
+      ],
+      "hex": "01010705696e6e657200"
+    },
+    {
+      "name": "nested_optional_inside_an_optional",
+      "ops": [
+        {
+          "op": "enter"
+        },
+        {
+          "op": "u32",
+          "value": "1"
+        },
+        {
+          "op": "optional",
+          "id": 1,
+          "ops": [
+            {
+              "op": "enter"
+            },
+            {
+              "op": "u32",
+              "value": "1"
+            },
+            {
+              "op": "optional",
+              "id": 2,
+              "ops": [
+                {
+                  "op": "string",
+                  "value": "deep"
+                }
+              ]
+            },
+            {
+              "op": "leave"
+            }
+          ]
+        },
+        {
+          "op": "leave"
+        }
+      ],
+      "hex": "0101080102050464656570"
+    },
+    {
+      "name": "an_unknown_optional_field_is_skipped_by_length",
+      "ops": [
+        {
+          "op": "enter"
+        },
+        {
+          "op": "u64",
+          "value": "7"
+        },
+        {
+          "op": "u32",
+          "value": "2"
+        },
+        {
+          "op": "optional",
+          "id": 1,
+          "ops": [
+            {
+              "op": "string",
+              "value": "hi"
+            }
+          ]
+        },
+        {
+          "op": "optional",
+          "id": 99,
+          "unknown": true,
+          "ops": [
+            {
+              "op": "bytes",
+              "value": "abcdef"
+            }
+          ]
+        },
+        {
+          "op": "leave"
+        }
+      ],
+      "hex": "07020103026869630403abcdef"
+    },
+    {
+      "name": "only_unknown_optional_fields",
+      "ops": [
+        {
+          "op": "enter"
+        },
+        {
+          "op": "bool",
+          "value": false
+        },
+        {
+          "op": "u32",
+          "value": "2"
+        },
+        {
+          "op": "optional",
+          "id": 40,
+          "unknown": true,
+          "ops": [
+            {
+              "op": "u64",
+              "value": "1"
+            }
+          ]
+        },
+        {
+          "op": "optional",
+          "id": 41,
+          "unknown": true,
+          "ops": [
+            {
+              "op": "string",
+              "value": "x"
+            }
+          ]
+        },
+        {
+          "op": "leave"
+        }
+      ],
+      "hex": "000228010129020178"
+    },
+    {
+      "name": "nesting_at_the_depth_limit",
+      "ops": [
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "u32",
+          "value": "1"
+        },
+        {
+          "op": "leave"
+        },
+        {
+          "op": "leave"
+        },
+        {
+          "op": "leave"
+        },
+        {
+          "op": "leave"
+        },
+        {
+          "op": "leave"
+        },
+        {
+          "op": "leave"
+        },
+        {
+          "op": "leave"
+        },
+        {
+          "op": "leave"
+        },
+        {
+          "op": "leave"
+        },
+        {
+          "op": "leave"
+        },
+        {
+          "op": "leave"
+        },
+        {
+          "op": "leave"
+        },
+        {
+          "op": "leave"
+        },
+        {
+          "op": "leave"
+        },
+        {
+          "op": "leave"
+        },
+        {
+          "op": "leave"
+        }
+      ],
+      "hex": "01"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "bool_byte_two",
+      "hex": "02",
+      "read_ops": [
+        {
+          "op": "bool"
+        }
+      ],
+      "error": "InvalidBool",
+      "why": "docs/02-protocol.md section 4: a bool is 0 or 1, anything else is a decode error"
+    },
+    {
+      "name": "bool_byte_ff",
+      "hex": "ff",
+      "read_ops": [
+        {
+          "op": "bool"
+        }
+      ],
+      "error": "InvalidBool",
+      "why": "truthiness is not canonical"
+    },
+    {
+      "name": "string_length_past_end",
+      "hex": "0568656c",
+      "read_ops": [
+        {
+          "op": "string"
+        }
+      ],
+      "error": "UnexpectedEnd",
+      "why": "the prefix claims 5 bytes and 3 are present"
+    },
+    {
+      "name": "string_over_the_limit",
+      "hex": "818004",
+      "read_ops": [
+        {
+          "op": "string"
+        }
+      ],
+      "error": "StringTooLong",
+      "why": "checked against the limit before the buffer is present, let alone allocated"
+    },
+    {
+      "name": "string_not_utf8",
+      "hex": "02fffe",
+      "read_ops": [
+        {
+          "op": "string"
+        }
+      ],
+      "error": "InvalidUtf8",
+      "why": "0xff 0xfe is not a UTF-8 sequence"
+    },
+    {
+      "name": "string_truncated_utf8_sequence",
+      "hex": "02e4b8",
+      "read_ops": [
+        {
+          "op": "string"
+        }
+      ],
+      "error": "InvalidUtf8",
+      "why": "the first two bytes of a three-byte codepoint are not a string"
+    },
+    {
+      "name": "bytes_over_the_limit",
+      "hex": "818008",
+      "read_ops": [
+        {
+          "op": "bytes"
+        }
+      ],
+      "error": "BytesTooLong",
+      "why": "one ciphertext is the size this limit was chosen for"
+    },
+    {
+      "name": "list_over_the_limit",
+      "hex": "8120",
+      "read_ops": [
+        {
+          "op": "list_len"
+        }
+      ],
+      "error": "ListTooLong",
+      "why": "a count is an allocation request from a stranger"
+    },
+    {
+      "name": "list_count_larger_than_remaining_bytes",
+      "hex": "640102",
+      "read_ops": [
+        {
+          "op": "list_len"
+        }
+      ],
+      "error": "ListTooLong",
+      "why": "every item costs at least one byte, so 100 items cannot fit in 2"
+    },
+    {
+      "name": "id_truncated",
+      "hex": "0102030405",
+      "read_ops": [
+        {
+          "op": "id"
+        }
+      ],
+      "error": "UnexpectedEnd",
+      "why": "an id has no length prefix, so a short buffer is the only signal"
+    },
+    {
+      "name": "optional_length_past_end",
+      "hex": "01050102",
+      "read_ops": [
+        {
+          "op": "optional"
+        }
+      ],
+      "error": "UnexpectedEnd",
+      "why": "the field length must be inside the frame it was read from"
+    },
+    {
+      "name": "trailing_bytes_after_the_value",
+      "hex": "01ff",
+      "read_ops": [
+        {
+          "op": "u32"
+        }
+      ],
+      "error": "TrailingBytes",
+      "why": "leftovers mean the two sides disagree about the schema"
+    },
+    {
+      "name": "nesting_one_past_the_limit",
+      "hex": "",
+      "read_ops": [
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        },
+        {
+          "op": "enter"
+        }
+      ],
+      "error": "DepthExceeded",
+      "why": "MAX_NESTING_DEPTH is 16; deeper recursion is a stack attack"
+    }
+  ]
+}

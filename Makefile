@@ -1,0 +1,250 @@
+# Migo — top-level developer entrypoints.
+# Everything a newcomer needs should be reachable from `make help`.
+
+SHELL      := /bin/bash
+.SHELLFLAGS := -eu -o pipefail -c
+.DEFAULT_GOAL := help
+
+SERVER_DIR := server
+WEB_DIR    := clients/web
+CARGO      := cargo
+PNPM       := pnpm
+
+# Cargo takes --manifest-path *after* the subcommand, not before it, so the flag
+# cannot live in $(CARGO). Every recipe below places it explicitly; a target that
+# forgets it silently operates on whatever workspace the caller happens to be in.
+MANIFEST   := --manifest-path $(SERVER_DIR)/Cargo.toml
+
+# Colours only when attached to a TTY.
+ifneq ($(shell test -t 1 && echo tty),)
+  C_H := \033[1;36m
+  C_R := \033[0m
+else
+  C_H :=
+  C_R :=
+endif
+
+.PHONY: help
+help: ## Show this help
+	@printf "$(C_H)Migo — make targets$(C_R)\n\n"
+	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
+		| sort \
+		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[1m%-18s\033[0m %s\n", $$1, $$2}'
+
+# ---------------------------------------------------------------- setup
+
+.PHONY: setup
+setup: ## Install toolchain components and JS dependencies
+	rustup component add rustfmt clippy 2>/dev/null || true
+	$(PNPM) install
+
+.PHONY: protocol
+protocol: ## Regenerate Rust + TypeScript protocol code from shared/protocol/schema
+	node tools/protocol-codegen/generate.mjs
+
+.PHONY: protocol-check
+protocol-check: ## Fail if generated protocol code is stale (CI gate)
+	node tools/protocol-codegen/generate.mjs --check
+
+.PHONY: entities
+entities: ## Regenerate SeaORM entities from server/migrations
+	node tools/entity-codegen/generate.mjs
+
+.PHONY: entity-check
+entity-check: ## Fail if generated entities are stale (CI gate)
+	node tools/entity-codegen/generate.mjs --check
+
+.PHONY: brief-check
+brief-check: ## Fail if migo.md contradicts the schema or docs (CI gate, see brief section 178)
+	python3 tools/scripts/brief-audit.py
+
+.PHONY: vectors
+vectors: ## Regenerate the cross-language conformance vectors in shared/protocol/vectors
+	# Both generators are independent implementations written from the
+	# specification and the RFCs; the crypto one refuses to emit anything until it
+	# reproduces the published test vectors it was written against.
+	python3 tools/vectors/generate_wire_vectors.py
+	python3 tools/vectors/generate_crypto_vectors.py
+
+.PHONY: vector-check
+vector-check: ## Fail if the committed vectors are stale (CI gate, no Rust toolchain needed)
+	# Separate from the runners on purpose. If a generator now produces different
+	# bytes, the interesting failure is "the vectors moved" — and this target
+	# answers that in two seconds, without a Rust toolchain, so it can live in the
+	# fast gate job alongside protocol-check.
+	python3 tools/vectors/generate_wire_vectors.py --check
+	python3 tools/vectors/generate_crypto_vectors.py --check --quiet
+
+# ---------------------------------------------------------------- build
+
+.PHONY: build
+build: build-server build-ts build-web ## Build everything
+
+.PHONY: build-server
+build-server: ## Build the Rust workspace
+	$(CARGO) build $(MANIFEST) --workspace
+
+.PHONY: build-release
+build-release: ## Build the Rust workspace in release mode
+	$(CARGO) build $(MANIFEST) --workspace --release
+
+.PHONY: build-ts
+build-ts: ## Build the TypeScript packages (protocol, wire, crypto, sdk)
+	# One `tsc --build` at the root rather than one per package: the packages are
+	# composite projects with references, so the root build works out the order itself
+	# and skips what is already current. Building them one at a time would recompile
+	# each shared dependency once per dependent.
+	$(PNPM) run --if-present build
+
+.PHONY: build-web
+build-web: ## Build the Next.js web client
+	$(PNPM) --filter @migo/web build
+
+# ---------------------------------------------------------------- run
+
+.PHONY: dev
+dev: ## Run migod (in-memory store) + web client together
+	tools/scripts/dev.sh
+
+.PHONY: dev-server
+dev-server: ## Run migod only, in-memory store, all roles
+	MIGO_STORE__BACKEND=memory MIGO_CACHE__BACKEND=memory \
+	  $(CARGO) run $(MANIFEST) -p migod -- serve
+
+.PHONY: dev-pg
+dev-pg: ## Run migod against Postgres + Redis from infra/compose
+	MIGO_STORE__BACKEND=postgres MIGO_CACHE__BACKEND=redis \
+	  $(CARGO) run $(MANIFEST) -p migod -- serve
+
+.PHONY: dev-web
+dev-web: ## Run the Next.js dev server only
+	$(PNPM) --filter @migo/web dev
+
+.PHONY: infra-up
+infra-up: ## Start Postgres, Redis and MinIO via Docker Compose
+	docker compose -f infra/compose/docker-compose.dev.yml up -d
+
+.PHONY: infra-down
+infra-down: ## Stop the local infrastructure
+	docker compose -f infra/compose/docker-compose.dev.yml down
+
+.PHONY: migrate
+migrate: ## Apply SQL migrations to $$MIGO_STORE__URL
+	$(CARGO) run $(MANIFEST) -p migod -- migrate
+
+# ---------------------------------------------------------------- quality
+
+.PHONY: check
+check: ## Fast type-check of the Rust workspace
+	$(CARGO) check $(MANIFEST) --workspace --all-targets
+
+.PHONY: fmt
+fmt: ## Format Rust and TypeScript
+	$(CARGO) fmt $(MANIFEST) --all
+	# `run`, not `-r run`: pnpm's recursive mode deliberately excludes the workspace
+	# root, and the root is where Prettier is configured. `-r` here ran a script that
+	# no package defines, reported success, and formatted nothing.
+	$(PNPM) run --if-present format
+
+.PHONY: fmt-check
+fmt-check: fmt-check-rust fmt-check-js ## Verify formatting (CI gate)
+
+# The -rust / -js split repeats through fmt-check, lint and test-vectors, and exists for
+# CI rather than for people: the job with a warm target/ has no pnpm, the job with pnpm
+# has no Rust toolchain, and a job that had to install both to run one gate would
+# install both to run neither well. Run the unsuffixed target locally; it does both.
+.PHONY: fmt-check-rust
+fmt-check-rust: ## rustfmt only, check mode (CI gate)
+	$(CARGO) fmt $(MANIFEST) --all -- --check
+
+.PHONY: fmt-check-js
+fmt-check-js: ## Prettier only, check mode (CI gate)
+	# Prettier's scope is the whole tree, docs and workflows included, because
+	# .prettierignore decides what is out of scope and not this recipe — whether a file
+	# is formatted should be settled by one rule wherever the file lives.
+	$(PNPM) run --if-present format:check
+
+.PHONY: lint
+lint: lint-rust lint-js ## Clippy (deny warnings) + ESLint
+
+.PHONY: lint-rust
+lint-rust: ## Clippy only, warnings denied (CI gate)
+	$(CARGO) clippy $(MANIFEST) --workspace --all-targets --all-features -- -D warnings
+
+.PHONY: lint-js
+lint-js: ## ESLint only, over the whole workspace (CI gate)
+	# From the root, for the same reason there is one flat config: a rule enforced in
+	# only some packages is a rule a reviewer cannot rely on. The typed rules need type
+	# information, so this wants the build first — `make ci` orders it that way.
+	$(PNPM) exec eslint .
+
+.PHONY: doc-check
+doc-check: ## Fail on broken intra-doc links (CI gate)
+	# `cargo test` compiles doc examples but never resolves doc *links*, so a link to
+	# a renamed or private item is a hole in the published documentation that every
+	# other gate reports as green. RUSTDOCFLAGS rather than a global RUSTFLAGS: the
+	# latter would also apply to dependencies, where somebody else's deprecation
+	# warning would fail our build.
+	RUSTDOCFLAGS="-D warnings" $(CARGO) doc $(MANIFEST) --workspace --no-deps
+
+.PHONY: test
+test: test-server test-web ## Run all tests
+
+.PHONY: test-server
+test-server: ## Run the Rust test suite
+	$(CARGO) test $(MANIFEST) --workspace
+
+.PHONY: test-contract
+test-contract: ## Contract suites against real backends (needs MIGO_TEST_DATABASE_URL, MIGO_TEST_REDIS_URL)
+	@test -n "$${MIGO_TEST_DATABASE_URL:-}" \
+	  || echo "note: MIGO_TEST_DATABASE_URL unset — the Postgres half will pass by doing nothing"
+	@test -n "$${MIGO_TEST_REDIS_URL:-}" \
+	  || echo "note: MIGO_TEST_REDIS_URL unset — the Redis half will pass by doing nothing"
+	$(CARGO) test $(MANIFEST) -p migo-store -p migo-cache
+
+.PHONY: test-vectors
+test-vectors: test-vectors-rust test-vectors-ts ## Cross-language conformance: Rust and TS must agree on the wire + crypto vectors
+
+.PHONY: test-vectors-rust
+test-vectors-rust: vector-check ## The Rust half of the conformance vectors (CI gate)
+	$(CARGO) test $(MANIFEST) -p migo-wire -p migo-crypto --test vectors
+
+.PHONY: test-vectors-ts
+test-vectors-ts: vector-check ## The TypeScript half of the conformance vectors (CI gate)
+	# Gated on the dependencies being installed rather than skipped silently, and the
+	# gate fails: "0 packages" scrolling past in a green build is how a language binding
+	# drifts for a month without anybody noticing, and this target's entire claim is
+	# that both languages read the same bytes and agree.
+	@if [ -d node_modules ]; then \
+	  $(MAKE) --no-print-directory build-ts; \
+	  $(PNPM) --filter @migo/protocol --filter @migo/wire --filter @migo/crypto test; \
+	else \
+	  echo "error: node_modules is missing, so the TypeScript half of the vector suite"; \
+	  echo "       cannot run and this target must not claim success. Run 'make setup'."; \
+	  exit 1; \
+	fi
+
+.PHONY: test-web
+test-web: build-ts ## Run web/TypeScript tests
+	# Depends on build-ts because each package's `test` script runs `node --test` over
+	# dist/. With no build the glob matches nothing, node exits 0, and the suite passes
+	# by not existing.
+	$(PNPM) -r --if-present test
+
+.PHONY: audit
+audit: ## Dependency vulnerability + licence audit
+	# cargo-audit reads the lockfile, not the manifest, so it takes --file rather
+	# than --manifest-path. Both are `|| true` because an advisory published this
+	# morning is news, not a reason to block an unrelated change.
+	$(CARGO) audit --file $(SERVER_DIR)/Cargo.lock || true
+	$(PNPM) audit --audit-level high || true
+
+.PHONY: ci
+ci: protocol-check entity-check brief-check vector-check fmt-check build-ts lint doc-check test test-vectors ## Everything CI runs
+
+# ---------------------------------------------------------------- misc
+
+.PHONY: clean
+clean: ## Remove build artefacts
+	$(CARGO) clean $(MANIFEST)
+	rm -rf $(WEB_DIR)/.next node_modules/.cache

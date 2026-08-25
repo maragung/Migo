@@ -1,0 +1,113 @@
+# =============================================================================
+# Migo — local development stack.
+#
+#   docker compose -f infra/compose/docker-compose.yml up --build
+#
+# Brings up four services on one network:
+#   postgres  durable store (SeaORM; migod migrates it on boot)
+#   redis     cache and rate-limiter backend (ephemeral: no persistence)
+#   migod     the server — REST on /v1, realtime gateway on /ws, probes at root
+#   web       the Next.js PWA, talking to migod from the browser
+#
+# Startup ordering is enforced by health checks: migod waits until postgres and
+# redis are healthy, and web waits until migod is healthy. This is a DEVELOPMENT
+# configuration — it runs with environment=development, which permits the ephemeral
+# node key, the well-known token placeholder, and a filesystem media backend. None
+# of these pass the server's own production validation; do not deploy this file.
+# =============================================================================
+
+name: migo
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: migo
+      POSTGRES_PASSWORD: migo
+      POSTGRES_DB: migo
+    volumes:
+      - migo-postgres:/var/lib/postgresql/data
+    # Uncomment to reach the database from the host (e.g. psql) during development.
+    # ports:
+    #   - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U migo -d migo"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # A cache holds nothing worth persisting: disable both the RDB snapshot and the
+    # append-only log so a restart comes up empty and fast.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    # ports:
+    #   - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  migod:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.migod
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # --- node identity ---
+      MIGO_NODE__ID: migo-dev-1
+      MIGO_NODE__REGION: local
+      MIGO_NODE__COUNTRY: ID
+      MIGO_NODE__ROLES: api,gateway,room,game
+      MIGO_NODE__ENVIRONMENT: development
+      # --- listeners ---
+      MIGO_HTTP__BIND: 0.0.0.0:8080
+      MIGO_HTTP__PUBLIC_URL: http://localhost:8080
+      MIGO_HTTP__CORS_ORIGINS: http://localhost:3000
+      # --- durable store (migod runs SeaORM migrations against this on boot) ---
+      MIGO_STORE__BACKEND: postgres
+      MIGO_STORE__URL: postgres://migo:migo@postgres:5432/migo
+      # --- cache / rate limiter ---
+      MIGO_CACHE__BACKEND: redis
+      MIGO_CACHE__URL: redis://redis:6379/0
+      # --- media (development stand-in; the server never proxies bytes, brief 168) ---
+      MIGO_MEDIA__BACKEND: filesystem
+      MIGO_MEDIA__LOCAL_DIR: /var/lib/migo/media
+      # --- auth: the documented development placeholder, refused outside development ---
+      MIGO_AUTH__TOKEN_KEY: development-only-insecure-token-key
+      MIGO_AUTH__ALLOW_REGISTRATION: "true"
+      RUST_LOG: info
+    volumes:
+      - migo-media:/var/lib/migo/media
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.web
+      # NEXT_PUBLIC_* are inlined at build time. These are the URLs the BROWSER uses,
+      # so they resolve on the host (localhost), not on the compose network.
+      args:
+        NEXT_PUBLIC_MIGO_API_URL: http://localhost:8080
+        NEXT_PUBLIC_MIGO_GATEWAY_URL: ws://localhost:8080/ws
+        NEXT_PUBLIC_MIGO_APP_VERSION: 0.1.0
+    depends_on:
+      migod:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  migo-postgres:
+  migo-media:

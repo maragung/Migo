@@ -1,0 +1,26 @@
+{
+  "name": "Migo",
+  "short_name": "Migo",
+  "description": "End-to-end encrypted messaging.",
+  "start_url": "/chat",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0b1020",
+  "theme_color": "#0b1020",
+  "categories": ["social", "communication"],
+  "icons": [
+    {
+      "src": "/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}
