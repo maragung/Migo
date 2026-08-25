@@ -38,7 +38,7 @@ fn with_database(url: &str, database: &str) -> String {
         None => (url, None),
     };
     let trimmed = base.trim_end_matches('/');
-    let cut = trimmed.rfind('/').map_or(trimmed.len(), |at| at);
+    let cut = trimmed.rfind('/').unwrap_or(trimmed.len());
     let mut swapped = format!("{}/{database}", &trimmed[..cut]);
     if let Some(query) = query {
         swapped.push('?');

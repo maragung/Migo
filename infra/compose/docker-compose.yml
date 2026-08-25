@@ -31,7 +31,7 @@ services:
     # ports:
     #   - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U migo -d migo"]
+      test: ['CMD-SHELL', 'pg_isready -U migo -d migo']
       interval: 5s
       timeout: 3s
       retries: 10
@@ -42,11 +42,11 @@ services:
     image: redis:7-alpine
     # A cache holds nothing worth persisting: disable both the RDB snapshot and the
     # append-only log so a restart comes up empty and fast.
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    command: ['redis-server', '--save', '', '--appendonly', 'no']
     # ports:
     #   - "6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
       timeout: 3s
       retries: 10
@@ -83,12 +83,12 @@ services:
       MIGO_MEDIA__LOCAL_DIR: /var/lib/migo/media
       # --- auth: the documented development placeholder, refused outside development ---
       MIGO_AUTH__TOKEN_KEY: development-only-insecure-token-key
-      MIGO_AUTH__ALLOW_REGISTRATION: "true"
+      MIGO_AUTH__ALLOW_REGISTRATION: 'true'
       RUST_LOG: info
     volumes:
       - migo-media:/var/lib/migo/media
     ports:
-      - "8080:8080"
+      - '8080:8080'
     restart: unless-stopped
 
   web:
@@ -105,7 +105,7 @@ services:
       migod:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      - '3000:3000'
     restart: unless-stopped
 
 volumes:

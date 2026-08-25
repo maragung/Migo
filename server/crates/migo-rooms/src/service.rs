@@ -371,7 +371,7 @@ where
         let Some(member) = self.store.room_member(room.room_id, account_id).await? else {
             return Ok(None);
         };
-        Ok(Some(member.role).filter(|_| member.is_active()))
+        Ok(member.is_active().then_some(member.role))
     }
 
     /// The member count as it stands now, re-read after a write that moved it.

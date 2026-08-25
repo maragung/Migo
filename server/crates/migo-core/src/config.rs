@@ -891,12 +891,13 @@ pub fn decode_key_material(value: &str) -> Vec<u8> {
         && !trimmed.is_empty()
         && trimmed.chars().all(|c| c.is_ascii_hexdigit())
     {
-        // Two hex digits per byte; the length check above makes this exact.
         let mut out = Vec::with_capacity(trimmed.len() / 2);
-        let bytes = trimmed.as_bytes();
-        for pair in bytes.chunks_exact(2) {
-            let hi = (pair[0] as char).to_digit(16).unwrap_or(0) as u8;
-            let lo = (pair[1] as char).to_digit(16).unwrap_or(0) as u8;
+        // Two hex digits per byte. The even, non-empty, all-hex length checked above means every
+        // pair is a whole byte and the remainder is empty.
+        let (pairs, _rest) = trimmed.as_bytes().as_chunks::<2>();
+        for &[hi, lo] in pairs {
+            let hi = (hi as char).to_digit(16).unwrap_or(0) as u8;
+            let lo = (lo as char).to_digit(16).unwrap_or(0) as u8;
             out.push(hi << 4 | lo);
         }
         return out;

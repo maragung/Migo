@@ -824,7 +824,9 @@ function genKotlin() {
   out += kdoc('Protocol name and version this build speaks.');
   out += `const val PROTOCOL_NAME: String = "${meta.protocol.name}"\n`;
   out += `const val PROTOCOL_VERSION: Int = ${meta.protocol.version}\n`;
-  out += kdoc('Milliseconds between the Unix epoch and the Migo epoch; timestamps travel relative to it.');
+  out += kdoc(
+    'Milliseconds between the Unix epoch and the Migo epoch; timestamps travel relative to it.',
+  );
   out += `const val EPOCH_MS: Long = ${meta.epoch_ms}L\n\n`;
 
   // Features. bitmask64 maps to ULong, which is not a const-safe type, so these are `val`s on
@@ -859,7 +861,9 @@ function genKotlin() {
   out += `fun errorSymbol(code: Long): String? = ERROR_SYMBOLS[code]\n\n`;
 
   // Error classes
-  out += kdoc('Behavioural class of an error code, so a client can react without knowing every code.');
+  out += kdoc(
+    'Behavioural class of an error code, so a client can react without knowing every code.',
+  );
   out += `enum class ErrorClass {\n${errorsDoc.classes.map((c) => `    ${c.name},`).join('\n')}\n    Unknown,\n}\n\n`;
   out += `private data class ErrorRange(val from: Long, val to: Long, val cls: ErrorClass, val retryable: Boolean, val action: String)\n\n`;
   out += `private val ERROR_RANGES: List<ErrorRange> = listOf(\n${errorsDoc.classes.map((c) => `    ErrorRange(${c.range[0]}L, ${c.range[1]}L, ErrorClass.${c.name}, ${c.retryable}, "${c.client_action}"),`).join('\n')}\n)\n\n`;
@@ -928,7 +932,8 @@ function genKotlin() {
     out += `            val optionalCount = r.u32()\n            for (i in 0L until optionalCount) {\n`;
     if (opt.length) {
       out += `                val (fieldId, sub) = r.optional()\n                when (fieldId) {\n`;
-      for (const f of opt) out += `                    ${f.id}L -> ${camel(f.name)} = ${kotlinRead(f.type, 'sub')}\n`;
+      for (const f of opt)
+        out += `                    ${f.id}L -> ${camel(f.name)} = ${kotlinRead(f.type, 'sub')}\n`;
       out += `                    else -> {} // unknown optional field: skipped by length (forward compatibility)\n                }\n`;
     } else {
       out += `                r.optional() // no optional fields in this build; a newer peer's are skipped by length\n`;
@@ -953,7 +958,9 @@ function genKotlin() {
   }
   out += `}\n\n`;
 
-  out += kdoc('Static metadata for one opcode: its rate-limit cost, delivery class, required auth, and shape.');
+  out += kdoc(
+    'Static metadata for one opcode: its rate-limit cost, delivery class, required auth, and shape.',
+  );
   out += `data class OpcodeMeta(\n    val code: Long,\n    val name: String,\n    val cost: Int,\n    val cls: DeliveryClass,\n    val auth: AuthLevel,\n    val direction: Direction,\n    val ackRequired: Boolean,\n    val payload: String,\n    val response: String? = null,\n    val coalesceKey: String? = null,\n)\n\n`;
 
   out += `val OPCODES: Map<Long, OpcodeMeta> = mapOf(\n`;

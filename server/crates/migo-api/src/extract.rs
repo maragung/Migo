@@ -74,8 +74,14 @@ impl RequestFacts {
 impl<S: Send + Sync> FromRequestParts<S> for RequestFacts {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        Ok(Self::from_parts(parts))
+    // No `.await` here — the facts are read synchronously from the request head. Written as a
+    // non-async fn returning a ready future rather than an `async fn`: a newer clippy flags an
+    // `async fn` trait impl with no await, and this form is equivalent on every clippy version.
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(Ok(Self::from_parts(parts)))
     }
 }
 
@@ -125,8 +131,13 @@ pub struct IdempotencyKey(pub Option<String>);
 impl<S: Send + Sync> FromRequestParts<S> for IdempotencyKey {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        Ok(Self(header_named(parts, "idempotency-key")))
+    // No `.await` here — the header lifts synchronously. A non-async fn returning a ready future
+    // rather than an `async fn`, for the reason given on `RequestFacts` above.
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(Ok(Self(header_named(parts, "idempotency-key"))))
     }
 }
 

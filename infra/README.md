@@ -21,12 +21,12 @@ docker compose -f infra/compose/docker-compose.yml up --build
 
 This builds both images and starts four services in dependency order:
 
-| Service    | Purpose                                             | Address              |
-|------------|-----------------------------------------------------|----------------------|
-| `postgres` | durable store; `migod` migrates it on boot          | internal             |
-| `redis`    | cache and rate-limiter backend (no persistence)     | internal             |
-| `migod`    | server: REST `/v1`, gateway `/ws`, probes at root   | http://localhost:8080 |
-| `web`      | the Next.js PWA                                     | http://localhost:3000 |
+| Service    | Purpose                                           | Address               |
+| ---------- | ------------------------------------------------- | --------------------- |
+| `postgres` | durable store; `migod` migrates it on boot        | internal              |
+| `redis`    | cache and rate-limiter backend (no persistence)   | internal              |
+| `migod`    | server: REST `/v1`, gateway `/ws`, probes at root | http://localhost:8080 |
+| `web`      | the Next.js PWA                                   | http://localhost:3000 |
 
 Open http://localhost:3000. Registration is enabled, so you can create an account
 and sign in immediately.
@@ -97,7 +97,7 @@ for the file form. The keys the compose stack sets are documented inline in
 ### Operational endpoints
 
 | Path       | Meaning                                                        |
-|------------|----------------------------------------------------------------|
+| ---------- | -------------------------------------------------------------- |
 | `/health`  | liveness — the process can serve a request (image healthcheck) |
 | `/ready`   | readiness — the node is willing to take traffic                |
 | `/metrics` | Prometheus exposition                                          |

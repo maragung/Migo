@@ -140,11 +140,12 @@ impl SeededRandom {
 
 impl Random for SeededRandom {
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        let mut chunks = dest.chunks_exact_mut(8);
-        for chunk in &mut chunks {
-            chunk.copy_from_slice(&self.next().to_le_bytes());
+        // Eight bytes at a time from successive draws, then the shorter tail from one more draw.
+        // The draw count is unchanged, so seeded sequences are too.
+        let (blocks, tail) = dest.as_chunks_mut::<8>();
+        for block in blocks {
+            *block = self.next().to_le_bytes();
         }
-        let tail = chunks.into_remainder();
         if !tail.is_empty() {
             let bytes = self.next().to_le_bytes();
             tail.copy_from_slice(&bytes[..tail.len()]);

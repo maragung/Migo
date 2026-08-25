@@ -123,8 +123,10 @@ fn decode_ranks(bytes: &[u8]) -> Option<Vec<Rank>> {
     if !bytes.len().is_multiple_of(RANK_BYTES) {
         return None;
     }
-    let mut ranks = Vec::with_capacity(bytes.len() / RANK_BYTES);
-    for chunk in bytes.chunks_exact(RANK_BYTES) {
+    // The multiple-of check above guarantees a whole number of records and an empty remainder.
+    let (records, _rest) = bytes.as_chunks::<RANK_BYTES>();
+    let mut ranks = Vec::with_capacity(records.len());
+    for chunk in records {
         let position = u32::from_be_bytes(chunk[0..4].try_into().ok()?);
         let account_id = Id::from_bytes(chunk[4..20].try_into().ok()?);
         let xp = i64::from_be_bytes(chunk[20..28].try_into().ok()?);
