@@ -413,7 +413,11 @@ mod tests {
         );
         // The distinguishing detail is kept, but only for our own log.
         assert!(unknown.internal_message().contains("allow-list"));
-        assert_eq!(unknown.kind(), ErrorKind::Auth);
+        // A mesh handshake fault is a federation-class code, not an end-user
+        // credential failure: MESH_AUTH_FAILED is 1703, and 1700..=1799 is the
+        // federation range, so it groups with the other mesh faults for alerting.
+        // The "auth" in the name is about authenticating a peer node, not the caller.
+        assert_eq!(unknown.kind(), ErrorKind::Federation);
     }
 
     #[test]
