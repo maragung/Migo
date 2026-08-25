@@ -38,7 +38,7 @@ use tokio::time::{interval, timeout, MissedTickBehavior};
 use migo_auth::{Identity, RequestContext};
 use migo_core::{Error as CoreError, Id, Timestamp};
 use migo_protocol::{
-    codes, fault, from_frame, Ack, Acknowledged, Authenticate, Authenticated, AuthLevel,
+    codes, fault, from_frame, Ack, Acknowledged, AuthLevel, Authenticate, Authenticated,
     CloseReason, DeliveryClass, Encode, Frame, Hello, Limits, Opcode, Ping, Pong, ReconnectHint,
     ResumeRequest, SubscribeRequest, SubscribeResponse, Welcome, WireError, PROTOCOL_VERSION,
 };
@@ -271,7 +271,10 @@ impl<T: Transport> Connection<'_, T> {
         if hello.protocol_version != PROTOCOL_VERSION {
             let error = fault::error(
                 codes::PROTOCOL_VERSION_UNSUPPORTED,
-                format!("client requested protocol version {}", hello.protocol_version),
+                format!(
+                    "client requested protocol version {}",
+                    hello.protocol_version
+                ),
             )
             .public("unsupported protocol version");
             self.reject(
@@ -291,11 +294,13 @@ impl<T: Transport> Connection<'_, T> {
             Ok(verdict) => {
                 gateway.meters.rate_limited();
                 let error = fault::rate_limited(verdict.retry_after_ms().unwrap_or(0));
-                self.fail(Opcode::Hello.to_wire(), correlation, &error).await;
+                self.fail(Opcode::Hello.to_wire(), correlation, &error)
+                    .await;
                 return None;
             }
             Err(error) => {
-                self.fail(Opcode::Hello.to_wire(), correlation, &error).await;
+                self.fail(Opcode::Hello.to_wire(), correlation, &error)
+                    .await;
                 return None;
             }
         }
@@ -333,7 +338,8 @@ impl<T: Transport> Connection<'_, T> {
                     "resume window does not cover the requested sequence",
                 )
                 .public("resume required");
-                self.fail(Opcode::Hello.to_wire(), correlation, &error).await;
+                self.fail(Opcode::Hello.to_wire(), correlation, &error)
+                    .await;
                 None
             }
             None => {
@@ -341,7 +347,8 @@ impl<T: Transport> Connection<'_, T> {
                 let error =
                     fault::error(codes::RESUME_REQUIRED, "no resumable session for that id")
                         .public("resume required");
-                self.fail(Opcode::Hello.to_wire(), correlation, &error).await;
+                self.fail(Opcode::Hello.to_wire(), correlation, &error)
+                    .await;
                 None
             }
         }
@@ -404,16 +411,20 @@ impl<T: Transport> Connection<'_, T> {
             resume_from_seq,
             authenticated_user: identity.map(Identity::account_id),
         };
-        let bytes =
-            match encode_message(Opcode::Hello.to_wire(), correlation, &welcome, self.compression) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    tracing::warn!(?error, "failed to encode WELCOME");
-                    gateway.release();
-                    self.transport.close().await;
-                    return false;
-                }
-            };
+        let bytes = match encode_message(
+            Opcode::Hello.to_wire(),
+            correlation,
+            &welcome,
+            self.compression,
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(?error, "failed to encode WELCOME");
+                gateway.release();
+                self.transport.close().await;
+                return false;
+            }
+        };
         if self.transport.send(bytes).await.is_err() {
             gateway.release();
             self.transport.close().await;
@@ -563,7 +574,15 @@ impl<T: Transport> Connection<'_, T> {
             // speaking an unknown verb is not a framing violation.
             let error = fault::error(codes::UNKNOWN_OPCODE, "opcode not known to this build")
                 .public("unknown opcode");
-            push_error(outbound, meters, opcode_raw, correlation, &error, now, self.compression);
+            push_error(
+                outbound,
+                meters,
+                opcode_raw,
+                correlation,
+                &error,
+                now,
+                self.compression,
+            );
             return FrameOutcome::Continue;
         };
 
@@ -571,14 +590,30 @@ impl<T: Transport> Connection<'_, T> {
         if !opcode.accepts_from_client() {
             let error =
                 fault::unexpected_opcode(opcode_raw, "this opcode is not accepted from a client");
-            push_error(outbound, meters, opcode_raw, correlation, &error, now, self.compression);
+            push_error(
+                outbound,
+                meters,
+                opcode_raw,
+                correlation,
+                &error,
+                now,
+                self.compression,
+            );
             return FrameOutcome::Close(Closed::ProtocolViolation);
         }
 
         // A second HELLO after the handshake is complete is a violation.
         if opcode == Opcode::Hello {
             let error = fault::unexpected_opcode(opcode_raw, "the handshake is already complete");
-            push_error(outbound, meters, opcode_raw, correlation, &error, now, self.compression);
+            push_error(
+                outbound,
+                meters,
+                opcode_raw,
+                correlation,
+                &error,
+                now,
+                self.compression,
+            );
             return FrameOutcome::Close(Closed::ProtocolViolation);
         }
 
@@ -586,7 +621,15 @@ impl<T: Transport> Connection<'_, T> {
         // exists. AuthLevel::None opcodes (PING, ACK, AUTHENTICATE) are legal in any phase.
         if !matches!(opcode.auth(), AuthLevel::None) && established.phase != Phase::Ready {
             let error = fault::unexpected_opcode(opcode_raw, "the session is not authenticated");
-            push_error(outbound, meters, opcode_raw, correlation, &error, now, self.compression);
+            push_error(
+                outbound,
+                meters,
+                opcode_raw,
+                correlation,
+                &error,
+                now,
+                self.compression,
+            );
             return FrameOutcome::Close(Closed::ProtocolViolation);
         }
 
@@ -850,7 +893,13 @@ impl<T: Transport> Connection<'_, T> {
         now: Timestamp,
     ) -> FrameOutcome {
         if !self
-            .charge_or_reject(outbound, established.identity.as_ref(), opcode, correlation, now)
+            .charge_or_reject(
+                outbound,
+                established.identity.as_ref(),
+                opcode,
+                correlation,
+                now,
+            )
             .await
         {
             return FrameOutcome::Continue;
@@ -914,11 +963,27 @@ impl<T: Transport> Connection<'_, T> {
             Ok(verdict) => {
                 meters.rate_limited();
                 let error = fault::rate_limited(verdict.retry_after_ms().unwrap_or(0));
-                push_error(outbound, meters, opcode.to_wire(), correlation, &error, now, self.compression);
+                push_error(
+                    outbound,
+                    meters,
+                    opcode.to_wire(),
+                    correlation,
+                    &error,
+                    now,
+                    self.compression,
+                );
                 false
             }
             Err(error) => {
-                push_error(outbound, meters, opcode.to_wire(), correlation, &error, now, self.compression);
+                push_error(
+                    outbound,
+                    meters,
+                    opcode.to_wire(),
+                    correlation,
+                    &error,
+                    now,
+                    self.compression,
+                );
                 false
             }
         }
@@ -1042,7 +1107,11 @@ fn push_message<M: Encode>(
             }
         }
         Err(error) => {
-            tracing::warn!(opcode = opcode.name(), ?error, "failed to encode an outbound reply");
+            tracing::warn!(
+                opcode = opcode.name(),
+                ?error,
+                "failed to encode an outbound reply"
+            );
         }
     }
 }

@@ -70,11 +70,7 @@ fn wire_error(error: &CoreError) -> ErrorMessage {
 }
 
 /// Builds and encodes a frame, applying the compression policy only when compression is on.
-fn frame_bytes(
-    header: FrameHeader,
-    payload: Bytes,
-    compression: bool,
-) -> Result<Bytes, CoreError> {
+fn frame_bytes(header: FrameHeader, payload: Bytes, compression: bool) -> Result<Bytes, CoreError> {
     let frame = if compression {
         Frame::compressing(header, payload)
     } else {

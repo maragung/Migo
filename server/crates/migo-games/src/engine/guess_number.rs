@@ -11,8 +11,7 @@ use migo_core::id::ID_BYTE_LEN;
 use migo_core::{Id, Random};
 
 use super::{
-    get_id, get_u16, get_u8, put_id, Applied, ApplyError, Corrupt, Created, Decoded, Engine,
-    Reject,
+    get_id, get_u16, get_u8, put_id, Applied, ApplyError, Corrupt, Created, Decoded, Engine, Reject,
 };
 use crate::model::{Event, Feedback, GamesConfig, Guess, Move, Outcome, Render};
 

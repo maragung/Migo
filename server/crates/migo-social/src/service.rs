@@ -162,12 +162,7 @@ where
     L: RateLimiter + ?Sized,
 {
     /// Assembles the service and registers every series at zero.
-    pub fn new(
-        store: Arc<S>,
-        limiter: Arc<L>,
-        registry: &Registry,
-        config: SocialConfig,
-    ) -> Self {
+    pub fn new(store: Arc<S>, limiter: Arc<L>, registry: &Registry, config: SocialConfig) -> Self {
         Self {
             store,
             limiter,
@@ -512,7 +507,12 @@ where
     }
 
     /// Writes one edge, dated now.
-    async fn put_edge(&self, caller: &Caller, subject_id: Id, kind: RelationshipKind) -> Result<()> {
+    async fn put_edge(
+        &self,
+        caller: &Caller,
+        subject_id: Id,
+        kind: RelationshipKind,
+    ) -> Result<()> {
         self.store
             .put_relationship(Relationship {
                 account_id: caller.account_id,
@@ -943,7 +943,11 @@ where
         // the system to answer "who follows me".
         Ok(self
             .store
-            .inbound_relationships(caller.account_id, RelationshipKind::Follow, Self::page(limit))
+            .inbound_relationships(
+                caller.account_id,
+                RelationshipKind::Follow,
+                Self::page(limit),
+            )
             .await?
             .iter()
             // `other_id` on an inbound row is the caller, so the projection has to name
@@ -1105,12 +1109,7 @@ where
         Ok(out)
     }
 
-    async fn search(
-        &self,
-        caller: &Caller,
-        query: &str,
-        limit: Option<u16>,
-    ) -> Result<Vec<Found>> {
+    async fn search(&self, caller: &Caller, query: &str, limit: Option<u16>) -> Result<Vec<Found>> {
         Self::require_identity(caller)?;
         if !query_is_usable(query) {
             return Err(fault::validation(

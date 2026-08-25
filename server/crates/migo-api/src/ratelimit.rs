@@ -24,7 +24,11 @@ use crate::ApiState;
 ///
 /// Returns `RATE_LIMITED` (carrying the retry delay) when the network bucket is exhausted, or
 /// the limiter's own error if the charge could not be evaluated.
-pub(crate) async fn charge_ip(state: &ApiState, ip: Option<IpAddr>, cost: u32) -> Result<(), ApiError> {
+pub(crate) async fn charge_ip(
+    state: &ApiState,
+    ip: Option<IpAddr>,
+    cost: u32,
+) -> Result<(), ApiError> {
     let Some(ip) = ip else {
         return Ok(());
     };

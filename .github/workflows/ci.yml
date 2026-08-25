@@ -210,9 +210,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # No version pinned here on purpose. pnpm/action-setup@v4 reads the version from
+      # the "packageManager" field in package.json (pnpm@9.15.9); passing it in both
+      # places is a hard error ("Multiple versions of pnpm specified"). package.json is
+      # the single source of truth, and setup-node's `cache: pnpm` below keys off it too.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - uses: actions/setup-node@v4
         with:

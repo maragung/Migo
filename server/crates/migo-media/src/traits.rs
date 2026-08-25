@@ -91,12 +91,7 @@ pub trait Storage: Send + Sync {
     /// # Errors
     ///
     /// Whatever the backend fails with, mapped to `MEDIA_UNAVAILABLE` by the caller.
-    async fn sign_upload(
-        &self,
-        key: &str,
-        byte_size: u64,
-        expires_at: Timestamp,
-    ) -> Result<Grant>;
+    async fn sign_upload(&self, key: &str, byte_size: u64, expires_at: Timestamp) -> Result<Grant>;
 
     /// Signs a URL a client may download from.
     ///
@@ -282,7 +277,12 @@ pub type SharedLibrary = std::sync::Arc<dyn Library>;
 /// parsing has edge cases, and a check that reads its input out of a filename is a check
 /// a reviewer cannot see. The destination is a column now. The key is just a name.
 #[must_use]
-pub fn storage_key(kind: MediaKind, destination: Destination, media_id: Id, at: Timestamp) -> String {
+pub fn storage_key(
+    kind: MediaKind,
+    destination: Destination,
+    media_id: Id,
+    at: Timestamp,
+) -> String {
     let scope = match destination {
         Destination::Conversation(_) => "c",
         Destination::Profile => "p",

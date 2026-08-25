@@ -175,7 +175,10 @@ mod tests {
             let sku = Sku::parse(&gift.code()).expect("gift code parses");
             let listing = catalogue.get(&sku).expect("gift is listed");
             assert!(listing.price.amount > 0, "every gift has a positive price");
-            assert!(listing.reputation >= 1, "every gift confers some reputation");
+            assert!(
+                listing.reputation >= 1,
+                "every gift confers some reputation"
+            );
         }
     }
 

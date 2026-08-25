@@ -99,8 +99,12 @@ impl Dispatcher for AppDispatcher {
         match context.opcode() {
             // --- messaging ---
             Opcode::MessageSend => {
-                let caller =
-                    MessageCaller::new(identity.account_id(), identity.device_id(), identity.tier, now);
+                let caller = MessageCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
                 let request: MessageSend = from_frame(frame).map_err(fault::from_wire)?;
                 let (accepted, fanout) = self.messaging.send(&caller, request).await?;
                 context.reply(&accepted)?;
@@ -110,8 +114,12 @@ impl Dispatcher for AppDispatcher {
                 Ok(())
             }
             Opcode::MessageReceipt => {
-                let caller =
-                    MessageCaller::new(identity.account_id(), identity.device_id(), identity.tier, now);
+                let caller = MessageCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
                 let request: MessageReceipt = from_frame(frame).map_err(fault::from_wire)?;
                 if let Some(fanout) = self.messaging.receipt(&caller, request).await? {
                     publish_messaging(context, caller.account_id, fanout)?;
@@ -119,8 +127,12 @@ impl Dispatcher for AppDispatcher {
                 Ok(())
             }
             Opcode::MessageDelete => {
-                let caller =
-                    MessageCaller::new(identity.account_id(), identity.device_id(), identity.tier, now);
+                let caller = MessageCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
                 let request: MessageDelete = from_frame(frame).map_err(fault::from_wire)?;
                 let (accepted, fanout) = self.messaging.delete(&caller, request).await?;
                 context.reply(&accepted)?;
@@ -130,30 +142,47 @@ impl Dispatcher for AppDispatcher {
                 Ok(())
             }
             Opcode::Sync => {
-                let caller =
-                    MessageCaller::new(identity.account_id(), identity.device_id(), identity.tier, now);
+                let caller = MessageCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
                 let request: SyncRequest = from_frame(frame).map_err(fault::from_wire)?;
                 let response = self.messaging.sync(&caller, request).await?;
                 context.reply(&response)
             }
             Opcode::ConversationList => {
-                let caller =
-                    MessageCaller::new(identity.account_id(), identity.device_id(), identity.tier, now);
-                let request: ConversationListRequest = from_frame(frame).map_err(fault::from_wire)?;
+                let caller = MessageCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
+                let request: ConversationListRequest =
+                    from_frame(frame).map_err(fault::from_wire)?;
                 let response = self.messaging.conversations(&caller, request).await?;
                 context.reply(&response)
             }
             Opcode::ConversationCreate => {
-                let caller =
-                    MessageCaller::new(identity.account_id(), identity.device_id(), identity.tier, now);
+                let caller = MessageCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
                 let request: ConversationCreateRequest =
                     from_frame(frame).map_err(fault::from_wire)?;
                 let summary = self.messaging.create(&caller, request).await?;
                 context.reply(&summary)
             }
             Opcode::Typing => {
-                let caller =
-                    MessageCaller::new(identity.account_id(), identity.device_id(), identity.tier, now);
+                let caller = MessageCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
                 let request: TypingEvent = from_frame(frame).map_err(fault::from_wire)?;
                 if let Some(fanout) = self.messaging.typing(&caller, request).await? {
                     publish_messaging(context, caller.account_id, fanout)?;
@@ -192,8 +221,12 @@ impl Dispatcher for AppDispatcher {
 
             // --- rooms ---
             Opcode::RoomJoin => {
-                let caller =
-                    RoomCaller::new(identity.account_id(), identity.device_id(), identity.tier, now);
+                let caller = RoomCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
                 let request: RoomJoinRequest = from_frame(frame).map_err(fault::from_wire)?;
                 let (response, fanout) = self.rooms.join(&caller, request).await?;
                 context.reply(&response)?;
@@ -203,8 +236,12 @@ impl Dispatcher for AppDispatcher {
                 Ok(())
             }
             Opcode::RoomLeave => {
-                let caller =
-                    RoomCaller::new(identity.account_id(), identity.device_id(), identity.tier, now);
+                let caller = RoomCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
                 let request: RoomLeaveRequest = from_frame(frame).map_err(fault::from_wire)?;
                 if let Some(fanout) = self.rooms.leave(&caller, request).await? {
                     publish_rooms(context, fanout)?;
@@ -212,8 +249,12 @@ impl Dispatcher for AppDispatcher {
                 Ok(())
             }
             Opcode::RoomList => {
-                let caller =
-                    RoomCaller::new(identity.account_id(), identity.device_id(), identity.tier, now);
+                let caller = RoomCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
                 let request: RoomListRequest = from_frame(frame).map_err(fault::from_wire)?;
                 let response = self.rooms.list(&caller, request).await?;
                 context.reply(&response)

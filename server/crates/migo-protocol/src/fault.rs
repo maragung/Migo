@@ -406,7 +406,11 @@ mod tests {
         assert_eq!(unknown.code(), bad_sig.code());
         assert_eq!(unknown.symbol(), bad_sig.symbol());
         assert_eq!(unknown.public_message(), bad_sig.public_message());
-        assert_eq!(unknown.public_message(), "", "no reason may leak to the peer");
+        assert_eq!(
+            unknown.public_message(),
+            "",
+            "no reason may leak to the peer"
+        );
         // The distinguishing detail is kept, but only for our own log.
         assert!(unknown.internal_message().contains("allow-list"));
         assert_eq!(unknown.kind(), ErrorKind::Auth);
@@ -419,11 +423,17 @@ mod tests {
         // conflict to reconcile rather than a transient failure.
         assert_eq!(kind_of(codes::PEER_UNREACHABLE), ErrorKind::Federation);
         assert_eq!(kind_of(codes::REGION_DEGRADED), ErrorKind::Federation);
-        assert_eq!(kind_of(codes::ROOM_READ_ONLY_PARTITION), ErrorKind::Federation);
+        assert_eq!(
+            kind_of(codes::ROOM_READ_ONLY_PARTITION),
+            ErrorKind::Federation
+        );
         assert!(peer_unreachable("node 7").is_retryable());
         assert!(region_degraded("eu-west").is_retryable());
         assert!(room_read_only_partition().is_retryable());
         assert_eq!(http_status(codes::ROUTING_EPOCH_STALE), 409);
-        assert_eq!(routing_epoch_stale("epoch 4 < 5").code(), codes::ROUTING_EPOCH_STALE);
+        assert_eq!(
+            routing_epoch_stale("epoch 4 < 5").code(),
+            codes::ROUTING_EPOCH_STALE
+        );
     }
 }

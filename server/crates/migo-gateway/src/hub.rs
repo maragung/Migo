@@ -87,10 +87,7 @@ impl Hub {
     /// which were refused. Already-held topics are accepted idempotently and do not count
     /// against the cap a second time.
     pub(crate) fn subscribe(&self, session_id: Id, topics: &[Topic]) -> Subscribed {
-        let mut held = self
-            .session_topics
-            .entry(session_id)
-            .or_default();
+        let mut held = self.session_topics.entry(session_id).or_default();
         let mut accepted = Vec::with_capacity(topics.len());
         let mut rejected = Vec::new();
         let mut added = 0_u64;
@@ -163,10 +160,9 @@ impl Hub {
                 continue;
             }
             if let Some(handle) = self.sessions.get(&session_id) {
-                let outcome =
-                    handle
-                        .outbound()
-                        .push(encoded.clone(), class, coalesce_key, now);
+                let outcome = handle
+                    .outbound()
+                    .push(encoded.clone(), class, coalesce_key, now);
                 if let PushOutcome::Dropped(class) = outcome {
                     self.meters.frame_dropped(class);
                 }

@@ -311,12 +311,14 @@ where
             return Err(fault::mesh_auth_failed("handshake nonce replayed"));
         }
         let Ok(public) = NodePublic::parse(&record.public_key) else {
-            self.meters.handshake_rejected(HandshakeReject::ProofInvalid);
+            self.meters
+                .handshake_rejected(HandshakeReject::ProofInvalid);
             tracing::warn!(node = %remote.node_id, "peer key in the allow-list is corrupt");
             return Err(fault::mesh_auth_failed("corrupt peer key in allow-list"));
         };
         if let Err(error) = node::verify_proof(&public, local, remote, proof, now) {
-            self.meters.handshake_rejected(HandshakeReject::ProofInvalid);
+            self.meters
+                .handshake_rejected(HandshakeReject::ProofInvalid);
             tracing::warn!(node = %remote.node_id, %error, "mesh handshake proof did not verify");
             return Err(fault::mesh_auth_failed(format!(
                 "proof did not verify: {error}"
@@ -324,7 +326,9 @@ where
         }
         // Proven. Stamp last-seen and clear any stale sequence state so the new session starts
         // numbering from one.
-        self.store.touch_peer(&remote.node_id.to_string(), now).await?;
+        self.store
+            .touch_peer(&remote.node_id.to_string(), now)
+            .await?;
         self.links.reset(remote.node_id);
         self.meters.handshake_accepted();
         Ok(PeerIdentity {
@@ -422,7 +426,9 @@ where
         error: &str,
     ) -> Result<()> {
         let next_attempt_at = now.saturating_add_millis(self.backoff_delay(attempts_so_far));
-        self.store.mark_failed(event_id, next_attempt_at, error).await?;
+        self.store
+            .mark_failed(event_id, next_attempt_at, error)
+            .await?;
         self.meters.outbox_failed();
         Ok(())
     }

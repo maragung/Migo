@@ -53,9 +53,9 @@ use migo_store::{SharedStore, Store, MAX_PAGE};
 use crate::catalogue::Catalogue;
 use crate::metrics::{CacheOutcome, Meters, TxOutcome};
 use crate::model::{
-    Award, AwardOutcome, BadgeGrant, Board, BoardScope, Caller, Category, EconomyConfig,
-    GiftOutcome, GiftTally, Grant, GrantReceipt, LedgerEntry, Listing, ProgressionView,
-    PurchaseOutcome, Rank, Reason, SendGift, Sku, Wallet, Window, level_for_xp,
+    level_for_xp, Award, AwardOutcome, BadgeGrant, Board, BoardScope, Caller, Category,
+    EconomyConfig, GiftOutcome, GiftTally, Grant, GrantReceipt, LedgerEntry, Listing,
+    ProgressionView, PurchaseOutcome, Rank, Reason, SendGift, Sku, Wallet, Window,
 };
 use crate::traits::{Announcement, Announcer, SharedAnnouncer, SharedTreasurer, Treasurer};
 
@@ -207,7 +207,12 @@ where
     /// Charges a caller's rate-limit budget, refusing with the limiter's own error if empty.
     async fn charge(&self, caller: &Caller, cost: u32) -> Result<()> {
         self.limiter
-            .charge(&[BucketKey::account(caller.account_id)], cost, caller.tier, caller.now)
+            .charge(
+                &[BucketKey::account(caller.account_id)],
+                cost,
+                caller.tier,
+                caller.now,
+            )
             .await?
             .into_result()
     }
@@ -225,7 +230,10 @@ where
         at: Timestamp,
     ) -> Result<Id> {
         let create_with = self.new_id(at);
-        let account = self.store.ledger_account(owner, kind, currency, create_with, at).await?;
+        let account = self
+            .store
+            .ledger_account(owner, kind, currency, create_with, at)
+            .await?;
         Ok(account.ledger_account_id)
     }
 
@@ -295,7 +303,12 @@ where
         let mut wallet = Wallet::default();
         for currency in [Currency::Coins, Currency::Gems, Currency::Points] {
             let account = self
-                .account_for(Some(caller.account_id), LedgerAccountKind::User, currency, caller.now)
+                .account_for(
+                    Some(caller.account_id),
+                    LedgerAccountKind::User,
+                    currency,
+                    caller.now,
+                )
                 .await?;
             wallet.set(currency, self.store.balance(account).await?);
         }
@@ -311,9 +324,17 @@ where
     ) -> Result<Vec<LedgerEntry>> {
         self.charge(caller, READ_COST).await?;
         let account = self
-            .account_for(Some(caller.account_id), LedgerAccountKind::User, currency, caller.now)
+            .account_for(
+                Some(caller.account_id),
+                LedgerAccountKind::User,
+                currency,
+                caller.now,
+            )
             .await?;
-        let history = self.store.ledger_history(account, Self::page(limit)).await?;
+        let history = self
+            .store
+            .ledger_history(account, Self::page(limit))
+            .await?;
         Ok(history
             .into_iter()
             .map(|(tx, balance_after)| {
@@ -345,11 +366,22 @@ where
         client_key: &str,
     ) -> Result<PurchaseOutcome> {
         self.charge(caller, PURCHASE_COST).await?;
-        let price = self.catalogue.get(sku).ok_or_else(|| fault::not_found("item"))?.price;
+        let price = self
+            .catalogue
+            .get(sku)
+            .ok_or_else(|| fault::not_found("item"))?
+            .price;
         let payer = self
-            .account_for(Some(caller.account_id), LedgerAccountKind::User, price.currency, caller.now)
+            .account_for(
+                Some(caller.account_id),
+                LedgerAccountKind::User,
+                price.currency,
+                caller.now,
+            )
             .await?;
-        let fee = self.account_for(None, LedgerAccountKind::Fee, price.currency, caller.now).await?;
+        let fee = self
+            .account_for(None, LedgerAccountKind::Fee, price.currency, caller.now)
+            .await?;
         // The item is the receipt of the transaction that paid for it: the store writes the
         // entitlement and the ledger legs in one transaction, refuses a second identical
         // ownership with ALREADY_EXISTS before writing, and refuses an unaffordable debit with
@@ -363,8 +395,14 @@ where
                 created_by: Some(caller.account_id),
                 currency: price.currency,
                 legs: vec![
-                    LedgerLeg { ledger_account_id: payer, amount: -price.amount },
-                    LedgerLeg { ledger_account_id: fee, amount: price.amount },
+                    LedgerLeg {
+                        ledger_account_id: payer,
+                        amount: -price.amount,
+                    },
+                    LedgerLeg {
+                        ledger_account_id: fee,
+                        amount: price.amount,
+                    },
                 ],
                 receipt: Some(Receipt::Entitlement { sku: sku.code() }),
                 created_at: caller.now,
@@ -378,17 +416,28 @@ where
         })
     }
 
+    // A linear payment saga: charge the sender, mint the recipient's reputation, then notify.
+    // The length is struct-literal `NewTransaction` blocks and the comments explaining each
+    // step's idempotency and crash-recovery invariants, not branching depth — splitting it
+    // would scatter a sequence the reader has to follow in order. Kept whole on purpose.
+    #[allow(clippy::too_many_lines)]
     async fn send_gift(&self, caller: &Caller, gift: SendGift) -> Result<GiftOutcome> {
         self.charge(caller, GIFT_COST).await?;
         // A gift to oneself would launder spendable currency into reputation points, which
         // section 87 keeps non-cash-outable precisely so it cannot become a shadow balance.
         // Refuse it before anything is priced.
         if gift.recipient_id == caller.account_id {
-            return Err(fault::validation("recipient_id", "a gift needs a different recipient"));
+            return Err(fault::validation(
+                "recipient_id",
+                "a gift needs a different recipient",
+            ));
         }
         let sku = Sku::new(Category::Gift, gift.gift.slug())
             .ok_or_else(|| fault::internal("gift slug is not a valid sku"))?;
-        let listing = self.catalogue.get(&sku).ok_or_else(|| fault::not_found("gift"))?;
+        let listing = self
+            .catalogue
+            .get(&sku)
+            .ok_or_else(|| fault::not_found("gift"))?;
         let price = listing.price;
         let reputation = listing.reputation;
         let gift_code = gift.gift.code();
@@ -397,9 +446,16 @@ where
         // receipt, so a gift that exists was always paid for. Keyed on the sender's client key
         // so a retry returns the original rather than charging twice.
         let payer = self
-            .account_for(Some(caller.account_id), LedgerAccountKind::User, price.currency, caller.now)
+            .account_for(
+                Some(caller.account_id),
+                LedgerAccountKind::User,
+                price.currency,
+                caller.now,
+            )
             .await?;
-        let fee = self.account_for(None, LedgerAccountKind::Fee, price.currency, caller.now).await?;
+        let fee = self
+            .account_for(None, LedgerAccountKind::Fee, price.currency, caller.now)
+            .await?;
         let gift_id = self.new_id(caller.now);
         let posted = self
             .post(NewTransaction {
@@ -410,8 +466,14 @@ where
                 created_by: Some(caller.account_id),
                 currency: price.currency,
                 legs: vec![
-                    LedgerLeg { ledger_account_id: payer, amount: -price.amount },
-                    LedgerLeg { ledger_account_id: fee, amount: price.amount },
+                    LedgerLeg {
+                        ledger_account_id: payer,
+                        amount: -price.amount,
+                    },
+                    LedgerLeg {
+                        ledger_account_id: fee,
+                        amount: price.amount,
+                    },
                 ],
                 receipt: Some(Receipt::Gift(GiftReceipt {
                     gift_id,
@@ -437,9 +499,16 @@ where
         // swallowed, because the retry that carries the same key is what finishes the job.
         if reputation > 0 {
             let recipient = self
-                .account_for(Some(gift.recipient_id), LedgerAccountKind::User, Currency::Points, caller.now)
+                .account_for(
+                    Some(gift.recipient_id),
+                    LedgerAccountKind::User,
+                    Currency::Points,
+                    caller.now,
+                )
                 .await?;
-            let mint = self.account_for(None, LedgerAccountKind::Mint, Currency::Points, caller.now).await?;
+            let mint = self
+                .account_for(None, LedgerAccountKind::Mint, Currency::Points, caller.now)
+                .await?;
             self.post(NewTransaction {
                 tx_id: self.new_id(caller.now),
                 reason: Reason::GiftReputation.to_i16(),
@@ -448,8 +517,14 @@ where
                 created_by: None,
                 currency: Currency::Points,
                 legs: vec![
-                    LedgerLeg { ledger_account_id: mint, amount: -reputation },
-                    LedgerLeg { ledger_account_id: recipient, amount: reputation },
+                    LedgerLeg {
+                        ledger_account_id: mint,
+                        amount: -reputation,
+                    },
+                    LedgerLeg {
+                        ledger_account_id: recipient,
+                        amount: reputation,
+                    },
                 ],
                 receipt: None,
                 created_at: caller.now,
@@ -487,7 +562,9 @@ where
 
     async fn gifts_received(&self, caller: &Caller, limit: u16) -> Result<Vec<GiftSent>> {
         self.charge(caller, READ_COST).await?;
-        self.store.gifts_received(caller.account_id, Self::page(limit)).await
+        self.store
+            .gifts_received(caller.account_id, Self::page(limit))
+            .await
     }
 
     async fn gift_shelf(&self, caller: &Caller, of_account: Id) -> Result<Vec<GiftTally>> {
@@ -503,7 +580,11 @@ where
         self.charge(caller, READ_COST).await?;
         // An account that never earned anything has no row and reads as level one, not as an
         // error: a level is a projection of a total, and the total of nothing is zero.
-        let xp = self.store.progression(of_account).await?.map_or(0, |progression| progression.xp);
+        let xp = self
+            .store
+            .progression(of_account)
+            .await?
+            .map_or(0, |progression| progression.xp);
         Ok(ProgressionView::of(of_account, xp))
     }
 
@@ -515,7 +596,10 @@ where
     async fn leaderboard(&self, caller: &Caller, board: Board) -> Result<Vec<Rank>> {
         self.charge(caller, LEADERBOARD_COST).await?;
         let limit = board.limit.clamp(1, self.config.leaderboard_max);
-        let key = CacheKey::new("economy_leaderboard", &board_tag(&board.scope, board.window, limit));
+        let key = CacheKey::new(
+            "economy_leaderboard",
+            &board_tag(&board.scope, board.window, limit),
+        );
         if let Some(bytes) = self.cache.get(&key, caller.now).await? {
             if let Some(ranks) = decode_ranks(&bytes) {
                 self.meters.leaderboard_read(CacheOutcome::Hit);
@@ -545,7 +629,11 @@ where
         // Cache best-effort: a board that could not be written is one recomputed next time,
         // not a failed read. The TTL is short by design so the staleness is invisible.
         let ttl = Ttl::from_millis(self.config.leaderboard_ttl_ms);
-        if let Err(error) = self.cache.set(&key, &encode_ranks(&ranks), ttl, caller.now).await {
+        if let Err(error) = self
+            .cache
+            .set(&key, &encode_ranks(&ranks), ttl, caller.now)
+            .await
+        {
             tracing::warn!(code = error.code(), "leaderboard cache write failed");
         }
         self.meters.leaderboard_read(CacheOutcome::Miss);
@@ -559,12 +647,19 @@ where
             return Err(fault::validation("amount", "a grant must be positive"));
         }
         let recipient = self
-            .account_for(Some(grant.account_id), LedgerAccountKind::User, grant.currency, grant.at)
+            .account_for(
+                Some(grant.account_id),
+                LedgerAccountKind::User,
+                grant.currency,
+                grant.at,
+            )
             .await?;
         // Currency is issued from the mint, which is the one account allowed to run negative:
         // the sum of every balance in a currency stays zero because the mint holds the debit
         // for everything ever granted.
-        let mint = self.account_for(None, LedgerAccountKind::Mint, grant.currency, grant.at).await?;
+        let mint = self
+            .account_for(None, LedgerAccountKind::Mint, grant.currency, grant.at)
+            .await?;
         let posted = self
             .post(NewTransaction {
                 tx_id: self.new_id(grant.at),
@@ -574,8 +669,14 @@ where
                 created_by: grant.created_by,
                 currency: grant.currency,
                 legs: vec![
-                    LedgerLeg { ledger_account_id: mint, amount: -grant.amount },
-                    LedgerLeg { ledger_account_id: recipient, amount: grant.amount },
+                    LedgerLeg {
+                        ledger_account_id: mint,
+                        amount: -grant.amount,
+                    },
+                    LedgerLeg {
+                        ledger_account_id: recipient,
+                        amount: grant.amount,
+                    },
                 ],
                 receipt: None,
                 created_at: grant.at,
@@ -597,7 +698,10 @@ where
         // read from the durable award rows, not a cache counter, so a cache restart cannot
         // silently reset an abuser's daily limit.
         let since = Self::day_before(award.at);
-        let earned_all = self.store.xp_earned_since(award.account_id, None, since).await?;
+        let earned_all = self
+            .store
+            .xp_earned_since(award.account_id, None, since)
+            .await?;
         let earned_source = self
             .store
             .xp_earned_since(award.account_id, Some(award.source.to_i16()), since)
@@ -612,8 +716,11 @@ where
             // the real standing so a client can say "you have hit today's limit" rather than
             // showing a phantom award.
             self.meters.xp_capped(award.source);
-            let current =
-                self.store.progression(award.account_id).await?.map_or(0, |progression| progression.xp);
+            let current = self
+                .store
+                .progression(award.account_id)
+                .await?
+                .map_or(0, |progression| progression.xp);
             let level = level_for_xp(current);
             return Ok(AwardOutcome {
                 requested: award.amount,
@@ -671,7 +778,9 @@ where
         if level_after > level_before {
             // The cached level is a projection of the total; rewrite it only when a threshold
             // was crossed, and tell the account its level rose.
-            self.store.set_level(award.account_id, level_after, award.at).await?;
+            self.store
+                .set_level(award.account_id, level_after, award.at)
+                .await?;
             self.meters.levelup();
             self.announce(Announcement {
                 account_id: award.account_id,

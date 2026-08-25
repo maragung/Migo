@@ -652,7 +652,9 @@ impl Window {
             Self::AllTime => return None,
         };
         let millis = days * 24 * 60 * 60 * 1000;
-        Some(Timestamp::from_millis(now.as_millis().saturating_sub(millis)))
+        Some(Timestamp::from_millis(
+            now.as_millis().saturating_sub(millis),
+        ))
     }
 }
 
@@ -1071,7 +1073,10 @@ mod tests {
         assert!(Sku::parse("theme.mid-night").is_none(), "hyphen");
         assert!(Sku::parse("theme.").is_none(), "empty slug");
         assert!(Sku::parse("theme").is_none(), "no dot");
-        assert!(Sku::parse(&format!("theme.{}", "x".repeat(64))).is_none(), "too long");
+        assert!(
+            Sku::parse(&format!("theme.{}", "x".repeat(64))).is_none(),
+            "too long"
+        );
     }
 
     #[test]
@@ -1088,7 +1093,11 @@ mod tests {
     fn level_curve_and_inverse_agree_at_boundaries() {
         for level in 1..=200 {
             let need = xp_for_level(level);
-            assert_eq!(level_for_xp(need), level, "exact threshold is the new level");
+            assert_eq!(
+                level_for_xp(need),
+                level,
+                "exact threshold is the new level"
+            );
             if level > 1 {
                 assert_eq!(
                     level_for_xp(need - 1),
@@ -1140,7 +1149,10 @@ mod tests {
         let now = Timestamp::from_millis(1_000 * 24 * 60 * 60 * 1000);
         let week = Window::Weekly.since(now).expect("bounded");
         let month = Window::Monthly.since(now).expect("bounded");
-        assert!(month.as_millis() < week.as_millis(), "month reaches back further");
+        assert!(
+            month.as_millis() < week.as_millis(),
+            "month reaches back further"
+        );
         assert!(week.as_millis() < now.as_millis());
         assert_eq!(Window::AllTime.since(now), None);
     }

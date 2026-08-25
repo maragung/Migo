@@ -28,9 +28,8 @@ use migo_protocol::NotificationKind;
 use migo_store::model::{BadgeAward, Currency, Entitlement, GiftSent};
 
 use crate::model::{
-    Award, AwardOutcome, BadgeGrant, Board, Caller, GiftOutcome, GiftTally, Grant,
-    GrantReceipt, LedgerEntry, Listing, ProgressionView, PurchaseOutcome, Rank, SendGift, Sku,
-    Wallet,
+    Award, AwardOutcome, BadgeGrant, Board, Caller, GiftOutcome, GiftTally, Grant, GrantReceipt,
+    LedgerEntry, Listing, ProgressionView, PurchaseOutcome, Rank, SendGift, Sku, Wallet,
 };
 
 /// One thing worth telling somebody about: a gift arrived, a level rose, a badge was earned.

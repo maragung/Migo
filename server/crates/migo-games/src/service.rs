@@ -133,7 +133,11 @@ where
     /// Refuses unless the caller is a member of the conversation, hiding its existence
     /// otherwise (section 48).
     async fn require_member(&self, caller: &Caller, conversation_id: Id) -> Result<()> {
-        if self.store.is_member(conversation_id, caller.account_id).await? {
+        if self
+            .store
+            .is_member(conversation_id, caller.account_id)
+            .await?
+        {
             Ok(())
         } else {
             Err(fault::not_found("conversation"))
@@ -203,7 +207,9 @@ fn build_view(viewer: Id, session: &GameSession) -> Result<GameView> {
     let kind = kind_of(session)?;
     let status = status_of(session)?;
     let decoded = engine(kind).decode(&session.state).map_err(corrupt)?;
-    let render = engine(kind).render(&session.state, viewer).map_err(corrupt)?;
+    let render = engine(kind)
+        .render(&session.state, viewer)
+        .map_err(corrupt)?;
     // The store's status is authoritative for whether a game is over; the state decides the
     // outcome of a game finished by play, and an abandoned game has no winner.
     let (turn_of, outcome) = match status {
@@ -262,7 +268,10 @@ where
             }
             self.require_member(caller, conversation_id).await?;
             if !self.store.is_member(conversation_id, opponent).await? {
-                return Err(fault::validation("opponents", "a player is not in the conversation"));
+                return Err(fault::validation(
+                    "opponents",
+                    "a player is not in the conversation",
+                ));
             }
             players.push(opponent);
         }
@@ -379,7 +388,8 @@ where
                     let view = build_view(caller.account_id, &updated)?;
                     if let Some(outcome) = applied.finished {
                         self.meters.finished(Conclusion::of(outcome));
-                        self.reward(&view.players, outcome, game_id, caller.now).await;
+                        self.reward(&view.players, outcome, game_id, caller.now)
+                            .await;
                     }
                     return Ok(MoveResult {
                         view,

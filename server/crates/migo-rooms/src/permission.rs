@@ -132,12 +132,8 @@ pub const ALL: u64 = CHAT_SEND
 /// Deliberately generous on speech and deliberately empty on moderation: a Public
 /// Room whose members cannot talk is not a room, and a member who can mute other
 /// people is not a member.
-pub const MEMBER_DEFAULT: u64 = CHAT_SEND
-    | VOICE_NOTE_SEND
-    | VOICE_NOTE_PLAY
-    | VOICE_NOTE_FORWARD
-    | CALL_JOIN
-    | BOT_USE;
+pub const MEMBER_DEFAULT: u64 =
+    CHAT_SEND | VOICE_NOTE_SEND | VOICE_NOTE_PLAY | VOICE_NOTE_FORWARD | CALL_JOIN | BOT_USE;
 
 /// What a mute takes away.
 ///

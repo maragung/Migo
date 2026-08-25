@@ -73,8 +73,7 @@ pub(crate) enum ReplayReason {
 }
 
 impl ReplayReason {
-    pub(crate) const ALL: [Self; 3] =
-        [Self::NonceReused, Self::SequenceReplay, Self::SequenceGap];
+    pub(crate) const ALL: [Self; 3] = [Self::NonceReused, Self::SequenceReplay, Self::SequenceGap];
 
     pub(crate) const fn label(self) -> &'static str {
         match self {

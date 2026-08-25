@@ -100,8 +100,8 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let api = ApiState::from_ref(state);
-        let token =
-            bearer(parts).ok_or_else(|| ApiError::from(fault::unauthenticated("missing bearer")))?;
+        let token = bearer(parts)
+            .ok_or_else(|| ApiError::from(fault::unauthenticated("missing bearer")))?;
         let now = api.now();
         // Cheap first: signature and expiry only, no I/O. This also yields the device the token
         // was minted for, which the revocation-checked lookup needs.

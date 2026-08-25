@@ -39,16 +39,17 @@ use crate::model::{
     game_status, notification_kind, report_status, Account, AccountStatus, AdvanceGame, Appended,
     AuditEntry, BadgeAward, Bot, Conversation, ConversationMember, ConversationPosition,
     ConversationSummary, Currency, Cursor, Device, Entitlement, GameSession, GiftSent, KeyBundle,
-    LedgerAccount, LedgerAccountKind, LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice,
-    NewGame, NewMessage, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward,
-    Notification, OutboxRecord, Patch, PeerRecord, Posted, Profile, ProfilePatch, Progression,
-    PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship, Report, RevokeReason, Room,
-    RoomMember, Scope, Session, Standing, StoredMessage, Visibility, XpChange,
+    LedgerAccount, LedgerAccountKind, LedgerTransaction, MediaObject, NewAccount, NewBot,
+    NewDevice, NewGame, NewMessage, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction,
+    NewXpAward, Notification, OutboxRecord, Patch, PeerRecord, Posted, Profile, ProfilePatch,
+    Progression, PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship, Report,
+    RevokeReason, Room, RoomMember, Scope, Session, Standing, StoredMessage, Visibility, XpChange,
 };
 use crate::traits::{
     canonical_country, clamp_limit, AccountStore, BotStore, DeviceStore, EconomyStore,
-    FederationStore, GameStore, KeyStore, MediaStore, MessagingStore, NotifyStore, ProgressionStore,
-    RoomKindFilter, RoomStore, SafetyStore, SessionStore, SocialStore, Store, MAX_LEDGER_LEGS,
+    FederationStore, GameStore, KeyStore, MediaStore, MessagingStore, NotifyStore,
+    ProgressionStore, RoomKindFilter, RoomStore, SafetyStore, SessionStore, SocialStore, Store,
+    MAX_LEDGER_LEGS,
 };
 
 /// Case-insensitive index key for a name, email, or slug.

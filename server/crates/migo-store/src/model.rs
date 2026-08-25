@@ -1273,7 +1273,8 @@ pub struct GameSession {
     /// Which game this is, numbered by `migo-games`. Raw here on purpose.
     pub kind: i16,
     /// The conversation the game is played in. Membership of it is the
-    /// authorisation check for every move, answered by [`MessagingStore::is_member`].
+    /// authorisation check for every move, answered by
+    /// [`crate::traits::MessagingStore::is_member`].
     pub conversation_id: Id,
     /// Authoritative state, opaque to the store.
     pub state: Vec<u8>,

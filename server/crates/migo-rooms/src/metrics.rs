@@ -219,13 +219,7 @@ pub(crate) enum SanctionKind {
 }
 
 impl SanctionKind {
-    const ALL: [Self; 5] = [
-        Self::Mute,
-        Self::Unmute,
-        Self::Kick,
-        Self::Ban,
-        Self::Unban,
-    ];
+    const ALL: [Self; 5] = [Self::Mute, Self::Unmute, Self::Kick, Self::Ban, Self::Unban];
 
     const fn label(self) -> &'static str {
         match self {
@@ -262,12 +256,7 @@ pub(crate) enum ChangeOutcome {
 }
 
 impl ChangeOutcome {
-    const ALL: [Self; 4] = [
-        Self::Applied,
-        Self::Unchanged,
-        Self::Invalid,
-        Self::Denied,
-    ];
+    const ALL: [Self; 4] = [Self::Applied, Self::Unchanged, Self::Invalid, Self::Denied];
 
     const fn label(self) -> &'static str {
         match self {
@@ -395,21 +384,13 @@ impl Meters {
                     )
                 })
                 .collect(),
-            archives: registry.counter(
-                "migo_rooms_archives_total",
-                "Rooms archived.",
-                &[],
-            ),
+            archives: registry.counter("migo_rooms_archives_total", "Rooms archived.", &[]),
             transfers: registry.counter(
                 "migo_rooms_ownership_transfers_total",
                 "Ownership transfers completed.",
                 &[],
             ),
-            listings: registry.counter(
-                "migo_rooms_listings_total",
-                "Room listings served.",
-                &[],
-            ),
+            listings: registry.counter("migo_rooms_listings_total", "Room listings served.", &[]),
             listing_rooms: registry.histogram(
                 "migo_rooms_listing_rooms",
                 "Rooms returned by one listing.",

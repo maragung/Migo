@@ -199,7 +199,13 @@ impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized> Moderation<
     /// One key, the account. Not the device: a report limit that was per device would be a
     /// report limit somebody defeats by opening a second tab, and brief section 50 prices
     /// abuse per person.
-    async fn charge(&self, account_id: Id, tier: TrustTier, cost: u32, now: Timestamp) -> Result<()> {
+    async fn charge(
+        &self,
+        account_id: Id,
+        tier: TrustTier,
+        cost: u32,
+        now: Timestamp,
+    ) -> Result<()> {
         self.limiter
             .charge(&[BucketKey::account(account_id)], cost, tier, now)
             .await?
@@ -334,7 +340,9 @@ impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized> Moderation<
 }
 
 #[async_trait]
-impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized> Warden for Moderation<S, L, R> {
+impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized> Warden
+    for Moderation<S, L, R>
+{
     async fn file_report(&self, caller: &Caller, filing: Filing) -> Result<Filed> {
         if caller.account_id.is_nil() {
             self.meters.refused(Refused::Invalid);
@@ -506,7 +514,10 @@ impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized> Warden for 
         // reinstating their own suspended account, and neither is a thing to allow.
         if action.subject_account() == Some(resolved.account_id) {
             self.meters.refused(Refused::Invalid);
-            return Err(fault::validation("target", "cannot act on your own account"));
+            return Err(fault::validation(
+                "target",
+                "cannot act on your own account",
+            ));
         }
 
         let summary = self.apply(&action, &resolved).await?;
@@ -548,12 +559,7 @@ impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized> Warden for 
         Ok(rows)
     }
 
-    async fn assess(
-        &self,
-        account_id: Id,
-        signals: Signals,
-        now: Timestamp,
-    ) -> Result<Assessment> {
+    async fn assess(&self, account_id: Id, signals: Signals, now: Timestamp) -> Result<Assessment> {
         if account_id.is_nil() {
             return Err(fault::validation("account_id", "an id is required"));
         }
@@ -647,7 +653,12 @@ impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized> Moderation<
                 // the envelope, and for an end-to-end conversation nothing could.
                 let removed = self
                     .store
-                    .delete_message(conversation_id, message_id, operator.account_id, operator.now)
+                    .delete_message(
+                        conversation_id,
+                        message_id,
+                        operator.account_id,
+                        operator.now,
+                    )
                     .await?;
                 if removed.is_none() {
                     self.meters.refused(Refused::Missing);

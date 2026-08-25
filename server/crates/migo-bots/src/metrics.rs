@@ -77,11 +77,7 @@ impl Meters {
     /// Registers every series at zero up front.
     pub(crate) fn new(registry: &Registry) -> Self {
         Self {
-            registered: registry.counter(
-                "migo_bots_registered_total",
-                "Bots registered.",
-                &[],
-            ),
+            registered: registry.counter("migo_bots_registered_total", "Bots registered.", &[]),
             authenticated: registry.counter(
                 "migo_bots_authenticated_total",
                 "Bot tokens accepted.",

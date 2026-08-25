@@ -204,7 +204,9 @@ impl GatewayInner {
     /// Takes the retained resume buffer for a session id, if one is held, removing it from the
     /// store so a resume consumes it exactly once.
     pub(crate) fn take_resume(&self, session_id: Id) -> Option<ResumeBuffer> {
-        self.resume_store.remove(&session_id).map(|(_, buffer)| buffer)
+        self.resume_store
+            .remove(&session_id)
+            .map(|(_, buffer)| buffer)
     }
 
     /// Retains a session's resume buffer for a possible reconnect.
@@ -215,7 +217,8 @@ impl GatewayInner {
     pub(crate) fn store_resume(&self, session_id: Id, buffer: ResumeBuffer) {
         if self.resume_store.len() >= self.settings.max_sessions {
             let now = self.now();
-            self.resume_store.retain(|_, retained| !retained.expired(now));
+            self.resume_store
+                .retain(|_, retained| !retained.expired(now));
         }
         self.resume_store.insert(session_id, buffer);
     }

@@ -217,9 +217,28 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
+      # Wrapped in a retry loop for the same reason android.yml is: dependency resolution
+      # reaches Maven Central and the Gradle Plugin Portal, both of which hand out HTTP 429
+      # (rate limit) often enough on shared CI egress to redden an otherwise-green build.
+      # Three attempts with growing backoff turn a transient 429 into a slower green; a
+      # genuine compile error still fails all three and reports as it would without the loop.
       - name: Assemble the APK
         working-directory: clients/android
-        run: gradle --no-daemon --stacktrace :app:assembleDebug
+        run: |
+          set -o pipefail
+          for attempt in 1 2 3; do
+            echo "::group::Gradle attempt ${attempt}/3"
+            if gradle --no-daemon --stacktrace :app:assembleDebug; then
+              echo "::endgroup::"; exit 0
+            fi
+            echo "::endgroup::"
+            if [ "${attempt}" -lt 3 ]; then
+              echo "Attempt ${attempt} failed; backing off $((attempt * 20))s before retry."
+              sleep $((attempt * 20))
+            fi
+          done
+          echo "All 3 Gradle attempts failed." >&2
+          exit 1
 
       - name: Attach to the release
         env:

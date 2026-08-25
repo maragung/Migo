@@ -70,9 +70,10 @@ use crate::metrics::{
     AuthorizeOutcome, ChangeOutcome, CreateOutcome, JoinOutcome, Meters, SanctionKind,
 };
 use crate::model::{
-    slug_is_valid, Authorized, Caller, NewRoomRequest, RoomsConfig, Sanction, Settings, TopicChange,
-    DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, MAX_MUTE_MS, MAX_NAME_LEN, MAX_QUERY_LEN, MAX_REASON_LEN,
-    MAX_ROSTER_PAGE, MAX_SLOW_MODE_SECONDS, MAX_TOPIC_LEN, MIN_ROOM_CAPACITY, PERMANENT_BAN_MS,
+    slug_is_valid, Authorized, Caller, NewRoomRequest, RoomsConfig, Sanction, Settings,
+    TopicChange, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, MAX_MUTE_MS, MAX_NAME_LEN, MAX_QUERY_LEN,
+    MAX_REASON_LEN, MAX_ROSTER_PAGE, MAX_SLOW_MODE_SECONDS, MAX_TOPIC_LEN, MIN_ROOM_CAPACITY,
+    PERMANENT_BAN_MS,
 };
 use crate::permission;
 use crate::traits::Roomkeeper;
@@ -284,8 +285,11 @@ where
             self.meters.authorize(AuthorizeOutcome::NotAMember);
             return Err(Self::not_a_member());
         }
-        let permissions =
-            permission::resolve(member.role, member.permissions_grant, member.permissions_deny);
+        let permissions = permission::resolve(
+            member.role,
+            member.permissions_grant,
+            member.permissions_deny,
+        );
         if member.is_muted(caller.now) && needed & permission::SILENCED_BY_MUTE != 0 {
             self.meters.authorize(AuthorizeOutcome::Muted);
             return Err(Self::muted());
@@ -675,7 +679,10 @@ where
             self.meters.join(JoinOutcome::Archived);
             return Err(Self::room_archived());
         }
-        let existing = self.store.room_member(room.room_id, caller.account_id).await?;
+        let existing = self
+            .store
+            .room_member(room.room_id, caller.account_id)
+            .await?;
         // Before anything else about the room: a ban survives leaving and rejoining,
         // and the store's `join_room` does not check it.
         if existing
@@ -744,15 +751,14 @@ where
         // Re-read so the summary carries the count the join produced rather than the
         // one from before it.
         let room = self.load_room(room.room_id).await?;
-        let last_seq = self
-            .store
-            .conversation(room.conversation_id)
-            .await?
-            .map_or(NO_MESSAGES_YET, |conversation| {
+        let last_seq = self.store.conversation(room.conversation_id).await?.map_or(
+            NO_MESSAGES_YET,
+            |conversation| {
                 // `max(0)` before the cast: a negative sequence is impossible and an
                 // `as u64` of one would hand the client eighteen quintillion.
                 conversation.last_seq.max(0) as u64
-            });
+            },
+        );
         let response = RoomJoinResponse {
             room: view::summary(&room, Some(stored.role)),
             conversation_id: room.conversation_id,
@@ -791,7 +797,11 @@ where
         }
         self.charge(caller, Opcode::RoomLeave).await?;
         let room = self.load_room(request.room_id).await?;
-        let Some(member) = self.store.room_member(room.room_id, caller.account_id).await? else {
+        let Some(member) = self
+            .store
+            .room_member(room.room_id, caller.account_id)
+            .await?
+        else {
             self.meters.leave(ChangeOutcome::Unchanged);
             return Ok(None);
         };
@@ -1071,8 +1081,8 @@ where
         // is a schema change, and a domain crate is not where the packet registry
         // gets edited.
         self.meters.settings(ChangeOutcome::Applied);
-        let fanout = (!view::is_empty(&event))
-            .then(|| Fanout::state(room_id, caller.device_id, event));
+        let fanout =
+            (!view::is_empty(&event)).then(|| Fanout::state(room_id, caller.device_id, event));
         Ok((view::summary(&updated, Some(actor.role)), fanout))
     }
 
@@ -1084,7 +1094,9 @@ where
         // room for everybody in it, and it is the one settings action a Manager
         // appointed this morning should not be able to take alone.
         if room.owner_id != caller.account_id {
-            return Err(fault::permission_denied("only the owner may archive a room"));
+            return Err(fault::permission_denied(
+                "only the owner may archive a room",
+            ));
         }
         if room.archived_at.is_some() {
             // Idempotent. The second press of a button whose first press succeeded is
@@ -1250,9 +1262,8 @@ where
                 duration_ms,
                 reason,
             } => {
-                let until = Timestamp::from_millis(
-                    caller.now.as_millis().saturating_add(duration_ms),
-                );
+                let until =
+                    Timestamp::from_millis(caller.now.as_millis().saturating_add(duration_ms));
                 self.store
                     .set_room_sanction(
                         room_id,
@@ -1310,18 +1321,15 @@ where
                 duration_ms,
                 reason,
             } => {
-                let until = Timestamp::from_millis(duration_ms.map_or(
-                    PERMANENT_BAN_MS,
-                    |ms| {
-                        // Clamped, so a client that sends a very large duration gets a
-                        // permanent ban rather than a timestamp that wrapped.
-                        caller
-                            .now
-                            .as_millis()
-                            .saturating_add(ms)
-                            .min(PERMANENT_BAN_MS)
-                    },
-                ));
+                let until = Timestamp::from_millis(duration_ms.map_or(PERMANENT_BAN_MS, |ms| {
+                    // Clamped, so a client that sends a very large duration gets a
+                    // permanent ban rather than a timestamp that wrapped.
+                    caller
+                        .now
+                        .as_millis()
+                        .saturating_add(ms)
+                        .min(PERMANENT_BAN_MS)
+                }));
                 self.store
                     .set_room_sanction(
                         room_id,
@@ -1393,7 +1401,9 @@ where
         // there should not be: the room is the owner's to give away, and a bit for it
         // would be a bit somebody could be granted.
         if room.owner_id != caller.account_id {
-            return Err(fault::permission_denied("only the owner may transfer a room"));
+            return Err(fault::permission_denied(
+                "only the owner may transfer a room",
+            ));
         }
         if to == caller.account_id {
             // Already the owner. The store treats this as a no-op too; returning early

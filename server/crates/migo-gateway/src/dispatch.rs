@@ -188,7 +188,13 @@ impl<'a> ClientContext<'a> {
         message: &T,
         coalesce_key: Option<u64>,
     ) -> Result<(), CoreError> {
-        self.publish_inner(topic, opcode, message, coalesce_key, Some(self.session.session_id()))
+        self.publish_inner(
+            topic,
+            opcode,
+            message,
+            coalesce_key,
+            Some(self.session.session_id()),
+        )
     }
 
     /// The shared body of [`publish`](Self::publish) and
@@ -203,8 +209,14 @@ impl<'a> ClientContext<'a> {
         exclude: Option<Id>,
     ) -> Result<(), CoreError> {
         let encoded = encode_message(opcode.to_wire(), 0, message, self.compression)?;
-        self.hub
-            .broadcast(topic, &encoded, opcode.class(), coalesce_key, self.now, exclude);
+        self.hub.broadcast(
+            topic,
+            &encoded,
+            opcode.class(),
+            coalesce_key,
+            self.now,
+            exclude,
+        );
         Ok(())
     }
 
@@ -242,11 +254,7 @@ pub trait Dispatcher: Send + Sync {
     ///
     /// Returns the error to send back to the client (reusing the request's opcode and
     /// correlation) when the handler chooses not to send its own reply.
-    async fn dispatch(
-        &self,
-        context: &ClientContext<'_>,
-        frame: &Frame,
-    ) -> Result<(), CoreError>;
+    async fn dispatch(&self, context: &ClientContext<'_>, frame: &Frame) -> Result<(), CoreError>;
 }
 
 /// A dispatcher with no application logic: every application opcode is answered `FEATURE_DISABLED`.
@@ -259,11 +267,7 @@ pub struct NoopDispatcher;
 
 #[async_trait]
 impl Dispatcher for NoopDispatcher {
-    async fn dispatch(
-        &self,
-        context: &ClientContext<'_>,
-        _frame: &Frame,
-    ) -> Result<(), CoreError> {
+    async fn dispatch(&self, context: &ClientContext<'_>, _frame: &Frame) -> Result<(), CoreError> {
         Err(fault::feature_disabled(context.opcode().name()))
     }
 }

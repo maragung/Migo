@@ -42,8 +42,8 @@ use migo_store::{SharedStore, Store};
 
 use crate::metrics::{AuthReject, Meters};
 use crate::model::{
-    BotIdentity, BotView, BotsConfig, Caller, NewBotSpec, Registered, Scopes, MAX_DISPLAY_NAME_CHARS,
-    MAX_WEBHOOK_URL_BYTES,
+    BotIdentity, BotView, BotsConfig, Caller, NewBotSpec, Registered, Scopes,
+    MAX_DISPLAY_NAME_CHARS, MAX_WEBHOOK_URL_BYTES,
 };
 use crate::token::Minter;
 use crate::traits::{Bots, SharedBots};
@@ -195,7 +195,10 @@ fn validate_display_name(raw: &str) -> Result<String> {
         return Err(fault::field_required("display_name"));
     }
     if trimmed.chars().count() > MAX_DISPLAY_NAME_CHARS {
-        return Err(fault::field_too_long("display_name", MAX_DISPLAY_NAME_CHARS));
+        return Err(fault::field_too_long(
+            "display_name",
+            MAX_DISPLAY_NAME_CHARS,
+        ));
     }
     Ok(trimmed.to_string())
 }

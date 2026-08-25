@@ -103,8 +103,9 @@ use crate::model::{
 };
 use crate::traits::{
     canonical_country, clamp_limit, AccountStore, BotStore, DeviceStore, EconomyStore,
-    FederationStore, GameStore, KeyStore, MediaStore, MessagingStore, NotifyStore, ProgressionStore,
-    RoomKindFilter, RoomStore, SafetyStore, SessionStore, SocialStore, Store, MAX_LEDGER_LEGS,
+    FederationStore, GameStore, KeyStore, MediaStore, MessagingStore, NotifyStore,
+    ProgressionStore, RoomKindFilter, RoomStore, SafetyStore, SessionStore, SocialStore, Store,
+    MAX_LEDGER_LEGS,
 };
 
 /// A duplicate key. Postgres reports which index, and the caller needs to know:
@@ -4934,10 +4935,7 @@ impl BotStore for PostgresStore {
             })
         })?;
 
-        transaction
-            .commit()
-            .await
-            .context("register_bot: commit")?;
+        transaction.commit().await.context("register_bot: commit")?;
         Ok(bot_of(bot))
     }
 
@@ -5176,11 +5174,13 @@ impl FederationStore for PostgresStore {
             .exec(&self.db)
             .await
             .context("mark_delivered")?;
-        Ok(entity::federation_outbox::Entity::find_by_id(uuid_of(event_id))
-            .one(&self.db)
-            .await
-            .context("mark_delivered: read back")?
-            .map(outbox_of))
+        Ok(
+            entity::federation_outbox::Entity::find_by_id(uuid_of(event_id))
+                .one(&self.db)
+                .await
+                .context("mark_delivered: read back")?
+                .map(outbox_of),
+        )
     }
 
     async fn mark_failed(
@@ -5212,11 +5212,13 @@ impl FederationStore for PostgresStore {
         if result.rows_affected == 0 {
             return Ok(None);
         }
-        Ok(entity::federation_outbox::Entity::find_by_id(uuid_of(event_id))
-            .one(&self.db)
-            .await
-            .context("mark_failed: read back")?
-            .map(outbox_of))
+        Ok(
+            entity::federation_outbox::Entity::find_by_id(uuid_of(event_id))
+                .one(&self.db)
+                .await
+                .context("mark_failed: read back")?
+                .map(outbox_of),
+        )
     }
 }
 

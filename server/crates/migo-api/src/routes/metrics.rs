@@ -23,8 +23,5 @@ pub(crate) fn routes() -> Router<ApiState> {
 #[allow(clippy::unused_async)]
 async fn metrics(State(state): State<ApiState>) -> impl IntoResponse {
     let body = state.registry().render();
-    (
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
-        body,
-    )
+    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body)
 }

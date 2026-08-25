@@ -169,12 +169,7 @@ pub trait Warden: Send + Sync {
     /// Writes nothing unless the level reaches [`crate::model::Risk::Restrict`] *and* the
     /// deployment turned automatic suspension on. The default is to make the queue loud,
     /// not to make the ban automatic.
-    async fn assess(
-        &self,
-        account_id: Id,
-        signals: Signals,
-        now: Timestamp,
-    ) -> Result<Assessment>;
+    async fn assess(&self, account_id: Id, signals: Signals, now: Timestamp) -> Result<Assessment>;
 }
 
 /// A shared, fully erased moderation service.

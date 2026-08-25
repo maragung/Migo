@@ -210,6 +210,5 @@ pub trait Graph: Send + Sync {
     ///
     /// Only accounts that opted into being searchable, which the store enforces in the
     /// query rather than after ranking, and never an account either side has blocked.
-    async fn search(&self, caller: &Caller, query: &str, limit: Option<u16>)
-        -> Result<Vec<Found>>;
+    async fn search(&self, caller: &Caller, query: &str, limit: Option<u16>) -> Result<Vec<Found>>;
 }

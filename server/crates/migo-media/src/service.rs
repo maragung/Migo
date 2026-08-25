@@ -420,7 +420,9 @@ where
             // carry the expiry, and the ticket lifetime is a constant, so the original
             // moment is recoverable exactly. Storing the key in the ticket instead would
             // work and would make the token longer for a value that is derivable.
-            claim.expires_at.saturating_add_millis(-self.policy.ticket_ttl_ms),
+            claim
+                .expires_at
+                .saturating_add_millis(-self.policy.ticket_ttl_ms),
         );
         let uploaded_bytes = self
             .storage
@@ -458,7 +460,9 @@ where
             claim.kind,
             claim.destination,
             claim.media_id,
-            claim.expires_at.saturating_add_millis(-self.policy.ticket_ttl_ms),
+            claim
+                .expires_at
+                .saturating_add_millis(-self.policy.ticket_ttl_ms),
         );
         let Some(head) = self
             .storage
@@ -548,7 +552,9 @@ where
             claim.kind,
             claim.destination,
             claim.media_id,
-            claim.expires_at.saturating_add_millis(-self.policy.ticket_ttl_ms),
+            claim
+                .expires_at
+                .saturating_add_millis(-self.policy.ticket_ttl_ms),
         );
         self.storage
             .remove(&key)
@@ -559,19 +565,19 @@ where
     }
 
     async fn fetch_url(&self, caller: &Caller, media_id: Id) -> Result<Grant> {
-        self.charge(caller, FETCH_COST)
-            .await
-            .inspect_err(|error| {
-                if error.code() == codes::RATE_LIMITED {
-                    self.meters.granted(Granted::RateLimited);
-                }
-            })?;
+        self.charge(caller, FETCH_COST).await.inspect_err(|error| {
+            if error.code() == codes::RATE_LIMITED {
+                self.meters.granted(Granted::RateLimited);
+            }
+        })?;
         let object = self.authorize(caller, media_id).await?;
         if object.owner_id != caller.account_id && Scan::of_i16(object.scan_status) != Scan::Clean {
             self.meters.granted(Granted::NotCleared);
             return Err(not_cleared());
         }
-        let expires_at = caller.now.saturating_add_millis(self.policy.download_ttl_ms);
+        let expires_at = caller
+            .now
+            .saturating_add_millis(self.policy.download_ttl_ms);
         let grant = self
             .storage
             .sign_download(&object.storage_key, expires_at)
@@ -695,6 +701,12 @@ pub fn open(
     registry: &Registry,
 ) -> SharedLibrary {
     Arc::new(Media::new(
-        store, limiter, storage, random, root_secret, config, registry,
+        store,
+        limiter,
+        storage,
+        random,
+        root_secret,
+        config,
+        registry,
     ))
 }
