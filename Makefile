@@ -94,6 +94,13 @@ kotlin-check: ## Static checks on the Android Kotlin, which nothing here can com
 	# slash-star in prose swallows the rest of the file and reports at EOF), Cyrillic
 	# homoglyphs, and imports that are unused, duplicated or unsorted. It is not a type
 	# checker and cannot be one without the classpath; see the script's header.
+	#
+	# The checker runs against itself first. It is the only gate here with no compiler
+	# standing behind it, so a regex that quietly stops matching would turn it into a
+	# green light rather than a broken build, and that is the one failure mode a gate
+	# must not have. --selftest breaks a copy of each shape on purpose and also checks
+	# the shapes that must NOT be reported.
+	python3 tools/scripts/kotlin-lint.py --selftest
 	python3 tools/scripts/kotlin-lint.py $(ANDROID_DIR)
 
 # ---------------------------------------------------------------- build

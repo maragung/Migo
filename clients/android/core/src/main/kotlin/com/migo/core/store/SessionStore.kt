@@ -199,9 +199,16 @@ class SessionStore private constructor(
      *
      * Fixed-width blocks are also what makes the prefix sweep in [deleteConversation] exact: a
      * conversation's hex block can never be a prefix of a different conversation's.
+     *
+     * Two overloads rather than one `vararg`, because [Id] is `@JvmInline` and Kotlin has no
+     * representation for an array of an inline class, so `vararg ids: Id` does not compile. Only
+     * the two arities below are ever needed: a sending entry is keyed by the conversation alone,
+     * and the other two kinds by the conversation and one device.
      */
-    private fun nameFor(prefix: String, vararg ids: Id): String =
-        ids.joinToString(separator = "", prefix = prefix) { hexOf(bytesOf(it)) }
+    private fun nameFor(prefix: String, id: Id): String = prefix + hexOf(bytesOf(id))
+
+    private fun nameFor(prefix: String, first: Id, second: Id): String =
+        prefix + hexOf(bytesOf(first)) + hexOf(bytesOf(second))
 
     /** [idToBytes], with its `IllegalArgumentException` translated into this store's vocabulary. */
     private fun bytesOf(id: Id): ByteArray = try {

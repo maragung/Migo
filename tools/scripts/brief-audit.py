@@ -431,13 +431,26 @@ def main() -> int:
                  f"{doubled}")
 
         # The point of the middle block: a crate listed there must actually have no
-        # tests. The moment a test file appears, the entry is stale in the direction
-        # that flatters the project, which is the direction nobody notices.
-        premature = sorted(
-            c for c in members
-            if listed_in(untested_block, c)
-            and any((root / "server" / "crates" / c / "tests").glob("*.rs"))
-        )
+        # tests. The moment a test appears, the entry is stale in the direction that
+        # flatters the project, which is the direction nobody notices.
+        #
+        # Both places a Rust test can live, not just one. The first version of this
+        # check globbed crates/<name>/tests/*.rs and nothing else, so a crate whose
+        # tests were unit tests in a #[cfg(test)] module -- which is where most of this
+        # workspace's tests are -- kept its untested entry and this gate kept reporting
+        # green. A checker that can only see half the places a thing hides is worse
+        # than no checker, because it is the reason nobody looks in the other half.
+        def has_tests(crate):
+            crate_dir = root / "server" / "crates" / crate
+            if any((crate_dir / "tests").glob("*.rs")):
+                return True
+            for source in (crate_dir / "src").rglob("*.rs"):
+                body = source.read_text(encoding="utf-8")
+                if re.search(r"(?m)^\s*#\[(?:tokio::)?test\]", body):
+                    return True
+            return False
+
+        premature = sorted(c for c in members if listed_in(untested_block, c) and has_tests(c))
         a.expect(not premature,
                  "no crate listed as untested actually has tests",
                  f"tests exist, so move these to BUILT: {premature}")
