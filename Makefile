@@ -8,6 +8,7 @@ SHELL      := /bin/bash
 SERVER_DIR  := server
 DESKTOP_DIR := clients/desktop
 WEB_DIR     := clients/web
+ANDROID_DIR := clients/android
 CARGO       := cargo
 PNPM        := pnpm
 
@@ -83,6 +84,17 @@ vector-check: ## Fail if the committed vectors are stale (CI gate, no Rust toolc
 	# fast gate job alongside protocol-check.
 	python3 tools/vectors/generate_wire_vectors.py --check
 	python3 tools/vectors/generate_crypto_vectors.py --check --quiet
+
+.PHONY: kotlin-check
+kotlin-check: ## Static checks on the Android Kotlin, which nothing here can compile (CI gate)
+	# The Android module needs a JDK, the Android SDK and Gradle, so android.yml is the
+	# only place in this project that compiles Kotlin at all — every mistake in that tree
+	# costs a push and a runner. This target checks the handful of properties that are
+	# cheap to read off the text: block comments that never close (Kotlin's nest, so a
+	# slash-star in prose swallows the rest of the file and reports at EOF), Cyrillic
+	# homoglyphs, and imports that are unused, duplicated or unsorted. It is not a type
+	# checker and cannot be one without the classpath; see the script's header.
+	python3 tools/scripts/kotlin-lint.py $(ANDROID_DIR)
 
 # ---------------------------------------------------------------- build
 
@@ -279,7 +291,7 @@ audit: ## Dependency vulnerability + licence audit
 	$(PNPM) audit --audit-level high || true
 
 .PHONY: ci
-ci: protocol-check entity-check brief-check vector-check fmt-check build-ts lint doc-check test test-vectors ## Everything CI runs
+ci: protocol-check entity-check brief-check vector-check kotlin-check fmt-check build-ts lint doc-check test test-vectors ## Everything CI runs
 
 # ---------------------------------------------------------------- misc
 

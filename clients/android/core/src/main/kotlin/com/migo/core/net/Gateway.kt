@@ -1,15 +1,15 @@
 package com.migo.core.net
 
 import com.migo.core.protocol.Ack
-import com.migo.core.protocol.Error as ProtocolError
-import com.migo.core.protocol.Op
-import com.migo.core.protocol.Welcome
-import com.migo.core.protocol.opcodeName
 import com.migo.core.protocol.DeliveryClass
+import com.migo.core.protocol.Error as ProtocolError
 import com.migo.core.protocol.Feature
 import com.migo.core.protocol.Hello
 import com.migo.core.protocol.OPCODES
+import com.migo.core.protocol.Op
 import com.migo.core.protocol.Ping
+import com.migo.core.protocol.Welcome
+import com.migo.core.protocol.opcodeName
 import com.migo.core.wire.Compress
 import com.migo.core.wire.Flags
 import com.migo.core.wire.Frame

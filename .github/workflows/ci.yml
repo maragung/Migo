@@ -74,6 +74,15 @@ jobs:
         # all report the same thing at ten minutes' notice instead of one.
         run: make vector-check
 
+      - name: Android Kotlin passes the static checks
+        # Here rather than in android.yml on purpose. That workflow only triggers on
+        # clients/android and shared/protocol, so a change anywhere else could leave the
+        # Kotlin tree broken with nothing to say so until someone next touches it. This
+        # step is Python and costs a second, and the failure it exists for — a nesting
+        # block comment that hides the rest of a file — otherwise arrives as several
+        # hundred unresolved references in a six-minute Gradle run.
+        run: make kotlin-check
+
   # ------------------------------------------------------------------ rust
   # One job for formatting, lints and the whole test suite, because all three want the
   # same warm `target/` directory and splitting them means building the workspace three

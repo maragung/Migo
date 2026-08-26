@@ -16,7 +16,7 @@ import com.goterl.lazysodium.interfaces.Sign
  * library the server links, so a byte produced here matches a byte produced there. Nothing in
  * this package implements a cryptographic transform of its own; it assembles RFC constructions
  * (HKDF over HMAC, the Double Ratchet) on top of these primitives, the same way `@migo/crypto`
- * assembles them on top of `@noble/*`.
+ * assembles them on top of the `@noble` packages.
  *
  * The instance is resolved lazily so that a process that never touches crypto never loads the
  * native library. Production always uses the bundled Android build. Tests inject a desktop

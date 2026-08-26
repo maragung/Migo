@@ -60,6 +60,7 @@ import com.migo.core.store.SavedSession
 import com.migo.core.wire.Id
 import com.migo.core.wire.NIL_ID
 import com.migo.core.wire.parseId
+import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -70,7 +71,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlin.random.Random
 import okhttp3.OkHttpClient
 
 /**

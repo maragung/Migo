@@ -3,9 +3,12 @@ package com.migo.core.crypto
 /**
  * Variant names, shared with the Rust crate and the TypeScript client.
  *
- * `shared/protocol/vectors/crypto/*.json` names the expected failure for a case by one of these
- * words, and all three implementations have to answer with the same one or the vector is not
- * testing agreement.
+ * The vector files under `shared/protocol/vectors/crypto` name the expected failure for a case
+ * by one of these words, and all three implementations have to answer with the same one or the
+ * vector is not testing agreement.
+ *
+ * Kotlin block comments nest, so the sequence that opens one must not appear in prose. That is
+ * why the directory is named here rather than the glob that would have been shorter.
  */
 enum class CryptoErrorKind {
     BadLength,
