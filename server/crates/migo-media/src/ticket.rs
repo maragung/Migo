@@ -36,7 +36,7 @@
 //! # Format
 //!
 //! Fixed-width big-endian, hand-rolled rather than serialized with anything, because
-//! the layout is eighty-five bytes and a dependency that can produce a different
+//! the layout is ninety-seven bytes and a dependency that can produce a different
 //! encoding next minor version is a dependency that can invalidate every ticket in
 //! flight during a rolling deploy.
 //!
@@ -51,10 +51,24 @@
 //!     67     8  byte_size
 //!     75     8  expires_at, milliseconds
 //!     83     1  flags
-//!     84     1  mime length
-//!     85     n  mime, UTF-8
-//!   85+n    32  tag over bytes 0..85+n
+//!     84     4  width in pixels, zero when the client supplied none
+//!     88     4  height in pixels, zero when the client supplied none
+//!     92     4  duration in milliseconds, zero when the client supplied none
+//!     96     1  mime length
+//!     97     n  mime, UTF-8
+//!   97+n    32  tag over bytes 0..97+n
 //! ```
+//!
+//! # Why the dimensions are in here
+//!
+//! They are the client's own description of its object and the server never verifies
+//! them, so carrying them looks like carrying nothing. What they buy is that the three
+//! numbers `begin` accepted are the three numbers `commit` writes. The alternative is
+//! to take them again at commit, which means a voice note whose duration was checked
+//! against this deployment's ceiling at begin can be committed with a different one, and
+//! the check becomes decorative. Zero means absent: no real object has a zero width, a
+//! zero height, or a zero duration, and a presence bit per field would be three flags
+//! and three branches to save nothing.
 
 use migo_core::{Error, Id, Timestamp};
 use migo_crypto::mac::{MacKey, TAG_LEN};
@@ -63,10 +77,15 @@ use migo_protocol::fault;
 use crate::model::{Destination, MediaKind, MAX_MIME_LEN};
 
 /// Layout version. Bumping it invalidates every ticket in flight, by design.
-const VERSION: u8 = 1;
+///
+/// Version two added the three dimension fields. A ticket minted by a version-one build
+/// is refused rather than parsed, which during a rolling deploy costs an upload its
+/// `begin` call and nothing else, because no ticket is worth more than its thirty
+/// minutes and nothing is written until commit.
+const VERSION: u8 = 2;
 
 /// Everything before the MIME string.
-const HEADER_LEN: usize = 85;
+const HEADER_LEN: usize = 97;
 
 /// Set when the destination conversation is end-to-end encrypted.
 const FLAG_END_TO_END: u8 = 1 << 0;
@@ -111,6 +130,15 @@ pub struct Claim {
     pub end_to_end: bool,
     /// The MIME type the client declared.
     pub mime: String,
+    /// Pixel width the client declared, if any.
+    pub width: Option<u32>,
+    /// Pixel height the client declared, if any.
+    pub height: Option<u32>,
+    /// Duration the client declared, if any.
+    ///
+    /// For a voice note this is the value checked against the deployment's ceiling at
+    /// begin, which is why it travels inside the MAC rather than being taken again.
+    pub duration_ms: Option<u32>,
 }
 
 impl Claim {
@@ -149,6 +177,9 @@ pub fn seal(key: &MacKey, claim: &Claim) -> Vec<u8> {
     body.extend_from_slice(&claim.byte_size.to_be_bytes());
     body.extend_from_slice(&claim.expires_at.as_millis().to_be_bytes());
     body.push(if claim.end_to_end { FLAG_END_TO_END } else { 0 });
+    body.extend_from_slice(&claim.width.unwrap_or(0).to_be_bytes());
+    body.extend_from_slice(&claim.height.unwrap_or(0).to_be_bytes());
+    body.extend_from_slice(&claim.duration_ms.unwrap_or(0).to_be_bytes());
     body.push(u8::try_from(mime.len()).unwrap_or(0));
     body.extend_from_slice(mime);
 
@@ -225,7 +256,7 @@ pub fn open(key: &MacKey, token: &[u8], now: Timestamp) -> Result<Claim, Rejecti
     if body[0] != VERSION {
         return Err(Rejection::Unusable);
     }
-    let mime_len = usize::from(body[84]);
+    let mime_len = usize::from(body[96]);
     if body.len() != HEADER_LEN + mime_len {
         return Err(Rejection::Unusable);
     }
@@ -251,7 +282,19 @@ pub fn open(key: &MacKey, token: &[u8], now: Timestamp) -> Result<Claim, Rejecti
         expires_at,
         end_to_end: body[83] & FLAG_END_TO_END != 0,
         mime: mime.to_string(),
+        width: absent_if_zero(u32::from_be_bytes(read4(body, 84))),
+        height: absent_if_zero(u32::from_be_bytes(read4(body, 88))),
+        duration_ms: absent_if_zero(u32::from_be_bytes(read4(body, 92))),
     })
+}
+
+/// Turns the wire's zero back into the absence it stands for.
+const fn absent_if_zero(value: u32) -> Option<u32> {
+    if value == 0 {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 /// Reads sixteen bytes at `offset`. The caller has already checked the length.
@@ -265,5 +308,12 @@ fn read16(body: &[u8], offset: usize) -> [u8; 16] {
 fn read8(body: &[u8], offset: usize) -> [u8; 8] {
     let mut out = [0u8; 8];
     out.copy_from_slice(&body[offset..offset + 8]);
+    out
+}
+
+/// Reads four bytes at `offset`. The caller has already checked the length.
+fn read4(body: &[u8], offset: usize) -> [u8; 4] {
+    let mut out = [0u8; 4];
+    out.copy_from_slice(&body[offset..offset + 4]);
     out
 }

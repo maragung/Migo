@@ -154,6 +154,27 @@ where
         &self.policy
     }
 
+    /// Refuses a request that carries no identity.
+    ///
+    /// Before the charge, deliberately. `charge` keys its bucket on the account id, so a
+    /// request with `Id::NIL` would be billed to a bucket every unidentified request in
+    /// the deployment shares -- which turns an anonymous request into a way to exhaust a
+    /// budget nobody owns. And a profile upload asks no membership question at all, so
+    /// without this an unauthenticated caller would walk out with a signed URL and a
+    /// MAC-authenticated ticket for a real storage key.
+    ///
+    /// The device matters as much as the account: brief section 69 asks for an
+    /// attachment token *"yang terikat pada account dan device"*, and a ticket bound to
+    /// `Id::NIL` as its device is a ticket bound to whatever presents it.
+    fn require_identity(caller: &Caller) -> Result<()> {
+        if caller.account_id.is_nil() || caller.device_id.is_nil() {
+            return Err(fault::unauthenticated(
+                "the media library needs an identified account and device",
+            ));
+        }
+        Ok(())
+    }
+
     /// Charges the caller's bucket.
     ///
     /// One key, the account. Not the device: brief section 70 gives a *user* an upload
@@ -374,6 +395,7 @@ where
     B: Storage + ?Sized + 'static,
 {
     async fn begin(&self, caller: &Caller, request: UploadRequest) -> Result<Ticket> {
+        Self::require_identity(caller)?;
         self.charge_upload(caller, BEGIN_COST).await?;
         self.vet(&request)?;
         let end_to_end = self.admit(caller, request.destination).await?;
@@ -398,6 +420,9 @@ where
             expires_at,
             end_to_end,
             mime: request.mime,
+            width: request.width,
+            height: request.height,
+            duration_ms: request.duration_ms,
         };
         self.meters.begun(request.kind);
         Ok(Ticket {
@@ -410,6 +435,7 @@ where
     }
 
     async fn status(&self, caller: &Caller, token: &[u8]) -> Result<Progress> {
+        Self::require_identity(caller)?;
         self.charge_upload(caller, STATUS_COST).await?;
         let claim = self.claim_of(caller, token)?;
         let key = storage_key(
@@ -439,6 +465,7 @@ where
     }
 
     async fn commit(&self, caller: &Caller, token: &[u8], commit: Commit) -> Result<Stored> {
+        Self::require_identity(caller)?;
         self.charge_upload(caller, COMMIT_COST).await?;
         let claim = self.claim_of(caller, token)?;
 
@@ -521,6 +548,28 @@ where
             Policy::clearance_at_commit(EncryptionMode::Transport)
         };
 
+        // A client that never saw the answer to its first commit retries it. The id was
+        // minted at begin, so the retry is the same row rather than a second object made
+        // out of one upload, and it is answered from the row rather than refused: a
+        // client that cannot learn the id of bytes it successfully uploaded has lost
+        // them, and the ticket is the proof it is the same upload. The counters are not
+        // touched on the way out, so one upload is committed exactly once no matter how
+        // many times the answer was lost.
+        if let Some(existing) = self.store.media(claim.media_id).await? {
+            if existing.deleted_at.is_some() {
+                // Committed, then deleted, then retried. There is nothing to hand back,
+                // and saying so is honest rather than resurrecting a tombstone.
+                return Err(fault::not_found("media object"));
+            }
+            if existing.owner_id != claim.owner_id {
+                // The id space is the server's own and every id is minted from the
+                // random source, so a valid ticket cannot reach somebody else's row.
+                // If it ever does, it is a collision, not an idempotent retry.
+                return Err(fault::already_exists("media object"));
+            }
+            return Ok(project(&existing));
+        }
+
         let stored = self
             .store
             .create_media(MediaObject {
@@ -529,9 +578,16 @@ where
                 kind: claim.kind.to_i16(),
                 mime,
                 byte_size: i64::try_from(head.byte_size).unwrap_or(i64::MAX),
-                width: None,
-                height: None,
-                duration_ms: None,
+                // The client's own description, as it stood at begin. The server never
+                // measured these and does not claim to: they are what a chat client
+                // needs to lay out a bubble before the bytes arrive, and taking them
+                // from the ticket rather than from the commit request is what stops a
+                // voice note from changing its duration after the ceiling was checked.
+                width: claim.width.and_then(|value| i32::try_from(value).ok()),
+                height: claim.height.and_then(|value| i32::try_from(value).ok()),
+                duration_ms: claim
+                    .duration_ms
+                    .and_then(|value| i32::try_from(value).ok()),
                 storage_key: key,
                 conversation_id: claim.destination.conversation_id(),
                 checksum: commit.checksum,
@@ -546,6 +602,7 @@ where
     }
 
     async fn abort(&self, caller: &Caller, token: &[u8]) -> Result<()> {
+        Self::require_identity(caller)?;
         self.charge_upload(caller, ABORT_COST).await?;
         let claim = self.claim_of(caller, token)?;
         let key = storage_key(
@@ -565,6 +622,7 @@ where
     }
 
     async fn fetch_url(&self, caller: &Caller, media_id: Id) -> Result<Grant> {
+        Self::require_identity(caller)?;
         self.charge(caller, FETCH_COST).await.inspect_err(|error| {
             if error.code() == codes::RATE_LIMITED {
                 self.meters.granted(Granted::RateLimited);
@@ -588,12 +646,14 @@ where
     }
 
     async fn describe(&self, caller: &Caller, media_id: Id) -> Result<Stored> {
+        Self::require_identity(caller)?;
         self.charge(caller, DESCRIBE_COST).await?;
         let object = self.authorize(caller, media_id).await?;
         Ok(project(&object))
     }
 
     async fn delete(&self, caller: &Caller, media_id: Id) -> Result<()> {
+        Self::require_identity(caller)?;
         self.charge(caller, DELETE_COST).await?;
         let Some(object) = self.store.media(media_id).await? else {
             return Err(self.hidden(Granted::Missing));
