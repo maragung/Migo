@@ -1345,7 +1345,7 @@ where
                 // free text an annoyed moderator typed onto every subscriber's screen.
                 Ok(Some(Fanout::member(
                     room_id,
-                    subject_id,
+                    caller.device_id,
                     member_event(
                         room_id,
                         subject_id,
