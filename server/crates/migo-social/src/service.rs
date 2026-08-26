@@ -285,6 +285,20 @@ where
         }
     }
 
+    /// Which label a block belongs under, whichever side wrote it.
+    ///
+    /// Both sides are a block to the operator, and only the caller is kept from telling
+    /// them apart. That distinction cannot be recovered from the error, because the
+    /// error a subject's block produces is deliberately the same one a privacy setting
+    /// produces -- so it is taken from the state instead, at every site that has the
+    /// state in hand.
+    fn block_outcome(state: BlockState) -> GateOutcome {
+        match state {
+            BlockState::Clear => GateOutcome::Allowed,
+            BlockState::ByCaller | BlockState::BySubject => GateOutcome::Blocked,
+        }
+    }
+
     /// The one refusal a privacy setting produces.
     ///
     /// A constructor rather than an inline `fault::error` at nine call sites, so that
@@ -415,6 +429,15 @@ where
             };
         }
         let state = self.block_state(caller.account_id, subject_id).await?;
+        // The subject's block leaves here as an *outcome* and not as an error. It has
+        // to reach the caller as the same refusal a privacy setting produces, and an
+        // error carries only its code, so an error would arrive at the counter
+        // indistinguishable from a privacy setting and the operator would lose the one
+        // reading the caller is not allowed to have. `require_gate` turns this into
+        // that refusal.
+        if state == BlockState::BySubject {
+            return Ok(GateOutcome::Blocked);
+        }
         if let Some(refusal) = Self::block_refusal(state) {
             return Err(refusal);
         }
@@ -463,8 +486,10 @@ where
 
     /// Which label a refusal belongs under.
     ///
-    /// `BLOCKED_BY_USER` and the block half of `PRIVACY_RESTRICTED` are both blocks to
-    /// the operator; only the caller is kept from telling them apart.
+    /// Only ever reached by a refusal whose code says everything there is to say. A
+    /// block never arrives here -- the caller's own block would be readable from its
+    /// code, but the subject's would not, so both are labelled from the state by
+    /// [`Self::block_outcome`] before the error is built.
     fn outcome_of(error: &Error) -> GateOutcome {
         match error.code() {
             codes::BLOCKED_BY_USER => GateOutcome::Blocked,
@@ -742,7 +767,7 @@ where
             // name in a pending list forever with no way to clear it.
             self.drop_pending(caller.account_id, requester_id).await?;
             self.meters.response(ResponseOutcome::Missing);
-            self.meters.gate(Self::outcome_of(&refusal));
+            self.meters.gate(Self::block_outcome(state));
             return Err(refusal);
         }
 
@@ -780,7 +805,7 @@ where
         self.charge(caller, EDGE_COST).await?;
         let state = self.block_state(caller.account_id, subject_id).await?;
         if let Some(refusal) = Self::block_refusal(state) {
-            self.meters.gate(Self::outcome_of(&refusal));
+            self.meters.gate(Self::block_outcome(state));
             return Err(refusal);
         }
         // The subject must exist. A follow of a deleted account is a row pointing at
@@ -822,6 +847,33 @@ where
         )
         .await?;
 
+        // What the block is about to undo, read before it is undone. Four keyed reads on
+        // an operation a person performs by hand, so that the removal counters keep
+        // meaning "an edge that existed is gone" rather than "a block happened": most
+        // blocks are of strangers, and counting a friendship removal for every one of
+        // those would leave the friend series unable to answer the single question it
+        // exists for.
+        let was_friend = self
+            .store
+            .relationship(caller.account_id, subject_id, RelationshipKind::Friend)
+            .await?
+            .is_some();
+        let was_following = self
+            .store
+            .relationship(caller.account_id, subject_id, RelationshipKind::Follow)
+            .await?
+            .is_some()
+            || self
+                .store
+                .relationship(subject_id, caller.account_id, RelationshipKind::Follow)
+                .await?
+                .is_some();
+        let was_favorite = self
+            .store
+            .relationship(caller.account_id, subject_id, RelationshipKind::Favorite)
+            .await?
+            .is_some();
+
         // The block row first. If any of what follows fails, the state left behind is
         // "blocked, and some edges not yet cleared" — which still stops contact. The
         // other order leaves "edges cleared, not blocked", which stops nothing and
@@ -844,6 +896,19 @@ where
             .await?;
 
         self.meters.added(EdgeKind::Block);
+        // The edges a block took with it are counted as removals, because that is what
+        // they are. An operator watching `added` against `removed` for one kind is
+        // watching how many of that edge exist, and a removal path that reported nothing
+        // would make the two series drift apart by exactly the number of blocks.
+        if was_friend {
+            self.meters.removed(EdgeKind::Friend);
+        }
+        if was_following {
+            self.meters.removed(EdgeKind::Follow);
+        }
+        if was_favorite {
+            self.meters.removed(EdgeKind::Favorite);
+        }
         Ok(())
     }
 

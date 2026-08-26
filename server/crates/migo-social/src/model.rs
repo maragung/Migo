@@ -164,13 +164,16 @@ pub struct Edge {
     pub kind: RelationshipKind,
     /// When it was created.
     pub since: Timestamp,
-    /// Whether a friendship is mutual and settled.
+    /// Whether this edge is settled, meaning both ends agreed to it.
+    ///
+    /// False for a friendship with no acceptance date and false for a request, which is
+    /// the same statement twice: those are the two rows that stand for a friendship
+    /// nobody has agreed to yet, and neither may ever read as settled. A pending request
+    /// that read as a friendship would have a client showing a stranger as a friend, and
+    /// every gate in this crate rests on the same distinction.
     ///
     /// Always true for a follow, a block, and a favourite: those need no consent, so
-    /// there is no pending state for them to be in. For a friendship it is the
-    /// difference between a relationship and a request, and the two must never be
-    /// conflated — a pending request that read as a friendship would let anybody see a
-    /// `Friends`-only field by asking to be a friend.
+    /// there is no pending state for them to be in.
     pub accepted: bool,
 }
 
@@ -184,6 +187,11 @@ impl Edge {
             since: row.created_at,
             accepted: match row.kind {
                 RelationshipKind::Friend => row.accepted_at.is_some(),
+                // A request is not settled, whichever end of it this row is. It reaches
+                // this projection through `Graph::pending`, where the whole point is
+                // that nobody has answered yet.
+                RelationshipKind::PendingIncoming | RelationshipKind::PendingOutgoing => false,
+                // No consent to record, so nothing to be pending on.
                 _ => true,
             },
         }
