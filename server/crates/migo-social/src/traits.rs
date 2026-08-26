@@ -30,11 +30,17 @@
 //!
 //! # What is deliberately not here
 //!
-//! **No profile read and no profile write.** `who_can_message`, `who_can_add`, and
-//! `show_last_seen` are read here to answer a gate, and set through the account
-//! service that owns the profile row. A settings writer in this crate would be a
-//! second owner of one row, and the first time the two disagreed a privacy setting
-//! would be saved and then quietly overwritten.
+//! **No profile write.** `who_can_message`, `who_can_add`, and `show_last_seen` are
+//! read here to answer a gate, and set through the account service that owns the
+//! profile row. A settings writer in this crate would be a second owner of one row, and
+//! the first time the two disagreed a privacy setting would be saved and then quietly
+//! overwritten.
+//!
+//! **No profile settings in a profile read.** [`Graph::profiles`] returns the public
+//! face and none of the three visibility columns. Reading a profile is here rather than
+//! in the account service for one reason — a profile read has to honour a block, and the
+//! block lives in this crate — but honouring a block is the whole of what this crate
+//! adds, so it hands back what a stranger may see and nothing else.
 //!
 //! **No presence.** `Interaction::LastSeen` answers *whether* the caller may see a
 //! last-seen time; the time itself lives in `migo_presence`, which asks this crate the
@@ -54,7 +60,8 @@ use async_trait::async_trait;
 use migo_core::{Id, Result};
 
 use crate::model::{
-    Caller, Edge, Found, FriendOutcome, Interaction, Pending, RespondOutcome, Standing, Suggestion,
+    Caller, Edge, Found, FriendOutcome, Interaction, Pending, ProfileCard, RespondOutcome,
+    Standing, Suggestion,
 };
 use crate::notice::Notice;
 
@@ -205,6 +212,34 @@ pub trait Graph: Send + Sync {
     /// somebody blocked last week would be the product undoing a decision the user
     /// made deliberately.
     async fn suggest(&self, caller: &Caller, limit: Option<u16>) -> Result<Vec<Suggestion>>;
+
+    /// Public profiles for a batch of accounts.
+    ///
+    /// Here rather than in the account service because a profile read has to honour a
+    /// block, and the block lives in this crate. An account that blocked the caller must
+    /// not have its profile served to them, and a handler that read `profile` straight
+    /// from the store would do exactly that — with no bug visible at the call site,
+    /// because the read succeeds and returns real data.
+    ///
+    /// # Silent omission, never an error
+    ///
+    /// A requested id that is blocked in either direction, that does not exist, or that
+    /// has no profile row is **left out of the result**. It is not an error and it is not
+    /// a tombstone entry, because either of those would answer the question brief section
+    /// 180 arranges the error codes not to answer: a caller that got `NOT_FOUND` for one
+    /// id and a profile for another has learned which of the two blocked them. Omission
+    /// makes "blocked you", "deleted their account", and "never existed" the same
+    /// observation.
+    ///
+    /// So the result may be shorter than the request and is in no particular order
+    /// relative to it. Callers match on [`ProfileCard::account_id`].
+    ///
+    /// # Bounded, because the price is flat
+    ///
+    /// At most [`MAX_PROFILE_BATCH`](crate::model::MAX_PROFILE_BATCH) ids, duplicates
+    /// collapsed. `PROFILE_FETCH` costs the same whatever the batch carries, so the
+    /// ceiling is what keeps one charge from buying an unbounded number of reads.
+    async fn profiles(&self, caller: &Caller, account_ids: &[Id]) -> Result<Vec<ProfileCard>>;
 
     /// Finds accounts by username or display-name prefix.
     ///

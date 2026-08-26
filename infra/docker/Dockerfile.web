@@ -1,12 +1,19 @@
 # syntax=docker/dockerfile:1.7
 # =============================================================================
-# Migo web client — a Next.js standalone PWA over @migo/sdk.
+# Migo web client — a statically exported PWA over @migo/sdk, served on 19991.
 #
 # The workspace SDK chain (@migo/wire -> @migo/protocol -> @migo/crypto ->
 # @migo/sdk) ships as compiled ESM whose package `exports` resolve to dist/, so
-# those packages are built with tsc before `next build`. `output: 'standalone'`
-# then traces exactly the files the server needs into .next/standalone, and the
-# final stage runs that alone — no pnpm, no workspace node_modules, no source.
+# those packages are built with tsc before `next build`.
+#
+# The client is FULLY client-side: `output: 'export'` emits plain HTML, CSS and
+# JavaScript into clients/web/out, and that directory is the entire artifact.
+# There is no Next server in this image and no server-side rendering, because
+# there is nothing a server could render — message content is encrypted and
+# decrypted in the browser, and the keys never leave the device. The runtime
+# stage is Node plus a ~300-line standard-library file server (see
+# clients/web/tools/serve.mjs) plus the exported files. No pnpm, no
+# node_modules, no source, no framework runtime.
 #
 # NEXT_PUBLIC_* values are inlined into the client bundle at BUILD time, so the
 # API and gateway URLs are build arguments, not runtime environment: rebuild to
@@ -62,25 +69,27 @@ RUN pnpm --filter @migo/web build
 
 # --- runtime -----------------------------------------------------------------
 FROM node:${NODE_VERSION}-${DEBIAN_RELEASE}-slim AS runtime
+# 19991 is Migo's web client port. PORT is honoured too, so a platform that
+# injects one still works, but nothing here needs to be told where to listen.
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
-    PORT=3000 \
-    HOSTNAME=0.0.0.0
-RUN useradd --system --create-home --uid 10001 nextjs
+    MIGO_WEB_PORT=19991 \
+    MIGO_WEB_HOST=0.0.0.0
+RUN useradd --system --create-home --uid 10001 migoweb
 WORKDIR /app
 
-# The standalone bundle preserves the workspace layout, so server.js lives under
-# clients/web/. Next does not fold static assets or public/ into the trace, so both
-# are copied alongside it at the paths the server expects.
-COPY --from=builder --chown=nextjs:nextjs /app/clients/web/.next/standalone ./
-COPY --from=builder --chown=nextjs:nextjs /app/clients/web/.next/static ./clients/web/.next/static
-COPY --from=builder --chown=nextjs:nextjs /app/clients/web/public ./clients/web/public
+# The whole artifact: the exported bundle and the file server that serves it.
+# serve.mjs resolves its default directory relative to its own package root, so
+# the two are copied into the layout it expects.
+COPY --from=builder --chown=migoweb:migoweb /app/clients/web/out ./out
+COPY --from=builder --chown=migoweb:migoweb /app/clients/web/tools ./tools
 
-USER nextjs
-EXPOSE 3000
+USER migoweb
+EXPOSE 19991
 
-# Node 22 has a global fetch, so the readiness probe needs no extra tool in the image.
-HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=5 \
-    CMD node -e "fetch('http://localhost:'+(process.env.PORT||3000)+'/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+# The server answers /healthz before touching the filesystem, so this probe stays
+# meaningful even when the bundle directory is the thing that is wrong.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
+    CMD node -e "fetch('http://127.0.0.1:'+(process.env.MIGO_WEB_PORT||19991)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-CMD ["node", "clients/web/server.js"]
+CMD ["node", "tools/serve.mjs"]

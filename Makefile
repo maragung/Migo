@@ -5,15 +5,24 @@ SHELL      := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 .DEFAULT_GOAL := help
 
-SERVER_DIR := server
-WEB_DIR    := clients/web
-CARGO      := cargo
-PNPM       := pnpm
+SERVER_DIR  := server
+DESKTOP_DIR := clients/desktop
+WEB_DIR     := clients/web
+CARGO       := cargo
+PNPM        := pnpm
 
 # Cargo takes --manifest-path *after* the subcommand, not before it, so the flag
 # cannot live in $(CARGO). Every recipe below places it explicitly; a target that
 # forgets it silently operates on whatever workspace the caller happens to be in.
 MANIFEST   := --manifest-path $(SERVER_DIR)/Cargo.toml
+
+# The desktop client is a *separate* workspace, not a member of the server one, so it needs
+# its own --manifest-path everywhere. That separation is deliberate and worth keeping in
+# mind when editing these recipes: eframe drags in winit, glutin and a windowing stack that
+# the server has no use for, and a shared workspace would put all of it in the server's
+# Cargo.lock and in every server build's dependency graph. The cost is the duplication
+# below; the benefit is that `make check` on a headless box still only builds a server.
+DESKTOP_MANIFEST := --manifest-path $(DESKTOP_DIR)/Cargo.toml
 
 # Colours only when attached to a TTY.
 ifneq ($(shell test -t 1 && echo tty),)
@@ -122,11 +131,11 @@ dev-web: ## Run the Next.js dev server only
 
 .PHONY: infra-up
 infra-up: ## Start Postgres, Redis and MinIO via Docker Compose
-	docker compose -f infra/compose/docker-compose.dev.yml up -d
+	docker compose -f infra/compose/docker-compose.yml up -d
 
 .PHONY: infra-down
 infra-down: ## Stop the local infrastructure
-	docker compose -f infra/compose/docker-compose.dev.yml down
+	docker compose -f infra/compose/docker-compose.yml down
 
 .PHONY: migrate
 migrate: ## Apply SQL migrations to $$MIGO_STORE__URL
@@ -135,27 +144,49 @@ migrate: ## Apply SQL migrations to $$MIGO_STORE__URL
 # ---------------------------------------------------------------- quality
 
 .PHONY: check
-check: ## Fast type-check of the Rust workspace
+check: check-server check-desktop ## Fast type-check of both Rust workspaces
+
+.PHONY: check-server
+check-server: ## Fast type-check of the server workspace
 	$(CARGO) check $(MANIFEST) --workspace --all-targets
+
+.PHONY: check-desktop
+check-desktop: ## Fast type-check of the desktop client workspace
+	# Checks, never builds. `cargo check` needs no OpenGL, X11 or Wayland development
+	# headers because nothing is linked; winit and glutin open those libraries at run
+	# time. That is what lets this target pass on a headless container, and it is also
+	# why the release build of this crate is a CI job rather than something a developer
+	# is expected to be able to link locally.
+	$(CARGO) check $(DESKTOP_MANIFEST) --workspace --all-targets
 
 .PHONY: fmt
 fmt: ## Format Rust and TypeScript
 	$(CARGO) fmt $(MANIFEST) --all
+	$(CARGO) fmt $(DESKTOP_MANIFEST) --all
 	# `run`, not `-r run`: pnpm's recursive mode deliberately excludes the workspace
 	# root, and the root is where Prettier is configured. `-r` here ran a script that
 	# no package defines, reported success, and formatted nothing.
 	$(PNPM) run --if-present format
 
 .PHONY: fmt-check
-fmt-check: fmt-check-rust fmt-check-js ## Verify formatting (CI gate)
+fmt-check: fmt-check-rust fmt-check-desktop fmt-check-js ## Verify formatting (CI gate)
 
 # The -rust / -js split repeats through fmt-check, lint and test-vectors, and exists for
 # CI rather than for people: the job with a warm target/ has no pnpm, the job with pnpm
 # has no Rust toolchain, and a job that had to install both to run one gate would
 # install both to run neither well. Run the unsuffixed target locally; it does both.
 .PHONY: fmt-check-rust
-fmt-check-rust: ## rustfmt only, check mode (CI gate)
+fmt-check-rust: ## rustfmt only, server workspace, check mode (CI gate)
 	$(CARGO) fmt $(MANIFEST) --all -- --check
+
+.PHONY: fmt-check-desktop
+fmt-check-desktop: ## rustfmt only, desktop workspace, check mode (CI gate)
+	# Split out for the same reason as the -rust / -js pair: it is the gate for a
+	# different CI job, one whose cache holds a windowing stack instead of a database
+	# driver. clients/desktop/rustfmt.toml repeats the server's settings verbatim,
+	# because rustfmt stops looking for configuration at the workspace root and would
+	# otherwise format this half of the repository to its own defaults.
+	$(CARGO) fmt $(DESKTOP_MANIFEST) --all -- --check
 
 .PHONY: fmt-check-js
 fmt-check-js: ## Prettier only, check mode (CI gate)
@@ -165,11 +196,19 @@ fmt-check-js: ## Prettier only, check mode (CI gate)
 	$(PNPM) run --if-present format:check
 
 .PHONY: lint
-lint: lint-rust lint-js ## Clippy (deny warnings) + ESLint
+lint: lint-rust lint-desktop lint-js ## Clippy (deny warnings) + ESLint
 
 .PHONY: lint-rust
-lint-rust: ## Clippy only, warnings denied (CI gate)
+lint-rust: ## Clippy only, server workspace, warnings denied (CI gate)
 	$(CARGO) clippy $(MANIFEST) --workspace --all-targets --all-features -- -D warnings
+
+.PHONY: lint-desktop
+lint-desktop: ## Clippy only, desktop workspace, warnings denied (CI gate)
+	# --all-features is omitted on purpose. This crate's only features are eframe's
+	# renderer backends, which are mutually exclusive in practice: asking for all of
+	# them at once lints a configuration nobody ships. The default set is what the
+	# release job builds, so it is what gets linted.
+	$(CARGO) clippy $(DESKTOP_MANIFEST) --workspace --all-targets -- -D warnings
 
 .PHONY: lint-js
 lint-js: ## ESLint only, over the whole workspace (CI gate)
@@ -247,4 +286,5 @@ ci: protocol-check entity-check brief-check vector-check fmt-check build-ts lint
 .PHONY: clean
 clean: ## Remove build artefacts
 	$(CARGO) clean $(MANIFEST)
-	rm -rf $(WEB_DIR)/.next node_modules/.cache
+	$(CARGO) clean $(DESKTOP_MANIFEST)
+	rm -rf $(WEB_DIR)/.next $(WEB_DIR)/out node_modules/.cache

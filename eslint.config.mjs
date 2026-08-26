@@ -25,6 +25,11 @@ export default tseslint.config(
       // any tsconfig. Both only produce parser errors under the typed rules.
       'clients/web/next-env.d.ts',
       'clients/web/public/**',
+      // The static export. `next build` writes it, `make build-web` produces it, and the
+      // release workflow tars it verbatim — it is minified output of code that was already
+      // linted as source, so linting it again can only produce findings in generated
+      // chunks nobody may edit.
+      'clients/web/out/**',
     ],
   },
   js.configs.recommended,
@@ -96,7 +101,7 @@ export default tseslint.config(
     // Config and tool files are plain scripts outside any package's tsconfig. The web
     // client's own top-level configs (next.config.mjs, postcss.config.mjs) are the same:
     // ESM the framework loads directly, not part of the typed project.
-    files: ['*.mjs', 'tools/**/*.mjs', 'clients/web/*.mjs'],
+    files: ['*.mjs', '**/tools/**/*.mjs', 'clients/web/*.mjs'],
     ...tseslint.configs.disableTypeChecked,
   },
 );

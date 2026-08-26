@@ -1948,6 +1948,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "migo-keys"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "migo-core",
+ "migo-crypto",
+ "migo-protocol",
+ "migo-ratelimit",
+ "migo-store",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "migo-media"
 version = "0.1.0"
 dependencies = [
@@ -2120,6 +2134,7 @@ dependencies = [
  "migo-economy",
  "migo-games",
  "migo-gateway",
+ "migo-keys",
  "migo-media",
  "migo-messaging",
  "migo-moderation",

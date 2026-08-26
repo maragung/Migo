@@ -45,7 +45,7 @@ pnpm install
 pnpm --filter @migo/web dev
 ```
 
-Then open http://localhost:3000. In development the service worker is intentionally not registered, so
+Then open http://localhost:19991. In development the service worker is intentionally not registered, so
 code changes are never served stale.
 
 ## Build
@@ -55,7 +55,12 @@ pnpm --filter @migo/web build
 pnpm --filter @migo/web start
 ```
 
-The build uses `output: 'standalone'`, so it can be containerized without the full `node_modules` tree.
+The build uses `output: 'export'`: `next build` writes a directory of plain HTML, CSS and JavaScript to
+`out/`, and that directory is the entire artifact. `pnpm --filter @migo/web start` serves it on port
+19991 with `tools/serve.mjs`, a standard-library-only file server — the same one the container image
+runs, so a developer and production serve identical bytes through identical code. Any static host or
+CDN can serve `out/` instead; nothing in this client needs a server, because message content is
+encrypted and decrypted in the browser and the keys never leave the device.
 
 Type-check without emitting:
 

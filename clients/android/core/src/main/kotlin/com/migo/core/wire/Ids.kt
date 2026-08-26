@@ -1,6 +1,7 @@
 package com.migo.core.wire
 
 import java.math.BigInteger
+import java.security.SecureRandom
 
 /**
  * Identifiers: 128 bits on the wire, 26 Crockford base32 characters in memory.
@@ -97,7 +98,10 @@ fun parseId(text: String): Id =
         is IdParseResult.Ok -> result.id
         // The failure reason describes the shape of the input, not its content, and an id is
         // not secret material — so it is safe to state.
-        is IdParseResult.Fail -> throw IllegalArgumentException("not a Migo id (${describe(result.why)}): length ${text.length}")
+        is IdParseResult.Fail ->
+            throw IllegalArgumentException(
+                "not a Migo id (${describe(result.why)}): length ${text.length}",
+            )
     }
 
 /**
@@ -110,6 +114,54 @@ fun isId(value: String): Boolean =
         is IdParseResult.Ok -> result.id.value == value
         is IdParseResult.Fail -> false
     }
+
+/**
+ * Mints a fresh id: six big-endian bytes of Unix milliseconds, then ten random bytes.
+ *
+ * The counterpart of `Id::generate` in `migo-core/src/id.rs` and `newId` in `packages/sdk/src/ids.ts`,
+ * and it has to stay the counterpart: the server sorts by the time prefix and stores the id as the
+ * primary key, so a client that laid the bytes out differently would produce ids that sort into the
+ * wrong page and collide with nothing to say why.
+ *
+ * # Why the clock is read here and not injected
+ *
+ * A caller-supplied timestamp is a caller that can mint two ids for the same millisecond from two
+ * places and, worse, one that can mint an id dated last week. The ten random bytes are what actually
+ * make an id unique, so a shared millisecond is harmless; a wrong millisecond is not, because the
+ * prefix is the sort key. Determinism for a test comes from [idFromBytes], which takes the whole
+ * sixteen bytes and needs no clock at all.
+ *
+ * # Why this draws from its own generator
+ *
+ * [com.migo.core.crypto.Csprng] is deliberately the single source of *key* material, and these ten
+ * bytes are not key material: they are uniqueness, and nothing about the protocol's security rests on
+ * an id being unguessable. Reaching into the crypto package for them would make the wire layer depend
+ * on the crypto layer, which depends on the wire layer, purely to share a `SecureRandom`. A
+ * cryptographic generator is used anyway, because a weak one here would cost nothing and buy nothing.
+ */
+fun newId(): Id = idAt(System.currentTimeMillis())
+
+/**
+ * [newId] with the millisecond supplied, for a caller that has already stamped a batch.
+ *
+ * A negative or oversized value is clamped into the 48 bits the prefix holds rather than rejected:
+ * the only way to get one is a device whose clock is set before 1970 or past the year 10889, and an
+ * id that sorts oddly is a far better outcome there than a send that throws.
+ */
+fun idAt(unixMs: Long): Id {
+    val ms = unixMs.coerceIn(0L, 0xFFFF_FFFF_FFFFL)
+    val bytes = ByteArray(ID_BYTE_LEN)
+    for (i in 0 until 6) {
+        bytes[i] = ((ms shr ((5 - i) * 8)) and 0xFF).toByte()
+    }
+    val random = ByteArray(ID_BYTE_LEN - 6)
+    ID_RANDOM.nextBytes(random)
+    random.copyInto(bytes, 6)
+    return idFromBytes(bytes)
+}
+
+/** See [newId] for why this is not the crypto layer's generator. */
+private val ID_RANDOM = SecureRandom()
 
 /** Unix milliseconds from the id's time prefix. */
 fun idUnixMs(id: Id): Long {
@@ -153,7 +205,10 @@ private fun scan(text: String): Scan {
 private fun parseToBigInt(text: String): BigInteger =
     when (val scanned = scan(text)) {
         is Scan.Ok -> scanned.value
-        is Scan.Fail -> throw IllegalArgumentException("not a Migo id (${describe(scanned.why)}): length ${text.length}")
+        is Scan.Fail ->
+            throw IllegalArgumentException(
+                "not a Migo id (${describe(scanned.why)}): length ${text.length}",
+            )
     }
 
 private fun describe(why: IdParseFailure): String = when (why) {

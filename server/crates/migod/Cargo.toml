@@ -30,6 +30,7 @@ migo-cache      = { workspace = true }
 migo-ratelimit  = { workspace = true }
 # Layer 3: domain.
 migo-auth       = { workspace = true }
+migo-keys       = { workspace = true }
 migo-messaging  = { workspace = true }
 migo-presence   = { workspace = true }
 migo-rooms      = { workspace = true }

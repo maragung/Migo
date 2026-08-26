@@ -21,14 +21,14 @@ docker compose -f infra/compose/docker-compose.yml up --build
 
 This builds both images and starts four services in dependency order:
 
-| Service    | Purpose                                           | Address               |
-| ---------- | ------------------------------------------------- | --------------------- |
-| `postgres` | durable store; `migod` migrates it on boot        | internal              |
-| `redis`    | cache and rate-limiter backend (no persistence)   | internal              |
-| `migod`    | server: REST `/v1`, gateway `/ws`, probes at root | http://localhost:8080 |
-| `web`      | the Next.js PWA                                   | http://localhost:3000 |
+| Service    | Purpose                                           | Address                |
+| ---------- | ------------------------------------------------- | ---------------------- |
+| `postgres` | durable store; `migod` migrates it on boot        | internal               |
+| `redis`    | cache and rate-limiter backend (no persistence)   | internal               |
+| `migod`    | server: REST `/v1`, gateway `/ws`, probes at root | http://localhost:8080  |
+| `web`      | the static web client (no server-side rendering)  | http://localhost:19991 |
 
-Open http://localhost:3000. Registration is enabled, so you can create an account
+Open http://localhost:19991. Registration is enabled, so you can create an account
 and sign in immediately.
 
 Health checks gate the ordering: `migod` starts only once Postgres and Redis report
@@ -51,7 +51,7 @@ day-to-day work:
 # terminal 1 — server on :8080, nothing to install first
 cd server && MIGO_AUTH__TOKEN_KEY=development-only-insecure-token-key cargo run --bin migod
 
-# terminal 2 — web on :3000
+# terminal 2 — web on :19991
 pnpm install
 pnpm --filter "./packages/*" build
 pnpm --filter @migo/web dev

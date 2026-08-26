@@ -37,12 +37,25 @@ android {
 }
 
 dependencies {
-    implementation(libs.kotlinx.coroutines.core)
+    // api, not implementation, for the three whose types appear in this module's own public
+    // signatures. Gradle puts an `implementation` dependency on the compile classpath of this
+    // module only, so a consumer that named `MigoClientOptions.scope` or passed its own
+    // `OkHttpClient` would fail to compile with "cannot access class" — a build error about a
+    // dependency the consumer never chose, which is the worst kind to debug. What leaks, leaks
+    // deliberately: `CoroutineScope` on MigoClientOptions.scope, `OkHttpClient` on its
+    // restClient and socketClient, and `Flow` on Settings.flow, because a caller that owns the
+    // lifetime of an SDK has to be able to hand it a scope and an HTTP client it already has.
+    api(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
     // REST request and response bodies are JSON — a control-plane format, explicitly not the
     // realtime wire format, which is MWP/1 binary over the WebSocket. See migo.md section 178.
-    implementation(libs.kotlinx.serialization.json)
-    implementation(libs.okhttp)
+    // Only the serializer runtime leaks: Grant is @Serializable and public, so a consumer that
+    // stores one needs the annotation on its classpath.
+    api(libs.kotlinx.serialization.json)
+    api(libs.okhttp)
+    // Neither of these appears in a public signature. DataStore is behind Settings, which hands
+    // back a Flow of its own data class, and core-ktx is used internally only.
+    implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.core.ktx)
 
     // libsodium, bundled for Android as an AAR that carries the native .so for every ABI,

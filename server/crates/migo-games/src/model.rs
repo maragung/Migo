@@ -333,6 +333,18 @@ pub struct GameView {
     pub outcome: Option<Outcome>,
     /// The board as this caller may see it.
     pub render: Render,
+    /// Which state this view is of, monotonically non-decreasing per game.
+    ///
+    /// The store's `updated_at`, which is already the optimistic-lock token every move is
+    /// applied against, rendered as an opaque number. It is here because a client that
+    /// receives two broadcasts out of order has no other way to tell which one describes the
+    /// later board, and inventing a second counter beside the lock token would create two
+    /// notions of "which state" that could disagree.
+    ///
+    /// Opaque on purpose: it is not a move count and not a wall-clock time a client should
+    /// display. The only operation defined on it is comparison against another version of the
+    /// same game.
+    pub state_version: u64,
 }
 
 /// A one-line entry in a conversation's list of open games.

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext is refused everywhere except the loopback addresses a developer runs a server on.
+
+  targetSdk 28 and above already refuse cleartext by default, so without this file the app
+  cannot reach http://10.0.2.2:8080, which is the address an emulator uses for the host machine
+  and the default in MigoSession. The failure looks like the server being unreachable rather
+  than a policy decision, which is a bad first ten minutes for anyone building this.
+
+  The exceptions are the three addresses that cannot leave the machine: the emulator's alias for
+  its host, and IPv4 loopback by address and by name. A real deployment is a real domain, and a
+  real domain still needs TLS. That is why this lists hosts instead of setting
+  usesCleartextTraffic="true", which would permit cleartext to any server a user typed into the
+  sign-in field, and a messenger is the last program that should downgrade silently.
+
+  cleartextTrafficPermitted is false on the base config as well, so this does not rest on the
+  platform default: if a future targetSdk changed that default, this file would still refuse.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <domain-config cleartextTrafficPermitted="true">
+        <!-- The emulator's alias for the host machine's loopback interface. -->
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <!-- A device talking to a server on the device itself, for example via adb reverse. -->
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

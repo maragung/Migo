@@ -187,6 +187,8 @@ pub(crate) struct Meters {
     suggestion_scans: Arc<Counter>,
     searches: Arc<Counter>,
     search_hits: Arc<Counter>,
+    profiles_asked: Arc<Counter>,
+    profiles_served: Arc<Counter>,
 }
 
 impl Meters {
@@ -273,6 +275,16 @@ impl Meters {
                 "Accounts returned by search, after the caller's blocklist is applied.",
                 &[],
             ),
+            profiles_asked: registry.counter(
+                "migo_social_profiles_requested_total",
+                "Account ids asked for across all profile fetches, after deduplication.",
+                &[],
+            ),
+            profiles_served: registry.counter(
+                "migo_social_profiles_served_total",
+                "Profiles returned, after blocks and missing accounts are omitted.",
+                &[],
+            ),
         }
     }
 
@@ -320,5 +332,18 @@ impl Meters {
     pub(crate) fn search(&self, hits: usize) {
         self.searches.inc();
         self.search_hits.add(hits as u64);
+    }
+
+    /// Records one profile fetch.
+    ///
+    /// Both numbers, and the gap between them is the reason. A profile fetch omits what
+    /// the caller may not see rather than refusing it, so the *only* signal that
+    /// somebody is walking the id space asking for faces they will never get is the
+    /// ratio of served to asked. Neither number alone shows it, and section 174 forbids
+    /// labelling either by account, so an aggregate pair is exactly as much as this can
+    /// honestly report.
+    pub(crate) fn profiles(&self, asked: usize, served: usize) {
+        self.profiles_asked.add(asked as u64);
+        self.profiles_served.add(served as u64);
     }
 }

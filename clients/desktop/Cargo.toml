@@ -1,0 +1,75 @@
+# The desktop client is its own workspace on purpose.
+#
+# It depends on four crates from `server/` by path, but it must not be a *member* of that
+# workspace: eframe pulls winit, glutin, a font stack and an accessibility tree, and a member
+# would put all of it in the server's `Cargo.lock` and in every server CI cache. The server is
+# meant to stay small enough to build on a modest VPS. A separate workspace keeps the two
+# dependency graphs and the two lockfiles apart while still sharing one copy of the protocol,
+# the wire codec and the cryptography — which is the part that must never fork.
+#
+# Path dependencies keep their own workspace for inheritance: `migo-core` and friends resolve
+# `version.workspace = true` against `server/Cargo.toml`, which is their ancestor, not this file.
+[workspace]
+resolver = "2"
+
+[package]
+name = "migo-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+license = "Apache-2.0"
+repository = "https://github.com/maragung/Migo"
+description = "Migo native desktop client: an end-to-end encrypted messenger in Rust and egui."
+
+[[bin]]
+name = "migo-desktop"
+path = "src/main.rs"
+
+[dependencies]
+migo-core = { path = "../../server/crates/migo-core" }
+migo-wire = { path = "../../server/crates/migo-wire" }
+migo-protocol = { path = "../../server/crates/migo-protocol" }
+migo-crypto = { path = "../../server/crates/migo-crypto" }
+
+# `glow` rather than the default `wgpu` backend: this is a chat window, not a renderer. GL 3.3 is
+# available on every machine that can run a browser, the dependency tree is a fraction of wgpu's,
+# and the resulting binary starts on a headless VM with a software GL driver.
+eframe = { version = "0.36", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "glow",
+    "links",
+    "wayland",
+    "x11",
+] }
+egui = "0.36"
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "io-util"] }
+# rustls rather than the system OpenSSL: a released binary that links libssl breaks the moment it
+# lands on a distribution with a different OpenSSL 3 minor, and a messenger is exactly the wrong
+# program to have a TLS stack that varies by host.
+tokio-tungstenite = { version = "0.30", features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "charset"] }
+futures-util = "0.3"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = "1"
+zeroize = { version = "1", features = ["derive"] }
+# Argon2id for the on-disk vault. `migo-crypto::password` hashes passwords into PHC strings for the
+# server to verify against; a vault needs the opposite — raw key bytes out of a passphrase — so the
+# audited crate is used directly here rather than a second, subtly different helper being added to a
+# shared crate. Parameters are set at the call site, well above the server's login cost: unlocking is
+# one hash on one device, so memory that would be reckless under a login spike is free here.
+argon2 = "0.5"
+thiserror = "2"
+directories = "6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

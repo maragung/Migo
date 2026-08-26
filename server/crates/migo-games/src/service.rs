@@ -227,6 +227,7 @@ fn build_view(viewer: Id, session: &GameSession) -> Result<GameView> {
         turn_of,
         outcome,
         render,
+        state_version: session.updated_at.to_wire(),
     })
 }
 

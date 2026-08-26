@@ -3,11 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Migo web client: an end-to-end encrypted messaging PWA built on @migo/sdk.",
+  "description": "Migo web client: an end-to-end encrypted messaging PWA built on @migo/sdk. Statically exported; served on port 19991.",
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --port 19991",
     "build": "next build",
-    "start": "next start",
+    "start": "node tools/serve.mjs",
+    "serve": "node tools/serve.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -59,6 +59,18 @@ pub const MAX_BLOCKS: usize = 1_000;
 /// Accounts one account may mark as a favourite.
 pub const MAX_FAVORITES: usize = 200;
 
+/// Profiles one `PROFILE_FETCH` may ask for.
+///
+/// Sixty-four. The batch exists so that a member list or a conversation header renders
+/// in one round trip instead of one request per face, and sixty-four is more faces than
+/// any screen shows at once. It needs a hard ceiling because the price is flat: brief
+/// section 145 charges `PROFILE_FETCH` 3 whether it carries one id or a thousand, so the
+/// ceiling is the only thing standing between that price and an unbounded read. Each id
+/// costs three keyed reads — the symmetric block check, the profile, the account — so a
+/// full batch is a hundred and ninety-two, the same order as one listing at
+/// [`MAX_PAGE`].
+pub const MAX_PROFILE_BATCH: usize = 64;
+
 /// How far a mutual-friend answer will look.
 ///
 /// Two hundred each side, so a mutual check costs two bounded reads rather than one
@@ -289,6 +301,48 @@ pub struct Found {
     pub display_name: String,
     /// The avatar, if there is one.
     pub avatar_media_id: Option<Id>,
+}
+
+/// One account's public face.
+///
+/// # Why this is not `migo_protocol::UserProfile`
+///
+/// The wire struct has thirteen fields and this crate can honestly fill seven of them.
+/// `level` belongs to progression, `presence` to presence, `badges` and `verified` to
+/// moderation, and `custom_status` to a column the data model does not have. Returning
+/// the wire struct from here would mean returning it with six fields defaulted, and a
+/// defaulted `verified: false` on a verified account is not a missing field, it is a
+/// wrong answer that looks like an answer. The composition root joins the other domains
+/// in and leaves absent what is absent.
+///
+/// # What is deliberately missing
+///
+/// No visibility settings, no relationship flags, no last-seen time. A profile card is
+/// what a stranger may see; who may message this account is the account's own business,
+/// what the caller is to them is [`Standing`], and whether the caller may see a
+/// last-seen time is [`Interaction::LastSeen`]. Three separate answers, because they are
+/// governed by three separate rules and a struct that carried all of them would be
+/// filled by whichever caller happened to be convenient.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileCard {
+    /// The account.
+    pub account_id: Id,
+    /// The username, as its owner typed it.
+    pub username: String,
+    /// The display name.
+    pub display_name: String,
+    /// Free text the owner wrote, if any.
+    pub bio: Option<String>,
+    /// The avatar object, if there is one.
+    ///
+    /// An id and not a URL. Brief section 168 forbids the server from proxying media
+    /// bytes, so the URL is a signed one the media service mints on request, and minting
+    /// it here would put an expiring credential in a response that a client may cache.
+    pub avatar_media_id: Option<Id>,
+    /// ISO-3166 alpha-2, if the account has one.
+    pub country: Option<String>,
+    /// BCP-47 language tag.
+    pub locale: String,
 }
 
 /// The stricter of two visibility settings.

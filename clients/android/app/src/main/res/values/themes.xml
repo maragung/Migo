@@ -2,10 +2,17 @@
 <resources>
     <!--
       The window theme, named by the manifest. Compose draws the whole UI and supplies its
-      own Material 3 colors (see MigoTheme in MainActivity.kt), so this exists only to paint
-      the window before the first frame and to drop the action bar. It is parented on the
-      platform Material theme, which is present from API 26 (the app's minSdk), so naming a
-      window theme costs no AppCompat or Material Components dependency.
+      own Material 3 colors (see MigoTheme in ui/Theme.kt), so this exists for exactly two
+      things: painting the window before the first Compose frame, and dropping the action bar.
+
+      Parented on the platform Material theme, which is present from API 26 (the app's minSdk),
+      so naming a window theme costs no AppCompat or Material Components dependency.
+
+      windowBackground is set explicitly, and values-night/themes.xml overrides it. Without the
+      pair, a device in dark mode shows a white window for the frame or two before Compose draws,
+      which reads as a flash every time the app is opened.
     -->
-    <style name="Theme.Migo" parent="@android:style/Theme.Material.Light.NoActionBar" />
+    <style name="Theme.Migo" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
+    </style>
 </resources>

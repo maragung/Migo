@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
-import { useRouter } from 'next/navigation';
 
 import { ConversationKind } from '@migo/sdk';
 import type { Id } from '@migo/sdk';
@@ -10,6 +9,7 @@ import type { Id } from '@migo/sdk';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
+import { openConversation } from '@/lib/migo/use-open-conversation.js';
 
 import { Spinner } from './spinner.js';
 
@@ -22,7 +22,6 @@ import { Spinner } from './spinner.js';
 export function NewConversationDialog({ onClose }: { onClose: () => void }): ReactNode {
   const { client } = useMigo();
   const { noteConversation } = useConversations();
-  const router = useRouter();
 
   const [kind, setKind] = useState<ConversationKind>(ConversationKind.Direct);
   const [membersText, setMembersText] = useState('');
@@ -54,7 +53,7 @@ export function NewConversationDialog({ onClose }: { onClose: () => void }): Rea
       const summary = await client.startConversation(kind, members, options);
       noteConversation(summary);
       onClose();
-      router.push(`/chat/${summary.conversationId}`);
+      openConversation(summary.conversationId);
     } catch (cause) {
       setError(friendlyError(cause));
       setBusy(false);

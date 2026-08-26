@@ -45,6 +45,7 @@ use migo_core::{Clock, Config, OsRandom, Random, Shutdown, SystemClock};
 use migo_economy::{Catalogue, SharedAnnouncer, SharedTreasurer, Silent};
 use migo_games::{SharedReferee, SharedRewards};
 use migo_gateway::{Dispatcher, Gateway, GatewayServices};
+use migo_keys::SharedKeyring;
 use migo_media::{SharedLibrary, SharedStorage};
 use migo_messaging::SharedMessaging;
 use migo_moderation::{SharedRoster, SharedWarden};
@@ -96,6 +97,9 @@ pub struct App {
     pub rooms: SharedRooms,
     /// The social graph: follows, blocks, and the relationship checks other domains consult.
     pub social: SharedSocial,
+    /// Public key material: what a device publishes and what a sender fetches before it can
+    /// encrypt anything. Never a private key, in any form (brief section 163).
+    pub keys: SharedKeyring,
     /// Media: signed upload and download tickets, size verification, and tombstone sweeps.
     pub media: SharedLibrary,
     /// Moderation: operator actions gated on the staff roster's powers.
@@ -181,6 +185,17 @@ impl App {
             migo_social::SocialConfig::default(),
         );
 
+        // The default policy serves a bundle without a one-time prekey rather than refusing it: a
+        // conversation that starts with slightly weaker forward secrecy for its first message is
+        // better than a conversation that cannot start, and the owning device is told to publish
+        // more. A deployment that would rather fail says so with `refuse_when_exhausted`.
+        let keys = migo_keys::open(
+            store.clone(),
+            limiter.clone(),
+            &registry,
+            migo_keys::KeysConfig::default(),
+        );
+
         // Media never holds a byte (brief section 168); the filesystem backend is the development
         // stand-in for an object store, minting unsigned URLs under the node's public media path.
         let storage: SharedStorage = Arc::new(FsStorage::new(
@@ -256,11 +271,15 @@ impl App {
 
         // --- Layer 4: transports ---
         // The dispatcher is the one seam the gateway calls up through; it routes the client-facing
-        // opcodes this node speaks into messaging, presence, and rooms.
+        // opcodes this node speaks into messaging, presence, rooms, key material, the social graph,
+        // and games.
         let dispatcher: Arc<dyn Dispatcher> = Arc::new(AppDispatcher::new(
             messaging.clone(),
             presence.clone(),
             rooms.clone(),
+            keys.clone(),
+            social.clone(),
+            games.clone(),
         ));
 
         let gateway = Gateway::open(
@@ -303,6 +322,7 @@ impl App {
             presence,
             rooms,
             social,
+            keys,
             media,
             moderation,
             notify,

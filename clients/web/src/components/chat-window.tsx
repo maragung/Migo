@@ -2,7 +2,6 @@
 
 import { useEffect } from 'react';
 import type { ReactNode } from 'react';
-import Link from 'next/link';
 
 import { ConversationKind } from '@migo/sdk';
 import type { Id } from '@migo/sdk';
@@ -12,6 +11,7 @@ import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { presenceLabel, usePresence } from '@/lib/migo/use-presence.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
+import { closeConversation } from '@/lib/migo/use-open-conversation.js';
 
 import { Avatar } from './avatar.js';
 import { MessageComposer } from './message-composer.js';
@@ -58,9 +58,14 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   return (
     <div className="thread-pane" style={{ height: '100%' }}>
       <header className="thread-header">
-        <Link href="/chat" className="icon-btn back" aria-label="Back">
+        <button
+          type="button"
+          onClick={closeConversation}
+          className="icon-btn back"
+          aria-label="Back"
+        >
           ‹
-        </Link>
+        </button>
         <Avatar
           name={title}
           id={avatarId}

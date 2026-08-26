@@ -2,8 +2,6 @@
 
 import { useMemo } from 'react';
 import type { ReactNode } from 'react';
-import Link from 'next/link';
-import { usePathname } from 'next/navigation';
 
 import { ConversationKind } from '@migo/sdk';
 import type { ConversationSummary, Id, UserProfile } from '@migo/sdk';
@@ -12,6 +10,7 @@ import { formatRelative } from '@/lib/format.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
+import { conversationHref, useOpenConversation } from '@/lib/migo/use-open-conversation.js';
 
 import { Avatar } from './avatar.js';
 import { Spinner } from './spinner.js';
@@ -19,7 +18,7 @@ import { Spinner } from './spinner.js';
 export function ConversationList(): ReactNode {
   const { accountId } = useMigo();
   const { items, loading, error, hasMore, loadMore, unread } = useConversations();
-  const pathname = usePathname();
+  const openId = useOpenConversation();
 
   const peerIds = useMemo(() => {
     const ids: Id[] = [];
@@ -57,7 +56,7 @@ export function ConversationList(): ReactNode {
   return (
     <div className="conversation-list">
       {items.map((item) => {
-        const active = pathname === `/chat/${item.conversationId}`;
+        const active = openId === item.conversationId;
         return (
           <Row
             key={item.conversationId}
@@ -94,8 +93,8 @@ interface RowProps {
 function Row({ summary, peerName, peerAvatarUrl, active, unread }: RowProps): ReactNode {
   const time = summary.lastMessage?.createdAt;
   return (
-    <Link
-      href={`/chat/${summary.conversationId}`}
+    <a
+      href={conversationHref(summary.conversationId)}
       className={`conversation-row ${active ? 'active' : ''}`}
     >
       <Avatar name={peerName} id={summary.conversationId} size={44} avatarUrl={peerAvatarUrl} />
@@ -111,7 +110,7 @@ function Row({ summary, peerName, peerAvatarUrl, active, unread }: RowProps): Re
         {time ? <span className="conversation-time">{formatRelative(time)}</span> : <span />}
         {unread ? <span className="unread-dot" /> : null}
       </div>
-    </Link>
+    </a>
   );
 }
 

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The dark-mode window theme. Same name, so the manifest does not change; the platform picks
+      this one when the system is in dark mode. Parented on the dark platform Material theme so
+      the pre-Compose frame, the dialogs and the system bar icon treatment all agree with what
+      MigoTheme is about to draw.
+    -->
+    <style name="Theme.Migo" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
+    </style>
+</resources>

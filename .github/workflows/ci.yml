@@ -197,6 +197,44 @@ jobs:
           cargo check --manifest-path server/Cargo.toml \
             --workspace --all-targets --all-features
 
+  # ------------------------------------------------------------------ desktop
+  # The desktop client is its own Cargo workspace, so it gets its own job rather than a
+  # step inside `server`. Two reasons, both about the cache. Swatinem/rust-cache keys on a
+  # workspace path, so a second workspace in the same job either shares a key and thrashes
+  # it or needs a second entry that the job then restores on every run whether it touched
+  # that code or not. And the two dependency graphs have almost nothing in common: this one
+  # is winit, glutin and a windowing stack, the other is sea-orm and a database driver.
+  # Keeping them apart means a change to one does not invalidate the other's cache.
+  #
+  # fmt and clippy only. This job never links, which is what lets it skip the graphics
+  # development headers that `release.yml` installs for the real build: `cargo clippy`
+  # compiles to metadata, and winit and glutin open libGL, libX11 and libwayland at run
+  # time rather than at link time. The release build is where a linker error would show up,
+  # and that is the right place for it -- there is no point paying an apt install on every
+  # pull request to catch a class of error that only a release can produce.
+  desktop:
+    name: Desktop client — fmt, clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: gates
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clients/desktop
+          key: desktop-lints
+
+      - name: Formatting
+        run: make fmt-check-desktop
+
+      - name: Clippy, warnings denied
+        run: make lint-desktop
+
   # ------------------------------------------------------------------ typescript
   # The mirror of `server`: this job has pnpm and no Rust toolchain, so it runs the -js
   # halves of the shared gates. It used to probe for a root package.json and skip itself

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The one colour the platform needs before Compose runs. It is deliberately the same value as
+      MigoTheme's light `background`, and values-night/colors.xml matches the dark one: two places
+      that have to agree, so both name the reason rather than the number alone.
+    -->
+    <color name="window_background">#FFFBFBFE</color>
+</resources>

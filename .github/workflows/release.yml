@@ -13,11 +13,22 @@
 # the tag points at, not uploaded from a laptop.
 #
 # What a release produces:
-#   * migod, a stripped Linux x86_64 binary, as a .tar.gz with a SHA-256 sidecar
+#   * server_migod, a stripped Linux x86_64 binary, as a .tar.gz with a SHA-256 sidecar
 #     (attached to the GitHub Release).
+#   * client_web, the statically exported web bundle from clients/web/out, as a .tar.gz.
+#   * client_desktop, a stripped Linux x86_64 binary of the native egui client, as a .tar.gz.
+#   * client_android, the Android app APK (debug variant — the repository holds no
+#     release-signing key, so a signed release build is not something CI can honestly
+#     produce yet).
 #   * Two container images pushed to GHCR: migo-migod and migo-web.
-#   * The Android app APK (debug variant — the repository holds no release-signing key,
-#     so a signed release build is not something CI can honestly produce yet).
+#
+# Release-asset names carry an origin prefix: server_ for the server, client_ for anything
+# that runs on a user's device (client_web, client_desktop, client_android). The prefix is
+# on the uploaded file name only — the executable inside the server tarball stays `migod`,
+# because the systemd unit, the Dockerfiles and docker-compose all invoke it by that name, so
+# renaming the binary would break every one of them while renaming the asset breaks nothing.
+# What the prefix buys is a release page that says at a glance what each file is and where it
+# belongs.
 
 name: Release
 
@@ -113,7 +124,10 @@ jobs:
         run: |
           version="${TAG#v}"
           triple="x86_64-unknown-linux-gnu"
-          name="migod-${version}-${triple}"
+          # server_ marks this as the server asset on the release page. Only the file name is
+          # prefixed; the executable copied in below stays `migod`, the name the systemd unit,
+          # the Dockerfiles and docker-compose all invoke.
+          name="server_migod-${version}-${triple}"
           bin="server/target/release/migod"
           # strip mirrors the Docker image build, so the tarball and the container carry
           # the same size binary rather than one with debug symbols and one without.
@@ -246,6 +260,143 @@ jobs:
         run: |
           version="${TAG#v}"
           apk="clients/android/app/build/outputs/apk/debug/app-debug.apk"
-          out="migo-${version}-debug.apk"
+          # client_ marks this as a client asset, matching client_web and client_desktop; the
+          # APK gains a SHA-256 sidecar too, so every release asset is verifiable the same way.
+          out="client_android-${version}-debug.apk"
+          test -f "$apk" || { echo "APK not found at $apk" >&2; exit 1; }
           cp "$apk" "$out"
-          gh release upload "$TAG" "$out" --clobber
+          sha256sum "$out" > "$out.sha256"
+          gh release upload "$TAG" "$out" "$out.sha256" --clobber
+
+  # ---------------------------------------------------------------- web bundle
+  # The web client is a static export (see clients/web/next.config.mjs): `next build` with
+  # output: 'export' writes plain HTML, CSS and JS into clients/web/out, and that directory is
+  # the whole artifact. The tarball carries the contents of out/ with no leading out/ path
+  # component, so it unpacks straight into any static host's document root.
+  client-web:
+    name: client_web — static bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: create-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm and Node exactly as ci.yml sets them up: pnpm/action-setup reads the version from
+      # the packageManager field in package.json, and setup-node's `cache: pnpm` keys off the
+      # same field — passing a version here would be the "Multiple versions of pnpm" error.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # --frozen-lockfile so a lockfile that disagrees with the manifests fails here rather
+      # than resolving to something no developer has ever built.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # build-ts before build-web: the web app imports @migo/sdk and its siblings by their
+      # compiled dist/ entry points, so those packages have to be built before `next build`
+      # can resolve them — the same order the web image's Dockerfile builds in.
+      - name: Build the SDK packages and the web client
+        run: |
+          make build-ts
+          make build-web
+
+      - name: Package the tarball and checksum
+        run: |
+          version="${TAG#v}"
+          name="client_web-${version}"
+          out="clients/web/out"
+          # Fail loudly if the export produced nothing: an empty out/ would otherwise tar into
+          # a valid-looking but useless asset that only reveals itself when someone deploys it.
+          test -f "${out}/index.html" || { echo "web export produced no ${out}/index.html" >&2; exit 1; }
+          mkdir -p dist
+          # -C out . archives the contents of the directory rather than the directory itself,
+          # so there is no leading out/ component to strip on unpack.
+          tar -czf "dist/${name}.tar.gz" -C "$out" .
+          ( cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+          ls -l dist
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber
+
+  # ---------------------------------------------------------------- desktop binary
+  # clients/desktop is a separate cargo workspace with its own Cargo.lock, deliberately not a
+  # member of the server workspace so eframe/winit/glutin stay out of the server's lockfile and
+  # CI cache (see the note atop clients/desktop/Cargo.toml). That separation is honoured here: a
+  # cache key distinct from the server's keeps the two workspaces from ever sharing a target/.
+  client-desktop:
+    name: client_desktop — Linux x86_64 binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: create-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # eframe with the glow (OpenGL) backend and both the x11 and wayland features links
+      # against the platform's window-system and GL libraries, and ubuntu-latest ships none of
+      # the -dev packages. Install them: the X11 client libs winit uses (Xlib plus the Xcursor,
+      # XInput2 and XRandR extensions), the Wayland client library the wayland feature links,
+      # xkbcommon for the keymap handling shared by both display paths, and the mesa GL/EGL
+      # development headers the glow backend builds against.
+      - name: Install the GUI development libraries the build needs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libgl1-mesa-dev \
+            libegl1-mesa-dev
+
+      # Stable, matching ci.yml and the migod job — clients/desktop/Cargo.toml declares the
+      # same rust-version as the server, so the release build uses the toolchain developers do.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The desktop workspace, not the server one, and a key of its own: the two lockfiles
+          # and target/ dirs must never be shared, or one workspace would poison the other's
+          # cache. release-migod above uses `workspaces: server` with a different key.
+          workspaces: clients/desktop
+          key: release-desktop
+
+      - name: Build the release binary
+        working-directory: clients/desktop
+        # --locked so the build uses the committed Cargo.lock exactly; a release must not
+        # silently resolve a dependency graph other than the one that was reviewed.
+        run: cargo build --release --locked
+
+      - name: Package the tarball and checksum
+        run: |
+          version="${TAG#v}"
+          triple="x86_64-unknown-linux-gnu"
+          name="client_desktop-${version}-${triple}"
+          bin="clients/desktop/target/release/migo-desktop"
+          test -x "$bin" || { echo "desktop binary not found at $bin" >&2; exit 1; }
+          # The release profile already strips symbols; strip again anyway so the packaged asset
+          # is symbol-free regardless of a future change to that profile, matching the migod job.
+          strip "$bin"
+          mkdir -p "dist/${name}"
+          cp "$bin" "dist/${name}/migo-desktop"
+          # LICENSE if the repository carries one at the root; harmless if it does not.
+          cp LICENSE "dist/${name}/" 2>/dev/null || true
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          ( cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+          ls -l dist
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber

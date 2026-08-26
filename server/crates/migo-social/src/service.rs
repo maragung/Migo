@@ -65,8 +65,8 @@ use migo_store::{SharedStore, Store};
 use crate::metrics::{EdgeKind, GateOutcome, Meters, RequestOutcome, ResponseOutcome};
 use crate::model::{
     query_is_usable, strictest, Caller, Edge, Found, FriendOutcome, Interaction, Pending,
-    RespondOutcome, SocialConfig, Standing, Suggestion, DEFAULT_PAGE, MAX_FAVORITES,
-    MAX_MUTUAL_SCAN, MAX_PAGE,
+    ProfileCard, RespondOutcome, SocialConfig, Standing, Suggestion, DEFAULT_PAGE, MAX_FAVORITES,
+    MAX_MUTUAL_SCAN, MAX_PAGE, MAX_PROFILE_BATCH,
 };
 use crate::notice::Notice;
 use crate::traits::Graph;
@@ -1147,6 +1147,76 @@ where
             });
         }
         self.meters.search(out.len());
+        Ok(out)
+    }
+
+    async fn profiles(&self, caller: &Caller, account_ids: &[Id]) -> Result<Vec<ProfileCard>> {
+        Self::require_identity(caller)?;
+        if account_ids.is_empty() {
+            return Err(fault::field_required("user_ids"));
+        }
+        if account_ids.len() > MAX_PROFILE_BATCH {
+            return Err(fault::validation(
+                "user_ids",
+                "too many accounts in one profile fetch",
+            ));
+        }
+
+        // Deduplicated before the charge, not after, so that the bound above and the
+        // flat price both apply to work that will actually be done. A client that sends
+        // the same id sixty-four times gets one profile and pays for one batch; without
+        // this it would get one profile and cost sixty-four times the reads.
+        let mut wanted: Vec<Id> = Vec::with_capacity(account_ids.len());
+        for &account_id in account_ids {
+            if account_id.is_nil() {
+                return Err(fault::field_required("user_ids"));
+            }
+            if !wanted.contains(&account_id) {
+                wanted.push(account_id);
+            }
+        }
+
+        self.charge_opcode(caller, Opcode::ProfileFetch).await?;
+
+        let asked = wanted.len();
+        let mut out = Vec::with_capacity(asked);
+        for account_id in wanted {
+            // Symmetric, and first. A profile is the one read where getting this wrong
+            // is invisible in testing: the store answers, the response is well formed,
+            // and the only thing wrong with it is that it went to somebody who was
+            // blocked. The caller's own id skips the check rather than being special
+            // cased later, because nobody can block themselves and a nil-result branch
+            // for the self case would be a branch that has to stay correct forever.
+            if account_id != caller.account_id
+                && self
+                    .store
+                    .is_blocked_either_way(caller.account_id, account_id)
+                    .await?
+            {
+                continue;
+            }
+            // Missing rows are omitted, not reported. See `Graph::profiles`: a caller
+            // that could tell "no such account" from "blocked you" has been told which
+            // one it was. Note that both reads have to land -- an account with no
+            // profile row is mid-registration, and a card with a defaulted display name
+            // is worse than no card.
+            let Some(profile) = self.store.profile(account_id).await? else {
+                continue;
+            };
+            let Some(account) = self.store.account_by_id(account_id).await? else {
+                continue;
+            };
+            out.push(ProfileCard {
+                account_id,
+                username: account.username,
+                display_name: profile.display_name,
+                bio: profile.bio,
+                avatar_media_id: profile.avatar_media_id,
+                country: account.country,
+                locale: account.locale,
+            });
+        }
+        self.meters.profiles(asked, out.len());
         Ok(out)
     }
 }

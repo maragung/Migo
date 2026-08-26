@@ -11,6 +11,7 @@ members = [
     "crates/migo-cache",
     "crates/migo-ratelimit",
     "crates/migo-auth",
+    "crates/migo-keys",
     "crates/migo-messaging",
     "crates/migo-presence",
     "crates/migo-rooms",
@@ -45,6 +46,7 @@ migo-store      = { path = "crates/migo-store" }
 migo-cache      = { path = "crates/migo-cache" }
 migo-ratelimit  = { path = "crates/migo-ratelimit" }
 migo-auth       = { path = "crates/migo-auth" }
+migo-keys       = { path = "crates/migo-keys" }
 migo-messaging  = { path = "crates/migo-messaging" }
 migo-presence   = { path = "crates/migo-presence" }
 migo-rooms      = { path = "crates/migo-rooms" }

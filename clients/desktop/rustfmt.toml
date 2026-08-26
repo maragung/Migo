@@ -1,0 +1,14 @@
+# Identical to server/rustfmt.toml, and deliberately a copy rather than a symlink or an
+# inherited file: rustfmt looks for its configuration by walking up from the file being
+# formatted to the *workspace* root and stops there, so a desktop crate in its own
+# workspace would silently fall back to rustfmt's defaults — 4-space, 100-column-ish but
+# not 100 — and the two halves of one repository would drift apart a line at a time.
+#
+# The settings themselves are the same three the server uses, for the same reasons: pinned
+# edition so a toolchain bump cannot reformat the tree, 100 columns because these files
+# carry prose comments that read badly at 80 and scan badly past 100, and field-init
+# shorthand because `Self { sink, vault_path }` says what `Self { sink: sink }` says with
+# less to read.
+edition = "2021"
+max_width = 100
+use_field_init_shorthand = true

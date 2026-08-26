@@ -223,7 +223,7 @@ impl Default for HttpConfig {
         Self {
             bind: "0.0.0.0:8080".to_string(),
             public_url: "http://localhost:8080".to_string(),
-            cors_origins: vec!["http://localhost:3000".to_string()],
+            cors_origins: vec!["http://localhost:19991".to_string()],
             max_body_bytes: 1024 * 1024,
             request_timeout_ms: 15_000,
         }

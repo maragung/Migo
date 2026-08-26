@@ -56,7 +56,7 @@ make setup
 make protocol
 
 # 2. run the whole stack with zero external dependencies (in-memory store)
-make dev            # migod on :8080 (HTTP+WS) + web client on :3000
+make dev            # migod on :8080 (HTTP+WS) + web client on :19991
 
 # …or with real Postgres/Redis/MinIO
 make infra-up && make dev-pg

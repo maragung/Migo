@@ -51,21 +51,29 @@ use std::hash::{Hash, Hasher};
 
 use async_trait::async_trait;
 
-use migo_core::{Error, Id};
+use migo_core::{Error, Id, PublicId};
+use migo_games::{
+    Caller as GameCaller, Event as GameDelta, GameView, Hand, Move, Outcome, SharedReferee,
+};
 use migo_gateway::{ClientContext, Dispatcher};
+use migo_keys::{Bundle, Caller as KeyCaller, SharedKeyring, SIGNED_PREKEY_LIFETIME_MS};
 use migo_messaging::{
     Broadcast as MessageBroadcast, Caller as MessageCaller, Fanout as MessageFanout,
     SharedMessaging,
 };
 use migo_presence::{Caller as PresenceCaller, SharedPresence};
 use migo_protocol::{
-    fault, from_frame, BandwidthMode, ConversationCreateRequest, ConversationListRequest, Frame,
-    MessageDelete, MessageReceipt, MessageSend, Opcode, PresenceUpdate, RoomJoinRequest,
-    RoomLeaveRequest, RoomListRequest, SyncRequest, Topic, TopicKind, TypingEvent,
+    fault, from_frame, Acknowledged, BandwidthMode, ConversationCreateRequest,
+    ConversationListRequest, Frame, GameAction, GameEvent, KeyBundle as WireBundle,
+    KeyBundleRequest, KeyBundleResponse, KeyPublish, KeyPublishResult, MessageDelete,
+    MessageReceipt, MessageSend, Opcode, PresenceUpdate, ProfileRequest, ProfileResponse,
+    RoomJoinRequest, RoomLeaveRequest, RoomListRequest, SyncRequest, Topic, TopicKind, TypingEvent,
+    UserProfile,
 };
 use migo_rooms::{
     Broadcast as RoomBroadcast, Caller as RoomCaller, Fanout as RoomFanout, SharedRooms,
 };
+use migo_social::{Caller as SocialCaller, ProfileCard, SharedSocial};
 
 /// The dispatcher that routes the client-facing application opcodes into the domain services.
 ///
@@ -76,16 +84,29 @@ pub struct AppDispatcher {
     messaging: SharedMessaging,
     presence: SharedPresence,
     rooms: SharedRooms,
+    keys: SharedKeyring,
+    social: SharedSocial,
+    games: SharedReferee,
 }
 
 impl AppDispatcher {
-    /// Wires the dispatcher to the three domains whose opcodes it routes.
+    /// Wires the dispatcher to the six domains whose opcodes it routes.
     #[must_use]
-    pub fn new(messaging: SharedMessaging, presence: SharedPresence, rooms: SharedRooms) -> Self {
+    pub fn new(
+        messaging: SharedMessaging,
+        presence: SharedPresence,
+        rooms: SharedRooms,
+        keys: SharedKeyring,
+        social: SharedSocial,
+        games: SharedReferee,
+    ) -> Self {
         Self {
             messaging,
             presence,
             rooms,
+            keys,
+            social,
+            games,
         }
     }
 }
@@ -260,6 +281,105 @@ impl Dispatcher for AppDispatcher {
                 context.reply(&response)
             }
 
+            // --- key material ---
+            Opcode::KeyPublish => {
+                let caller = KeyCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
+                let request: KeyPublish = from_frame(frame).map_err(fault::from_wire)?;
+                // The expiry section 163 requires is not on the wire: the IDL and its golden
+                // vectors are frozen and neither `KeyPublish` nor `KeyBundle` carries the field.
+                // The server supplies it, which is the safer half of the disagreement — a client
+                // that chose its own expiry could choose one ten years out.
+                let outcome = self
+                    .keys
+                    .publish(
+                        &caller,
+                        migo_keys::PublishRequest {
+                            identity_key: request.identity_key,
+                            signed_prekey_id: request.signed_prekey_id,
+                            signed_prekey: request.signed_prekey,
+                            signed_prekey_signature: request.signed_prekey_signature,
+                            signed_prekey_expires_at: now
+                                .saturating_add_millis(SIGNED_PREKEY_LIFETIME_MS),
+                            one_time_prekeys: request
+                                .one_time_prekeys
+                                .into_iter()
+                                .map(|entry| (entry.key_id, entry.public_key))
+                                .collect(),
+                        },
+                    )
+                    .await?;
+                // `one_time_prekeys_remaining` has no field on `KeyPublishResult` and is dropped
+                // here rather than smuggled into another one. A client learns the count from its
+                // own bookkeeping — it knows what it just published — and the server's number
+                // only diverges from that after fetches it will see the effect of anyway.
+                context.reply(&KeyPublishResult {
+                    accepted_prekeys: outcome.accepted_prekeys,
+                    identity_fingerprint: outcome.identity_fingerprint,
+                })
+            }
+            Opcode::KeyBundleFetch => {
+                let caller = KeyCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
+                let request: KeyBundleRequest = from_frame(frame).map_err(fault::from_wire)?;
+                let fetched = self
+                    .keys
+                    .bundles(&caller, request.user_id, request.device_id)
+                    .await?;
+                context.reply(&KeyBundleResponse {
+                    bundles: fetched.bundles.into_iter().map(wire_bundle).collect(),
+                })
+            }
+
+            // --- social ---
+            Opcode::ProfileFetch => {
+                let caller = SocialCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
+                let request: ProfileRequest = from_frame(frame).map_err(fault::from_wire)?;
+                let cards = self.social.profiles(&caller, &request.user_ids).await?;
+                // Possibly shorter than what was asked for, and deliberately unordered: a
+                // profile the caller may not see is omitted rather than reported, so that
+                // "blocked you", "deleted their account", and "never existed" are one
+                // observation (section 180). A client matches on `user_id`.
+                context.reply(&ProfileResponse {
+                    profiles: cards.into_iter().map(wire_profile).collect(),
+                })
+            }
+
+            // --- games ---
+            Opcode::GameAction => {
+                let caller = GameCaller {
+                    account_id: identity.account_id(),
+                    device_id: identity.device_id(),
+                    tier: identity.tier,
+                    now,
+                    request_id: None,
+                };
+                let request: GameAction = from_frame(frame).map_err(fault::from_wire)?;
+                // `room_id` and `action_id` arrive and are not trusted. The conversation a game
+                // belongs to comes from the game itself, so a client cannot fan its move out
+                // onto a topic the game is not in; replays are beaten by the store's
+                // compare-and-set, which sees a board that already reflects the move and rejects
+                // it, so a client-supplied counter would be a second, weaker defence that a
+                // client controls.
+                let mv = domain_move(&request)?;
+                let result = self.games.play(&caller, request.game_id, mv).await?;
+                context.reply(&Acknowledged { ok: true })?;
+                publish_game(context, &result.view, &result.events)
+            }
+
             // Every other opcode is one this node speaks the transport for but does not route.
             other => Err(fault::feature_disabled(other.name())),
         }
@@ -315,6 +435,173 @@ fn publish_rooms(context: &ClientContext<'_>, fanout: RoomFanout) -> Result<(), 
             context.publish_excluding_self(&topic, opcode, event, Some(stream_key(&fanout.room_id)))
         }
     }
+}
+
+/// Projects a domain [`Bundle`] onto the wire struct.
+///
+/// The domain's `one_time_prekey: Option<(u32, Vec<u8>)>` becomes the wire's two independent
+/// `Option`s, which can in principle disagree; they never do here, because they are filled from one
+/// `Option` in one expression. `signed_prekey_expires_at` has no wire field and is dropped — the
+/// receiving client learns nothing about when the prekey it just fetched dies, which is a real gap
+/// in the frozen IDL and not a decision taken here.
+fn wire_bundle(bundle: Bundle) -> WireBundle {
+    let (one_time_prekey_id, one_time_prekey) = match bundle.one_time_prekey {
+        Some((key_id, public_key)) => (Some(key_id), Some(public_key)),
+        None => (None, None),
+    };
+    WireBundle {
+        user_id: bundle.account_id,
+        device_id: bundle.device_id,
+        identity_key: bundle.identity_key,
+        signed_prekey_id: bundle.signed_prekey_id,
+        signed_prekey: bundle.signed_prekey,
+        signed_prekey_signature: bundle.signed_prekey_signature,
+        one_time_prekey_id,
+        one_time_prekey,
+    }
+}
+
+/// Projects a [`ProfileCard`] onto the wire struct.
+///
+/// Six of the thirteen wire fields are left absent, and absent is not the same as false. `level`
+/// belongs to progression, `presence` to presence, `badges` and `verified` to moderation, and
+/// `custom_status` to a column the data model does not have; a defaulted `verified: false` on a
+/// verified account would be a wrong answer wearing the shape of an answer. `avatar_url` is absent
+/// for a different reason: section 168 forbids the server from proxying media bytes, so the URL is a
+/// signed one the media service mints on request, and minting it here would put an expiring
+/// credential inside a response a client may cache. The same absence is already the rule in
+/// `migo_messaging` and `migo_rooms`.
+///
+/// `public_id` is derived rather than stored: it is a lossy display projection of the account id
+/// (`MGO-XXXXXXXX`), which is why nothing persists it.
+fn wire_profile(card: ProfileCard) -> UserProfile {
+    UserProfile {
+        user_id: card.account_id,
+        public_id: card.account_id.public_id(PublicId::User),
+        username: card.username,
+        display_name: card.display_name,
+        avatar_url: None,
+        bio: card.bio,
+        country: card.country,
+        language: Some(card.locale),
+        level: None,
+        presence: None,
+        badges: None,
+        verified: None,
+        custom_status: None,
+    }
+}
+
+/// Reads a [`Move`] out of a [`GameAction`]'s `action` name and its one argument.
+///
+/// The wire carries a string and a list of strings; the domain carries a closed enum. The mapping is
+/// deliberately narrow — three names, one argument each, nothing optional — because every string the
+/// server accepts here is a string every client must produce identically, and a permissive parser
+/// would make "which spellings work" a property of this function rather than of the protocol.
+///
+/// A name this build does not know is `VALIDATION_FAILED` on `action`, and a missing or unparsable
+/// argument is `VALIDATION_FAILED` on `args`. Neither is `FEATURE_DISABLED`: the feature is wired,
+/// the request is wrong.
+fn domain_move(request: &GameAction) -> Result<Move, Error> {
+    let arg = |index: usize| -> Result<&str, Error> {
+        request
+            .args
+            .as_ref()
+            .and_then(|args| args.get(index))
+            .map(String::as_str)
+            .ok_or_else(|| fault::validation("args", "this action needs an argument"))
+    };
+    match request.action.as_str() {
+        "place" => {
+            let cell: u8 = arg(0)?
+                .parse()
+                .map_err(|_| fault::validation("args", "cell must be a number"))?;
+            Ok(Move::Place { cell })
+        }
+        "throw" => {
+            let hand = match arg(0)? {
+                "rock" => Hand::Rock,
+                "paper" => Hand::Paper,
+                "scissors" => Hand::Scissors,
+                _ => {
+                    return Err(fault::validation(
+                        "args",
+                        "hand must be rock, paper or scissors",
+                    ))
+                }
+            };
+            Ok(Move::Throw { hand })
+        }
+        "guess" => {
+            let value: u16 = arg(0)?
+                .parse()
+                .map_err(|_| fault::validation("args", "guess must be a number"))?;
+            Ok(Move::Guess { value })
+        }
+        _ => Err(fault::validation("action", "unknown game action")),
+    }
+}
+
+/// Publishes one move's deltas to the conversation the game is played in.
+///
+/// **Including the mover's own connection**, which is the one place in this file that does not use
+/// [`publish_excluding_self`](ClientContext::publish_excluding_self). The house rule holds elsewhere
+/// because the reply carries the outcome; here the IDL's response to `GAME_ACTION` is
+/// `Acknowledged`, which carries nothing, so a mover excluded from its own fan-out would never learn
+/// whose turn it now is or that the game just ended. The deltas are safe to send to every player by
+/// construction — section 39's `Moved` says only *that* somebody moved, never what the move was — so
+/// there is nothing in them the mover may not see.
+///
+/// The topic comes from [`GameView::conversation_id`], never from the request. A client that could
+/// name the topic could publish a game event into a conversation it is not playing in.
+///
+/// `payload` and `text` are absent throughout. There is no delta to put in `payload`: the domain's
+/// events carry no board content on purpose, and a full snapshot is exactly what the field forbids.
+/// `text` would need display names to render a line, which this dispatcher does not have and would
+/// have to fetch per event; a client that already holds the profiles renders it better.
+fn publish_game(
+    context: &ClientContext<'_>,
+    view: &GameView,
+    events: &[GameDelta],
+) -> Result<(), Error> {
+    let topic = Topic {
+        kind: TopicKind::Conversation,
+        id: view.conversation_id,
+    };
+    for event in events {
+        let (name, subject) = match event {
+            // The account each event is *about*, which for a turn change is whose turn it now is
+            // rather than who caused it: the wire has one id field and that is the id a client
+            // needs in order to highlight a seat.
+            GameDelta::Started { .. } => ("started", None),
+            GameDelta::Moved { by, .. } => ("moved", Some(*by)),
+            GameDelta::TurnChanged { turn_of, .. } => ("turn_changed", Some(*turn_of)),
+            GameDelta::Finished { outcome, .. } => (
+                "finished",
+                match outcome {
+                    Outcome::Win { winner } => Some(*winner),
+                    Outcome::Draw | Outcome::NoContest => None,
+                },
+            ),
+        };
+        let wire = GameEvent {
+            game_id: view.game_id,
+            // The IDL calls it `room_id`; a game is played in a conversation, and this is that
+            // conversation. One subject, two names, and the domain's is the authoritative one.
+            room_id: view.conversation_id,
+            // Every event of one move describes the same resulting state, so they share a version.
+            // A client receiving them out of order can still tell which board they describe.
+            state_version: view.state_version,
+            event: name.to_string(),
+            payload: None,
+            actor_id: subject,
+            text: None,
+        };
+        // Coalescing is not offered: `GAME_EVENT` is Critical, so a queued event is never
+        // superseded, and collapsing two moves would lose one.
+        context.publish(&topic, Opcode::GameEvent, &wire, None)?;
+    }
+    Ok(())
 }
 
 /// A stable per-process key that groups the frames of one Coalescable stream.

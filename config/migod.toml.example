@@ -29,7 +29,7 @@ environment = "development"           # development | staging | production
 [http]
 bind = "0.0.0.0:8080"
 public_url = "http://localhost:8080"
-cors_origins = ["http://localhost:3000"]
+cors_origins = ["http://localhost:19991"]
 
 [store]
 backend = "memory"                    # memory | postgres
