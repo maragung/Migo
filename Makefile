@@ -119,6 +119,19 @@ infra-check: ## Static hygiene checks on infra/ that need no daemon (CI gate)
 	# section 177 keeps infra out of BUILT for precisely that reason.
 	python3 tools/scripts/infra-audit.py
 
+.PHONY: pydeps-check
+pydeps-check: ## The CI gate installs exactly the Python modules tools/ imports
+	# Written after a red build. The gate job pins an interpreter so that pip install is
+	# permitted at all, and pinning one also replaces whatever the runner image happened
+	# to pre-install. The crypto vector generator imported cryptography, the image had
+	# it, nothing declared it, and the gate broke the moment the interpreter moved.
+	#
+	# So the pip list in the workflow is a declaration, and this reads both sides of it:
+	# the imports under tools/ and the install line in .github/workflows/ci.yml. A
+	# module imported but not installed is that failure. A module installed but not
+	# imported is the reverse, an install line that outlived its reason. Both fail here.
+	python3 tools/scripts/pydeps-audit.py
+
 # ---------------------------------------------------------------- build
 
 .PHONY: build
@@ -314,7 +327,7 @@ audit: ## Dependency vulnerability + licence audit
 	$(PNPM) audit --audit-level high || true
 
 .PHONY: ci
-ci: protocol-check entity-check brief-check vector-check kotlin-check infra-check fmt-check build-ts lint doc-check test test-vectors ## Everything CI runs
+ci: protocol-check entity-check brief-check vector-check kotlin-check infra-check pydeps-check fmt-check build-ts lint doc-check test test-vectors ## Everything CI runs
 
 # ---------------------------------------------------------------- misc
 

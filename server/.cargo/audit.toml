@@ -1,0 +1,19 @@
+# cargo-audit reads this from the working directory it runs in, so the audit step in
+# .github/workflows/ci.yml runs from `server/` rather than passing --file from the root.
+
+[advisories]
+# RUSTSEC-2026-0235: out-of-bounds reads in rkyv 0.7 archives that contain Rc/Arc.
+#
+# Kept rather than fixed, because there is nothing here to fix. rkyv reaches this tree
+# as sea-orm -> rust_decimal -> rkyv, where it is an *optional* feature of rust_decimal
+# that nothing enables. Cargo.lock is feature-agnostic and records every optional
+# resolution, so the crate is listed without ever being built: `cargo build` produces
+# forty rust_decimal artefacts and zero rkyv ones. Code that is never compiled cannot
+# deserialise a hostile archive.
+#
+# The upstream fix is rust_decimal moving to rkyv 0.8, which cannot be forced from here:
+# hand-editing the entry out of Cargo.lock only makes the next `cargo update` put it
+# back. Re-check this on every sea-orm bump and delete the entry the moment the
+# resolution moves to >=0.8.17 — an ignore that outlives its reason is how a real
+# advisory gets waved through later.
+ignore = ["RUSTSEC-2026-0235"]

@@ -4,14 +4,27 @@ Dokumen ini adalah turunan yang mudah dibaca dari **migo.md section 177 (IMPLEME
 STATUS)**. migo.md tetap satu-satunya sumber kebenaran; kalau keduanya berbeda, migo.md yang
 benar dan file ini yang salah. Gate `python3 tools/scripts/brief-audit.py` (41 pemeriksaan)
 menegakkan section 177 secara mekanis: ia menolak crate yang ditandai BUILT tanpa test, crate
-yang punya test tapi masih ditandai belum, dan crate yang muncul di dua blok sekaligus. Sejak
-commit ini ada gate kedua, `python3 tools/scripts/infra-audit.py` (12 pemeriksaan), yang membaca
-berkas penyebaran di `infra/` tanpa menyalakan satu pun container. Keduanya dijalankan job
-`gates` pada `.github/workflows/ci.yml` lewat `make brief-check` dan `make infra-check`.
+yang punya test tapi masih ditandai belum, dan crate yang muncul di dua blok sekaligus. Di
+sebelahnya ada `infra-audit.py` (12 pemeriksaan), yang membaca berkas penyebaran di `infra/`
+tanpa menyalakan satu pun container, dan `pydeps-audit.py` (6 pemeriksaan), yang memastikan
+baris `pip install` pada job CI memasang tepat modul pihak ketiga yang benar-benar diimpor
+`tools/`. Ketiganya dijalankan job `gates` pada `.github/workflows/ci.yml` lewat
+`make brief-check`, `make infra-check`, dan `make pydeps-check`, bersama empat gate pembaca
+berkas lain: `protocol-check`, `entity-check`, `vector-check`, dan `kotlin-check`.
 
-Terakhir diselaraskan: 27 Agustus 2026, pada commit yang memindahkan enam crate terakhir
-(`migo-games`, `migo-bots`, `migo-federation`, `migo-gateway`, `migo-api`, `migod`) bersama
-`packages/sdk`, `clients/web`, dan `tools/loadgen` ke BUILT.
+Job `audit` melaporkan advisory tanpa memblokir merge dan membawa tepat satu pengecualian
+beralasan di `server/.cargo/audit.toml`, yaitu RUSTSEC-2026-0235 pada `rkyv`. `rkyv` masuk
+sebagai feature opsional `rust_decimal` yang tidak dinyalakan siapa pun, jadi ia tercatat di
+`Cargo.lock` tanpa pernah dikompilasi: satu build menghasilkan 40 artefak `rust_decimal` dan nol
+artefak `rkyv`. Pengecualian itu wajib dicek ulang pada setiap kenaikan sea-orm dan dihapus
+begitu resolusinya pindah ke 0.8.17 atau lebih baru, karena ignore yang hidup lebih lama
+daripada alasannya adalah cara sebuah advisory sungguhan diloloskan diam-diam.
+
+Terakhir diselaraskan: 27 Agustus 2026, pada commit yang memperbaiki job `gates` setelah gate
+konformans pecah di CI, menambahkan gate ketujuh `make pydeps-check` supaya kelas kegagalan itu
+tidak terulang, dan memberi job advisory satu pengecualian beralasan. Commit sebelumnya
+memindahkan enam crate terakhir (`migo-games`, `migo-bots`, `migo-federation`, `migo-gateway`,
+`migo-api`, dan `migod`) bersama `packages/sdk`, `clients/web`, dan `tools/loadgen` ke BUILT.
 
 ## Ringkasan
 
@@ -164,24 +177,26 @@ tetapi belum satu pun byte kodenya ditulis:
 
 Tahap test bukan pekerjaan tulis ulang. Sejauh ini ia menemukan empat belas cacat nyata pada
 kode yang sudah dianggap selesai, dan semuanya diperbaiki pada commit yang sama dengan test yang
-menemukannya:
+menemukannya. Baris kelima belas datang bukan dari test melainkan dari pipeline-nya sendiri, dan
+tetap dicatat di sini karena ia adalah cacat pada sesuatu yang sudah dianggap selesai:
 
-| Crate             | Cacat                                                                                                                                                                                                   | Perbaikan                                                                                                  |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `migo-social`     | `pending` melaporkan permintaan yang belum dijawab sebagai sudah disetujui                                                                                                                              | membaca kolom keadaan yang benar                                                                           |
-| `migo-social`     | `block` menghapus edge tanpa menghitungnya, sehingga hitungan relasi melenceng                                                                                                                          | penghapusan ikut mengurangi hitungan                                                                       |
-| `migo-media`      | tidak ada pemeriksaan identitas sama sekali di seluruh crate                                                                                                                                            | `require_identity` sebelum pemungutan biaya di 7 metode                                                    |
-| `migo-media`      | lebar, tinggi, dan durasi diperiksa di `begin` lalu dibuang sebelum ditulis                                                                                                                             | format tiket naik ke versi dua dan membawa ketiganya                                                       |
-| `migo-media`      | `commit` yang diulang ditolak sebagai objek yang sudah ada                                                                                                                                              | dijawab dari baris yang ada tanpa menyentuh penghitung                                                     |
-| `migo-moderation` | `file_report` menerima caller yang membawa akun tanpa device                                                                                                                                            | identitas akun dan device diperiksa sebelum biaya dipungut                                                 |
-| `migo-store`      | `open_reports` in-memory mengurut menurut urutan tulis, PostgreSQL menurut `created_at`                                                                                                                 | double diurutkan menurut `created_at` lalu `report_id`                                                     |
-| `migo-notify`     | lima metode yang menghadap client tidak memeriksa identitas pemanggil                                                                                                                                   | `require_identity` sebelum pemungutan biaya                                                                |
-| `migo-cache`      | `CacheKey::new` menolak underscore, sehingga scope coalescing panic di build debug                                                                                                                      | assertion menerima underscore, titik dua tetap dilarang                                                    |
-| `migo-store`      | token CAS game adalah timestamp milidetik, jadi dua langkah dalam milidetik yang sama membuatnya tidak bergerak dan langkah kedua menimpa langkah pertama tanpa pernah melihatnya                       | token didorong melewati nilai yang baru saja dicocokkan pada kedua backend, dan contract case memakukannya |
-| `migo-bots`       | pemanggil tanpa identitas dimeter terhadap akun yang disebut permintaannya, sehingga penyerang dapat menguras budget akun orang lain tanpa membayar apa pun                                             | identitas diperiksa dan ditolak sebelum limiter disentuh                                                   |
-| `migo-core`       | staging dan production menerima kredensial database `migo:migo` yang terdokumentasi terbuka di compose dan CI                                                                                           | startup ditolak dengan menyebut field-nya tanpa menggemakan kredensialnya                                  |
-| `clients/web`     | ketika server menahan pesan manusia, SDK melipat pesan kosong menjadi symbol mesin dan UI menampilkannya, sehingga NOT_FOUND dan PRIVACY_RESTRICTED yang sengaja dibuat identik menjadi dapat dibedakan | pesan server hanya ditampilkan bila benar-benar ada, selebihnya satu baris generik                         |
-| `tools/loadgen`   | logger menulis barisnya tanpa redaksi dan laporan menggemakan URL server yang utuh beserta userinfo-nya                                                                                                 | setiap baris logger lewat `redact`, dan laporan melewatkan kedua URL lewat `sanitizeUrl`                   |
+| Crate             | Cacat                                                                                                                                                                                                                                | Perbaikan                                                                                                                                               |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `migo-social`     | `pending` melaporkan permintaan yang belum dijawab sebagai sudah disetujui                                                                                                                                                           | membaca kolom keadaan yang benar                                                                                                                        |
+| `migo-social`     | `block` menghapus edge tanpa menghitungnya, sehingga hitungan relasi melenceng                                                                                                                                                       | penghapusan ikut mengurangi hitungan                                                                                                                    |
+| `migo-media`      | tidak ada pemeriksaan identitas sama sekali di seluruh crate                                                                                                                                                                         | `require_identity` sebelum pemungutan biaya di 7 metode                                                                                                 |
+| `migo-media`      | lebar, tinggi, dan durasi diperiksa di `begin` lalu dibuang sebelum ditulis                                                                                                                                                          | format tiket naik ke versi dua dan membawa ketiganya                                                                                                    |
+| `migo-media`      | `commit` yang diulang ditolak sebagai objek yang sudah ada                                                                                                                                                                           | dijawab dari baris yang ada tanpa menyentuh penghitung                                                                                                  |
+| `migo-moderation` | `file_report` menerima caller yang membawa akun tanpa device                                                                                                                                                                         | identitas akun dan device diperiksa sebelum biaya dipungut                                                                                              |
+| `migo-store`      | `open_reports` in-memory mengurut menurut urutan tulis, PostgreSQL menurut `created_at`                                                                                                                                              | double diurutkan menurut `created_at` lalu `report_id`                                                                                                  |
+| `migo-notify`     | lima metode yang menghadap client tidak memeriksa identitas pemanggil                                                                                                                                                                | `require_identity` sebelum pemungutan biaya                                                                                                             |
+| `migo-cache`      | `CacheKey::new` menolak underscore, sehingga scope coalescing panic di build debug                                                                                                                                                   | assertion menerima underscore, titik dua tetap dilarang                                                                                                 |
+| `migo-store`      | token CAS game adalah timestamp milidetik, jadi dua langkah dalam milidetik yang sama membuatnya tidak bergerak dan langkah kedua menimpa langkah pertama tanpa pernah melihatnya                                                    | token didorong melewati nilai yang baru saja dicocokkan pada kedua backend, dan contract case memakukannya                                              |
+| `migo-bots`       | pemanggil tanpa identitas dimeter terhadap akun yang disebut permintaannya, sehingga penyerang dapat menguras budget akun orang lain tanpa membayar apa pun                                                                          | identitas diperiksa dan ditolak sebelum limiter disentuh                                                                                                |
+| `migo-core`       | staging dan production menerima kredensial database `migo:migo` yang terdokumentasi terbuka di compose dan CI                                                                                                                        | startup ditolak dengan menyebut field-nya tanpa menggemakan kredensialnya                                                                               |
+| `clients/web`     | ketika server menahan pesan manusia, SDK melipat pesan kosong menjadi symbol mesin dan UI menampilkannya, sehingga NOT_FOUND dan PRIVACY_RESTRICTED yang sengaja dibuat identik menjadi dapat dibedakan                              | pesan server hanya ditampilkan bila benar-benar ada, selebihnya satu baris generik                                                                      |
+| `tools/loadgen`   | logger menulis barisnya tanpa redaksi dan laporan menggemakan URL server yang utuh beserta userinfo-nya                                                                                                                              | setiap baris logger lewat `redact`, dan laporan melewatkan kedua URL lewat `sanitizeUrl`                                                                |
+| `ci.yml`          | menyematkan interpreter Python untuk satu gate ikut menyembunyikan modul yang kebetulan sudah ada di image runner, sehingga generator vector kripto kehilangan `cryptography` dan gate konformans pecah di CI padahal hijau di lokal | kedua modul dipasang eksplisit dalam satu langkah, dan `make pydeps-check` membandingkan daftar itu dengan impor `tools/` yang sebenarnya di kedua arah |
 
 ## 9. Aturan yang mengikat status ini
 

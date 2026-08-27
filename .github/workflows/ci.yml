@@ -59,13 +59,22 @@ jobs:
         with:
           node-version: 22
 
-      # Every gate below except infra-check is standard-library Python and would run
-      # on whatever interpreter the image ships. This pins one anyway, because the
-      # distribution interpreter on the runner image is an externally-managed
-      # environment (PEP 668) and refuses `pip install`, which infra-check needs.
+      # Pinning an interpreter is what lets the gates install what they import: the
+      # distribution Python on the runner image is an externally-managed environment
+      # (PEP 668) and refuses `pip install`, while a tool-cache interpreter accepts it.
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      # Every third-party module any gate imports, installed in one place. This step is
+      # not optional bookkeeping: pinning the interpreter above also *hides* whatever the
+      # runner image happened to pre-install, and the crypto vector generator imports
+      # `cryptography`, which the image ships and the tool cache does not. Installing it
+      # here is what keeps the gate reading its own generators rather than the image's
+      # package list. infra-check imports `yaml`; nothing else under tools/ imports
+      # anything outside the standard library.
+      - name: Python modules the gates import
+        run: python3 -m pip install --quiet --disable-pip-version-check pyyaml cryptography
 
       - name: Generated protocol code is not stale
         run: make protocol-check
@@ -95,12 +104,15 @@ jobs:
         # Deployment mistakes are the ones nobody sees until they are already running:
         # an image tag that quietly moved, a secret typed into a compose file, a
         # container that asked for the host's PID namespace. This reads the files, so
-        # it needs no Docker and no cluster and belongs in the one-minute job. It is
-        # the only script under tools/ that imports a third-party module, hence the
-        # explicit interpreter and the single pip install.
-        run: |
-          python3 -m pip install --quiet --disable-pip-version-check pyyaml
-          make infra-check
+        # it needs no Docker and no cluster and belongs in the one-minute job.
+        run: make infra-check
+
+      - name: The gate installs exactly the Python modules it imports
+        # The guard for the step three above this one. Pinning an interpreter is what
+        # makes the install line necessary, and an install line that nothing checks
+        # drifts from the imports it is meant to cover -- which is exactly how the
+        # crypto vector gate broke once already. This compares the two directly.
+        run: make pydeps-check
 
   # ------------------------------------------------------------------ rust
   # One job for formatting, lints and the whole test suite, because all three want the
@@ -333,6 +345,12 @@ jobs:
           key: audit
 
       - name: cargo-audit
+        # Run from `server/` rather than passing --file, because that is the directory
+        # whose .cargo/audit.toml carries the one reasoned ignore this tree has. A job
+        # that is red on every commit teaches everyone to scroll past it, which is the
+        # opposite of what an advisory report is for, so the exception is written down
+        # next to the lockfile it applies to instead of being tolerated as noise here.
+        working-directory: server
         run: |
           cargo install cargo-audit --locked
-          cargo audit --file server/Cargo.lock
+          cargo audit
