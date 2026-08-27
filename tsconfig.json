@@ -8,6 +8,7 @@
     { "path": "./packages/protocol" },
     { "path": "./packages/crypto" },
     { "path": "./packages/sdk" },
-    { "path": "./tools/loadgen" }
+    { "path": "./tools/loadgen" },
+    { "path": "./tools/chatbot" }
   ]
 }

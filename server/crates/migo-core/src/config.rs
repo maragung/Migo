@@ -341,6 +341,11 @@ pub struct AuthConfig {
     pub max_devices_per_user: u32,
     /// Minimum password length. Length beats composition rules.
     pub password_min_length: usize,
+    /// Override the rate-limit price of one new-account registration, in tokens.
+    /// Defaults to the full anonymous endpoint bucket, which is the safe and tight
+    /// choice for the public internet. Lower it for local two-node smokes where
+    /// the value is in the round trip, not the rate ceiling.
+    pub registration_cost: Option<u32>,
 }
 
 impl Default for AuthConfig {
@@ -352,6 +357,7 @@ impl Default for AuthConfig {
             allow_registration: true,
             max_devices_per_user: 8,
             password_min_length: 10,
+            registration_cost: None,
         }
     }
 }

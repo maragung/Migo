@@ -46,6 +46,8 @@ import {
   encodeSubscribeRequest,
   decodeSubscribeResponse,
   decodeAcknowledged,
+  encodePing,
+  decodePong,
 } from '@migo/protocol';
 import type {
   Acknowledged,
@@ -598,6 +600,19 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     await transport.connect();
 
     const rpc = new Rpc(transport, this.#options.onEventError);
+    // Server-initiated heartbeats arrive as a PING on the wire (brief 139
+    // reuses the opcode for both directions). The client must answer each
+    // one with a PONG or the server closes the session as
+    // `heartbeat_timeout` and inbound events stop arriving. A frame that
+    // is the reply itself is also a PING and the codec hands the handler
+    // a decoded Pong, so we read the result and drop it.
+    rpc.on(OP.PING, decodePong, () => {
+      void rpc.call(OP.PING, encodePing, decodePong, { clientTime: Date.now() }).catch(() => {
+        // The server is welcome to drop the session if it cannot tolerate
+        // a missing PONG; the next keepalive will close the loop and
+        // the caller will see the disconnect.
+      });
+    });
     const keys = new KeysDomain(rpc, this.#keyStore);
     const sessionCrypto = new SessionCrypto(this.#keyStore, this);
     const groupCrypto = new GroupCrypto(this.#keyStore);

@@ -98,18 +98,23 @@ struct Prices {
 }
 
 impl Prices {
-    fn from_policies(policies: &migo_ratelimit::Policies) -> Self {
+    fn from_policies(
+        policies: &migo_ratelimit::Policies,
+        config: &migo_core::config::AuthConfig,
+    ) -> Self {
         // The tightest surface a stranger reaches: one opcode, one network, no standing.
         let full = policies
             .resolve(Scope::Endpoint, TrustTier::Anonymous)
             .capacity();
         let attempt = (full / 5).max(1);
+        let register = config.registration_cost.unwrap_or(full);
         Self {
             attempt,
             penalty: full.saturating_sub(attempt),
             // Creating an account is the expensive one: it writes rows, hashes a
             // password, and is the thing a spam operation needs thousands of.
-            register: full,
+            // An override exists for local development only.
+            register,
         }
     }
 }
@@ -174,7 +179,7 @@ where
                 fault::internal("auth.token_key is required to sign session tokens")
             })?;
         let signer = Signer::new(key, &config.node.region)?;
-        let prices = Prices::from_policies(limiter.policies());
+        let prices = Prices::from_policies(limiter.policies(), &config.auth);
         let mut random = random;
         let absent_hash = migo_crypto::password::hash(ABSENT_ACCOUNT_PLACEHOLDER, &mut *random)
             .map_err(|error| {

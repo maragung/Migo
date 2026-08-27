@@ -1,0 +1,26 @@
+{
+  "name": "@migo/chatbot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Migo two-account chat bot: registers two accounts, opens a 1:1 conversation, and sends N round-trip messages over the realtime gateway.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "migo-chatbot": "./dist/main.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "clean": "tsc --build --clean",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@migo/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}
