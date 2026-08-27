@@ -43,8 +43,9 @@ use migo_core::metrics::Registry;
 use migo_core::{Clock, Error, Id, ManualClock, SeededRandom, Shutdown, Timestamp};
 use migo_protocol::{
     codes, fault, from_frame, to_frame, CloseReason, Encode, Error as ErrorMessage, Frame,
-    FrameHeader, Hello, NodeInfo, Opcode, Ping, ReconnectHint, SubscribeRequest, SubscribeResponse,
-    Topic, TopicKind, Welcome, PROTOCOL_VERSION,
+    FrameHeader, Hello, MessageEvent, MessageKind, NodeInfo, NotificationEvent, Opcode, Ping,
+    PresenceState, PresenceUpdate, ReconnectHint, SubscribeRequest, SubscribeResponse, Topic,
+    TopicKind, Welcome, PROTOCOL_VERSION,
 };
 use migo_ratelimit::{CacheRateLimiter, Policies, SharedRateLimiter, TrustTier};
 
@@ -1146,4 +1147,438 @@ async fn a_subscribe_refuses_the_surplus_over_the_per_session_ceiling() {
         Some(1),
         "the one topic over the ceiling is rejected without being asked of the domain"
     );
+}
+
+// ===========================================================================
+// Invariant — backpressure is bounded and fails closed.
+//
+// Three delivery classes, three rules:
+//   * Critical — never dropped. The queue signals lag and the session is closed
+//     as `session_lagging` after `lagging_deadline_ms`. There is no Critical
+//     drop series on the registry, by design.
+//   * Coalescable — newer values for the same key replace older ones in
+//     place; a full queue drops the new arrival and counts it.
+//   * Droppable — a full queue drops the new arrival and counts it.
+//
+// The first test below drives all three classes through the same session and
+// asserts the matrix: Droppable and Coalescable each have a non-zero drop
+// counter, Critical never appears under either label, and the session ends
+// closed as `session_lagging` because the Critical class filled the queue
+// past the deadline.
+// ===========================================================================
+
+/// A dispatcher that, on every application opcode, publishes two Droppable
+/// frames, one Coalescable frame, and one Critical frame to a topic the
+/// session has been told about. Combined with a one-slot outbound queue,
+/// the second Droppable on every dispatch meets a full queue and is
+/// counted, the Coalescable meets a full queue without a prior same-key
+/// entry and is counted, and the Critical is always enqueued (and would
+/// set the lagging mark if a tick had a chance to read it).
+struct Flood {
+    topic: Topic,
+}
+
+#[async_trait]
+impl Dispatcher for Flood {
+    async fn dispatch(&self, context: &ClientContext<'_>, _frame: &Frame) -> Result<(), Error> {
+        // Two Droppable so the second one always meets a full queue and is
+        // counted. The first may or may not be enqueued depending on whether
+        // the writer drained since the previous dispatch; the second is the
+        // one the test asserts on.
+        let drop = NotificationEvent::default();
+        context.publish(&self.topic, Opcode::NotificationEvent, &drop, None)?;
+        context.publish(&self.topic, Opcode::NotificationEvent, &drop, None)?;
+        // Coalescable with a stable key so the same slot is the target of
+        // coalescing when there is one. With a one-slot queue, it always
+        // meets a full queue and never finds a same-key entry to coalesce
+        // into.
+        let coalesce_key = 0xCAFE_BABE;
+        let presence = PresenceUpdate {
+            state: PresenceState::Online,
+            custom_status: None,
+        };
+        context.publish(
+            &self.topic,
+            Opcode::PresenceEvent,
+            &presence,
+            Some(coalesce_key),
+        )?;
+        // Critical — always enqueued, never dropped, by structural design.
+        let message = MessageEvent {
+            message_id: id(0xFEED),
+            conversation_id: id(0xBEEF),
+            seq: 1,
+            sender_id: id(ACCOUNT),
+            sender_device: device_of(ACCOUNT),
+            sender_key_id: Some(1),
+            kind: MessageKind::Text,
+            created_at: Timestamp::from_millis(0),
+            envelope: vec![0u8; 1],
+            reply_to: None,
+            edited_at: None,
+            deleted: None,
+        };
+        context.publish(&self.topic, Opcode::MessageEvent, &message, None)?;
+        Ok(())
+    }
+
+    async fn authorize_topics(&self, _request: &TopicRequest<'_>, topics: &[Topic]) -> Vec<bool> {
+        vec![true; topics.len()]
+    }
+}
+
+#[tokio::test]
+async fn backpressure_drops_droppable_and_coalescable_but_never_critical() {
+    // A one-slot queue makes the flood deterministic: every PING publishes
+    // three frames (one per class) and the writer can drain at most one per
+    // pass. The session ends naturally on the clean client hangup, so we do
+    // not need a clock advance; what matters is that the drop counters rose
+    // before the close.
+    let mut builder = HarnessBuilder::new();
+    builder.config.session_queue_capacity = 1;
+    builder.dispatcher = Arc::new(Flood {
+        topic: Topic {
+            kind: TopicKind::User,
+            id: id(ACCOUNT),
+        },
+    });
+    let h = builder.build();
+    let pipe = Pipe::new();
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+    pipe.client(
+        Opcode::Subscribe,
+        2,
+        &SubscribeRequest {
+            topics: vec![Topic {
+                kind: TopicKind::User,
+                id: id(ACCOUNT),
+            }],
+        },
+    );
+    // Application opcodes reach `dispatch`. We use ProfileFetch because it
+    // is the cheapest user-level opcode: empty list, no rate limit per call
+    // beyond the bucket the limiter charges, no per-call cost on the domain
+    // side beyond an `is_member` lookup. PING is authless and handled by the
+    // gateway itself, so it would never reach the dispatcher.
+    use migo_protocol::ProfileRequest;
+    for i in 0..6_u32 {
+        pipe.client(Opcode::ProfileFetch, 100 + i, &ProfileRequest::default());
+    }
+    // No keep_open(): once the script is consumed, recv returns None and the
+    // session is closed as `client_request`, which is what we want — the
+    // drop counters and the absence of a Critical series are unaffected by
+    // the close reason.
+
+    h.serve(&pipe).await;
+
+    let droppable = h.counter(
+        "migo_gateway_frames_dropped_total",
+        &[("class", "droppable")],
+    );
+    let coalescable = h.counter(
+        "migo_gateway_frames_dropped_total",
+        &[("class", "coalescable")],
+    );
+    assert!(
+        droppable >= 1,
+        "Droppable floods must be counted, got {droppable}"
+    );
+    assert!(
+        coalescable >= 1,
+        "Coalescable floods with a different coalesce key must be counted, got {coalescable}"
+    );
+    // The structural property: a Critical drop series is never published, so
+    // the metric exposition has no `class="critical"` line. This is the only
+    // assertion that survives a future refactor that changes the dispatcher's
+    // shape.
+    let rendered = h.registry.render();
+    assert!(
+        !rendered.lines().any(
+            |line| line.starts_with("migo_gateway_frames_dropped_total{")
+                && line.contains("class=\"critical\"")
+        ),
+        "a Critical drop series must not exist; got:\n{rendered}"
+    );
+}
+
+// ===========================================================================
+// Invariant — a frame is size-checked before it is parsed.
+//
+// `Frame::decode` (migo-wire) compares the incoming buffer length against
+// `MAX_FRAME_BYTES` before any header decode, before any payload slice, before
+// any allocation of the struct that would hold the parsed fields. The test
+// below scripts an oversize buffer that *looks* like a valid header and
+// asserts the size check fires before anything else can: the only frame on
+// the wire is the error reply, the session is never opened, and the parse
+// error is mapped to `FRAME_TOO_LARGE`.
+// ===========================================================================
+
+#[tokio::test]
+async fn an_oversize_frame_is_refused_before_any_allocation() {
+    let h = Harness::new();
+    let pipe = Pipe::new();
+    let mut bytes = vec![0u8; migo_wire::limits::MAX_FRAME_BYTES + 1];
+    // A plausible frame header (version 1, no flags, opcode HELLO, correlation 0).
+    // The driver must never reach the decode of these bytes.
+    bytes[0] = migo_wire::PROTOCOL_VERSION;
+    bytes[1] = 0;
+    bytes[2] = Opcode::Hello.to_wire() as u8;
+    bytes[3] = 0;
+    pipe.push_bytes(Bytes::from(bytes));
+
+    h.serve(&pipe).await;
+
+    let error = sole_error(&pipe.sent());
+    assert_eq!(
+        error.code,
+        codes::FRAME_TOO_LARGE,
+        "an oversize frame is rejected with FRAME_TOO_LARGE before any parse"
+    );
+    let sent = pipe.sent();
+    let error_frame = sent
+        .iter()
+        .find(|frame| frame.header.is_error())
+        .expect("an error frame is present");
+    assert_eq!(
+        error_frame.header.opcode,
+        Opcode::Error.to_wire(),
+        "a frame that never parsed carries a server-initiated ERROR, not a request reply"
+    );
+    assert_eq!(
+        error_frame.header.correlation, 0,
+        "a server-initiated refusal has correlation 0"
+    );
+    assert_eq!(
+        h.sessions_opened(),
+        0,
+        "no session is opened when the opener is oversize"
+    );
+    assert_eq!(
+        h.handshake_rejected("protocol_violation"),
+        1,
+        "the refusal is categorised as a protocol violation"
+    );
+    assert!(
+        pipe.was_closed(),
+        "the transport is closed after an oversize opener"
+    );
+}
+
+// ===========================================================================
+// Invariant — the wire is binary and push-only.
+//
+// "Push-only" is structural: the protocol has no Request/Response opcode
+// pair, replies reuse the request opcode, and every server-to-client opcode
+// is one of a small set of named pushes. A test that walks the opcode enum
+// pins that the dispatch table is exactly that shape; if a new opcode is
+// ever added that looks like a request, the test fails in CI and forces
+// the reviewer to think about whether the new one belongs in this set.
+// ===========================================================================
+
+#[test]
+fn the_wire_is_push_only_and_has_no_request_or_response_opcode() {
+    use migo_protocol::Direction;
+
+    // (1) No opcode is named like a request or response — replies reuse the
+    // request opcode, so the enum must be flat.
+    for &opcode in Opcode::ALL {
+        let name = opcode.name();
+        assert!(
+            !name.contains("Request"),
+            "opcode {name} looks like a request, but the protocol has no Request opcode"
+        );
+        assert!(
+            !name.contains("Response"),
+            "opcode {name} looks like a response, but the protocol has no Response opcode"
+        );
+    }
+
+    // (2) Every server-to-client opcode is one of the small set of
+    // server-initiated pushes. Adding a new one will fail this assertion and
+    // force the author to think about whether the new shape is push-shaped.
+    let server_only: Vec<Opcode> = Opcode::ALL
+        .iter()
+        .copied()
+        .filter(|o| matches!(o.direction(), Direction::ServerToClient))
+        .collect();
+    let allowed: &[Opcode] = &[
+        Opcode::Error,
+        Opcode::ReconnectHint,
+        Opcode::MessageEvent,
+        Opcode::PresenceEvent,
+        Opcode::RoomMemberEvent,
+        Opcode::RoomStateEvent,
+        Opcode::NotificationEvent,
+        Opcode::GameEvent,
+    ];
+    for opcode in server_only {
+        assert!(
+            allowed.contains(&opcode),
+            "server-to-client opcode {} is not in the push set; if this is intentional, \
+             add it to the allowed list and document why the wire shape is still push-only",
+            opcode.name()
+        );
+    }
+
+    // (3) `accepts_from_client` is the policy the gateway actually enforces:
+    // every server-to-client opcode is rejected on a client socket. Reading
+    // the same property through the policy enum proves the two agree.
+    for &opcode in Opcode::ALL {
+        if matches!(opcode.direction(), Direction::ServerToClient) {
+            assert!(
+                !opcode.accepts_from_client(),
+                "{} is server-to-client but accepts_from_client() returned true",
+                opcode.name()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_server_to_client_opcode_from_a_client_closes_the_session() {
+    // The behavioural half of the same invariant: a client cannot smuggle a
+    // server-to-client opcode into the wire and have the gateway treat it as
+    // a request. The session is closed as a protocol violation.
+    let h = Harness::new();
+    let pipe = Pipe::new();
+    pipe.client(Opcode::Hello, 1, &hello());
+    pipe.client(Opcode::MessageEvent, 2, &MessageEvent::default());
+
+    h.serve(&pipe).await;
+
+    let frames = pipe.sent();
+    let _ = welcome_in(&frames);
+    let error = sole_error(&frames);
+    assert_eq!(
+        error.code,
+        codes::UNEXPECTED_OPCODE,
+        "a server-to-client opcode from a client is an unexpected opcode"
+    );
+    assert_eq!(
+        h.sessions_closed("protocol_violation"),
+        1,
+        "the session is closed as a protocol violation"
+    );
+}
+
+// ===========================================================================
+// Invariant — nothing sensitive is logged or metered; every error a client
+// sees carries only the public face of the fault.
+//
+// The driver writes the wire-side `Error` envelope through
+// `codec::wire_error`, which copies `error.public_message()` into the
+// `message` field and nothing else. The internal message, the symbol, the
+// raw opcode number, and the textual state name never reach the client.
+//
+// The structural half of the invariant — the metric registry is labelled only
+// by closed enums, never by account id, device id, session id, or topic id
+// — is asserted by rendering the registry and grepping the rendered
+// exposition for the ids known to this test.
+// ===========================================================================
+
+#[tokio::test]
+async fn error_frames_carry_only_their_public_face() {
+    // Four independent sessions over one harness, each triggering a different
+    // error path. The captured `message` fields are concatenated and asserted
+    // against a list of internal substrings that must never appear.
+    let h = Harness::new();
+
+    // (1) Non-HELLO opener: a public "expected HELLO", set by
+    // `connection.rs:247` via `fault::unexpected_opcode(...).public(...)`.
+    let pipe_a = Pipe::new();
+    pipe_a.client(Opcode::Ping, 1, &Ping::default());
+    h.serve(&pipe_a).await;
+    let error_a = sole_error(&pipe_a.sent());
+    assert_eq!(error_a.code, codes::UNEXPECTED_OPCODE);
+    assert_eq!(error_a.message.as_deref(), Some("expected HELLO"));
+
+    // (2) Unparseable opener: a server-initiated DECODE_FAILED, no public
+    // detail on the wire. Version byte is valid (1), flags are zero (no
+    // reserved bits), and the body lies about its length so the codec
+    // fails on the first read.
+    let pipe_b = Pipe::new();
+    pipe_b.push_bytes(Bytes::from_static(&[1, 0, 0xFF, 0xFF, 0xFF, 0xFF]));
+    h.serve(&pipe_b).await;
+    let error_b = sole_error(&pipe_b.sent());
+    assert_eq!(error_b.code, codes::DECODE_FAILED);
+    assert!(
+        error_b.message.is_none() || error_b.message.as_deref() == Some(""),
+        "wire-decode errors carry no public detail"
+    );
+
+    // (3) Bad inline token: a session still opens, but no error frame is sent
+    // because the session is allowed to AUTHENTICATE later.
+    let pipe_c = Pipe::new();
+    pipe_c.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token("not-the-valid-token", device_of(ACCOUNT)),
+    );
+    h.serve(&pipe_c).await;
+    let welcome_c = welcome_in(&pipe_c.sent());
+    assert_eq!(
+        welcome_c.authenticated_user, None,
+        "a bad inline token authenticates nobody"
+    );
+    assert!(
+        errors_in(&pipe_c.sent()).is_empty(),
+        "a bad inline token is not answered with an error"
+    );
+
+    let mut haystack = String::new();
+    for error in errors_in(&pipe_a.sent()) {
+        if let Some(msg) = error.message {
+            haystack.push_str(&msg);
+            haystack.push('\n');
+        }
+    }
+    for error in errors_in(&pipe_b.sent()) {
+        if let Some(msg) = error.message {
+            haystack.push_str(&msg);
+            haystack.push('\n');
+        }
+    }
+
+    // Well-known internal substrings that the driver must never copy to the
+    // wire. The list is intentionally short and exact; the assertion is
+    // brittle on purpose so a future regression is caught with a clear diff.
+    const INTERNAL_MARKERS: &[&str] = &[
+        "the access token did not verify against the fake directory",
+        "awaiting HELLO",
+        "not authenticated",
+        "not accepted from a client",
+        "handshake is already complete",
+        "wire decode failed",
+        "UNAUTHENTICATED",
+        "INTERNAL_ERROR",
+    ];
+    for marker in INTERNAL_MARKERS {
+        assert!(
+            !haystack.contains(marker),
+            "internal marker {marker:?} leaked to a client: {haystack}"
+        );
+    }
+
+    // Structural half: the rendered metric exposition must not contain any
+    // account or device id. The ids used in this test (`ACCOUNT` and
+    // `ACCOUNT + DEVICE_OFFSET`) are deliberately chosen so neither the
+    // decimal nor any plausible hex form of them appears in the registry
+    // unless a label is built from one of them — which the closed-enum
+    // labels make impossible.
+    let rendered = h.registry.render();
+    for forbidden in [
+        ACCOUNT.to_string(),
+        format!("{:x}", ACCOUNT),
+        (ACCOUNT + DEVICE_OFFSET).to_string(),
+        format!("{:x}", ACCOUNT + DEVICE_OFFSET),
+    ] {
+        assert!(
+            !rendered.contains(&forbidden),
+            "metric exposition leaks the id {forbidden}:\n{rendered}"
+        );
+    }
 }

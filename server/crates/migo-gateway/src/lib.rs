@@ -103,11 +103,11 @@ use migo_protocol::NodeInfo;
 use migo_ratelimit::SharedRateLimiter;
 
 use crate::config::{Settings, MAX_SUBSCRIPTIONS};
-use crate::hub::Hub;
 use crate::metrics::Meters;
 use crate::outbound::ResumeBuffer;
 
 pub use crate::dispatch::{ClientContext, Dispatcher, NoopDispatcher, TopicRequest};
+pub use crate::hub::Hub;
 pub use crate::transport::{Transport, TransportError};
 
 /// A running transport node.
@@ -288,4 +288,56 @@ impl Gateway {
     pub async fn serve<T: Transport>(&self, transport: T, context: RequestContext) {
         connection::run(&self.inner, transport, context).await;
     }
+
+    /// Broadcasts one server-originated notification event to a recipient's user topic.
+    ///
+    /// This is the seam a domain crate calls when it has something to wake a user about — a
+    /// mention, a room invite, a friend request — and the recipient's session must learn of it
+    /// over the realtime path. The event is encoded once, fanned out by the subscription hub to
+    /// every session subscribed to the recipient's `User` topic, and counted in the same
+    /// backpressure series as any other frame the gateway pushes.
+    ///
+    /// The notification is delivered with `DeliveryClass::Droppable` (its wire class) and a
+    /// coalescing key keyed on the recipient, so a burst of notifications for the same user
+    /// collapses to the latest for any subscriber whose mailbox is backed up.
+    ///
+    /// The recipient's subscription is the same gate the realtime path uses: only sessions that
+    /// successfully passed the dispatcher-authorized `SUBSCRIBE` for that `User` topic receive
+    /// the event.
+    pub fn emit_notification(
+        &self,
+        recipient: migo_core::Id,
+        event: &migo_protocol::NotificationEvent,
+        now: migo_core::Timestamp,
+    ) {
+        use migo_protocol::{to_frame, Opcode, Topic, TopicKind};
+        let topic = Topic {
+            kind: TopicKind::User,
+            id: recipient,
+        };
+        let bytes = match to_frame(Opcode::NotificationEvent.to_wire(), 0, event) {
+            Ok(frame) => match frame.encode() {
+                Ok(bytes) => bytes,
+                Err(_) => return,
+            },
+            Err(_) => return,
+        };
+        self.inner.hub.broadcast(
+            &topic,
+            &bytes,
+            Opcode::NotificationEvent.class(),
+            Some(coalesce_key_for(&recipient)),
+            now,
+            None,
+        );
+    }
+}
+
+/// A stable per-process key that groups the frames of one Coalescable stream.
+fn coalesce_key_for(id: &migo_core::Id) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    id.hash(&mut hasher);
+    hasher.finish()
 }

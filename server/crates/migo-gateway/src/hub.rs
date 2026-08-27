@@ -36,7 +36,7 @@ use crate::session::SessionHandle;
 use crate::topic::TopicKey;
 
 /// The subscription registry and fan-out point for one node.
-pub(crate) struct Hub {
+pub struct Hub {
     /// Topic to the set of sessions listening on it.
     subscribers: DashMap<TopicKey, HashSet<Id>>,
     /// Session id to its handle, for delivery.

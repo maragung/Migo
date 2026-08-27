@@ -1088,3 +1088,197 @@ async fn authorize_topics_refuses_unknown_and_game_topics() {
         "no broadcast targets `Unknown` or `Game` topics, so both are refused"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Area 8: opcode 144 NOTIFICATION_EVENT round-trips through the gateway.
+//
+// The only IDL opcode that was still marked SCHEMA in migo.md section 177 is
+// opcode 144, a server-to-client push. There is no inbound dispatcher arm
+// for it — clients cannot send it, and the gateway already enforces that —
+// so the test below is the *outbound* half: a server-side call to
+// `Gateway::emit_notification` must reach a session that has subscribed to
+// the recipient's `User` topic, in the form of a binary frame whose opcode
+// is `NOTIFICATION_EVENT` (144).
+// ---------------------------------------------------------------------------
+
+use bytes::Bytes;
+use migo_gateway::Transport;
+use migo_gateway::TransportError;
+use migo_protocol::{from_frame, Frame, Hello, NotificationEvent, NotificationKind, Opcode};
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
+/// A `Transport` over a pair of byte queues, just enough to drive a session to a subscription
+/// and capture the frames the gateway sends back. The queues are shared so the test can both
+/// push scripted client bytes and read the server's replies.
+#[derive(Clone, Default)]
+struct FakeTransport {
+    inbound: Arc<Mutex<VecDeque<Bytes>>>,
+    outbound: Arc<Mutex<Vec<Bytes>>>,
+    closed: Arc<Mutex<bool>>,
+    park: Arc<Mutex<bool>>,
+}
+
+impl FakeTransport {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn client(&self, bytes: Bytes) {
+        self.inbound.lock().unwrap().push_back(bytes);
+    }
+
+    fn sent(&self) -> Vec<Bytes> {
+        self.outbound.lock().unwrap().clone()
+    }
+
+    fn keep_open(&self) {
+        *self.park.lock().unwrap() = true;
+    }
+}
+
+#[async_trait::async_trait]
+impl Transport for FakeTransport {
+    async fn recv(&mut self) -> Result<Option<Bytes>, TransportError> {
+        let next = self.inbound.lock().unwrap().pop_front();
+        match next {
+            Some(bytes) => Ok(Some(bytes)),
+            None => {
+                if *self.park.lock().unwrap() {
+                    std::future::pending().await
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    async fn send(&mut self, frame: Bytes) -> Result<(), TransportError> {
+        self.outbound.lock().unwrap().push(frame);
+        Ok(())
+    }
+
+    async fn close(&mut self) {
+        *self.closed.lock().unwrap() = true;
+    }
+}
+
+#[tokio::test]
+async fn emit_notification_reaches_a_subscribed_session_as_opcode_144() {
+    // Build a full app so the gateway is wired against the real domain services and
+    // an in-memory store. The user has to be real so the dispatcher's authorize_topics
+    // path grants their own `User` topic.
+    let app = build_default_app().await;
+    let bob = registered_account(&app, "bobnotif").await;
+    let now = app.clock.now();
+    let bob_password = Secret::new("correct-horse-battery-staple");
+    // A second sign-in to obtain a token for bob that the fake gateway-side transport
+    // session can use to authenticate. The issued_at / expires_at are computed from
+    // the context's now, so the token must be minted against the app's clock — not
+    // against an arbitrary epoch — or the gateway-side verifier will see it as
+    // already expired.
+    let bob_sign_in = app
+        .auth
+        .sign_in(
+            migo_auth::SignIn {
+                identifier: "bobnotif".to_string(),
+                password: bob_password,
+                device: migo_auth::DeviceClaim::new(Platform::Web, "notif test"),
+            },
+            &migo_auth::RequestContext::at(now),
+        )
+        .await
+        .expect("bob can sign in");
+    let bob_token = bob_sign_in.access_token;
+    let bob_device = bob_sign_in.device_id;
+
+    // Drive a fake transport through the gateway: hello with token, subscribe to
+    // bob's user topic, then yield so the gateway's writer has a chance to flush
+    // before the test calls `emit_notification`.
+    let transport = FakeTransport::new();
+    transport.keep_open();
+    let transport_for_serve = transport.clone();
+    let shutdown = app.shutdown.clone();
+    let gateway = app.gateway.clone();
+    let serve = tokio::spawn(async move {
+        gateway
+            .serve(
+                transport_for_serve,
+                migo_auth::RequestContext::at(Timestamp::from_millis(1)),
+            )
+            .await;
+    });
+
+    // The hello+token promotes the session to Ready in one frame.
+    let hello = Hello {
+        protocol_version: migo_protocol::PROTOCOL_VERSION,
+        access_token: Some(bob_token),
+        device_id: Some(bob_device),
+        ..Default::default()
+    };
+    let hello_frame = migo_protocol::to_frame(Opcode::Hello.to_wire(), 1, &hello)
+        .expect("hello encodes")
+        .encode()
+        .expect("hello frame encodes");
+    transport.client(hello_frame);
+
+    // Subscribe to bob's user topic. The dispatcher's authorize_topics grants
+    // bob's own topic and refuses anything else.
+    let subscribe = migo_protocol::SubscribeRequest {
+        topics: vec![migo_protocol::Topic {
+            kind: migo_protocol::TopicKind::User,
+            id: bob,
+        }],
+    };
+    let sub_frame = migo_protocol::to_frame(Opcode::Subscribe.to_wire(), 2, &subscribe)
+        .expect("subscribe encodes")
+        .encode()
+        .expect("subscribe frame encodes");
+    transport.client(sub_frame);
+
+    // Give the gateway time to process hello + subscribe before emitting the
+    // notification. Without this yield the notification can race the subscribe
+    // and find no subscribers yet.
+    tokio::task::yield_now().await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Server-side trigger. This is the seam a domain crate would call when it has
+    // something to wake a user about; the test calls it directly to assert the
+    // round-trip without needing an end-to-end trigger path.
+    let event = NotificationEvent {
+        kind: NotificationKind::Mention,
+        at: Timestamp::from_millis(1_700_000_000_000),
+        title: Some("ping".to_string()),
+        body: None,
+        conversation_id: None,
+        room_id: None,
+        actor_id: None,
+    };
+    app.gateway.emit_notification(bob, &event, now);
+
+    // Give the hub's writer a moment to deliver.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // The first two outbound frames are the WELCOME and the SUBSCRIBE response; the
+    // third, if the round-trip works, is the NOTIFICATION_EVENT frame.
+    let sent = transport.sent();
+    let frames: Vec<Frame> = sent
+        .iter()
+        .cloned()
+        .map(|b| Frame::decode(b).expect("an outbound frame must decode"))
+        .collect();
+    let notification_frame = frames
+        .iter()
+        .find(|frame| {
+            frame.header.opcode == Opcode::NotificationEvent.to_wire() && !frame.header.is_error()
+        })
+        .expect("a NOTIFICATION_EVENT frame is broadcast to the subscriber");
+    let decoded: NotificationEvent =
+        from_frame(notification_frame).expect("the broadcast decodes as NotificationEvent");
+    assert_eq!(decoded.kind, NotificationKind::Mention);
+    assert_eq!(decoded.title.as_deref(), Some("ping"));
+
+    // Clean teardown so the spawned task exits.
+    shutdown.trigger();
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(100), serve).await;
+}
