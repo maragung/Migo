@@ -30,7 +30,7 @@ use dashmap::DashMap;
 use migo_core::{Id, Timestamp};
 use migo_protocol::{DeliveryClass, Topic};
 
-use crate::metrics::Meters;
+use crate::metrics::{Meters, Refused};
 use crate::outbound::PushOutcome;
 use crate::session::SessionHandle;
 use crate::topic::TopicKey;
@@ -106,6 +106,8 @@ impl Hub {
         }
         drop(held);
         self.meters.subscriptions_added(added);
+        self.meters
+            .subscriptions_refused(Refused::Cap, rejected.len() as u64);
         Subscribed { accepted, rejected }
     }
 

@@ -40,14 +40,15 @@ use migo_core::{Error as CoreError, Id, Timestamp};
 use migo_protocol::{
     codes, fault, from_frame, Ack, Acknowledged, AuthLevel, Authenticate, Authenticated,
     CloseReason, DeliveryClass, Encode, Frame, Hello, Limits, Opcode, Ping, Pong, ReconnectHint,
-    ResumeRequest, SubscribeRequest, SubscribeResponse, Welcome, WireError, PROTOCOL_VERSION,
+    ResumeRequest, SubscribeRequest, SubscribeResponse, Topic, Welcome, WireError,
+    PROTOCOL_VERSION,
 };
 use migo_ratelimit::{BucketKey, TrustTier, Verdict};
 
 use crate::codec::{encode_error, encode_message};
 use crate::config::MAX_SUBSCRIPTIONS;
-use crate::dispatch::ClientContext;
-use crate::metrics::{Closed, HandshakeReject, Meters, ResumeOutcome};
+use crate::dispatch::{ClientContext, TopicRequest};
+use crate::metrics::{Closed, HandshakeReject, Meters, Refused, ResumeOutcome};
 use crate::outbound::{Outbound, PushOutcome, ResumeBuffer};
 use crate::session::{Phase, SessionHandle};
 use crate::transport::{Transport, TransportError};
@@ -806,16 +807,72 @@ impl<T: Transport> Connection<'_, T> {
                 );
             }
         };
+        let Some(identity) = established.identity.as_ref() else {
+            // Unreachable: SUBSCRIBE carries AuthLevel::User, so the phase gate above has already
+            // refused this frame on a session that has not authenticated.
+            return FrameOutcome::Close(Closed::ProtocolViolation);
+        };
+
+        // The surplus over the per-session ceiling is refused before the dispatcher is asked
+        // anything, and that ordering is the point rather than an optimisation. A frame is bounded
+        // by MAX_FRAME_BYTES, and a topic costs about eighteen bytes on the wire, so one frame can
+        // name tens of thousands of them -- and asking the domain about each would turn a single
+        // client frame into tens of thousands of membership reads. Nothing past the ceiling could
+        // ever be held by this session anyway, so refusing it costs the caller nothing it could
+        // have had.
+        let (asked, surplus) = if request.topics.len() > MAX_SUBSCRIPTIONS {
+            request.topics.split_at(MAX_SUBSCRIPTIONS)
+        } else {
+            (&request.topics[..], &[][..])
+        };
+        self.gateway
+            .meters
+            .subscriptions_refused(Refused::Cap, surplus.len() as u64);
+
+        // Authorization is read from the dispatcher, never taken from the frame. The gateway
+        // cannot make this decision itself: a topic id is a conversation, a room or an account, and
+        // this crate knows what none of those are (section 177).
+        let granted = self
+            .gateway
+            .dispatcher
+            .authorize_topics(
+                &TopicRequest::new(identity, established.session_id, now),
+                asked,
+            )
+            .await;
+        // A mask that does not line up with the topics it answers is a bug in the dispatcher, and
+        // the only safe reading of a bug in an authorization answer is that nothing was granted.
+        let aligned = granted.len() == asked.len();
+        let mut permitted = Vec::with_capacity(asked.len());
+        let mut rejected: Vec<Topic> = surplus.to_vec();
+        for (index, topic) in asked.iter().enumerate() {
+            if aligned && granted[index] {
+                permitted.push(topic.clone());
+            } else {
+                rejected.push(topic.clone());
+            }
+        }
+        self.gateway.meters.subscriptions_refused(
+            Refused::Unauthorized,
+            (rejected.len() - surplus.len()) as u64,
+        );
+
         let subscribed = self
             .gateway
             .hub
-            .subscribe(established.session_id, &request.topics);
+            .subscribe(established.session_id, &permitted);
+        // One refusal list for three reasons -- over the ceiling, not granted, and the hub's own
+        // cap -- carrying no reason for any of them. That is deliberate: a caller who could tell
+        // "you may not have this topic" from "no such topic" would have a probe for which
+        // conversations and rooms exist, and SUBSCRIBE would answer it 512 topics at a time. The
+        // ordering within the list is not a contract; the set is.
+        rejected.extend(subscribed.rejected);
         let response = SubscribeResponse {
             accepted: subscribed.accepted,
-            rejected: if subscribed.rejected.is_empty() {
+            rejected: if rejected.is_empty() {
                 None
             } else {
-                Some(subscribed.rejected)
+                Some(rejected)
             },
         };
         push_message(

@@ -952,6 +952,19 @@ where
         )))
     }
 
+    async fn is_participant(&self, caller: &Caller, conversation_id: Id) -> Result<bool> {
+        if conversation_id.is_nil() {
+            return Ok(false);
+        }
+        // The membership row alone, not `conversation_for`: a membership row for a conversation
+        // that does not exist cannot be written, so the existence read would be a second query
+        // that can only agree with this one. One indexed lookup per topic is also what keeps this
+        // usable on the subscribe path, where section 14 forbids reading a roster.
+        self.store
+            .is_member(conversation_id, caller.account_id)
+            .await
+    }
+
     async fn purge_expired(&self, now: Timestamp, limit: u16) -> Result<u64> {
         let purged = self
             .store

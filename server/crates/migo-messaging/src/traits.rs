@@ -23,7 +23,7 @@
 //! and a caller cannot forget to check.
 
 use async_trait::async_trait;
-use migo_core::{Result, Timestamp};
+use migo_core::{Id, Result, Timestamp};
 use migo_protocol::{
     ConversationCreateRequest, ConversationListRequest, ConversationListResponse,
     ConversationSummary, MessageAccepted, MessageDelete, MessageReceipt, MessageSend, SyncRequest,
@@ -154,6 +154,26 @@ pub trait Messaging: Send + Sync {
     ///
     /// Returns `None` when the mark did not change, which is section 156 again.
     async fn typing(&self, caller: &Caller, request: TypingEvent) -> Result<Option<Fanout>>;
+
+    /// Whether the caller is currently in this conversation.
+    ///
+    /// For the transport, which has to decide whether a session may subscribe to a
+    /// conversation's topic before it will deliver a single event from it. That
+    /// decision cannot live in the gateway: a topic id is just an id there, and
+    /// nothing in a transport crate knows what a conversation is (brief section
+    /// 177).
+    ///
+    /// One boolean, and deliberately not the `NOT_FOUND` that every other read on
+    /// this trait raises. The caller asks about a batch of topics at once and is
+    /// told which it may have, without being told which of "there is no such
+    /// conversation" and "you are not in it" applied to the rest -- the same
+    /// conflation `conversation_for` makes internally, in the only shape a batch
+    /// answer can take. A caller who could tell those apart would have a probe for
+    /// which conversations exist, 512 ids at a time.
+    ///
+    /// Not rate limited, for the reason `migo_social`'s `may_interact` is not: it is
+    /// called inside an operation the transport has already charged for.
+    async fn is_participant(&self, caller: &Caller, conversation_id: Id) -> Result<bool>;
 
     /// Deletes messages whose disappearing-message deadline has passed.
     ///

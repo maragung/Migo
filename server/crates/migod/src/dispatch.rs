@@ -10,7 +10,7 @@
 //!
 //! One request becomes four steps, always in this order:
 //!
-//! 1. **Build the caller.** The authenticated [`Identity`](migo_auth::Identity) the gateway proved
+//! 1. **Build the caller.** The authenticated [`Identity`] the gateway proved
 //!    becomes the domain's `Caller` — account, device, trust tier, and the single sampled `now`.
 //!    Each domain has its own `Caller` type on purpose: they are not interchangeable, and the
 //!    composition root is the one place that holds all of them at once.
@@ -51,11 +51,12 @@ use std::hash::{Hash, Hasher};
 
 use async_trait::async_trait;
 
-use migo_core::{Error, Id, PublicId};
+use migo_auth::Identity;
+use migo_core::{Error, Id, PublicId, Timestamp};
 use migo_games::{
     Caller as GameCaller, Event as GameDelta, GameView, Hand, Move, Outcome, SharedReferee,
 };
-use migo_gateway::{ClientContext, Dispatcher};
+use migo_gateway::{ClientContext, Dispatcher, TopicRequest};
 use migo_keys::{Bundle, Caller as KeyCaller, SharedKeyring, SIGNED_PREKEY_LIFETIME_MS};
 use migo_messaging::{
     Broadcast as MessageBroadcast, Caller as MessageCaller, Fanout as MessageFanout,
@@ -73,7 +74,7 @@ use migo_protocol::{
 use migo_rooms::{
     Broadcast as RoomBroadcast, Caller as RoomCaller, Fanout as RoomFanout, SharedRooms,
 };
-use migo_social::{Caller as SocialCaller, ProfileCard, SharedSocial};
+use migo_social::{Caller as SocialCaller, Interaction, ProfileCard, SharedSocial};
 
 /// The dispatcher that routes the client-facing application opcodes into the domain services.
 ///
@@ -382,6 +383,88 @@ impl Dispatcher for AppDispatcher {
 
             // Every other opcode is one this node speaks the transport for but does not route.
             other => Err(fault::feature_disabled(other.name())),
+        }
+    }
+
+    async fn authorize_topics(&self, request: &TopicRequest<'_>, topics: &[Topic]) -> Vec<bool> {
+        let identity = request.identity();
+        let now = request.now();
+        let mut verdicts = Vec::with_capacity(topics.len());
+        for topic in topics {
+            verdicts.push(self.authorize_topic(identity, now, topic).await);
+        }
+        verdicts
+    }
+}
+
+impl AppDispatcher {
+    /// Whether this caller may receive the fan-out of one [`Topic`], asked ahead of subscription.
+    ///
+    /// `SUBSCRIBE` is the one place the gateway would otherwise let a frame's own contents decide
+    /// what the server sends back, so the decision is read from the domain rather than trusted from
+    /// the frame. A `false` here is the same refusal whether the subject is another account, a room
+    /// the caller is not in, or a conversation that does not exist: nothing in the answer names why
+    /// (section 48), so the batch answer doubles as a probe for which ids are real, and therefore
+    /// carries nothing that could be one.
+    ///
+    /// Refusal rather than error on every lookup failure. The alternative — a `Result` that fails
+    /// the whole batch for one bad topic, or leaks which topic was bad — is exactly the probe this
+    /// path must not become. `unwrap_or(false)` is that posture: a domain lookup that cannot answer
+    /// must answer "no".
+    async fn authorize_topic(&self, identity: &Identity, now: Timestamp, topic: &Topic) -> bool {
+        match topic.kind {
+            // A conversation's topic is its private stream — message, receipt, typing and game
+            // events — and only its members may hold it. Membership is the question, and it is
+            // read from the row, never assumed from the frame (section 48).
+            TopicKind::Conversation => {
+                let caller = MessageCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
+                self.messaging
+                    .is_participant(&caller, topic.id)
+                    .await
+                    .unwrap_or(false)
+            }
+            // A room topic carries membership and state events — and, for a room that does not
+            // claim end-to-end, the messages themselves. An empty mask to `authorize` asks only
+            // "may this account be here at all": membership is the gate, and not-a-member and
+            // banned and muted are all the same "no" once the answer is collapsed to a boolean.
+            TopicKind::Room => {
+                let caller = RoomCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
+                self.rooms.authorize(&caller, topic.id, 0).await.is_ok()
+            }
+            // A user topic is a presence stream. The caller's own presence is theirs by right; a
+            // peer's is theirs only when the peer's own `show_last_seen` rule says so — the very
+            // gate the presence read path already consults, so the subscribe door cannot show a
+            // user who the read door hides (section 180).
+            TopicKind::User => {
+                if topic.id == identity.account_id() {
+                    true
+                } else {
+                    let caller = SocialCaller::new(
+                        identity.account_id(),
+                        identity.device_id(),
+                        identity.tier,
+                        now,
+                    );
+                    self.social
+                        .may_interact(&caller, topic.id, Interaction::LastSeen)
+                        .await
+                        .is_ok()
+                }
+            }
+            // Nothing on this node ever broadcasts to either, so subscribing is refused outright.
+            // Granting them would be granting a topic that produces no events but still costs a
+            // held subscription slot.
+            TopicKind::Unknown | TopicKind::Game => false,
         }
     }
 }

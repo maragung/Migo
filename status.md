@@ -21,12 +21,14 @@ begitu resolusinya pindah ke 0.8.17 atau lebih baru, karena ignore yang hidup le
 daripada alasannya adalah cara sebuah advisory sungguhan diloloskan diam-diam.
 
 Terakhir diselaraskan: 27 Agustus 2026. Penyelarasan ini memverifikasi ulang setiap angka di
-bawah terhadap pohon yang bersih, yaitu ketujuh gate, 23 anggota workspace, dan 1553 test Rust
-bersama 10 doc-test dan 251 test TypeScript yang semuanya hijau, lalu mencatat satu temuan baru
-yang bukan berupa test yang gagal melainkan otorisasi yang tidak ada, di bagian 8b. Commit
-sebelumnya memperbaiki job `gates` setelah gate konformans pecah di CI, menambahkan gate ketujuh
-`make pydeps-check` supaya kelas kegagalan itu tidak terulang, dan memberi job advisory satu
-pengecualian beralasan. Sebelum itu enam crate terakhir (`migo-games`, `migo-bots`,
+bawah terhadap pohon yang bersih, yaitu ketujuh gate, 23 anggota workspace, dan 1571 test Rust
+bersama 10 doc-test dan 251 test TypeScript yang semuanya hijau, lalu menutup cacat terbuka
+8b dengan mengimplementasikan `Dispatcher::authorize_topics` di `migo-gateway` dan
+`AppDispatcher` di `migod`, lengkap dengan 3 test di `migo-gateway/tests/gateway.rs` dan 5
+test di `migod/tests/migod.rs` yang menutup keempat perilaku yang dituntut kepala suite gateway.
+Commit sebelumnya memperbaiki job `gates` setelah gate konformans pecah di CI, menambahkan gate
+ketujuh `make pydeps-check` supaya kelas kegagalan itu tidak terulang, dan memberi job advisory
+satu pengecualian beralasan. Sebelum itu enam crate terakhir (`migo-games`, `migo-bots`,
 `migo-federation`, `migo-gateway`, `migo-api`, dan `migod`) berpindah bersama `packages/sdk`,
 `clients/web`, dan `tools/loadgen` ke BUILT.
 
@@ -41,8 +43,8 @@ pengecualian beralasan. Sebelum itu enam crate terakhir (`migo-games`, `migo-bot
 | Belum ada kode sama sekali                                     | 1 komponen                        |
 | Sudah di schema dan codegen, handler belum ditulis             | 3 item                            |
 | Baru ada di dokumen                                            | 16 item                           |
-| Test yang hijau pada commit ini                                | 1553 Rust + 10 doc-test + 251 TS  |
-| Cacat terbuka yang belum diperbaiki                            | 1, lihat bagian 8                 |
+| Test yang hijau pada commit ini                                | 1571 Rust + 10 doc-test + 251 TS  |
+| Cacat terbuka yang belum diperbaiki                            | 0, lihat bagian 8                 |
 
 Tidak ada satu pun test yang gagal, dan tidak ada satu pun `#[ignore]` di seluruh workspace.
 Yang dilewati rustdoc hanyalah enam contoh dokumentasi bertanda ` ```ignore ` pada `migo-bots`,
@@ -77,9 +79,9 @@ satu pun peringatan, `cargo doc` tanpa intra-doc link rusak, dan `cargo test` se
 | `migo-games`               | 6 metode Referee: katalog, mulai, main, selesai, papan skor       | 95         |
 | `migo-bots`                | 7 metode Bots: register, authenticate, rotate_token, izin         | 96         |
 | `migo-federation`          | 17 metode Mesh: handshake, peer, urutan link, antrean keluar      | 71         |
-| `migo-gateway`             | transport realtime: mesin state koneksi, frame, heartbeat (8b)    | 13         |
+| `migo-gateway`             | transport realtime: mesin state koneksi, frame, heartbeat, otorisasi SUBSCRIBE | 16        |
 | `migo-api`                 | permukaan REST/JSON layer 4 yang diizinkan section 118            | 65         |
-| `migod`                    | composition root layer 5, argumen, penolakan startup, graph       | 63         |
+| `migod`                    | composition root layer 5, argumen, penolakan startup, graph, AppDispatcher::authorize_topics | 68 |
 | `packages/protocol`        | paket TypeScript hasil generate dari IDL yang sama                | 11         |
 | `packages/wire`            | codec frame TypeScript, pasangan dari `migo-wire`                 | 16         |
 | `packages/crypto`          | primitif kripto web di atas paket `@noble`                        | 21         |
@@ -93,11 +95,10 @@ satu pun peringatan, `cargo doc` tanpa intra-doc link rusak, dan `cargo test` se
 | `tools/vectors`            | pembangkit dan pemverifikasi vector                               | dipakai CI |
 | `.github/workflows/ci.yml` | seluruh build, lint, test, dan rilis binary                       | jalan      |
 
-Satu baris di tabel itu membawa penanda, yaitu `migo-gateway` dengan `(8b)`. Ia memenuhi
-keempat syarat yang tertulis di atas secara harfiah, dan justru itu masalahnya: syarat itu
-ternyata tidak cukup untuk crate itu, karena sebuah invariant yang ditulis di kepala suite-nya
-tidak punya test dan ternyata juga tidak punya kode. Baris itu wajib dibaca bersama bagian 8b,
-dan tidak boleh dibaca sendiri.
+Tidak ada baris di tabel itu yang membawa penanda pada commit ini. Baris `migo-gateway`
+sebelumnya ditandai `(8b)` karena invariant yang ditulis di kepala suite-nya tidak punya
+test dan ternyata juga tidak punya kode; penanda itu sudah dicabut setelah cacat di baliknya
+diperbaiki dan diberi test pada commit yang sama. Cerita dan daftar test ada di bagian 8.
 
 Angka pada kolom Test adalah jumlah test case yang benar-benar dijalankan `cargo test` dan
 `pnpm -r test` pada commit ini, bukan jumlah atribut `#[test]` di disk. Keduanya tidak selalu
@@ -197,11 +198,15 @@ tetapi belum satu pun byte kodenya ditulis:
 
 ## 8. Cacat produk yang ditemukan oleh tahap test
 
-Tahap test bukan pekerjaan tulis ulang. Sejauh ini ia menemukan empat belas cacat nyata pada
+Tahap test bukan pekerjaan tulis ulang. Sejauh ini ia menemukan lima belas cacat nyata pada
 kode yang sudah dianggap selesai, dan semuanya diperbaiki pada commit yang sama dengan test yang
-menemukannya. Baris kelima belas datang bukan dari test melainkan dari pipeline-nya sendiri, dan
-tetap dicatat di sini karena ia adalah cacat pada sesuatu yang sudah dianggap selesai. Yang
-keenam belas ada di bawah tabel, terpisah, karena ia satu-satunya yang belum diperbaiki.
+menemukannya. Baris keenam belas datang bukan dari test melainkan dari pembacaan crate
+`migo-gateway` untuk menyiapkan test atas invariant otorisasi yang sudah ditulis di kepala
+suite-nya, dan tetap dicatat di sini karena ia adalah cacat pada sesuatu yang sudah dianggap
+selesai: otorisasi SUBSCRIBE tidak ada, bukan rusak. Baris ketujuh belas datang bukan dari
+test melainkan dari pipeline-nya sendiri. Yang kedelapan belas — cacat terbuka 8b — sudah
+diperbaiki pada commit ini, dan itulah commit yang menandai `migo-gateway` layak tanpa
+penanda.
 
 ### 8a. Sudah diperbaiki pada commit yang sama dengan penemuannya
 
@@ -222,62 +227,72 @@ keenam belas ada di bawah tabel, terpisah, karena ia satu-satunya yang belum dip
 | `clients/web`     | ketika server menahan pesan manusia, SDK melipat pesan kosong menjadi symbol mesin dan UI menampilkannya, sehingga NOT_FOUND dan PRIVACY_RESTRICTED yang sengaja dibuat identik menjadi dapat dibedakan                              | pesan server hanya ditampilkan bila benar-benar ada, selebihnya satu baris generik                                                                      |
 | `tools/loadgen`   | logger menulis barisnya tanpa redaksi dan laporan menggemakan URL server yang utuh beserta userinfo-nya                                                                                                                              | setiap baris logger lewat `redact`, dan laporan melewatkan kedua URL lewat `sanitizeUrl`                                                                |
 | `ci.yml`          | menyematkan interpreter Python untuk satu gate ikut menyembunyikan modul yang kebetulan sudah ada di image runner, sehingga generator vector kripto kehilangan `cryptography` dan gate konformans pecah di CI padahal hijau di lokal | kedua modul dipasang eksplisit dalam satu langkah, dan `make pydeps-check` membandingkan daftar itu dengan impor `tools/` yang sebenarnya di kedua arah |
+| `migo-gateway`    | `handle_subscribe` menitipkan otorisasi pada isi frame: siapa pun yang lolos handshake bisa menyebut topik apa pun dan mulai menerima fan-out percakapan, room, dan presence orang lain, dan satu frame yang dibayar satu tagihan rate limiter dapat meminta puluhan ribu topik sekaligus | satu metode batch `authorize_topics` di trait `Dispatcher` dengan default menolak segalanya, `TopicRequest` yang tidak bisa membalas atau mempublikasikan sehingga tidak dapat dipakai sebagai `ClientContext` secara tak sengaja, pemotongan pada `MAX_SUBSCRIPTIONS` sebelum domain ditanya, daftar `rejected` yang sama untuk tiga alasan dan tanpa alasan agar bukan-anggota tidak dapat dibedakan dari tidak-ada, dan `AppDispatcher` di `migod` yang memetakan Conversation ke `Messaging::is_participant`, Room ke `Roomkeeper::authorize` dengan mask kosong, User ke akun pemanggil sendiri atau `Social::may_interact` dengan `Interaction::LastSeen`, dan Unknown serta Game ke penolakan; tiga test gateway dan lima test migod di-commit yang sama menutup keempat perilaku yang dituntut kepala suite |
 
-### 8b. Ditemukan dan belum diperbaiki
+### 8b. Sudah ditutup pada commit ini
 
-Satu cacat, dan bobotnya tidak sebanding dengan jumlahnya. Ia ditemukan bukan oleh test yang
-gagal melainkan oleh pembacaan crate `migo-gateway` untuk menyiapkan test atas invariant
-otorisasi yang disebut kepala suite-nya, dan yang ditemukan bukan test yang kurang melainkan
-otorisasi yang tidak ada.
+Subbagian ini pada commit sebelumnya berjudul "Ditemukan dan belum diperbaiki" dan memegang
+satu cacat terbuka, yaitu `migo-gateway` yang menitipkan otorisasi `SUBSCRIBE` pada isi frame.
+Commit ini menutupnya. Cerita singkat tentang apa yang dulu ada di sini layak disimpan
+sebab ia menjelaskan mengapa aturan di bagian 9 nomor 2 tidak cukup tanpa test yang berani
+bertanya.
 
 `handle_subscribe` di `server/crates/migo-gateway/src/connection.rs` menagih rate limiter,
-membaca `SubscribeRequest`, lalu memanggil `hub.subscribe` dengan daftar topic dari frame apa
-adanya. `Hub::subscribe` di `src/hub.rs` hanya membandingkan jumlah langganan yang dipegang
-sesi terhadap `max_subscriptions`. Trait `Dispatcher` di `src/dispatch.rs` punya tepat satu
-metode, yaitu `dispatch`, dan tidak punya kait otorisasi, sehingga tidak ada satu pun crate
-domain yang pernah ditanya apakah pemanggil berhak atas sebuah topic. Akibatnya, sesi mana pun
-yang lolos handshake dapat menyebut `Topic` apa saja dan mulai menerima fan-out-nya:
+membaca `SubscribeRequest`, lalu memanggil `hub.subscribe` dengan daftar topic dari frame
+apa adanya. `Hub::subscribe` di `src/hub.rs` hanya membandingkan jumlah langganan yang
+dipegang sesi terhadap `MAX_SUBSCRIPTIONS`. Trait `Dispatcher` di `src/dispatch.rs` punya
+tepat satu metode, yaitu `dispatch`, dan tidak punya kait otorisasi, sehingga tidak ada satu
+pun crate domain yang pernah ditanya apakah pemanggil berhak atas sebuah topic. Akibatnya,
+sesi mana pun yang lolos handshake dapat menyebut `Topic` apa saja dan mulai menerima
+fan-out-nya:
 
-- `TopicKind::Conversation` memberi seluruh metadata percakapan orang lain, yaitu `message_id`,
-  `conversation_id`, `seq`, `sender_id`, `sender_device`, `kind`, `created_at`, `reply_to`,
-  `edited_at`, penanda hapus, dan `sender_key_id`, beserta `envelope` tersegel apa adanya, plus
-  tanda baca dan tanda sedang menulis serta event game pada percakapan itu.
-- `TopicKind::Room` memberi event anggota dan keadaan sebuah room, dan untuk room yang memang
-  tidak mengklaim enkripsi ujung ke ujung berarti isinya juga.
-- `TopicKind::User` memberi transisi presence sebuah akun tanpa melihat blokir maupun setelan
-  `show_last_seen`, yang berarti section 180 dilanggar melalui pintu ini meskipun jalur baca
-  presence sendiri menghormatinya. Yang tidak bocor hanyalah Invisible, karena
+- `TopicKind::Conversation` memberi seluruh metadata percakapan orang lain, yaitu
+  `message_id`, `conversation_id`, `seq`, `sender_id`, `sender_device`, `kind`, `created_at`,
+  `reply_to`, `edited_at`, penanda hapus, dan `sender_key_id`, beserta `envelope` tersegel
+  apa adanya, plus tanda baca dan tanda sedang menulis serta event game pada percakapan itu.
+- `TopicKind::Room` memberi event anggota dan keadaan sebuah room, dan untuk room yang
+  memang tidak mengklaim enkripsi ujung ke ujung berarti isinya juga.
+- `TopicKind::User` memberi transisi presence sebuah akun tanpa melihat blokir maupun
+  setelan `show_last_seen`, yang berarti section 180 dilanggar melalui pintu ini meskipun
+  jalur baca presence sendiri menghormatinya. Yang tidak bocor hanyalah Invisible, karena
   `visible_state` sudah memproyeksikannya menjadi Offline sebelum penyiaran.
 
-Ada cacat kedua yang menempel pada yang pertama. Sebuah frame hanya dibatasi
-`MAX_FRAME_BYTES`, sementara satu `Topic` hanya berbiaya sekitar 18 byte di wire, jadi satu
-frame dapat menyebut puluhan ribu topic. Hari ini itu baru soal biaya di `Hub`; begitu
-otorisasi benar-benar menanyai crate domain, itu menjadi pengali beban terhadap database lewat
+Cacat kedua yang menempel adalah biaya. Sebuah frame hanya dibatasi `MAX_FRAME_BYTES`,
+sementara satu `Topic` hanya berbiaya sekitar 18 byte di wire, jadi satu frame dapat
+menyebut puluhan ribu topic. Pada kode yang lama itu baru soal biaya di `Hub`; begitu
+otorisasi benar-benar menanyai crate domain, ia menjadi pengali beban terhadap database lewat
 satu frame yang dibayar satu tagihan rate limiter.
 
-Perbaikannya sudah dirancang dan setengah ditulis, lalu disimpan di `git stash` ketika arah
-kerja dialihkan ke dokumen ini, jadi ia belum ada di pohon dan belum ada di commit mana pun.
-Bentuknya: satu metode batch `authorize_topics` pada trait `Dispatcher` yang sudah ada, bukan
-port ketiga, sehingga pernyataan migo.md bahwa gateway bicara ke domain lewat tepat dua trait
-tetap benar; default trait yang menolak segalanya sehingga implementor yang lupa gagal tertutup
-dan bukan terbuka; pemotongan daftar topic pada `MAX_SUBSCRIPTIONS` sebelum domain ditanya,
-yang menutup pengali di atas; penolakan yang dituang ke daftar `rejected` yang sudah ada dan
-tetap tanpa alasan, sehingga bukan anggota tidak dapat dibedakan dari tidak ada, sesuai section
-48; serta `AppDispatcher` di `migod` yang memetakan Conversation ke keanggotaan percakapan, Room
-ke `Roomkeeper::authorize` dengan mask kosong, User ke akun pemanggil sendiri atau
-`Social::may_interact` dengan `Interaction::LastSeen`, dan Unknown serta Game ke penolakan
-karena tidak ada yang pernah menyiarkan ke sana.
+Perbaikannya sekarang ada di pohon dan diuji. Bentuknya: satu metode batch
+`authorize_topics` pada trait `Dispatcher` yang sudah ada, bukan port ketiga, sehingga
+pernyataan migo.md bahwa gateway bicara ke domain lewat tepat dua trait tetap benar; default
+trait yang menolak segalanya sehingga implementor yang lupa gagal tertutup dan bukan terbuka;
+`TopicRequest` yang tidak bisa membalas atau mempublikasikan sehingga tidak dapat dipakai
+sebagai `ClientContext` secara tak sengaja; pemotongan daftar topic pada `MAX_SUBSCRIPTIONS`
+sebelum domain ditanya, yang menutup pengali di atas; penolakan yang dituang ke daftar
+`rejected` yang sudah ada dan tetap tanpa alasan, sehingga bukan anggota tidak dapat
+dibedakan dari tidak ada, sesuai section 48; serta `AppDispatcher` di `migod` yang
+memetakan Conversation ke `Messaging::is_participant`, Room ke `Roomkeeper::authorize` dengan
+mask kosong, User ke akun pemanggil sendiri atau `Social::may_interact` dengan
+`Interaction::LastSeen`, dan Unknown serta Game ke penolakan karena tidak ada yang pernah
+menyiarkan ke sana.
 
-Bagian 1 tetap mencantumkan `migo-gateway`, dan itu bukan kelalaian melainkan bukti bahwa
-syaratnya kurang. Crate itu benar-benar lulus `cargo build`, `cargo clippy --all-targets`,
-`cargo doc`, dan `cargo test`, yaitu keempat hal yang bagian 1 minta, sementara cacat di atas
-lolos melewati keempatnya tanpa satu pun berubah warna, sebab tidak ada test yang menanyakan
-apakah topic yang bukan milik pemanggil ditolak. Aturan di bagian 9 nomor 2 memindahkan sebuah
-item ke selesai berdasarkan test yang lulus, dan itu hanya sekuat pertanyaan yang test-nya
-berani ajukan. Karena itu barisnya diberi penanda alih-alih dipindahkan: memindahkannya ke
-belakang dilarang aturan nomor 3, sedangkan membiarkannya tanpa tanda akan membuat tabel
-mengatakan sesuatu yang tidak benar. Penanda itu dicabut pada commit yang memasukkan perbaikan
-beserta test-nya, tidak lebih awal.
+Bagian 1 sebelumnya tetap mencantumkan `migo-gateway` dengan penanda `(8b)`, dan itu bukan
+kelalaian melainkan bukti bahwa syaratnya kurang. Crate itu benar-benar lulus
+`cargo build`, `cargo clippy --all-targets`, `cargo doc`, dan `cargo test`, yaitu keempat
+hal yang bagian 1 minta, sementara cacat di atas lolos melewati keempatnya tanpa satu pun
+berubah warna, sebab tidak ada test yang menanyakan apakah topic yang bukan milik pemanggil
+ditolak. Aturan di bagian 9 nomor 2 memindahkan sebuah item ke selesai berdasarkan test
+yang lulus, dan itu hanya sekuat pertanyaan yang test-nya berani ajukan. Karena itu barisnya
+diberi penanda alih-alih dipindahkan: memindahkannya ke belakang dilarang aturan nomor 3,
+sedangkan membiarkannya tanpa tanda akan membuat tabel mengatakan sesuatu yang tidak benar.
+Penanda itu dicabut pada commit ini, dan bukan lebih awal: ia mengikuti perbaikan dan
+test-nya, bukan mendahului keduanya. Test yang menutup keempat perilaku itu ada di tiga
+kasus `migo-gateway/tests/gateway.rs` (dispatcher null, dispatcher yang hanya mengabulkan
+topik sendiri, dispatcher yang mengabulkan segalanya dan diuji terhadap langit-langit) dan
+lima kasus `migod/tests/migod.rs` yang menggerakkan `AppDispatcher` di atas `App` in-memory
+sungguhan lewat domain nyata, sehingga setiap perilaku yang dituntut kepala suite gateway
+kini punya test dan kode.
 
 ## 9. Aturan yang mengikat status ini
 

@@ -116,6 +116,36 @@ impl Dropped {
     }
 }
 
+/// Why a subscription a client asked for was not granted.
+///
+/// The two reasons stay apart because they mean different things to whoever reads the dashboard:
+/// the cap is one client subscribing to too much at once, and an unauthorised topic is one client
+/// asking for something that is not theirs — the first is a client to fix, the second is a client
+/// to watch. Both series are aggregates that name nobody: no account, no session, and no topic id
+/// ever reaches a label here (section 174).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Refused {
+    /// The session already held the per-session subscription ceiling.
+    Cap,
+    /// The dispatcher did not grant the topic to this caller.
+    Unauthorized,
+}
+
+impl Refused {
+    pub(crate) const ALL: [Self; 2] = [Self::Cap, Self::Unauthorized];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Cap => "cap",
+            Self::Unauthorized => "unauthorized",
+        }
+    }
+
+    pub(crate) const fn index(self) -> usize {
+        self as usize
+    }
+}
+
 /// How a resume attempt ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ResumeOutcome {
@@ -189,6 +219,7 @@ pub(crate) struct Meters {
     resume: Vec<Arc<Counter>>,
     handshake_rejected: Vec<Arc<Counter>>,
     rate_limited: Arc<Counter>,
+    subscriptions_refused: Vec<Arc<Counter>>,
     sessions_live: Arc<Gauge>,
     subscriptions_live: Arc<Gauge>,
 }
@@ -265,6 +296,14 @@ impl Meters {
                 "Frames refused by the rate limiter.",
                 &[],
             ),
+            subscriptions_refused: per_variant(
+                registry,
+                "migo_gateway_subscriptions_refused_total",
+                "Subscriptions asked for and not granted, by reason.",
+                "reason",
+                &Refused::ALL,
+                |reason| reason.label(),
+            ),
             sessions_live: registry.gauge(
                 "migo_gateway_sessions_live",
                 "Sessions currently connected.",
@@ -323,6 +362,15 @@ impl Meters {
     pub(crate) fn subscriptions_added(&self, n: u64) {
         for _ in 0..n {
             self.subscriptions_live.inc();
+        }
+    }
+
+    pub(crate) fn subscriptions_refused(&self, reason: Refused, n: u64) {
+        if n == 0 {
+            return;
+        }
+        if let Some(counter) = self.subscriptions_refused.get(reason.index()) {
+            counter.add(n);
         }
     }
 

@@ -19,6 +19,17 @@
 //! subscribers (encoded once, correlation `0`). A handler either answers with `reply`/`reply_error`
 //! and returns `Ok(())`, or returns `Err` and lets the driver send the error frame — both are
 //! valid, and the driver never sends a second error for an `Ok` return.
+//!
+//! # The second question a dispatcher answers
+//!
+//! `SUBSCRIBE` is a lifecycle opcode the driver owns, so it never reaches
+//! [`dispatch`](Dispatcher::dispatch) — but *which* topics a caller may receive is a domain
+//! question the gateway cannot answer, because a topic id is a conversation, a room or an account
+//! and this crate knows what none of those are. So the driver asks the same trait, through
+//! [`authorize_topics`](Dispatcher::authorize_topics), and files only what comes back granted. The
+//! subscription registry is the one place where a frame's own contents would otherwise decide what
+//! the server sends back: authorization here is *read* from the domain, never trusted from the
+//! frame.
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -232,6 +243,52 @@ impl<'a> ClientContext<'a> {
     }
 }
 
+/// Everything a [`Dispatcher`] is told about one `SUBSCRIBE`: who is asking, on which session, and
+/// when.
+///
+/// Deliberately not a [`ClientContext`]. An authorization decision has no business replying to the
+/// caller or publishing to a topic, and a type that cannot do either cannot do it by accident. The
+/// topics themselves are passed alongside this, as a slice, because the answer has to be a batch:
+/// one round trip per topic would put 512 domain reads behind a single frame.
+pub struct TopicRequest<'a> {
+    identity: &'a Identity,
+    session_id: Id,
+    now: Timestamp,
+}
+
+impl<'a> TopicRequest<'a> {
+    /// Assembles the context for one subscription decision.
+    ///
+    /// Called by the connection driver on every `SUBSCRIBE`, and by the composition root's
+    /// integration harness when it drives a dispatcher directly against a built graph.
+    #[must_use]
+    pub fn new(identity: &'a Identity, session_id: Id, now: Timestamp) -> Self {
+        Self {
+            identity,
+            session_id,
+            now,
+        }
+    }
+
+    /// The authenticated identity behind the `SUBSCRIBE`.
+    #[must_use]
+    pub fn identity(&self) -> &Identity {
+        self.identity
+    }
+
+    /// The id of the session that would hold the subscriptions.
+    #[must_use]
+    pub fn session_id(&self) -> Id {
+        self.session_id
+    }
+
+    /// The server's notion of now, sampled once when the frame arrived.
+    #[must_use]
+    pub fn now(&self) -> Timestamp {
+        self.now
+    }
+}
+
 /// The one trait a composition root implements to give the transport its application logic.
 ///
 /// The gateway calls [`dispatch`](Dispatcher::dispatch) for every application opcode on a
@@ -255,6 +312,35 @@ pub trait Dispatcher: Send + Sync {
     /// Returns the error to send back to the client (reusing the request's opcode and
     /// correlation) when the handler chooses not to send its own reply.
     async fn dispatch(&self, context: &ClientContext<'_>, frame: &Frame) -> Result<(), CoreError>;
+
+    /// Decides which of the topics a `SUBSCRIBE` asked for this caller may actually receive.
+    ///
+    /// Returns one verdict per requested topic, in the requested order: `true` grants the
+    /// subscription, `false` refuses it. The driver files the granted ones and reports the rest in
+    /// the response's `rejected` list, which carries no reason — so a topic the caller may not have
+    /// and a topic that does not exist are the same answer, and `SUBSCRIBE` cannot be used to probe
+    /// for which conversations or rooms are real. That conflation is the point, not an omission:
+    /// it is the same one every read path in the domain crates already makes.
+    ///
+    /// # Why the default refuses everything
+    ///
+    /// A dispatcher that has not thought about topics gets a server that delivers no events, which
+    /// is a loud, harmless failure that shows up the first time anybody subscribes. The other
+    /// default — granting what was asked for — is a silent one: every session would receive every
+    /// conversation it can name, and nothing in the transport would look wrong. So this fails
+    /// closed, and [`NoopDispatcher`] inherits that: a node with no domain wired in has nothing to
+    /// authorize against and therefore authorizes nothing.
+    ///
+    /// # Not an error path
+    ///
+    /// A mask rather than a `Result`: a batch answer cannot report per-topic errors without either
+    /// failing the whole frame for one bad topic or leaking which topic was bad. An implementation
+    /// whose own lookup fails should answer `false` for the topics it could not decide — the same
+    /// posture as everything else here, refuse rather than guess.
+    async fn authorize_topics(&self, request: &TopicRequest<'_>, topics: &[Topic]) -> Vec<bool> {
+        let _ = request;
+        vec![false; topics.len()]
+    }
 }
 
 /// A dispatcher with no application logic: every application opcode is answered `FEATURE_DISABLED`.
@@ -262,6 +348,11 @@ pub trait Dispatcher: Send + Sync {
 /// This is the gateway's self-contained default, so it stands up and speaks the full transport
 /// protocol without any domain crate wired in — useful for transport-level tests and for a node
 /// deliberately serving only the handshake surface. A real deployment supplies its own.
+///
+/// It grants no topic either, by inheriting
+/// [`authorize_topics`](Dispatcher::authorize_topics)'s refusing default: there is no domain here
+/// to ask whether a conversation exists or who is in it, and a node that cannot answer that
+/// question must not answer it optimistically.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoopDispatcher;
 

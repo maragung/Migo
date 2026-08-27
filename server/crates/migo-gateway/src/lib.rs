@@ -107,7 +107,7 @@ use crate::hub::Hub;
 use crate::metrics::Meters;
 use crate::outbound::ResumeBuffer;
 
-pub use crate::dispatch::{ClientContext, Dispatcher, NoopDispatcher};
+pub use crate::dispatch::{ClientContext, Dispatcher, NoopDispatcher, TopicRequest};
 pub use crate::transport::{Transport, TransportError};
 
 /// A running transport node.

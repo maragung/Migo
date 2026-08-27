@@ -789,3 +789,302 @@ async fn filesystem_storage_reports_an_absent_object_as_absent() {
         .expect("an absent object is not an error");
     assert!(head.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Area 7: the gateway's `SUBSCRIBE` authorization seam reaches the domain.
+//
+// The test file that proves the contract the four other crates uphold is
+// `migo-gateway/tests/gateway.rs`. Here we drive the same seam through the
+// real `AppDispatcher` built by `migod`, against the real domain services
+// against the in-memory store, so the seam is exercised end to end: a
+// `TopicRequest` goes in, the dispatcher's `authorize_topics` consults the
+// store, and the verdict is what the wire would carry.
+// ---------------------------------------------------------------------------
+
+use migo_auth::Identity as AuthIdentity;
+use migo_gateway::{Dispatcher as GatewayDispatcher, TopicRequest as GatewayTopicRequest};
+use migo_messaging::Caller as MessageCaller;
+use migo_protocol::{ConversationKind, RoomKind, Topic, TopicKind};
+use migo_ratelimit::TrustTier;
+use migo_rooms::NewRoomRequest;
+use migod::dispatch::AppDispatcher;
+
+/// The `Identity` a `SUBSCRIBE` arrives with, built from a registered account so the dispatcher's
+/// domain calls (membership, privacy gate) have real rows to read.
+///
+/// Device and session ids are not what the dispatcher looks at — only the account id and the
+/// privacy/membership rows behind it matter — so they only have to be non-nil. Two reserved
+/// sentinel values keep the seam honest with the messages a real gateway would forward, without
+/// requiring the test to mint and track a third id alongside the account.
+fn identity_for(account: Id, username: &str) -> AuthIdentity {
+    AuthIdentity {
+        claims: migo_auth::Claims {
+            account_id: account,
+            device_id: id(0xD1_0000),
+            session_id: id(0x5E_0000),
+            capabilities: migo_auth::Capabilities::NONE,
+            issued_at: Timestamp::from_millis(1),
+            expires_at: Timestamp::from_millis(1_700_000_000_000),
+            authenticated_at: Timestamp::from_millis(1),
+        },
+        username: username.to_string(),
+        tier: TrustTier::Established,
+        capabilities: migo_auth::Capabilities::NONE,
+    }
+}
+
+fn id(v: u128) -> Id {
+    Id::from(v)
+}
+
+fn now() -> Timestamp {
+    Timestamp::from_millis(1)
+}
+
+/// A real `AppDispatcher` wired to the same services `App::build` wires the production gateway
+/// to. `App` does not re-export the dispatcher it built — `GatewayServices::dispatcher` holds
+/// the only public reference — so the harness re-constructs the equivalent value from the
+/// service handles `App` does expose. The two instances are functionally interchangeable
+/// because the only state `AppDispatcher` holds is the six `Arc<dyn Trait>` handles, and those
+/// are what we re-use; the test is therefore a property of the seam, not of the binary's
+/// specific pointer to it.
+struct DispatcherHarness {
+    app: migod::App,
+    dispatcher: AppDispatcher,
+}
+
+async fn dispatcher() -> DispatcherHarness {
+    let app = build_default_app().await;
+    let dispatcher = AppDispatcher::new(
+        app.messaging.clone(),
+        app.presence.clone(),
+        app.rooms.clone(),
+        app.keys.clone(),
+        app.social.clone(),
+        app.games.clone(),
+    );
+    DispatcherHarness { app, dispatcher }
+}
+
+/// A direct conversation between `a` and `b`, the simplest conversation the messaging service
+/// offers, and the one whose `is_participant` row the dispatcher asks.
+async fn direct_conversation(app: &migod::App, a: Id, b: Id) -> Id {
+    let caller = MessageCaller::new(a, id(0xD1_0001), TrustTier::Established, now());
+    let summary = app
+        .messaging
+        .create(
+            &caller,
+            migo_protocol::ConversationCreateRequest {
+                kind: ConversationKind::Direct,
+                members: vec![a, b],
+                title: None,
+            },
+        )
+        .await
+        .expect("a direct conversation between two real accounts must build");
+    summary.conversation_id
+}
+
+#[tokio::test]
+async fn authorize_topics_grants_the_caller_their_own_user_topic() {
+    let h = dispatcher().await;
+    let alice = registered_account(&h.app, "alice").await;
+    let identity = identity_for(alice, "alice");
+
+    let verdict = h
+        .dispatcher
+        .authorize_topics(
+            &GatewayTopicRequest::new(&identity, id(0x5E_0000), now()),
+            &[Topic {
+                kind: TopicKind::User,
+                id: alice,
+            }],
+        )
+        .await;
+
+    assert_eq!(
+        verdict,
+        vec![true],
+        "the caller's own presence topic is always theirs"
+    );
+}
+
+#[tokio::test]
+async fn authorize_topics_grants_conversation_membership() {
+    let h = dispatcher().await;
+    let alice = registered_account(&h.app, "alice").await;
+    let bob = registered_account(&h.app, "bob").await;
+    let carol = registered_account(&h.app, "carol").await;
+    let conversation = direct_conversation(&h.app, alice, bob).await;
+
+    let alice_identity = identity_for(alice, "alice");
+    let carol_identity = identity_for(carol, "carol");
+
+    let alice_verdict = h
+        .dispatcher
+        .authorize_topics(
+            &GatewayTopicRequest::new(&alice_identity, id(0x5E_0000), now()),
+            &[Topic {
+                kind: TopicKind::Conversation,
+                id: conversation,
+            }],
+        )
+        .await;
+    assert_eq!(
+        alice_verdict,
+        vec![true],
+        "a member of the conversation may subscribe to it"
+    );
+
+    let carol_verdict = h
+        .dispatcher
+        .authorize_topics(
+            &GatewayTopicRequest::new(&carol_identity, id(0x5E_0000), now()),
+            &[Topic {
+                kind: TopicKind::Conversation,
+                id: conversation,
+            }],
+        )
+        .await;
+    assert_eq!(
+        carol_verdict,
+        vec![false],
+        "a stranger to the conversation is not granted its topic"
+    );
+
+    // An id that no conversation has ever used is refused, indistinguishably from "you are not
+    // in it" — the probe-resisting conflation section 48 demands.
+    let absent = h
+        .dispatcher
+        .authorize_topics(
+            &GatewayTopicRequest::new(&alice_identity, id(0x5E_0000), now()),
+            &[Topic {
+                kind: TopicKind::Conversation,
+                id: id(0xDEAD_BEEF),
+            }],
+        )
+        .await;
+    assert_eq!(
+        absent,
+        vec![false],
+        "an absent conversation is refused exactly the same way as a non-member"
+    );
+}
+
+#[tokio::test]
+async fn authorize_topics_grants_room_membership() {
+    let h = dispatcher().await;
+    let owner = registered_account(&h.app, "room_owner").await;
+    let guest = registered_account(&h.app, "room_guest").await;
+
+    // The owner creates a public room; the guest never asks to join it. `authorize` with an
+    // empty mask is the membership check the dispatcher performs.
+    let room_caller = migo_rooms::Caller::new(owner, id(0xD1_0001), TrustTier::Established, now());
+    let room = h
+        .app
+        .rooms
+        .create(
+            &room_caller,
+            NewRoomRequest {
+                slug: "presence-room".to_string(),
+                name: "Presence Room".to_string(),
+                topic: None,
+                kind: RoomKind::Public,
+                max_members: None,
+            },
+        )
+        .await
+        .expect("a public room with a unique slug and an authenticated owner must build");
+
+    let owner_identity = identity_for(owner, "owner");
+    let guest_identity = identity_for(guest, "guest");
+
+    let owner_verdict = h
+        .dispatcher
+        .authorize_topics(
+            &GatewayTopicRequest::new(&owner_identity, id(0x5E_0000), now()),
+            &[Topic {
+                kind: TopicKind::Room,
+                id: room.room_id,
+            }],
+        )
+        .await;
+    assert_eq!(
+        owner_verdict,
+        vec![true],
+        "the owner of a room may hold its topic"
+    );
+
+    let guest_verdict = h
+        .dispatcher
+        .authorize_topics(
+            &GatewayTopicRequest::new(&guest_identity, id(0x5E_0000), now()),
+            &[Topic {
+                kind: TopicKind::Room,
+                id: room.room_id,
+            }],
+        )
+        .await;
+    assert_eq!(
+        guest_verdict,
+        vec![false],
+        "a non-member is refused the room's topic"
+    );
+}
+
+#[tokio::test]
+async fn authorize_topics_honours_the_presence_privacy_gate() {
+    let h = dispatcher().await;
+    let alice = registered_account(&h.app, "alice").await;
+    let bob = registered_account(&h.app, "bob").await;
+
+    // The default privacy for a fresh profile is `Friends` (1) on `show_last_seen`, so a
+    // stranger cannot see bob's last-seen time. Authorising bob's presence topic for alice —
+    // who is not bob's friend — must therefore come back false.
+    let alice_identity = identity_for(alice, "alice");
+
+    let verdict = h
+        .dispatcher
+        .authorize_topics(
+            &GatewayTopicRequest::new(&alice_identity, id(0x5E_0000), now()),
+            &[Topic {
+                kind: TopicKind::User,
+                id: bob,
+            }],
+        )
+        .await;
+    assert_eq!(
+        verdict,
+        vec![false],
+        "presence is gated by `show_last_seen`, and a stranger defaults to denied"
+    );
+}
+
+#[tokio::test]
+async fn authorize_topics_refuses_unknown_and_game_topics() {
+    let h = dispatcher().await;
+    let alice = registered_account(&h.app, "alice").await;
+    let alice_identity = identity_for(alice, "alice");
+
+    let verdict = h
+        .dispatcher
+        .authorize_topics(
+            &GatewayTopicRequest::new(&alice_identity, id(0x5E_0000), now()),
+            &[
+                Topic {
+                    kind: TopicKind::Unknown,
+                    id: id(0x1234),
+                },
+                Topic {
+                    kind: TopicKind::Game,
+                    id: id(0x5678),
+                },
+            ],
+        )
+        .await;
+    assert_eq!(
+        verdict,
+        vec![false, false],
+        "no broadcast targets `Unknown` or `Game` topics, so both are refused"
+    );
+}

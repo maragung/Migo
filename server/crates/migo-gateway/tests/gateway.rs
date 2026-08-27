@@ -40,15 +40,17 @@ use migo_auth::{
 use migo_cache::MemoryCache;
 use migo_core::config::{Config, GatewayConfig};
 use migo_core::metrics::Registry;
-use migo_core::{Clock, Id, ManualClock, SeededRandom, Shutdown, Timestamp};
+use migo_core::{Clock, Error, Id, ManualClock, SeededRandom, Shutdown, Timestamp};
 use migo_protocol::{
     codes, fault, from_frame, to_frame, CloseReason, Encode, Error as ErrorMessage, Frame,
-    FrameHeader, Hello, NodeInfo, Opcode, Ping, ReconnectHint, Welcome, PROTOCOL_VERSION,
+    FrameHeader, Hello, NodeInfo, Opcode, Ping, ReconnectHint, SubscribeRequest, SubscribeResponse,
+    Topic, TopicKind, Welcome, PROTOCOL_VERSION,
 };
 use migo_ratelimit::{CacheRateLimiter, Policies, SharedRateLimiter, TrustTier};
 
 use migo_gateway::{
-    Dispatcher, Gateway, GatewayServices, NoopDispatcher, Transport, TransportError,
+    ClientContext, Dispatcher, Gateway, GatewayServices, NoopDispatcher, TopicRequest, Transport,
+    TransportError,
 };
 
 // ---------------------------------------------------------------------------
@@ -937,5 +939,211 @@ async fn two_missed_heartbeats_close_a_silent_session_and_release_its_slot() {
     assert!(
         errors_in(&pipe.sent()).is_empty(),
         "there is nobody left to read an explanation, so none is written"
+    );
+}
+
+// ===========================================================================
+// Invariant — authorization is read from the dispatcher, never trusted from the frame.
+//
+// `SUBSCRIBE` is the one place a frame's own list of topics would otherwise decide what the
+// server sends back. The gateway cannot tell a conversation from a room from an account, so it
+// asks the Dispatcher — the seam that reaches the domain — and files only what comes back
+// granted. The three tests below drive a `Ready` session and script a `SUBSCRIBE` over the wire,
+// with three dispatchers that answer the same question three different ways, and assert the
+// session holds exactly and only what the domain granted.
+// ===========================================================================
+
+/// A dispatcher that answers every authorization question "yes".
+///
+/// Used to isolate the gateway's own bookkeeping — the ceiling and the keeping of granted topics
+/// — from any notion of who owns what: with everything granted, what is rejected can only be the
+/// surplus over the per-session cap.
+#[derive(Clone, Copy, Debug, Default)]
+struct GrantAll;
+
+#[async_trait]
+impl Dispatcher for GrantAll {
+    async fn dispatch(&self, _context: &ClientContext<'_>, _frame: &Frame) -> Result<(), Error> {
+        Ok(())
+    }
+
+    async fn authorize_topics(&self, _request: &TopicRequest<'_>, topics: &[Topic]) -> Vec<bool> {
+        vec![true; topics.len()]
+    }
+}
+
+/// A dispatcher that grants exactly the caller's own `User` topic and nothing else.
+///
+/// This is the shape of the invariant the suite's preamble names: a topic that is not the
+/// caller's is rejected. Everything a stranger could name — a conversation, a room, another
+/// account's presence — comes back denied, and because the transport conflates the reasons the
+/// same way the domain crates do, the rejection carries no hint of which of those it is.
+#[derive(Clone, Copy, Debug, Default)]
+struct OwnOnly;
+
+#[async_trait]
+impl Dispatcher for OwnOnly {
+    async fn dispatch(&self, _context: &ClientContext<'_>, _frame: &Frame) -> Result<(), Error> {
+        Ok(())
+    }
+
+    async fn authorize_topics(&self, request: &TopicRequest<'_>, topics: &[Topic]) -> Vec<bool> {
+        let account = request.identity().account_id();
+        topics
+            .iter()
+            .map(|topic| topic.kind == TopicKind::User && topic.id == account)
+            .collect()
+    }
+}
+
+/// The single non-error `SUBSCRIBE` response the server sent, decoded.
+#[track_caller]
+fn subscribe_response_in(frames: &[Frame]) -> SubscribeResponse {
+    let frame = frames
+        .iter()
+        .find(|frame| {
+            frame.header.opcode == Opcode::Subscribe.to_wire() && !frame.header.is_error()
+        })
+        .expect("a SUBSCRIBE request must be answered with a SUBSCRIBE response");
+    from_frame::<SubscribeResponse>(frame).expect("the SUBSCRIBE response must decode")
+}
+
+#[tokio::test]
+async fn a_subscribe_on_a_null_dispatcher_grants_nothing() {
+    // The default dispatcher a bare gateway stands up with has no domain to ask, so it answers
+    // the refusing default. A pre-authenticated client names two topics; the session must end
+    // holding neither.
+    let h = Harness::new();
+    let pipe = Pipe::new();
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+    pipe.client(
+        Opcode::Subscribe,
+        2,
+        &SubscribeRequest {
+            topics: vec![
+                Topic {
+                    kind: TopicKind::Conversation,
+                    id: id(0xBEEF),
+                },
+                Topic {
+                    kind: TopicKind::User,
+                    id: id(0xCAFE),
+                },
+            ],
+        },
+    );
+
+    h.serve(&pipe).await;
+
+    let response = subscribe_response_in(&pipe.sent());
+    assert!(
+        response.accepted.is_empty(),
+        "a dispatcher with no domain grants no topic"
+    );
+    assert_eq!(
+        response.rejected.as_ref().map(Vec::len),
+        Some(2),
+        "every topic the domain cannot grant is rejected"
+    );
+}
+
+#[tokio::test]
+async fn a_subscribe_keeps_only_the_topics_that_belong_to_the_caller() {
+    // The owned-topic invariant: of the three topics asked for, exactly the caller's own is
+    // accepted; the stranger's conversation and room are both rejected, and because the reasons
+    // are conflated, neither rejection says why.
+    let mut builder = HarnessBuilder::new();
+    builder.dispatcher = Arc::new(OwnOnly);
+    let h = builder.build();
+    let pipe = Pipe::new();
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+    let mine = Topic {
+        kind: TopicKind::User,
+        id: id(ACCOUNT),
+    };
+    let a_strangers_room = Topic {
+        kind: TopicKind::Room,
+        id: id(0xCAFE),
+    };
+    let a_strangers_conversation = Topic {
+        kind: TopicKind::Conversation,
+        id: id(0xBEEF),
+    };
+    pipe.client(
+        Opcode::Subscribe,
+        3,
+        &SubscribeRequest {
+            topics: vec![
+                a_strangers_room.clone(),
+                mine.clone(),
+                a_strangers_conversation.clone(),
+            ],
+        },
+    );
+
+    h.serve(&pipe).await;
+
+    let response = subscribe_response_in(&pipe.sent());
+    assert_eq!(
+        response.accepted,
+        vec![mine],
+        "only the topic that belongs to the caller is subscribed, in the requested order"
+    );
+    let rejected = response
+        .rejected
+        .expect("a refused topic is named in the rejected list");
+    assert!(
+        rejected.contains(&a_strangers_room),
+        "a room that is not the caller's is rejected"
+    );
+    assert!(
+        rejected.contains(&a_strangers_conversation),
+        "a conversation that is not the caller's is rejected"
+    );
+}
+
+#[tokio::test]
+async fn a_subscribe_refuses_the_surplus_over_the_per_session_ceiling() {
+    // A frame can name thousands of topics, but a session may hold only the ceiling. The surplus
+    // is refused before the domain is asked anything — the ordering is the point — so a single
+    // client frame never turns into a per-topic lookup against the store.
+    let mut builder = HarnessBuilder::new();
+    builder.dispatcher = Arc::new(GrantAll);
+    let h = builder.build();
+    let pipe = Pipe::new();
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+    // 513 topics, one past the 512 ceiling, distinct ids so none is a duplicate of another.
+    let topics: Vec<Topic> = (0_u32..513)
+        .map(|i| Topic {
+            kind: TopicKind::User,
+            id: id(ACCOUNT + i as u128),
+        })
+        .collect();
+    pipe.client(Opcode::Subscribe, 4, &SubscribeRequest { topics });
+
+    h.serve(&pipe).await;
+
+    let response = subscribe_response_in(&pipe.sent());
+    assert_eq!(
+        response.accepted.len(),
+        512,
+        "the session holds exactly the ceiling, no more"
+    );
+    assert_eq!(
+        response.rejected.as_ref().map(Vec::len),
+        Some(1),
+        "the one topic over the ceiling is rejected without being asked of the domain"
     );
 }
