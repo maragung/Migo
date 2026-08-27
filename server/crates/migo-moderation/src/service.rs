@@ -344,9 +344,11 @@ impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized> Warden
     for Moderation<S, L, R>
 {
     async fn file_report(&self, caller: &Caller, filing: Filing) -> Result<Filed> {
-        if caller.account_id.is_nil() {
+        if caller.account_id.is_nil() || caller.device_id.is_nil() {
             self.meters.refused(Refused::Invalid);
-            return Err(fault::unauthenticated("a report needs an account"));
+            return Err(fault::unauthenticated(
+                "a report needs an identified account and device",
+            ));
         }
         if filing.subject.is_nil() {
             self.meters.refused(Refused::Invalid);

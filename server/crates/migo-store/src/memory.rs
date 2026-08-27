@@ -3051,13 +3051,21 @@ impl SafetyStore for MemoryStore {
         let s = self.state.read();
         // Oldest first. A queue ordered newest-first starves the reports that have
         // been waiting longest, which are the ones most likely to matter.
-        Ok(s.report_order
+        //
+        // By `created_at` and then by id, matching the ORDER BY the SQL store issues, and
+        // not by the order rows were inserted. The two agree for reports that arrive as
+        // they happen, and disagree the moment anything writes a report with an older
+        // timestamp than the one before it -- an import, a backfill, a replayed queue. A
+        // double whose order came from insertion would let a test prove an ordering the
+        // real store does not have.
+        let mut open: Vec<&Report> = s
+            .report_order
             .iter()
             .filter_map(|id| s.reports.get(id))
             .filter(|report| report.status == report_status::OPEN)
-            .take(limit)
-            .cloned()
-            .collect())
+            .collect();
+        open.sort_by_key(|report| (report.created_at, report.report_id));
+        Ok(open.into_iter().take(limit).cloned().collect())
     }
 
     async fn open_report_by_reporter(
@@ -3070,16 +3078,19 @@ impl SafetyStore for MemoryStore {
         // Oldest first, matching the queue order, so a caller that shows the duplicate
         // back to the reporter shows the one they actually filed rather than whichever
         // one the map happened to yield.
-        Ok(s.report_order
+        let mut held: Vec<&Report> = s
+            .report_order
             .iter()
             .filter_map(|id| s.reports.get(id))
-            .find(|report| {
+            .filter(|report| {
                 report.status == report_status::OPEN
                     && report.reporter_id == reporter_id
                     && report.subject_kind == subject_kind
                     && report.subject_id == subject_id
             })
-            .cloned())
+            .collect();
+        held.sort_by_key(|report| (report.created_at, report.report_id));
+        Ok(held.into_iter().next().cloned())
     }
 
     async fn count_reports_about(

@@ -53,7 +53,7 @@ use crate::traits::{Notifier, PushSender, Sent, SharedNotifier, SharedPushSender
 /// One key per device per kind. Not per account: coalescing at the account level would
 /// mean a wake-up to a phone suppressing the one to a tablet, and the two are not the
 /// same person's attention.
-const COALESCE_SCOPE: &str = "notify:coalesce";
+const COALESCE_SCOPE: &str = "notify_coalesce";
 
 /// What reading a page of the inbox costs.
 const INBOX_COST: u32 = 3;
@@ -173,6 +173,21 @@ where
             )
             .await?
             .into_result()
+    }
+
+    /// Refuses a caller that is not fully identified.
+    ///
+    /// Checked before the rate-limit charge, so an unauthenticated caller cannot spend a
+    /// bucket it has no business reaching. A nil account or a nil device means the request
+    /// did not arrive through an authenticated session, and reading or writing a
+    /// notification for "nobody" is a bug upstream that must not reach the store.
+    fn require_identity(caller: &Caller) -> Result<()> {
+        if caller.account_id.is_nil() || caller.device_id.is_nil() {
+            return Err(fault::unauthenticated(
+                "notifications need an identified account and device",
+            ));
+        }
+        Ok(())
     }
 
     /// Writes the inbox row for an event, if its kind belongs in the inbox.
@@ -523,6 +538,7 @@ where
     }
 
     async fn inbox(&self, caller: &Caller, limit: u16) -> Result<Inbox> {
+        Self::require_identity(caller)?;
         self.charge(caller, INBOX_COST).await?;
         let rows = self
             .store
@@ -537,6 +553,7 @@ where
     }
 
     async fn badge(&self, caller: &Caller) -> Result<u32> {
+        Self::require_identity(caller)?;
         self.charge(caller, BADGE_COST).await?;
         let count = self.store.unread_notifications(caller.account_id).await?;
         self.meters.badge_read();
@@ -544,6 +561,7 @@ where
     }
 
     async fn acknowledge(&self, caller: &Caller, through: Timestamp) -> Result<u32> {
+        Self::require_identity(caller)?;
         self.charge(caller, ACK_COST).await?;
         let changed = self
             .store
@@ -554,6 +572,7 @@ where
     }
 
     async fn register(&self, caller: &Caller, token: RawToken) -> Result<()> {
+        Self::require_identity(caller)?;
         self.charge(caller, REGISTER_COST).await?;
         // The platform the client claims is recorded on the device row at sign-in, and
         // this is not the place to change it: a client that could rewrite its platform
@@ -580,6 +599,7 @@ where
     }
 
     async fn unregister(&self, caller: &Caller) -> Result<()> {
+        Self::require_identity(caller)?;
         // Not charged. Sign-out must not be refusable by a rate limiter: a client that
         // cannot unregister is a phone that keeps buzzing for an account somebody
         // deliberately left, and "you are doing that too often" is not an acceptable

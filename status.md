@@ -6,14 +6,15 @@ benar dan file ini yang salah. Gate `python3 tools/scripts/brief-audit.py` meneg
 177 secara mekanis: ia menolak crate yang ditandai BUILT tanpa test, crate yang punya test tapi
 masih ditandai belum, dan crate yang muncul di dua blok sekaligus.
 
-Terakhir diselaraskan: 27 Agustus 2026, pada commit yang memindahkan `migo-media` ke BUILT.
+Terakhir diselaraskan: 27 Agustus 2026, pada commit yang memindahkan `migo-moderation` dan
+`migo-notify` ke BUILT.
 
 ## Ringkasan
 
 | Kategori                                                       | Jumlah                           |
 | -------------------------------------------------------------- | -------------------------------- |
-| Selesai: kode, test, clippy bersih                             | 16 crate Cargo + 9 komponen lain |
-| Kode lengkap, test belum ditulis (workspace Cargo)             | 8 crate                          |
+| Selesai: kode, test, clippy bersih                             | 18 crate Cargo + 9 komponen lain |
+| Kode lengkap, test belum ditulis (workspace Cargo)             | 6 crate                          |
 | Kode lengkap, test belum ditulis (di luar workspace Cargo)     | 5 komponen                       |
 | Kode lengkap, kompilasi diverifikasi di CI, test belum ditulis | 1 komponen                       |
 | Belum ada kode sama sekali                                     | 1 komponen                       |
@@ -42,6 +43,8 @@ satu pun peringatan, `cargo doc` tanpa intra-doc link rusak, dan `cargo test` se
 | `migo-rooms`               | 15 metode Roomkeeper: pembuatan, join, roster, peran, moderasi    | 108        |
 | `migo-social`              | 19 metode Graph: pertemanan, follow, block, favourite, privasi    | 111        |
 | `migo-media`               | 8 metode Library: begin, status, commit, abort, fetch_url, delete | 50         |
+| `migo-moderation`          | 7 metode Warden: laporan, queue, keputusan, aksi, audit, skor     | 84         |
+| `migo-notify`              | 8 metode Notifier: notify, inbox, badge, token push, sweep        | 63         |
 | `packages/protocol`        | paket TypeScript hasil generate dari IDL yang sama                | 11         |
 | `packages/wire`            | codec frame TypeScript, pasangan dari `migo-wire`                 | 16         |
 | `packages/crypto`          | primitif kripto web di atas paket `@noble`                        | 21         |
@@ -59,20 +62,18 @@ banyak case: contract suite `migo-cache` misalnya dijalankan terhadap dua backen
 
 ## 2. Kode lengkap, test belum ditulis (workspace Cargo)
 
-Kedelapan crate ini sudah lengkap kodenya dan lulus `cargo build` serta `cargo clippy
+Keenam crate ini sudah lengkap kodenya dan lulus `cargo build` serta `cargo clippy
 --all-targets` tanpa peringatan, tetapi belum punya test. Inilah pekerjaan yang sedang berjalan
 sekarang, dalam urutan ini:
 
 | Urutan | Crate             | Isi singkat                                                         | Keadaan        |
 | ------ | ----------------- | ------------------------------------------------------------------- | -------------- |
-| 1      | `migo-moderation` | 7 metode Warden: laporan, queue, keputusan, banding, audit          | sedang ditulis |
-| 2      | `migo-notify`     | 8 metode Notifier: notify, inbox, badge, token push, mute           | sedang ditulis |
-| 3      | `migo-games`      | 6 metode Referee: katalog, mulai, main, selesai, papan skor         | belum          |
-| 4      | `migo-bots`       | 7 metode Bots: register, authenticate, rotate_token, izin           | belum          |
-| 5      | `migo-federation` | 17 metode Mesh: peer, status, sinkronisasi, transport antar node    | belum          |
-| 6      | `migo-gateway`    | transport realtime: mesin state koneksi, frame, backpressure        | belum          |
-| 7      | `migo-api`        | permukaan REST/JSON layer 4 yang diizinkan section 118              | belum          |
-| 8      | `migod`           | composition root layer 5, satu-satunya crate yang menyusun semuanya | belum          |
+| 1      | `migo-games`      | 6 metode Referee: katalog, mulai, main, selesai, papan skor         | sedang ditulis |
+| 2      | `migo-bots`       | 7 metode Bots: register, authenticate, rotate_token, izin           | belum          |
+| 3      | `migo-federation` | 17 metode Mesh: peer, status, sinkronisasi, transport antar node    | belum          |
+| 4      | `migo-gateway`    | transport realtime: mesin state koneksi, frame, backpressure        | belum          |
+| 5      | `migo-api`        | permukaan REST/JSON layer 4 yang diizinkan section 118              | belum          |
+| 6      | `migod`           | composition root layer 5, satu-satunya crate yang menyusun semuanya | belum          |
 
 ## 3. Kode lengkap di luar workspace Cargo, test belum ditulis
 
@@ -132,17 +133,21 @@ tetapi belum satu pun byte kodenya ditulis:
 
 ## 8. Cacat produk yang ditemukan oleh tahap test
 
-Tahap test bukan pekerjaan tulis ulang. Sejauh ini ia menemukan lima cacat nyata pada kode yang
+Tahap test bukan pekerjaan tulis ulang. Sejauh ini ia menemukan sembilan cacat nyata pada kode yang
 sudah dianggap selesai, dan semuanya diperbaiki pada commit yang sama dengan test yang
 menemukannya:
 
-| Crate         | Cacat                                                                          | Perbaikan                                               |
-| ------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------- |
-| `migo-social` | `pending` melaporkan permintaan yang belum dijawab sebagai sudah disetujui     | membaca kolom keadaan yang benar                        |
-| `migo-social` | `block` menghapus edge tanpa menghitungnya, sehingga hitungan relasi melenceng | penghapusan ikut mengurangi hitungan                    |
-| `migo-media`  | tidak ada pemeriksaan identitas sama sekali di seluruh crate                   | `require_identity` sebelum pemungutan biaya di 7 metode |
-| `migo-media`  | lebar, tinggi, dan durasi diperiksa di `begin` lalu dibuang sebelum ditulis    | format tiket naik ke versi dua dan membawa ketiganya    |
-| `migo-media`  | `commit` yang diulang ditolak sebagai objek yang sudah ada                     | dijawab dari baris yang ada tanpa menyentuh penghitung  |
+| Crate             | Cacat                                                                                   | Perbaikan                                                  |
+| ----------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `migo-social`     | `pending` melaporkan permintaan yang belum dijawab sebagai sudah disetujui              | membaca kolom keadaan yang benar                           |
+| `migo-social`     | `block` menghapus edge tanpa menghitungnya, sehingga hitungan relasi melenceng          | penghapusan ikut mengurangi hitungan                       |
+| `migo-media`      | tidak ada pemeriksaan identitas sama sekali di seluruh crate                            | `require_identity` sebelum pemungutan biaya di 7 metode    |
+| `migo-media`      | lebar, tinggi, dan durasi diperiksa di `begin` lalu dibuang sebelum ditulis             | format tiket naik ke versi dua dan membawa ketiganya       |
+| `migo-media`      | `commit` yang diulang ditolak sebagai objek yang sudah ada                              | dijawab dari baris yang ada tanpa menyentuh penghitung     |
+| `migo-moderation` | `file_report` menerima caller yang membawa akun tanpa device                            | identitas akun dan device diperiksa sebelum biaya dipungut |
+| `migo-store`      | `open_reports` in-memory mengurut menurut urutan tulis, PostgreSQL menurut `created_at` | double diurutkan menurut `created_at` lalu `report_id`     |
+| `migo-notify`     | lima metode yang menghadap client tidak memeriksa identitas pemanggil                   | `require_identity` sebelum pemungutan biaya                |
+| `migo-cache`      | `CacheKey::new` menolak underscore, sehingga scope coalescing panic di build debug      | assertion menerima underscore, titik dua tetap dilarang    |
 
 ## 9. Aturan yang mengikat status ini
 

@@ -68,11 +68,15 @@ impl CacheKey {
     /// `tail` is escaped and truncated at [`MAX_TAIL_BYTES`]. Truncation happens on
     /// the escaped form and at a character boundary, so the result is always valid
     /// UTF-8 and always a prefix of what was asked for.
+    ///
+    /// `scope` is a literal and is not escaped, so it must already be safe: lowercase
+    /// ASCII words joined by underscores. A colon in a scope would be a scope pretending
+    /// to be two scopes, which makes a key prefix ambiguous, so it is refused.
     #[must_use]
     pub fn new(scope: &'static str, tail: &str) -> Self {
         debug_assert!(
-            !scope.is_empty() && scope.bytes().all(|b| b.is_ascii_lowercase()),
-            "scope must be a lowercase ASCII literal, got {scope:?}"
+            !scope.is_empty() && scope.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'),
+            "scope must be lowercase ASCII words joined by underscores, got {scope:?}"
         );
         let mut text = String::with_capacity(PREFIX.len() + scope.len() + tail.len() + 2);
         text.push_str(PREFIX);
