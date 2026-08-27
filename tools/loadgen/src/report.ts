@@ -8,6 +8,7 @@
  */
 
 import type { Config } from './config.js';
+import { sanitizeUrl } from './redact.js';
 import type { DigestSnapshot, Metrics } from './stats.js';
 
 export interface RunOutcome {
@@ -51,7 +52,7 @@ export function renderText(outcome: RunOutcome): string {
   lines.push(
     `Migo load test — scenario "${outcome.scenarioName}"${outcome.interrupted ? ' (interrupted)' : ''}`,
   );
-  lines.push(`  server         ${config.apiUrl}  (${config.gatewayUrl})`);
+  lines.push(`  server         ${sanitizeUrl(config.apiUrl)}  (${sanitizeUrl(config.gatewayUrl)})`);
   lines.push(
     `  virtual users  ${outcome.requestedVus} requested, ${outcome.connectedCount} connected`,
   );
@@ -105,7 +106,7 @@ export function renderJson(outcome: RunOutcome): string {
   const document = {
     scenario: outcome.scenarioName,
     interrupted: outcome.interrupted,
-    server: { api: config.apiUrl, gateway: config.gatewayUrl },
+    server: { api: sanitizeUrl(config.apiUrl), gateway: sanitizeUrl(config.gatewayUrl) },
     requestedVus: outcome.requestedVus,
     connectedCount: outcome.connectedCount,
     durationMs: outcome.durationMsActual,

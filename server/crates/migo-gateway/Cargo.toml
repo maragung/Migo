@@ -23,4 +23,14 @@ parking_lot.workspace = true
 dashmap.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread", "time", "sync"] }
+migo-cache.workspace = true
+tokio = { workspace = true, features = [
+    "rt",
+    "macros",
+    "rt-multi-thread",
+    "time",
+    "sync",
+    # `test-util` pauses the clock, so the liveness and drain tests resolve their timers
+    # instantly instead of waiting out a production tick.
+    "test-util",
+] }

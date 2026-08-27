@@ -2413,6 +2413,138 @@ pub async fn the_audit_log_is_newest_first_and_scoped_to_one_target(store: &Shar
     assert_eq!(store.audit_for_target(0, bob, 1).await.unwrap().len(), 1);
 }
 
+/// A game's lock token moves on every write, even inside one millisecond.
+///
+/// The token is `updated_at`, and the store is handed the time by its caller, so two moves
+/// computed from the same state and stamped with the same millisecond would otherwise leave
+/// the token identical: the second writer would find its own now-stale expectation satisfied
+/// and would overwrite a move it never saw. That is exactly the lost update the compare-and-set
+/// exists to prevent, so the token has to end up strictly past the value it replaced.
+pub async fn a_game_token_moves_even_within_one_millisecond(store: &SharedStore) {
+    let conversation = id(9_001);
+    let alice = seed_account(store, 9_002, "gamer_one").await;
+    let bob = seed_account(store, 9_003, "gamer_two").await;
+    store
+        .create_conversation(
+            Conversation {
+                conversation_id: conversation,
+                kind: ConversationKind::Group,
+                encryption: EncryptionMode::Transport,
+                room_id: None,
+                last_seq: 0,
+                created_by: alice,
+                created_at: ts(1_000),
+                last_message_at: None,
+                archived_at: None,
+            },
+            vec![alice, bob],
+        )
+        .await
+        .expect("the conversation seeds");
+    let game_id = id(9_004);
+    let session = store
+        .create_game(NewGame {
+            game_id,
+            kind: 0,
+            conversation_id: conversation,
+            state: vec![1, 0, 0],
+            turn_of: Some(alice),
+            stake_currency: None,
+            stake_amount: None,
+            at: ts(5_000),
+        })
+        .await
+        .expect("the game is created");
+    // Both writers read the same row and so name the same token, and both are stamped with the
+    // same millisecond -- the same millisecond the row was created in, at that.
+    let token = session.updated_at;
+    let first = store
+        .advance_game(AdvanceGame {
+            game_id,
+            expected_updated_at: token,
+            state: vec![1, 1, 0],
+            turn_of: Some(bob),
+            status: game_status::OPEN,
+            at: ts(5_000),
+        })
+        .await
+        .expect("the store answers")
+        .expect("the first move lands");
+    assert!(
+        first.updated_at > token,
+        "the token must move: {:?} did not pass {token:?}",
+        first.updated_at
+    );
+    let second = store
+        .advance_game(AdvanceGame {
+            game_id,
+            expected_updated_at: token,
+            state: vec![1, 0, 2],
+            turn_of: Some(alice),
+            status: game_status::OPEN,
+            at: ts(5_000),
+        })
+        .await
+        .expect("the store answers");
+    assert!(
+        second.is_none(),
+        "the second move named a token that is no longer current and must be refused"
+    );
+    let stored = store
+        .game(game_id)
+        .await
+        .expect("the store answers")
+        .expect("the game exists");
+    assert_eq!(
+        stored.state,
+        vec![1, 1, 0],
+        "the move that won the race is the one in the row"
+    );
+    // And the winner can carry on from the token it was handed back.
+    let third = store
+        .advance_game(AdvanceGame {
+            game_id,
+            expected_updated_at: first.updated_at,
+            state: vec![1, 1, 2],
+            turn_of: Some(alice),
+            status: game_status::FINISHED,
+            at: ts(5_000),
+        })
+        .await
+        .expect("the store answers")
+        .expect("a move against the current token lands");
+    assert!(third.updated_at > first.updated_at);
+    assert_eq!(
+        third.finished_at,
+        Some(ts(5_000)),
+        "the end time is the real one"
+    );
+    // A terminal game takes nothing further, token or no token.
+    assert!(
+        store
+            .advance_game(AdvanceGame {
+                game_id,
+                expected_updated_at: third.updated_at,
+                state: vec![1, 1, 1],
+                turn_of: None,
+                status: game_status::OPEN,
+                at: ts(5_000),
+            })
+            .await
+            .expect("the store answers")
+            .is_none(),
+        "a decided game cannot be reopened"
+    );
+    assert!(
+        store
+            .abandon_game(game_id, ts(6_000))
+            .await
+            .expect("the store answers")
+            .is_none(),
+        "a decided game cannot be abandoned"
+    );
+}
+
 /// Names every case in the suite, so a backend file lists none of them.
 ///
 /// A test that exists but is only wired into one backend is worse than no test:
@@ -2465,5 +2597,6 @@ macro_rules! for_each_contract_case {
         $case!(a_deleted_media_row_outlives_its_bytes);
         $case!(the_moderation_queue_is_oldest_first_and_resolves_once);
         $case!(the_audit_log_is_newest_first_and_scoped_to_one_target);
+        $case!(a_game_token_moves_even_within_one_millisecond);
     };
 }

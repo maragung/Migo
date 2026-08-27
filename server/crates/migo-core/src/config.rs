@@ -795,6 +795,23 @@ impl Config {
                         .to_string(),
                 );
             }
+            // The compose file and CI ship a well-known `migo:migo` login for the local Postgres;
+            // it is documented in the open, so a node that reached staging or production still
+            // pointed at it is authenticating real traffic with a credential every reader of the
+            // repository already knows. Refuse to start, naming the field but never echoing the
+            // credential itself into a log line or an error a user might paste somewhere.
+            if self
+                .store
+                .url
+                .as_ref()
+                .is_some_and(|url| url.expose().contains("migo:migo@"))
+            {
+                problems.push(
+                    "store.url carries the documented development database credential outside \
+                     development: provision real database credentials before serving real users"
+                        .to_string(),
+                );
+            }
             if self.media.backend == MediaBackend::Filesystem {
                 problems.push(
                     "media.backend is filesystem outside development: uploads would not survive a \

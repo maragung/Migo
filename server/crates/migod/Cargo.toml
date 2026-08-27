@@ -58,3 +58,6 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# The suite generates a valid 32-byte token key (base64) to exercise the production startup
+# path, and needs no other test-only crates.
+base64 = { workspace = true }

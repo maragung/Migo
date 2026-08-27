@@ -1,13 +1,34 @@
-//! The `migod` binary: initialise logging, then hand off to the library.
+//! The `migod` binary: parse the command line, then either print and exit or hand off to serve.
 //!
 //! Everything of substance is in the `migod` library ([`migod::run_blocking`]); this entry point
-//! exists only to install a tracing subscriber before the server starts, because choosing how logs
-//! are formatted and filtered is a decision for the process, not for the library a test also links.
+//! answers the two questions that must not start a server — `--help` and `--version` — and, for the
+//! default serve command, installs a tracing subscriber before handing off. Choosing how logs are
+//! formatted and filtered is a decision for the process, not for the library a test also links, and
+//! it happens only on the path that actually serves: `migod --version` touches no logging, no
+//! configuration, and no socket.
 
-/// Installs logging, then runs the server until shutdown.
+use migod::cli::{self, Command, EXIT_USAGE};
+
+/// Parses arguments, then prints-and-exits or serves.
 fn main() -> anyhow::Result<()> {
-    init_tracing();
-    migod::run_blocking()
+    match cli::parse(std::env::args().skip(1)) {
+        Ok(Command::Serve) => {
+            init_tracing();
+            migod::run_blocking()
+        }
+        Ok(Command::Help) => {
+            print!("{}", cli::HELP);
+            Ok(())
+        }
+        Ok(Command::Version) => {
+            println!("{}", cli::VERSION_LINE);
+            Ok(())
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(EXIT_USAGE);
+        }
+    }
 }
 
 /// Installs a tracing subscriber filtered by the `RUST_LOG` environment variable.

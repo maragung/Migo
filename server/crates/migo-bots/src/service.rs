@@ -130,7 +130,20 @@ where
     }
 
     /// Charges the owner `cost` against their account budget, or returns a rate-limit error.
+    ///
+    /// An unidentified caller — one whose account or device id is nil — is refused before the
+    /// limiter is touched. The charge is keyed on the caller's account id, so metering an
+    /// unidentified request first is charging *some* account for a request that could not
+    /// prove it is that account: an attacker who names a stranger's account id drains the
+    /// stranger's budget, and a request that will be rejected anyway costs its own sender
+    /// nothing. Identity is a precondition of every management method, and every one funnels
+    /// through here, so proving it once at the charge is what makes it impossible to skip.
     async fn charge(&self, caller: &Caller, cost: u32) -> Result<()> {
+        if caller.account_id.is_nil() || caller.device_id.is_nil() {
+            return Err(fault::unauthenticated(
+                "a bot management request needs an identified account and device",
+            ));
+        }
         self.limiter
             .charge(
                 &[BucketKey::account(caller.account_id)],

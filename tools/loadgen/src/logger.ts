@@ -5,7 +5,12 @@
  * `migo-loadgen --output json > run.json` captures a clean document while progress still shows on
  * the terminal. Everything here is diagnostic and therefore goes to stderr. Warnings and errors
  * ignore the level: an operator running under `--quiet` still needs to see that something is wrong.
+ *
+ * Every line is passed through {@link redact} before it is written, so a credential or token can
+ * never reach the terminal even when it rode in on a URL or an error message the logger was handed.
  */
+
+import { redact } from './redact.js';
 
 export type LogLevel = 'quiet' | 'normal' | 'verbose';
 
@@ -20,21 +25,21 @@ export class Logger {
 
   /** High-level phase progress. Shown at `normal` and `verbose`. */
   info(message: string): void {
-    if (RANK[this.#level] >= RANK.normal) process.stderr.write(`${message}\n`);
+    if (RANK[this.#level] >= RANK.normal) process.stderr.write(`${redact(message)}\n`);
   }
 
   /** Per-VU and per-transition detail. Shown only at `verbose`. */
   debug(message: string): void {
-    if (RANK[this.#level] >= RANK.verbose) process.stderr.write(`  ${message}\n`);
+    if (RANK[this.#level] >= RANK.verbose) process.stderr.write(`  ${redact(message)}\n`);
   }
 
   /** Something the operator must not miss. Always shown, even under `--quiet`. */
   warn(message: string): void {
-    process.stderr.write(`warning: ${message}\n`);
+    process.stderr.write(`warning: ${redact(message)}\n`);
   }
 
   /** A failure. Always shown. */
   error(message: string): void {
-    process.stderr.write(`error: ${message}\n`);
+    process.stderr.write(`error: ${redact(message)}\n`);
   }
 }

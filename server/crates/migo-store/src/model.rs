@@ -1348,6 +1348,26 @@ pub struct AdvanceGame {
     pub at: Timestamp,
 }
 
+/// The `updated_at` a successful [`AdvanceGame`] must write: `at`, but never at or before the
+/// token it just matched on.
+///
+/// The token is a millisecond timestamp, so `at` on its own does not guarantee that the token
+/// moves: two moves arriving inside the same millisecond would leave it identical, the second
+/// writer would find its own expectation still satisfied, and it would overwrite the first
+/// move without ever having seen it. That is the lost update the compare-and-swap exists to
+/// prevent, so the token is nudged past the value it replaced instead. The nudge is bounded by
+/// the number of moves a single game takes in one millisecond, and it applies to the token
+/// only: `finished_at` stays the real time the game ended.
+#[must_use]
+pub(crate) fn advanced_token(expected: Timestamp, at: Timestamp) -> Timestamp {
+    let floor = Timestamp::from_millis(expected.as_millis().saturating_add(1));
+    if at > floor {
+        at
+    } else {
+        floor
+    }
+}
+
 /// A bot as stored: one row of `bot`, joined to nothing.
 ///
 /// A bot is an ordinary account that a human owns and that authenticates by a

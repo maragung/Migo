@@ -59,6 +59,14 @@ jobs:
         with:
           node-version: 22
 
+      # Every gate below except infra-check is standard-library Python and would run
+      # on whatever interpreter the image ships. This pins one anyway, because the
+      # distribution interpreter on the runner image is an externally-managed
+      # environment (PEP 668) and refuses `pip install`, which infra-check needs.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Generated protocol code is not stale
         run: make protocol-check
 
@@ -82,6 +90,17 @@ jobs:
         # block comment that hides the rest of a file — otherwise arrives as several
         # hundred unresolved references in a six-minute Gradle run.
         run: make kotlin-check
+
+      - name: Infra files pass the static hygiene checks
+        # Deployment mistakes are the ones nobody sees until they are already running:
+        # an image tag that quietly moved, a secret typed into a compose file, a
+        # container that asked for the host's PID namespace. This reads the files, so
+        # it needs no Docker and no cluster and belongs in the one-minute job. It is
+        # the only script under tools/ that imports a third-party module, hence the
+        # explicit interpreter and the single pip install.
+        run: |
+          python3 -m pip install --quiet --disable-pip-version-check pyyaml
+          make infra-check
 
   # ------------------------------------------------------------------ rust
   # One job for formatting, lints and the whole test suite, because all three want the

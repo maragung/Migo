@@ -1,0 +1,791 @@
+//! Integration tests for `migod`, the composition root and the workspace's only binary.
+//!
+//! Every other crate is tested for what it *does*. `migod` is different: its job is to *connect*,
+//! and the invariants that matter here are the ones that are silent when they hold and catastrophic
+//! when they break — the kind no unit test in a leaf crate is positioned to catch, because no leaf
+//! crate can see the whole graph. This suite guards six of them.
+//!
+//! 1. **Production refuses to start unsafe.** A node that reaches a hardened environment with no
+//!    token key, with the *documented* placeholder key, or pointed at the *documented* development
+//!    database login must refuse to boot — loudly, by naming the field, and without ever echoing
+//!    the secret it rejected into a log line an operator might paste into a ticket. The same
+//!    posture must *not* fire in development, where those defaults are the point.
+//! 2. **Configuration layers and validates predictably.** Defaults, then files, then environment;
+//!    an unknown key is a mistake, not a silent no-op; an invalid value is reported against the
+//!    field that carried it; and every problem is collected so one restart surfaces the whole list.
+//! 3. **The composition graph is acyclic and complete.** Every service can be built against
+//!    in-memory backends with no socket and no database; building twice yields two independent
+//!    systems that share nothing; and the one adapter that bridges two sibling domains (games into
+//!    the economy) forwards, while its null counterpart swallows.
+//! 4. **Nothing sensitive reaches a log, a metric, or an error.** The one metric registry the whole
+//!    process shares renders no account, device, or node identifier (brief section 174), and the
+//!    [`Config`] a panic might print redacts its token key and its database credential.
+//! 5. **Shutdown is clean and idempotent.** One signal, shared by clone; triggering it twice is not
+//!    a bug; and a task already past the trigger observes it immediately.
+//! 6. **The binary's front door is cheap and honest.** `--help` and `--version` are answered by a
+//!    pure parser that touches no configuration and no database; an unrecognised argument is a
+//!    usage error, never a silently ignored flag. The parser is driven in-process; the built binary
+//!    is never spawned.
+
+use migo_core::config::{ConfigError, Environment, StoreBackend, DEVELOPMENT_TOKEN_KEY};
+use migo_core::{Config, Secret, Shutdown};
+use migod::cli::{self, Command};
+
+// ---------------------------------------------------------------------------
+// Harness
+// ---------------------------------------------------------------------------
+
+/// Turns `&str` pairs into the owned environment slice the config loader takes. Mirrors the helper
+/// the `migo-core` unit tests use, so a config built here is built exactly as the daemon builds it.
+fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+        .collect()
+}
+
+/// Turns `&str` arguments into the owned iterator [`cli::parse`] takes.
+fn args(list: &[&str]) -> Vec<String> {
+    list.iter().map(|arg| (*arg).to_string()).collect()
+}
+
+/// A real, 32-byte token key encoded as standard base64 — the shape a production node is required
+/// to carry. `[7u8; 32]` is arbitrary; what matters is that it decodes to the minimum length.
+fn valid_token_key() -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode([7u8; 32])
+}
+
+/// Builds a config from an explicit environment without touching the process environment, then
+/// returns the message [`Config::validate`] refuses it with. Panics if validation *passes*, because
+/// a test that expected a refusal and got none is a failed test, not a silent one.
+fn refusal(pairs: &[(&str, &str)]) -> String {
+    Config::from_sources(&[], &env(pairs))
+        .expect("configuration should parse")
+        .validate()
+        .expect_err("configuration should be refused")
+        .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Area 6: the binary's front door (the in-process argument parser)
+// ---------------------------------------------------------------------------
+// These run first because they are the cheapest proof the crate links and the surface a human
+// touches first. The parser must decide help and version *without* the machinery the serve path
+// needs, so none of these tests build a runtime, read a file, or open a connection.
+
+#[test]
+fn no_arguments_means_serve() {
+    assert_eq!(cli::parse(args(&[])).unwrap(), Command::Serve);
+}
+
+#[test]
+fn long_help_flag_is_help() {
+    assert_eq!(cli::parse(args(&["--help"])).unwrap(), Command::Help);
+}
+
+#[test]
+fn short_help_flag_is_help() {
+    assert_eq!(cli::parse(args(&["-h"])).unwrap(), Command::Help);
+}
+
+#[test]
+fn long_version_flag_is_version() {
+    assert_eq!(cli::parse(args(&["--version"])).unwrap(), Command::Version);
+}
+
+#[test]
+fn short_version_flag_is_version() {
+    assert_eq!(cli::parse(args(&["-V"])).unwrap(), Command::Version);
+}
+
+#[test]
+fn an_unknown_flag_is_a_usage_error() {
+    assert!(cli::parse(args(&["--nope"])).is_err());
+}
+
+#[test]
+fn a_usage_error_names_the_offending_argument() {
+    let error = cli::parse(args(&["--frobnicate"])).unwrap_err();
+    assert_eq!(error.arg(), "--frobnicate");
+}
+
+#[test]
+fn a_usage_error_reads_as_a_usage_error() {
+    // The Display is what `main` prints to stderr; it must say what went wrong and where to look,
+    // and it must be a real `std::error::Error` so `main` can treat it as one.
+    let error = cli::parse(args(&["--frobnicate"])).unwrap_err();
+    let rendered = error.to_string();
+    assert!(rendered.contains("--frobnicate"), "{rendered}");
+    assert!(rendered.contains("Usage"), "{rendered}");
+    assert!(rendered.contains("--help"), "{rendered}");
+    // It implements the trait, not merely a `to_string`.
+    let _: &dyn std::error::Error = &error;
+}
+
+#[test]
+fn a_stray_positional_argument_is_rejected() {
+    // `migod` has no subcommands; a bare word is as much a mistake as a bad flag, and swallowing it
+    // silently would hide a typo in an init script.
+    assert!(cli::parse(args(&["serve"])).is_err());
+}
+
+#[test]
+fn the_first_recognised_flag_wins() {
+    // `migod --help --version` prints help: the first request recognised is the one honoured,
+    // rather than letting a later argument override an earlier one.
+    assert_eq!(
+        cli::parse(args(&["--help", "--version"])).unwrap(),
+        Command::Help
+    );
+    assert_eq!(
+        cli::parse(args(&["--version", "--help"])).unwrap(),
+        Command::Version
+    );
+}
+
+#[test]
+fn a_bad_flag_trailing_a_good_one_is_still_rejected() {
+    // Recognising `--help` does not stop the scan: `migod --help --frobnicate` is a misspelling an
+    // operator needs told about, not a request to print help and pretend the rest was meant.
+    let error = cli::parse(args(&["--help", "--frobnicate"])).unwrap_err();
+    assert_eq!(error.arg(), "--frobnicate");
+}
+
+#[test]
+fn the_version_line_names_the_binary_and_its_version() {
+    assert!(
+        cli::VERSION_LINE.starts_with("migod "),
+        "{}",
+        cli::VERSION_LINE
+    );
+    assert!(
+        cli::VERSION_LINE.contains(env!("CARGO_PKG_VERSION")),
+        "{}",
+        cli::VERSION_LINE
+    );
+}
+
+#[test]
+fn the_help_text_documents_both_flags() {
+    assert!(cli::HELP.contains("--help"), "{}", cli::HELP);
+    assert!(cli::HELP.contains("--version"), "{}", cli::HELP);
+}
+
+#[test]
+fn a_usage_error_exits_two_by_convention() {
+    // Distinct from the `1` the serve path returns on a runtime failure, so an init system can tell
+    // "you invoked me wrong" from "I tried to run and failed".
+    assert_eq!(cli::EXIT_USAGE, 2);
+}
+
+// ---------------------------------------------------------------------------
+// Area 1: production startup refusals
+// ---------------------------------------------------------------------------
+
+#[test]
+fn production_refuses_a_missing_token_key() {
+    let rendered = refusal(&[("MIGO_NODE__ENVIRONMENT", "production")]);
+    assert!(rendered.contains("auth.token_key"), "{rendered}");
+}
+
+#[test]
+fn production_refuses_an_empty_token_key() {
+    // An empty environment value means "unset", so an operator who exported an empty key gets the
+    // same refusal as one who set nothing at all, rather than a node signing with a zero-length key.
+    let rendered = refusal(&[
+        ("MIGO_NODE__ENVIRONMENT", "production"),
+        ("MIGO_AUTH__TOKEN_KEY", ""),
+    ]);
+    assert!(rendered.contains("auth.token_key"), "{rendered}");
+}
+
+#[test]
+fn production_refuses_the_documented_development_key() {
+    let rendered = refusal(&[
+        ("MIGO_NODE__ENVIRONMENT", "production"),
+        ("MIGO_AUTH__TOKEN_KEY", DEVELOPMENT_TOKEN_KEY),
+    ]);
+    assert!(rendered.contains("development placeholder"), "{rendered}");
+}
+
+#[test]
+fn the_development_key_refusal_does_not_echo_the_key() {
+    // The rejected value must not travel into the error text a user might paste into a bug report.
+    let rendered = refusal(&[
+        ("MIGO_NODE__ENVIRONMENT", "production"),
+        ("MIGO_AUTH__TOKEN_KEY", DEVELOPMENT_TOKEN_KEY),
+    ]);
+    assert!(!rendered.contains(DEVELOPMENT_TOKEN_KEY), "{rendered}");
+}
+
+#[test]
+fn production_refuses_a_short_token_key() {
+    use base64::Engine as _;
+    let short = base64::engine::general_purpose::STANDARD.encode([1u8; 16]);
+    let rendered = refusal(&[
+        ("MIGO_NODE__ENVIRONMENT", "production"),
+        ("MIGO_AUTH__TOKEN_KEY", &short),
+    ]);
+    assert!(rendered.contains("at least 32 bytes"), "{rendered}");
+    // And the (secret) key material never appears in the complaint about it.
+    assert!(!rendered.contains(&short), "{rendered}");
+}
+
+#[test]
+fn development_accepts_the_documented_development_key() {
+    // The placeholder is the placeholder *for* development; refusing it here would make the default
+    // laptop config fail to boot, which is exactly the friction the hardened check is scoped to
+    // avoid.
+    let config = Config::from_sources(
+        &[],
+        &env(&[("MIGO_AUTH__TOKEN_KEY", DEVELOPMENT_TOKEN_KEY)]),
+    )
+    .expect("configuration should parse");
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn production_refuses_the_documented_database_credential() {
+    // The compose file and CI ship a well-known `migo:migo` Postgres login. A hardened node still
+    // pointed at it is authenticating real traffic with a credential every reader of the repository
+    // already knows; it must refuse.
+    let rendered = refusal(&[
+        ("MIGO_NODE__ENVIRONMENT", "production"),
+        ("MIGO_STORE__BACKEND", "postgres"),
+        ("MIGO_STORE__URL", "postgres://migo:migo@db:5432/migo"),
+    ]);
+    assert!(rendered.contains("store.url"), "{rendered}");
+}
+
+#[test]
+fn the_database_credential_refusal_does_not_echo_the_credential() {
+    // The whole point is to keep the credential out of logs, so the refusal that flags it must not
+    // reproduce it.
+    let rendered = refusal(&[
+        ("MIGO_NODE__ENVIRONMENT", "production"),
+        ("MIGO_STORE__BACKEND", "postgres"),
+        ("MIGO_STORE__URL", "postgres://migo:migo@db:5432/migo"),
+    ]);
+    assert!(!rendered.contains("migo:migo"), "{rendered}");
+}
+
+#[test]
+fn development_accepts_the_documented_database_credential() {
+    // On a laptop, `migo:migo` is the normal login; the credential check is a hardened-only posture.
+    let config = Config::from_sources(
+        &[],
+        &env(&[
+            ("MIGO_STORE__BACKEND", "postgres"),
+            (
+                "MIGO_STORE__URL",
+                "postgres://migo:migo@localhost:5432/migo",
+            ),
+        ]),
+    )
+    .expect("configuration should parse");
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn staging_is_hardened_like_production() {
+    // The refusals are keyed on "is this a hardened environment", not on "is this literally
+    // production", so staging gets the same protection.
+    let rendered = refusal(&[("MIGO_NODE__ENVIRONMENT", "staging")]);
+    assert!(rendered.contains("auth.token_key"), "{rendered}");
+}
+
+// ---------------------------------------------------------------------------
+// Area 2: configuration precedence and validation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_default_environment_is_development() {
+    let config = Config::from_toml_str("", &[]).expect("empty config is all defaults");
+    assert_eq!(config.node.environment, Environment::Development);
+}
+
+#[test]
+fn the_default_store_backend_is_memory() {
+    let config = Config::from_toml_str("", &[]).expect("empty config is all defaults");
+    assert_eq!(config.store.backend, StoreBackend::Memory);
+}
+
+#[test]
+fn the_environment_overrides_a_file_value() {
+    // Precedence is defaults, then files, then environment. A value set in both must resolve to the
+    // environment's.
+    let config = Config::from_toml_str(
+        "[node]\nenvironment = \"staging\"\n",
+        &env(&[("MIGO_NODE__ENVIRONMENT", "production")]),
+    )
+    .expect("configuration should parse");
+    assert_eq!(config.node.environment, Environment::Production);
+}
+
+#[test]
+fn an_unknown_key_is_rejected() {
+    // `deny_unknown_fields` turns a typo into a startup failure rather than a setting that silently
+    // does nothing.
+    let error = Config::from_toml_str("[node]\nregionn = \"eu\"\n", &[])
+        .expect_err("a misspelled key must fail");
+    assert!(matches!(error, ConfigError::Schema(_)), "{error:?}");
+}
+
+#[test]
+fn an_unknown_key_error_names_the_key() {
+    let error = Config::from_toml_str("[node]\nregionn = \"eu\"\n", &[])
+        .expect_err("a misspelled key must fail");
+    assert!(error.to_string().contains("regionn"), "{error}");
+}
+
+#[test]
+fn an_invalid_enum_value_is_a_schema_error() {
+    let error = Config::from_sources(&[], &env(&[("MIGO_NODE__ENVIRONMENT", "teapot")]))
+        .expect_err("an unknown environment must fail");
+    assert!(matches!(error, ConfigError::Schema(_)), "{error:?}");
+    assert!(error.to_string().contains("teapot"), "{error}");
+}
+
+#[test]
+fn an_invalid_value_is_reported_against_its_field() {
+    // A coherence problem names the field that carries it, so the operator reads "fix this key",
+    // not "something, somewhere, is wrong".
+    let rendered = refusal(&[("MIGO_HTTP__MAX_BODY_BYTES", "0")]);
+    assert!(rendered.contains("http.max_body_bytes"), "{rendered}");
+}
+
+#[test]
+fn every_problem_is_reported_at_once() {
+    // One restart should surface the whole list, not the first mistake and then, after a fix, the
+    // second.
+    let rendered = refusal(&[
+        ("MIGO_HTTP__BIND", "not-an-address"),
+        ("MIGO_STORE__MAX_CONNECTIONS", "0"),
+    ]);
+    assert!(rendered.contains("http.bind"), "{rendered}");
+    assert!(rendered.contains("store.max_connections"), "{rendered}");
+}
+
+#[test]
+fn an_empty_environment_value_means_unset() {
+    // So exporting `MIGO_NODE__SIGNING_KEY=` reads as "no key", not "an empty key".
+    let config = Config::from_sources(&[], &env(&[("MIGO_NODE__SIGNING_KEY", "")]))
+        .expect("configuration should parse");
+    assert!(config.node.signing_key.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Area 4 (part): the config a panic might print redacts its secrets
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_config_debug_does_not_leak_the_token_key() {
+    let key = valid_token_key();
+    let config = Config::from_sources(&[], &env(&[("MIGO_AUTH__TOKEN_KEY", &key)]))
+        .expect("configuration should parse");
+    let debug = format!("{config:?}");
+    assert!(
+        !debug.contains(&key),
+        "token key leaked into Debug: {debug}"
+    );
+}
+
+#[test]
+fn the_config_debug_does_not_leak_the_database_credential() {
+    let config = Config::from_sources(
+        &[],
+        &env(&[("MIGO_STORE__URL", "postgres://user:s3cr3t@localhost/migo")]),
+    )
+    .expect("configuration should parse");
+    let debug = format!("{config:?}");
+    assert!(
+        !debug.contains("s3cr3t"),
+        "db password leaked into Debug: {debug}"
+    );
+}
+
+#[test]
+fn a_secret_redacts_itself_in_debug() {
+    // The mechanism the two tests above rely on, asserted directly: a `Secret`'s Debug is the
+    // redaction form, never the bytes.
+    let secret = Secret::new("super-secret-value");
+    let debug = format!("{secret:?}");
+    assert!(!debug.contains("super-secret-value"), "{debug}");
+}
+
+#[test]
+fn the_summary_is_safe_to_log() {
+    // `Config::summary` is printed at startup; it must carry composition and backends but neither
+    // the token key nor the database credential.
+    let key = valid_token_key();
+    let config = Config::from_sources(
+        &[],
+        &env(&[
+            ("MIGO_AUTH__TOKEN_KEY", &key),
+            ("MIGO_STORE__URL", "postgres://user:s3cr3t@localhost/migo"),
+        ]),
+    )
+    .expect("configuration should parse");
+    let summary = config.summary();
+    assert!(!summary.contains(&key), "{summary}");
+    assert!(!summary.contains("s3cr3t"), "{summary}");
+}
+
+// ---------------------------------------------------------------------------
+// Area 5: shutdown is clean and idempotent
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_fresh_shutdown_is_not_triggered() {
+    assert!(!Shutdown::new().is_triggered());
+}
+
+#[test]
+fn triggering_a_shutdown_flips_it() {
+    let shutdown = Shutdown::new();
+    shutdown.trigger();
+    assert!(shutdown.is_triggered());
+}
+
+#[test]
+fn triggering_a_shutdown_twice_is_idempotent() {
+    // A second SIGTERM, or a manual trigger racing the signal handler, must not panic or reset.
+    let shutdown = Shutdown::new();
+    shutdown.trigger();
+    shutdown.trigger();
+    assert!(shutdown.is_triggered());
+}
+
+#[test]
+fn a_cloned_shutdown_shares_the_signal() {
+    // The gateway, the axum server, and the signal handler all hold clones of one signal; a trigger
+    // on any must be seen by all.
+    let shutdown = Shutdown::new();
+    let clone = shutdown.clone();
+    shutdown.trigger();
+    assert!(clone.is_triggered());
+}
+
+#[tokio::test]
+async fn cancelled_returns_immediately_once_triggered() {
+    // A task that starts awaiting the signal after it has already fired must not block forever.
+    let shutdown = Shutdown::new();
+    shutdown.trigger();
+    shutdown.cancelled().await;
+}
+
+// ---------------------------------------------------------------------------
+// Area 3: the composition graph is acyclic and complete, plus the port adapters
+// ---------------------------------------------------------------------------
+// `App::build` against the default configuration is the whole graph assembled with in-memory
+// backends. It opens no socket and reaches no database: the memory store connects to nothing, and
+// in development an absent signing key yields an ephemeral secret rather than a refusal. If any
+// crate's constructor were ordered before one of its arguments, or a cycle introduced, none of
+// these would build.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use migo_auth::{DeviceClaim, Registration, RequestContext};
+use migo_core::{Id, Timestamp};
+use migo_games::{Rewards, Unrewarded};
+use migo_media::Storage;
+use migo_moderation::{Powers, Roster};
+use migo_protocol::Platform;
+use migod::ports::{EconomyRewards, FsStorage, StaffRoster};
+
+/// A development environment with in-memory backends plus a real token key. `migo_auth` requires a
+/// token key to sign session tokens in *every* environment; the bare defaults leave it unset — they
+/// validate, but cannot open authentication — so a development operator supplies one exactly as
+/// this does. Extra pairs are appended and take precedence.
+fn dev_env(extra: &[(&str, &str)]) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    pairs.push(("MIGO_AUTH__TOKEN_KEY".to_string(), valid_token_key()));
+    pairs.extend(
+        extra
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string())),
+    );
+    pairs
+}
+
+/// Builds an `App` against a development configuration with in-memory backends: memory store and
+/// cache, filesystem media, an ephemeral node secret, and no socket bound. The one place these
+/// tests hold the whole graph at once.
+async fn build_default_app() -> migod::App {
+    let config = Config::from_sources(&[], &dev_env(&[])).expect("configuration should parse");
+    migod::App::build(&config)
+        .await
+        .expect("a development configuration must build against in-memory backends")
+}
+
+#[tokio::test]
+async fn a_development_configuration_builds_the_whole_graph() {
+    // That this returns at all is the proof the twenty-one-crate graph is acyclic and every
+    // service's dependencies are constructed before it.
+    let app = build_default_app().await;
+    assert_eq!(app.bind, Config::default().http.bind);
+}
+
+#[tokio::test]
+async fn a_built_app_starts_with_an_untriggered_shutdown() {
+    let app = build_default_app().await;
+    assert!(!app.shutdown.is_triggered());
+}
+
+#[tokio::test]
+async fn building_twice_yields_independent_authenticators() {
+    // Two builds must not alias a service. If a constructor cached a global, these would be the
+    // same pointer.
+    let first = build_default_app().await;
+    let second = build_default_app().await;
+    assert!(!Arc::ptr_eq(&first.auth, &second.auth));
+}
+
+#[tokio::test]
+async fn building_twice_yields_independent_economies() {
+    let first = build_default_app().await;
+    let second = build_default_app().await;
+    assert!(!Arc::ptr_eq(&first.economy, &second.economy));
+}
+
+#[tokio::test]
+async fn building_twice_yields_independent_games() {
+    let first = build_default_app().await;
+    let second = build_default_app().await;
+    assert!(!Arc::ptr_eq(&first.games, &second.games));
+}
+
+#[tokio::test]
+async fn building_twice_yields_independent_registries() {
+    // One registry per process, but a fresh one per build; two apps never share a metric namespace.
+    let first = build_default_app().await;
+    let second = build_default_app().await;
+    assert!(!Arc::ptr_eq(&first.registry, &second.registry));
+}
+
+// ---------------------------------------------------------------------------
+// Area 4 (part): the shared metric registry carries no identity
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_metric_registry_carries_no_node_identity() {
+    // Brief section 174: metrics are not labelled by account, device, node, or peer id. Build with
+    // a distinctive node id and assert the registry the whole process shares — the very instance
+    // the REST API renders at `/metrics` — never spells it out.
+    let config = Config::from_sources(
+        &[],
+        &dev_env(&[("MIGO_NODE__ID", "migonode-pii-canary-7f3a")]),
+    )
+    .expect("configuration should parse");
+    let app = migod::App::build(&config)
+        .await
+        .expect("the configuration must build");
+    let rendered = app.registry.render();
+    assert!(
+        !rendered.contains("migonode-pii-canary-7f3a"),
+        "the node id reached a metric: {rendered}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Area 3 (part): the null reward sink vs the real economy bridge
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_null_reward_sink_swallows_experience() {
+    // `Unrewarded` is the default when no economy is wired; a game that finishes on such a node
+    // still succeeds, dropping the credit rather than failing the game.
+    Unrewarded
+        .award_experience(
+            Id::from(1u128),
+            10,
+            Id::from(2u128),
+            Timestamp::from_millis(1),
+        )
+        .await
+        .expect("the null sink accepts an award");
+}
+
+#[tokio::test]
+async fn the_null_reward_sink_swallows_a_win() {
+    Unrewarded
+        .mark_winner(Id::from(1u128), Id::from(2u128), Timestamp::from_millis(1))
+        .await
+        .expect("the null sink accepts a win");
+}
+
+/// Registers one real account through a built app and returns its id.
+///
+/// An invented id will not do: a reward is a write against a wallet, a wallet belongs to an
+/// account, and the economy rightly refuses to credit an account that does not exist. The only
+/// way to make one through [`migod::App`] is the front door every client uses, which is also what
+/// makes these tests exercise two domains wired to the same store rather than one in isolation.
+async fn registered_account(app: &migod::App, username: &str) -> Id {
+    app.auth
+        .register(
+            Registration {
+                username: username.to_string(),
+                email: None,
+                phone: None,
+                password: Secret::new("correct-horse-battery-staple"),
+                locale: "en-US".to_string(),
+                country: None,
+                device: DeviceClaim::new(Platform::Web, "integration test"),
+            },
+            &RequestContext::at(Timestamp::from_millis(1)),
+        )
+        .await
+        .expect("a development app registers an account")
+        .account_id
+}
+
+#[tokio::test]
+async fn the_economy_bridge_forwards_a_game_credit() {
+    // The real adapter, over the real economy from a built app: a finished game credits experience
+    // as an economy award tagged `Source::Game`. A malformed award, or one aimed at an account the
+    // economy cannot find, would error here.
+    let app = build_default_app().await;
+    let account = registered_account(&app, "creditplayer").await;
+    let rewards = EconomyRewards::new(app.economy.clone());
+    rewards
+        .award_experience(account, 25, Id::from(2002u128), Timestamp::from_millis(1))
+        .await
+        .expect("the credit forwards to the economy");
+}
+
+#[tokio::test]
+async fn the_economy_bridge_credit_is_idempotent_per_game() {
+    // The adapter tags the award with the game id, so replaying a finished game's reward adds
+    // nothing a second time — and, crucially, does not error.
+    let app = build_default_app().await;
+    let account = registered_account(&app, "replayplayer").await;
+    let rewards = EconomyRewards::new(app.economy.clone());
+    let game = Id::from(2002u128);
+    let now = Timestamp::from_millis(1);
+    rewards
+        .award_experience(account, 25, game, now)
+        .await
+        .expect("first credit");
+    rewards
+        .award_experience(account, 25, game, now)
+        .await
+        .expect("a replayed credit is absorbed, not rejected");
+}
+
+#[tokio::test]
+async fn the_economy_bridge_forwards_a_win_as_a_badge() {
+    // A win becomes a `GameChampion` badge grant; the grant is idempotent, so replaying it is safe.
+    let app = build_default_app().await;
+    let account = registered_account(&app, "winnerplayer").await;
+    let rewards = EconomyRewards::new(app.economy.clone());
+    let game = Id::from(2002u128);
+    let now = Timestamp::from_millis(1);
+    rewards
+        .mark_winner(account, game, now)
+        .await
+        .expect("the win forwards to the economy");
+    rewards
+        .mark_winner(account, game, now)
+        .await
+        .expect("a replayed win is absorbed, not rejected");
+}
+
+#[tokio::test]
+async fn the_economy_bridge_refuses_a_credit_for_an_account_that_does_not_exist() {
+    // The complement of the three above, and the reason they need a real account: the bridge does
+    // not invent a wallet for an unknown id. `Games` treats this refusal as a dropped reward and
+    // counts it rather than failing the finished game, so the error must surface here to be
+    // droppable there — swallowing it inside the adapter would hide a real inconsistency.
+    let app = build_default_app().await;
+    let rewards = EconomyRewards::new(app.economy.clone());
+    let error = rewards
+        .award_experience(
+            Id::from(404u128),
+            25,
+            Id::from(2002u128),
+            Timestamp::from_millis(1),
+        )
+        .await
+        .expect_err("an unknown account cannot be credited");
+    assert_eq!(error.code(), migo_protocol::codes::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// Area 3 (part): the staff roster port
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_empty_staff_roster_grants_nobody_anything() {
+    // The development posture: nobody is staff, so every operator action is refused.
+    let roster = StaffRoster::empty();
+    assert_eq!(roster.powers(Id::from(7u128)).await.unwrap(), Powers::NONE);
+}
+
+#[tokio::test]
+async fn a_configured_staff_roster_grants_the_listed_powers() {
+    let operator = Id::from(7u128);
+    let mut staff = HashMap::new();
+    staff.insert(operator, Powers::SUSPEND);
+    let roster = StaffRoster::new(staff);
+    assert_eq!(roster.powers(operator).await.unwrap(), Powers::SUSPEND);
+}
+
+#[tokio::test]
+async fn a_configured_staff_roster_grants_strangers_nothing() {
+    // An account not on the roster resolves to `NONE`, never an error: "not staff" is the common
+    // case, asked on every operator request.
+    let mut staff = HashMap::new();
+    staff.insert(Id::from(7u128), Powers::SUSPEND);
+    let roster = StaffRoster::new(staff);
+    assert_eq!(roster.powers(Id::from(8u128)).await.unwrap(), Powers::NONE);
+}
+
+// ---------------------------------------------------------------------------
+// Area 3 (part): the filesystem storage port
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn filesystem_storage_normalises_a_trailing_slash() {
+    // A doubled slash in a media URL is a real bug when the public base is configured with a
+    // trailing slash, as URLs often are. `new` strips it so joining a key yields exactly one.
+    let storage = FsStorage::new(std::env::temp_dir(), "https://media.example/m/");
+    let grant = storage
+        .sign_download("objectkey", Timestamp::from_millis(1000))
+        .await
+        .expect("an unsigned download URL is always available");
+    assert_eq!(grant.expose(), "https://media.example/m/objectkey");
+}
+
+#[tokio::test]
+async fn filesystem_storage_refuses_a_traversal_key() {
+    // Keys are server-generated and flat; a key that tries to climb out of the media root is
+    // refused rather than followed (defence in depth).
+    let storage = FsStorage::new(std::env::temp_dir(), "https://media.example/m");
+    assert!(storage.head("../../etc/passwd", 16).await.is_err());
+}
+
+#[tokio::test]
+async fn filesystem_storage_refuses_an_empty_key() {
+    let storage = FsStorage::new(std::env::temp_dir(), "https://media.example/m");
+    assert!(storage.head("", 16).await.is_err());
+}
+
+#[tokio::test]
+async fn filesystem_storage_refuses_an_absolute_key() {
+    let storage = FsStorage::new(std::env::temp_dir(), "https://media.example/m");
+    assert!(storage.head("/etc/passwd", 16).await.is_err());
+}
+
+#[tokio::test]
+async fn filesystem_storage_reports_an_absent_object_as_absent() {
+    // A safe key under a root that holds nothing is `Ok(None)`, not an error: "not there" is a
+    // normal answer the media service's size check and sweeper both depend on.
+    let storage = FsStorage::new(std::env::temp_dir(), "https://media.example/m");
+    let head = storage
+        .head("migod-absent-object-canary-4b1c9e", 16)
+        .await
+        .expect("an absent object is not an error");
+    assert!(head.is_none());
+}

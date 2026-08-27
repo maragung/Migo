@@ -103,6 +103,22 @@ kotlin-check: ## Static checks on the Android Kotlin, which nothing here can com
 	python3 tools/scripts/kotlin-lint.py --selftest
 	python3 tools/scripts/kotlin-lint.py $(ANDROID_DIR)
 
+.PHONY: infra-check
+infra-check: ## Static hygiene checks on infra/ that need no daemon (CI gate)
+	# Deployment files are the one tree where a mistake is invisible until it is
+	# already running somewhere: an unpinned tag that silently moves, a secret typed
+	# into a compose file, a container that asked for the host's namespaces. None of
+	# that needs Docker to see, so this gate reads the files instead of starting a
+	# stack. It checks pinned images, private key material and secret-shaped values
+	# outside the two documented development constants, privileged containers, host
+	# namespaces and writable host mounts, requests, limits and both probes on every
+	# Kubernetes workload, two services publishing the same host port, and the web
+	# client publishing exactly port 19991.
+	#
+	# It starts no container, so it is not a substitute for a smoke test; brief
+	# section 177 keeps infra out of BUILT for precisely that reason.
+	python3 tools/scripts/infra-audit.py
+
 # ---------------------------------------------------------------- build
 
 .PHONY: build
@@ -298,7 +314,7 @@ audit: ## Dependency vulnerability + licence audit
 	$(PNPM) audit --audit-level high || true
 
 .PHONY: ci
-ci: protocol-check entity-check brief-check vector-check kotlin-check fmt-check build-ts lint doc-check test test-vectors ## Everything CI runs
+ci: protocol-check entity-check brief-check vector-check kotlin-check infra-check fmt-check build-ts lint doc-check test test-vectors ## Everything CI runs
 
 # ---------------------------------------------------------------- misc
 

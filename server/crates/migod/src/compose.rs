@@ -85,6 +85,10 @@ pub struct App {
     pub clock: Arc<dyn Clock>,
     /// The one cooperative shutdown signal for the whole process.
     pub shutdown: Shutdown,
+    /// The single metric [`Registry`] every service registered into; the REST API renders this
+    /// exact instance at `/metrics`. Held here so an integration test can render it directly and
+    /// assert that nothing sensitive ever reached a metric, without driving an HTTP request.
+    pub registry: Arc<Registry>,
     /// The socket address the server binds, taken from the HTTP configuration.
     pub bind: String,
     /// Authentication: register, sign in, refresh, sign out, and access-token verification.
@@ -299,13 +303,14 @@ impl App {
 
         // The REST API renders the very registry every service just registered into, so wrapping it
         // in an `Arc` here must come after the last `&registry` borrow above.
+        let registry = Arc::new(registry);
         let api_router = migo_api::router(
             config,
             migo_api::ApiServices {
                 authenticator: auth.clone(),
                 rate_limiter: limiter,
                 clock: clock.clone(),
-                registry: Arc::new(registry),
+                registry: registry.clone(),
                 node,
                 features: FEATURES,
             },
@@ -316,6 +321,7 @@ impl App {
             api_router,
             clock,
             shutdown,
+            registry,
             bind: config.http.bind.clone(),
             auth,
             messaging,

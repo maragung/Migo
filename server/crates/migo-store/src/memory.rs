@@ -36,14 +36,15 @@ use migo_protocol::{fault, ConversationKind, EncryptionMode, RelationshipKind, R
 use parking_lot::RwLock;
 
 use crate::model::{
-    game_status, notification_kind, report_status, Account, AccountStatus, AdvanceGame, Appended,
-    AuditEntry, BadgeAward, Bot, Conversation, ConversationMember, ConversationPosition,
-    ConversationSummary, Currency, Cursor, Device, Entitlement, GameSession, GiftSent, KeyBundle,
-    LedgerAccount, LedgerAccountKind, LedgerTransaction, MediaObject, NewAccount, NewBot,
-    NewDevice, NewGame, NewMessage, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction,
-    NewXpAward, Notification, OutboxRecord, Patch, PeerRecord, Posted, Profile, ProfilePatch,
-    Progression, PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship, Report,
-    RevokeReason, Room, RoomMember, Scope, Session, Standing, StoredMessage, Visibility, XpChange,
+    advanced_token, game_status, notification_kind, report_status, Account, AccountStatus,
+    AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, Conversation, ConversationMember,
+    ConversationPosition, ConversationSummary, Currency, Cursor, Device, Entitlement, GameSession,
+    GiftSent, KeyBundle, LedgerAccount, LedgerAccountKind, LedgerTransaction, MediaObject,
+    NewAccount, NewBot, NewDevice, NewGame, NewMessage, NewOutboxEvent, NewPeer, NewRoom,
+    NewSession, NewTransaction, NewXpAward, Notification, OutboxRecord, Patch, PeerRecord, Posted,
+    Profile, ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Receipt,
+    Relationship, Report, RevokeReason, Room, RoomMember, Scope, Session, Standing, StoredMessage,
+    Visibility, XpChange,
 };
 use crate::traits::{
     canonical_country, clamp_limit, AccountStore, BotStore, DeviceStore, EconomyStore,
@@ -2486,7 +2487,13 @@ impl GameStore for MemoryStore {
         game.state = advance.state;
         game.turn_of = advance.turn_of;
         game.status = advance.status;
-        game.updated_at = advance.at;
+        // The token has to move on every write, and `at` alone does not guarantee that: two
+        // moves arriving inside the same millisecond would leave it unchanged, and the second
+        // writer would find its own now-stale expectation satisfied and overwrite the first
+        // move without ever seeing it. The comparison above pins the current value, so a
+        // strictly greater one is computable here without a second read. Only the token is
+        // nudged; `finished_at` stays the real time the game ended.
+        game.updated_at = advanced_token(advance.expected_updated_at, advance.at);
         game.finished_at = if advance.status == game_status::OPEN {
             None
         } else {

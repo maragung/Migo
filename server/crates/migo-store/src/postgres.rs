@@ -92,14 +92,15 @@ use uuid::Uuid;
 use crate::entity;
 use crate::migration::{Migrator, MIGRATION_LOCK_KEY};
 use crate::model::{
-    game_status, notification_kind, Account, AccountStatus, AdvanceGame, Appended, AuditEntry,
-    BadgeAward, Bot, Conversation, ConversationMember, ConversationPosition, ConversationSummary,
-    Currency, Cursor, Device, Entitlement, GameSession, GiftSent, KeyBundle, LedgerAccount,
-    LedgerAccountKind, LedgerLeg, LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice,
-    NewGame, NewMessage, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward,
-    Notification, OutboxRecord, Patch, PeerRecord, Posted, Profile, ProfilePatch, Progression,
-    PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship, Report, RevokeReason, Room,
-    RoomMember, Scope, Session, Standing, StoredMessage, Visibility, XpChange,
+    advanced_token, game_status, notification_kind, Account, AccountStatus, AdvanceGame, Appended,
+    AuditEntry, BadgeAward, Bot, Conversation, ConversationMember, ConversationPosition,
+    ConversationSummary, Currency, Cursor, Device, Entitlement, GameSession, GiftSent, KeyBundle,
+    LedgerAccount, LedgerAccountKind, LedgerLeg, LedgerTransaction, MediaObject, NewAccount,
+    NewBot, NewDevice, NewGame, NewMessage, NewOutboxEvent, NewPeer, NewRoom, NewSession,
+    NewTransaction, NewXpAward, Notification, OutboxRecord, Patch, PeerRecord, Posted, Profile,
+    ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship,
+    Report, RevokeReason, Room, RoomMember, Scope, Session, Standing, StoredMessage, Visibility,
+    XpChange,
 };
 use crate::traits::{
     canonical_country, clamp_limit, AccountStore, BotStore, DeviceStore, EconomyStore,
@@ -4811,7 +4812,15 @@ impl GameStore for PostgresStore {
                 state: Set(advance.state),
                 turn_of: Set(advance.turn_of.map(uuid_of)),
                 status: Set(advance.status),
-                updated_at: Set(stamp_of(advance.at)),
+                // Strictly past the token this update matched on, because `at` alone does not
+                // guarantee movement: two moves inside the same millisecond would leave the
+                // token unchanged and the second would satisfy its own stale expectation,
+                // overwriting the first. The filter pins the old value, so the new one is a
+                // constant rather than an expression over the row.
+                updated_at: Set(stamp_of(advanced_token(
+                    advance.expected_updated_at,
+                    advance.at,
+                ))),
                 finished_at: Set(finished_at),
                 ..Default::default()
             })
@@ -4823,8 +4832,8 @@ impl GameStore for PostgresStore {
         }
         // Read the row back so the caller sees exactly what landed. Safe against a
         // racing writer: any concurrent move would have had to name the token this
-        // update just replaced, so none can have committed between the write and this
-        // read.
+        // update just replaced, and the token this update wrote is strictly past it,
+        // so no other move can have committed between the write and this read.
         self.game(advance.game_id).await
     }
 

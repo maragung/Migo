@@ -20,3 +20,8 @@ serde.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }
+migo-store.workspace = true
+migo-cache.workspace = true
+tower.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true

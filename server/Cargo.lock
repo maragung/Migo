@@ -1790,13 +1790,18 @@ dependencies = [
 name = "migo-api"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "migo-auth",
+ "migo-cache",
  "migo-core",
  "migo-protocol",
  "migo-ratelimit",
+ "migo-store",
  "serde",
+ "serde_json",
  "tokio",
+ "tower",
  "tower-http",
 ]
 
@@ -1824,6 +1829,7 @@ dependencies = [
  "async-trait",
  "base64",
  "migo-auth",
+ "migo-cache",
  "migo-core",
  "migo-crypto",
  "migo-protocol",
@@ -1921,6 +1927,7 @@ name = "migo-games"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "migo-cache",
  "migo-core",
  "migo-protocol",
  "migo-ratelimit",
@@ -1938,6 +1945,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "migo-auth",
+ "migo-cache",
  "migo-core",
  "migo-protocol",
  "migo-ratelimit",
@@ -2125,6 +2133,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "base64",
  "bytes",
  "migo-api",
  "migo-auth",

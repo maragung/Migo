@@ -1,0 +1,32 @@
+{
+  // A Node-runnable projection of the browser bundle, for the test suite only.
+  //
+  // The app's own tsconfig targets the DOM and emits nothing (`noEmit`, `moduleResolution: Bundler`):
+  // it exists to type-check code that Next.js bundles, not to produce files a runtime can execute. The
+  // tests, by contrast, run under Node's built-in `node:test`, so they need real emitted `.js`. This
+  // config extends the app config — inheriting every strictness switch, the `@/*` path alias, and the
+  // DOM lib the source needs to type-check — and overrides only what turns it into a Node build:
+  // NodeNext resolution, JSX compiled to `react/jsx-runtime` calls, and an output directory.
+  //
+  // `include` names only the test files. The compiler follows their imports into `src/`, so exactly the
+  // source modules a test actually exercises are compiled — and nothing else (the app pages, the CSS
+  // imports, and the React hooks that only run inside a renderer stay out of the Node build). The `@/`
+  // specifiers the compiled source still contains are resolved at run time by `tools/test-loader.mjs`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "jsx": "react-jsx",
+    "rootDir": ".",
+    "outDir": "dist",
+    "incremental": false,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": true,
+    "plugins": []
+  },
+  "include": ["test/**/*.ts", "test/**/*.tsx"],
+  "exclude": ["node_modules", ".next", "out", "dist"]
+}
