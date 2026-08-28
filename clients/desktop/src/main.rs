@@ -19,17 +19,23 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod config;
 mod crypto;
 mod model;
 mod net;
+mod settings;
 mod theme;
 mod ui;
 mod vault;
 
 use std::path::PathBuf;
 
-/// The server address offered on first run when nothing else says otherwise.
-const DEFAULT_SERVER: &str = "http://127.0.0.1:8080";
+use crate::config::{default_loopback_server_endpoint, ServerEndpoint};
+use crate::settings::{load_or_default, Settings, SettingsError};
+
+/// The fallback server when the env var is unset and no settings file is reachable.
+const DEFAULT_HOST: &str = "127.0.0.1";
+const DEFAULT_PORT: u16 = 18080;
 
 fn main() -> eframe::Result<()> {
     install_tracing();
@@ -44,7 +50,7 @@ fn main() -> eframe::Result<()> {
             std::process::exit(2);
         }
     };
-    let server = std::env::var("MIGO_SERVER").unwrap_or_else(|_| DEFAULT_SERVER.to_owned());
+    let server = resolve_server_endpoint();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -67,6 +73,97 @@ fn main() -> eframe::Result<()> {
         Box::new(move |cc| Ok(Box::new(app::App::new(cc, vault_path, server)))),
     )
 }
+
+/// What server to offer on first run.
+///
+/// `MIGO_SERVER` overrides the persisted endpoint (so a CI or test harness can point at a
+/// different node without rewriting the settings file), and the settings file is the user's last
+/// typed choice. A first launch with nothing anywhere falls back to the loopback dev policy.
+fn resolve_server_endpoint() -> ServerEndpoint {
+    if let Ok(raw) = std::env::var("MIGO_SERVER") {
+        if let Some(endpoint) = parse_env_server(&raw) {
+            return endpoint;
+        }
+    }
+    if let Some(path) = Settings::default_path() {
+        let settings = load_or_default(&path);
+        return settings.server;
+    }
+    default_loopback_server_endpoint(DEFAULT_HOST, DEFAULT_PORT)
+}
+
+/// Parses the env-supplied URL into a {@link ServerEndpoint}. A malformed URL falls back to the
+/// default rather than refusing to start: the env is a developer convenience, not a contract.
+fn parse_env_server(raw: &str) -> Option<ServerEndpoint> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let url = url_simple_parse(trimmed)?;
+    let rest_scheme = match url.scheme.as_str() {
+        "https" => crate::config::RestScheme::Https,
+        "http" => crate::config::RestScheme::Http,
+        _ => return None,
+    };
+    let host = url.host;
+    let port = url
+        .port
+        .unwrap_or(if rest_scheme == crate::config::RestScheme::Https {
+            443
+        } else {
+            80
+        });
+    let scheme = if rest_scheme == crate::config::RestScheme::Https {
+        crate::config::Scheme::Ws(crate::config::WsScheme::Wss)
+    } else {
+        crate::config::Scheme::Ws(crate::config::WsScheme::Ws)
+    };
+    Some(ServerEndpoint {
+        host,
+        port,
+        gateway_port: port.saturating_add(1),
+        transport: crate::config::Transport::WebSocket,
+        scheme,
+        rest_scheme,
+    })
+}
+
+struct SimpleUrl {
+    scheme: String,
+    host: String,
+    port: Option<u16>,
+}
+
+fn url_simple_parse(input: &str) -> Option<SimpleUrl> {
+    let (scheme, rest) = input.split_once("://")?;
+    let (authority, _) = rest.split_once('/').unwrap_or((rest, ""));
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port_text)) => {
+            if host.is_empty() {
+                return None;
+            }
+            // The authority is `host:port`; the port must be digits.
+            if port_text.chars().all(|c| c.is_ascii_digit()) && !port_text.is_empty() {
+                let port = port_text.parse::<u16>().ok()?;
+                if port == 0 {
+                    return None;
+                }
+                (host.to_ascii_lowercase(), Some(port))
+            } else {
+                (authority.to_ascii_lowercase(), None)
+            }
+        }
+        None => (authority.to_ascii_lowercase(), None),
+    };
+    Some(SimpleUrl {
+        scheme: scheme.to_ascii_lowercase(),
+        host,
+        port,
+    })
+}
+
+#[allow(dead_code)]
+fn _settings_error_marker(_: SettingsError) {}
 
 /// Where the vault lives.
 ///

@@ -75,10 +75,15 @@ test('a fresh VU is not yet connected and has no partner or conversation', () =>
   assert.equal(vu.conversationId, undefined);
 });
 
-test('the MigoClient is created with the run URLs, timeout, and identifiable device name', () => {
+test('the MigoClient is created with the run endpoint, timeout, and identifiable device name', () => {
   const { created } = buildWithStubbedClient(3, CONFIG);
-  assert.equal(created['baseUrl'], 'http://localhost:8080');
-  assert.equal(created['gatewayUrl'], 'ws://localhost:8080/ws');
+  const server = created['server'] as Record<string, unknown>;
+  assert.equal(server['host'], 'localhost');
+  assert.equal(server['port'], 8080);
+  assert.equal(server['gatewayPort'], 8081);
+  assert.equal(server['transport'], 'WebSocket');
+  assert.equal(server['scheme'], 'Ws');
+  assert.equal(server['restScheme'], 'Http');
   assert.equal(created['requestTimeoutMs'], 12_345);
   assert.equal(created['deviceDisplayName'], 'loadgen/tag42/3');
   assert.equal(typeof created['onEventError'], 'function');

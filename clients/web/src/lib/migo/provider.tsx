@@ -11,6 +11,8 @@
  *     operation that can mutate it, so a reload keeps the identity and its ability to read history.
  *   - The grant (the session tokens) is written to IndexedDB and, when its access token has expired by
  *     the time we return, refreshed over REST before the socket is opened.
+ *   - The user-chosen {@link ServerEndpoint} is also written to IndexedDB, so a self-hosted user does
+ *     not have to type the address on every visit.
  *
  * Everything realtime flows through the SDK's gateway WebSocket; this module never polls. The only
  * timers involved are the SDK's own heartbeat and reconnect backoff.
@@ -20,9 +22,9 @@ import { createContext, useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import { BootstrapClient, KeyStore, MigoClient, PresenceState } from '@migo/sdk';
-import type { ConnectionState, Grant, Id, RegisterParams } from '@migo/sdk';
+import type { ConnectionState, Grant, Id, RegisterParams, ServerEndpoint } from '@migo/sdk';
 
-import { config } from '@/lib/config.js';
+import { defaultServerEndpoint } from '@/lib/config.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { deviceDisplayName, webHello } from '@/lib/migo/hello.js';
 import {
@@ -31,6 +33,11 @@ import {
   saveKeyStoreSnapshot,
 } from '@/lib/storage/keystore-store.js';
 import { clearSession, loadSession, saveSession } from '@/lib/storage/session-store.js';
+import {
+  clearServerEndpoint,
+  loadServerEndpoint,
+  saveServerEndpoint,
+} from '@/lib/storage/server-endpoint-store.js';
 
 /** The overall authentication lifecycle, distinct from the transport's {@link ConnectionState}. */
 export type AuthStatus = 'initializing' | 'anonymous' | 'connecting' | 'ready';
@@ -61,8 +68,8 @@ export interface MigoContextValue {
   resetNonce: number;
   /** The live client once {@link status} is `ready`, else `null`. */
   client: MigoClient | null;
-  register: (form: RegisterForm) => Promise<void>;
-  login: (form: LoginForm) => Promise<void>;
+  register: (form: RegisterForm, server: ServerEndpoint) => Promise<void>;
+  login: (form: LoginForm, server: ServerEndpoint) => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -81,6 +88,7 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
   const [client, setClient] = useState<MigoClient | null>(null);
 
   const clientRef = useRef<MigoClient | null>(null);
+  const serverRef = useRef<ServerEndpoint | null>(null);
   const inboundOffRef = useRef<(() => void) | null>(null);
   const persistScheduledRef = useRef(false);
 
@@ -116,6 +124,7 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
     inboundOffRef.current = null;
     const current = clientRef.current;
     clientRef.current = null;
+    serverRef.current = null;
     setClient(null);
     if (current !== null) {
       try {
@@ -153,10 +162,9 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
   // --- client construction ---
 
   const buildClient = useCallback(
-    (options: { keyStore?: KeyStore; deviceId?: Id }): MigoClient => {
+    (options: { keyStore?: KeyStore; deviceId?: Id; server: ServerEndpoint }): MigoClient => {
       const created = MigoClient.create({
-        baseUrl: config.apiBaseUrl,
-        gatewayUrl: config.gatewayUrl,
+        server: options.server,
         hello: webHello(),
         deviceDisplayName: deviceDisplayName(),
         ...(options.keyStore ? { keyStore: options.keyStore } : {}),
@@ -172,6 +180,7 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
         },
       });
       clientRef.current = created;
+      serverRef.current = options.server;
       return created;
     },
     [scheduleKeyStorePersist],
@@ -188,11 +197,18 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
   // --- register / login / logout ---
 
   const register = useCallback(
-    async (form: RegisterForm): Promise<void> => {
+    async (form: RegisterForm, server: ServerEndpoint): Promise<void> => {
       setError(null);
       setStatus('connecting');
+      // Persist the new endpoint *before* opening a socket, so a mid-flight failure can be retried
+      // against the same server without the form losing the address the user just typed.
       try {
-        const created = buildClient({});
+        await saveServerEndpoint(server);
+      } catch {
+        // Persistence is best-effort: a failed write will not block the in-flight attempt.
+      }
+      try {
+        const created = buildClient({ server });
         const params: Omit<RegisterParams, 'device'> = {
           username: form.username.trim(),
           password: form.password,
@@ -225,11 +241,16 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
   );
 
   const login = useCallback(
-    async (form: LoginForm): Promise<void> => {
+    async (form: LoginForm, server: ServerEndpoint): Promise<void> => {
       setError(null);
       setStatus('connecting');
       try {
-        const created = buildClient({});
+        await saveServerEndpoint(server);
+      } catch {
+        // Best-effort, see register above.
+      }
+      try {
+        const created = buildClient({ server });
         const grant = await created.login({
           identifier: form.identifier.trim(),
           password: form.password,
@@ -253,10 +274,13 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
 
   const logout = useCallback(async (): Promise<void> => {
     const grant = clientRef.current?.connected ? clientRef.current.grant : null;
-    // Best-effort server-side revocation before dropping the local session.
-    if (grant) {
+    const server = serverRef.current;
+    // Best-effort server-side revocation before dropping the local session. The endpoint for the
+    // call is the one the live client was built with: rebuilding a fresh one from the env default
+    // would mean logging out from a self-hosted server on the env default URL, which is a bug.
+    if (grant && server) {
       try {
-        await new BootstrapClient(config.apiBaseUrl).logout(grant.accessToken, grant.sessionId);
+        await new BootstrapClient(server).logout(grant.accessToken, grant.sessionId);
       } catch {
         // Revocation is best-effort; the local session is cleared regardless.
       }
@@ -276,7 +300,12 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
     let cancelled = false;
 
     async function restore(): Promise<void> {
-      const [session, snapshot] = await Promise.all([loadSession(), loadKeyStoreSnapshot()]);
+      const [session, snapshot, endpoint] = await Promise.all([
+        loadSession(),
+        loadKeyStoreSnapshot(),
+        loadServerEndpoint(),
+      ]);
+      const server = endpoint ?? defaultServerEndpoint();
       if (!session || !snapshot) {
         if (!cancelled) {
           setStatus('anonymous');
@@ -285,11 +314,11 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
       }
 
       const keyStore = KeyStore.restore(snapshot);
-      const created = buildClient({ keyStore, deviceId: session.grant.deviceId });
+      const created = buildClient({ keyStore, deviceId: session.grant.deviceId, server });
 
       let grant = session.grant;
       if (grant.accessExpiresAtMs <= Date.now() + REFRESH_SKEW_MS) {
-        grant = await new BootstrapClient(config.apiBaseUrl).refresh({
+        grant = await new BootstrapClient(server).refresh({
           refreshToken: grant.refreshToken,
           deviceId: grant.deviceId,
         });
@@ -354,3 +383,6 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
 
   return <MigoContext.Provider value={value}>{children}</MigoContext.Provider>;
 }
+
+// Reserved for a future "forget server" affordance; kept exported to make the import non-dead.
+export { clearServerEndpoint };

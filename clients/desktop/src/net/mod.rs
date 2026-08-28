@@ -37,6 +37,7 @@ use migo_core::{Id, OsRandom, Random, Timestamp};
 use migo_protocol::{features, ClientInfo, ConversationKind, EncryptionMode, MessageKind, Opcode};
 use tokio::sync::mpsc;
 
+use crate::config::ServerEndpoint;
 use crate::crypto::content::{self, Content};
 use crate::crypto::envelope::Envelope;
 use crate::crypto::session::{DeviceKeys, SessionStore, ONE_TIME_PREKEY_COUNT};
@@ -56,14 +57,14 @@ const ONE_TIME_PREKEY_LOW_WATER: usize = ONE_TIME_PREKEY_COUNT as usize / 5;
 pub enum Command {
     /// Create an account, generate keys, and write a new vault.
     Register {
-        server: String,
+        server: ServerEndpoint,
         username: String,
         password: String,
         passphrase: String,
     },
     /// Sign in to an existing account, generating keys if this device has none yet.
     SignIn {
-        server: String,
+        server: ServerEndpoint,
         identifier: String,
         password: String,
         passphrase: String,
@@ -233,6 +234,7 @@ impl Sink {
 
 /// One signed-in session's worth of state.
 struct Signed {
+    server: ServerEndpoint,
     rest: Rest,
     account: Account,
     access_token: String,
@@ -438,7 +440,7 @@ impl Worker {
     /// Registers or signs in, generating keys and writing the vault.
     async fn bootstrap(
         &mut self,
-        server: String,
+        server: ServerEndpoint,
         identifier: String,
         password: String,
         passphrase: String,
@@ -446,7 +448,7 @@ impl Worker {
     ) {
         self.sink.send(Event::Connection(Connection::Connecting));
 
-        let rest = match Rest::new(&server) {
+        let rest = match Rest::new(&crate::config::rest_base_url(&server)) {
             Ok(rest) => rest,
             Err(error) => return self.fail(error.to_string()),
         };
@@ -475,7 +477,7 @@ impl Worker {
         // verified, and every safety number would change with no explanation.
         let mut keys = existing.unwrap_or_else(DeviceKeys::generate);
         keys.session = Some(SavedSession {
-            server_url: rest.base().to_owned(),
+            server_url: crate::config::rest_base_url(&server),
             account_id: grant.account_id,
             device_id: grant.device_id,
             username: identifier.clone(),
@@ -486,6 +488,7 @@ impl Worker {
         }
 
         self.establish(
+            server,
             rest,
             keys,
             grant.account_id,
@@ -508,7 +511,11 @@ impl Worker {
         let Some(saved) = keys.session.clone() else {
             return self.fail("this vault has no saved sign-in; sign in again".to_owned());
         };
-        let rest = match Rest::new(&saved.server_url) {
+        // Reconstruct the server endpoint from the legacy string field, falling back to the dev
+        // policy for any shape the parser does not recognise. The saved URL is the one this device
+        // last successfully used, so the form is not consulted on unlock.
+        let server = crate::config::server_endpoint_from_url(&saved.server_url);
+        let rest = match Rest::new(&crate::config::rest_base_url(&server)) {
             Ok(rest) => rest,
             Err(error) => return self.fail(error.to_string()),
         };
@@ -530,6 +537,7 @@ impl Worker {
         }
 
         self.establish(
+            server,
             rest,
             keys,
             grant.account_id,
@@ -545,6 +553,7 @@ impl Worker {
     #[allow(clippy::too_many_arguments)]
     async fn establish(
         &mut self,
+        server: ServerEndpoint,
         rest: Rest,
         keys: DeviceKeys,
         account_id: Id,
@@ -564,6 +573,7 @@ impl Worker {
         let sessions = SessionStore::new(keys);
 
         self.signed = Some(Signed {
+            server,
             rest,
             account: account.clone(),
             access_token,
@@ -582,7 +592,7 @@ impl Worker {
         let Some(signed) = self.signed.as_ref() else {
             return;
         };
-        let url = signed.rest.gateway_url();
+        let url = crate::config::gateway_url(&signed.server);
         let hello = migo_protocol::Hello {
             protocol_version: migo_protocol::PROTOCOL_VERSION,
             client: ClientInfo {

@@ -95,6 +95,7 @@ import { NotificationsDomain } from './domains/notifications.js';
 import { GamesDomain } from './domains/games.js';
 import type { DeviceAddress, DeviceDirectory } from './domains/messaging.js';
 import type { ConversationKind } from '@migo/protocol';
+import type { ServerEndpoint } from './server-endpoint.js';
 
 /** The handshake parameters minus the credentials the client fills from a {@link Grant}. */
 export type ClientHello = Omit<HelloParams, 'accessToken' | 'deviceId'>;
@@ -112,10 +113,12 @@ export interface PrekeyReplenishPolicy {
 
 /** Everything needed to construct a client. One instance drives one device's session. */
 export interface MigoClientOptions {
-  /** The REST origin for bootstrap (register, login, refresh), e.g. `https://api.migo.example`. */
-  baseUrl: string;
-  /** The gateway WebSocket URL, e.g. `wss://node.migo.example/ws`. */
-  gatewayUrl: string;
+  /**
+   * The user's chosen server: host, port, gateway port, and the schemes. The REST origin and the
+   * gateway WebSocket URL are both derived from this, so a single configuration yields a coherent
+   * pair of endpoints with no way to disagree about which deployment is meant.
+   */
+  server: ServerEndpoint;
   /** The handshake parameters; the access token and device id are supplied from the grant. */
   hello: ClientHello;
   /** The human-readable device name recorded on the account's device list. */
@@ -201,7 +204,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   private constructor(options: MigoClientOptions) {
     this.#options = options;
     const bootstrapOptions = options.fetch !== undefined ? { fetch: options.fetch } : {};
-    this.#bootstrap = new BootstrapClient(options.baseUrl, bootstrapOptions);
+    this.#bootstrap = new BootstrapClient(options.server, bootstrapOptions);
     this.#keyStore = options.keyStore ?? KeyStore.create();
     this.#replenishPolicy = options.replenishPolicy ?? DEFAULT_REPLENISH_POLICY;
   }
@@ -811,7 +814,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
       deviceId: grant.deviceId,
     };
     const options: TransportOptions = {
-      url: this.#options.gatewayUrl,
+      server: this.#options.server,
       hello,
       onStateChange: (state) => this.#options.onStateChange?.(state),
       onReset: () => this.#handleReset(),

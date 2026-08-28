@@ -65,6 +65,8 @@ import {
   requiresAck,
 } from './codec.js';
 import { RemoteError, TimeoutError, TransportError } from './errors.js';
+import { gatewayUrl } from './server-endpoint.js';
+import type { ServerEndpoint } from './server-endpoint.js';
 
 /** The feature bits a stock client offers; the server intersects this with its own. */
 export const DEFAULT_CLIENT_FEATURES =
@@ -99,8 +101,12 @@ export type WebSocketFactory = (url: string) => WebSocket;
 
 /** Options for a {@link GatewayTransport}. */
 export interface TransportOptions {
-  /** The gateway URL, e.g. `wss://node.example/ws`. */
-  url: string;
+  /**
+   * The user's configured server. The transport derives the gateway URL from it
+   * (`ws(s)://host:gatewayPort/ws`) and opens a socket there. The WebSocket factory injection stays
+   * so tests can stub the socket without going through a real network.
+   */
+  server: ServerEndpoint;
   /** The handshake parameters. */
   hello: HelloParams;
   /** The WebSocket factory; defaults to the global `WebSocket`. */
@@ -339,7 +345,7 @@ export class GatewayTransport {
       this.#handshake = { resolve, reject };
       let ws: WebSocket;
       try {
-        ws = this.#makeSocket(this.#options.url);
+        ws = this.#makeSocket(gatewayUrl(this.#options.server));
       } catch (cause) {
         this.#handshake = null;
         reject(new TransportError(`failed to open socket: ${String(cause)}`));

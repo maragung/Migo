@@ -18,17 +18,18 @@
 
 use egui::{Align, Layout, RichText, Ui};
 
+use crate::config::ServerEndpoint;
 use crate::net::Command;
 use crate::theme::{palette, space};
+use crate::ui::server_form::{self, ServerFormState};
 use crate::ui::{widgets, Context, Screen};
 
 /// What the three forms are holding.
 ///
 /// The secrets live here for exactly as long as the form is on screen and are cleared the moment they
 /// are handed to the worker. A form struct is not a keyring.
-#[derive(Default)]
 pub struct AuthState {
-    pub server: String,
+    pub server: ServerEndpoint,
     pub identifier: String,
     pub password: String,
     pub passphrase: String,
@@ -36,6 +37,26 @@ pub struct AuthState {
     /// True from submit until the worker reports success or failure, so a second click cannot fire a
     /// second registration.
     pub busy: bool,
+    /// The local form state for the server disclosure. The disclosure owns its own "open" flag
+    /// (held in egui's temp data so it does not reset on every frame), but the typed-but-not-yet
+    /// accepted values live here so they survive a screen switch.
+    pub server_form: ServerFormState,
+}
+
+impl Default for AuthState {
+    fn default() -> Self {
+        let server = crate::config::default_loopback_server_endpoint("localhost", 18080);
+        let server_form = ServerFormState::from_endpoint(&server);
+        Self {
+            server,
+            identifier: String::new(),
+            password: String::new(),
+            passphrase: String::new(),
+            confirm: String::new(),
+            busy: false,
+            server_form,
+        }
+    }
 }
 
 impl AuthState {
@@ -50,9 +71,16 @@ impl AuthState {
         }
     }
 
+    /// Updates the server endpoint from the disclosure widget, then re-seeds the form state so
+    /// the next time the disclosure opens it shows the accepted value.
+    pub fn apply_server(&mut self, endpoint: ServerEndpoint) {
+        self.server = endpoint.clone();
+        self.server_form = ServerFormState::from_endpoint(&endpoint);
+    }
+
     /// Whether the register form is complete enough to submit.
     fn register_ready(&self) -> bool {
-        !self.server.trim().is_empty()
+        !self.server.host.trim().is_empty()
             && self.identifier.trim().len() >= 3
             && self.password.len() >= 8
             && self.passphrase.len() >= crate::vault::MIN_PASSPHRASE_BYTES
@@ -61,7 +89,7 @@ impl AuthState {
 
     /// Whether the sign-in form is complete enough to submit.
     fn sign_in_ready(&self) -> bool {
-        !self.server.trim().is_empty()
+        !self.server.host.trim().is_empty()
             && !self.identifier.trim().is_empty()
             && !self.password.is_empty()
             && self.passphrase.len() >= crate::vault::MIN_PASSPHRASE_BYTES
@@ -175,6 +203,16 @@ fn unlock(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
     });
 }
 
+/// Renders the server disclosure into `ui`, applying the user's accepted endpoint back into
+/// [`AuthState`]. Split out so the sign-in and register screens share the same disclosure
+/// rendering rather than carrying the wiring twice.
+fn draw_server_disclosure(ui: &mut Ui, context: &Context<'_>, state: &mut AuthState) {
+    let theme = context.theme;
+    if let Some(endpoint) = server_form::show(ui, theme, &mut state.server_form) {
+        state.apply_server(endpoint);
+    }
+}
+
 /// The sign-in form.
 fn sign_in(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
     widgets::header(
@@ -185,14 +223,7 @@ fn sign_in(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
     );
     ui.add_space(space::LG);
 
-    widgets::field(
-        ui,
-        context.theme,
-        "Server",
-        &mut state.server,
-        false,
-        "https://…",
-    );
+    draw_server_disclosure(ui, context, state);
     widgets::field(
         ui,
         context.theme,
@@ -227,7 +258,7 @@ fn sign_in(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
     let ready = state.sign_in_ready() && !state.busy;
     if widgets::primary_button(ui, context.theme, "Sign in", ready).clicked() {
         context.issue(Command::SignIn {
-            server: state.server.trim().to_owned(),
+            server: state.server.clone(),
             identifier: state.identifier.trim().to_owned(),
             password: state.password.clone(),
             passphrase: state.passphrase.clone(),
@@ -251,14 +282,7 @@ fn register(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
     widgets::header(ui, context.theme, "Create an account", None);
     ui.add_space(space::LG);
 
-    widgets::field(
-        ui,
-        context.theme,
-        "Server",
-        &mut state.server,
-        false,
-        "https://…",
-    );
+    draw_server_disclosure(ui, context, state);
     widgets::field(
         ui,
         context.theme,
@@ -306,7 +330,7 @@ fn register(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
     let ready = state.register_ready() && !state.busy;
     if widgets::primary_button(ui, context.theme, "Create account", ready).clicked() {
         context.issue(Command::Register {
-            server: state.server.trim().to_owned(),
+            server: state.server.clone(),
             username: state.identifier.trim().to_owned(),
             password: state.password.clone(),
             passphrase: state.passphrase.clone(),

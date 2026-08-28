@@ -751,6 +751,78 @@ main {
   font-size: 13px;
 }
 
+/* --- the "Server" disclosure on the auth forms --- */
+
+.server-disclosure {
+  margin: 0 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+}
+.server-disclosure-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-weight: 600;
+  text-align: left;
+}
+.server-disclosure-toggle:hover {
+  color: var(--text);
+}
+.server-disclosure-icon {
+  display: inline-block;
+  width: 12px;
+  text-align: center;
+}
+.server-disclosure-summary {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-weight: 400;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.server-disclosure-panel {
+  padding: 4px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-top: 1px solid var(--border);
+}
+.server-disclosure-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.server-disclosure-row .field-label {
+  margin: 0;
+}
+.server-disclosure-note {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--panel);
+  border: 1px dashed var(--border-strong);
+  border-radius: 7px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+.server-disclosure-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.btn-secondary {
+  background: var(--panel);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.btn-secondary:hover {
+  background: var(--panel-2);
+}
+
 /* --- segmented control (Direct / Group) --- */
 
 .segmented {

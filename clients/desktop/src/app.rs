@@ -18,8 +18,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::config::ServerEndpoint;
 use crate::model::{Account, Connection, Toast, ToastKind};
 use crate::net::{Command, Event, Net};
+use crate::settings::{self, Settings};
 use crate::theme::{self, palette, space, Theme};
 use crate::ui::{auth::AuthState, chat::ChatState, widgets, Context, Screen};
 
@@ -35,11 +37,18 @@ pub struct App {
     toasts: Vec<Toast>,
     /// Reused each frame so a screen's command buffer costs no allocation per frame.
     commands: Vec<Command>,
+    /// The path the settings file lives at, when the platform data directory is reachable.
+    /// None disables persistence; the form still works, the choice just does not survive a reload.
+    settings_path: Option<PathBuf>,
 }
 
 impl App {
     /// Builds the application and starts the network worker.
-    pub fn new(cc: &eframe::CreationContext<'_>, vault_path: PathBuf, server: String) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        vault_path: PathBuf,
+        server: ServerEndpoint,
+    ) -> Self {
         // Follow the desktop's own light or dark setting on first run. Overriding it would mean a
         // window that does not match every other window on the machine, and the user did not ask for
         // that.
@@ -49,10 +58,14 @@ impl App {
         let net = Net::spawn(cc.egui_ctx.clone(), vault_path);
         // The server address is the one field the caller decides; everything else on the auth form
         // starts empty, and a passphrase field pre-filled from anywhere would be a bug.
+        // The server is the same endpoint the user just set; the auth form's own
+        // `server` field starts from the loopback default and the user can
+        // overtype it from the form's server disclosure.
         let auth = AuthState {
-            server,
+            server: server.clone(),
             ..AuthState::default()
         };
+        let settings_path = crate::settings::Settings::default_path();
 
         Self {
             theme,
@@ -64,6 +77,23 @@ impl App {
             chat: ChatState::default(),
             toasts: Vec::new(),
             commands: Vec::new(),
+            settings_path,
+        }
+    }
+
+    /// Persists the user's chosen server to the settings file, when the platform data directory
+    /// is reachable. Best-effort: a failed write is logged at warn level, never surfaced as a
+    /// toast, because the in-memory state is the source of truth for the current session.
+    fn persist_server(&self, endpoint: &ServerEndpoint) {
+        let Some(path) = self.settings_path.as_ref() else {
+            return;
+        };
+        let record = Settings {
+            version: crate::settings::SETTINGS_VERSION,
+            server: endpoint.clone(),
+        };
+        if let Err(error) = settings::save(path, &record) {
+            tracing::warn!("migo-desktop: could not persist server endpoint: {error}");
         }
     }
 
@@ -243,6 +273,9 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
 
+        // Capture the server at the start of the frame so we can detect an in-frame change below.
+        let server_before = self.auth.server.clone();
+
         let colors = palette(self.theme);
         egui::Panel::top("title")
             .exact_size(44.0)
@@ -275,6 +308,13 @@ impl eframe::App for App {
         if let Some(target) = navigate {
             self.screen = target;
         }
+
+        // The server disclosure commits a new value to `auth.server` only on a successful
+        // "Use this server" click, so detecting the change here is the right moment to persist.
+        if self.auth.server != server_before {
+            self.persist_server(&self.auth.server);
+        }
+
         for command in self.commands.drain(..) {
             self.net.send(command);
         }

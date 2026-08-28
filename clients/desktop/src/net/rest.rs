@@ -179,6 +179,7 @@ impl Rest {
 
     /// The server this client talks to.
     #[must_use]
+    #[allow(dead_code)] // Used once the auth form reads the persisted base back to confirm.
     pub fn base(&self) -> &str {
         &self.base
     }
@@ -188,6 +189,7 @@ impl Rest {
     /// Derived rather than configured separately so a user who typed one address cannot end up with a
     /// client whose API and gateway point at different deployments.
     #[must_use]
+    #[allow(dead_code)] // Used once the gateway worker is built off the persisted endpoint.
     pub fn gateway_url(&self) -> String {
         let rest = self
             .base

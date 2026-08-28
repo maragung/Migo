@@ -20,6 +20,8 @@ import type { Id } from '@migo/wire';
 import { Platform } from '@migo/protocol';
 
 import { RemoteError } from './errors.js';
+import { restBaseUrl } from './server-endpoint.js';
+import type { ServerEndpoint } from './server-endpoint.js';
 
 /** The platform names the server's `parse_platform` recognises; anything else maps to Unknown. */
 const PLATFORM_NAME: Partial<Record<Platform, string>> = {
@@ -227,17 +229,18 @@ function parseGrant(body: unknown): Grant {
 /**
  * The REST bootstrap client.
  *
- * Construct it with the node's base URL (the origin, e.g. `https://node.example`); each method
- * appends its own `/v1/...` path. Every call that fails with a non-2xx status throws a
- * {@link RemoteError} built from the server's error envelope.
+ * Construct it with the user's {@link ServerEndpoint} (host, port, scheme); the REST origin
+ * `http(s)://host:port` is derived from it and each method appends its own `/v1/...` path. Every
+ * call that fails with a non-2xx status throws a {@link RemoteError} built from the server's error
+ * envelope.
  */
 export class BootstrapClient {
   readonly #baseUrl: string;
   readonly #fetch: FetchLike;
 
-  constructor(baseUrl: string, options: BootstrapOptions = {}) {
+  constructor(server: ServerEndpoint, options: BootstrapOptions = {}) {
     // Store the origin without a trailing slash so path joins are unambiguous.
-    this.#baseUrl = baseUrl.replace(/\/+$/, '');
+    this.#baseUrl = restBaseUrl(server).replace(/\/+$/, '');
     const fetchImpl = options.fetch ?? globalThis.fetch;
     if (fetchImpl === undefined) {
       throw new TypeError(

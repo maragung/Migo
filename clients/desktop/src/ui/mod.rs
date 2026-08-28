@@ -15,6 +15,7 @@
 
 pub mod auth;
 pub mod chat;
+pub mod server_form;
 pub mod widgets;
 
 use crate::model::{Account, Connection};

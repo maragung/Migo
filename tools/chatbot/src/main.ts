@@ -26,12 +26,12 @@ import {
   ContentType,
   ConversationKind,
   EncryptionMode,
+  serverEndpointFromUrl,
   type IncomingMessage,
   type Id,
 } from '@migo/sdk';
 
 const API_URL = process.env.MIGOD_API_URL ?? 'http://localhost:18080';
-const GATEWAY_URL = process.env.MIGOD_GATEWAY_URL ?? 'ws://localhost:18080/ws';
 const ROUNDS = Number.parseInt(process.env.BOT_ROUNDS ?? '10', 10);
 const APP_VERSION = '0.1.0';
 const LOCALE = 'en-US';
@@ -116,8 +116,7 @@ async function main(): Promise<void> {
   // a fresh keystore on construction), so the sender-key distribution that
   // `messaging.send` performs on first use is a real-world shape.
   const aliceClient = MigoClient.create({
-    baseUrl: API_URL,
-    gatewayUrl: GATEWAY_URL,
+    server: serverEndpointFromUrl(API_URL),
     deviceDisplayName: alice.displayName,
     hello: {
       platform: 4, // Desktop — Platform enum
@@ -127,8 +126,7 @@ async function main(): Promise<void> {
     },
   });
   const bobClient = MigoClient.create({
-    baseUrl: API_URL,
-    gatewayUrl: GATEWAY_URL,
+    server: serverEndpointFromUrl(API_URL),
     deviceDisplayName: bob.displayName,
     hello: {
       platform: 4,

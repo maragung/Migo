@@ -8,7 +8,7 @@
  * cryptographically independent, just as separate devices are.
  */
 
-import { MigoClient, Platform, BandwidthMode } from '@migo/sdk';
+import { MigoClient, Platform, BandwidthMode, serverEndpointFromUrl } from '@migo/sdk';
 import type { Id } from '@migo/sdk';
 
 import type { Config } from './config.js';
@@ -43,8 +43,7 @@ export class VirtualUser {
     this.#config = deps.config;
     this.#password = deps.password;
     this.client = MigoClient.create({
-      baseUrl: deps.config.apiUrl,
-      gatewayUrl: deps.config.gatewayUrl,
+      server: serverEndpointFromUrl(deps.config.apiUrl),
       deviceDisplayName: `loadgen/${deps.runTag}/${index}`,
       requestTimeoutMs: deps.config.requestTimeoutMs,
       hello: {

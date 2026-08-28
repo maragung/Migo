@@ -33,6 +33,36 @@ export type {
   ServerConfig,
 } from './rest.js';
 
+// --- the user-configured server endpoint (host, port, scheme, transport) ---
+export {
+  assertValidServerEndpoint,
+  defaultInternetServerEndpoint,
+  defaultLoopbackServerEndpoint,
+  defaultSchemesForHost,
+  gatewaySchemePrefix,
+  gatewayUrl,
+  isLoopbackHost,
+  parseHost,
+  restBaseUrl,
+  restSchemePrefix,
+  serverEndpointFromUrl,
+  validatePorts,
+  validateServerEndpoint,
+  DEFAULT_REST_PORT,
+  DEFAULT_GATEWAY_PORT_OFFSET,
+} from './server-endpoint.js';
+export type {
+  Host,
+  QuicScheme,
+  RestScheme,
+  Scheme,
+  ServerEndpoint,
+  ServerEndpointValidation,
+  Transport,
+  WsScheme,
+} from './server-endpoint.js';
+export { ServerEndpointError } from './server-endpoint.js';
+
 /**
  * The set of capability bits the SDK knows about.
  *

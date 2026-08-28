@@ -21,6 +21,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { GatewayTransport, encodeBody } from '../src/index.js';
+import type { ServerEndpoint } from '../src/index.js';
 import { decodeFrame, encodeFrame, frameHeader } from '@migo/wire';
 import { BandwidthMode, OP, Platform, encodeWelcome } from '@migo/protocol';
 import type { Welcome } from '@migo/protocol';
@@ -107,8 +108,16 @@ function welcomeFrame(): Uint8Array {
 /** Builds a transport wired to a fresh {@link FakeSocket} and drives it to Ready. */
 async function connectReady(): Promise<{ transport: GatewayTransport; socket: FakeSocket }> {
   let socket: FakeSocket | undefined;
+  const server: ServerEndpoint = {
+    host: 'node.example',
+    port: 443,
+    gatewayPort: 443,
+    transport: 'WebSocket',
+    scheme: 'Wss',
+    restScheme: 'Https',
+  };
   const transport = new GatewayTransport({
-    url: 'wss://node.example/mwp',
+    server,
     hello: {
       platform: Platform.Web,
       appVersion: '1.0.0',
