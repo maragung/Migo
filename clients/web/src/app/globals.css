@@ -823,6 +823,47 @@ main {
   background: var(--panel-2);
 }
 
+/* --- captcha widget on the auth forms --- */
+
+.captcha-widget {
+  margin: 0 0 14px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.captcha-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+.captcha-row .field-label {
+  flex: 1;
+  margin: 0;
+}
+.captcha-question {
+  display: block;
+  margin-top: 6px;
+  padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 18px;
+  letter-spacing: 0.18em;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  min-height: 1.6em;
+}
+.captcha-refresh {
+  padding: 0 12px;
+  height: 44px;
+  font-size: 18px;
+  line-height: 1;
+}
+
 /* --- segmented control (Direct / Group) --- */
 
 .segmented {

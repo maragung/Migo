@@ -5,12 +5,13 @@ import type { FormEvent, ReactNode } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
+import { CaptchaWidget } from '@/components/captcha-widget.js';
 import { ServerForm } from '@/components/server-form.js';
 import { Spinner } from '@/components/spinner.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { loadServerEndpoint, saveServerEndpoint } from '@/lib/storage/server-endpoint-store.js';
 
-import type { ServerEndpoint } from '@migo/sdk';
+import type { CaptchaProof, ServerEndpoint } from '@migo/sdk';
 
 /** Create a new account. Identity keys are generated on this device and never leave it. */
 export default function RegisterPage(): ReactNode {
@@ -22,6 +23,7 @@ export default function RegisterPage(): ReactNode {
   const [email, setEmail] = useState('');
   const [endpoint, setEndpoint] = useState<ServerEndpoint | null>(null);
   const [endpointReady, setEndpointReady] = useState(false);
+  const [captcha, setCaptcha] = useState<CaptchaProof | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const submitting = status === 'connecting';
 
@@ -55,7 +57,7 @@ export default function RegisterPage(): ReactNode {
     }
     setValidationError(null);
     try {
-      await register({ username, password, email: email || undefined }, endpoint);
+      await register({ username, password, email: email || undefined }, endpoint, captcha);
     } catch {
       // The provider surfaces the reason through `error`; keep the form populated for a retry.
     }
@@ -114,6 +116,8 @@ export default function RegisterPage(): ReactNode {
             autoComplete="email"
           />
         </label>
+
+        {endpoint !== null ? <CaptchaWidget endpoint={endpoint} onChange={setCaptcha} /> : null}
 
         {validationError ? <p className="form-error">{validationError}</p> : null}
         {error ? <p className="form-error">{error}</p> : null}

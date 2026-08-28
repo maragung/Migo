@@ -22,7 +22,14 @@ import { createContext, useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import { BootstrapClient, KeyStore, MigoClient, PresenceState } from '@migo/sdk';
-import type { ConnectionState, Grant, Id, RegisterParams, ServerEndpoint } from '@migo/sdk';
+import type {
+  CaptchaProof,
+  ConnectionState,
+  Grant,
+  Id,
+  RegisterParams,
+  ServerEndpoint,
+} from '@migo/sdk';
 
 import { defaultServerEndpoint } from '@/lib/config.js';
 import { friendlyError } from '@/lib/migo/errors.js';
@@ -68,8 +75,12 @@ export interface MigoContextValue {
   resetNonce: number;
   /** The live client once {@link status} is `ready`, else `null`. */
   client: MigoClient | null;
-  register: (form: RegisterForm, server: ServerEndpoint) => Promise<void>;
-  login: (form: LoginForm, server: ServerEndpoint) => Promise<void>;
+  register: (
+    form: RegisterForm,
+    server: ServerEndpoint,
+    captcha: CaptchaProof | null,
+  ) => Promise<void>;
+  login: (form: LoginForm, server: ServerEndpoint, captcha: CaptchaProof | null) => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -197,7 +208,11 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
   // --- register / login / logout ---
 
   const register = useCallback(
-    async (form: RegisterForm, server: ServerEndpoint): Promise<void> => {
+    async (
+      form: RegisterForm,
+      server: ServerEndpoint,
+      captcha: CaptchaProof | null,
+    ): Promise<void> => {
       setError(null);
       setStatus('connecting');
       // Persist the new endpoint *before* opening a socket, so a mid-flight failure can be retried
@@ -222,6 +237,9 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
         if (form.country?.trim()) {
           params.country = form.country.trim();
         }
+        if (captcha !== null) {
+          params.captcha = captcha;
+        }
         const grant = await created.register(params);
         await Promise.all([
           saveSession({ grant }),
@@ -241,7 +259,11 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
   );
 
   const login = useCallback(
-    async (form: LoginForm, server: ServerEndpoint): Promise<void> => {
+    async (
+      form: LoginForm,
+      server: ServerEndpoint,
+      captcha: CaptchaProof | null,
+    ): Promise<void> => {
       setError(null);
       setStatus('connecting');
       try {
@@ -254,6 +276,7 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
         const grant = await created.login({
           identifier: form.identifier.trim(),
           password: form.password,
+          ...(captcha !== null ? { captcha } : {}),
         });
         await Promise.all([
           saveSession({ grant }),
