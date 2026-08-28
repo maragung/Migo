@@ -95,10 +95,10 @@ data class ServerEndpoint(
             return ServerEndpoint(
                 host = host.lowercase(),
                 port = port,
-                gatewayPort = if (restScheme == RestScheme.Https) port else port + 1,
+                gatewayPort = if (schemes.restScheme == RestScheme.Https) port else port + 1,
                 transport = Transport.WebSocket,
-                gatewayScheme = gatewayScheme,
-                restScheme = restScheme,
+                gatewayScheme = schemes.gatewayScheme,
+                restScheme = schemes.restScheme,
             )
         }
 
