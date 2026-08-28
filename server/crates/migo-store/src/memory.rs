@@ -346,6 +346,90 @@ impl AccountStore for MemoryStore {
         Ok(())
     }
 
+    async fn set_contact(&self, account_id: Id, contact: &str, at: Timestamp) -> Result<()> {
+        let trimmed = contact.trim();
+        if trimmed.is_empty() {
+            return Err(fault::validation("contact", "must not be empty"));
+        }
+        // Branch on the visible shape before locking the state: the kind
+        // of contact decides what to validate, and the validation has to
+        // happen before we touch the account row, so a malformed value
+        // never has to be unwound.
+        let new_email_lower: Option<String>;
+        let new_email: Option<String>;
+        let new_phone: Option<String>;
+        if trimmed.contains('@') {
+            if !trimmed.contains('.') || trimmed.split('@').count() != 2 {
+                return Err(fault::validation("email", "domain needs a dot"));
+            }
+            new_email = Some(trimmed.to_string());
+            new_email_lower = Some(fold(trimmed));
+            new_phone = None;
+        } else if trimmed.starts_with('+') {
+            let normalised: String = trimmed
+                .chars()
+                .filter(|c| c.is_ascii_digit() || *c == '+')
+                .collect();
+            if normalised.len() < 9 {
+                return Err(fault::validation("phone", "must contain at least 8 digits"));
+            }
+            new_email = None;
+            new_email_lower = None;
+            new_phone = Some(normalised);
+        } else {
+            return Err(fault::validation(
+                "contact",
+                "must be an email (containing @) or a phone (starting with +)",
+            ));
+        }
+        let mut s = self.state.write();
+        // Take the existing account out of the map by cloning its current
+        // contact fields. Removing it lets us reinsert under the new
+        // values without holding two mutable references to `s` at once.
+        let account = s
+            .accounts
+            .get(&account_id)
+            .cloned()
+            .ok_or_else(|| fault::not_found("account"))?;
+        // The two `by_*` indexes have to be kept consistent: removing
+        // the old contact so it does not still resolve to this account
+        // is part of the same write that adds the new one.
+        if let Some(old) = account.email.as_deref() {
+            s.by_email.remove(&fold(old));
+        }
+        if let Some(old) = account.phone.as_deref() {
+            s.by_phone.remove(old);
+        }
+        // Collision check on the new key. `Some(other) != Some(account_id)`
+        // is "this email or phone is already in use by another account".
+        if let Some(key) = new_email_lower.as_deref() {
+            if let Some(other) = s.by_email.get(key) {
+                if *other != account_id {
+                    return Err(fault::already_exists("email"));
+                }
+            }
+        }
+        if let Some(key) = new_phone.as_deref() {
+            if let Some(other) = s.by_phone.get(key) {
+                if *other != account_id {
+                    return Err(fault::already_exists("phone"));
+                }
+            }
+        }
+        let mut updated = account;
+        updated.email = new_email.clone();
+        updated.phone = new_phone.clone();
+        updated.updated_at = at;
+        s.accounts.insert(account_id, updated);
+        if let Some(key) = new_email_lower {
+            s.by_email.insert(key, account_id);
+        }
+        if let Some(key) = new_phone {
+            s.by_phone.insert(key, account_id);
+        }
+        Ok(())
+    }
+
     async fn record_login(&self, account_id: Id, at: Timestamp) -> Result<()> {
         let mut s = self.state.write();
         let account = s

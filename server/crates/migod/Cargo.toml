@@ -44,6 +44,7 @@ migo-bots       = { workspace = true }
 # Layer 4: transports. The two front doors, mounted side by side; they never see each other.
 migo-gateway    = { workspace = true }
 migo-api        = { workspace = true }
+migo-captcha    = { workspace = true }
 
 # --- runtime, transport, and glue ---
 tokio        = { workspace = true }

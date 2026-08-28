@@ -91,7 +91,7 @@ pub use crate::capability::Capabilities;
 pub use crate::model::{
     DeviceClaim, Grant, Refresh, Registration, RequestContext, SessionSummary, SignIn,
 };
-pub use crate::service::{open, Auth, SharedAuth};
+pub use crate::service::{open, Auth, ConcreteAuth, SharedAuth};
 pub use crate::tier::{of_account as tier_of_account, PROBATION_MILLIS, TRUSTED_MILLIS};
 pub use crate::token::{Claims, Signer, REFRESH_BYTES, TOKEN_BYTES, TOKEN_VERSION};
 pub use crate::traits::{Authenticator, Identity, PasswordChange, REAUTH_WINDOW_MS};

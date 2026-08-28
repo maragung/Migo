@@ -17,6 +17,7 @@
 use async_trait::async_trait;
 use migo_core::{Id, Result, Secret, Timestamp};
 use migo_ratelimit::TrustTier;
+use migo_store::traits::RecoveryRow;
 
 use crate::capability::Capabilities;
 use crate::model::{Grant, Refresh, Registration, RequestContext, SessionSummary, SignIn};
@@ -225,4 +226,69 @@ pub trait Authenticator: Send + Sync {
         change: PasswordChange,
         context: &RequestContext,
     ) -> Result<Grant>;
+
+    /// Records a recoverable contact on the caller's account.
+    ///
+    /// The value is parsed as one of an email or a phone number. The auth crate
+    /// validates the format; the store persists it on the right column so
+    /// the `CONTACTABLE` capability bit kicks in on the next
+    /// [`Authenticator::authenticate`].
+    async fn set_contact(
+        &self,
+        identity: &Identity,
+        contact: &str,
+        context: &RequestContext,
+    ) -> Result<()>;
+
+    /// Mints a captcha challenge and returns its public view. Returns `None`
+    /// when the gate is not wired, which the route layer surfaces as
+    /// `FEATURE_DISABLED`.
+    fn issue_captcha<'a>(
+        &'a self,
+        now: Timestamp,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Option<migo_captcha::CaptchaChallengeView>>
+                + Send
+                + 'a,
+        >,
+    >;
+
+    /// Starts a password-recovery flow: looks the account up by `identifier`
+    /// (the same email/phone/username shape [`Authenticator::sign_in`]
+    /// accepts), mints a recovery row, and returns the row's `token_id` and
+    /// the hex-encoded HMAC tag that the caller proves possession of when
+    /// the user comes back to confirm.
+    ///
+    /// Enumeration-safe: an identifier that does not match any account
+    /// returns the same shape and never reveals it was wrong. A wrong
+    /// captcha, an invalid format, or a deployment with the captcha turned
+    /// off entirely is the caller's responsibility to surface; this method
+    /// assumes a valid proof was supplied.
+    async fn request_recovery(
+        &self,
+        identifier: &str,
+        captcha: &migo_captcha::CaptchaProof,
+        context: &RequestContext,
+    ) -> Result<RecoveryRow>;
+
+    /// Confirms a recovery row, applies a new password, and revokes every
+    /// other session.
+    ///
+    /// The HMAC `tag` is verified with the per-purpose `LABEL_RECOVERY`
+    /// subkey; the row's `consumed_at` is stamped in one statement with the
+    /// call so a confirm cannot replay. `Ok(())` on success.
+    ///
+    /// Fails with `RECOVERY_NOT_FOUND` when the row is unknown, already
+    /// consumed, or expired; with `WEAK_PASSWORD` when the new password is
+    /// too short or on the common list; and with `INVALID_CAPTCHA` if the
+    /// tag does not verify (the row is left in place, so a typo on the
+    /// first try does not consume the row).
+    async fn confirm_recovery(
+        &self,
+        token_id: Id,
+        tag: &[u8],
+        new_password: &Secret,
+        context: &RequestContext,
+    ) -> Result<()>;
 }

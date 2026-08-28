@@ -86,7 +86,7 @@ pub use crate::identity::{
     IdentityPublic, IdentitySecret, KeyPair, SignedPrekey, IDENTITY_PUBLIC_LEN, PUBLIC_KEY_LEN,
     SIGNATURE_LEN,
 };
-pub use crate::mac::MacKey;
+pub use crate::mac::{MacKey, LABEL_RECOVERY};
 pub use crate::node::{NodeHello, NodeProof, NodePublic, NodeSecret};
 pub use crate::password::Verification;
 pub use crate::ratchet::{RatchetHeader, RatchetSession};

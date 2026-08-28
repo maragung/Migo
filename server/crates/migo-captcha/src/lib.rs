@@ -100,7 +100,7 @@ pub struct CaptchaProof {
 /// log the value thinking it is opaque. The id and the countdown are
 /// what the client needs to answer; the code is what the server
 /// already has.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct CaptchaChallengeView {
     /// The id the client echoes back as the proof's `challenge_id`.
     pub challenge_id: Id,

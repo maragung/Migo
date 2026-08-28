@@ -19,6 +19,7 @@ migo-store.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 parking_lot.workspace = true
+serde.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 

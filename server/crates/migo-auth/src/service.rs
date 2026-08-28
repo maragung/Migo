@@ -51,13 +51,16 @@ use migo_captcha::CaptchaProof;
 use migo_core::config::{AuthConfig, Config};
 use migo_core::metrics::Registry;
 use migo_core::{Error, Id, OsRandom, Random, Result, Secret, Timestamp};
+use migo_crypto::{MacKey, LABEL_RECOVERY};
 use migo_protocol::{codes, fault, Opcode, Platform};
 use migo_ratelimit::{BucketKey, RateLimiter, Scope, SharedRateLimiter, TrustTier};
 use migo_store::model::{
     Account, AccountStatus, AuditActorKind, AuditEntry, AuditTargetKind, Device, NewAccount,
     NewDevice, NewSession, Profile, RevokeReason, Session, Visibility,
 };
-use migo_store::traits::{AccountStore, DeviceStore, SafetyStore, SessionStore};
+use migo_store::traits::{
+    AccountStore, DeviceStore, RecoveryRow, RecoveryStore, SafetyStore, SessionStore,
+};
 use migo_store::{SharedStore, Store};
 use parking_lot::Mutex;
 
@@ -73,11 +76,27 @@ use crate::tier;
 use crate::token::{Claims, Signer};
 use crate::traits::{Authenticator, Identity, PasswordChange};
 
-/// A shared, fully erased authenticator.
+/// The opaque, dyn-erased handle every route layer and the chat
+/// shell hold onto. Its concrete type is `Auth<...>`; the
+/// `Authenticator` trait hides the storage behind `dyn` so routes do
+/// not depend on the inner type.
 pub type SharedAuth = Arc<dyn Authenticator>;
+/// The concrete handle the composition root owns between `open` and
+/// the moment the captcha gate (and any other per-process state that
+/// must be exactly-once) is attached. Routes only see `SharedAuth`; the
+/// composition root uses this only briefly, to call `with_captcha` and
+/// re-erase.
+pub type ConcreteAuth = Arc<Auth<dyn Store, dyn RateLimiter>>;
 
 /// The generation number of a family's first session.
 const FIRST_GENERATION: i32 = 1;
+
+/// How long a recovery token stays valid. One hour, picked because the
+/// threat model is a user who forgot the password and is reading the
+/// recovery email on the same device; longer than an hour is a window
+/// in which somebody with persistent access to the inbox can still
+/// use a token the user never opened.
+pub const RECOVERY_TTL: i64 = 60 * 60 * 1_000;
 
 /// What the placeholder hash is made from.
 ///
@@ -142,9 +161,21 @@ pub struct Auth<S: ?Sized = dyn Store, L: ?Sized = dyn RateLimiter> {
     /// has to carry a proof. `None` means the captcha is off for the
     /// whole process and the auth path skips the checks entirely.
     captcha: Option<Arc<CaptchaGate>>,
+    /// The recovery MAC key, when the deployment has password-recovery
+    /// turned on. `None` means the recovery endpoints are not mounted
+    /// and `request_recovery` / `confirm_recovery` are short-circuited
+    /// at the route layer. Holding only the key — and not the store —
+    /// keeps the in-process tests that do not need recovery from
+    /// having to know which store the test is running over.
+    recovery: Option<MacKey>,
 }
 
 /// Builds an authenticator over the shared store and limiter.
+///
+/// `secret_root` is the per-deployment root from which the recovery
+/// subkey is derived; pass `b""` for tests and an ephemeral dev
+/// deployment that does not mount the recovery endpoints, or the same
+/// value every other token-signing subsystem uses for production.
 ///
 /// Fails when the token key is missing or too short, when the node's region label does
 /// not fit the token layout, or when the placeholder hash cannot be produced — all three
@@ -154,20 +185,22 @@ pub fn open(
     limiter: SharedRateLimiter,
     config: &Config,
     registry: &Registry,
-) -> Result<SharedAuth> {
+    secret_root: &[u8],
+) -> Result<Arc<Auth<dyn Store, dyn RateLimiter>>> {
     let auth = Auth::new(
         store,
         limiter,
         config,
         registry,
         Box::new(OsRandom) as Box<dyn Random>,
-    )?;
+    )?
+    .with_recovery(secret_root);
     Ok(Arc::new(auth))
 }
 
 impl<S, L> Auth<S, L>
 where
-    S: AccountStore + DeviceStore + SessionStore + SafetyStore + ?Sized,
+    S: AccountStore + DeviceStore + SessionStore + SafetyStore + RecoveryStore + ?Sized,
     L: RateLimiter + ?Sized,
 {
     /// Builds an authenticator over a concrete or erased store and limiter.
@@ -207,6 +240,11 @@ where
             // tests that build an `Auth` for unrelated reasons do not
             // need to know about the captcha plumbing.
             captcha: None,
+            // The recovery key follows the same opt-in pattern: the
+            // route layer is the only place that asks for it, and a
+            // test that does not mount the recovery endpoints never
+            // builds one.
+            recovery: None,
         })
     }
 
@@ -226,6 +264,30 @@ where
         }
         self.captcha = Some(gate);
         Ok(self)
+    }
+
+    /// Attaches a recovery MAC key.
+    ///
+    /// The key is derived from `secret_root` under
+    /// [`migo_crypto::LABEL_RECOVERY`], the same way every other
+    /// short-lived server token on Migo uses a labelled subkey. An
+    /// empty `secret_root` is allowed only for tests; production
+    /// builds it from the configured node signing key.
+    pub fn with_recovery(mut self, secret_root: &[u8]) -> Self {
+        self.recovery = Some(MacKey::derive(secret_root, LABEL_RECOVERY));
+        self
+    }
+
+    /// The captcha gate, or `None` when captcha is off.
+    #[must_use]
+    pub fn captcha_gate(&self) -> Option<&CaptchaGate> {
+        self.captcha.as_deref()
+    }
+
+    /// The recovery MAC key, or `None` when recovery is off.
+    #[must_use]
+    pub fn recovery_key(&self) -> Option<&MacKey> {
+        self.recovery.as_ref()
     }
 
     /// The signer, for a caller that verifies tokens without the rest of the service.
@@ -781,7 +843,15 @@ fn summarise(session: &Session, device: Option<&Device>, current: Id) -> Session
 #[async_trait]
 impl<S, L> Authenticator for Auth<S, L>
 where
-    S: AccountStore + DeviceStore + SessionStore + SafetyStore + ?Sized + Send + Sync + 'static,
+    S: AccountStore
+        + DeviceStore
+        + SessionStore
+        + SafetyStore
+        + RecoveryStore
+        + ?Sized
+        + Send
+        + Sync
+        + 'static,
     L: RateLimiter + ?Sized + Send + Sync + 'static,
 {
     async fn register(&self, request: Registration, context: &RequestContext) -> Result<Grant> {
@@ -1322,6 +1392,29 @@ where
         Ok(revoked)
     }
 
+    fn issue_captcha<'a>(
+        &'a self,
+        _now: Timestamp,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Option<migo_captcha::CaptchaChallengeView>>
+                + Send
+                + 'a,
+        >,
+    > {
+        // The gate, when present, owns both the service and the store. When
+        // absent, captcha is off for the whole process and the route layer
+        // surfaces `FEATURE_DISABLED` rather than answering with a
+        // meaningless stub. The `now` parameter is reserved for a future
+        // time-anchored challenge-id (UUIDv7) when the gate is wired to a
+        // multi-replica store that needs monotonic ids.
+        let gate = self.captcha.clone();
+        Box::pin(async move {
+            let gate = gate?;
+            gate.request().await.ok()
+        })
+    }
+
     async fn change_password(
         &self,
         identity: &Identity,
@@ -1389,6 +1482,201 @@ where
         )
         .await;
         Ok(grant)
+    }
+
+    async fn set_contact(
+        &self,
+        identity: &Identity,
+        contact: &str,
+        context: &RequestContext,
+    ) -> Result<()> {
+        self.charge_account(identity, context, Opcode::Authenticate)
+            .await?;
+        let account = self.live_account(identity.account_id()).await?;
+        // The auth crate validates the format up front so the store's
+        // structural gate (and the unique indexes behind it) see a
+        // canonical value rather than the user's first guess.
+        let normalised = if credential::looks_like_email(contact) {
+            credential::email(contact)?
+        } else if let Ok(phone) = credential::phone(contact) {
+            phone
+        } else {
+            return Err(fault::validation(
+                "contact",
+                "must be an email (containing @) or a phone (starting with +)",
+            ));
+        };
+        self.store
+            .set_contact(account.account_id, &normalised, context.now)
+            .await?;
+        self.audit(
+            Some(account.account_id),
+            AuditActorKind::User,
+            "account.contact.set",
+            AuditTargetKind::Account,
+            Some(account.account_id),
+            "contact recorded".to_string(),
+            context,
+        )
+        .await;
+        Ok(())
+    }
+
+    async fn request_recovery(
+        &self,
+        identifier: &str,
+        captcha: &CaptchaProof,
+        context: &RequestContext,
+    ) -> Result<RecoveryRow> {
+        // The captcha proof is consumed on the way in: a flood of recovery
+        // requests cannot spend the captcha store's budget without a valid
+        // challenge, and a captured proof cannot be replayed to mint a
+        // second row for the same identifier.
+        let Some(gate) = self.captcha.as_ref() else {
+            return Err(crate::captcha::error_required());
+        };
+        match gate.verify(captcha).await? {
+            true => {}
+            false => {
+                return Err(crate::captcha::error_invalid(
+                    "the captcha proof did not verify",
+                ))
+            }
+        }
+        let Some(recovery_key) = self.recovery.as_ref() else {
+            // Recovery is not configured for this deployment. The route
+            // layer is the place that decides whether to mount the
+            // endpoint at all; surfacing `CAPTCHA_REQUIRED` here is the
+            // safe fail-closed answer.
+            return Err(crate::captcha::error_required());
+        };
+        // Look the account up the same way `sign_in` does. The result is
+        // not allowed to leak: an unknown identifier produces a row
+        // anyway, and a real one does too, so the caller's response
+        // shape is identical.
+        let now = context.now;
+        let identifier = identifier.trim();
+        let account = if credential::looks_like_email(identifier) {
+            match credential::email(identifier) {
+                Ok(email) => self.store.account_by_email(&email).await?,
+                Err(_) => None,
+            }
+        } else if let Ok(phone) = credential::phone(identifier) {
+            self.store.account_by_phone(&phone).await?
+        } else {
+            let folded = identifier.trim_start_matches('@').to_ascii_lowercase();
+            self.store.account_by_username(&folded).await?
+        };
+        // A short-lived fake account id is used when the identifier does
+        // not resolve; it never escapes, never persists, and keeps the
+        // work the recovery flow does for a real account (mint a row,
+        // compute a tag) identical to the work it does for a fake one.
+        let (account_id, real) = match account {
+            Some(account) => (account.account_id, true),
+            None => (Id::generate_at(now, &mut **self.random.lock()), false),
+        };
+        let token_id = self.new_id(now);
+        let expires_at = now.saturating_add_millis(RECOVERY_TTL);
+        let tag = recovery_key.tag_parts(&[token_id.as_bytes(), LABEL_RECOVERY]);
+        let row = RecoveryRow {
+            token_id,
+            account_id,
+            tag: tag.to_vec(),
+            expires_at,
+            consumed_at: None,
+            created_at: now,
+        };
+        // The row is only persisted for a real account. A row that names
+        // a fake account id is what an attacker probing for which
+        // identifier exists would scan for, and skipping the write is
+        // the only way to deny them that signal.
+        if real {
+            self.store.recovery_put(row.clone()).await?;
+        }
+        Ok(row)
+    }
+
+    async fn confirm_recovery(
+        &self,
+        token_id: Id,
+        tag: &[u8],
+        new_password: &Secret,
+        context: &RequestContext,
+    ) -> Result<()> {
+        let Some(recovery_key) = self.recovery.as_ref() else {
+            return Err(fault::error(
+                codes::RECOVERY_NOT_FOUND,
+                "recovery is not available on this deployment",
+            ));
+        };
+        // The HMAC tag is verified before the row is touched: a wrong tag
+        // does not consume the row, so a typo on the first try does not
+        // lock the user out of a working recovery.
+        if recovery_key
+            .verify_parts(&[token_id.as_bytes(), LABEL_RECOVERY], tag)
+            .is_err()
+        {
+            return Err(fault::error(
+                codes::RECOVERY_NOT_FOUND,
+                "the recovery tag did not verify",
+            ));
+        }
+        let now = context.now;
+        let row = match self.store.recovery_consume(token_id, now).await? {
+            Some(row) => row,
+            None => {
+                return Err(fault::error(
+                    codes::RECOVERY_NOT_FOUND,
+                    "the recovery token is unknown, expired, or already consumed",
+                ));
+            }
+        };
+        let account = self
+            .store
+            .account_by_id(row.account_id)
+            .await?
+            .ok_or_else(|| {
+                fault::error(
+                    codes::RECOVERY_NOT_FOUND,
+                    "the account behind this recovery token is gone",
+                )
+            })?;
+        // Mirror the password rules that `change_password` enforces. A
+        // weak replacement is the failure mode a recovery flow is most
+        // likely to attract — the user forgot the old password, the
+        // temptation is to set something memorable, and memorable
+        // collides with the common list more often than not.
+        credential::password(
+            new_password,
+            self.config.password_min_length,
+            Some(&account.username),
+        )?;
+        let hash = self
+            .hash_password(new_password.expose(), &self.meters)
+            .await?;
+        self.store
+            .set_password_hash(account.account_id, hash.expose(), now)
+            .await?;
+        // Revoke every session, including the one the user is on: a
+        // recovery is exactly the moment a stolen token is most useful,
+        // and the only safe assumption is that whatever signed in
+        // before is now signed in by whoever clicked the link.
+        let revoked = self
+            .store
+            .revoke_account_sessions(account.account_id, None, RevokeReason::PasswordChanged, now)
+            .await?;
+        self.meters.sessions_revoked(revoked);
+        self.audit(
+            Some(account.account_id),
+            AuditActorKind::User,
+            "account.password.recover",
+            AuditTargetKind::Account,
+            Some(account.account_id),
+            format!("password recovered; {revoked} sessions ended"),
+            context,
+        )
+        .await;
+        Ok(())
     }
 }
 

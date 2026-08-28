@@ -271,6 +271,30 @@ pub struct SessionSummary {
     pub is_current: bool,
 }
 
+impl serde::Serialize for SessionSummary {
+    /// Hand-written because the `Platform` enum is not serialisable: a
+    /// session-list UI does not need to know whether the device is a
+    /// phone or a laptop, only how to label the row. The wire shape skips
+    /// the field entirely.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("SessionSummary", 8)?;
+        s.serialize_field("session_id", &self.session_id)?;
+        s.serialize_field("device_id", &self.device_id)?;
+        s.serialize_field("device_name", &self.device_name)?;
+        s.serialize_field("created_at", &self.created_at)?;
+        s.serialize_field("refresh_expires_at", &self.refresh_expires_at)?;
+        if let Some(ip) = &self.ip_class {
+            s.serialize_field("ip_class", ip)?;
+        }
+        if let Some(ua) = &self.user_agent {
+            s.serialize_field("user_agent", ua)?;
+        }
+        s.serialize_field("is_current", &self.is_current)?;
+        s.end()
+    }
+}
+
 /// Truncates a string to a character count, not a byte count.
 ///
 /// Byte truncation splits multi-byte characters, and a display name is exactly where

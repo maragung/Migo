@@ -15,6 +15,7 @@ migo-protocol.workspace = true
 async-trait.workspace = true
 parking_lot.workspace = true
 rand = "0.8"
+serde.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

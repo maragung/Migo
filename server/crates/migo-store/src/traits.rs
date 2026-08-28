@@ -113,6 +113,17 @@ pub trait AccountStore: Send + Sync {
     /// same request, so that a password change logs other devices out.
     async fn set_password_hash(&self, account_id: Id, hash: &str, at: Timestamp) -> Result<()>;
 
+    /// Sets the recoverable contact on the account — the email or phone that
+    /// account recovery and security notifications are addressed to.
+    ///
+    /// `contact` is parsed as one of the two. An email is stored on both
+    /// `email` and `email_lower` so case-insensitive lookups keep working; a
+    /// phone is stored on `phone` exactly (E.164 is the canonical form). A
+    /// value that is neither, or an account id that is unknown, is
+    /// `VALIDATION_FAILED` or `NOT_FOUND` respectively; callers should not
+    /// treat the two as interchangeable.
+    async fn set_contact(&self, account_id: Id, contact: &str, at: Timestamp) -> Result<()>;
+
     /// Records a successful sign-in.
     async fn record_login(&self, account_id: Id, at: Timestamp) -> Result<()>;
 

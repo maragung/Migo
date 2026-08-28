@@ -37,8 +37,9 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context};
 
-use migo_auth::SharedAuth;
+use migo_auth::{captcha::CaptchaGate, ConcreteAuth, SharedAuth};
 use migo_bots::SharedBots;
+use migo_captcha::{CaptchaService, InMemoryStore as CaptchaInMemoryStore};
 use migo_core::config::Environment;
 use migo_core::metrics::Registry;
 use migo_core::{Clock, Config, OsRandom, Random, Shutdown, SystemClock};
@@ -65,6 +66,35 @@ const FEATURES: u64 = 0;
 
 /// Bytes of ephemeral secret to mint when no node signing key is configured (development only).
 const EPHEMERAL_SECRET_LEN: usize = 32;
+
+/// Builds the captcha gate that the bootstrap layer uses to gate the public
+/// surface after enough failures from the same network. The in-memory
+/// store is the right answer for a single-process migod; a multi-replica
+/// deployment would replace this with the `PostgresCaptchaStore` that lives
+/// in `migo-store`.
+fn migod_captcha_gate(threshold: u32, secret_root: &[u8]) -> Arc<CaptchaGate> {
+    let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock);
+    let service = Arc::new(CaptchaService::new(secret_root, clock.clone()));
+    let store: Arc<dyn migo_captcha::CaptchaStore + Send + Sync> =
+        Arc::new(CaptchaInMemoryStore::new());
+    Arc::new(CaptchaGate::new(service, store, threshold))
+}
+
+/// Attaches the captcha gate to a `SharedAuth` whose internal type is
+/// hidden behind `dyn Authenticator`. The auth crate owns
+/// `Auth::with_captcha`; this thin wrapper converts the concrete
+/// `Auth<...>` into a `dyn Authenticator` after the gate is attached,
+/// so the gate is per-process state and a clone would mean two
+/// captcha stores racing on the same network.
+fn attach_captcha(auth: ConcreteAuth, gate: Arc<CaptchaGate>) -> migo_core::Result<SharedAuth> {
+    let auth = Arc::try_unwrap(auth).map_err(|_| {
+        migo_protocol::fault::internal(
+            "the auth handle still has another owner; cannot attach the captcha gate",
+        )
+    })?;
+    let auth = auth.with_captcha(gate)?;
+    Ok(Arc::new(auth) as SharedAuth)
+}
 
 /// A fully wired server: every layer constructed, connected, and ready to [`serve`](App::serve).
 ///
@@ -164,8 +194,33 @@ impl App {
         // --- Layer 3: domain ---
         // Authentication takes the whole config: token lifetimes, argon2 parameters, and the
         // sign-in policy all live under different config sections it reads together.
-        let auth = migo_auth::open(store.clone(), limiter.clone(), config, &registry)
-            .context("cannot open authentication")?;
+        let concrete: ConcreteAuth = migo_auth::open(
+            store.clone(),
+            limiter.clone(),
+            config,
+            &registry,
+            // The same 32-byte secret root the rest of the server tokens
+            // derive from. None would have the auth crate refuse to start
+            // in production; the dev value is a stand-in only.
+            config
+                .auth
+                .token_key
+                .as_ref()
+                .map_or(&[], |s| s.expose().as_bytes()),
+        )
+        .context("cannot open authentication")?;
+        let auth: SharedAuth = attach_captcha(
+            concrete,
+            migod_captcha_gate(
+                config.auth.captcha_threshold.unwrap_or(3),
+                config
+                    .auth
+                    .token_key
+                    .as_ref()
+                    .map_or(&[], |s| s.expose().as_bytes()),
+            ),
+        )
+        .context("cannot attach the captcha gate")?;
 
         let messaging =
             migo_messaging::open(store.clone(), cache.clone(), limiter.clone(), &registry);

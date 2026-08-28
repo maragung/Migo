@@ -16,7 +16,7 @@
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -41,10 +41,17 @@ pub(crate) fn routes() -> Router<ApiState> {
     Router::new().nest(
         "/auth",
         Router::new()
+            .route("/captcha", post(captcha))
             .route("/register", post(register))
             .route("/login", post(login))
             .route("/refresh", post(refresh))
-            .route("/logout", post(logout)),
+            .route("/logout", post(logout))
+            .route("/password", post(change_password))
+            .route("/sessions", get(list_sessions))
+            .route("/sessions/revoke-others", post(revoke_other_sessions))
+            .route("/sessions/{session_id}/revoke", post(revoke_one_session))
+            .route("/recovery/request", post(recovery_request))
+            .route("/recovery/confirm", post(recovery_confirm)),
     )
 }
 
@@ -265,6 +272,169 @@ async fn logout(
     state
         .authenticator()
         .sign_out(&auth.identity, body.session_id, &context)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// --- captcha and recovery surface -----------------------------------------
+
+/// `POST /v1/auth/captcha` — issue a fresh captcha. Anonymous; the
+/// rate limiter at the IP tier is the cost gate. The response is the
+/// gate's own public view of the issued challenge: an id the client
+/// must echo back, the six digits to type, and the seconds the
+/// challenge is still valid.
+async fn captcha(
+    State(state): State<ApiState>,
+    facts: RequestFacts,
+) -> Result<Json<migo_captcha::CaptchaChallengeView>, crate::ApiError> {
+    charge_ip(&state, facts.ip, BOOTSTRAP_COST).await?;
+    let now = state.now();
+    let challenge = state
+        .authenticator()
+        .issue_captcha(now)
+        .await
+        .ok_or_else(|| crate::ApiError::from(migo_protocol::fault::feature_disabled("captcha")))?;
+    Ok(Json(challenge))
+}
+
+/// `POST /v1/auth/recovery/request` — start a password-recovery flow.
+/// Returns 200 `{ ok: true }` regardless of whether the identifier
+/// resolved, so an attacker cannot enumerate accounts.
+#[derive(Deserialize)]
+struct RecoveryRequestBody {
+    identifier: String,
+    captcha: Option<CaptchaProofBody>,
+}
+#[derive(Serialize)]
+struct RecoveryRequestResponse {
+    ok: bool,
+}
+async fn recovery_request(
+    State(state): State<ApiState>,
+    facts: RequestFacts,
+    Json(body): Json<RecoveryRequestBody>,
+) -> Result<Json<RecoveryRequestResponse>, crate::ApiError> {
+    charge_ip(&state, facts.ip, BOOTSTRAP_COST).await?;
+    let now = state.now();
+    let captcha = body
+        .captcha
+        .map(migo_auth::CaptchaProof::from)
+        .ok_or_else(|| {
+            crate::ApiError::from(migo_protocol::fault::validation(
+                "captcha",
+                "captcha is required for recovery",
+            ))
+        })?;
+    let context = facts.context(now);
+    let _ = state
+        .authenticator()
+        .request_recovery(&body.identifier, &captcha, &context)
+        .await?;
+    Ok(Json(RecoveryRequestResponse { ok: true }))
+}
+
+#[derive(Deserialize)]
+struct RecoveryConfirmBody {
+    token_id: migo_core::Id,
+    /// The hex-encoded HMAC tag the request route issued.
+    tag: String,
+    new_password: String,
+}
+async fn recovery_confirm(
+    State(state): State<ApiState>,
+    facts: RequestFacts,
+    Json(body): Json<RecoveryConfirmBody>,
+) -> Result<Json<RecoveryRequestResponse>, crate::ApiError> {
+    let now = state.now();
+    let context = facts.context(now);
+    let tag = hex::decode(&body.tag).map_err(|_| {
+        crate::ApiError::from(migo_protocol::fault::validation(
+            "tag",
+            "tag must be hex-encoded",
+        ))
+    })?;
+    state
+        .authenticator()
+        .confirm_recovery(
+            body.token_id,
+            &tag,
+            &migo_core::Secret::new(body.new_password),
+            &context,
+        )
+        .await?;
+    Ok(Json(RecoveryRequestResponse { ok: true }))
+}
+
+// --- password, sessions, contact ------------------------------------------
+
+#[derive(Deserialize)]
+struct ChangePasswordBody {
+    current_password: String,
+    new_password: String,
+}
+async fn change_password(
+    State(state): State<ApiState>,
+    auth: Authenticated,
+    Json(body): Json<ChangePasswordBody>,
+) -> Result<Json<GrantResponse>, crate::ApiError> {
+    let now = state.now();
+    let context = auth.facts.context(now);
+    let change = migo_auth::PasswordChange {
+        current: migo_core::Secret::new(body.current_password),
+        next: migo_core::Secret::new(body.new_password),
+    };
+    let grant = state
+        .authenticator()
+        .change_password(&auth.identity, change, &context)
+        .await?;
+    Ok(Json(grant.into()))
+}
+
+#[derive(Serialize)]
+struct SessionsResponse {
+    sessions: Vec<migo_auth::SessionSummary>,
+}
+async fn list_sessions(
+    State(state): State<ApiState>,
+    auth: Authenticated,
+) -> Result<Json<SessionsResponse>, crate::ApiError> {
+    let now = state.now();
+    let context = auth.facts.context(now);
+    let sessions = state
+        .authenticator()
+        .sessions(&auth.identity, &context)
+        .await?;
+    Ok(Json(SessionsResponse { sessions }))
+}
+
+#[derive(Serialize)]
+struct RevokeOthersResponse {
+    ok: bool,
+    revoked: u64,
+}
+async fn revoke_other_sessions(
+    State(state): State<ApiState>,
+    auth: Authenticated,
+) -> Result<Json<RevokeOthersResponse>, crate::ApiError> {
+    let now = state.now();
+    let context = auth.facts.context(now);
+    let revoked = state
+        .authenticator()
+        .sign_out_others(&auth.identity, &context)
+        .await?;
+    Ok(Json(RevokeOthersResponse { ok: true, revoked }))
+}
+
+async fn revoke_one_session(
+    State(state): State<ApiState>,
+    auth: Authenticated,
+    axum::extract::Path(session_id): axum::extract::Path<migo_core::Id>,
+) -> Result<StatusCode, crate::ApiError> {
+    let now = state.now();
+    let context = auth.facts.context(now);
+    state
+        .authenticator()
+        .revoke_device(&auth.identity, session_id, &context)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }

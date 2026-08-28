@@ -247,6 +247,47 @@ impl Authenticator for FakeAuth {
     ) -> migo_core::Result<Grant> {
         unimplemented!("the gateway never changes passwords")
     }
+
+    async fn set_contact(
+        &self,
+        _identity: &Identity,
+        _contact: &str,
+        _context: &RequestContext,
+    ) -> migo_core::Result<()> {
+        unimplemented!("the gateway never changes the contact record")
+    }
+
+    fn issue_captcha<'a>(
+        &'a self,
+        _now: migo_core::Timestamp,
+    ) -> std::pin::Pin<
+        std::boxed::Box<
+            dyn std::future::Future<Output = Option<migo_captcha::CaptchaChallengeView>>
+                + Send
+                + 'a,
+        >,
+    > {
+        unimplemented!("the gateway never issues captchas")
+    }
+
+    async fn request_recovery(
+        &self,
+        _identifier: &str,
+        _captcha: &migo_auth::CaptchaProof,
+        _context: &RequestContext,
+    ) -> migo_core::Result<migo_store::traits::RecoveryRow> {
+        unimplemented!("the gateway never starts a recovery flow")
+    }
+
+    async fn confirm_recovery(
+        &self,
+        _token_id: Id,
+        _tag: &[u8],
+        _new_password: &migo_core::Secret,
+        _context: &RequestContext,
+    ) -> migo_core::Result<()> {
+        unimplemented!("the gateway never confirms a recovery flow")
+    }
 }
 
 // ---------------------------------------------------------------------------

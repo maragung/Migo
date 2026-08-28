@@ -809,6 +809,63 @@ impl AccountStore for PostgresStore {
         Ok(())
     }
 
+    async fn set_contact(&self, account_id: Id, contact: &str, at: Timestamp) -> Result<()> {
+        let trimmed = contact.trim();
+        if trimmed.is_empty() {
+            return Err(fault::validation("contact", "must not be empty"));
+        }
+        // Branch on the visible shape — `@` for email, `+` for phone — the same
+        // way the memory backend does. The auth crate validates with its own
+        // stricter rules before calling in; this is the structural gate.
+        let (email, email_lower, phone) = if trimmed.contains('@') {
+            if !trimmed.contains('.') || trimmed.split('@').count() != 2 {
+                return Err(fault::validation("email", "domain needs a dot"));
+            }
+            let folded = fold(trimmed);
+            (Some(trimmed.to_string()), Some(folded), None)
+        } else if trimmed.starts_with('+') {
+            let normalised: String = trimmed
+                .chars()
+                .filter(|c| c.is_ascii_digit() || *c == '+')
+                .collect();
+            if normalised.len() < 9 {
+                return Err(fault::validation("phone", "must contain at least 8 digits"));
+            }
+            (None, None, Some(normalised))
+        } else {
+            return Err(fault::validation(
+                "contact",
+                "must be an email (containing @) or a phone (starting with +)",
+            ));
+        };
+        // Partial update: a single statement sets the right pair, leaves the
+        // other alone, and stamps `updated_at`. The unique indexes on
+        // `email_lower` and `phone` catch a collision and surface it as
+        // `ALREADY_EXISTS` through the standard `on_conflict` translation.
+        let result = entity::account::Entity::update_many()
+            .filter(entity::account::Column::AccountId.eq(uuid_of(account_id)))
+            .set(entity::account::ActiveModel {
+                email: Set(email),
+                email_lower: Set(email_lower),
+                phone: Set(phone),
+                updated_at: Set(stamp_of(at)),
+                ..Default::default()
+            })
+            .exec(&self.db)
+            .await
+            .map_err(|error| {
+                on_conflict(error, "account", |name| match name {
+                    "account_email_lower_key" => Some(fault::already_exists("email")),
+                    "account_phone_key" => Some(fault::already_exists("phone")),
+                    _ => None,
+                })
+            })?;
+        if result.rows_affected == 0 {
+            return Err(fault::not_found("account"));
+        }
+        Ok(())
+    }
+
     async fn record_login(&self, account_id: Id, at: Timestamp) -> Result<()> {
         let result = entity::account::Entity::update_many()
             .filter(entity::account::Column::AccountId.eq(uuid_of(account_id)))

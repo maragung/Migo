@@ -1792,8 +1792,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "hex",
  "migo-auth",
  "migo-cache",
+ "migo-captcha",
  "migo-core",
  "migo-protocol",
  "migo-ratelimit",
@@ -1819,6 +1821,7 @@ dependencies = [
  "migo-ratelimit",
  "migo-store",
  "parking_lot",
+ "serde",
  "tokio",
  "tracing",
 ]
@@ -1865,6 +1868,7 @@ dependencies = [
  "migo-protocol",
  "parking_lot",
  "rand 0.8.7",
+ "serde",
  "tokio",
 ]
 
@@ -1960,9 +1964,11 @@ dependencies = [
  "dashmap",
  "migo-auth",
  "migo-cache",
+ "migo-captcha",
  "migo-core",
  "migo-protocol",
  "migo-ratelimit",
+ "migo-store",
  "migo-wire",
  "parking_lot",
  "tokio",
@@ -2153,6 +2159,7 @@ dependencies = [
  "migo-auth",
  "migo-bots",
  "migo-cache",
+ "migo-captcha",
  "migo-core",
  "migo-economy",
  "migo-games",
