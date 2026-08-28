@@ -6,6 +6,7 @@ import com.migo.core.ConnectionState
 import com.migo.core.MigoClient
 import com.migo.core.MigoClientOptions
 import com.migo.core.domain.KeyStore
+import com.migo.core.store.ServerEndpoint
 import com.migo.core.store.SessionStore
 import com.migo.core.store.Vault
 import com.migo.core.store.VaultError
@@ -13,8 +14,23 @@ import com.migo.core.wire.Id
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** The default server for a debug build: the emulator's route to the host, where migod binds 8080. */
-const val DEFAULT_SERVER_URL = "http://10.0.2.2:8080"
+/**
+ * The default server the form pre-fills with on first launch.
+ *
+ * Points at the emulator's route to the host machine (`10.0.2.2`) on `migod`'s default REST
+ * port, with the gateway on the next one up. A user who has a server on the host picks
+ * the same value by leaving the form at its defaults; a user with `migod` on a phone
+ * changes the host to `127.0.0.1`. The form's "Use this server" button persists the
+ * choice, so the defaults only ever show up on a fresh install.
+ */
+val DEFAULT_SERVER_ENDPOINT: ServerEndpoint = ServerEndpoint(
+    host = "10.0.2.2",
+    port = 8080,
+    gatewayPort = 8081,
+    transport = com.migo.core.store.Transport.WebSocket,
+    gatewayScheme = com.migo.core.store.GatewayScheme.Ws,
+    restScheme = com.migo.core.store.RestScheme.Http,
+)
 
 /** What the app wants told about a connection, as it happens rather than when something asks. */
 class SessionHooks(
@@ -129,7 +145,7 @@ class MigoSession private constructor(
 
             val store = withContext(Dispatchers.IO) { SessionStore.open(context) }
             val client = build(
-                saved.serverUrl,
+                ServerEndpoint.fromRestUrl(saved.serverUrl),
                 appVersion,
                 saved.deviceId,
                 KeyStore.restore(keys),
@@ -150,13 +166,13 @@ class MigoSession private constructor(
         suspend fun register(
             context: Context,
             appVersion: String,
-            serverUrl: String,
+            endpoint: ServerEndpoint,
             username: String,
             password: String,
             hooks: SessionHooks = SessionHooks(),
         ): MigoSession {
             val (vault, store) = reset(context)
-            val client = build(serverUrl, appVersion, null, KeyStore.create(), store, hooks)
+            val client = build(endpoint, appVersion, null, KeyStore.create(), store, hooks)
             val session = MigoSession(client, username, vault, store)
             client.register(username, password)
             session.persist()
@@ -174,7 +190,7 @@ class MigoSession private constructor(
         suspend fun signIn(
             context: Context,
             appVersion: String,
-            serverUrl: String,
+            endpoint: ServerEndpoint,
             identifier: String,
             password: String,
             hooks: SessionHooks = SessionHooks(),
@@ -198,7 +214,7 @@ class MigoSession private constructor(
                 val store = withContext(Dispatchers.IO) { SessionStore.open(context) }
                 val deviceId = keys.session?.deviceId
                 val client =
-                    build(serverUrl, appVersion, deviceId, KeyStore.restore(keys), store, hooks)
+                    build(endpoint, appVersion, deviceId, KeyStore.restore(keys), store, hooks)
                 val session = MigoSession(client, identifier, vault, store)
                 client.login(identifier, password)
                 session.persist()
@@ -206,7 +222,7 @@ class MigoSession private constructor(
             }
 
             val (vault, store) = reset(context)
-            val client = build(serverUrl, appVersion, null, KeyStore.create(), store, hooks)
+            val client = build(endpoint, appVersion, null, KeyStore.create(), store, hooks)
             val session = MigoSession(client, identifier, vault, store)
             client.login(identifier, password)
             session.persist()
@@ -242,7 +258,7 @@ class MigoSession private constructor(
          * build fingerprint would serve only whoever is fingerprinting.
          */
         private fun build(
-            serverUrl: String,
+            endpoint: ServerEndpoint,
             appVersion: String,
             deviceId: Id?,
             keyStore: KeyStore,
@@ -250,7 +266,8 @@ class MigoSession private constructor(
             hooks: SessionHooks,
         ): MigoClient = MigoClient.create(
             MigoClientOptions(
-                baseUrl = serverUrl,
+                baseUrl = endpoint.restBaseUrl(),
+                gatewayUrl = endpoint.gatewayUrl(),
                 appVersion = appVersion,
                 osVersion = "Android ${Build.VERSION.RELEASE}",
                 deviceModel = Build.MODEL,

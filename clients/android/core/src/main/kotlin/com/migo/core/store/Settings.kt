@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStoreFile
 import com.migo.core.protocol.BandwidthMode
@@ -165,13 +166,28 @@ enum class MediaAutoDownload {
  */
 data class AppSettings(
     /**
-     * The server this account belongs to, e.g. `https://api.migo.example`.
+     * The server this account belongs to, as the structured record the user picked.
      *
-     * Empty until the user has chosen one. Kept here rather than compiled in so one build can serve a
-     * self-hosted deployment; the value is also in [SavedSession], and that copy is the authoritative
-     * one for a signed-in device -- this one is what a sign-in screen pre-fills.
+     * Defaults to the dev policy's loopback: a plain WebSocket on `localhost:18080`, with the
+     * gateway on `18081`. The defaults are what the form is initialised with and what the
+     * bootstrap falls back to when nothing has been written yet, so an empty
+     * [ServerEndpoint.host] should not normally reach the SDK; the guard is here so a caller
+     * that hands the record to `MigoClient.create` gets a clear failure rather than a
+     * nonsense URL. The same record is persisted into [SavedSession] for a signed-in device,
+     * and that copy is the authoritative one on the resume path.
      */
-    val serverUrl: String = "",
+    val serverEndpoint: ServerEndpoint = ServerEndpoint.loopbackDefault(),
+
+    /**
+     * The same server as a single string, kept in lockstep with [serverEndpoint].
+     *
+     * Kept for callers that have not yet been migrated to the structured form (the
+     * `SavedSession.serverUrl` field, which is the resume path's source of truth for
+     * which server this device is on). Updated on every write, so the two cannot drift
+     * in the persisted file -- a writer that forgot to update one would see the next read
+     * repopulate it from the other.
+     */
+    val serverUrl: String = serverEndpoint.restBaseUrl(),
 
     /**
      * The language tag sent in HELLO, for server-composed strings.
@@ -219,6 +235,14 @@ data class AppSettings(
 
 // The preference keys. Private to this file: a key is a storage detail, and anything outside that could
 // name one could also write a value the readers below do not expect.
+private val KEY_SERVER_HOST = stringPreferencesKey("server_host")
+private val KEY_SERVER_PORT = intPreferencesKey("server_port")
+private val KEY_SERVER_GATEWAY_PORT = intPreferencesKey("server_gateway_port")
+private val KEY_SERVER_TRANSPORT = stringPreferencesKey("server_transport")
+private val KEY_SERVER_GATEWAY_SCHEME = stringPreferencesKey("server_gateway_scheme")
+private val KEY_SERVER_REST_SCHEME = stringPreferencesKey("server_rest_scheme")
+// The legacy single-string key, kept so a pre-migration install's value carries forward into the
+// new structured fields. New writes do not touch it.
 private val KEY_SERVER_URL = stringPreferencesKey("server_url")
 private val KEY_LOCALE = stringPreferencesKey("locale")
 private val KEY_BANDWIDTH_MODE = stringPreferencesKey("bandwidth_mode")
@@ -239,8 +263,10 @@ private val KEY_ONBOARDING_COMPLETE = booleanPreferencesKey("onboarding_complete
  */
 private fun Preferences.toAppSettings(): AppSettings {
     val defaults = AppSettings()
+    val endpoint = readServerEndpoint(this, defaults.serverEndpoint)
     return AppSettings(
-        serverUrl = this[KEY_SERVER_URL] ?: defaults.serverUrl,
+        serverEndpoint = endpoint,
+        serverUrl = endpoint.restBaseUrl(),
         locale = this[KEY_LOCALE] ?: defaults.locale,
         bandwidthMode = readBandwidthMode(this[KEY_BANDWIDTH_MODE], defaults.bandwidthMode),
         theme = readEnum(this[KEY_THEME], ThemeChoice.entries, defaults.theme),
@@ -260,7 +286,12 @@ private fun Preferences.toAppSettings(): AppSettings {
 
 /** Writes a snapshot in full, so a field removed from the snapshot cannot survive in the file. */
 private fun AppSettings.writeTo(preferences: MutablePreferences) {
-    preferences[KEY_SERVER_URL] = serverUrl
+    preferences[KEY_SERVER_HOST] = serverEndpoint.host
+    preferences[KEY_SERVER_PORT] = serverEndpoint.port
+    preferences[KEY_SERVER_GATEWAY_PORT] = serverEndpoint.gatewayPort
+    preferences[KEY_SERVER_TRANSPORT] = serverEndpoint.transport.name
+    preferences[KEY_SERVER_GATEWAY_SCHEME] = serverEndpoint.gatewayScheme.name
+    preferences[KEY_SERVER_REST_SCHEME] = serverEndpoint.restScheme.name
     preferences[KEY_LOCALE] = locale
     preferences[KEY_BANDWIDTH_MODE] = bandwidthMode.name
     preferences[KEY_THEME] = theme.name
@@ -284,6 +315,93 @@ private fun AppSettings.writeTo(preferences: MutablePreferences) {
 private fun <E : Enum<E>> readEnum(stored: String?, values: List<E>, fallback: E): E {
     if (stored == null) return fallback
     return values.firstOrNull { it.name == stored } ?: fallback
+}
+
+/**
+ * Reads the structured [ServerEndpoint] from the preferences, or migrates the legacy single
+ * `server_url` string when only that is present.
+ *
+ * The migration path is one-shot: a fresh install that has never written the old key sees
+ * the defaults; a device that had only the old key now sees a parsed endpoint. The parsed
+ * endpoint is then re-written on the next `update`, so the legacy key is dropped from the
+ * file without a dedicated migration pass.
+ *
+ * An unrecognised transport or scheme name falls back to the field's default rather than
+ * crashing -- a newer build that names a value this one has never heard of keeps working,
+ * the same forward-compatibility rule the protocol enums follow with
+ * [BandwidthMode.fromWire].
+ */
+private fun readServerEndpoint(preferences: Preferences, fallback: ServerEndpoint): ServerEndpoint {
+    val host = preferences[KEY_SERVER_HOST]
+    val port = preferences[KEY_SERVER_PORT]
+    val gatewayPort = preferences[KEY_SERVER_GATEWAY_PORT]
+    val transportName = preferences[KEY_SERVER_TRANSPORT]
+    val gatewaySchemeName = preferences[KEY_SERVER_GATEWAY_SCHEME]
+    val restSchemeName = preferences[KEY_SERVER_REST_SCHEME]
+    if (host == null && port == null && gatewayPort == null && transportName == null &&
+        gatewaySchemeName == null && restSchemeName == null
+    ) {
+        // No structured fields written. Fall through to the legacy single-string migration
+        // when it exists, otherwise use the supplied default.
+        val legacy = preferences[KEY_SERVER_URL] ?: return fallback
+        if (legacy.isBlank()) return fallback
+        return migrateLegacyServerUrl(legacy, fallback)
+    }
+    val resolvedHost = host ?: fallback.host
+    val resolvedPort = port ?: fallback.port
+    val resolvedGatewayPort = gatewayPort ?: fallback.gatewayPort
+    val resolvedTransport = readEnum(transportName, Transport.entries, fallback.transport)
+    val resolvedGatewayScheme = readEnum(
+        gatewaySchemeName,
+        GatewayScheme.entries,
+        ServerEndpoint.defaultSchemesForHost(resolvedHost).first,
+    )
+    val resolvedRestScheme = readEnum(
+        restSchemeName,
+        RestScheme.entries,
+        ServerEndpoint.defaultSchemesForHost(resolvedHost).second,
+    )
+    // A record with a Quic transport (e.g. one chosen in a newer build) silently downgrades
+    // to WebSocket here, because the wire does not yet speak QUIC and a record this build
+    // cannot honour would be worse than one the user has to change.
+    val transport = if (resolvedTransport == Transport.Quic) Transport.WebSocket else resolvedTransport
+    return ServerEndpoint(
+        host = resolvedHost,
+        port = resolvedPort,
+        gatewayPort = resolvedGatewayPort,
+        transport = transport,
+        gatewayScheme = resolvedGatewayScheme,
+        restScheme = resolvedRestScheme,
+    )
+}
+
+/**
+ * Parses a legacy `server_url` value (a REST origin like `http://localhost:18080`) into
+ * the structured record, keeping the existing dev policy: a loopback host gets the plain
+ * pair, anything else gets the TLS pair.
+ *
+ * The legacy value is a REST origin only; the gateway port is derived as `rest + 1` for
+ * loopback, `rest` for non-loopback, which is the same rule the dev policy used when
+ * there was a single string.
+ */
+private fun migrateLegacyServerUrl(raw: String, fallback: ServerEndpoint): ServerEndpoint {
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return fallback
+    val lower = trimmed.lowercase()
+    val (scheme, hostAndPort) = when {
+        lower.startsWith("https://") -> RestScheme.Https to trimmed.substring("https://".length)
+        lower.startsWith("http://") -> RestScheme.Http to trimmed.substring("http://".length)
+        else -> return fallback
+    }
+    // The legacy value carried a path sometimes (`http://host:port/`), so split the path
+    // off before splitting the authority.
+    val authority = hostAndPort.substringBefore('/')
+    val (host, port) = when (val colon = authority.lastIndexOf(':')) {
+        -1 -> authority.lowercase() to if (scheme == RestScheme.Https) 443 else 80
+        else -> authority.substring(0, colon).lowercase() to
+            (authority.substring(colon + 1).toIntOrNull() ?: (if (scheme == RestScheme.Https) 443 else 80))
+    }
+    return ServerEndpoint.defaultFor(host, port)
 }
 
 /**

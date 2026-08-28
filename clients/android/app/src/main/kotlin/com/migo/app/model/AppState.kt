@@ -2,6 +2,7 @@ package com.migo.app.model
 
 import com.migo.core.ConnectionState
 import com.migo.core.protocol.ConversationKind
+import com.migo.core.store.ServerEndpoint
 import com.migo.core.wire.Id
 
 /**
@@ -28,8 +29,17 @@ sealed interface AppState {
 
     /** Nobody is signed in on this device, or the last session could not be resumed. */
     data class SignedOut(
-        /** The server to talk to. Editable, because there is no single Migo deployment. */
-        val serverUrl: String,
+        /**
+         * The server to talk to, as the structured record the user picked.
+         *
+         * The form is initialised with the persisted choice (or the dev default on a
+         * fresh install) and re-emits a new record on every "Use this server" click
+         * through [com.migo.app.AppViewModel.setServerEndpoint]. The form holds the
+         * typed text in its own local state, so this field is always a valid
+         * [ServerEndpoint] -- a partial host (one that does not satisfy
+         * [ServerEndpoint.init]) never reaches here.
+         */
+        val serverEndpoint: ServerEndpoint,
         /** Username or email, kept across a failed attempt so it does not have to be retyped. */
         val identifier: String = "",
         /** True while a register or sign-in call is in flight; the form is disabled. */

@@ -7,7 +7,6 @@ import com.migo.app.model.AppState
 import com.migo.app.model.ChatMessage
 import com.migo.app.model.ChatState
 import com.migo.app.model.ConversationRow
-import com.migo.app.session.DEFAULT_SERVER_URL
 import com.migo.app.session.MigoSession
 import com.migo.app.session.SessionHooks
 import com.migo.core.ConnectionState
@@ -21,6 +20,7 @@ import com.migo.core.protocol.ConversationSummary
 import com.migo.core.protocol.ReceiptKind
 import com.migo.core.protocol.TypingEvent
 import com.migo.core.protocol.TypingState
+import com.migo.core.store.ServerEndpoint
 import com.migo.core.store.Settings
 import com.migo.core.wire.Id
 import com.migo.core.wire.WireError
@@ -84,8 +84,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     // --- authentication ---
 
-    /** Records what was typed in the server field, so a failed attempt does not clear it. */
-    fun setServerUrl(text: String) = signedOut { it.copy(serverUrl = text, failure = null) }
+    /**
+     * Replaces the working endpoint. Called by the form's "Use this server" button
+     * after validation.
+     *
+     * The form holds the typed text in its own `rememberSaveable` state and only
+     * calls this once the user has clicked "Use this server". A keystroke never
+     * reaches the view model -- a partial host (one that does not yet satisfy the
+     * `ServerEndpoint.init` check) is never constructed.
+     */
+    fun setServerEndpoint(endpoint: ServerEndpoint) = signedOut {
+        it.copy(serverEndpoint = endpoint, failure = null)
+    }
 
     /** Records what was typed in the account field. */
     fun setIdentifier(text: String) = signedOut { it.copy(identifier = text, failure = null) }
@@ -94,7 +104,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun signIn(password: String, create: Boolean) {
         val form = _state.value as? AppState.SignedOut ?: return
         if (form.busy) return
-        val serverUrl = form.serverUrl.trim().ifBlank { DEFAULT_SERVER_URL }
+        val endpoint = form.serverEndpoint
         val identifier = form.identifier.trim()
         if (identifier.isEmpty() || password.isEmpty()) {
             signedOut { it.copy(failure = "Fill in both fields first.") }
@@ -108,7 +118,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     MigoSession.register(
                         getApplication(),
                         BuildConfig.VERSION_NAME,
-                        serverUrl,
+                        endpoint,
                         identifier,
                         password,
                         hooks(),
@@ -117,13 +127,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     MigoSession.signIn(
                         getApplication(),
                         BuildConfig.VERSION_NAME,
-                        serverUrl,
+                        endpoint,
                         identifier,
                         password,
                         hooks(),
                     )
                 }
-                settings.update { it.copy(serverUrl = serverUrl, onboardingComplete = true) }
+                settings.update { it.copy(serverEndpoint = endpoint, onboardingComplete = true) }
                 attach(opened)
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -146,7 +156,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         detach()
         _state.value = AppState.Starting
         viewModelScope.launch {
-            val serverUrl = settings.current().serverUrl.ifBlank { DEFAULT_SERVER_URL }
+            val endpoint = settings.current().serverEndpoint
             try {
                 leaving.signOut()
             } catch (cancelled: CancellationException) {
@@ -156,7 +166,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 // this device any less signed out.
             }
             names.clear()
-            _state.value = AppState.SignedOut(serverUrl)
+            _state.value = AppState.SignedOut(endpoint)
         }
     }
 
@@ -367,7 +377,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun bootstrap() {
         val stored = settings.current()
-        val fallback = stored.serverUrl.ifBlank { DEFAULT_SERVER_URL }
+        val fallback = stored.serverEndpoint
         try {
             val resumed = MigoSession.resumeStored(getApplication(), BuildConfig.VERSION_NAME, hooks())
             if (resumed == null) {
