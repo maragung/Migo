@@ -91,14 +91,18 @@ data class ServerEndpoint(
          * focus can rebuild the pair without re-running the whole endpoint construction.
          */
         fun defaultFor(host: String, port: Int = DEFAULT_REST_PORT): ServerEndpoint {
-            val schemes = defaultSchemesForHost(host)
+            // defaultSchemesForHost returns a Pair<GatewayScheme, RestScheme>; destructure
+            // it into named locals so the constructor below can refer to each side by name.
+            // A Pair has no `gatewayScheme` / `restScheme` fields, so accessing them with
+            // `schemes.gatewayScheme` (the previous form) would not compile.
+            val (gatewayScheme, restScheme) = defaultSchemesForHost(host)
             return ServerEndpoint(
                 host = host.lowercase(),
                 port = port,
-                gatewayPort = if (schemes.restScheme == RestScheme.Https) port else port + 1,
+                gatewayPort = if (restScheme == RestScheme.Https) port else port + 1,
                 transport = Transport.WebSocket,
-                gatewayScheme = schemes.gatewayScheme,
-                restScheme = schemes.restScheme,
+                gatewayScheme = gatewayScheme,
+                restScheme = restScheme,
             )
         }
 
