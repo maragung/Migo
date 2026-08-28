@@ -75,6 +75,12 @@ pub const LABEL_WEBHOOK: &[u8] = b"migo-webhook-v1";
 /// kind of credential can never be replayed as another. Like a refresh token, a bot
 /// token is a random value turned into a lookup key, never a signed claim.
 pub const LABEL_BOT_TOKEN: &[u8] = b"migo-bot-token-v1";
+/// Password-recovery tokens, the MAC tag stored alongside a recovery row. A
+/// separate label from every other token kind for the same reason
+/// [`LABEL_BOT_TOKEN`] is: a database dump that contains recovery tags must not
+/// also be a valid tag for any other purpose, so an operator can revoke one
+/// kind of credential without invalidating the others.
+pub const LABEL_RECOVERY: &[u8] = b"migo-recovery-v1";
 
 /// A key for one purpose, derived from the deployment's root secret.
 ///

@@ -9,6 +9,7 @@ authors.workspace = true
 description = "Registration, sign-in, session tokens, and device revocation."
 
 [dependencies]
+migo-captcha.workspace = true
 migo-core.workspace = true
 migo-crypto.workspace = true
 migo-protocol.workspace = true

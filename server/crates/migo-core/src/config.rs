@@ -346,6 +346,12 @@ pub struct AuthConfig {
     /// choice for the public internet. Lower it for local two-node smokes where
     /// the value is in the round trip, not the rate ceiling.
     pub registration_cost: Option<u32>,
+    /// Number of consecutive sign-in failures from the same network at which a
+    /// captcha proof becomes mandatory for the next attempt. `None` disables the
+    /// captcha gate entirely; the `/v1/auth/captcha` route still issues challenges
+    /// but the authenticator never asks for one. Defaults to a small value so the
+    /// gate is on by default and the deployment has to opt out by setting `None`.
+    pub captcha_threshold: Option<u32>,
 }
 
 impl Default for AuthConfig {
@@ -358,6 +364,7 @@ impl Default for AuthConfig {
             max_devices_per_user: 8,
             password_min_length: 10,
             registration_cost: None,
+            captcha_threshold: Some(3),
         }
     }
 }
@@ -722,6 +729,13 @@ impl Config {
         }
         if self.auth.max_devices_per_user == 0 {
             problems.push("auth.max_devices_per_user must be at least 1".to_string());
+        }
+        if matches!(self.auth.captcha_threshold, Some(0)) {
+            problems.push(
+                "auth.captcha_threshold of 0 would require a captcha on the first attempt; \
+                 use None to disable the gate entirely"
+                    .to_string(),
+            );
         }
 
         // --- gateway coherence ---

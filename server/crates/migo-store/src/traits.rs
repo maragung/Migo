@@ -106,6 +106,9 @@ pub trait AccountStore: Send + Sync {
     /// Looks up by email, case-insensitively.
     async fn account_by_email(&self, email: &str) -> Result<Option<Account>>;
 
+    /// Looks up by phone, exactly (the E.164 form is canonical).
+    async fn account_by_phone(&self, phone: &str) -> Result<Option<Account>>;
+
     /// Replaces the password hash. Callers revoke sessions separately, in the
     /// same request, so that a password change logs other devices out.
     async fn set_password_hash(&self, account_id: Id, hash: &str, at: Timestamp) -> Result<()>;
@@ -1115,6 +1118,90 @@ pub trait FederationStore: Send + Sync {
     ) -> Result<Option<OutboxRecord>>;
 }
 
+/// A row in the `captcha_challenge` table.
+///
+/// The service in `migo-captcha` is the only writer and reader; the store
+/// trait exists so the same service can be pointed at a memory or Postgres
+/// backend without changing its source. The struct mirrors the table shape:
+/// a primary key, a tag, and the two timestamps.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptchaRow {
+    /// The challenge id, surfaced to the client as the `challenge_id` field.
+    pub challenge_id: Id,
+    /// The HMAC tag over (challenge_id || code). Never the code itself.
+    pub tag: Vec<u8>,
+    /// When the challenge stops being accepted.
+    pub expires_at: Timestamp,
+    /// When the row was inserted.
+    pub created_at: Timestamp,
+}
+
+/// Storage for the captcha challenge table.
+///
+/// The captcha service in `migo-captcha` issues the challenge; the store
+/// persists it. Splitting them lets the same service run against the
+/// in-memory store used in tests and the Postgres store used in production
+/// without re-implementing the issuance or verification logic.
+#[async_trait]
+pub trait CaptchaStore: Send + Sync {
+    /// Inserts or replaces a challenge. The captcha is one-shot per id, so a
+    /// second call with the same `challenge_id` overwrites the first.
+    async fn put_captcha(&self, row: CaptchaRow) -> Result<()>;
+
+    /// Reads a live challenge by id. Returns `None` if the row does not exist
+    /// or its `expires_at` is at or before `now`.
+    async fn get_captcha(&self, challenge_id: Id, now: Timestamp) -> Result<Option<CaptchaRow>>;
+
+    /// Drops a challenge. Called on success and on a permanent failure so a
+    /// tag cannot be replayed.
+    async fn delete_captcha(&self, challenge_id: Id) -> Result<()>;
+}
+
+/// A row in the `password_recovery` table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryRow {
+    /// The token id, surfaced to the client.
+    pub token_id: Id,
+    /// Owning account.
+    pub account_id: Id,
+    /// The HMAC tag over (token_id || 'recovery').
+    pub tag: Vec<u8>,
+    /// When the token stops being accepted.
+    pub expires_at: Timestamp,
+    /// Stamped when the token is exchanged for a new password.
+    pub consumed_at: Option<Timestamp>,
+    /// When the row was inserted.
+    pub created_at: Timestamp,
+}
+
+/// Storage for the password-recovery token table.
+///
+/// Distinct from the captcha store because the two are not interchangeable:
+/// captcha rows are short-lived and one-shot, recovery rows are
+/// twenty-minute-scoped and have a consumed state. The `recovery_consume`
+/// call is the atomic "stamp and return" the confirm handler relies on; an
+/// in-memory backend takes its lock, the Postgres backend uses a single
+/// update with a `where consumed_at is null` predicate.
+#[async_trait]
+pub trait RecoveryStore: Send + Sync {
+    /// Inserts a new token row.
+    async fn recovery_put(&self, row: RecoveryRow) -> Result<()>;
+
+    /// Reads a row by token id.
+    async fn recovery_get(&self, token_id: Id) -> Result<Option<RecoveryRow>>;
+
+    /// Stamps the row as consumed, returning the row as it was on a successful
+    /// transition (i.e. a row whose `consumed_at` is `None` and whose
+    /// `expires_at` is still in the future). Returns `Ok(None)` when the
+    /// transition cannot happen — already consumed, expired, or unknown.
+    async fn recovery_consume(&self, token_id: Id, at: Timestamp) -> Result<Option<RecoveryRow>>;
+
+    /// Deletes rows whose `expires_at` is at or before `before`. Bounded by
+    /// `limit` so a sweeper that has been broken for a long time cannot
+    /// take a lock proportional to the cleanup debt.
+    async fn recovery_delete_expired(&self, before: Timestamp, limit: u32) -> Result<u64>;
+}
+
 /// Everything, for the composition root.
 ///
 /// Domain crates should depend on the narrow traits instead. This exists so
@@ -1136,6 +1223,8 @@ pub trait Store:
     + MediaStore
     + NotifyStore
     + SafetyStore
+    + CaptchaStore
+    + RecoveryStore
     + Send
     + Sync
     + 'static

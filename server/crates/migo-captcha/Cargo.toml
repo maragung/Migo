@@ -1,0 +1,20 @@
+[package]
+name = "migo-captcha"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Numeric captcha challenges for the public bootstrap surface."
+
+[dependencies]
+migo-core.workspace = true
+migo-crypto.workspace = true
+migo-protocol.workspace = true
+async-trait.workspace = true
+parking_lot.workspace = true
+rand = "0.8"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

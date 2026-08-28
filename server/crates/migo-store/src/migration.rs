@@ -64,7 +64,11 @@ pub(crate) struct Migrator;
 
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(Initial)]
+        vec![
+            Box::new(Initial),
+            Box::new(CaptchaChallenges),
+            Box::new(Recovery),
+        ]
     }
 }
 
@@ -96,6 +100,72 @@ impl MigrationTrait for Initial {
         // something smaller. Tests that want an empty database create a new one.
         Err(DbErr::Migration(
             "0001_initial cannot be rolled back: create a new database instead".to_owned(),
+        ))
+    }
+}
+
+/// `0002_captcha_challenges` -- the captcha challenge table for the public
+/// bootstrap surface. See `server/migrations/0002_captcha_challenges.sql` for the
+/// shape, and `crates/migo-captcha` for the service that reads and writes it.
+struct CaptchaChallenges;
+
+impl MigrationName for CaptchaChallenges {
+    fn name(&self) -> &str {
+        "0002_captcha_challenges"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CaptchaChallenges {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!(
+                "../../../migrations/0002_captcha_challenges.sql"
+            ))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Same posture as Initial: refusing to drop a table that the rest of the
+        // server is still writing to is not a missing feature.
+        Err(DbErr::Migration(
+            "0002_captcha_challenges cannot be rolled back: create a new database instead"
+                .to_owned(),
+        ))
+    }
+}
+
+/// `0003_password_recovery` -- the password-recovery token table behind
+/// `/v1/auth/recovery/*`. See `server/migrations/0003_password_recovery.sql` for
+/// the shape, and the recovery store in this crate for the read and write paths.
+struct Recovery;
+
+impl MigrationName for Recovery {
+    fn name(&self) -> &str {
+        "0003_password_recovery"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for Recovery {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!(
+                "../../../migrations/0003_password_recovery.sql"
+            ))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Same posture as Initial: refusing to drop a table that the rest of the
+        // server is still writing to is not a missing feature.
+        Err(DbErr::Migration(
+            "0003_password_recovery cannot be rolled back: create a new database instead"
+                .to_owned(),
         ))
     }
 }

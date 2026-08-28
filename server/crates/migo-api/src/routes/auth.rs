@@ -111,6 +111,11 @@ struct RegisterRequest {
     #[serde(default)]
     country: Option<String>,
     device: DeviceRequest,
+    /// Captcha proof, present once the gate is engaged and absent on a
+    /// first attempt. The handler is allowed to forward `None`; the
+    /// `Authenticator` decides whether `None` is acceptable and answers
+    /// `CAPTCHA_REQUIRED` when it is not.
+    captcha: Option<CaptchaProofBody>,
 }
 
 /// A sign-in request. One identifier field because a user does not think of a username and an
@@ -120,6 +125,27 @@ struct LoginRequest {
     identifier: String,
     password: String,
     device: DeviceRequest,
+    captcha: Option<CaptchaProofBody>,
+}
+
+/// Wire shape of a captcha proof on a bootstrap request. Converts into the
+/// domain `CaptchaProof` at the handler boundary so the rest of the service
+/// never sees a `serde::Deserialize` type.
+#[derive(Deserialize)]
+struct CaptchaProofBody {
+    /// The id the user was given when the challenge was issued.
+    challenge_id: migo_core::Id,
+    /// The six-digit answer the user typed.
+    answer: String,
+}
+
+impl From<CaptchaProofBody> for migo_auth::CaptchaProof {
+    fn from(body: CaptchaProofBody) -> Self {
+        Self {
+            challenge_id: body.challenge_id,
+            answer: body.answer,
+        }
+    }
 }
 
 /// A refresh-token exchange. The device id is checked against the session the token was minted
@@ -182,6 +208,7 @@ async fn register(
         locale: body.locale,
         country: body.country,
         device: body.device.into_claim(),
+        captcha: body.captcha.map(migo_auth::CaptchaProof::from),
     };
     let context = facts.context(now);
     let grant = state
@@ -203,6 +230,7 @@ async fn login(
         identifier: body.identifier,
         password: Secret::new(body.password),
         device: body.device.into_claim(),
+        captcha: body.captcha.map(migo_auth::CaptchaProof::from),
     };
     let context = facts.context(now);
     let grant = state.authenticator().sign_in(sign_in, &context).await?;

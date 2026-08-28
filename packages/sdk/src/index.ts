@@ -18,7 +18,10 @@ export type { MigoClientOptions, ClientHello, PrekeyReplenishPolicy } from './cl
 // --- bootstrap over REST ---
 export { BootstrapClient } from './rest.js';
 export type {
+  AccountSession,
   BootstrapOptions,
+  CaptchaChallenge,
+  CaptchaProof,
   ConfigLimits,
   DeviceDescriptor,
   FetchLike,
@@ -29,6 +32,28 @@ export type {
   RegisterParams,
   ServerConfig,
 } from './rest.js';
+
+/**
+ * The set of capability bits the SDK knows about.
+ *
+ * The full bit set is on the {@link Grant.capabilities} `bigint`; the constants here are the named
+ * ones callers branch on. `CONTACTABLE` (bit 4) means the account has a verified-or-pending email
+ * or phone on file, so a client that knows it can prompt for an address before the user relies
+ * on account recovery.
+ */
+
+export const CAPABILITY = {
+  /** The session is authenticated. Always set on a non-bot session after `register` or `login`. */
+  AUTHENTICATED: 1n << 0n,
+  /** The session belongs to a bot actor, not a person. */
+  BOT: 1n << 1n,
+  /** The account is new enough that limits are tightened. */
+  PROBATION: 1n << 2n,
+  /** The account has earned raised limits. */
+  TRUSTED: 1n << 3n,
+  /** The account has a verified-or-pending address on file. */
+  CONTACTABLE: 1n << 4n,
+} as const;
 
 // --- the resumable gateway transport ---
 export { GatewayTransport, DEFAULT_CLIENT_FEATURES } from './transport.js';

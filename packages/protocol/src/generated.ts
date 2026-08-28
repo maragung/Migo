@@ -131,6 +131,14 @@ export const CODE = {
   USERNAME_TAKEN: 1306,
   USERNAME_RESERVED: 1307,
   WEAK_PASSWORD: 1308,
+  /** Captcha proof did not verify */
+  INVALID_CAPTCHA: 1309,
+  /** Captcha proof was consumed or expired */
+  CAPTCHA_EXPIRED: 1310,
+  /** This endpoint needs a captcha proof in this state */
+  CAPTCHA_REQUIRED: 1311,
+  /** Recovery token does not exist or is no longer valid */
+  RECOVERY_NOT_FOUND: 1312,
   RATE_LIMITED: 1400,
   QUOTA_EXCEEDED: 1401,
   SLOW_MODE_ACTIVE: 1402,
@@ -206,6 +214,10 @@ export const ERROR_SYMBOLS: Record<number, string> = {
   1306: 'USERNAME_TAKEN',
   1307: 'USERNAME_RESERVED',
   1308: 'WEAK_PASSWORD',
+  1309: 'INVALID_CAPTCHA',
+  1310: 'CAPTCHA_EXPIRED',
+  1311: 'CAPTCHA_REQUIRED',
+  1312: 'RECOVERY_NOT_FOUND',
   1400: 'RATE_LIMITED',
   1401: 'QUOTA_EXCEEDED',
   1402: 'SLOW_MODE_ACTIVE',

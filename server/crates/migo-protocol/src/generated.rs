@@ -135,6 +135,14 @@ pub mod codes {
     pub const USERNAME_TAKEN: u32 = 1306;
     pub const USERNAME_RESERVED: u32 = 1307;
     pub const WEAK_PASSWORD: u32 = 1308;
+    /// Captcha proof did not verify
+    pub const INVALID_CAPTCHA: u32 = 1309;
+    /// Captcha proof was consumed or expired
+    pub const CAPTCHA_EXPIRED: u32 = 1310;
+    /// This endpoint needs a captcha proof in this state
+    pub const CAPTCHA_REQUIRED: u32 = 1311;
+    /// Recovery token does not exist or is no longer valid
+    pub const RECOVERY_NOT_FOUND: u32 = 1312;
     pub const RATE_LIMITED: u32 = 1400;
     pub const QUOTA_EXCEEDED: u32 = 1401;
     pub const SLOW_MODE_ACTIVE: u32 = 1402;
@@ -213,6 +221,10 @@ pub mod codes {
         USERNAME_TAKEN,
         USERNAME_RESERVED,
         WEAK_PASSWORD,
+        INVALID_CAPTCHA,
+        CAPTCHA_EXPIRED,
+        CAPTCHA_REQUIRED,
+        RECOVERY_NOT_FOUND,
         RATE_LIMITED,
         QUOTA_EXCEEDED,
         SLOW_MODE_ACTIVE,
@@ -333,6 +345,10 @@ pub fn error_symbol(code: u32) -> Option<&'static str> {
         codes::USERNAME_TAKEN => "USERNAME_TAKEN",
         codes::USERNAME_RESERVED => "USERNAME_RESERVED",
         codes::WEAK_PASSWORD => "WEAK_PASSWORD",
+        codes::INVALID_CAPTCHA => "INVALID_CAPTCHA",
+        codes::CAPTCHA_EXPIRED => "CAPTCHA_EXPIRED",
+        codes::CAPTCHA_REQUIRED => "CAPTCHA_REQUIRED",
+        codes::RECOVERY_NOT_FOUND => "RECOVERY_NOT_FOUND",
         codes::RATE_LIMITED => "RATE_LIMITED",
         codes::QUOTA_EXCEEDED => "QUOTA_EXCEEDED",
         codes::SLOW_MODE_ACTIVE => "SLOW_MODE_ACTIVE",
@@ -407,6 +423,10 @@ pub fn error_http_status(code: u32) -> u16 {
         codes::USERNAME_TAKEN => 409,
         codes::USERNAME_RESERVED => 400,
         codes::WEAK_PASSWORD => 400,
+        codes::INVALID_CAPTCHA => 400,
+        codes::CAPTCHA_EXPIRED => 400,
+        codes::CAPTCHA_REQUIRED => 400,
+        codes::RECOVERY_NOT_FOUND => 404,
         codes::RATE_LIMITED => 429,
         codes::QUOTA_EXCEEDED => 429,
         codes::SLOW_MODE_ACTIVE => 429,

@@ -127,6 +127,7 @@ fn registration(username: &str) -> Registration {
         locale: "en".to_string(),
         country: Some("ID".to_string()),
         device: DeviceClaim::new(Platform::Web, "Firefox on Linux"),
+        captcha: None,
     }
 }
 
@@ -136,6 +137,7 @@ fn sign_in(identifier: &str) -> SignIn {
         identifier: identifier.to_string(),
         password: Secret::new(GOOD_PASSWORD),
         device: DeviceClaim::new(Platform::Web, "Firefox on Linux"),
+        captcha: None,
     }
 }
 
@@ -906,6 +908,7 @@ async fn changing_a_password_ends_every_session_and_returns_a_replacement() {
                 identifier: "ada".to_string(),
                 password: Secret::new("pelican trombone lantern"),
                 device: DeviceClaim::new(Platform::Web, "Firefox on Linux"),
+                captcha: None,
             },
             &context_from(5_000, "198.51.100.20"),
         )

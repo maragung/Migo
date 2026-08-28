@@ -25,6 +25,7 @@
 //!             locale: "en".to_string(),
 //!             country: None,
 //!             device: DeviceClaim::new(Platform::Web, "Firefox on Linux"),
+//!             captcha: None,
 //!         },
 //!         &context,
 //!     )
@@ -77,6 +78,7 @@
 #![warn(missing_docs, clippy::all)]
 
 pub mod capability;
+pub mod captcha;
 pub mod credential;
 pub mod metrics;
 pub mod model;
@@ -93,3 +95,4 @@ pub use crate::service::{open, Auth, SharedAuth};
 pub use crate::tier::{of_account as tier_of_account, PROBATION_MILLIS, TRUSTED_MILLIS};
 pub use crate::token::{Claims, Signer, REFRESH_BYTES, TOKEN_BYTES, TOKEN_VERSION};
 pub use crate::traits::{Authenticator, Identity, PasswordChange, REAUTH_WINDOW_MS};
+pub use migo_captcha::CaptchaProof;

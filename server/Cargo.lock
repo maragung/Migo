@@ -1812,6 +1812,7 @@ dependencies = [
  "async-trait",
  "base64",
  "migo-cache",
+ "migo-captcha",
  "migo-core",
  "migo-crypto",
  "migo-protocol",
@@ -1852,6 +1853,19 @@ dependencies = [
  "redis",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "migo-captcha"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "migo-core",
+ "migo-crypto",
+ "migo-protocol",
+ "parking_lot",
+ "rand 0.8.7",
+ "tokio",
 ]
 
 [[package]]

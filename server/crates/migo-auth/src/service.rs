@@ -47,6 +47,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use migo_captcha::CaptchaProof;
 use migo_core::config::{AuthConfig, Config};
 use migo_core::metrics::Registry;
 use migo_core::{Error, Id, OsRandom, Random, Result, Secret, Timestamp};
@@ -61,6 +62,7 @@ use migo_store::{SharedStore, Store};
 use parking_lot::Mutex;
 
 use crate::capability::Capabilities;
+use crate::captcha::CaptchaGate;
 use crate::credential;
 use crate::metrics::{Meters, RefreshOutcome, SignInOutcome};
 use crate::model::{
@@ -134,6 +136,12 @@ pub struct Auth<S: ?Sized = dyn Store, L: ?Sized = dyn RateLimiter> {
     /// what keeps a mutex on a hot path from becoming a scheduling problem.
     random: Mutex<Box<dyn Random>>,
     meters: Meters,
+    /// The captcha gate, when the deployment has captcha turned on. The
+    /// route layer mints challenges through it; the authenticator
+    /// consults it to decide whether a register or sign-in attempt
+    /// has to carry a proof. `None` means the captcha is off for the
+    /// whole process and the auth path skips the checks entirely.
+    captcha: Option<Arc<CaptchaGate>>,
 }
 
 /// Builds an authenticator over the shared store and limiter.
@@ -194,7 +202,30 @@ where
             absent_hash,
             random: Mutex::new(random),
             meters: Meters::new(registry),
+            // The captcha is opt-in via [`Self::with_captcha`]; the
+            // default constructor leaves the gate out so the many
+            // tests that build an `Auth` for unrelated reasons do not
+            // need to know about the captcha plumbing.
+            captcha: None,
         })
+    }
+
+    /// Attaches a captcha gate to the authenticator.
+    ///
+    /// Returns `self` rather than mutating in place so the call site
+    /// reads top-to-bottom: `Auth::new(...).with_captcha(gate)?`.
+    /// Returns an error rather than panicking if the gate's threshold
+    /// is zero, which would require a captcha on the first attempt —
+    /// the configuration layer already rejects that, but the check is
+    /// duplicated here so a hand-rolled `Auth` cannot sidestep it.
+    pub fn with_captcha(mut self, gate: Arc<CaptchaGate>) -> Result<Self> {
+        if gate.threshold() == 0 {
+            return Err(fault::internal(
+                "captcha threshold of 0 would require a proof on the first attempt",
+            ));
+        }
+        self.captcha = Some(gate);
+        Ok(self)
     }
 
     /// The signer, for a caller that verifies tokens without the rest of the service.
@@ -567,6 +598,73 @@ where
         }
         Ok(account)
     }
+
+    // --- captcha ---------------------------------------------------------------
+
+    /// Enforces the captcha gate on a bootstrap attempt.
+    ///
+    /// Three outcomes:
+    ///
+    /// - The gate is off (no captcha deployment) — accept any body.
+    /// - The gate is on and the network does not yet require a proof —
+    ///   accept any body.
+    /// - The gate is on and the network is over the threshold — the
+    ///   body must carry a proof, and the proof must verify. A missing
+    ///   proof is `CAPTCHA_REQUIRED`; a present-but-wrong proof is
+    ///   `INVALID_CAPTCHA`. Either way the call short-circuits before
+    ///   the rate limiter is charged or the credentials are touched,
+    ///   so a flood of captcha-less attempts is priced at the captcha
+    ///   check rather than at the rest of the pipeline.
+    async fn enforce_captcha(
+        &self,
+        captcha: Option<&CaptchaProof>,
+        context: &RequestContext,
+    ) -> Result<()> {
+        let Some(gate) = self.captcha.as_ref() else {
+            return Ok(());
+        };
+        let Some(ip) = context.ip else {
+            // An addressless caller cannot be measured against the per-IP
+            // counter, so the captcha check would be a coin flip either
+            // way. Skipping is the honest answer: an in-process caller
+            // already has to be inside the service, and a unix-socket
+            // call is the operator's own tooling.
+            return Ok(());
+        };
+        if !gate.needs_captcha(ip) {
+            return Ok(());
+        }
+        let Some(proof) = captcha else {
+            return Err(crate::captcha::error_required());
+        };
+        match gate.verify(proof).await? {
+            true => Ok(()),
+            // The service reports "wrong answer" and "expired or never
+            // existed" with the same boolean; the gate cannot tell the
+            // two apart without its own clock. A wrong answer and an
+            // expired answer are both the user's mistake and both
+            // surface as `INVALID_CAPTCHA` so the client knows to
+            // fetch a fresh challenge.
+            false => Err(crate::captcha::error_invalid(
+                "the captcha proof did not verify",
+            )),
+        }
+    }
+
+    /// Notes a per-IP failure past the captcha threshold, or no-ops when
+    /// the gate is off.
+    fn note_captcha_failure(&self, context: &RequestContext) {
+        if let (Some(gate), Some(ip)) = (self.captcha.as_ref(), context.ip) {
+            gate.record_failure(ip);
+        }
+    }
+
+    /// Clears the per-IP failure counter on a successful authentication.
+    fn note_captcha_success(&self, context: &RequestContext) {
+        if let (Some(gate), Some(ip)) = (self.captcha.as_ref(), context.ip) {
+            gate.record_success(ip);
+        }
+    }
 }
 
 impl<S: ?Sized, L: ?Sized> fmt::Debug for Auth<S, L> {
@@ -691,6 +789,15 @@ where
             self.meters.registration_refused();
             return Err(fault::feature_disabled("registration"));
         }
+        // Captcha is the cheapest gate to apply, so it goes first: a
+        // flood of captcha-less attempts is priced at the captcha
+        // check rather than the bucket that funds the rest of the
+        // pipeline. The bucket stays untouched on a captcha refusal,
+        // which is the right shape — captcha failures should not
+        // look like rate-limit failures to a client.
+        self.enforce_captcha(request.captcha.as_ref(), context)
+            .await?;
+
         // Priced before any work: registration is the endpoint a spam operation hits
         // hardest, and validating first would let it spend our CPU for free.
         if let Err(error) = self
@@ -795,6 +902,14 @@ where
     }
 
     async fn sign_in(&self, request: SignIn, context: &RequestContext) -> Result<Grant> {
+        // Captcha is checked first for the same reason as `register`:
+        // a flood of captcha-less attempts is priced at the captcha
+        // check rather than the rate-limit bucket. The captcha check
+        // has no opinion on whether the credentials are valid; that
+        // is the password's job, which runs after this gate.
+        self.enforce_captcha(request.captcha.as_ref(), context)
+            .await?;
+
         if let Err(error) = self
             .charge_stranger(context, Opcode::Authenticate, self.prices.attempt)
             .await
@@ -812,6 +927,14 @@ where
                 // credentials are wrong", and the client already validates the field.
                 Err(_) => None,
             }
+        } else if let Ok(phone) = credential::phone(identifier) {
+            // The sign-in form's label says "Username, email, or phone" and the brief
+            // accepts phone-registered accounts at the same door. The lookup runs after
+            // the email branch so an `@` in the identifier never falls through to a
+            // phone-shaped value, and the malformed-phone case (and anything else
+            // that is not email or a real E.164) skips silently to the placeholder
+            // verifier below.
+            self.store.account_by_phone(&phone).await?
         } else {
             let folded = identifier.trim_start_matches('@').to_ascii_lowercase();
             self.store.account_by_username(&folded).await?
@@ -824,6 +947,7 @@ where
                 .verify_password(request.password.expose(), &self.absent_hash, &self.meters)
                 .await;
             self.charge_penalty(context, Opcode::Authenticate).await;
+            self.note_captcha_failure(context);
             self.meters.signin(SignInOutcome::UnknownUser);
             return Err(fault::invalid_credentials());
         };
@@ -837,6 +961,7 @@ where
             .await?;
         let Some(verification) = verification else {
             self.charge_penalty(context, Opcode::Authenticate).await;
+            self.note_captcha_failure(context);
             self.meters.signin(SignInOutcome::BadPassword);
             return Err(fault::invalid_credentials());
         };
@@ -887,6 +1012,10 @@ where
             .open_session(&account, &device, tier, now, context, None, None, false)
             .await?;
         self.store.record_login(account.account_id, now).await?;
+        // A successful sign-in clears the per-IP captcha counter. The
+        // gate suspects a network, not a person; the person just
+        // proved they own the account, so the suspicion is over.
+        self.note_captcha_success(context);
         self.meters.signin(SignInOutcome::Success);
         Ok(grant)
     }

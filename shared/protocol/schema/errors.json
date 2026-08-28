@@ -50,6 +50,10 @@
     { "code": 1306, "symbol": "USERNAME_TAKEN",               "http": 409 },
     { "code": 1307, "symbol": "USERNAME_RESERVED",            "http": 400 },
     { "code": 1308, "symbol": "WEAK_PASSWORD",                "http": 400 },
+    { "code": 1309, "symbol": "INVALID_CAPTCHA",              "http": 400, "doc": "Captcha proof did not verify" },
+    { "code": 1310, "symbol": "CAPTCHA_EXPIRED",              "http": 400, "doc": "Captcha proof was consumed or expired" },
+    { "code": 1311, "symbol": "CAPTCHA_REQUIRED",             "http": 400, "doc": "This endpoint needs a captcha proof in this state" },
+    { "code": 1312, "symbol": "RECOVERY_NOT_FOUND",           "http": 404, "doc": "Recovery token does not exist or is no longer valid" },
 
     { "code": 1400, "symbol": "RATE_LIMITED",                 "http": 429 },
     { "code": 1401, "symbol": "QUOTA_EXCEEDED",               "http": 429 },

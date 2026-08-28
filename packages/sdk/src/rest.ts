@@ -46,6 +46,19 @@ export interface DeviceDescriptor {
   deviceModel?: string;
 }
 
+/** A captcha challenge the server hands out for the public bootstrap surface. */
+export interface CaptchaChallenge {
+  challenge_id: Id;
+  question: string;
+  ttl_seconds: number;
+}
+
+/** A user-supplied captcha answer, bound to the challenge it answers. */
+export interface CaptchaProof {
+  challenge_id: Id;
+  answer: string;
+}
+
 /** A new-account request. `locale` defaults to the server's own default when omitted. */
 export interface RegisterParams {
   username: string;
@@ -55,6 +68,11 @@ export interface RegisterParams {
   locale?: string;
   country?: string;
   device: DeviceDescriptor;
+  /**
+   * When the server returns `CAPTCHA_REQUIRED` for a state it gates, the client supplies the
+   * proof on a retry. Omitted on the first attempt.
+   */
+  captcha?: CaptchaProof;
 }
 
 /** A sign-in request. One identifier field because a user does not separate username from email. */
@@ -62,12 +80,35 @@ export interface LoginParams {
   identifier: string;
   password: string;
   device: DeviceDescriptor;
+  /**
+   * When the server returns `CAPTCHA_REQUIRED` for a state it gates, the client supplies the
+   * proof on a retry. Omitted on the first attempt.
+   */
+  captcha?: CaptchaProof;
 }
 
 /** A refresh-token exchange, checked against the device the token was minted for. */
 export interface RefreshParams {
   refreshToken: string;
   deviceId: Id;
+}
+
+/**
+ * One row of the sessions list.
+ *
+ * `id` is the session id (so the caller can revoke it), `device` is the human-readable device
+ * name the session was opened on, `created_at` and `last_seen_at` are Unix milliseconds, and
+ * `ip_class` is the server's coarse classification of the source address. Named differently from
+ * the transport's `SessionInfo` (which describes the gateway session) to keep the two ideas
+ * unambiguous: this is the account-side sessions list used by the security page, not the
+ * transport-state struct.
+ */
+export interface AccountSession {
+  id: Id;
+  device: string;
+  created_at: number;
+  last_seen_at: number;
+  ip_class: number;
 }
 
 /**
@@ -150,6 +191,23 @@ function deviceBody(device: DeviceDescriptor): Record<string, unknown> {
   };
 }
 
+/** Maps a {@link CaptchaProof} to the snake_case body the server's captcha deserialiser reads. */
+function captchaBody(proof: CaptchaProof): Record<string, unknown> {
+  return { challenge_id: proof.challenge_id, answer: proof.answer };
+}
+
+/** Maps a `AccountSession`-shaped JSON row from the server into the SDK's typed view. */
+function parseSessionInfo(row: Record<string, unknown>): AccountSession {
+  const deviceField = (row['device'] ?? row['display_name'] ?? '') as string;
+  return {
+    id: parseId(String(row['id'] ?? row['session_id'])),
+    device: deviceField,
+    created_at: Number(row['created_at']),
+    last_seen_at: Number(row['last_seen_at']),
+    ip_class: Number(row['ip_class']),
+  };
+}
+
 /** Maps a `GrantResponse` JSON body into a {@link Grant}, parsing its Id text fields. */
 function parseGrant(body: unknown): Grant {
   const g = body as Record<string, unknown>;
@@ -200,6 +258,7 @@ export class BootstrapClient {
       ...(params.phone !== undefined ? { phone: params.phone } : {}),
       ...(params.locale !== undefined ? { locale: params.locale } : {}),
       ...(params.country !== undefined ? { country: params.country } : {}),
+      ...(params.captcha !== undefined ? { captcha: captchaBody(params.captcha) } : {}),
     };
     return parseGrant(await this.#post('/v1/auth/register', body));
   }
@@ -210,8 +269,134 @@ export class BootstrapClient {
       identifier: params.identifier,
       password: params.password,
       device: deviceBody(params.device),
+      ...(params.captcha !== undefined ? { captcha: captchaBody(params.captcha) } : {}),
     };
     return parseGrant(await this.#post('/v1/auth/login', body));
+  }
+
+  /**
+   * `POST /v1/auth/captcha` — request a captcha challenge for the public bootstrap surface.
+   *
+   * The server mints a short-lived challenge the user answers on the next register/login attempt.
+   * Errors are surfaced as {@link RemoteError} like any other bootstrap call; the caller handles
+   * `CAPTCHA_REQUIRED` itself, not this method.
+   */
+  async requestCaptcha(): Promise<CaptchaChallenge> {
+    const body = (await this.#post('/v1/auth/captcha', {})) as Record<string, unknown>;
+    return {
+      challenge_id: parseId(String(body['challenge_id'])),
+      question: String(body['question']),
+      ttl_seconds: Number(body['ttl_seconds']),
+    };
+  }
+
+  /**
+   * `POST /v1/auth/recovery/request` — start a password-recovery flow.
+   *
+   * The server is deliberately enumeration-safe: a real account and a not-found one both answer
+   * `{ ok: true }`. The captcha gate is the rate-limiter's defence; the page is generic.
+   */
+  async recoverAccount(params: {
+    identifier: string;
+    captcha: CaptchaProof;
+  }): Promise<{ ok: true }> {
+    const body = {
+      identifier: params.identifier,
+      captcha: captchaBody(params.captcha),
+    };
+    await this.#post('/v1/auth/recovery/request', body);
+    return { ok: true };
+  }
+
+  /**
+   * `POST /v1/auth/recovery/confirm` — apply a recovery token to set a new password.
+   *
+   * `token_id` is the public id of the recovery grant; `token` is the proof (its hash), supplied
+   * out-of-band. On success the new password is set and the caller signs the user in normally.
+   */
+  async confirmRecovery(params: {
+    token_id: Id;
+    token: string;
+    new_password: string;
+  }): Promise<{ ok: true }> {
+    const body = {
+      token_id: params.token_id,
+      token: params.token,
+      new_password: params.new_password,
+    };
+    await this.#post('/v1/auth/recovery/confirm', body);
+    return { ok: true };
+  }
+
+  /**
+   * `GET /v1/auth/sessions` — list every session for the authenticated account.
+   *
+   * Requires the caller's access token; it is sent as a Bearer credential.
+   */
+  async listSessions(accessToken: string): Promise<AccountSession[]> {
+    const body = (await this.#get('/v1/auth/sessions', accessToken)) as {
+      sessions: Record<string, unknown>[];
+    };
+    return (body.sessions ?? []).map(parseSessionInfo);
+  }
+
+  /**
+   * `POST /v1/auth/sessions/{id}/revoke` — revoke a single session by id.
+   *
+   * Requires the caller's access token. Answers `{ ok: true }` on success.
+   */
+  async revokeSession(accessToken: string, sessionId: Id): Promise<{ ok: true }> {
+    await this.#post(`/v1/auth/sessions/${sessionId}/revoke`, {}, accessToken);
+    return { ok: true };
+  }
+
+  /**
+   * `POST /v1/auth/sessions/revoke-others` — revoke every session except the caller's.
+   *
+   * Returns the number of sessions that were revoked. The caller's own session stays alive.
+   */
+  async signOutOthers(accessToken: string): Promise<{ revoked: number }> {
+    const body = (await this.#post('/v1/auth/sessions/revoke-others', {}, accessToken)) as Record<
+      string,
+      unknown
+    >;
+    return { revoked: Number(body['revoked']) };
+  }
+
+  /**
+   * `POST /v1/auth/password` — change the authenticated account's password.
+   *
+   * On success the server returns a fresh grant; the caller's existing session and refresh token
+   * are replaced with new ones.
+   */
+  async changePassword(
+    accessToken: string,
+    params: { current_password: string; new_password: string },
+  ): Promise<Grant> {
+    return parseGrant(
+      await this.#post(
+        '/v1/auth/password',
+        {
+          current_password: params.current_password,
+          new_password: params.new_password,
+        },
+        accessToken,
+      ),
+    );
+  }
+
+  /**
+   * `PUT /v1/auth/contact` — record an email or phone so the account can be recovered.
+   *
+   * The wire layer accepts exactly one of the two; the client-side check in {@link
+   * MigoClient.updateContact} keeps callers from sending a request the server will reject.
+   */
+  async updateContact(
+    accessToken: string,
+    params: { email_or_phone: string },
+  ): Promise<{ ok: true }> {
+    await this.#put('/v1/auth/contact', params, accessToken);
+    return { ok: true };
   }
 
   /** `POST /v1/auth/refresh` — exchange a refresh token for a fresh session. */
@@ -265,9 +450,23 @@ export class BootstrapClient {
     return this.#unwrap(res);
   }
 
+  /** Issues a JSON PUT, throwing a {@link RemoteError} on any non-2xx answer. */
+  async #put(path: string, body: unknown, bearer?: string): Promise<unknown> {
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (bearer !== undefined) headers['authorization'] = `Bearer ${bearer}`;
+    const res = await this.#fetch(`${this.#baseUrl}${path}`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify(body),
+    });
+    return this.#unwrap(res);
+  }
+
   /** Issues a GET, throwing a {@link RemoteError} on any non-2xx answer. */
-  async #get(path: string): Promise<unknown> {
-    const res = await this.#fetch(`${this.#baseUrl}${path}`, { method: 'GET' });
+  async #get(path: string, bearer?: string): Promise<unknown> {
+    const headers: Record<string, string> = {};
+    if (bearer !== undefined) headers['authorization'] = `Bearer ${bearer}`;
+    const res = await this.#fetch(`${this.#baseUrl}${path}`, { method: 'GET', headers });
     return this.#unwrap(res);
   }
 

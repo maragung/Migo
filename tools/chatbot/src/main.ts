@@ -1,4 +1,3 @@
-/* eslint-disable no-console */
 /**
  * Migo two-account chat bot.
  *

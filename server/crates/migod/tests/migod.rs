@@ -633,6 +633,7 @@ async fn registered_account(app: &migod::App, username: &str) -> Id {
                 locale: "en-US".to_string(),
                 country: None,
                 device: DeviceClaim::new(Platform::Web, "integration test"),
+                captcha: None,
             },
             &RequestContext::at(Timestamp::from_millis(1)),
         )
@@ -1184,6 +1185,7 @@ async fn emit_notification_reaches_a_subscribed_session_as_opcode_144() {
                 identifier: "bobnotif".to_string(),
                 password: bob_password,
                 device: migo_auth::DeviceClaim::new(Platform::Web, "notif test"),
+                captcha: None,
             },
             &migo_auth::RequestContext::at(now),
         )

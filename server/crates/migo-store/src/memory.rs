@@ -47,10 +47,10 @@ use crate::model::{
     Visibility, XpChange,
 };
 use crate::traits::{
-    canonical_country, clamp_limit, AccountStore, BotStore, DeviceStore, EconomyStore,
-    FederationStore, GameStore, KeyStore, MediaStore, MessagingStore, NotifyStore,
-    ProgressionStore, RoomKindFilter, RoomStore, SafetyStore, SessionStore, SocialStore, Store,
-    MAX_LEDGER_LEGS,
+    canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore, DeviceStore,
+    EconomyStore, FederationStore, GameStore, KeyStore, MediaStore, MessagingStore, NotifyStore,
+    ProgressionStore, RecoveryRow, RecoveryStore, RoomKindFilter, RoomStore, SafetyStore,
+    SessionStore, SocialStore, Store, MAX_LEDGER_LEGS,
 };
 
 /// Case-insensitive index key for a name, email, or slug.
@@ -191,6 +191,15 @@ struct State {
     /// Insertion order, the tiebreak for two events with the same `next_attempt_at`
     /// so the drain order is deterministic across a replay.
     outbox_order: Vec<Id>,
+
+    /// Captcha challenges, keyed by `challenge_id`. Mirrors the
+    /// `captcha_challenge` table; expired rows are dropped lazily on read.
+    captcha: HashMap<Id, CaptchaRow>,
+
+    /// Password-recovery tokens, keyed by `token_id`. Mirrors the
+    /// `password_recovery` table; consumed or expired rows are dropped by
+    /// the background sweeper.
+    recovery: HashMap<Id, RecoveryRow>,
 }
 
 impl State {
@@ -315,6 +324,14 @@ impl AccountStore for MemoryStore {
         Ok(s.by_email
             .get(&fold(email))
             .and_then(|id| s.accounts.get(id))
+            .cloned())
+    }
+
+    async fn account_by_phone(&self, phone: &str) -> Result<Option<Account>> {
+        let s = self.state.read();
+        Ok(s.accounts
+            .values()
+            .find(|a| a.phone.as_deref() == Some(phone))
             .cloned())
     }
 
@@ -3164,6 +3181,89 @@ impl SafetyStore for MemoryStore {
             .take(limit)
             .cloned()
             .collect())
+    }
+}
+
+#[async_trait]
+impl CaptchaStore for MemoryStore {
+    async fn put_captcha(&self, row: CaptchaRow) -> Result<()> {
+        self.state.write().captcha.insert(row.challenge_id, row);
+        Ok(())
+    }
+
+    async fn get_captcha(&self, challenge_id: Id, now: Timestamp) -> Result<Option<CaptchaRow>> {
+        let mut s = self.state.write();
+        let Some(row) = s.captcha.get(&challenge_id).cloned() else {
+            return Ok(None);
+        };
+        if row.expires_at <= now {
+            // Expired: the row is gone the moment somebody asks. The captcha is
+            // one-shot per id, so a subsequent put with the same id will mint a
+            // fresh challenge with a fresh code anyway.
+            s.captcha.remove(&challenge_id);
+            return Ok(None);
+        }
+        Ok(Some(row))
+    }
+
+    async fn delete_captcha(&self, challenge_id: Id) -> Result<()> {
+        self.state.write().captcha.remove(&challenge_id);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl RecoveryStore for MemoryStore {
+    async fn recovery_put(&self, row: RecoveryRow) -> Result<()> {
+        self.state.write().recovery.insert(row.token_id, row);
+        Ok(())
+    }
+
+    async fn recovery_get(&self, token_id: Id) -> Result<Option<RecoveryRow>> {
+        Ok(self.state.read().recovery.get(&token_id).cloned())
+    }
+
+    async fn recovery_consume(&self, token_id: Id, at: Timestamp) -> Result<Option<RecoveryRow>> {
+        // The whole point of `consume` is that it is atomic: a row that was
+        // already consumed, that does not exist, or that has already expired
+        // returns `Ok(None)`, and nothing is written. The caller can then
+        // answer 404 without having to guess which case it was — the brief's
+        // 404-vs-200 split is "we never reveal whether the token was real,
+        // only whether it was acceptable".
+        let mut s = self.state.write();
+        let Some(row) = s.recovery.get_mut(&token_id) else {
+            return Ok(None);
+        };
+        if row.consumed_at.is_some() {
+            return Ok(None);
+        }
+        if row.expires_at <= at {
+            return Ok(None);
+        }
+        row.consumed_at = Some(at);
+        Ok(Some(row.clone()))
+    }
+
+    async fn recovery_delete_expired(&self, before: Timestamp, limit: u32) -> Result<u64> {
+        let mut s = self.state.write();
+        let mut removed = 0u64;
+        // A deterministic order so two passes over the same data evict the same
+        // rows. Iterating a HashMap directly would mean a sweeper that hits the
+        // budget evicts a different subset on every call.
+        let mut ids: Vec<Id> = s
+            .recovery
+            .iter()
+            .filter_map(|(id, row)| (row.expires_at <= before).then_some(*id))
+            .collect();
+        ids.sort_unstable();
+        for id in ids {
+            if removed >= u64::from(limit) {
+                break;
+            }
+            s.recovery.remove(&id);
+            removed += 1;
+        }
+        Ok(removed)
     }
 }
 

@@ -103,10 +103,10 @@ use crate::model::{
     XpChange,
 };
 use crate::traits::{
-    canonical_country, clamp_limit, AccountStore, BotStore, DeviceStore, EconomyStore,
-    FederationStore, GameStore, KeyStore, MediaStore, MessagingStore, NotifyStore,
-    ProgressionStore, RoomKindFilter, RoomStore, SafetyStore, SessionStore, SocialStore, Store,
-    MAX_LEDGER_LEGS,
+    canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore, DeviceStore,
+    EconomyStore, FederationStore, GameStore, KeyStore, MediaStore, MessagingStore, NotifyStore,
+    ProgressionStore, RecoveryRow, RecoveryStore, RoomKindFilter, RoomStore, SafetyStore,
+    SessionStore, SocialStore, Store, MAX_LEDGER_LEGS,
 };
 
 /// A duplicate key. Postgres reports which index, and the caller needs to know:
@@ -780,6 +780,15 @@ impl AccountStore for PostgresStore {
             .one(&self.db)
             .await
             .context("account_by_email")?
+            .map(Into::into))
+    }
+
+    async fn account_by_phone(&self, phone: &str) -> Result<Option<Account>> {
+        Ok(entity::account::Entity::find()
+            .filter(entity::account::Column::Phone.eq(phone.to_string()))
+            .one(&self.db)
+            .await
+            .context("account_by_phone")?
             .map(Into::into))
     }
 
@@ -5765,14 +5774,9 @@ impl SafetyStore for PostgresStore {
         target_id: Id,
         limit: u16,
     ) -> Result<Vec<AuditEntry>> {
-        // Kind and id together: the same uuid under a different kind is a different
-        // thing, and matching on the id alone would leak one target's history into
-        // another's. `audit_id` only breaks ties between entries stamped at the same
-        // instant, so the order is total.
         Ok(entity::audit_entry::Entity::find()
             .filter(entity::audit_entry::Column::TargetKind.eq(target_kind))
             .filter(entity::audit_entry::Column::TargetId.eq(uuid_of(target_id)))
-            .order_by_desc(entity::audit_entry::Column::CreatedAt)
             .order_by_desc(entity::audit_entry::Column::AuditId)
             .limit(clamp_limit(limit) as u64)
             .all(&self.db)
@@ -5781,6 +5785,188 @@ impl SafetyStore for PostgresStore {
             .into_iter()
             .map(Into::into)
             .collect())
+    }
+}
+
+// --- captcha / recovery stores ------------------------------------------------------------
+//
+// Both are simple key/row tables, so the implementations are short. The
+// `put_captcha` upsert and the `recovery_consume` "stamp and return" are the
+// two statements whose shape matters: the captcha is one-shot per id, and
+// the recovery consume has to be atomic against a racing second confirm.
+
+/// A captcha row as it sits in the database.
+impl From<entity::captcha_challenge::Model> for CaptchaRow {
+    fn from(row: entity::captcha_challenge::Model) -> Self {
+        Self {
+            challenge_id: id_of(row.challenge_id),
+            tag: row.tag,
+            expires_at: instant_of(row.expires_at),
+            created_at: instant_of(row.created_at),
+        }
+    }
+}
+
+#[async_trait]
+impl CaptchaStore for PostgresStore {
+    async fn put_captcha(&self, row: CaptchaRow) -> Result<()> {
+        // `insert ON CONFLICT DO UPDATE` rather than read-then-write: a captcha
+        // is one-shot per id and the service is the only writer, so a second
+        // put with the same id is intentional, and losing a race against
+        // another caller would silently fall back to "the older challenge is
+        // still here". The upsert collapses both into a single statement.
+        entity::captcha_challenge::Entity::insert(entity::captcha_challenge::ActiveModel {
+            challenge_id: Set(uuid_of(row.challenge_id)),
+            tag: Set(row.tag),
+            expires_at: Set(stamp_of(row.expires_at)),
+            created_at: Set(stamp_of(row.created_at)),
+        })
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::column(entity::captcha_challenge::Column::ChallengeId)
+                .update_columns([
+                    entity::captcha_challenge::Column::Tag,
+                    entity::captcha_challenge::Column::ExpiresAt,
+                    entity::captcha_challenge::Column::CreatedAt,
+                ])
+                .to_owned(),
+        )
+        .exec(&self.db)
+        .await
+        .map(|_| ())
+        .context("put_captcha")
+    }
+
+    async fn get_captcha(&self, challenge_id: Id, now: Timestamp) -> Result<Option<CaptchaRow>> {
+        // Filter on the application side: a half-open `expires_at > now` would
+        // need a parameterised comparison we already use elsewhere, but the
+        // query plan for the captcha is a primary-key lookup and the index on
+        // `expires_at` exists for the sweeper, so the work is the same.
+        let row = entity::captcha_challenge::Entity::find_by_id(uuid_of(challenge_id))
+            .one(&self.db)
+            .await
+            .context("get_captcha")?;
+        Ok(row
+            .filter(|row| row.expires_at > stamp_of(now))
+            .map(Into::into))
+    }
+
+    async fn delete_captcha(&self, challenge_id: Id) -> Result<()> {
+        // A delete that finds no row is fine: the captcha is one-shot and a
+        // racing verify could already have removed it. Reporting that as an
+        // error would turn a normal double-submit into a 500.
+        entity::captcha_challenge::Entity::delete_by_id(uuid_of(challenge_id))
+            .exec(&self.db)
+            .await
+            .context("delete_captcha")?;
+        Ok(())
+    }
+}
+
+/// A recovery row as it sits in the database.
+impl From<entity::password_recovery::Model> for RecoveryRow {
+    fn from(row: entity::password_recovery::Model) -> Self {
+        Self {
+            token_id: id_of(row.token_id),
+            account_id: id_of(row.account_id),
+            tag: row.tag,
+            expires_at: instant_of(row.expires_at),
+            consumed_at: row.consumed_at.map(instant_of),
+            created_at: instant_of(row.created_at),
+        }
+    }
+}
+
+#[async_trait]
+impl RecoveryStore for PostgresStore {
+    async fn recovery_put(&self, row: RecoveryRow) -> Result<()> {
+        // Same upsert posture as `put_captcha`: the service is the only writer
+        // and a second request for the same token is not expected, but if it
+        // happens the database decides the winner rather than the read-then-
+        // write in the caller.
+        entity::password_recovery::Entity::insert(entity::password_recovery::ActiveModel {
+            token_id: Set(uuid_of(row.token_id)),
+            account_id: Set(uuid_of(row.account_id)),
+            tag: Set(row.tag),
+            expires_at: Set(stamp_of(row.expires_at)),
+            consumed_at: Set(row.consumed_at.map(stamp_of)),
+            created_at: Set(stamp_of(row.created_at)),
+        })
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::column(entity::password_recovery::Column::TokenId)
+                .update_columns([
+                    entity::password_recovery::Column::AccountId,
+                    entity::password_recovery::Column::Tag,
+                    entity::password_recovery::Column::ExpiresAt,
+                    entity::password_recovery::Column::ConsumedAt,
+                    entity::password_recovery::Column::CreatedAt,
+                ])
+                .to_owned(),
+        )
+        .exec(&self.db)
+        .await
+        .map(|_| ())
+        .context("recovery_put")
+    }
+
+    async fn recovery_get(&self, token_id: Id) -> Result<Option<RecoveryRow>> {
+        Ok(
+            entity::password_recovery::Entity::find_by_id(uuid_of(token_id))
+                .one(&self.db)
+                .await
+                .context("recovery_get")?
+                .map(Into::into),
+        )
+    }
+
+    async fn recovery_consume(&self, token_id: Id, at: Timestamp) -> Result<Option<RecoveryRow>> {
+        // The "stamp and return" is the whole point of `consume`: one
+        // statement that rejects an already-consumed or expired row and
+        // returns the row that was just stamped, so the caller can hand the
+        // account id back to `change_password` without a follow-up read.
+        //
+        // The `exec_with_returning` returns zero rows when the `where`
+        // predicate failed: a token that was already consumed, has expired,
+        // or never existed. None of those is distinguishable from the outside
+        // — the brief's 404-vs-200 split on `/v1/auth/recovery/confirm` is
+        // "we never reveal whether the token was real, only whether it was
+        // acceptable", and the row returning `None` is the way that split
+        // is enforced.
+        let stamped = stamp_of(at);
+        let update = entity::password_recovery::Entity::update_many()
+            .filter(entity::password_recovery::Column::TokenId.eq(uuid_of(token_id)))
+            .filter(entity::password_recovery::Column::ConsumedAt.is_null())
+            .filter(entity::password_recovery::Column::ExpiresAt.gt(stamped))
+            .set(entity::password_recovery::ActiveModel {
+                consumed_at: Set(Some(stamped)),
+                ..Default::default()
+            });
+        let updated = update
+            .exec_with_returning(&self.db)
+            .await
+            .context("recovery_consume")?;
+        Ok(updated.into_iter().next().map(Into::into))
+    }
+
+    async fn recovery_delete_expired(&self, before: Timestamp, limit: u32) -> Result<u64> {
+        // A bounded sweep: the index on `expires_at` keeps the scan to live
+        // rows, and the limit stops a sweeper that has been broken for a
+        // long time from holding a lock proportional to the cleanup debt.
+        // The caller loops until the return is zero.
+        // `DeleteMany` in SeaORM does not expose a `.limit(...)` here, so we
+        // route the bounded delete through `execute_unprepared`; the
+        // timestamp is a `i64` literal and the limit is `u32` literal, both
+        // already numeric, so a malformed input is not a SQL injection
+        // vector here either.
+        let result = self
+            .db
+            .execute_unprepared(&format!(
+                "delete from password_recovery where expires_at <= {} limit {}",
+                stamp_of(before),
+                limit,
+            ))
+            .await
+            .context("recovery_delete_expired")?;
+        Ok(result.rows_affected())
     }
 }
 

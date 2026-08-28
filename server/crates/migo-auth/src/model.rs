@@ -18,6 +18,7 @@
 
 use std::net::IpAddr;
 
+use migo_captcha::CaptchaProof;
 use migo_core::{Id, Secret, Timestamp};
 use migo_protocol::Platform;
 
@@ -173,6 +174,10 @@ pub struct Registration {
     pub country: Option<String>,
     /// The device this registration comes from.
     pub device: DeviceClaim,
+    /// Captcha proof, when the gate is engaged. `None` is rejected as
+    /// `CAPTCHA_REQUIRED`; a present proof is consumed on the way in so
+    /// the same `challenge_id` cannot be replayed across two attempts.
+    pub captcha: Option<CaptchaProof>,
 }
 
 /// An existing account signing in.
@@ -186,6 +191,11 @@ pub struct SignIn {
     pub password: Secret,
     /// The device signing in.
     pub device: DeviceClaim,
+    /// Captcha proof, required when the per-IP failure counter is at or
+    /// past the configured threshold. A first attempt against a fresh
+    /// account never needs one; a tenth attempt against the same
+    /// network after nine wrong passwords always does.
+    pub captcha: Option<CaptchaProof>,
 }
 
 /// A refresh token being exchanged.

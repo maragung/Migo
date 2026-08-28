@@ -59,7 +59,16 @@ import type {
 } from '@migo/protocol';
 
 import { BootstrapClient } from './rest.js';
-import type { DeviceDescriptor, FetchLike, Grant, LoginParams, RegisterParams } from './rest.js';
+import type {
+  AccountSession,
+  CaptchaChallenge,
+  CaptchaProof,
+  DeviceDescriptor,
+  FetchLike,
+  Grant,
+  LoginParams,
+  RegisterParams,
+} from './rest.js';
 import { DEFAULT_CLIENT_FEATURES, GatewayTransport } from './transport.js';
 import type {
   ConnectionState,
@@ -587,6 +596,116 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     this.#keyStore.replenishOneTimePrekeys(this.#replenishPolicy.batch);
     await ctx.keys.publish();
     return true;
+  }
+
+  // --- account management (REST over the live access token) ---
+
+  /**
+   * Lists every active session for the authenticated account.
+   *
+   * Each row carries the session id, the human-readable device name, creation and last-seen
+   * timestamps, and the server's coarse ip-class bucket. The list does not include the access
+   * tokens — only the caller's own session is identified by its own id.
+   */
+  async sessions(): Promise<AccountSession[]> {
+    const ctx = this.#requireConnected();
+    return this.#bootstrap.listSessions(ctx.grant.accessToken);
+  }
+
+  /**
+   * Revokes a single session by id.
+   *
+   * The caller's own session is not in the set of revocable ids on the server side, so passing the
+   * current session id is a no-op error there, not a self-destruct.
+   */
+  async revokeSession(params: { session_id: Id }): Promise<{ ok: true }> {
+    const ctx = this.#requireConnected();
+    return this.#bootstrap.revokeSession(ctx.grant.accessToken, params.session_id);
+  }
+
+  /**
+   * Revokes every session except the caller's own, returning the number revoked.
+   *
+   * Use this from a "sign out other devices" affordance. The caller's own session stays live.
+   */
+  async signOutOthers(): Promise<{ revoked: number }> {
+    const ctx = this.#requireConnected();
+    return this.#bootstrap.signOutOthers(ctx.grant.accessToken);
+  }
+
+  /**
+   * Changes the authenticated account's password.
+   *
+   * The server returns a fresh grant with a new access token and refresh token; the new grant
+   * replaces the in-memory one (so the access token used to call this is no longer valid), and
+   * the realtime transport is re-authenticated with the new credential so live events keep
+   * flowing without a reconnect.
+   */
+  async changePassword(params: { current_password: string; new_password: string }): Promise<Grant> {
+    const ctx = this.#requireConnected();
+    const refreshed = await this.#bootstrap.changePassword(ctx.grant.accessToken, params);
+    await ctx.transport.reauthenticate(refreshed.accessToken, refreshed.deviceId);
+    this.#ctx = { ...ctx, grant: refreshed };
+    return refreshed;
+  }
+
+  /**
+   * Records an email or phone on the authenticated account.
+   *
+   * The server stores exactly one of the two per account (the other is a no-op error there).
+   * Validates the input shape on the client: exactly one of `email` and `phone` is set, the
+   * other is `undefined`. Sends a single `email_or_phone` field in the body, as the contract
+   * requires.
+   */
+  async updateContact(params: { email?: string; phone?: string }): Promise<{ ok: true }> {
+    if ((params.email === undefined) === (params.phone === undefined)) {
+      throw new SdkError('migo: updateContact requires exactly one of email or phone');
+    }
+    const value = params.email ?? params.phone;
+    if (value === undefined || value === '') {
+      throw new SdkError('migo: updateContact requires a non-empty email or phone');
+    }
+    const ctx = this.#requireConnected();
+    return this.#bootstrap.updateContact(ctx.grant.accessToken, { email_or_phone: value });
+  }
+
+  // --- recovery (anonymous REST) ---
+
+  /**
+   * Asks the server to start a recovery flow for the given identifier.
+   *
+   * The server is enumeration-safe: a real account and an unknown one both answer `{ ok: true }`.
+   * The captcha gate is the rate limiter's defence. The page is generic on purpose.
+   */
+  async recoverAccount(params: {
+    identifier: string;
+    captcha: CaptchaProof;
+  }): Promise<{ ok: true }> {
+    return this.#bootstrap.recoverAccount(params);
+  }
+
+  /**
+   * Applies a recovery token (out-of-band) to set a new password.
+   *
+   * The caller is responsible for routing the new password to the user through whatever channel
+   * the operator chose; this method only validates the token server-side and sets the password.
+   */
+  async confirmRecovery(params: {
+    token_id: Id;
+    token: string;
+    new_password: string;
+  }): Promise<{ ok: true }> {
+    return this.#bootstrap.confirmRecovery(params);
+  }
+
+  /**
+   * Asks the server for a captcha challenge, used by the public bootstrap surface.
+   *
+   * The page (or the caller) stores the `challenge_id`, prompts the user for an answer, and
+   * passes the resulting {@link CaptchaProof} into the next register/login attempt.
+   */
+  async requestCaptcha(): Promise<CaptchaChallenge> {
+    return this.#bootstrap.requestCaptcha();
   }
 
   // --- internals ---
