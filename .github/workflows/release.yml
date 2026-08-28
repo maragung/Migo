@@ -86,15 +86,25 @@ jobs:
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists; reusing it."
+            # If a previous run left the release in draft, the assets uploaded below
+            # would not be visible. Force it back to published so the page is consistent
+            # with what a fresh run would produce.
+            if gh release view "$TAG" --json isDraft --jq .isDraft | grep -q true; then
+              echo "Release was a draft; publishing."
+              gh release edit "$TAG" --draft=false
+            fi
             exit 0
           fi
           # A tag with a pre-release suffix (v1.2.3-rc1) is marked pre-release so it does
-          # not show up as the latest stable release.
+          # not show up as the latest stable release. `--draft=false` makes the release
+          # visible immediately; without it gh leaves the release in draft and the
+          # assets uploaded below would land on a page nobody can see.
           prerelease=""
           case "$TAG" in *-*) prerelease="--prerelease" ;; esac
           gh release create "$TAG" $prerelease \
             --title "Migo $TAG" \
             --generate-notes \
+            --draft=false \
             --verify-tag
 
   # ---------------------------------------------------------------- migod binary

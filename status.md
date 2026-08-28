@@ -22,7 +22,7 @@ daripada alasannya adalah cara sebuah advisory sungguhan diloloskan diam-diam.
 
 Terakhir diselaraskan: 27 Agustus 2026. Penyelarasan ini memverifikasi ulang setiap angka di
 bawah terhadap pohon yang bersih, yaitu ketujuh gate, 23 anggota workspace, dan 1598 test Rust
-bersama 10 doc-test dan 251 test TypeScript yang semuanya hijau, lalu menutup tiga hal dari
+bersama 10 doc-test dan 251 test TypeScript yang semuanya hijau, lalu menutup empat hal dari
 status sebelumnya. Yang pertama: empat invariant migo-gateway yang sebelumnya hanya ditulis
 di kepala suite (backpressure, parse-before-alloc, push-only, hygiene) kini diuji dengan
 lima test baru di `migo-gateway/tests/gateway.rs`. Yang kedua: opcode 144
@@ -33,15 +33,20 @@ ketiga: smoke test dua-node end-to-end di `tools/2node/run.sh` yang menjalankan 
 instance migod berdiri sendiri (port berbeda, database postgres berbeda, node identity
 berbeda) lalu menggerakkan chat bot TypeScript di `tools/chatbot/` yang mendaftarkan
 dua akun, membuka percakapan langsung, dan mengirim 10 round-trip pesan — semua dari
-nol sampai pesan tervalidasi dalam satu skrip. Commit sebelumnya menutup cacat terbuka 8b
-dengan mengimplementasikan `Dispatcher::authorize_topics` di `migo-gateway` dan
-`AppDispatcher` di `migod`, lengkap dengan 3 test di `migo-gateway/tests/gateway.rs` dan
-5 test di `migod/tests/migod.rs` yang menutup keempat perilaku yang dituntut kepala suite
-gateway. Commit sebelumnya memperbaiki job `gates` setelah gate konformans pecah di CI,
-menambahkan gate ketujuh `make pydeps-check` supaya kelas kegagalan itu tidak terulang,
-dan memberi job advisory satu pengecualian beralasan. Sebelum itu enam crate terakhir
-(`migo-games`, `migo-bots`, `migo-federation`, `migo-gateway`, `migo-api`, dan
-`migod`) berpindah bersama `packages/sdk`, `clients/web`, dan `tools/loadgen` ke BUILT.
+nol sampai pesan tervalidasi dalam satu skrip. Yang keempat: release `v0.1.0` yang
+sebelumnya dibuat sebagai `draft: true` (sehingga semua binary yang di-upload
+tidak terlihat di halaman publik) sudah dipublish manual, dan `release.yml` dipatch
+agar `gh release create` memakai `--draft=false` dan me-publish ulang kalau
+sebuah run menemukan kembali release yang masih draft. Commit sebelumnya menutup
+cacat terbuka 8b dengan mengimplementasikan `Dispatcher::authorize_topics` di
+`migo-gateway` dan `AppDispatcher` di `migod`, lengkap dengan 3 test di
+`migo-gateway/tests/gateway.rs` dan 5 test di `migod/tests/migod.rs` yang menutup
+keempat perilaku yang dituntut kepala suite gateway. Commit sebelumnya memperbaiki
+job `gates` setelah gate konformans pecah di CI, menambahkan gate ketujuh `make pydeps-check`
+supaya kelas kegagalan itu tidak terulang, dan memberi job advisory satu pengecualian
+beralasan. Sebelum itu enam crate terakhir (`migo-games`, `migo-bots`,
+`migo-federation`, `migo-gateway`, `migo-api`, dan `migod`) berpindah bersama `packages/sdk`,
+`clients/web`, dan `tools/loadgen` ke BUILT.
 
 ## Ringkasan
 
@@ -101,8 +106,8 @@ satu pun peringatan, `cargo doc` tanpa intra-doc link rusak, dan `cargo test` se
 | `tools/protocol-codegen`   | generator Rust dan TypeScript dari IDL                                                                                               | dipakai CI |
 | `tools/entity-codegen`     | generator entity SeaORM dari schema                                                                                                  | dipakai CI |
 | `tools/loadgen`            | pembangkit beban yang menggerakkan MigoClient sungguhan                                                                              | 84         |
-| `tools/chatbot`            | dua akun, satu percakapan langsung, sepuluh pesan bolak-balik lewat gateway; hanya end-to-end smoke | 0          |
-| `tools/2node`              | dua migod berdiri sendiri (port + database + node identity berbeda) plus skrip run.sh end-to-end | 0          |
+| `tools/chatbot`            | dua akun, satu percakapan langsung, sepuluh pesan bolak-balik lewat gateway; hanya end-to-end smoke                                  | 0          |
+| `tools/2node`              | dua migod berdiri sendiri (port + database + node identity berbeda) plus skrip run.sh end-to-end                                     | 0          |
 | `shared/protocol/schema`   | IDL itu sendiri: 29 opcode, error code, feature bit                                                                                  | gate       |
 | `shared/protocol/vectors`  | vector konformans wire dan kripto                                                                                                    | 2 runner   |
 | `tools/vectors`            | pembangkit dan pemverifikasi vector                                                                                                  | dipakai CI |
