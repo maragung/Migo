@@ -29,19 +29,24 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use migo_protocol::{codes, fault};
+use parking_lot::Mutex;
+use serde_json::Value;
+
 use migo_bots::model::{
     BotsConfig, Caller, NewBotSpec, Scopes, DEFAULT_MAX_BOTS_PER_OWNER, MAX_DISPLAY_NAME_CHARS,
     MAX_WEBHOOK_URL_BYTES,
 };
 use migo_bots::service::BotService;
 use migo_bots::token::Minter;
+use migo_bots::traits::{SharedWebhook, Webhook};
 use migo_bots::{Bots, Registered};
 use migo_cache::MemoryCache;
 use migo_core::config::Config;
 use migo_core::metrics::Registry;
 use migo_core::random::OsRandom;
 use migo_core::{Error, ErrorKind, Id, Result, Timestamp};
-use migo_protocol::codes;
 use migo_ratelimit::{BucketKey, CacheRateLimiter, Policies, RateLimiter, TrustTier};
 use migo_store::model::Bot;
 use migo_store::traits::{AccountStore, BotStore};
@@ -78,6 +83,17 @@ fn device_of(account: u128) -> Id {
 
 /// An owner at `NOW`, on an Established connection. The bot service always speaks to an
 /// owner — a human managing bots — never to a bot itself.
+/// A second, unrelated account: the one commanding somebody else's bot.
+fn commander() -> Caller {
+    Caller {
+        account_id: id(OTHER),
+        device_id: device_of(OTHER),
+        tier: TrustTier::Established,
+        now: ts(NOW),
+        request_id: None,
+    }
+}
+
 fn owner(account: u128) -> Caller {
     Caller {
         account_id: id(account),
@@ -118,12 +134,52 @@ fn expect_error<T>(result: Result<T>) -> Error {
 
 type TestService = BotService<MemoryStore, CacheRateLimiter<MemoryCache>>;
 
+/// A webhook sink that records what it was handed instead of speaking HTTPS.
+///
+/// It can be told to fail, so a test can stand in for a bot backend that is unreachable,
+/// and it answers asynchronously like the real transport does.
+struct RecordingSink {
+    deliveries: Mutex<Vec<(String, Vec<u8>)>>,
+    broken: Mutex<bool>,
+}
+
+impl RecordingSink {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            deliveries: Mutex::new(Vec::new()),
+            broken: Mutex::new(false),
+        })
+    }
+
+    fn deliveries(&self) -> Vec<(String, Vec<u8>)> {
+        self.deliveries.lock().clone()
+    }
+
+    fn fail_from_now_on(&self) {
+        *self.broken.lock() = true;
+    }
+}
+
+#[async_trait]
+impl Webhook for RecordingSink {
+    async fn deliver(&self, url: &str, payload: &[u8]) -> Result<()> {
+        if *self.broken.lock() {
+            return Err(fault::internal("the bot backend is unreachable"));
+        }
+        self.deliveries
+            .lock()
+            .push((url.to_string(), payload.to_vec()));
+        Ok(())
+    }
+}
+
 /// Everything a test needs, with the real limiter over a real cache and the real store.
 struct Harness {
     service: TestService,
     store: Arc<MemoryStore>,
     limiter: Arc<CacheRateLimiter<MemoryCache>>,
     registry: Registry,
+    sink: Arc<RecordingSink>,
 }
 
 impl Harness {
@@ -142,6 +198,7 @@ impl Harness {
             policies,
             &registry,
         ));
+        let sink = RecordingSink::new();
         let service = BotService::new(
             Arc::clone(&store),
             Arc::clone(&limiter),
@@ -149,6 +206,12 @@ impl Harness {
             TOKEN_ROOT,
             Box::new(OsRandom),
             &registry,
+            {
+                // The same coercion quirk as everywhere else in this suite: an explicit
+                // local of the trait-object type is where `Arc<RecordingSink>` unsizes.
+                let sink: SharedWebhook = sink.clone();
+                sink
+            },
         )
         .expect("the one-time locked hash builds");
         Self {
@@ -156,6 +219,7 @@ impl Harness {
             store,
             limiter,
             registry,
+            sink,
         }
     }
 
@@ -181,6 +245,15 @@ impl Harness {
     async fn register_with(&self, owner: &Caller, username: &str, scopes: Scopes) -> Registered {
         let mut spec = Self::spec(username);
         spec.scopes = scopes;
+        self.service
+            .register(owner, spec)
+            .await
+            .expect("registration succeeds")
+    }
+
+    /// A registration with an explicit spec, for the tests that need a webhook or other
+    /// non-default fields.
+    async fn register_spec(&self, owner: &Caller, spec: NewBotSpec) -> Registered {
         self.service
             .register(owner, spec)
             .await
@@ -801,7 +874,7 @@ async fn getting_a_bot_that_does_not_exist_is_not_found() {
 #[tokio::test]
 async fn getting_another_owners_bot_is_not_found_not_forbidden() {
     let harness = Harness::new();
-    let registered = harness.register(&owner(OTHER), "weatherbot").await;
+    let registered = harness.register(&commander(), "weatherbot").await;
     // OWNER may not see OTHER's bot. The answer is "no such bot", not "not yours".
     let error = expect_error(
         harness
@@ -824,7 +897,7 @@ async fn getting_another_owners_bot_is_not_found_not_forbidden() {
 #[tokio::test]
 async fn a_missing_bot_and_someone_elses_bot_are_the_same_error() {
     let harness = Harness::new();
-    let registered = harness.register(&owner(OTHER), "weatherbot").await;
+    let registered = harness.register(&commander(), "weatherbot").await;
     let missing = expect_error(harness.service.get(&owner(OWNER), id(999_999)).await);
     let not_mine = expect_error(
         harness
@@ -842,7 +915,7 @@ async fn a_missing_bot_and_someone_elses_bot_are_the_same_error() {
 #[tokio::test]
 async fn rotating_another_owners_bot_is_not_found() {
     let harness = Harness::new();
-    let registered = harness.register(&owner(OTHER), "weatherbot").await;
+    let registered = harness.register(&commander(), "weatherbot").await;
     expect_code(
         harness
             .service
@@ -855,7 +928,7 @@ async fn rotating_another_owners_bot_is_not_found() {
 #[tokio::test]
 async fn setting_scopes_on_another_owners_bot_is_not_found() {
     let harness = Harness::new();
-    let registered = harness.register(&owner(OTHER), "weatherbot").await;
+    let registered = harness.register(&commander(), "weatherbot").await;
     expect_code(
         harness
             .service
@@ -868,7 +941,7 @@ async fn setting_scopes_on_another_owners_bot_is_not_found() {
 #[tokio::test]
 async fn pausing_another_owners_bot_is_not_found() {
     let harness = Harness::new();
-    let registered = harness.register(&owner(OTHER), "weatherbot").await;
+    let registered = harness.register(&commander(), "weatherbot").await;
     expect_code(
         harness
             .service
@@ -883,7 +956,7 @@ async fn a_foreign_bot_is_untouched_by_a_rejected_management_call() {
     let harness = Harness::new();
     // A denied call must have no effect on the bot it could not reach.
     let registered = harness
-        .register_with(&owner(OTHER), "weatherbot", Scopes::NONE)
+        .register_with(&commander(), "weatherbot", Scopes::NONE)
         .await;
     let _ = harness
         .service
@@ -902,7 +975,7 @@ async fn list_returns_only_the_callers_own_bots() {
     let harness = Harness::new();
     harness.register(&owner(OWNER), "weatherbot").await;
     harness.register(&owner(OWNER), "chronosbot").await;
-    harness.register(&owner(OTHER), "greeter").await;
+    harness.register(&commander(), "greeter").await;
     let mine = harness
         .service
         .list(&owner(OWNER))
@@ -1389,7 +1462,7 @@ async fn the_owner_cap_is_per_owner_not_global() {
     // OTHER has their own separate allowance; OWNER filling theirs does not exhaust it.
     harness
         .service
-        .register(&owner(OTHER), Harness::spec("greeter"))
+        .register(&commander(), Harness::spec("greeter"))
         .await
         .expect("OTHER's first bot fits under their own cap");
     expect_code(
@@ -1767,7 +1840,7 @@ async fn a_duplicate_username_is_reported_as_taken() {
     let error = expect_error(
         harness
             .service
-            .register(&owner(OTHER), Harness::spec("weatherbot"))
+            .register(&commander(), Harness::spec("weatherbot"))
             .await,
     );
     assert_eq!(error.code(), codes::USERNAME_TAKEN);
@@ -1955,4 +2028,197 @@ async fn a_read_reflects_a_disable_written_straight_to_the_store() {
         view.disabled,
         "the service read reflects a store-only change; it holds no state of its own"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Commanding a bot
+// ---------------------------------------------------------------------------
+
+/// An argument shaped to break out of a naive splice into a command line or a JSON
+/// document. The payload is built with a serializer, so it must arrive as one string
+/// inside the args array and nothing more.
+const SNEAKY_ARG: &str = "\"}";
+
+/// A webhook the command path can deliver to, plus a spec that registers it.
+fn webhook_spec(username: &str, url: &str) -> NewBotSpec {
+    NewBotSpec {
+        username: username.to_string(),
+        display_name: format!("{username} display"),
+        scopes: Scopes::NONE,
+        webhook_url: Some(url.to_string()),
+        locale: None,
+    }
+}
+
+/// The §41 integration surface: any identified account commands an enabled bot, and the
+/// command lands on the webhook its owner registered, addressed from the commander.
+#[tokio::test]
+async fn a_command_reaches_the_bot_webhook_with_the_callers_identity() {
+    let harness = Harness::new();
+    let owner = owner(OWNER);
+    let registered = harness
+        .register_spec(
+            &owner,
+            webhook_spec("weather", "https://bots.example.test/hook"),
+        )
+        .await;
+
+    let commander = commander();
+    harness
+        .service
+        .command(
+            &commander,
+            registered.bot.bot_id,
+            "forecast",
+            &["jakarta".to_string(), "--days=3".to_string()],
+        )
+        .await
+        .expect("a command to an enabled bot is delivered");
+
+    let deliveries = harness.sink.deliveries();
+    assert_eq!(deliveries.len(), 1, "exactly one delivery");
+    let (url, body) = &deliveries[0];
+    assert_eq!(url, "https://bots.example.test/hook");
+
+    let payload: Value = serde_json::from_slice(body).expect("the payload is JSON");
+    assert_eq!(payload["command"], "forecast");
+    assert_eq!(payload["args"][0], "jakarta");
+    assert_eq!(payload["args"][1], "--days=3");
+    assert_eq!(
+        payload["from"],
+        commander.account_id.to_text(),
+        "the bot learns who asked, so it can answer"
+    );
+    assert_eq!(payload["bot_id"], registered.bot.bot_id.to_text());
+}
+
+/// An argument that looks like structure stays an argument: the payload is one JSON array,
+/// not a spliced command line somebody can grow a second command out of.
+#[tokio::test]
+async fn an_argument_stays_an_argument() {
+    let harness = Harness::new();
+    let owner = owner(OWNER);
+    let registered = harness
+        .register_spec(
+            &owner,
+            webhook_spec("calc", "https://bots.example.test/hook"),
+        )
+        .await;
+
+    harness
+        .service
+        .command(
+            &commander(),
+            registered.bot.bot_id,
+            "eval",
+            &[SNEAKY_ARG.to_string()],
+        )
+        .await
+        .expect("a hostile-looking argument is still just an argument");
+
+    let (_, body) = &harness.sink.deliveries()[0];
+    let payload: Value = serde_json::from_slice(body).expect("the payload parses as JSON");
+    assert_eq!(payload["args"][0], SNEAKY_ARG);
+    assert_eq!(
+        payload["command"], "eval",
+        "exactly one command left the room"
+    );
+}
+
+/// A bot with no webhook has no delivery channel on this wire. Refusing tells the truth;
+/// swallowing the command would make the user wait for a reply that is never coming.
+#[tokio::test]
+async fn a_command_to_a_bot_without_a_webhook_is_refused() {
+    let harness = Harness::new();
+    let owner = owner(OWNER);
+    let registered = harness.register(&owner, "plain").await;
+
+    expect_code(
+        harness
+            .service
+            .command(&commander(), registered.bot.bot_id, "ping", &[])
+            .await,
+        codes::VALIDATION_FAILED,
+    );
+    assert!(
+        harness.sink.deliveries().is_empty(),
+        "nothing was delivered, because there was nowhere to deliver to"
+    );
+}
+
+/// A paused bot reads as missing, the same answer its token gives. A disabled integration
+/// must not keep accepting work, and a difference between the two answers would let a
+/// caller probe which bot ids ever existed.
+#[tokio::test]
+async fn a_command_to_a_paused_bot_is_not_distinguishable_from_an_unknown_bot() {
+    let harness = Harness::new();
+    let owner = owner(OWNER);
+    let registered = harness
+        .register_spec(
+            &owner,
+            webhook_spec("paused", "https://bots.example.test/hook"),
+        )
+        .await;
+    harness
+        .service
+        .set_paused(&owner, registered.bot.bot_id, true)
+        .await
+        .expect("pause succeeds");
+
+    expect_code(
+        harness
+            .service
+            .command(&commander(), registered.bot.bot_id, "ping", &[])
+            .await,
+        codes::NOT_FOUND,
+    );
+    expect_code(
+        harness
+            .service
+            .command(&commander(), id(0xB0B), "ping", &[])
+            .await,
+        codes::NOT_FOUND,
+    );
+}
+
+/// When the bot's backend cannot be reached, the failure is the same opaque error whoever
+/// is asking and whatever went wrong — the commanding user is not told whether the URL
+/// resolved, refused, or timed out.
+#[tokio::test]
+async fn an_unreachable_webhook_is_one_opaque_error() {
+    let harness = Harness::new();
+    let owner = owner(OWNER);
+    let registered = harness
+        .register_spec(
+            &owner,
+            webhook_spec("down", "https://bots.example.test/hook"),
+        )
+        .await;
+    harness.sink.fail_from_now_on();
+
+    expect_code(
+        harness
+            .service
+            .command(&commander(), registered.bot.bot_id, "ping", &[])
+            .await,
+        codes::INTERNAL_ERROR,
+    );
+}
+
+/// Commanding is charged like everything else, and a refusal for a missing bot happens
+/// after the charge — a caller fishing for bot ids pays per guess.
+#[tokio::test]
+async fn commanding_is_charged_even_when_it_refuses() {
+    let harness = Harness::new();
+    let caller = commander();
+    let before = harness.account_balance(&caller).await;
+    expect_code(
+        harness
+            .service
+            .command(&caller, id(0xB0B), "ping", &[])
+            .await,
+        codes::NOT_FOUND,
+    );
+    let after = harness.account_balance(&caller).await;
+    assert_eq!(before - after, 2, "BOT_COMMAND is priced at 2");
 }

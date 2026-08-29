@@ -18,8 +18,10 @@ pub mod dispatch;
 pub mod ports;
 
 mod compose;
+pub mod mesh;
 mod serve;
 mod transport;
+mod webhook;
 
 pub use compose::App;
 pub use serve::GATEWAY_PATH;

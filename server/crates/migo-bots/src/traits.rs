@@ -23,6 +23,28 @@ use crate::model::{BotIdentity, BotView, Caller, NewBotSpec, Registered, Scopes}
 /// A shared bot subsystem, the shape the layer above holds.
 pub type SharedBots = Arc<dyn Bots>;
 
+/// The port that delivers a command to a bot's webhook, owned by the layer above.
+///
+/// Section 41 names the webhook as one of the ways a bot integrates, and the bot row
+/// carries the https URL the owner registered. Actually speaking HTTPS is transport, not
+/// bot policy — the same split as `Storage` in media and `PushSender` in notify — so the
+/// crate defines the port and the composition root supplies the client. A test supplies a
+/// recording fake.
+#[async_trait]
+pub trait Webhook: Send + Sync {
+    /// POSTs `payload` to `url`, resolving when the bot's backend has answered.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the transport answers — the service maps it to one opaque error, because
+    /// why a webhook was unreachable is the operator's debugging problem, not the
+    /// commanding user's.
+    async fn deliver(&self, url: &str, payload: &[u8]) -> Result<()>;
+}
+
+/// A shared webhook transport, built at the composition root.
+pub type SharedWebhook = std::sync::Arc<dyn Webhook>;
+
 /// The bot subsystem, as the layer above reaches it.
 ///
 /// Ownership is enforced here, not trusted from the caller: every management method resolves
@@ -76,4 +98,26 @@ pub trait Bots: Send + Sync {
     /// One bot the caller owns, or [`fault::not_found`](migo_protocol::fault::not_found) if it
     /// is not theirs or does not exist.
     async fn get(&self, owner: &Caller, bot_id: Id) -> Result<BotView>;
+
+    /// Delivers a user's command to a bot, over the webhook its owner registered.
+    ///
+    /// Any identified account may command an enabled bot — this is the §41 integration
+    /// surface, not a management call, so ownership is not the gate here; existence and
+    /// being enabled are. A bot without a webhook has no delivery channel on this wire, and
+    /// refusing beats pretending: the caller is told, and may message the bot as an account
+    /// instead. The payload's shape is the bot SDK's contract; this layer only guarantees
+    /// it arrives, once, ordered behind earlier commands from the same caller.
+    ///
+    /// # Errors
+    ///
+    /// [`not_found`](migo_protocol::fault::not_found) for an unknown or disabled bot,
+    /// [`validation`](migo_protocol::fault::validation) when the bot has no webhook, and
+    /// one opaque error when the webhook itself fails.
+    async fn command(
+        &self,
+        caller: &Caller,
+        bot_id: Id,
+        command: &str,
+        args: &[String],
+    ) -> Result<()>;
 }

@@ -331,6 +331,34 @@ impl Gateway {
             None,
         );
     }
+
+    /// Publishes a server-originated frame to one topic, for callers outside a session.
+    ///
+    /// The mesh ingest path is the reason this exists: an event that arrives over the
+    /// server-to-server link carries no originating session, but its readers are the same
+    /// subscribers the realtime path serves, so it enters the same hub through the same
+    /// subscription gate. Nothing here re-checks who may read the topic — that decision was
+    /// made once, when the subscription was authorized — and nothing here charges a rate
+    /// limit, because the sender is this node, not a client connection.
+    pub fn broadcast_to_topic<E: migo_protocol::Encode>(
+        &self,
+        topic: &migo_protocol::Topic,
+        opcode: migo_protocol::Opcode,
+        event: &E,
+        now: migo_core::Timestamp,
+    ) {
+        use migo_protocol::to_frame;
+        let bytes = match to_frame(opcode.to_wire(), 0, event) {
+            Ok(frame) => match frame.encode() {
+                Ok(bytes) => bytes,
+                Err(_) => return,
+            },
+            Err(_) => return,
+        };
+        self.inner
+            .hub
+            .broadcast(topic, &bytes, opcode.class(), None, now, None);
+    }
 }
 
 /// A stable per-process key that groups the frames of one Coalescable stream.
@@ -340,4 +368,258 @@ fn coalesce_key_for(id: &migo_core::Id) -> u64 {
     let mut hasher = DefaultHasher::new();
     id.hash(&mut hasher);
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+
+    use migo_auth::{
+        Authenticator, Claims, Grant, Identity, PasswordChange, Refresh, Registration,
+        SessionSummary, SignIn,
+    };
+    use migo_cache::MemoryCache;
+    use migo_core::config::Config;
+    use migo_core::{ManualClock, SeededRandom};
+    use migo_protocol::{from_frame, Frame, NotificationEvent, Opcode, Topic, TopicKind};
+    use migo_ratelimit::{CacheRateLimiter, Policies};
+
+    use super::*;
+
+    use crate::outbound::Outbound;
+    use crate::session::SessionHandle;
+
+    const SECOND: i64 = 1_000;
+    /// A fixed, plausible wall clock; nothing under test reads it.
+    const NOW: i64 = 1_700_000_000 * SECOND;
+
+    fn ts(millis: i64) -> Timestamp {
+        Timestamp::from_millis(millis)
+    }
+
+    /// An authenticator whose every method is unreachable: the seam under test speaks to the hub
+    /// alone, so a call reaching this double would mean a gateway that authenticates its own
+    /// outbound frames, and a test failure rather than a silent anomaly.
+    struct UnusedAuth;
+
+    #[async_trait]
+    impl Authenticator for UnusedAuth {
+        async fn register(
+            &self,
+            _request: Registration,
+            _context: &RequestContext,
+        ) -> migo_core::Result<Grant> {
+            unimplemented!("the broadcast test never registers an account")
+        }
+
+        async fn sign_in(
+            &self,
+            _request: SignIn,
+            _context: &RequestContext,
+        ) -> migo_core::Result<Grant> {
+            unimplemented!("the broadcast test never signs accounts in")
+        }
+
+        async fn refresh(
+            &self,
+            _request: Refresh,
+            _context: &RequestContext,
+        ) -> migo_core::Result<Grant> {
+            unimplemented!("the broadcast test never refreshes tokens")
+        }
+
+        async fn authenticate(
+            &self,
+            _access_token: &str,
+            _device_id: Id,
+            _context: &RequestContext,
+        ) -> migo_core::Result<Identity> {
+            unimplemented!("the broadcast test never verifies a token")
+        }
+
+        fn verify_access(&self, _access_token: &str, _now: Timestamp) -> migo_core::Result<Claims> {
+            unimplemented!("the broadcast test never verifies a token")
+        }
+
+        fn token_region(&self, _access_token: &str) -> Option<String> {
+            None
+        }
+
+        async fn sign_out(
+            &self,
+            _identity: &Identity,
+            _session_id: Id,
+            _context: &RequestContext,
+        ) -> migo_core::Result<()> {
+            unimplemented!("the broadcast test never signs sessions out")
+        }
+
+        async fn sign_out_others(
+            &self,
+            _identity: &Identity,
+            _context: &RequestContext,
+        ) -> migo_core::Result<u64> {
+            unimplemented!("the broadcast test never revokes sessions")
+        }
+
+        async fn sessions(
+            &self,
+            _identity: &Identity,
+            _context: &RequestContext,
+        ) -> migo_core::Result<Vec<SessionSummary>> {
+            unimplemented!("the broadcast test never lists sessions")
+        }
+
+        async fn revoke_device(
+            &self,
+            _identity: &Identity,
+            _device_id: Id,
+            _context: &RequestContext,
+        ) -> migo_core::Result<u64> {
+            unimplemented!("the broadcast test never revokes devices")
+        }
+
+        async fn change_password(
+            &self,
+            _identity: &Identity,
+            _change: PasswordChange,
+            _context: &RequestContext,
+        ) -> migo_core::Result<Grant> {
+            unimplemented!("the broadcast test never changes passwords")
+        }
+
+        async fn set_contact(
+            &self,
+            _identity: &Identity,
+            _contact: &str,
+            _context: &RequestContext,
+        ) -> migo_core::Result<()> {
+            unimplemented!("the broadcast test never changes a contact record")
+        }
+
+        fn issue_captcha<'a>(
+            &'a self,
+            _now: Timestamp,
+        ) -> std::pin::Pin<
+            std::boxed::Box<
+                dyn std::future::Future<Output = Option<migo_captcha::CaptchaChallengeView>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            unimplemented!("the broadcast test never issues captchas")
+        }
+
+        async fn request_recovery(
+            &self,
+            _identifier: &str,
+            _captcha: &migo_captcha::CaptchaProof,
+            _context: &RequestContext,
+        ) -> migo_core::Result<migo_store::traits::RecoveryRow> {
+            unimplemented!("the broadcast test never starts a recovery flow")
+        }
+
+        async fn confirm_recovery(
+            &self,
+            _token_id: Id,
+            _tag: &[u8],
+            _new_password: &migo_core::Secret,
+            _context: &RequestContext,
+        ) -> migo_core::Result<()> {
+            unimplemented!("the broadcast test never confirms a recovery flow")
+        }
+    }
+
+    /// A gateway over the real limiter and registry and an authenticator nothing reaches, mirroring
+    /// the harness in `tests/gateway.rs` minus the socket: the seam under test is called from
+    /// outside any session.
+    fn gateway() -> Gateway {
+        let registry = Registry::new();
+        let policies = Policies::from_config(&Config::default().rate_limit)
+            .expect("the default rate-limit policies are valid");
+        let limiter: SharedRateLimiter = Arc::new(CacheRateLimiter::new(
+            Arc::new(MemoryCache::new()),
+            policies,
+            &registry,
+        ));
+        Gateway::open(
+            &registry,
+            &GatewayConfig::default(),
+            GatewayServices {
+                authenticator: Arc::new(UnusedAuth) as SharedAuth,
+                rate_limiter: limiter,
+                clock: Arc::new(ManualClock::new(ts(NOW))) as Arc<dyn Clock>,
+                random: Box::new(SeededRandom::new(1)),
+                dispatcher: Arc::new(NoopDispatcher),
+                shutdown: Shutdown::new(),
+                node: NodeInfo::default(),
+                features: 0,
+            },
+        )
+    }
+
+    #[test]
+    fn broadcast_to_topic_reaches_a_subscribed_session() {
+        let gateway = gateway();
+        let session_id = Id::from(0x00B2);
+        // A real mailbox built to the node's resolved settings, registered against the hub
+        // directly — the same registry a live session's handle sits in, without the socket.
+        let outbound = Arc::new(Outbound::new(
+            gateway.inner.settings.queue_capacity,
+            gateway.inner.settings.resume_buffer_frames,
+            gateway.inner.settings.resume_window_ms,
+        ));
+        gateway
+            .inner
+            .hub
+            .register(SessionHandle::new(session_id, Arc::clone(&outbound)));
+        let room = Topic {
+            kind: TopicKind::Room,
+            id: Id::from(0x00C3),
+        };
+        let event = NotificationEvent::default();
+
+        // Nobody is subscribed yet: the broadcast is a silent no-op that leaves the mailbox
+        // untouched and must not panic — the "same gate" property's absence branch.
+        gateway.broadcast_to_topic(&room, Opcode::NotificationEvent, &event, ts(NOW));
+        assert!(
+            outbound.take_ready().is_empty(),
+            "a topic with no subscribers delivers nothing"
+        );
+
+        // Subscribe through the hub — the gate `broadcast_to_topic` itself does not re-check.
+        let subscribed = gateway
+            .inner
+            .hub
+            .subscribe(session_id, std::slice::from_ref(&room));
+        assert!(
+            subscribed.rejected.is_empty(),
+            "a single subscription is far below the per-session cap"
+        );
+
+        gateway.broadcast_to_topic(&room, Opcode::NotificationEvent, &event, ts(NOW));
+
+        let ready = outbound.take_ready();
+        assert_eq!(
+            ready.len(),
+            1,
+            "the frame reaches the subscribed session's mailbox"
+        );
+        let frame = Frame::decode(ready[0].clone()).expect("the broadcast frame must decode");
+        assert_eq!(
+            frame.header.opcode,
+            Opcode::NotificationEvent.to_wire(),
+            "the frame carries the opcode the caller named"
+        );
+        assert_eq!(
+            frame.header.correlation, 0,
+            "a server-originated frame carries correlation 0"
+        );
+        let decoded: NotificationEvent =
+            from_frame(&frame).expect("the broadcast payload must decode");
+        assert_eq!(
+            decoded, event,
+            "the payload arrives exactly as it was encoded"
+        );
+    }
 }

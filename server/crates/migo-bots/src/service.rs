@@ -46,7 +46,7 @@ use crate::model::{
     MAX_DISPLAY_NAME_CHARS, MAX_WEBHOOK_URL_BYTES,
 };
 use crate::token::Minter;
-use crate::traits::{Bots, SharedBots};
+use crate::traits::{Bots, SharedBots, SharedWebhook};
 
 /// What registering a bot costs the owner's rate-limit budget. The dearest action here: it
 /// writes three rows and is the point a flood of throwaway accounts would be created.
@@ -62,6 +62,9 @@ const PAUSE_COST: u32 = 5;
 const LIST_COST: u32 = 3;
 /// What reading one bot costs.
 const GET_COST: u32 = 3;
+/// What commanding a bot costs. The §145 price of `BOT_COMMAND`: cheap enough that a
+/// workflow asks its bot things all day, dear enough that a script pays per ask.
+const COMMAND_COST: u32 = 2;
 
 /// The bot service.
 ///
@@ -79,6 +82,9 @@ pub struct BotService<S: ?Sized = dyn Store, L: ?Sized = dyn RateLimiter> {
     /// service is shared. Drawn from for account and bot ids and for minting tokens.
     random: Mutex<Box<dyn Random>>,
     meters: Meters,
+    /// The transport that carries a command to a bot's webhook. Supply-side, like media's
+    /// `Storage`: the crate owns the policy, the composition root owns the client.
+    sink: SharedWebhook,
 }
 
 impl<S, L> BotService<S, L>
@@ -102,6 +108,7 @@ where
         token_root: &[u8],
         mut random: Box<dyn Random>,
         registry: &Registry,
+        sink: SharedWebhook,
     ) -> Result<Self> {
         let minter = Minter::new(token_root);
         let locked_hash = build_locked_hash(&mut *random)?;
@@ -113,6 +120,7 @@ where
             locked_hash,
             random: Mutex::new(random),
             meters: Meters::new(registry),
+            sink,
         })
     }
 
@@ -380,6 +388,57 @@ where
         let bot = self.owned(owner, bot_id).await?;
         Ok(view_of(&bot))
     }
+
+    async fn command(
+        &self,
+        caller: &Caller,
+        bot_id: Id,
+        command: &str,
+        args: &[String],
+    ) -> Result<()> {
+        self.charge(caller, COMMAND_COST).await?;
+
+        // Existence and being enabled are the gate, not ownership: a command is the §41
+        // integration surface every user may reach, so a bot someone else owns answers
+        // here as itself and stays invisible only when it does not exist at all. A paused
+        // bot reads the same as a missing one — its token already fails that way (§161),
+        // and a command that quietly queues for a paused bot would surprise the sender.
+        let bot = match self.store.bot(bot_id).await? {
+            Some(bot) if bot.disabled_at.is_none() => bot,
+            _ => return Err(fault::not_found("bot")),
+        };
+
+        // The webhook is the one delivery channel this row carries. An empty one means the
+        // owner never registered an integration, and refusing tells the commander so
+        // instead of swallowing the command into nowhere.
+        let Some(url) = bot.webhook_url.as_deref().filter(|url| !url.is_empty()) else {
+            return Err(fault::validation(
+                "webhook",
+                "this bot has no delivery channel registered",
+            ));
+        };
+
+        self.sink
+            .deliver(url, &command_payload(caller, bot_id, command, args)?)
+            .await
+    }
+}
+
+/// The JSON body `POST`-ed to a bot's webhook.
+///
+/// The webhook is the bot SDK's own contract, so JSON is right here — the no-JSON rule of
+/// section 169 governs the mesh, not a bot owner's endpoint. The caller's account id is
+/// included so the bot can answer through the same channel it was reached on; args are
+/// carried as an array, not spliced into the command, so an argument that looks like
+/// another flag stays an argument.
+fn command_payload(caller: &Caller, bot_id: Id, command: &str, args: &[String]) -> Result<Vec<u8>> {
+    serde_json::to_vec(&serde_json::json!({
+        "bot_id": bot_id.to_text(),
+        "command": command,
+        "args": args,
+        "from": caller.account_id.to_text(),
+    }))
+    .map_err(|error| fault::internal(format!("could not encode the command payload: {error}")))
 }
 
 /// Assembles a bot service behind the erased [`Bots`] trait, with the operating-system
@@ -397,6 +456,7 @@ pub fn open(
     config: BotsConfig,
     token_root: &[u8],
     registry: &Registry,
+    sink: SharedWebhook,
 ) -> Result<SharedBots> {
     let service = BotService::new(
         store,
@@ -405,6 +465,7 @@ pub fn open(
         token_root,
         Box::new(OsRandom) as Box<dyn Random>,
         registry,
+        sink,
     )?;
     Ok(Arc::new(service))
 }

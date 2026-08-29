@@ -356,12 +356,20 @@ impl App {
             &registry,
         );
 
+        // The webhook sink is the outbound HTTPS client bot commands ride on (section 41);
+        // the bots crate owns the policy, this root owns the transport.
+        let webhook_sink: migo_bots::SharedWebhook = {
+            let sink: migo_bots::SharedWebhook =
+                std::sync::Arc::new(crate::webhook::ReqwestWebhook::new()?);
+            sink
+        };
         let bots = migo_bots::open(
             store.clone(),
             limiter.clone(),
             migo_bots::BotsConfig::default(),
             &node_secret,
             &registry,
+            webhook_sink,
         )
         .context("cannot open bots")?;
 
@@ -404,7 +412,7 @@ impl App {
             bots.clone(),
         ));
 
-        let gateway = Gateway::open(
+        let gateway = Arc::new(Gateway::open(
             &registry,
             &config.gateway,
             GatewayServices {
@@ -417,7 +425,25 @@ impl App {
                 node: node.clone(),
                 features: FEATURES,
             },
-        );
+        ));
+
+        // The mesh transport: the listener only when the operator gave it an address — the
+        // internal segment it belongs to is a deployment concern (section 169) — and the
+        // outbox runner always, so a peer added later starts receiving without a restart.
+        let mesh_transport = Arc::new(crate::mesh::MeshTransport::new(
+            Arc::clone(&federation),
+            Some(Arc::clone(&gateway)),
+            &registry,
+            clock.clone(),
+        ));
+        if let Some(bind) = config.node.mesh_bind.as_deref() {
+            let bound = mesh_transport
+                .spawn_listener(bind)
+                .await
+                .context("cannot bind the mesh listener")?;
+            tracing::info!(%bound, "mesh listener bound");
+        }
+        mesh_transport.spawn_runner(clock.clone());
 
         // The REST API renders the very registry every service just registered into, so wrapping it
         // in an `Arc` here must come after the last `&registry` borrow above.
@@ -435,7 +461,7 @@ impl App {
         );
 
         Ok(Self {
-            gateway: Arc::new(gateway),
+            gateway,
             api_router,
             clock,
             shutdown,

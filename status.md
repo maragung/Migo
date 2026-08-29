@@ -408,3 +408,50 @@ CONVERSATION_CREATE, MESSAGE_SEND) terbayar pada kedua lapisan untuk akun yang b
 Catatan jujur: biaya registrasi memang menghabiskan seluruh bucket anonim (satu pendaftaran per
 ~5 detik per /24) — itu perilaku anti-spam yang disengaja dengan override
 `auth.registration_cost` untuk pengembangan lokal, bukan cacat.
+
+## 13. Yang SPEC kini bekerja: perintah bot dan transport mesh (v0.2.5)
+
+Dua item yang di bagian 10 diakui masih setengah jadi kini memiliki implementasi nyata dengan
+test yang menutupnya.
+
+BOT_COMMAND tidak lagi decode-dan-ack. `migo-bots` mendapat metode `command` pada trait `Bots`
+beserta port `Webhook` yang diisi composition root dengan klien HTTPS sungguhan
+(`ReqwestWebhook`, reqwest + rustls, batas waktu 5 detik) dan dengan palsu perekam di test.
+Aturannya milik crate: bot harus ada dan aktif (bot jeda membaca sama dengan bot tak dikenal,
+§161), webhook wajib terdaftar — tanpa itu perintah ditolak `VALIDATION_FAILED` alih-alih
+ditelan diam-diam, karena pengguna menunggu balasan yang tidak akan pernah datang — dan
+payload JSON memuat identitas pemberi perintah agar bot bisa menjawab lewat kanal yang sama.
+Enam test baru menutup delivery, argumen yang berbentuk merusak tetap menjadi satu string,
+penolakan tanpa webhook, opasitas bot jeda, satu error opak untuk webhook mati, dan harga 2
+yang tetap dipungut walau ditolak.
+
+Transport mesh kini ada: `migod::mesh::MeshTransport`, dua tugas tokio yang melengkapi batas
+keamanan `Mesh`. Listener menerima koneksi TCP dan menjalankan sisi server handshake
+(`FED_HELLO` dua arah, `FED_AUTH` membawa `NodeProof` sebagai `signed_at || signature`,
+diverifikasi lewat `Mesh::authenticate` yang menolak peer tak dikenal, jeda, atau diblokir
+sebelum tanda tangan diperiksa). Runner menguras outbox (`Mesh::due`) dan mengirim setiap
+event sebagai `FED_FORWARD` bernomor sequence per link; penerima menjawab `FED_ACK` berupa
+watermark kumulatif, yang dipetakan ke `Mesh::mark_delivered`; kegagalan kembali sebagai
+`Mesh::mark_failed` dengan backoff eksponensial yang sudah ada di crate. Frame dibingkai
+u32 big-endian + MWP/1 tanpa JSON, sesuai section 169; replay dijatuhkan tanpa ack dan gap
+meruntuhkan link (`check_sequence`); ping-pong memakai opcode PING untuk dua arah. Event
+yang tiba di-route: `FED_ROOM_EVENT` di-publish ke hub gateway sehingga sesi yang berlangganan
+room menerima persis seperti event lokal (bukit terakhir yang lengkap), sementara digest
+presence, call relay, subscribe, rotasi key, health, dan error divalidasi, dihitung di metrik,
+dan dicatat — port ingest presence/panggilan adalah langkah berikut, dan keterbatasan itu
+ditulis di sini alih-alih disembunyikan di balik ack.
+
+Testnya: tiga test unit di `migod/src/mesh.rs` yang menghubungkan dua `MeshService` sungguhan
+via duplex (handshake penuh, delivery, replay dijatuhkan, gap meruntuhkan link) dan satu test
+integrasi `migod/tests/federation_link.rs` yang mengikat listener loopback dan mengalirkan
+event dari outbox node B ke ingest node A melalui TCP nyata dengan runner sungguhan.
+
+Catatan jujur: jam proses uji memakai skala `Timestamp` ber-epoch kustom; upaya pertama
+transport membaca jam UNIX untuk stamp sesi sehingga setiap bukti handshake tampak meleset
+lima puluh tahun dan ditolak — cacat itu ditemukan oleh test integrasinya sendiri dan
+diperbaiki dengan menyerahkan `Clock` milik composition root ke transport, bukan membaca jam
+host di dalamnya. Konfigurasi listener mesh adalah `node.mesh_bind` (opsional; tanpa itu
+listener mati dan runner tetap berjalan, no-op selama allow-list kosong); listener mesh
+tetap milik segmen internal dan tidak boleh menghadap internet umum (section 169). TLS di
+depan listener adalah langkah deployment berikutnya; framing binary-nya sudah versi wire
+yang sama.

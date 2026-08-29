@@ -186,6 +186,12 @@ pub struct NodeConfig {
     pub environment: Environment,
     /// Base64 Ed25519 node signing key for the mesh. Empty in development.
     pub signing_key: Option<Secret>,
+    /// Where the mesh listener binds, e.g. `127.0.0.1:18090`. `None` disables the listener:
+    /// a node that accepts no peer connections still runs its outbox runner, which is a
+    /// no-op while the allow-list stays empty. The listener belongs on the internal
+    /// segment and must never face the public Internet (section 169).
+    #[serde(default)]
+    pub mesh_bind: Option<String>,
 }
 
 impl Default for NodeConfig {
@@ -197,6 +203,7 @@ impl Default for NodeConfig {
             roles: vec![Role::Api, Role::Gateway, Role::Room, Role::Game],
             environment: Environment::Development,
             signing_key: None,
+            mesh_bind: None,
         }
     }
 }

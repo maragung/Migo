@@ -86,4 +86,4 @@ pub mod traits;
 
 pub use crate::model::{BotIdentity, BotView, BotsConfig, Caller, NewBotSpec, Registered, Scopes};
 pub use crate::service::{open, BotService};
-pub use crate::traits::{Bots, SharedBots};
+pub use crate::traits::{Bots, SharedBots, SharedWebhook};

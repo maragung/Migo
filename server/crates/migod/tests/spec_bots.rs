@@ -9,8 +9,21 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use migo_bots::model::{BotsConfig, Caller, NewBotSpec, Scopes};
 use migo_bots::open;
+use migo_bots::traits::Webhook;
+use migo_core::Result;
+
+/// A webhook sink that does nothing, for tests that never command a bot.
+struct NoopWebhook;
+
+#[async_trait]
+impl Webhook for NoopWebhook {
+    async fn deliver(&self, _url: &str, _payload: &[u8]) -> Result<()> {
+        Ok(())
+    }
+}
 use migo_cache::MemoryCache;
 use migo_core::config::Config;
 use migo_core::metrics::Registry;
@@ -35,8 +48,18 @@ fn harness() -> (migo_bots::SharedBots, Arc<MemoryStore>) {
         &registry,
     ));
     let store: migo_store::SharedStore = mem.clone();
-    let svc = open(store, limiter, BotsConfig::default(), TOKEN_ROOT, &registry)
-        .expect("the bot service opens");
+    // A webhook sink that records instead of speaking HTTPS; the register path here never
+    // commands a bot, so an always-succeeding no-op is exactly the stand-in it needs.
+    let sink: migo_bots::SharedWebhook = Arc::new(NoopWebhook);
+    let svc = open(
+        store,
+        limiter,
+        BotsConfig::default(),
+        TOKEN_ROOT,
+        &registry,
+        sink,
+    )
+    .expect("the bot service opens");
     (svc, mem)
 }
 

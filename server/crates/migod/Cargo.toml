@@ -43,6 +43,7 @@ migo-games      = { workspace = true }
 migo-bots       = { workspace = true }
 migo-federation = { workspace = true }
 migo-crypto     = { workspace = true }
+migo-wire       = { workspace = true }
 # Layer 4: transports. The two front doors, mounted side by side; they never see each other.
 migo-gateway    = { workspace = true }
 migo-api        = { workspace = true }
@@ -55,6 +56,8 @@ tower-http   = { workspace = true }
 async-trait  = { workspace = true }
 bytes        = { workspace = true }
 anyhow       = { workspace = true }
+reqwest      = { workspace = true }
+parking_lot  = { workspace = true }
 tracing      = { workspace = true }
 # The binary chooses how logs are formatted and filtered; the library stays subscriber-agnostic.
 tracing-subscriber = { workspace = true }
