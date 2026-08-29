@@ -462,7 +462,8 @@
       "payload": "MediaStateEvent",
       "auth": "User",
       "cost": 0,
-      "class": "Coalescable"
+      "class": "Coalescable",
+      "coalesce_key": "object_id"
     },
     {
       "name": "NOTIFICATION_ACK",
@@ -649,7 +650,8 @@
       "response": "Acknowledged",
       "auth": "Server",
       "cost": 0,
-      "class": "Coalescable"
+      "class": "Coalescable",
+      "coalesce_key": "region"
     },
     {
       "name": "FED_KEY_ROTATE",
