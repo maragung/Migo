@@ -1414,6 +1414,7 @@ where
 
     fn issue_captcha<'a>(
         &'a self,
+        mode: migo_captcha::CaptchaMode,
         _now: Timestamp,
     ) -> std::pin::Pin<
         Box<
@@ -1431,7 +1432,7 @@ where
         let gate = self.captcha.clone();
         Box::pin(async move {
             let gate = gate?;
-            gate.request().await.ok()
+            gate.request(mode).await.ok()
         })
     }
 

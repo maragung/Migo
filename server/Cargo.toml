@@ -77,6 +77,10 @@ async-trait  = "0.1"
 # --- serialization ---
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
+# The image captcha's rasteriser and PNG encoder: migo-captcha draws its challenges with
+# these, and the desktop client decodes the same PNGs for display.
+image       = { version = "0.25", default-features = false, features = ["png"] }
+ab_glyph    = "0.2"
 toml        = "0.8"
 bytes       = "1"
 

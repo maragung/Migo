@@ -154,6 +154,9 @@ struct Policy {
     max_devices_per_user: u32,
     max_body_bytes: usize,
     public_url: String,
+    /// Whether the accessible alternative captcha mode may be requested. Copied from
+    /// `captcha.accessible_mode` so the route decides it without borrowing the whole tree.
+    captcha_accessible_mode: bool,
 }
 
 impl ApiState {
@@ -165,6 +168,7 @@ impl ApiState {
             max_devices_per_user: config.auth.max_devices_per_user,
             max_body_bytes: config.http.max_body_bytes,
             public_url: config.http.public_url.clone(),
+            captcha_accessible_mode: config.captcha.accessible_mode,
         };
         Self {
             inner: Arc::new(Inner {

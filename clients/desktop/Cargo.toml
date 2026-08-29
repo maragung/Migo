@@ -55,6 +55,14 @@ futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bytes = "1"
+
+# The captcha challenge arrives as base64 text over REST and becomes pixels on a texture: base64
+# unwraps the wire form, `image` decodes the PNG inside it. Only the PNG codec is compiled in —
+# the server promises exactly one format, and a decoder that accepts more is a client that can be
+# handed something it never agreed to render. Same versions the server's captcha crate uses, so
+# the two dependency graphs share one copy of each.
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
 zeroize = { version = "1", features = ["derive"] }
 # Argon2id for the on-disk vault. `migo-crypto::password` hashes passwords into PHC strings for the
 # server to verify against; a vault needs the opposite — raw key bytes out of a passphrase — so the

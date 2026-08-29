@@ -393,20 +393,59 @@ async fn logout(
 
 // --- captcha and recovery surface -----------------------------------------
 
-/// `POST /v1/auth/captcha` — issue a fresh captcha. Anonymous; the
-/// rate limiter at the IP tier is the cost gate. The response is the
-/// gate's own public view of the issued challenge: an id the client
-/// must echo back, the six digits to type, and the seconds the
-/// challenge is still valid.
+/// The request body of `POST /v1/auth/captcha`: absent, empty, or carrying a mode.
+///
+/// The mode is a string on the wire because the JSON is public surface and an unknown
+/// value must fail loudly at the route rather than deep inside the renderer.
+#[derive(Deserialize, Default)]
+struct CaptchaRequest {
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+/// `POST /v1/auth/captcha` — issue a fresh captcha. Anonymous; the rate limiter at the IP
+/// tier is the cost gate, the same bucket every other bootstrap endpoint charges.
+///
+/// The response is the gate's own public view of the issued challenge: an id the client
+/// echoes back, the rendered image as base64, the mode it was rendered in, and the
+/// seconds the challenge stays valid. The answer exists nowhere in the response, in any
+/// form — that is the whole point of rendering it into a picture.
+///
+/// `{"mode": "image_alt"}` asks for the accessible alternative: a fresh challenge with a
+/// different random code and gentler rendering, for the user who could not read the
+/// standard one. Refused with `FEATURE_DISABLED` when the deployment turned the
+/// alternative off, because silently serving the standard mode to someone who just said
+/// they cannot read it is the one wrong answer here.
 async fn captcha(
     State(state): State<ApiState>,
     facts: RequestFacts,
+    body: Option<Json<CaptchaRequest>>,
 ) -> Result<Json<migo_captcha::CaptchaChallengeView>, crate::ApiError> {
     charge_ip(&state, facts.ip, BOOTSTRAP_COST).await?;
+    let requested = body
+        .and_then(|Json(request)| request.mode)
+        .unwrap_or_else(|| "image".to_string());
+    let mode = match requested.as_str() {
+        "image" => migo_captcha::CaptchaMode::Image,
+        "image_alt" if state.policy().captcha_accessible_mode => {
+            migo_captcha::CaptchaMode::ImageAlt
+        }
+        "image_alt" => {
+            return Err(crate::ApiError::from(
+                migo_protocol::fault::feature_disabled("captcha accessible mode"),
+            ))
+        }
+        other => {
+            return Err(crate::ApiError::from(migo_protocol::fault::validation(
+                "mode",
+                &format!("unknown captcha mode {other:?}: expected \"image\" or \"image_alt\""),
+            )))
+        }
+    };
     let now = state.now();
     let challenge = state
         .authenticator()
-        .issue_captcha(now)
+        .issue_captcha(mode, now)
         .await
         .ok_or_else(|| crate::ApiError::from(migo_protocol::fault::feature_disabled("captcha")))?;
     Ok(Json(challenge))

@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use migo_captcha::{CaptchaChallengeView, CaptchaProof, CaptchaService, CaptchaStore, TTL};
+use migo_captcha::{CaptchaChallengeView, CaptchaMode, CaptchaProof, CaptchaService, CaptchaStore};
 use migo_core::{Error, Result};
 
 /// The captcha gate the authenticator consults and the route layer
@@ -95,30 +95,20 @@ impl CaptchaGate {
         }
     }
 
-    /// The TTL, in seconds, the route layer puts on the wire.
-    fn ttl_seconds(&self) -> u32 {
-        // The captcha crate's `TTL` is a `Duration`; the public value is
-        // seconds. Saturating to zero would only happen for an
-        // unrealistic constant, but `u64 -> u32` would silently wrap
-        // past 136 years, so the conversion is the narrower one.
-        u32::try_from(TTL.as_secs()).unwrap_or(u32::MAX)
-    }
-
     /// Issues a fresh challenge and returns the public view of it.
     ///
-    /// The route layer is the only caller; it puts the returned
-    /// `challenge_id` and `question` on the wire and the gate does not
-    /// hold on to them. The challenge is stored under the id, so a
-    /// later `verify` can find it.
-    pub async fn request(&self) -> Result<CaptchaChallengeView> {
-        let challenge = self.service.issue_default();
+    /// The route layer is the only caller; it puts the returned view on the wire — an id,
+    /// the rendered image, the mode, the countdown — and the gate holds nothing. The
+    /// stored half carries the answer only as a tag, so a store dump answers nothing.
+    ///
+    /// [`CaptchaMode::ImageAlt`] is the accessible alternative: a fresh challenge with a
+    /// different random code and gentler rendering, for the user who could not read the
+    /// standard one. Whether it may be asked for at all is the deployment's
+    /// `captcha.accessible_mode`, enforced by the route layer before it gets here.
+    pub async fn request(&self, mode: CaptchaMode) -> Result<CaptchaChallengeView> {
+        let (view, challenge) = self.service.issue(mode)?;
         self.store.put(&challenge).await?;
-        let ttl_seconds = self.ttl_seconds();
-        Ok(CaptchaChallengeView {
-            challenge_id: challenge.challenge_id,
-            question: challenge.code,
-            ttl_seconds,
-        })
+        Ok(view)
     }
 
     /// Verifies a captcha proof against the stored challenge and, on
@@ -224,11 +214,16 @@ pub fn error_expired() -> Error {
 mod tests {
     use super::*;
     use migo_captcha::InMemoryStore;
+    use migo_core::config::CaptchaConfig;
     use migo_core::{Clock, ManualClock, SystemClock};
 
     fn test_gate() -> (Arc<CaptchaService>, Arc<InMemoryStore>, CaptchaGate) {
         let clock: Arc<dyn Clock + Send + Sync> = Arc::new(ManualClock::at_epoch());
-        let service = Arc::new(CaptchaService::new(b"a-test-root", clock));
+        let service = Arc::new(CaptchaService::new(
+            b"a-test-root",
+            clock,
+            CaptchaConfig::default(),
+        ));
         let store = Arc::new(InMemoryStore::new());
         let gate = CaptchaGate::new(service.clone(), store.clone(), 3);
         (service, store, gate)
@@ -239,11 +234,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_fresh_request_returns_a_challenge_with_a_question_and_a_ttl() {
+    async fn a_fresh_request_returns_an_image_and_a_ttl() {
         let (_service, _store, gate) = test_gate();
-        let challenge = gate.request().await.expect("gate issues");
-        assert!(!challenge.question.is_empty());
-        assert_eq!(challenge.ttl_seconds, 60);
+        let challenge = gate.request(CaptchaMode::Image).await.expect("gate issues");
+        assert!(
+            !challenge.image_png_base64.is_empty(),
+            "the challenge carries a rendered image"
+        );
+        assert_eq!(challenge.ttl_seconds, CaptchaConfig::default().ttl_seconds);
     }
 
     #[test]
@@ -285,11 +283,16 @@ mod tests {
 
     #[tokio::test]
     async fn verify_consumes_a_challenge() {
-        let (_service, _store, gate) = test_gate();
-        let challenge = gate.request().await.expect("gate issues");
+        let (service, store, gate) = test_gate();
+        // The answer lives only in the issue call's return; the gate's own challenge view
+        // never carries it, so the proof is built from what the issuing side knows.
+        let (_view, stored, answer) = service
+            .issue_for_test(CaptchaMode::Image, &mut migo_core::SeededRandom::new(1))
+            .expect("issue");
+        store.put(&stored).await.expect("stored");
         let proof = CaptchaProof {
-            challenge_id: challenge.challenge_id,
-            answer: challenge.question,
+            challenge_id: stored.challenge_id,
+            answer: answer.clone(),
         };
         assert!(gate.verify(&proof).await.expect("verify"));
         // A second attempt with the same proof is now rejected: the
@@ -299,16 +302,14 @@ mod tests {
 
     #[tokio::test]
     async fn verify_rejects_a_wrong_answer() {
-        let (_service, _store, gate) = test_gate();
-        let challenge = gate.request().await.expect("gate issues");
-        let wrong = if challenge.question == "000000" {
-            "000001".to_string()
-        } else {
-            "000000".to_string()
-        };
+        let (service, store, gate) = test_gate();
+        let (_view, stored, _answer) = service
+            .issue_for_test(CaptchaMode::Image, &mut migo_core::SeededRandom::new(2))
+            .expect("issue");
+        store.put(&stored).await.expect("stored");
         let proof = CaptchaProof {
-            challenge_id: challenge.challenge_id,
-            answer: wrong,
+            challenge_id: stored.challenge_id,
+            answer: "WRONG1".to_string(),
         };
         assert!(!gate.verify(&proof).await.expect("verify"));
     }
@@ -320,7 +321,11 @@ mod tests {
         // gets the documented behaviour. The point of the test is to
         // pin the model, not to bless the configuration.
         let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock);
-        let service = Arc::new(CaptchaService::new(b"a-test-root", clock));
+        let service = Arc::new(CaptchaService::new(
+            b"a-test-root",
+            clock,
+            CaptchaConfig::default(),
+        ));
         let store = Arc::new(InMemoryStore::new());
         let gate = CaptchaGate::new(service, store, 0);
         let ip = ip();

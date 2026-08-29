@@ -2278,11 +2278,13 @@ name = "migo-desktop"
 version = "0.1.0"
 dependencies = [
  "argon2",
+ "base64",
  "bytes",
  "directories",
  "eframe",
  "egui",
  "futures-util",
+ "image",
  "migo-core",
  "migo-crypto",
  "migo-protocol",

@@ -21,6 +21,7 @@ use egui::{Align, Layout, RichText, Ui};
 use crate::config::ServerEndpoint;
 use crate::net::Command;
 use crate::theme::{palette, space};
+use crate::ui::captcha::{self, CaptchaState};
 use crate::ui::server_form::{self, ServerFormState};
 use crate::ui::{widgets, Context, Screen};
 
@@ -37,6 +38,10 @@ pub struct AuthState {
     /// True from submit until the worker reports success or failure, so a second click cannot fire a
     /// second registration.
     pub busy: bool,
+    /// The image captcha and everything about answering it. Shared by the register and sign-in
+    /// forms because a challenge answers either: the server binds it to nothing but itself, so
+    /// the second form to appear reuses the first one's picture rather than paying for another.
+    pub captcha: CaptchaState,
     /// The local form state for the server disclosure. The disclosure owns its own "open" flag
     /// (held in egui's temp data so it does not reset on every frame), but the typed-but-not-yet
     /// accepted values live here so they survive a screen switch.
@@ -54,6 +59,7 @@ impl Default for AuthState {
             passphrase: String::new(),
             confirm: String::new(),
             busy: false,
+            captcha: CaptchaState::default(),
             server_form,
         }
     }
@@ -74,6 +80,12 @@ impl AuthState {
     /// Updates the server endpoint from the disclosure widget, then re-seeds the form state so
     /// the next time the disclosure opens it shows the accepted value.
     pub fn apply_server(&mut self, endpoint: ServerEndpoint) {
+        if endpoint != self.server {
+            // A challenge was issued by the old server and cannot be answered on the new one.
+            // Drop it; the captcha section fetches from the new endpoint the moment it next
+            // draws with nothing held.
+            self.captcha.reset();
+        }
         self.server = endpoint.clone();
         self.server_form = ServerFormState::from_endpoint(&endpoint);
     }
@@ -253,6 +265,7 @@ fn sign_in(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
         context,
         "The vault passphrase encrypts your keys on this computer. It is not sent anywhere and cannot be reset.",
     );
+    captcha::show(ui, context, &mut state.captcha, &state.server);
     ui.add_space(space::LG);
 
     let ready = state.sign_in_ready() && !state.busy;
@@ -262,6 +275,7 @@ fn sign_in(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
             identifier: state.identifier.trim().to_owned(),
             password: state.password.clone(),
             passphrase: state.passphrase.clone(),
+            captcha: state.captcha.take_proof(),
         });
         state.busy = true;
         state.clear_secrets();
@@ -325,6 +339,7 @@ fn register(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
         context,
         "Two different secrets: the password signs you in to the server, the passphrase encrypts your keys here. Do not reuse one for the other.",
     );
+    captcha::show(ui, context, &mut state.captcha, &state.server);
     ui.add_space(space::LG);
 
     let ready = state.register_ready() && !state.busy;
@@ -334,6 +349,7 @@ fn register(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
             username: state.identifier.trim().to_owned(),
             password: state.password.clone(),
             passphrase: state.passphrase.clone(),
+            captcha: state.captcha.take_proof(),
         });
         state.busy = true;
         state.clear_secrets();

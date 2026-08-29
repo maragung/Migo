@@ -62,6 +62,7 @@ import { BootstrapClient } from './rest.js';
 import type {
   AccountSession,
   CaptchaChallenge,
+  CaptchaMode,
   CaptchaProof,
   DeviceDescriptor,
   FetchLike,
@@ -704,11 +705,13 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   /**
    * Asks the server for a captcha challenge, used by the public bootstrap surface.
    *
-   * The page (or the caller) stores the `challenge_id`, prompts the user for an answer, and
-   * passes the resulting {@link CaptchaProof} into the next register/login attempt.
+   * The caller stores the `challenge_id`, renders the PNG for the user, and passes what
+   * the user reads off the image back in as the {@link CaptchaProof} on the next
+   * register/login attempt. `mode` selects the rendering: the default distorted image,
+   * or `'image_alt'` for the gentler, more readable alternative.
    */
-  async requestCaptcha(): Promise<CaptchaChallenge> {
-    return this.#bootstrap.requestCaptcha();
+  async requestCaptcha(mode?: CaptchaMode): Promise<CaptchaChallenge> {
+    return this.#bootstrap.requestCaptcha(mode);
   }
 
   // --- internals ---

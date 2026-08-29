@@ -376,6 +376,63 @@ impl Default for AuthConfig {
     }
 }
 
+/// The image captcha's rendering and policy knobs.
+///
+/// The defaults are the standard posture the whole system ships with: enabled, five to
+/// six characters, a two-minute window, the accessible alternative mode on, and a
+/// middling noise strength. Every knob exists so a deployment can tune difficulty
+/// without recompiling, and every knob is validated — a captcha whose configuration
+/// locked users out (a zero TTL, an empty length range) would be an outage dressed as a
+/// security posture.
+///
+/// The knobs that shape the picture (`image_width`, `image_height`, `noise_strength`)
+/// feed the renderer in `migo-captcha` verbatim; the policy knobs (`ttl_seconds`,
+/// `length_min`/`length_max`, `accessible_mode`) are enforced by the service and the
+/// route. `enabled` is the one switch that matters at the composition root: it takes the
+/// whole gate down when an operator decides their deployment does not want it, the same
+/// posture as `auth.captcha_threshold = None` without touching two files.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CaptchaConfig {
+    /// Whether the captcha subsystem runs at all. `false` is the same posture as
+    /// `auth.captcha_threshold = None`: no gate is built and the challenge route
+    /// answers `FEATURE_DISABLED`.
+    pub enabled: bool,
+    /// The fewest characters a challenge may carry.
+    pub length_min: u8,
+    /// The most characters a challenge may carry. The renderer tightens spacing before
+    /// it ever shrinks glyphs, so the width bound and this bound stay in step.
+    pub length_max: u8,
+    /// How many seconds a challenge stays answerable, from issue to submit.
+    pub ttl_seconds: u32,
+    /// Whether the accessible alternative mode may be requested. When `false` a request
+    /// for it is refused rather than silently served the standard mode, because a client
+    /// that asked for the easier picture has a user behind it who could not read the
+    /// last one.
+    pub accessible_mode: bool,
+    /// The noise multiplier, `1..=5`. Every dot and speckle count scales with it.
+    pub noise_strength: u8,
+    /// The canvas width in pixels.
+    pub image_width: u32,
+    /// The canvas height in pixels.
+    pub image_height: u32,
+}
+
+impl Default for CaptchaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            length_min: 5,
+            length_max: 6,
+            ttl_seconds: 120,
+            accessible_mode: true,
+            noise_strength: 3,
+            image_width: 260,
+            image_height: 96,
+        }
+    }
+}
+
 /// Logging, metrics, tracing.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -530,6 +587,8 @@ pub struct Config {
     pub federation: FederationConfig,
     /// Abuse control.
     pub rate_limit: RateLimitConfig,
+    /// The image captcha.
+    pub captcha: CaptchaConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -736,6 +795,45 @@ impl Config {
         }
         if self.auth.max_devices_per_user == 0 {
             problems.push("auth.max_devices_per_user must be at least 1".to_string());
+        }
+        if !self.captcha.enabled && self.auth.captcha_threshold.is_some() {
+            // Not fatal — the threshold is simply ignored while the subsystem is off —
+            // but an operator who set both deserves to hear about the contradiction
+            // rather than discover it from a route that never asks for a proof.
+            problems.push(
+                "auth.captcha_threshold is set but captcha.enabled is false: the gate will \
+                 not engage while the captcha subsystem is disabled"
+                    .to_string(),
+            );
+        }
+        if self.captcha.length_min < 4
+            || self.captcha.length_max > 8
+            || self.captcha.length_min > self.captcha.length_max
+        {
+            problems.push(format!(
+                "captcha.length_min/max must satisfy 4 <= min <= max <= 8, got {} and {}",
+                self.captcha.length_min, self.captcha.length_max
+            ));
+        }
+        if !(30..=600).contains(&self.captcha.ttl_seconds) {
+            problems.push(format!(
+                "captcha.ttl_seconds must be within 30..=600, got {}",
+                self.captcha.ttl_seconds
+            ));
+        }
+        if !(1..=5).contains(&self.captcha.noise_strength) {
+            problems.push(format!(
+                "captcha.noise_strength must be within 1..=5, got {}",
+                self.captcha.noise_strength
+            ));
+        }
+        if !(120..=640).contains(&self.captcha.image_width)
+            || !(64..=240).contains(&self.captcha.image_height)
+        {
+            problems.push(format!(
+                "captcha.image_width/height must be within 120..=640 and 64..=240, got {}x{}",
+                self.captcha.image_width, self.captcha.image_height
+            ));
         }
         if matches!(self.auth.captcha_threshold, Some(0)) {
             problems.push(

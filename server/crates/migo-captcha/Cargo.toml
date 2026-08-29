@@ -16,6 +16,17 @@ async-trait.workspace = true
 parking_lot.workspace = true
 rand = "0.8"
 serde.workspace = true
+base64.workspace = true
+ab_glyph.workspace = true
+image = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+serde_json.workspace = true
+
+[features]
+# Exposes `CaptchaService::issue_for_test`, which returns the plaintext answer alongside
+# the challenge so an integration suite can complete its own challenge. Nothing on any
+# production path enables this; dev-dependencies opt in and feature unification keeps it
+# out of release builds.
+test-internal = []

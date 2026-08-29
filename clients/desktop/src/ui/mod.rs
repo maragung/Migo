@@ -14,6 +14,7 @@
 //! is still iterating.
 
 pub mod auth;
+pub mod captcha;
 pub mod chat;
 pub mod server_form;
 pub mod widgets;

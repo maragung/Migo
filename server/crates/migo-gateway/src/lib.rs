@@ -499,6 +499,7 @@ mod tests {
 
         fn issue_captcha<'a>(
             &'a self,
+            _mode: migo_captcha::CaptchaMode,
             _now: Timestamp,
         ) -> std::pin::Pin<
             std::boxed::Box<

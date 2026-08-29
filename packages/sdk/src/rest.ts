@@ -48,10 +48,30 @@ export interface DeviceDescriptor {
   deviceModel?: string;
 }
 
-/** A captcha challenge the server hands out for the public bootstrap surface. */
+/**
+ * Which rendering a captcha challenge asks the server for.
+ *
+ * `image` is the ordinary distorted-text challenge; `image_alt` is the accessible
+ * alternative — a freshly-issued challenge carrying a *different* random code, rendered
+ * with larger glyphs and less noise for the users who cannot read the ordinary one. It
+ * is still an image the user has to solve, just a gentler one; the two are answered and
+ * verified the same way, so a caller can offer the alt mode without any other change.
+ */
+export type CaptchaMode = 'image' | 'image_alt';
+
+/**
+ * An image captcha challenge the server hands out for the public bootstrap surface.
+ *
+ * `image_png_base64` is a standard-base64 PNG (padding included) that the caller renders
+ * for the user; the answer is whatever the user reads off that rendered image. Nothing
+ * about the answer is in this response — the challenge is the picture, and the proof is
+ * the user's typing bound to `challenge_id`. `mode` echoes which rendering the server
+ * actually issued, so a caller refreshing the challenge can ask for the same one again.
+ */
 export interface CaptchaChallenge {
   challenge_id: Id;
-  question: string;
+  image_png_base64: string;
+  mode: CaptchaMode;
   ttl_seconds: number;
 }
 
@@ -198,6 +218,17 @@ function captchaBody(proof: CaptchaProof): Record<string, unknown> {
   return { challenge_id: proof.challenge_id, answer: proof.answer };
 }
 
+/**
+ * Coerces the wire `mode` field into a {@link CaptchaMode}.
+ *
+ * The server answers `image` or `image_alt` and nothing else, but this field crosses a
+ * network: one that is missing (an older server) or unknown (a newer one) collapses to
+ * the default rendering rather than leaking a string the caller's types do not allow.
+ */
+function parseCaptchaMode(value: unknown): CaptchaMode {
+  return value === 'image_alt' ? 'image_alt' : 'image';
+}
+
 /** Maps a `AccountSession`-shaped JSON row from the server into the SDK's typed view. */
 function parseSessionInfo(row: Record<string, unknown>): AccountSession {
   const deviceField = (row['device'] ?? row['display_name'] ?? '') as string;
@@ -278,17 +309,28 @@ export class BootstrapClient {
   }
 
   /**
-   * `POST /v1/auth/captcha` — request a captcha challenge for the public bootstrap surface.
+   * `POST /v1/auth/captcha` — request an image captcha challenge for the public
+   * bootstrap surface.
    *
-   * The server mints a short-lived challenge the user answers on the next register/login attempt.
-   * Errors are surfaced as {@link RemoteError} like any other bootstrap call; the caller handles
-   * `CAPTCHA_REQUIRED` itself, not this method.
+   * The server mints a short-lived challenge as a PNG the caller renders; the user reads
+   * the answer off the image, and that typing becomes the {@link CaptchaProof} on the
+   * next register/login attempt. Nothing about the answer crosses the wire here. `mode`
+   * selects the rendering: omitted (or `'image'`) asks for the ordinary distorted text,
+   * and `'image_alt'` asks for the gentler accessible alternative — a fresh challenge
+   * either way, solved identically. Errors are surfaced as {@link RemoteError} like any
+   * other bootstrap call; the caller handles `CAPTCHA_REQUIRED` itself, not this method.
    */
-  async requestCaptcha(): Promise<CaptchaChallenge> {
-    const body = (await this.#post('/v1/auth/captcha', {})) as Record<string, unknown>;
+  async requestCaptcha(mode?: CaptchaMode): Promise<CaptchaChallenge> {
+    const body = (await this.#post(
+      '/v1/auth/captcha',
+      // An omitted mode is the ordinary challenge; `{ mode }` is how a caller asks for
+      // the alt rendering. The server accepts either shape for the default.
+      mode === undefined ? {} : { mode },
+    )) as Record<string, unknown>;
     return {
       challenge_id: parseId(String(body['challenge_id'])),
-      question: String(body['question']),
+      image_png_base64: String(body['image_png_base64']),
+      mode: parseCaptchaMode(body['mode']),
       ttl_seconds: Number(body['ttl_seconds']),
     };
   }

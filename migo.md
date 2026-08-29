@@ -5402,12 +5402,48 @@ packages/wire, yaitu codec frame TypeScript untuk varint, zigzag, MSE, flag, lim
 packages/crypto, yaitu HKDF label, XChaCha20-Poly1305, dan token HMAC di atas @noble/hashes dan @noble/ciphers tanpa satu pun primitive yang ditulis sendiri, dengan 21 test yang dijalankan terhadap file vector yang sama dengan sisi Rust ditambah case yang hanya bisa terjadi di JavaScript, yaitu byte key tidak boleh muncul di hasil String, JSON.stringify, maupun util.inspect, key yang dibungkus WAJIB menyalin byte-nya sehingga buffer pemanggil tidak bisa mengubah key setelahnya, dan key yang sudah dihapus WAJIB menolak dipakai alih-alih menghasilkan tag yang terlihat masuk akal dari key nol
 packages/sdk, yaitu MigoClient di atas rantai packages/wire, packages/protocol, dan packages/crypto yang ketiganya sudah BUILT, dengan register, sign in, resume, sesi gateway, distribusi sender key, percakapan direct dan group, pengiriman pesan tersegel, presence, dan abstraksi KeyStore bagi material kunci yang default-nya in-memory sehingga tidak ada private key yang meninggalkan proses, seluruhnya lulus tsc --build dalam mode strict tetapi belum memiliki satu pun test. Di sinilah cryptographic envelope section 11 pertama kali dikodekan, yaitu di src/session-crypto.ts, dan clients/desktop maupun clients/android menyalin layout-nya field demi field dari sana, sehingga ketiganya bukan tiga spesifikasi melainkan satu layout dengan tiga penulis: envelope_version, scheme, sender_key_id, lalu preamble X3DH yang hanya ada pada scheme prekey, lalu ratchet_public_key, message_counter, previous_chain_length, dan ciphertext sampai akhir yang enam belas byte terakhirnya adalah tag AEAD. Bahwa scheme dan bukan sebuah flag yang menentukan field mana yang hadir adalah keputusan yang disengaja, sebab boolean yang nilainya diam-diam menambahkan seratus byte ke layout adalah cara parser berakhir tidak sepakat tentang di mana ciphertext dimulai, dan 56 test yang menutup provenance kripto yaitu setiap primitif yang datang dari tiga library @noble yang diaudit dan bukan dari implementasi sendiri sementara layer SDK tidak mengimpor kriptografi apa pun miliknya sendiri, kerahasiaan kunci yaitu satu sesi 1:1 penuh maupun penanganan sender key yang sama sekali tidak menyentuh web store sehingga tidak ada private key yang pernah ditulis ke localStorage sesuai section 178, padding yang membulatkan plaintext ke bucket tetap sehingga dua pesan pendek yang berbeda isi tersegel dengan panjang yang sama, transport yang menaruh socket-nya ke mode biner sebelum handshake dan tidak pernah mengirim satu pun string teks maupun JSON serta tidak pernah menarik data realtime di atas timer, dan error yang absen hint-nya tetap menyisakan symbol-nya berdiri sendiri dengan kegagalan autentikasi yang tidak dapat dibedakan antara akun yang tidak ada dan password yang salah
 clients/web, yaitu PWA Next.js di atas packages/sdk yang lulus tsc --noEmit dalam mode strict, dengan seluruh data realtime mengalir sebagai frame biner di atas WebSocket dan bukan JSON, dan snapshot KeyStore disimpan di IndexedDB dan bukan di localStorage, sessionStorage, maupun cookie sesuai section 178, tetapi belum memiliki test. Ia sepenuhnya client side sesuai output export Next sehingga artefaknya adalah satu direktori berkas statis yang dapat dilayani host statis mana pun, CDN, maupun tools/serve.mjs di paket itu sendiri dengan byte yang identik, dan tidak ada proses server yang perlu berdiri di antara pengguna dan kuncinya sendiri sebab tidak ada apa pun untuk dirender di sisi server ketika server tidak dapat membaca apa pun; karena tidak ada server, route dinamis /chat/[id] tidak dapat diprerender sehingga conversation yang terbuka hidup di fragment URL yang tidak pernah diterima host statis, dan skrip dev-nya berjalan di port 19991, dan 63 test yang menutup apa yang boleh dan tidak boleh dilihat pengguna: tidak satu pun private key atau token yang ditulis ke localStorage, sessionStorage, maupun cookie sedangkan snapshot key store dan grant session bolak-balik lewat IndexedDB di bawah key yang terdokumentasi, tidak satu pun string yang dikendalikan server yang dirender sebagai elemen HTML hidup sehingga caption dan isi pesan yang bermusuhan tampil sebagai teks yang di-escape dan inert, error yang tidak terduga yang tidak pernah membocorkan message, stack, path, maupun cause-nya sementara symbol mesin tetap tersembunyi sehingga lookup yang dibatasi privasi tidak dapat dibedakan dari yang tidak ada sesuai section 180, presence yang tidak pernah menyingkap user yang Invisible, dan href percakapan yang membawa id di fragment dan bukan di path maupun query sehingga id yang memuat metakarakter URL tidak dapat menyelundupkan parameter fragment kedua
-migo-captcha, yaitu tantangan captcha numerik enam-digit untuk permukaan
-bootstrap publik. Service dan store InMemory-nya diuji dengan tujuh test
-dari crate yang sama, dan store Postgres-nya mengikuti pola backend lain
-di migo-store. Migrasi 0002 menambahkan tabel captcha_challenge berindeks
-expires_at. Captcha tidak menambah ketergantungan baru; ia menggunakan
-MacKey dan Random yang sudah ada, dan tidak menggunakan pustaka gambar captcha.
+migo-captcha, yaitu tantangan captcha gambar untuk permukaan bootstrap publik,
+standar di seluruh aplikasi sejak keputusan itu dibalik. Versi pertamanya adalah
+kode numerik enam-digit yang dibawa teks di respons, dengan alasan bahwa sinyal
+perilaku cukup untuk gerbang teman-atau-bot; postur itu menua buruk karena kode
+teks di body respons selesai dipecahkan oleh script yang sama yang membaca body,
+sehingga gerbangnya hanya memperlambat satu request. Sekarang setiap tantangan
+adalah PNG yang dirender server-side: lima sampai enam karakter alfanumerik
+huruf besar dari alfabet tanpa karakter ambigu (I, O, S, 0, 1, 5 dikeluarkan),
+digambar dengan tiga font TTF yang di-embed include_bytes (Liberation Sans,
+Serif, dan Sans Narrow Bold) supaya kesulitan tantangan identik di semua mesin
+build dan run, dengan rotasi, skala, jitter baseline, dan spacing per karakter
+yang diacak, latar ber-dot dan ber-speckle ber-opacity rendah, wobble per-baris
+yang membengkokkan goresan vertikal, dan tepat satu kurva interferensi
+Catmull-Rom yang knot-nya ditempatkan struktural di dalam pita tinta setiap
+karakter plus jangkar di luar kanvas kedua sisinya, sehingga kurva dijamin
+melintasi semua karakter dari sisi ke sisi dan tidak pernah lurus karena
+tinggi knot tiap karakter diundi dari pita tinta karakter itu sendiri;
+parameter kurva (ketebalan, opacity, arah) diundi dalam batas aman. Jawaban
+tidak pernah keluar server dalam bentuk apa pun: yang disimpan hanyalah tag
+HMAC-SHA-256 atas jawaban ternormalisasi (huruf besar, tanpa whitespace)
+di bawah label migo-captcha-v2 dari root MacKey yang sama dengan token lain,
+dan migrasi 0002 sudah berbentuk tag sejak awal sehingga tidak ada migrasi
+baru; perbandingan constant-time, sekali-jalan per id lewat consume atomik di
+store (InMemory untuk satu proses; Postgres mengikuti pola backend lain),
+TTL 120 detik, dan verifikasi case-insensitive serta whitespace-insensitive.
+Mode image_alt adalah jalur aksesibel: tantangan baru dengan kode acak
+berbeda dan render lebih lunak (glyph lebih besar, rotasi lebih kecil, kurva
+lebih tipis, kontras tetap) — tetap gambar yang harus dipecahkan, bukan
+bypass, karena membacakan jawaban akan membuka gerbang untuk script juga.
+Konfigurasi di CaptchaConfig (enabled, length_min/max, ttl_seconds,
+accessible_mode, noise_strength 1-5, image_width/height) tervalidasi di
+startup dan default-nya ON; auth.captcha_threshold tetap mengatur kapan
+gerbang menuntut bukti. Renderer bergantung pada image (png) dan ab_glyph;
+answer hanya keluar lewat pintu issue_for_test di balik fitur test-internal
+yang tidak pernah dinyalakan jalur produksi, dan 16 test crate ini menutup
+alfabet, keunikan gambar dan tag antar-issue, determinisme dari seed,
+PNG yang valid dan berukuran konfigurasi, mode alt yang berbeda, verifikasi
+benar/salah/kadaluarsa/replay, dua jawaban berlomba yang hanya satu menang,
+dan view yang tidak memuat jawaban di respons REST-nya; auth-flow menambah pin wire
+(gambar PNG ter-encode dalam field image, tanpa field question, mode alt
+berbeda, mode tak dikenal ditolak) dan desktop egui menampilkan tantangan sebagai texture dengan
+normalisasi yang sama.
 
 tools/protocol-codegen, yaitu generator dan pemeriksa staleness
 tools/entity-codegen, yaitu generator entity SeaORM dari server/migrations dan pemeriksa staleness yang dijalankan lewat make entity-check, sehingga schema tetap menjadi satu sumber kebenaran dan entity tidak pernah boleh diedit tangan. Komentar pada file migration menjadi doc comment pada entity, dan komentar yang ditulis di ujung baris sebuah kolom melekat pada kolom yang ditulisi komentar itu, bukan pada kolom berikutnya. Sebelumnya melekat pada kolom berikutnya, sehingga 13 kolom di seluruh schema membawa penomoran enum milik kolom lain, yaitu doc comment yang bukan sekadar hilang melainkan salah dan menjelaskan kolom yang berbeda dari tempatnya duduk

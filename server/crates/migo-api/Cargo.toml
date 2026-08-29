@@ -21,6 +21,10 @@ hex = "0.4"
 migo-captcha.workspace = true
 
 [dev-dependencies]
+# The auth-flow suite completes challenges it issues itself, which needs the test-only
+# answer door in migo-captcha; no production path enables it.
+migo-captcha = { workspace = true, features = ["test-internal"] }
+base64.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }
 migo-store.workspace = true
 migo-cache.workspace = true

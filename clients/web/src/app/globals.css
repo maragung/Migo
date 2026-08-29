@@ -837,30 +837,45 @@ main {
 }
 .captcha-row {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 10px;
 }
 .captcha-row .field-label {
   flex: 1;
   margin: 0;
 }
-.captcha-question {
+.captcha-actions {
+  display: flex;
+  gap: 8px;
+}
+/* The challenge image: the server's PNG scales down on narrow screens, and the
+   border plus panel background keep the (possibly white) image readable — and the
+   loading placeholder visible — on both the light and dark themes. */
+.captcha-image {
+  max-width: 100%;
+  height: auto;
   display: block;
-  margin-top: 6px;
-  padding: 10px 12px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 18px;
-  letter-spacing: 0.18em;
-  color: var(--text);
-  background: var(--panel);
+  border-radius: 4px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  min-height: 1.6em;
+  background: var(--panel);
+}
+/* The live region under the image announces the challenge lifecycle, never its
+   content; it stays visually quiet so it does not compete with the image itself. */
+.captcha-status {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-faint);
 }
 .captcha-refresh {
   padding: 0 12px;
   height: 44px;
   font-size: 18px;
+  line-height: 1;
+}
+.captcha-alt {
+  padding: 0 12px;
+  height: 44px;
+  font-size: 13px;
   line-height: 1;
 }
 

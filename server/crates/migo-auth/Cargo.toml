@@ -24,5 +24,8 @@ tokio = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 
 [dev-dependencies]
+# The gate tests complete challenges they issue themselves, which needs the test-only
+# answer door in migo-captcha; no production path enables it.
+migo-captcha = { workspace = true, features = ["test-internal"] }
 migo-cache.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }

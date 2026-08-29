@@ -13,11 +13,13 @@
  *      verifies it.
  *
  * These tests pin the third invariant by driving `MigoClient.register` through a `fetch` double and
- * asserting the JSON body has the right fields, and pin the first two by rendering the captcha and
+ * asserting the JSON body has the right fields, pin the first two by rendering the captcha and
  * server widgets (the only pieces of the page that do not pull in `next/navigation`) and checking
- * the question and answer inputs are in the markup. A regression that removed the widget, broke
- * the wire field name, or stripped the captcha from the body would land in one of these
- * assertions and never in a less observable place.
+ * the challenge image, the answer input, and the refresh and easier-challenge controls are in the
+ * markup, and pin the challenge's own wire shape by driving `BootstrapClient.requestCaptcha`
+ * through the same double. A regression that removed the widget, broke the wire field name, or
+ * stripped the captcha from the body would land in one of these assertions and never in a less
+ * observable place.
  */
 
 import assert from 'node:assert/strict';
@@ -25,7 +27,7 @@ import test from 'node:test';
 
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { MigoClient, Platform, BandwidthMode } from '@migo/sdk';
+import { BootstrapClient, MigoClient, Platform, BandwidthMode } from '@migo/sdk';
 import type { CaptchaProof, Grant, Id, ServerEndpoint } from '@migo/sdk';
 
 const HOST = 'migo.test';
@@ -40,9 +42,11 @@ const ENDPOINT: ServerEndpoint = {
 
 const USERNAME = 'alice';
 const PASSWORD = 'correct-horse-battery-staple';
+// The answer a user would have read off the rendered challenge image: five to six
+// letters and digits, nothing else.
 const CAPTCHA: CaptchaProof = {
   challenge_id: '01ARZ3NDEKTSV4RRFFQ69G5FAV' as Id,
-  answer: '123456',
+  answer: 'AB3D7',
 };
 
 type CapturedCall = { url: string; init: RequestInit };
@@ -51,9 +55,18 @@ function makeFetchDouble(calls: CapturedCall[]): typeof fetch {
   return (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     calls.push({ url, init: init ?? {} });
-    return Promise.resolve(
-      new Response(
-        JSON.stringify({
+    // The double answers every endpoint the bootstrap surface hits. The challenge is an
+    // image now — a base64 PNG plus the mode the server issued — while the grant keeps
+    // the shape register has always parsed.
+    const isCaptcha = url.endsWith('/v1/auth/captcha');
+    const body = isCaptcha
+      ? {
+          challenge_id: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+          image_png_base64: 'aGVsbG8=',
+          mode: 'image',
+          ttl_seconds: 120,
+        }
+      : {
           account_id: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
           device_id: '01ARZ3NDEKTSV4RRFFQ69G5FAW',
           session_id: '01ARZ3NDEKTSV4RRFFQ69G5FAX',
@@ -63,9 +76,12 @@ function makeFetchDouble(calls: CapturedCall[]): typeof fetch {
           refresh_expires_at_ms: 2,
           capabilities: '1',
           is_new_account: true,
-        }),
-        { status: 201, headers: { 'content-type': 'application/json' } },
-      ),
+        };
+    return Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status: isCaptcha ? 200 : 201,
+        headers: { 'content-type': 'application/json' },
+      }),
     );
   };
 }
@@ -84,18 +100,32 @@ function refusingSocket(): never {
   throw new Error('the handshake is not under test in this file');
 }
 
-test('the captcha widget renders the question, the answer input, and a refresh control', async () => {
+test('the captcha widget renders the challenge image, the answer input, and the challenge controls', async () => {
   const { CaptchaWidget } = await import('../src/components/captcha-widget.js');
   const markup = renderToStaticMarkup(
     <CaptchaWidget endpoint={ENDPOINT} onChange={() => undefined} />,
   );
   assert.ok(markup.includes('class="captcha-widget"'), 'captcha widget must render its shell');
+  assert.ok(markup.includes('<img'), 'the challenge must render as an image element');
+  assert.ok(
+    markup.includes('alt="'),
+    'the challenge image must carry an accessible description (never the answer)',
+  );
   assert.ok(markup.includes('Captcha'), 'captcha label must be visible to the user');
   assert.ok(markup.includes('Answer'), 'the captcha answer input must be visible');
   assert.ok(
-    markup.includes('placeholder="Six digits"'),
-    'the answer field must be a six-digit input',
+    markup.includes('placeholder="5–6 characters"'),
+    'the answer field must take five to six letters and digits',
   );
+  assert.ok(
+    markup.includes('aria-label="Request a new captcha"'),
+    'the refresh control must be present',
+  );
+  assert.ok(
+    markup.includes('aria-label="Request an easier-to-read captcha"'),
+    'the easier-challenge control must be present',
+  );
+  assert.ok(markup.includes('Easier challenge'), 'the easier-challenge control must be labelled');
 });
 
 test('the server form renders the disclosure that lets the user pick host, port, transport, scheme', async () => {
@@ -106,6 +136,33 @@ test('the server form renders the disclosure that lets the user pick host, port,
     'server disclosure must render its shell',
   );
   assert.ok(markup.includes('>Server<'), 'the disclosure is labelled "Server"');
+});
+
+test('requestCaptcha posts the chosen mode and parses the image challenge', async () => {
+  const calls: CapturedCall[] = [];
+  const bootstrap = new BootstrapClient(ENDPOINT, { fetch: makeFetchDouble(calls) });
+
+  const challenge = await bootstrap.requestCaptcha();
+  const altChallenge = await bootstrap.requestCaptcha('image_alt');
+
+  const captchaCalls = calls.filter((call) => call.url.endsWith('/v1/auth/captcha'));
+  assert.equal(captchaCalls.length, 2, 'one request per requestCaptcha call');
+  // The SDK always serializes the body as a JSON string, but the RequestInit type only says
+  // `body: BodyInit | null | undefined`, so the cast is the documented seam.
+  // eslint-disable-next-line @typescript-eslint/no-base-to-string, @typescript-eslint/no-unsafe-assignment
+  const defaultBody: Record<string, unknown> = JSON.parse(String(captchaCalls[0]?.init.body));
+  // eslint-disable-next-line @typescript-eslint/no-base-to-string, @typescript-eslint/no-unsafe-assignment
+  const altBody: Record<string, unknown> = JSON.parse(String(captchaCalls[1]?.init.body));
+  assert.deepEqual(defaultBody, {}, 'an omitted mode posts an empty object body');
+  assert.deepEqual(altBody, { mode: 'image_alt' }, 'a given mode rides in the body');
+  assert.equal(challenge.image_png_base64, 'aGVsbG8=', 'the image bytes cross as base64');
+  assert.equal(challenge.mode, 'image', 'the issued mode is echoed back');
+  assert.equal(challenge.ttl_seconds, 120, 'the ttl crosses as a number');
+  assert.equal(
+    altChallenge.challenge_id,
+    challenge.challenge_id,
+    'the challenge id parses into the SDK id type',
+  );
 });
 
 test('MigoClient.register sends a captcha proof in the body when one is supplied', async () => {

@@ -43,7 +43,7 @@ use crate::crypto::envelope::Envelope;
 use crate::crypto::session::{DeviceKeys, SessionStore, ONE_TIME_PREKEY_COUNT};
 use crate::model::{self, Account, Body, Connection, Conversation, Delivery, Message, ToastKind};
 use crate::net::gateway::{Gateway, GatewayError};
-use crate::net::rest::{DeviceRequest, Rest};
+use crate::net::rest::{CaptchaChallenge, CaptchaProof, DeviceRequest, Rest, RestError};
 use crate::vault::{self, SavedSession};
 
 /// When to warn that the one-time prekey pool is running down.
@@ -52,15 +52,62 @@ use crate::vault::{self, SavedSession};
 /// enough that there is still time to act before the pool is empty.
 const ONE_TIME_PREKEY_LOW_WATER: usize = ONE_TIME_PREKEY_COUNT as usize / 5;
 
+/// The server's error symbols that mean "the captcha proof is dead, whatever else is true".
+///
+/// Wrong, expired, or never sent: the three differ on the wire but demand the same response from
+/// a form — drop the held challenge, fetch a fresh one, keep the form standing. Matched here
+/// rather than in the UI because the symbol is wire vocabulary, and events are reduced facts.
+const CAPTCHA_REFUSAL_SYMBOLS: [&str; 3] =
+    ["INVALID_CAPTCHA", "CAPTCHA_EXPIRED", "CAPTCHA_REQUIRED"];
+
+/// A captcha answer on its way from a form to the worker.
+///
+/// Owned because everything a command carries crosses a channel; the worker lends it to
+/// [`CaptchaProof`] when the request body is built. The manual `Debug` keeps the answer out of
+/// any trace this command path might grow, for the same reason [`crate::net::rest::Grant`]'s
+/// keeps its tokens out — and even though an answer is worth far less than a token, a log line
+/// that never contains it is a log line that cannot leak it.
+pub struct CaptchaAnswer {
+    /// The challenge being answered, exactly as the server issued it.
+    pub challenge_id: String,
+    /// What the user read off the image, already normalised: upper-cased, whitespace-free.
+    pub answer: String,
+}
+
+impl std::fmt::Debug for CaptchaAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CaptchaAnswer")
+            .field("challenge_id", &self.challenge_id)
+            .field("answer", &"***")
+            .finish()
+    }
+}
+
 /// What the UI asks the worker to do.
 #[derive(Debug)]
 pub enum Command {
+    /// Fetch a fresh image captcha challenge for the auth forms.
+    ///
+    /// Separate from register and sign-in because the challenge has to be on screen *before*
+    /// either form can be finished; a form asks the moment it draws with nothing held.
+    FetchCaptcha {
+        /// The server to ask — the one the form is pointing at, which is not necessarily the
+        /// one a session lives on, because no session exists yet.
+        server: ServerEndpoint,
+        /// The rendering to ask for: `None` for the server's default, `Some("image_alt")` for
+        /// the gentler one. A string because it is the wire's own vocabulary, spelled out once
+        /// at the click that sets it.
+        mode: Option<String>,
+    },
     /// Create an account, generate keys, and write a new vault.
     Register {
         server: ServerEndpoint,
         username: String,
         password: String,
         passphrase: String,
+        /// The answered captcha challenge, when the form held one and the answer had the shape
+        /// worth sending. `None` submits without a proof.
+        captcha: Option<CaptchaAnswer>,
     },
     /// Sign in to an existing account, generating keys if this device has none yet.
     SignIn {
@@ -68,6 +115,8 @@ pub enum Command {
         identifier: String,
         password: String,
         passphrase: String,
+        /// The answered captcha challenge, as on [`Command::Register`].
+        captcha: Option<CaptchaAnswer>,
     },
     /// Open the existing vault and resume its saved sign-in.
     Unlock { passphrase: String },
@@ -105,6 +154,23 @@ pub enum Event {
     SignedIn(Account),
     /// Signed out, by request or because the server revoked the session.
     SignedOut,
+    /// A captcha challenge arrived for the auth forms.
+    ///
+    /// Carries the wire view as-is: the picture stays base64 until the form decodes it, because
+    /// the decode belongs with the texture it feeds, on the UI thread.
+    CaptchaChallenge(CaptchaChallenge),
+    /// A captcha challenge could not be fetched. `reason` is safe to show as-is.
+    ///
+    /// Separate from the connection state on purpose: a form whose challenge will not load is
+    /// not a form whose sign-in failed, and reporting it as one would release a busy flag that
+    /// was never set.
+    CaptchaUnavailable { reason: String },
+    /// The server refused a submit over the captcha: wrong, expired, or missing proof.
+    ///
+    /// One event for all three because they differ only in the telling. What each means to a
+    /// form is identical: the challenge it holds is dead, so drop it and fetch another, and
+    /// keep the form on screen for the next attempt.
+    CaptchaRefused,
     /// The full conversation list.
     Conversations(Vec<Conversation>),
     /// A page of history, oldest first.
@@ -387,13 +453,17 @@ impl Worker {
 
     async fn handle(&mut self, command: Command) {
         match command {
+            Command::FetchCaptcha { server, mode } => {
+                self.fetch_captcha(server, mode).await;
+            }
             Command::Register {
                 server,
                 username,
                 password,
                 passphrase,
+                captcha,
             } => {
-                self.bootstrap(server, username, password, passphrase, true)
+                self.bootstrap(server, username, password, passphrase, captcha, true)
                     .await;
             }
             Command::SignIn {
@@ -401,8 +471,9 @@ impl Worker {
                 identifier,
                 password,
                 passphrase,
+                captcha,
             } => {
-                self.bootstrap(server, identifier, password, passphrase, false)
+                self.bootstrap(server, identifier, password, passphrase, captcha, false)
                     .await;
             }
             Command::Unlock { passphrase } => self.unlock(passphrase).await,
@@ -444,6 +515,7 @@ impl Worker {
         identifier: String,
         password: String,
         passphrase: String,
+        captcha: Option<CaptchaAnswer>,
         register: bool,
     ) {
         self.sink.send(Event::Connection(Connection::Connecting));
@@ -462,14 +534,32 @@ impl Worker {
             .map(|s| s.device_id);
         let device = DeviceRequest::describe(device_id);
 
+        // Lent to the wire body rather than moved into it, so the answer's bytes stay in the
+        // command's own allocation until the request is done.
+        let proof = captcha.as_ref().map(|answer| CaptchaProof {
+            challenge_id: &answer.challenge_id,
+            answer: &answer.answer,
+        });
         let grant = if register {
-            rest.register(&identifier, &password, device).await
+            rest.register(&identifier, &password, device, proof).await
         } else {
-            rest.login(&identifier, &password, device).await
+            rest.login(&identifier, &password, device, proof).await
         };
         let grant = match grant {
             Ok(grant) => grant,
-            Err(error) => return self.fail(error.to_string()),
+            Err(error) => {
+                // A captcha refusal is not a dead form: the attempt consumed the challenge
+                // either way, so tell the UI to drop it and draw a fresh one, and let the
+                // ordinary failure path below keep the form standing for the retry.
+                if matches!(
+                    &error,
+                    RestError::Server { symbol, .. }
+                        if CAPTCHA_REFUSAL_SYMBOLS.contains(&symbol.as_str())
+                ) {
+                    self.sink.send(Event::CaptchaRefused);
+                }
+                return self.fail(error.to_string());
+            }
         };
 
         // A vault whose passphrase just opened keeps its keys; otherwise this device is new and needs
@@ -498,6 +588,25 @@ impl Worker {
             grant.access_token,
         )
         .await;
+    }
+
+    /// Fetches a captcha challenge for a form.
+    ///
+    /// Its failures are reported through [`Event::CaptchaUnavailable`] rather than
+    /// [`Self::fail`], because a challenge that will not load is not a failed sign-in: `fail`
+    /// would flip the connection state of a form that never submitted, and release a busy flag
+    /// that was never set.
+    async fn fetch_captcha(&mut self, server: ServerEndpoint, mode: Option<String>) {
+        let outcome = match Rest::new(&crate::config::rest_base_url(&server)) {
+            Ok(rest) => rest.request_captcha(mode.as_deref()).await,
+            Err(error) => Err(error),
+        };
+        match outcome {
+            Ok(challenge) => self.sink.send(Event::CaptchaChallenge(challenge)),
+            Err(error) => self.sink.send(Event::CaptchaUnavailable {
+                reason: error.to_string(),
+            }),
+        }
     }
 
     /// Opens the vault and resumes its saved sign-in.

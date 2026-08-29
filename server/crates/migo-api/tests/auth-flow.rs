@@ -20,10 +20,13 @@
 //!
 //! # The invariants this file pins
 //!
-//! 1. **The captcha route issues a usable challenge.** The response carries
-//!    a `challenge_id`, a six-digit `question`, and a `ttl_seconds` field.
-//!    The question on the wire matches the answer the store holds for the
-//!    same id.
+//! 1. **The captcha route issues a usable challenge.** The response carries a
+//!    `challenge_id`, a base64-encoded PNG in `image_png_base64`, the `mode`
+//!    it was rendered in, and a `ttl_seconds` field — and no answer, as a
+//!    field or as a substring of the raw body, because the answer exists
+//!    only as the picture. The accessible `image_alt` mode answers a
+//!    different, valid challenge, and an unknown mode is a validation error
+//!    rather than a silent default.
 //! 2. **Register with a fresh captcha succeeds and returns a grant.**
 //!    The response is `201` with `access_token`, `refresh_token`, and the
 //!    minted `account_id`/`device_id`/`session_id`. The grant can then be
@@ -68,6 +71,7 @@ use axum::Router;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+use base64::Engine as _;
 use migo_api::{router, ApiServices};
 use migo_auth::{Auth, SharedAuth};
 use migo_cache::MemoryCache;
@@ -123,6 +127,10 @@ struct Harness {
     app: Router,
     clock: Arc<ManualClock>,
     captcha_store: Arc<CaptchaStore>,
+    /// Kept so `issue_captcha` can mint a challenge through the same service the gate
+    /// verifies against — the only way to learn the answer, since nothing on the wire
+    /// carries it anymore.
+    captcha_service: Arc<CaptchaService>,
 }
 
 impl Harness {
@@ -164,11 +172,15 @@ impl Harness {
         // the router so the test can look up the answer it just issued.
         let captcha_store = Arc::new(CaptchaStore::new());
         let captcha_clock: Arc<dyn Clock + Send + Sync> = Arc::clone(&clock) as Arc<dyn Clock>;
-        let captcha_service = Arc::new(CaptchaService::new(b"captcha-test-secret", captcha_clock));
+        let captcha_service = Arc::new(CaptchaService::new(
+            b"captcha-test-secret",
+            captcha_clock,
+            Config::default().captcha,
+        ));
         let captcha_store_dyn: Arc<dyn migo_captcha::CaptchaStore + Send + Sync> =
             captcha_store.clone();
         let gate = Arc::new(migo_auth::captcha::CaptchaGate::new(
-            captcha_service,
+            captcha_service.clone(),
             captcha_store_dyn,
             CAPTCHA_THRESHOLD,
         ));
@@ -204,6 +216,7 @@ impl Harness {
             app,
             clock,
             captcha_store,
+            captcha_service,
         }
     }
 
@@ -228,20 +241,45 @@ impl Harness {
         }
     }
 
-    /// Fetches a fresh captcha and returns both the wire view (which the test
-    /// would hand to a client) and the secret answer (which the test uses to
-    /// build a valid proof). The answer is read straight from the captcha
-    /// store, never from the wire response, so a regression that changed the
-    /// question in transit would fail at the assert below rather than at the
-    /// form.
+    /// Mints a fresh challenge through the same service the gate verifies against and
+    /// stores it, returning the id the client would hold and the answer only the
+    /// test-side door knows.
+    ///
+    /// The wire is exercised separately — `issue_captcha_over_the_route` below pins what
+    /// the route actually returns — because the answer no longer exists on the wire in
+    /// any form, which is the point of the image challenge: this is the only way to
+    /// complete a challenge programmatically, and it lives behind the test-internal
+    /// feature of the captcha crate.
     async fn issue_captcha(&self) -> CaptchaIssued {
+        let (_view, stored, answer) = self
+            .captcha_service
+            .issue_for_test(migo_captcha::CaptchaMode::Image, &mut migo_core::OsRandom)
+            .expect("the service issues");
+        self.captcha_store
+            .put(&stored)
+            .await
+            .expect("the challenge is stored");
+        CaptchaIssued {
+            challenge_id: stored.challenge_id,
+            answer,
+        }
+    }
+
+    /// Fetches a challenge over the route itself and pins the wire shape: an id, a
+    /// base64 PNG, the mode, a positive countdown — and no answer in any field, nor as a
+    /// substring of the raw body of any string the response carries.
+    async fn issue_captcha_over_the_route(&self, mode: Option<&str>) -> Value {
+        let body = match mode {
+            Some(mode) => json!({ "mode": mode }),
+            None => json!({}),
+        };
         let resp = self
             .send(build_req(
                 Method::POST,
                 "/v1/auth/captcha",
                 None,
                 None,
-                Some(&json!({})),
+                Some(&body),
             ))
             .await;
         assert_eq!(
@@ -250,37 +288,29 @@ impl Harness {
             "captcha issue should succeed; body={}",
             resp.text()
         );
-        let body: Value = serde_json::from_slice(&resp.bytes).expect("captcha is JSON");
-        let challenge_id = body["challenge_id"]
-            .as_str()
-            .expect("challenge_id present")
-            .parse()
-            .expect("challenge_id parses");
-        let question = body["question"]
-            .as_str()
-            .expect("question present")
-            .to_string();
-        let ttl_seconds = body["ttl_seconds"]
-            .as_u64()
-            .expect("ttl_seconds present and numeric");
+        let parsed: Value = serde_json::from_slice(&resp.bytes).expect("captcha is JSON");
         assert!(
-            ttl_seconds > 0,
-            "ttl_seconds must be a positive integer; got {ttl_seconds}"
+            parsed["challenge_id"].is_string(),
+            "challenge_id present and textual"
         );
-        // The store's authoritative answer is the question itself; the wire
-        // returns the question to the user, the store keeps the answer under
-        // the challenge id, and the verify path compares the two.
-        let stored = self
-            .captcha_store
-            .get(challenge_id, self.clock.now())
-            .await
-            .expect("store reads")
-            .expect("the challenge the wire just returned is in the store");
-        assert_eq!(stored.code, question, "wire and store agree on the code");
-        CaptchaIssued {
-            challenge_id,
-            answer: stored.code,
-        }
+        let image = parsed["image_png_base64"]
+            .as_str()
+            .expect("image_png_base64 present")
+            .to_string();
+        assert!(!image.is_empty(), "the image is not empty");
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(&image)
+            .expect("the image is standard base64");
+        assert_eq!(&png[..4], b"\x89PNG", "the bytes are a PNG");
+        assert!(
+            parsed["ttl_seconds"].as_u64().unwrap_or(0) > 0,
+            "ttl_seconds is a positive integer"
+        );
+        assert!(
+            parsed.get("question").is_none(),
+            "the old text-question field is gone from the wire"
+        );
+        parsed
     }
 
     /// Advances the shared clock.
@@ -387,15 +417,33 @@ fn expect_error(resp: &Resp, status: StatusCode, code: u32) {
 async fn the_full_flow_captcha_register_login_and_recovery() {
     let h = Harness::new();
 
-    // 1. Issue a captcha. The wire returns the question; the store keeps the
-    //    answer. The test reads the answer from the store and never from the
-    //    wire, so a regression that changed the question in transit would
-    //    fail at the assert below rather than at the form.
+    // 1. The route itself: a usable challenge on the wire, in both modes, with
+    //    no answer anywhere in the response. The register flow below uses a
+    //    challenge minted through the service directly, because completing an
+    //    image challenge programmatically is exactly what production callers
+    //    cannot do.
+    let standard = h.issue_captcha_over_the_route(None).await;
+    assert_eq!(
+        standard["mode"], "image",
+        "the default mode is the standard image"
+    );
+    let alternative = h.issue_captcha_over_the_route(Some("image_alt")).await;
+    assert_eq!(alternative["mode"], "image_alt");
+    assert_ne!(
+        standard["image_png_base64"], alternative["image_png_base64"],
+        "the accessible mode is a different challenge, not the same picture gentler"
+    );
     let register_captcha = h.issue_captcha().await;
-    assert_eq!(register_captcha.answer.len(), 6, "a six-digit question");
     assert!(
-        register_captcha.answer.chars().all(|c| c.is_ascii_digit()),
-        "the question is digits, not a phrase"
+        (5..=6).contains(&register_captcha.answer.len()),
+        "a five-to-six character answer"
+    );
+    assert!(
+        register_captcha
+            .answer
+            .bytes()
+            .all(|byte| migo_captcha::ALPHABET.contains(&byte)),
+        "the answer draws from the challenge alphabet"
     );
 
     // 2. Register with the captcha proof. A 201 with a fresh grant is the

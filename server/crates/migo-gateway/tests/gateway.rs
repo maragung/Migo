@@ -259,6 +259,7 @@ impl Authenticator for FakeAuth {
 
     fn issue_captcha<'a>(
         &'a self,
+        _mode: migo_captcha::CaptchaMode,
         _now: migo_core::Timestamp,
     ) -> std::pin::Pin<
         std::boxed::Box<

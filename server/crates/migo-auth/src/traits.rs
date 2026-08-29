@@ -252,11 +252,12 @@ pub trait Authenticator: Send + Sync {
         context: &RequestContext,
     ) -> Result<()>;
 
-    /// Mints a captcha challenge and returns its public view. Returns `None`
-    /// when the gate is not wired, which the route layer surfaces as
+    /// Mints a captcha challenge in the requested mode and returns its public view.
+    /// Returns `None` when the gate is not wired, which the route layer surfaces as
     /// `FEATURE_DISABLED`.
     fn issue_captcha<'a>(
         &'a self,
+        mode: migo_captcha::CaptchaMode,
         now: Timestamp,
     ) -> std::pin::Pin<
         Box<

@@ -455,3 +455,36 @@ listener mati dan runner tetap berjalan, no-op selama allow-list kosong); listen
 tetap milik segmen internal dan tidak boleh menghadap internet umum (section 169). TLS di
 depan listener adalah langkah deployment berikutnya; framing binary-nya sudah versi wire
 yang sama.
+
+## 14. Image CAPTCHA sebagai standar (v0.2.6)
+
+Keputusan terdokumentasi "deliberately not an image captcha" dibalik dengan alasan yang
+dicatat jujur di migo.md: kode numerik enam-digit yang dibawa teks di respons selesai
+dipecahkan oleh script yang sama yang membaca body, sehingga gerbangnya hanya memperlambat
+satu request. Sekarang `migo-captcha` merender tantangan sebagai PNG server-side: 5–6
+karakter alfanumerik huruf besar dari alfabet tanpa I/O/S/0/1/5, tiga font TTF yang
+di-embed, rotasi/skala/jitter per karakter, latar ber-dot dan ber-speckle, wobble per-baris,
+dan tepat satu kurva interferensi Catmull-Rom yang knot-nya struktural di pita tinta setiap
+karakter sehingga dijamin melintasi semua karakter dan tidak pernah lurus. Yang disimpan
+hanya tag HMAC jawaban (kolom `tag` migrasi 0002 sudah berbentuk itu sejak awal); verifikasi
+constant-time, case- dan whitespace-insensitive, sekali-jalan lewat `consume` atomik di
+store; TTL 120 detik. Mode `image_alt` adalah jalur aksesibel: tantangan baru dengan kode
+acak berbeda dan render lebih lunak — tetap gambar, bukan bypass. Konfigurasi di
+`CaptchaConfig` (enabled/length/ttl/accessible_mode/noise/ukuran) tervalidasi startup dan
+default-nya ON; `captcha.enabled = false` setara threshold `None`.
+
+Client: web menampilkan `<img>` responsif dengan tombol refresh dan "Easier challenge",
+input ternormalisasi (uppercase, tanpa whitespace), 79/79 test web dan 88/88 SDK lulus;
+desktop egui menampilkan tantangan sebagai texture dengan alur fetch edge-triggered dan
+normalisasi yang sama, 18/18 test lulus. Server: 16 test crate captcha (alfabet, keunikan
+gambar dan tag antar-issue, determinisme dari seed, PNG valid berukuran konfigurasi, mode
+alt berbeda, benar/salah/kadaluarsa/replay, dua jawaban berlomba hanya satu menang, view
+tak memuat jawaban), auth-flow mem-pin wire (gambar PNG, tanpa field `question`, mode alt
+berbeda, mode tak dikenal ditolak), dan 80 suite workspace hijau. E2E dua akun
+register-connect-pesan terenkripsi tetap lulus.
+
+Catatan jujur: pintu `issue_for_test` di balik fitur `test-internal` adalah satu-satunya
+cara test integrasi menyelesaikan tantangan gambarnya sendiri — fitur itu hanya dinyalakan
+dev-dependencies dan tidak pernah ada di build produksi. Rate limit IP anonim di route
+captcha tetap lapisan pertama (biaya bootstrap per /24), captcha lapisan kedua, threshold
+kegagalan lapisan ketiga; captcha tidak pernah menjadi satu-satunya pertahanan.

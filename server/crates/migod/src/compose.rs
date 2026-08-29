@@ -80,7 +80,11 @@ const EPHEMERAL_SECRET_LEN: usize = 32;
 /// wants and is exactly the posture the configuration validator already
 /// rejects. The check is duplicated at the composition root so a
 /// hand-rolled migod cannot sidestep it.
-fn migod_captcha_gate(threshold: u32, secret_root: &[u8]) -> migo_core::Result<Arc<CaptchaGate>> {
+fn migod_captcha_gate(
+    threshold: u32,
+    secret_root: &[u8],
+    captcha: &migo_core::config::CaptchaConfig,
+) -> migo_core::Result<Arc<CaptchaGate>> {
     if threshold == 0 {
         return Err(migo_protocol::fault::internal(
             "captcha threshold of 0 would require a proof on the first attempt; \
@@ -88,7 +92,11 @@ fn migod_captcha_gate(threshold: u32, secret_root: &[u8]) -> migo_core::Result<A
         ));
     }
     let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock);
-    let service = Arc::new(CaptchaService::new(secret_root, clock.clone()));
+    let service = Arc::new(CaptchaService::new(
+        secret_root,
+        clock.clone(),
+        captcha.clone(),
+    ));
     let store: Arc<dyn migo_captcha::CaptchaStore + Send + Sync> =
         Arc::new(CaptchaInMemoryStore::new());
     Ok(Arc::new(CaptchaGate::new(service, store, threshold)))
@@ -108,7 +116,11 @@ pub(crate) fn captcha_gate_for_test(
     threshold: u32,
     secret_root: &[u8],
 ) -> migo_core::Result<Arc<CaptchaGate>> {
-    migod_captcha_gate(threshold, secret_root)
+    migod_captcha_gate(
+        threshold,
+        secret_root,
+        &migo_core::config::CaptchaConfig::default(),
+    )
 }
 
 /// Attaches the captcha gate to a `SharedAuth` whose internal type is
@@ -242,22 +254,33 @@ impl App {
                 .map_or(&[], |s| s.expose().as_bytes()),
         )
         .context("cannot open authentication")?;
-        let auth: SharedAuth = attach_captcha(
-            concrete,
-            migod_captcha_gate(
-                config
-                    .auth
-                    .captcha_threshold
-                    .unwrap_or(DEFAULT_CAPTCHA_THRESHOLD),
-                config
-                    .auth
-                    .token_key
-                    .as_ref()
-                    .map_or(&[], |s| s.expose().as_bytes()),
+        // Two switches, one posture. `captcha.enabled` is the master: off means no gate
+        // is built at all and the challenge route answers FEATURE_DISABLED. With the
+        // subsystem on, the threshold decides when the gate starts demanding proofs —
+        // and an unset threshold means "gate on at the documented default", because the
+        // captcha ships enabled as the standard posture and a deployment opts out.
+        let threshold = config
+            .auth
+            .captcha_threshold
+            .unwrap_or(DEFAULT_CAPTCHA_THRESHOLD);
+        let auth = if config.captcha.enabled {
+            attach_captcha(
+                concrete,
+                migod_captcha_gate(
+                    threshold,
+                    config
+                        .auth
+                        .token_key
+                        .as_ref()
+                        .map_or(&[], |s| s.expose().as_bytes()),
+                    &config.captcha,
+                )
+                .context("cannot build the captcha gate")?,
             )
-            .context("cannot build the captcha gate")?,
-        )
-        .context("cannot attach the captcha gate")?;
+            .context("cannot attach the captcha gate")?
+        } else {
+            concrete
+        };
 
         let messaging =
             migo_messaging::open(store.clone(), cache.clone(), limiter.clone(), &registry);

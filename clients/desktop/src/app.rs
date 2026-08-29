@@ -122,6 +122,9 @@ impl App {
                 Event::SignedIn(account) => {
                     self.auth.busy = false;
                     self.auth.clear_secrets();
+                    // Whatever challenge the form was holding died with the submit that
+                    // succeeded; the next sign-in starts from a fresh fetch, not a stale image.
+                    self.auth.captcha.reset();
                     self.account = Some(account);
                     self.screen = Screen::Chat;
                 }
@@ -129,12 +132,16 @@ impl App {
                     self.account = None;
                     self.auth.busy = false;
                     self.auth.clear_secrets();
+                    self.auth.captcha.reset();
                     // Drop every decrypted message with the session. Leaving a thread on screen after
                     // sign-out would mean plaintext outliving the keys that produced it, which is the
                     // one thing a signed-out client must not do.
                     self.chat = ChatState::default();
                     self.screen = Screen::Unlock;
                 }
+                Event::CaptchaChallenge(challenge) => self.auth.captcha.hold(challenge),
+                Event::CaptchaUnavailable { reason } => self.auth.captcha.unavailable(reason),
+                Event::CaptchaRefused => self.auth.captcha.refused(),
                 Event::Conversations(list) => self.chat.set_conversations(list),
                 Event::History {
                     conversation_id,

@@ -88,6 +88,8 @@ struct RegisterRequest<'a> {
     password: &'a str,
     locale: &'a str,
     device: DeviceRequest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    captcha: Option<CaptchaProof<'a>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -95,6 +97,8 @@ struct LoginRequest<'a> {
     identifier: &'a str,
     password: &'a str,
     device: DeviceRequest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    captcha: Option<CaptchaProof<'a>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,6 +110,77 @@ struct RefreshRequest<'a> {
 #[derive(Debug, Serialize)]
 struct LogoutRequest {
     session_id: Id,
+}
+
+/// The body of a captcha request: empty, or carrying a mode.
+///
+/// An absent mode is deliberately not `"image"`: it asks the server for its default rendering,
+/// which keeps this client correct if a deployment ever changes which challenge it leads with.
+#[derive(Debug, Serialize)]
+struct CaptchaRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<&'a str>,
+}
+
+/// The proof a register or sign-in body carries: the id the server issued and the characters the
+/// user read off the picture.
+///
+/// Borrowed, like every other request body in this file, because it only has to outlive the
+/// serialisation. The manual `Debug` keeps the answer out of traces: the server stores nothing
+/// but a tag of it, and the client has no business being more careless with it than that.
+#[derive(Serialize)]
+pub struct CaptchaProof<'a> {
+    /// The id of the challenge being answered.
+    pub challenge_id: &'a str,
+    /// What the user read off the image, already normalised by the form that collected it —
+    /// upper-cased, whitespace-free. The server normalises again before comparing, so this is a
+    /// courtesy, not a correctness requirement.
+    pub answer: &'a str,
+}
+
+impl std::fmt::Debug for CaptchaProof<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CaptchaProof")
+            .field("challenge_id", &self.challenge_id)
+            .field("answer", &"***")
+            .finish()
+    }
+}
+
+/// A captcha challenge as the auth server issues it: a picture, and the id that answers it.
+///
+/// The picture is the whole question — nothing in this struct describes what it shows, so a
+/// response body is not a solved captcha no matter who reads it. The manual `Debug` abbreviates
+/// the base64 for a different reason: it is not secret, but a multi-kilobyte wall of text has
+/// never made a trace line more readable.
+#[derive(Clone, Deserialize)]
+pub struct CaptchaChallenge {
+    /// The id to echo back as the proof's `challenge_id` when this challenge is answered.
+    pub challenge_id: String,
+    /// The rendered challenge: standard base64 with padding, wrapping a PNG this client decodes
+    /// and uploads as a texture.
+    pub image_png_base64: String,
+    /// The rendering mode (`"image"` or `"image_alt"`), echoed so a refresh can ask for the
+    /// same kind again — the alternative rendering is gentler, and someone who needed it once
+    /// will need it again.
+    pub mode: String,
+    /// How many seconds the challenge stays answerable. Informational only: the server is the
+    /// arbiter of expiry, and a client-side countdown would just guess at the server's clock.
+    pub ttl_seconds: u32,
+}
+
+impl std::fmt::Debug for CaptchaChallenge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CaptchaChallenge")
+            .field("challenge_id", &self.challenge_id)
+            .field(
+                "image_png_base64",
+                &format!("<{} chars>", self.image_png_base64.len()),
+            )
+            .field("mode", &self.mode)
+            .field("ttl_seconds", &self.ttl_seconds)
+            .finish()
+    }
 }
 
 /// A session, as the server issues it.
@@ -205,33 +280,55 @@ impl Rest {
         format!("{scheme}{host}/ws")
     }
 
+    /// Fetches a fresh image captcha challenge.
+    ///
+    /// Anonymous by design: the gate exists to judge the very first contact, so there is no
+    /// credential to offer. `mode` is `None` for the server's default rendering and
+    /// `Some("image_alt")` for the gentler one a user asks for when they cannot read the first
+    /// picture — the alternative is a fresh challenge, never the same code read aloud.
+    pub async fn request_captcha(&self, mode: Option<&str>) -> Result<CaptchaChallenge, RestError> {
+        self.post("/v1/auth/captcha", &CaptchaRequest { mode })
+            .await
+    }
+
     /// Creates an account and a first device.
+    ///
+    /// `captcha` is the proof for the challenge the form fetched; `None` sends no proof at all,
+    /// which a server with the gate on answers with `CAPTCHA_REQUIRED`. The caller decides what
+    /// that refusal means to the user.
     pub async fn register(
         &self,
         username: &str,
         password: &str,
         device: DeviceRequest,
+        captcha: Option<CaptchaProof<'_>>,
     ) -> Result<Grant, RestError> {
         let body = RegisterRequest {
             username,
             password,
             locale: "en",
             device,
+            captcha,
         };
         self.post("/v1/auth/register", &body).await
     }
 
     /// Signs in an existing account.
+    ///
+    /// `captcha` as for [`Self::register`]: the proof for a challenge the form fetched, or
+    /// `None` to submit without one.
     pub async fn login(
         &self,
         identifier: &str,
         password: &str,
         device: DeviceRequest,
+        captcha: Option<CaptchaProof<'_>>,
     ) -> Result<Grant, RestError> {
         let body = LoginRequest {
             identifier,
             password,
             device,
+            captcha,
         };
         self.post("/v1/auth/login", &body).await
     }
