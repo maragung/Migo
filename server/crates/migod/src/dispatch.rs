@@ -53,15 +53,20 @@ use async_trait::async_trait;
 
 use migo_auth::Identity;
 use migo_core::{Error, Id, PublicId, Timestamp};
+use migo_economy::SharedTreasurer;
+use migo_federation::SharedMesh;
 use migo_games::{
     Caller as GameCaller, Event as GameDelta, GameView, Hand, Move, Outcome, SharedReferee,
 };
 use migo_gateway::{ClientContext, Dispatcher, TopicRequest};
 use migo_keys::{Bundle, Caller as KeyCaller, SharedKeyring, SIGNED_PREKEY_LIFETIME_MS};
+use migo_media::SharedLibrary;
 use migo_messaging::{
     Broadcast as MessageBroadcast, Caller as MessageCaller, Fanout as MessageFanout,
     SharedMessaging,
 };
+use migo_moderation::SharedWarden;
+use migo_notify::SharedNotifier;
 use migo_presence::{Caller as PresenceCaller, SharedPresence};
 use migo_protocol::{
     fault, from_frame, Acknowledged, BandwidthMode, ConversationCreateRequest,
@@ -75,12 +80,24 @@ use migo_rooms::{
     Broadcast as RoomBroadcast, Caller as RoomCaller, Fanout as RoomFanout, SharedRooms,
 };
 use migo_social::{Caller as SocialCaller, Interaction, ProfileCard, SharedSocial};
+use migo_bots::SharedBots;
 
 /// The dispatcher that routes the client-facing application opcodes into the domain services.
 ///
 /// Holds a handle to each domain it speaks for. The handles are `Arc<dyn Trait>`, so the dispatcher
 /// is cheap to clone conceptually and is shared as `Arc<dyn Dispatcher>` by the gateway; it adds no
 /// state of its own beyond the three services.
+// Per-domain dispatch handlers. Each module owns the application opcodes for one domain and
+// is written against the domain's own `Shared` handle, keeping `AppDispatcher` free of
+// per-feature detail. See each module's header for the exact opcode-to-method map.
+pub(crate) mod bots;
+pub(crate) mod economy;
+pub(crate) mod federation;
+pub(crate) mod media;
+pub(crate) mod moderation;
+pub(crate) mod notify;
+pub(crate) mod social;
+
 pub struct AppDispatcher {
     messaging: SharedMessaging,
     presence: SharedPresence,
@@ -88,10 +105,16 @@ pub struct AppDispatcher {
     keys: SharedKeyring,
     social: SharedSocial,
     games: SharedReferee,
+    media: SharedLibrary,
+    economy: SharedTreasurer,
+    moderation: SharedWarden,
+    notify: SharedNotifier,
+    federation: SharedMesh,
+    bots: SharedBots,
 }
 
 impl AppDispatcher {
-    /// Wires the dispatcher to the six domains whose opcodes it routes.
+    /// Wires the dispatcher to every domain whose opcodes it routes.
     #[must_use]
     pub fn new(
         messaging: SharedMessaging,
@@ -100,6 +123,12 @@ impl AppDispatcher {
         keys: SharedKeyring,
         social: SharedSocial,
         games: SharedReferee,
+        media: SharedLibrary,
+        economy: SharedTreasurer,
+        moderation: SharedWarden,
+        notify: SharedNotifier,
+        federation: SharedMesh,
+        bots: SharedBots,
     ) -> Self {
         Self {
             messaging,
@@ -108,6 +137,12 @@ impl AppDispatcher {
             keys,
             social,
             games,
+            media,
+            economy,
+            moderation,
+            notify,
+            federation,
+            bots,
         }
     }
 }
@@ -380,6 +415,51 @@ impl Dispatcher for AppDispatcher {
                 context.reply(&Acknowledged { ok: true })?;
                 publish_game(context, &result.view, &result.events)
             }
+
+            // --- media ---
+            Opcode::MediaUploadBegin => media::handle_upload_begin(context, frame, &self.media).await,
+            Opcode::MediaUploadStatus => media::handle_upload_status(context, frame, &self.media).await,
+            Opcode::MediaUploadCommit => media::handle_upload_commit(context, frame, &self.media).await,
+            Opcode::MediaUploadAbort => media::handle_upload_abort(context, frame, &self.media).await,
+            Opcode::MediaFetchUrl => media::handle_fetch_url(context, frame, &self.media).await,
+
+            // --- social ---
+            Opcode::FriendRequest => social::handle_friend_request(context, frame, &self.social).await,
+            Opcode::FriendRespond => social::handle_friend_respond(context, frame, &self.social).await,
+            Opcode::BlockSet => social::handle_block_set(context, frame, &self.social).await,
+            Opcode::RelationshipList => social::handle_relationship_list(context, frame, &self.social).await,
+
+            // --- notify ---
+            Opcode::NotificationAck => notify::handle_ack(context, frame, &self.notify).await,
+            Opcode::NotificationList => notify::handle_list(context, frame, &self.notify).await,
+
+            // --- economy ---
+            Opcode::GiftSend => economy::handle_gift_send(context, frame, &self.economy).await,
+            Opcode::BalanceFetch => economy::handle_balance_fetch(context, frame, &self.economy).await,
+
+            // --- bots ---
+            Opcode::BotCommand => bots::handle_command(context, frame, &self.bots).await,
+            Opcode::BotRegister => bots::handle_register(context, frame, &self.bots).await,
+
+            // --- moderation ---
+            Opcode::ReportCreate => moderation::handle_report(context, frame, &self.moderation).await,
+            Opcode::ModerationAction => moderation::handle_action(context, frame, &self.moderation).await,
+
+            // --- federation (server-to-server mesh) ---
+            Opcode::FedHello => federation::handle_hello(context, frame, &self.federation).await,
+            Opcode::FedAuth => federation::handle_auth(context, frame, &self.federation).await,
+            Opcode::FedPing => federation::handle_ping(context, frame, &self.federation).await,
+            Opcode::FedForward => federation::handle_forward(context, frame, &self.federation).await,
+            Opcode::FedAck => federation::handle_ack(context, frame, &self.federation).await,
+            Opcode::FedRoomSubscribe => federation::handle_room_subscribe(context, frame, &self.federation).await,
+            Opcode::FedRoomEvent => federation::handle_room_event(context, frame, &self.federation).await,
+            Opcode::FedPresenceDigest => federation::handle_presence_digest(context, frame, &self.federation).await,
+            Opcode::FedKeyRotate => federation::handle_key_rotate(context, frame, &self.federation).await,
+            Opcode::FedHealth => federation::handle_health(context, frame, &self.federation).await,
+            Opcode::FedShardMap => federation::handle_shard_map(context, frame, &self.federation).await,
+            Opcode::FedError => federation::handle_error(context, frame, &self.federation).await,
+            Opcode::FedCallRelay => federation::handle_call_relay(context, frame, &self.federation).await,
+            Opcode::FedDirectory => federation::handle_directory(context, frame, &self.federation).await,
 
             // Every other opcode is one this node speaks the transport for but does not route.
             other => Err(fault::feature_disabled(other.name())),

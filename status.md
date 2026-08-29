@@ -321,3 +321,35 @@ Diambil dari migo.md section 177, karena aturannya sendiri adalah bagian dari st
 2. Sebuah item hanya boleh ditandai selesai bila punya test yang benar-benar dijalankan CI.
 3. Ketiga blok yang namanya memuat TEST BELUM DITULIS WAJIB kosong pada saat rilis, dan sebuah
    item hanya boleh berpindah keluar dari blok itu menuju selesai, tidak pernah sebaliknya.
+
+## 10. SPEC opcodes di-v0.2.0 (dispatch layer)
+
+Pada rilis ini, opcode SPEC (migo.md section 145) digabungkan ke schema dan dialihkan di
+`AppDispatcher` (server/crates/migod/src/dispatch.rs). Setiap handler membangun `Caller`,
+mendekode frame via `from_frame`, memanggil satu metode domain, lalu `reply`/`publish`.
+Sub-modul per-domain yang menangani permintaan klien:
+
+- `media.rs` — MEDIA_UPLOAD_BEGIN/STATUS/COMMIT/ABORT, MEDIA_FETCH_URL → `migo_media::Library`.
+- `social.rs` — FRIEND_REQUEST, FRIEND_RESPOND, BLOCK_SET, RELATIONSHIP_LIST → `migo_social::Graph`.
+- `notify.rs` — NOTIFICATION_ACK, NOTIFICATION_LIST → `migo_notify::Notifier`.
+- `economy.rs` — GIFT_SEND, BALANCE_FETCH → `migo_economy::Treasurer`.
+- `bots.rs` — BOT_REGISTER, BOT_COMMAND → `migo_bots::Bots`.
+- `moderation.rs` — REPORT_CREATE, MODERATION_ACTION → `migo_moderation::Warden`.
+- `federation.rs` — 14 opcode FED_* → `migo_federation::Mesh` (boundary: hello/auth periksa
+  epoch, shard_map/directory jawab daftar peer, sisanya dekode lalu ack karena efek substansial
+ nya mendarat di surface rooms/presence/messaging yang mesh hanya kirimkan).
+
+Opcode s2c murni (FRIEND_EVENT, MEDIA_STATE_EVENT, ECONOMY_EVENT, BOT_EVENT, MODERATION_EVENT)
+tidak punya arm handler klien: server memublikasikannya, bukan memintanya.
+
+Test integrasi per-domain ada di `server/crates/migod/tests/spec_*.rs` (media, social, notify,
+economy, bots, moderation, federation) yang menyusun service in-memory sungguhan dan menegaskan
+perilaku yang handler andalkan (dompet nol, kirim gift mengurangi koin, daftar relasi berisi
+target, ack membalik unread, dsb). `migod/tests/migod.rs` dan `migo-gateway/tests/gateway.rs`
+disesuaikan agar dispatcher 12-handle dan daftar push-only s2c yang baru lolos gate.
+
+Catatan jujur: handler federasi memanggil metode batas keamanan mesh, bukan router aplikasi —
+sesuai desain `Mesh` (section 169). Alur server-ke-server penuh (handshake, forwarding antar
+node) memerlukan transport mesh terpisah yang belum diarahkan lewat gateway klien; arm dispatcher
+ada dan terkompilasi, namun lalu lintas FED_* dari soket klien akan ditolak gate autentikasi
+sebagai `auth: Server`.

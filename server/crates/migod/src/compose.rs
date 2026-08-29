@@ -39,10 +39,12 @@ use anyhow::{bail, Context};
 
 use migo_auth::{captcha::CaptchaGate, ConcreteAuth, SharedAuth};
 use migo_bots::SharedBots;
+use migo_crypto::NodeSecret;
+use migo_federation::{MeshConfig, SharedMesh};
 use migo_captcha::{CaptchaService, InMemoryStore as CaptchaInMemoryStore};
 use migo_core::config::Environment;
 use migo_core::metrics::Registry;
-use migo_core::{Clock, Config, OsRandom, Random, Shutdown, SystemClock};
+use migo_core::{Clock, Config, Id, OsRandom, Random, Shutdown, SystemClock};
 use migo_economy::{Catalogue, SharedAnnouncer, SharedTreasurer, Silent};
 use migo_games::{SharedReferee, SharedRewards};
 use migo_gateway::{Dispatcher, Gateway, GatewayServices};
@@ -175,6 +177,8 @@ pub struct App {
     pub games: SharedReferee,
     /// Bots: registration and the minimum-privilege tokens automated accounts authenticate with.
     pub bots: SharedBots,
+    /// Federation: the server-to-server mesh of trusted, allow-listed peer nodes.
+    pub federation: SharedMesh,
 }
 
 impl App {
@@ -361,6 +365,26 @@ impl App {
         )
         .context("cannot open bots")?;
 
+        // The mesh derives its node identity from the same secret root the rest of the server
+        // tokens use; a production node must configure a real `node.signing_key`.
+        let fed_secret = NodeSecret::from_seed(&node_secret)
+            .context("cannot derive the federation node secret")?;
+        // The mesh identifies this node by an `Id`; configuration carries a human name, so derive a
+        // stable id from the (production) signing key bytes. The value is only used for mesh
+        // self-addressing and peer-row keys, so any deterministic mapping is fine.
+        let mut fed_node_id = [0u8; 16];
+        let n = node_secret.len().min(16);
+        fed_node_id[..n].copy_from_slice(&node_secret[..n]);
+        let federation = migo_federation::open(
+            store.clone(),
+            MeshConfig::default(),
+            Id::from_bytes(fed_node_id),
+            node.region.clone(),
+            fed_secret,
+            &registry,
+        )
+        .context("cannot open the federation mesh")?;
+
         // --- Layer 4: transports ---
         // The dispatcher is the one seam the gateway calls up through; it routes the client-facing
         // opcodes this node speaks into messaging, presence, rooms, key material, the social graph,
@@ -372,6 +396,12 @@ impl App {
             keys.clone(),
             social.clone(),
             games.clone(),
+            media.clone(),
+            economy.clone(),
+            moderation.clone(),
+            notify.clone(),
+            federation.clone(),
+            bots.clone(),
         ));
 
         let gateway = Gateway::open(
@@ -423,6 +453,7 @@ impl App {
             economy,
             games,
             bots,
+            federation,
         })
     }
 }

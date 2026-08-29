@@ -49,9 +49,19 @@ object Feature {
     val RESUME: ULong = 16384uL
     /** Gifts and currency events */
     val ECONOMY: ULong = 32768uL
+    /** Voice note attachments (section 167/179) */
+    val VOICE_NOTE: ULong = 65536uL
+    /** 1:1 voice/video calls (section 165/166/180) */
+    val CALLS: ULong = 131072uL
+    /** SFU group calls (section 166) */
+    val GROUP_CALL: ULong = 262144uL
+    /** Server-to-server mesh (section 169/170) */
+    val FEDERATION: ULong = 524288uL
+    /** Custom status and activity (section 26) */
+    val RICH_PRESENCE: ULong = 1048576uL
 
     /** Everything this build understands. */
-    val ALL: ULong = COMPRESSION or BATCHING or E2E_V1 or GROUP_E2E_V1 or PRESENCE or TYPING or ROOMS or MEDIA_UPLOAD or GAMES or BOTS or TRANSLATION or VOICE_MESSAGE or QUIC or TRACING or RESUME or ECONOMY
+    val ALL: ULong = COMPRESSION or BATCHING or E2E_V1 or GROUP_E2E_V1 or PRESENCE or TYPING or ROOMS or MEDIA_UPLOAD or GAMES or BOTS or TRANSLATION or VOICE_MESSAGE or QUIC or TRACING or RESUME or ECONOMY or VOICE_NOTE or CALLS or GROUP_CALL or FEDERATION or RICH_PRESENCE
 }
 
 /** Stable protocol error codes. Frozen once released. */
@@ -3234,6 +3244,2043 @@ data class GameEvent(
     }
 }
 
+/** A single subject account for a social action. */
+data class FriendTarget(
+    val userId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(userId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FriendTarget {
+            r.enter()
+            val userId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FriendTarget(userId)
+        }
+    }
+}
+
+/** Request for people the caller might know. */
+data class SocialSuggestReq(
+    val limit: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u32(limit)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): SocialSuggestReq {
+            r.enter()
+            val limit = r.u32()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return SocialSuggestReq(limit)
+        }
+    }
+}
+
+/** Suggested account ids. */
+data class SocialSuggestions(
+    val users: List<Id>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(users.size)
+        for (item in users) { w.id(item) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): SocialSuggestions {
+            r.enter()
+            val users = run { val n = r.listLen(); val acc = ArrayList<Id>(n); for (i in 0 until n) acc.add(r.id()); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return SocialSuggestions(users)
+        }
+    }
+}
+
+/** Open an upload ticket for a media object. */
+data class MediaBegin(
+    /** Content kind, from the media domain enum */
+    val kind: Long,
+    val contentType: String,
+    /** Declared total bytes */
+    val size: Long,
+    /** Present for conversation-scoped media; absent for profile media */
+    val conversationId: Id? = null,
+    val width: Long? = null,
+    val height: Long? = null,
+    val durationMs: Long? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u32(kind)
+        w.str(contentType)
+        w.u64(size)
+        var present = 0
+        if (conversationId != null) present++
+        if (width != null) present++
+        if (height != null) present++
+        if (durationMs != null) present++
+        w.u32(present)
+        if (conversationId != null) {
+            val value = conversationId
+            w.optional(1) { w ->
+                w.id(value)
+            }
+        }
+        if (width != null) {
+            val value = width
+            w.optional(2) { w ->
+                w.u32(value)
+            }
+        }
+        if (height != null) {
+            val value = height
+            w.optional(3) { w ->
+                w.u32(value)
+            }
+        }
+        if (durationMs != null) {
+            val value = durationMs
+            w.optional(4) { w ->
+                w.u64(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): MediaBegin {
+            r.enter()
+            val kind = r.u32()
+            val contentType = r.str()
+            val size = r.u64()
+            var conversationId: Id? = null
+            var width: Long? = null
+            var height: Long? = null
+            var durationMs: Long? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> conversationId = sub.id()
+                    2L -> width = sub.u32()
+                    3L -> height = sub.u32()
+                    4L -> durationMs = sub.u64()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return MediaBegin(kind, contentType, size, conversationId, width, height, durationMs)
+        }
+    }
+}
+
+/** Signed upload URL and the ticket that claims the object later. */
+data class MediaTicket(
+    val uploadId: Id,
+    val uploadUrl: String,
+    /** Headers the client must send with the PUT */
+    val headers: List<String>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(uploadId)
+        w.str(uploadUrl)
+        w.listLen(headers.size)
+        for (item in headers) { w.str(item) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): MediaTicket {
+            r.enter()
+            val uploadId = r.id()
+            val uploadUrl = r.str()
+            val headers = run { val n = r.listLen(); val acc = ArrayList<String>(n); for (i in 0 until n) acc.add(r.str()); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return MediaTicket(uploadId, uploadUrl, headers)
+        }
+    }
+}
+
+data class MediaStatusReq(
+    val uploadId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(uploadId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): MediaStatusReq {
+            r.enter()
+            val uploadId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return MediaStatusReq(uploadId)
+        }
+    }
+}
+
+data class MediaProgress(
+    val received: Long,
+    val expected: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u64(received)
+        w.u64(expected)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): MediaProgress {
+            r.enter()
+            val received = r.u64()
+            val expected = r.u64()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return MediaProgress(received, expected)
+        }
+    }
+}
+
+data class MediaCommit(
+    val uploadId: Id,
+    /** SHA-256 of the uploaded bytes */
+    val digest: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(uploadId)
+        w.bytes(digest)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): MediaCommit {
+            r.enter()
+            val uploadId = r.id()
+            val digest = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return MediaCommit(uploadId, digest)
+        }
+    }
+}
+
+data class MediaAbort(
+    val uploadId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(uploadId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): MediaAbort {
+            r.enter()
+            val uploadId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return MediaAbort(uploadId)
+        }
+    }
+}
+
+data class MediaFetch(
+    val objectId: Id,
+    val conversationId: Id? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(objectId)
+        var present = 0
+        if (conversationId != null) present++
+        w.u32(present)
+        if (conversationId != null) {
+            val value = conversationId
+            w.optional(1) { w ->
+                w.id(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): MediaFetch {
+            r.enter()
+            val objectId = r.id()
+            var conversationId: Id? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> conversationId = sub.id()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return MediaFetch(objectId, conversationId)
+        }
+    }
+}
+
+data class MediaUrl(
+    val url: String,
+    val expiresAt: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(url)
+        w.timestamp(expiresAt)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): MediaUrl {
+            r.enter()
+            val url = r.str()
+            val expiresAt = r.timestamp()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return MediaUrl(url, expiresAt)
+        }
+    }
+}
+
+data class MediaDelete(
+    val objectId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(objectId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): MediaDelete {
+            r.enter()
+            val objectId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return MediaDelete(objectId)
+        }
+    }
+}
+
+data class PushRegister(
+    val token: String,
+    val provider: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(token)
+        w.u32(provider)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): PushRegister {
+            r.enter()
+            val token = r.str()
+            val provider = r.u32()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return PushRegister(token, provider)
+        }
+    }
+}
+
+data class InboxReq(
+    val limit: Long,
+    val cursor: String? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u32(limit)
+        var present = 0
+        if (cursor != null) present++
+        w.u32(present)
+        if (cursor != null) {
+            val value = cursor
+            w.optional(1) { w ->
+                w.str(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): InboxReq {
+            r.enter()
+            val limit = r.u32()
+            var cursor: String? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> cursor = sub.str()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return InboxReq(limit, cursor)
+        }
+    }
+}
+
+data class InboxItem(
+    val id: Id,
+    val kind: String,
+    val at: Long,
+    val title: String? = null,
+    val body: String? = null,
+    val conversationId: Id? = null,
+    val roomId: Id? = null,
+    val actorId: Id? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(id)
+        w.str(kind)
+        w.timestamp(at)
+        var present = 0
+        if (title != null) present++
+        if (body != null) present++
+        if (conversationId != null) present++
+        if (roomId != null) present++
+        if (actorId != null) present++
+        w.u32(present)
+        if (title != null) {
+            val value = title
+            w.optional(1) { w ->
+                w.str(value)
+            }
+        }
+        if (body != null) {
+            val value = body
+            w.optional(2) { w ->
+                w.str(value)
+            }
+        }
+        if (conversationId != null) {
+            val value = conversationId
+            w.optional(3) { w ->
+                w.id(value)
+            }
+        }
+        if (roomId != null) {
+            val value = roomId
+            w.optional(4) { w ->
+                w.id(value)
+            }
+        }
+        if (actorId != null) {
+            val value = actorId
+            w.optional(5) { w ->
+                w.id(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): InboxItem {
+            r.enter()
+            val id = r.id()
+            val kind = r.str()
+            val at = r.timestamp()
+            var title: String? = null
+            var body: String? = null
+            var conversationId: Id? = null
+            var roomId: Id? = null
+            var actorId: Id? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> title = sub.str()
+                    2L -> body = sub.str()
+                    3L -> conversationId = sub.id()
+                    4L -> roomId = sub.id()
+                    5L -> actorId = sub.id()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return InboxItem(id, kind, at, title, body, conversationId, roomId, actorId)
+        }
+    }
+}
+
+data class InboxResponse(
+    val items: List<InboxItem>,
+    val nextCursor: String? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(items.size)
+        for (item in items) { item.encode(w) }
+        var present = 0
+        if (nextCursor != null) present++
+        w.u32(present)
+        if (nextCursor != null) {
+            val value = nextCursor
+            w.optional(1) { w ->
+                w.str(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): InboxResponse {
+            r.enter()
+            val items = run { val n = r.listLen(); val acc = ArrayList<InboxItem>(n); for (i in 0 until n) acc.add(InboxItem.decode(r)); acc }
+            var nextCursor: String? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> nextCursor = sub.str()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return InboxResponse(items, nextCursor)
+        }
+    }
+}
+
+/** Empty request; the caller's own wallet is implied by the session. */
+data class WalletReq(
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): WalletReq {
+            r.enter()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return WalletReq()
+        }
+    }
+}
+
+data class WalletView(
+    val balance: Long,
+    val points: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u64(balance)
+        w.u64(points)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): WalletView {
+            r.enter()
+            val balance = r.u64()
+            val points = r.u64()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return WalletView(balance, points)
+        }
+    }
+}
+
+data class GiftSend(
+    /** SKU slug */
+    val gift: String,
+    val recipient: Id,
+    val conversationId: Id? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(gift)
+        w.id(recipient)
+        var present = 0
+        if (conversationId != null) present++
+        w.u32(present)
+        if (conversationId != null) {
+            val value = conversationId
+            w.optional(1) { w ->
+                w.id(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): GiftSend {
+            r.enter()
+            val gift = r.str()
+            val recipient = r.id()
+            var conversationId: Id? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> conversationId = sub.id()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return GiftSend(gift, recipient, conversationId)
+        }
+    }
+}
+
+data class GiftSendResult(
+    val ok: Boolean,
+    val txId: Id? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.bool(ok)
+        var present = 0
+        if (txId != null) present++
+        w.u32(present)
+        if (txId != null) {
+            val value = txId
+            w.optional(1) { w ->
+                w.id(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): GiftSendResult {
+            r.enter()
+            val ok = r.bool()
+            var txId: Id? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> txId = sub.id()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return GiftSendResult(ok, txId)
+        }
+    }
+}
+
+/** Empty request for the gift catalogue. */
+data class CatalogueReq(
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CatalogueReq {
+            r.enter()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CatalogueReq()
+        }
+    }
+}
+
+data class GiftListing(
+    val sku: String,
+    val name: String,
+    val price: Long,
+    val category: String,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(sku)
+        w.str(name)
+        w.u64(price)
+        w.str(category)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): GiftListing {
+            r.enter()
+            val sku = r.str()
+            val name = r.str()
+            val price = r.u64()
+            val category = r.str()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return GiftListing(sku, name, price, category)
+        }
+    }
+}
+
+data class CatalogueView(
+    val items: List<GiftListing>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(items.size)
+        for (item in items) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CatalogueView {
+            r.enter()
+            val items = run { val n = r.listLen(); val acc = ArrayList<GiftListing>(n); for (i in 0 until n) acc.add(GiftListing.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CatalogueView(items)
+        }
+    }
+}
+
+data class BotRegister(
+    val username: String,
+    val displayName: String,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(username)
+        w.str(displayName)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): BotRegister {
+            r.enter()
+            val username = r.str()
+            val displayName = r.str()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return BotRegister(username, displayName)
+        }
+    }
+}
+
+data class BotView(
+    val botId: Id,
+    val username: String,
+    /** Present only on register/rotate; never logged */
+    val token: String? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(botId)
+        w.str(username)
+        var present = 0
+        if (token != null) present++
+        w.u32(present)
+        if (token != null) {
+            val value = token
+            w.optional(1) { w ->
+                w.str(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): BotView {
+            r.enter()
+            val botId = r.id()
+            val username = r.str()
+            var token: String? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> token = sub.str()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return BotView(botId, username, token)
+        }
+    }
+}
+
+data class BotAuth(
+    val token: String,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(token)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): BotAuth {
+            r.enter()
+            val token = r.str()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return BotAuth(token)
+        }
+    }
+}
+
+data class BotRotate(
+    val botId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(botId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): BotRotate {
+            r.enter()
+            val botId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return BotRotate(botId)
+        }
+    }
+}
+
+data class ReportFile(
+    /** 0 user, 1 message, 2 room, 3 bot */
+    val subjectKind: Long,
+    val subjectId: Id,
+    val reason: Long,
+    val note: String? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u32(subjectKind)
+        w.id(subjectId)
+        w.u32(reason)
+        var present = 0
+        if (note != null) present++
+        w.u32(present)
+        if (note != null) {
+            val value = note
+            w.optional(1) { w ->
+                w.str(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ReportFile {
+            r.enter()
+            val subjectKind = r.u32()
+            val subjectId = r.id()
+            val reason = r.u32()
+            var note: String? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> note = sub.str()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return ReportFile(subjectKind, subjectId, reason, note)
+        }
+    }
+}
+
+data class ModAction(
+    val caseId: Id,
+    val action: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(caseId)
+        w.u32(action)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ModAction {
+            r.enter()
+            val caseId = r.id()
+            val action = r.u32()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return ModAction(caseId, action)
+        }
+    }
+}
+
+data class ModQueueReq(
+    val limit: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u32(limit)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ModQueueReq {
+            r.enter()
+            val limit = r.u32()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return ModQueueReq(limit)
+        }
+    }
+}
+
+data class CaseView(
+    val caseId: Id,
+    val subjectKind: Long,
+    val subjectId: Id,
+    val reason: Long,
+    val state: String,
+    val filedAt: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(caseId)
+        w.u32(subjectKind)
+        w.id(subjectId)
+        w.u32(reason)
+        w.str(state)
+        w.timestamp(filedAt)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CaseView {
+            r.enter()
+            val caseId = r.id()
+            val subjectKind = r.u32()
+            val subjectId = r.id()
+            val reason = r.u32()
+            val state = r.str()
+            val filedAt = r.timestamp()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CaseView(caseId, subjectKind, subjectId, reason, state, filedAt)
+        }
+    }
+}
+
+data class ModQueue(
+    val items: List<CaseView>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(items.size)
+        for (item in items) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ModQueue {
+            r.enter()
+            val items = run { val n = r.listLen(); val acc = ArrayList<CaseView>(n); for (i in 0 until n) acc.add(CaseView.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return ModQueue(items)
+        }
+    }
+}
+
+data class FedPeerSpec(
+    val nodeId: String,
+    val region: String,
+    val country: String,
+    val publicKey: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(nodeId)
+        w.str(region)
+        w.str(country)
+        w.bytes(publicKey)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedPeerSpec {
+            r.enter()
+            val nodeId = r.str()
+            val region = r.str()
+            val country = r.str()
+            val publicKey = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedPeerSpec(nodeId, region, country, publicKey)
+        }
+    }
+}
+
+data class FedPeerView(
+    val nodeId: String,
+    val region: String,
+    val status: String,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(nodeId)
+        w.str(region)
+        w.str(status)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedPeerView {
+            r.enter()
+            val nodeId = r.str()
+            val region = r.str()
+            val status = r.str()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedPeerView(nodeId, region, status)
+        }
+    }
+}
+
+data class FedPeerId(
+    val nodeId: String,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(nodeId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedPeerId {
+            r.enter()
+            val nodeId = r.str()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedPeerId(nodeId)
+        }
+    }
+}
+
+data class FedListReq(
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedListReq {
+            r.enter()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedListReq()
+        }
+    }
+}
+
+data class FedPeerList(
+    val peers: List<FedPeerView>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(peers.size)
+        for (item in peers) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedPeerList {
+            r.enter()
+            val peers = run { val n = r.listLen(); val acc = ArrayList<FedPeerView>(n); for (i in 0 until n) acc.add(FedPeerView.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedPeerList(peers)
+        }
+    }
+}
+
+data class FedHello(
+    val nodeId: String,
+    val region: String,
+    val epoch: Long,
+    val nonce: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(nodeId)
+        w.str(region)
+        w.u64(epoch)
+        w.bytes(nonce)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedHello {
+            r.enter()
+            val nodeId = r.str()
+            val region = r.str()
+            val epoch = r.u64()
+            val nonce = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedHello(nodeId, region, epoch, nonce)
+        }
+    }
+}
+
+data class FedProof(
+    val nodeId: String,
+    val signature: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(nodeId)
+        w.bytes(signature)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedProof {
+            r.enter()
+            val nodeId = r.str()
+            val signature = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedProof(nodeId, signature)
+        }
+    }
+}
+
+data class FedForward(
+    val from: String,
+    val to: String,
+    val payload: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(from)
+        w.str(to)
+        w.bytes(payload)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedForward {
+            r.enter()
+            val from = r.str()
+            val to = r.str()
+            val payload = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedForward(from, to, payload)
+        }
+    }
+}
+
+data class FedPresenceDigest(
+    val region: String,
+    val digest: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(region)
+        w.bytes(digest)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedPresenceDigest {
+            r.enter()
+            val region = r.str()
+            val digest = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedPresenceDigest(region, digest)
+        }
+    }
+}
+
+data class FedRouting(
+    val epoch: Long,
+    val homeRegion: String,
+    val roomId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u64(epoch)
+        w.str(homeRegion)
+        w.id(roomId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedRouting {
+            r.enter()
+            val epoch = r.u64()
+            val homeRegion = r.str()
+            val roomId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedRouting(epoch, homeRegion, roomId)
+        }
+    }
+}
+
+data class FedEpoch(
+    val epoch: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u64(epoch)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedEpoch {
+            r.enter()
+            val epoch = r.u64()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedEpoch(epoch)
+        }
+    }
+}
+
+data class FedLinkState(
+    val nodeId: String,
+    val sequence: Long,
+    val healthy: Boolean,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(nodeId)
+        w.u64(sequence)
+        w.bool(healthy)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedLinkState {
+            r.enter()
+            val nodeId = r.str()
+            val sequence = r.u64()
+            val healthy = r.bool()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedLinkState(nodeId, sequence, healthy)
+        }
+    }
+}
+
+data class FedHealth(
+    val nodeId: String,
+    val status: String,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(nodeId)
+        w.str(status)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedHealth {
+            r.enter()
+            val nodeId = r.str()
+            val status = r.str()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedHealth(nodeId, status)
+        }
+    }
+}
+
+data class FedEvent(
+    val from: String,
+    val kind: String,
+    val payload: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(from)
+        w.str(kind)
+        w.bytes(payload)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedEvent {
+            r.enter()
+            val from = r.str()
+            val kind = r.str()
+            val payload = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedEvent(from, kind, payload)
+        }
+    }
+}
+
+data class FriendRespond(
+    val userId: Id,
+    val accept: Boolean,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(userId)
+        w.bool(accept)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FriendRespond {
+            r.enter()
+            val userId = r.id()
+            val accept = r.bool()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FriendRespond(userId, accept)
+        }
+    }
+}
+
+data class FriendEvent(
+    val userId: Id,
+    val state: String,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(userId)
+        w.str(state)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FriendEvent {
+            r.enter()
+            val userId = r.id()
+            val state = r.str()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FriendEvent(userId, state)
+        }
+    }
+}
+
+data class RelationshipListReq(
+    val limit: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u32(limit)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): RelationshipListReq {
+            r.enter()
+            val limit = r.u32()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return RelationshipListReq(limit)
+        }
+    }
+}
+
+data class RelationshipEntry(
+    val userId: Id,
+    val kind: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(userId)
+        w.u32(kind)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): RelationshipEntry {
+            r.enter()
+            val userId = r.id()
+            val kind = r.u32()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return RelationshipEntry(userId, kind)
+        }
+    }
+}
+
+data class RelationshipList(
+    val entries: List<RelationshipEntry>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(entries.size)
+        for (item in entries) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): RelationshipList {
+            r.enter()
+            val entries = run { val n = r.listLen(); val acc = ArrayList<RelationshipEntry>(n); for (i in 0 until n) acc.add(RelationshipEntry.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return RelationshipList(entries)
+        }
+    }
+}
+
+data class MediaStateEvent(
+    val objectId: Id,
+    val state: String,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(objectId)
+        w.str(state)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): MediaStateEvent {
+            r.enter()
+            val objectId = r.id()
+            val state = r.str()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return MediaStateEvent(objectId, state)
+        }
+    }
+}
+
+data class NotificationAck(
+    val id: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(id)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): NotificationAck {
+            r.enter()
+            val id = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return NotificationAck(id)
+        }
+    }
+}
+
+data class EconomyEvent(
+    val kind: String,
+    val amount: Long,
+    val currency: String,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(kind)
+        w.u64(amount)
+        w.str(currency)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): EconomyEvent {
+            r.enter()
+            val kind = r.str()
+            val amount = r.u64()
+            val currency = r.str()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return EconomyEvent(kind, amount, currency)
+        }
+    }
+}
+
+data class BotCommand(
+    val botId: Id,
+    val command: String,
+    val args: List<String>? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(botId)
+        w.str(command)
+        var present = 0
+        if (args != null) present++
+        w.u32(present)
+        if (args != null) {
+            val value = args
+            w.optional(1) { w ->
+                w.listLen(value.size)
+                for (item in value) { w.str(item) }
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): BotCommand {
+            r.enter()
+            val botId = r.id()
+            val command = r.str()
+            var args: List<String>? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> args = run { val n = sub.listLen(); val acc = ArrayList<String>(n); for (i in 0 until n) acc.add(sub.str()); acc }
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return BotCommand(botId, command, args)
+        }
+    }
+}
+
+data class BotEvent(
+    val botId: Id,
+    val event: String,
+    val payload: ByteArray? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(botId)
+        w.str(event)
+        var present = 0
+        if (payload != null) present++
+        w.u32(present)
+        if (payload != null) {
+            val value = payload
+            w.optional(1) { w ->
+                w.bytes(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): BotEvent {
+            r.enter()
+            val botId = r.id()
+            val event = r.str()
+            var payload: ByteArray? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> payload = sub.bytes()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return BotEvent(botId, event, payload)
+        }
+    }
+}
+
+data class FedAuth(
+    val nodeId: String,
+    val signature: ByteArray,
+    val epoch: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(nodeId)
+        w.bytes(signature)
+        w.u64(epoch)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedAuth {
+            r.enter()
+            val nodeId = r.str()
+            val signature = r.bytes()
+            val epoch = r.u64()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedAuth(nodeId, signature, epoch)
+        }
+    }
+}
+
+data class FedPing(
+    val nodeId: String,
+    val nonce: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(nodeId)
+        w.bytes(nonce)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedPing {
+            r.enter()
+            val nodeId = r.str()
+            val nonce = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedPing(nodeId, nonce)
+        }
+    }
+}
+
+data class FedPong(
+    val nonce: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.bytes(nonce)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedPong {
+            r.enter()
+            val nonce = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedPong(nonce)
+        }
+    }
+}
+
+data class FedAck(
+    val nodeId: String,
+    val seq: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(nodeId)
+        w.u64(seq)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedAck {
+            r.enter()
+            val nodeId = r.str()
+            val seq = r.u64()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedAck(nodeId, seq)
+        }
+    }
+}
+
+data class FedRoomEvent(
+    val roomId: Id,
+    val payload: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(roomId)
+        w.bytes(payload)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedRoomEvent {
+            r.enter()
+            val roomId = r.id()
+            val payload = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedRoomEvent(roomId, payload)
+        }
+    }
+}
+
+data class FedKeyRotate(
+    val nodeId: String,
+    val newPublicKey: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(nodeId)
+        w.bytes(newPublicKey)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedKeyRotate {
+            r.enter()
+            val nodeId = r.str()
+            val newPublicKey = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedKeyRotate(nodeId, newPublicKey)
+        }
+    }
+}
+
+data class FedShardMap(
+    val region: String,
+    val nodes: List<FedPeerView>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(region)
+        w.listLen(nodes.size)
+        for (item in nodes) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedShardMap {
+            r.enter()
+            val region = r.str()
+            val nodes = run { val n = r.listLen(); val acc = ArrayList<FedPeerView>(n); for (i in 0 until n) acc.add(FedPeerView.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedShardMap(region, nodes)
+        }
+    }
+}
+
+data class FedError(
+    val nodeId: String,
+    val code: Long,
+    val message: String,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(nodeId)
+        w.u32(code)
+        w.str(message)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedError {
+            r.enter()
+            val nodeId = r.str()
+            val code = r.u32()
+            val message = r.str()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedError(nodeId, code, message)
+        }
+    }
+}
+
+data class FedDirectoryReq(
+    val query: String,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(query)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedDirectoryReq {
+            r.enter()
+            val query = r.str()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedDirectoryReq(query)
+        }
+    }
+}
+
+data class FedDirectory(
+    val peers: List<FedPeerView>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(peers.size)
+        for (item in peers) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): FedDirectory {
+            r.enter()
+            val peers = run { val n = r.listLen(); val acc = ArrayList<FedPeerView>(n); for (i in 0 until n) acc.add(FedPeerView.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return FedDirectory(peers)
+        }
+    }
+}
+
+data class ModerationEvent(
+    val caseId: Id,
+    val action: Long,
+    val state: String,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(caseId)
+        w.u32(action)
+        w.str(state)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ModerationEvent {
+            r.enter()
+            val caseId = r.id()
+            val action = r.u32()
+            val state = r.str()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return ModerationEvent(caseId, action, state)
+        }
+    }
+}
+
 /** Delivery class, deciding what happens when a session queue is full. */
 enum class DeliveryClass { Critical, Coalescable, Droppable }
 /** Minimum session state an opcode requires. */
@@ -3276,6 +5323,42 @@ object Op {
     const val NOTIFICATION_EVENT: Long = 144L
     const val GAME_ACTION: Long = 176L
     const val GAME_EVENT: Long = 177L
+    const val FRIEND_REQUEST: Long = 113L
+    const val FRIEND_RESPOND: Long = 114L
+    const val FRIEND_EVENT: Long = 115L
+    const val BLOCK_SET: Long = 116L
+    const val RELATIONSHIP_LIST: Long = 117L
+    const val MEDIA_UPLOAD_BEGIN: Long = 128L
+    const val MEDIA_UPLOAD_STATUS: Long = 129L
+    const val MEDIA_UPLOAD_COMMIT: Long = 130L
+    const val MEDIA_UPLOAD_ABORT: Long = 131L
+    const val MEDIA_FETCH_URL: Long = 132L
+    const val MEDIA_STATE_EVENT: Long = 133L
+    const val NOTIFICATION_ACK: Long = 145L
+    const val NOTIFICATION_LIST: Long = 146L
+    const val GIFT_SEND: Long = 160L
+    const val BALANCE_FETCH: Long = 161L
+    const val ECONOMY_EVENT: Long = 162L
+    const val BOT_COMMAND: Long = 178L
+    const val BOT_EVENT: Long = 179L
+    const val BOT_REGISTER: Long = 180L
+    const val REPORT_CREATE: Long = 192L
+    const val MODERATION_ACTION: Long = 193L
+    const val MODERATION_EVENT: Long = 194L
+    const val FED_HELLO: Long = 208L
+    const val FED_AUTH: Long = 209L
+    const val FED_PING: Long = 210L
+    const val FED_FORWARD: Long = 211L
+    const val FED_ACK: Long = 212L
+    const val FED_ROOM_SUBSCRIBE: Long = 213L
+    const val FED_ROOM_EVENT: Long = 214L
+    const val FED_PRESENCE_DIGEST: Long = 215L
+    const val FED_KEY_ROTATE: Long = 216L
+    const val FED_HEALTH: Long = 217L
+    const val FED_SHARD_MAP: Long = 218L
+    const val FED_ERROR: Long = 219L
+    const val FED_CALL_RELAY: Long = 220L
+    const val FED_DIRECTORY: Long = 221L
 }
 
 /** Static metadata for one opcode: its rate-limit cost, delivery class, required auth, and shape. */
@@ -3322,6 +5405,42 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     144L to OpcodeMeta(144L, "NOTIFICATION_EVENT", 0, DeliveryClass.Droppable, AuthLevel.User, Direction.ServerToClient, false, "NotificationEvent", null, null),
     176L to OpcodeMeta(176L, "GAME_ACTION", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GameAction", "Acknowledged", null),
     177L to OpcodeMeta(177L, "GAME_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "GameEvent", null, null),
+    113L to OpcodeMeta(113L, "FRIEND_REQUEST", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "FriendTarget", "Acknowledged", null),
+    114L to OpcodeMeta(114L, "FRIEND_RESPOND", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "FriendRespond", "Acknowledged", null),
+    115L to OpcodeMeta(115L, "FRIEND_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "FriendEvent", null, null),
+    116L to OpcodeMeta(116L, "BLOCK_SET", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "FriendTarget", "Acknowledged", null),
+    117L to OpcodeMeta(117L, "RELATIONSHIP_LIST", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RelationshipListReq", "RelationshipList", null),
+    128L to OpcodeMeta(128L, "MEDIA_UPLOAD_BEGIN", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaBegin", "MediaTicket", null),
+    129L to OpcodeMeta(129L, "MEDIA_UPLOAD_STATUS", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaStatusReq", "MediaProgress", null),
+    130L to OpcodeMeta(130L, "MEDIA_UPLOAD_COMMIT", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaCommit", "Acknowledged", null),
+    131L to OpcodeMeta(131L, "MEDIA_UPLOAD_ABORT", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaAbort", "Acknowledged", null),
+    132L to OpcodeMeta(132L, "MEDIA_FETCH_URL", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaFetch", "MediaUrl", null),
+    133L to OpcodeMeta(133L, "MEDIA_STATE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "MediaStateEvent", null, null),
+    145L to OpcodeMeta(145L, "NOTIFICATION_ACK", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "NotificationAck", "Acknowledged", null),
+    146L to OpcodeMeta(146L, "NOTIFICATION_LIST", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "InboxReq", "InboxResponse", null),
+    160L to OpcodeMeta(160L, "GIFT_SEND", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GiftSend", "GiftSendResult", null),
+    161L to OpcodeMeta(161L, "BALANCE_FETCH", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "WalletReq", "WalletView", null),
+    162L to OpcodeMeta(162L, "ECONOMY_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "EconomyEvent", null, null),
+    178L to OpcodeMeta(178L, "BOT_COMMAND", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "BotCommand", "Acknowledged", null),
+    179L to OpcodeMeta(179L, "BOT_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "BotEvent", null, null),
+    180L to OpcodeMeta(180L, "BOT_REGISTER", 20, DeliveryClass.Critical, AuthLevel.Bot, Direction.ClientToServer, false, "BotRegister", "BotView", null),
+    192L to OpcodeMeta(192L, "REPORT_CREATE", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ReportFile", "Acknowledged", null),
+    193L to OpcodeMeta(193L, "MODERATION_ACTION", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ModAction", "Acknowledged", null),
+    194L to OpcodeMeta(194L, "MODERATION_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "ModerationEvent", null, null),
+    208L to OpcodeMeta(208L, "FED_HELLO", 5, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedHello", "FedHello", null),
+    209L to OpcodeMeta(209L, "FED_AUTH", 5, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedAuth", "Acknowledged", null),
+    210L to OpcodeMeta(210L, "FED_PING", 1, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedPing", "FedPong", null),
+    211L to OpcodeMeta(211L, "FED_FORWARD", 1, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedForward", "Acknowledged", null),
+    212L to OpcodeMeta(212L, "FED_ACK", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedAck", "Acknowledged", null),
+    213L to OpcodeMeta(213L, "FED_ROOM_SUBSCRIBE", 2, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedRouting", "Acknowledged", null),
+    214L to OpcodeMeta(214L, "FED_ROOM_EVENT", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedRoomEvent", "Acknowledged", null),
+    215L to OpcodeMeta(215L, "FED_PRESENCE_DIGEST", 0, DeliveryClass.Coalescable, AuthLevel.Server, Direction.Both, false, "FedPresenceDigest", "Acknowledged", null),
+    216L to OpcodeMeta(216L, "FED_KEY_ROTATE", 5, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedKeyRotate", "Acknowledged", null),
+    217L to OpcodeMeta(217L, "FED_HEALTH", 1, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedHealth", "FedHealth", null),
+    218L to OpcodeMeta(218L, "FED_SHARD_MAP", 2, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedShardMap", "Acknowledged", null),
+    219L to OpcodeMeta(219L, "FED_ERROR", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedError", "Acknowledged", null),
+    220L to OpcodeMeta(220L, "FED_CALL_RELAY", 1, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedForward", "Acknowledged", null),
+    221L to OpcodeMeta(221L, "FED_DIRECTORY", 2, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedDirectoryReq", "FedDirectory", null),
 )
 
 /** Human name for an opcode, for logs and errors. Never used on the wire. */

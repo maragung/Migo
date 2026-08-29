@@ -4308,6 +4308,8 @@ TIDAK BOLEH mengirim flag reserved dengan nilai bukan nol
 
 STATUS: SCHEMA untuk bit 0 sampai 15 di meta.json. STATUS: SPEC untuk bit 16 sampai 20 dan untuk logika negosiasi di gateway.
 
+Bit 16 sampai 20 yang masih SPEC adalah VOICE_NOTE, CALLS, GROUP_CALL, FEDERATION, dan RICH_PRESENCE; setiap bit menyalakan kelompok opcode yang bersangkutan (MEDIA untuk VOICE_NOTE, CALLS dan GROUP_CALL untuk range 224 sampai 238, FEDERATION untuk range 208 sampai 223, dan RICH_PRESENCE untuk status kustom).
+
 Mekanisme dan daftar bit ada di section 72. Bagian ini menetapkan aturan protokolnya.
 
 HELLO membawa features berupa bitmask64 milik client. Welcome membawa features milik server. Session memakai irisan keduanya, dan irisan itu bersifat tetap selama sesi berlangsung.

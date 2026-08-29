@@ -43,7 +43,7 @@ export const FLAG = {
   ACK_REQUIRED: 16,
   /** varint index, varint total follow; payload is a slice */
   FRAGMENT: 32,
-  /** Must be zero in MWP/1 */
+  /** Reserved. MUST be zero. Reserved in MWP/1 for a future METADATA block (section 141); a frame that sets it is rejected. */
   RESERVED_6: 64,
   /** A second flags byte follows (reserved for MWP/2) */
   FLAGS_EXT: 128,
@@ -84,8 +84,18 @@ export const FEATURE = {
   RESUME: 1n << 14n,
   /** Gifts and currency events */
   ECONOMY: 1n << 15n,
+  /** Voice note attachments (section 167/179) */
+  VOICE_NOTE: 1n << 16n,
+  /** 1:1 voice/video calls (section 165/166/180) */
+  CALLS: 1n << 17n,
+  /** SFU group calls (section 166) */
+  GROUP_CALL: 1n << 18n,
+  /** Server-to-server mesh (section 169/170) */
+  FEDERATION: 1n << 19n,
+  /** Custom status and activity (section 26) */
+  RICH_PRESENCE: 1n << 20n,
 } as const;
-export const ALL_FEATURES = FEATURE.COMPRESSION | FEATURE.BATCHING | FEATURE.E2E_V1 | FEATURE.GROUP_E2E_V1 | FEATURE.PRESENCE | FEATURE.TYPING | FEATURE.ROOMS | FEATURE.MEDIA_UPLOAD | FEATURE.GAMES | FEATURE.BOTS | FEATURE.TRANSLATION | FEATURE.VOICE_MESSAGE | FEATURE.QUIC | FEATURE.TRACING | FEATURE.RESUME | FEATURE.ECONOMY;
+export const ALL_FEATURES = FEATURE.COMPRESSION | FEATURE.BATCHING | FEATURE.E2E_V1 | FEATURE.GROUP_E2E_V1 | FEATURE.PRESENCE | FEATURE.TYPING | FEATURE.ROOMS | FEATURE.MEDIA_UPLOAD | FEATURE.GAMES | FEATURE.BOTS | FEATURE.TRANSLATION | FEATURE.VOICE_MESSAGE | FEATURE.QUIC | FEATURE.TRACING | FEATURE.RESUME | FEATURE.ECONOMY | FEATURE.VOICE_NOTE | FEATURE.CALLS | FEATURE.GROUP_CALL | FEATURE.FEDERATION | FEATURE.RICH_PRESENCE;
 
 /** Stable protocol error codes. */
 export const CODE = {
@@ -2334,6 +2344,1858 @@ export function decodeGameEvent(r: Reader): GameEvent {
   return out;
 }
 
+/** A single subject account for a social action. */
+export interface FriendTarget {
+  userId: Id;
+}
+
+export function encodeFriendTarget(w: Writer, v: FriendTarget): void {
+  w.enter();
+  w.id(v.userId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFriendTarget(r: Reader): FriendTarget {
+  r.enter();
+  const userId = r.id();
+  const out: FriendTarget = { userId } as FriendTarget;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Request for people the caller might know. */
+export interface SocialSuggestReq {
+  limit: number;
+}
+
+export function encodeSocialSuggestReq(w: Writer, v: SocialSuggestReq): void {
+  w.enter();
+  w.u32(v.limit);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeSocialSuggestReq(r: Reader): SocialSuggestReq {
+  r.enter();
+  const limit = r.u32();
+  const out: SocialSuggestReq = { limit } as SocialSuggestReq;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Suggested account ids. */
+export interface SocialSuggestions {
+  users: Id[];
+}
+
+export function encodeSocialSuggestions(w: Writer, v: SocialSuggestions): void {
+  w.enter();
+  { w.listLen(v.users.length); for (const item of v.users) { w.id(item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeSocialSuggestions(r: Reader): SocialSuggestions {
+  r.enter();
+  const users = ((): Id[] => { const n = r.listLen(); const v: Id[] = []; for (let i = 0; i < n; i++) v.push(r.id()); return v; })();
+  const out: SocialSuggestions = { users } as SocialSuggestions;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Open an upload ticket for a media object. */
+export interface MediaBegin {
+  /** Content kind, from the media domain enum */
+  kind: number;
+  contentType: string;
+  /** Declared total bytes */
+  size: number;
+  /** Present for conversation-scoped media; absent for profile media */
+  conversationId?: Id;
+  width?: number;
+  height?: number;
+  durationMs?: number;
+}
+
+export function encodeMediaBegin(w: Writer, v: MediaBegin): void {
+  w.enter();
+  w.u32(v.kind);
+  w.str(v.contentType);
+  w.u64(v.size);
+  let present = 0;
+  if (v.conversationId !== undefined) present++;
+  if (v.width !== undefined) present++;
+  if (v.height !== undefined) present++;
+  if (v.durationMs !== undefined) present++;
+  w.u32(present);
+  if (v.conversationId !== undefined) { const value = v.conversationId; w.optional(1, (w) => { w.id(value); }); }
+  if (v.width !== undefined) { const value = v.width; w.optional(2, (w) => { w.u32(value); }); }
+  if (v.height !== undefined) { const value = v.height; w.optional(3, (w) => { w.u32(value); }); }
+  if (v.durationMs !== undefined) { const value = v.durationMs; w.optional(4, (w) => { w.u64(value); }); }
+  w.leave();
+}
+
+export function decodeMediaBegin(r: Reader): MediaBegin {
+  r.enter();
+  const kind = r.u32();
+  const contentType = r.str();
+  const size = r.u64();
+  const out: MediaBegin = { kind, contentType, size } as MediaBegin;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.conversationId = sub.id(); break;
+      case 2: out.width = sub.u32(); break;
+      case 3: out.height = sub.u32(); break;
+      case 4: out.durationMs = sub.u64(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** Signed upload URL and the ticket that claims the object later. */
+export interface MediaTicket {
+  uploadId: Id;
+  uploadUrl: string;
+  /** Headers the client must send with the PUT */
+  headers: string[];
+}
+
+export function encodeMediaTicket(w: Writer, v: MediaTicket): void {
+  w.enter();
+  w.id(v.uploadId);
+  w.str(v.uploadUrl);
+  { w.listLen(v.headers.length); for (const item of v.headers) { w.str(item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeMediaTicket(r: Reader): MediaTicket {
+  r.enter();
+  const uploadId = r.id();
+  const uploadUrl = r.str();
+  const headers = ((): string[] => { const n = r.listLen(); const v: string[] = []; for (let i = 0; i < n; i++) v.push(r.str()); return v; })();
+  const out: MediaTicket = { uploadId, uploadUrl, headers } as MediaTicket;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface MediaStatusReq {
+  uploadId: Id;
+}
+
+export function encodeMediaStatusReq(w: Writer, v: MediaStatusReq): void {
+  w.enter();
+  w.id(v.uploadId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeMediaStatusReq(r: Reader): MediaStatusReq {
+  r.enter();
+  const uploadId = r.id();
+  const out: MediaStatusReq = { uploadId } as MediaStatusReq;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface MediaProgress {
+  received: number;
+  expected: number;
+}
+
+export function encodeMediaProgress(w: Writer, v: MediaProgress): void {
+  w.enter();
+  w.u64(v.received);
+  w.u64(v.expected);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeMediaProgress(r: Reader): MediaProgress {
+  r.enter();
+  const received = r.u64();
+  const expected = r.u64();
+  const out: MediaProgress = { received, expected } as MediaProgress;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface MediaCommit {
+  uploadId: Id;
+  /** SHA-256 of the uploaded bytes */
+  digest: Uint8Array;
+}
+
+export function encodeMediaCommit(w: Writer, v: MediaCommit): void {
+  w.enter();
+  w.id(v.uploadId);
+  w.bytes(v.digest);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeMediaCommit(r: Reader): MediaCommit {
+  r.enter();
+  const uploadId = r.id();
+  const digest = r.bytes();
+  const out: MediaCommit = { uploadId, digest } as MediaCommit;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface MediaAbort {
+  uploadId: Id;
+}
+
+export function encodeMediaAbort(w: Writer, v: MediaAbort): void {
+  w.enter();
+  w.id(v.uploadId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeMediaAbort(r: Reader): MediaAbort {
+  r.enter();
+  const uploadId = r.id();
+  const out: MediaAbort = { uploadId } as MediaAbort;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface MediaFetch {
+  objectId: Id;
+  conversationId?: Id;
+}
+
+export function encodeMediaFetch(w: Writer, v: MediaFetch): void {
+  w.enter();
+  w.id(v.objectId);
+  let present = 0;
+  if (v.conversationId !== undefined) present++;
+  w.u32(present);
+  if (v.conversationId !== undefined) { const value = v.conversationId; w.optional(1, (w) => { w.id(value); }); }
+  w.leave();
+}
+
+export function decodeMediaFetch(r: Reader): MediaFetch {
+  r.enter();
+  const objectId = r.id();
+  const out: MediaFetch = { objectId } as MediaFetch;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.conversationId = sub.id(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+export interface MediaUrl {
+  url: string;
+  expiresAt: number;
+}
+
+export function encodeMediaUrl(w: Writer, v: MediaUrl): void {
+  w.enter();
+  w.str(v.url);
+  w.timestamp(v.expiresAt);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeMediaUrl(r: Reader): MediaUrl {
+  r.enter();
+  const url = r.str();
+  const expiresAt = r.timestamp();
+  const out: MediaUrl = { url, expiresAt } as MediaUrl;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface MediaDelete {
+  objectId: Id;
+}
+
+export function encodeMediaDelete(w: Writer, v: MediaDelete): void {
+  w.enter();
+  w.id(v.objectId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeMediaDelete(r: Reader): MediaDelete {
+  r.enter();
+  const objectId = r.id();
+  const out: MediaDelete = { objectId } as MediaDelete;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface PushRegister {
+  token: string;
+  provider: number;
+}
+
+export function encodePushRegister(w: Writer, v: PushRegister): void {
+  w.enter();
+  w.str(v.token);
+  w.u32(v.provider);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodePushRegister(r: Reader): PushRegister {
+  r.enter();
+  const token = r.str();
+  const provider = r.u32();
+  const out: PushRegister = { token, provider } as PushRegister;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface InboxReq {
+  limit: number;
+  cursor?: string;
+}
+
+export function encodeInboxReq(w: Writer, v: InboxReq): void {
+  w.enter();
+  w.u32(v.limit);
+  let present = 0;
+  if (v.cursor !== undefined) present++;
+  w.u32(present);
+  if (v.cursor !== undefined) { const value = v.cursor; w.optional(1, (w) => { w.str(value); }); }
+  w.leave();
+}
+
+export function decodeInboxReq(r: Reader): InboxReq {
+  r.enter();
+  const limit = r.u32();
+  const out: InboxReq = { limit } as InboxReq;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.cursor = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+export interface InboxItem {
+  id: Id;
+  kind: string;
+  at: number;
+  title?: string;
+  body?: string;
+  conversationId?: Id;
+  roomId?: Id;
+  actorId?: Id;
+}
+
+export function encodeInboxItem(w: Writer, v: InboxItem): void {
+  w.enter();
+  w.id(v.id);
+  w.str(v.kind);
+  w.timestamp(v.at);
+  let present = 0;
+  if (v.title !== undefined) present++;
+  if (v.body !== undefined) present++;
+  if (v.conversationId !== undefined) present++;
+  if (v.roomId !== undefined) present++;
+  if (v.actorId !== undefined) present++;
+  w.u32(present);
+  if (v.title !== undefined) { const value = v.title; w.optional(1, (w) => { w.str(value); }); }
+  if (v.body !== undefined) { const value = v.body; w.optional(2, (w) => { w.str(value); }); }
+  if (v.conversationId !== undefined) { const value = v.conversationId; w.optional(3, (w) => { w.id(value); }); }
+  if (v.roomId !== undefined) { const value = v.roomId; w.optional(4, (w) => { w.id(value); }); }
+  if (v.actorId !== undefined) { const value = v.actorId; w.optional(5, (w) => { w.id(value); }); }
+  w.leave();
+}
+
+export function decodeInboxItem(r: Reader): InboxItem {
+  r.enter();
+  const id = r.id();
+  const kind = r.str();
+  const at = r.timestamp();
+  const out: InboxItem = { id, kind, at } as InboxItem;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.title = sub.str(); break;
+      case 2: out.body = sub.str(); break;
+      case 3: out.conversationId = sub.id(); break;
+      case 4: out.roomId = sub.id(); break;
+      case 5: out.actorId = sub.id(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+export interface InboxResponse {
+  items: InboxItem[];
+  nextCursor?: string;
+}
+
+export function encodeInboxResponse(w: Writer, v: InboxResponse): void {
+  w.enter();
+  { w.listLen(v.items.length); for (const item of v.items) { encodeInboxItem(w, item); } }
+  let present = 0;
+  if (v.nextCursor !== undefined) present++;
+  w.u32(present);
+  if (v.nextCursor !== undefined) { const value = v.nextCursor; w.optional(1, (w) => { w.str(value); }); }
+  w.leave();
+}
+
+export function decodeInboxResponse(r: Reader): InboxResponse {
+  r.enter();
+  const items = ((): InboxItem[] => { const n = r.listLen(); const v: InboxItem[] = []; for (let i = 0; i < n; i++) v.push(decodeInboxItem(r)); return v; })();
+  const out: InboxResponse = { items } as InboxResponse;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.nextCursor = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** Empty request; the caller's own wallet is implied by the session. */
+export interface WalletReq {
+}
+
+export function encodeWalletReq(w: Writer, v: WalletReq): void {
+  w.enter();
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeWalletReq(r: Reader): WalletReq {
+  r.enter();
+  const out: WalletReq = {  } as WalletReq;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface WalletView {
+  balance: number;
+  points: number;
+}
+
+export function encodeWalletView(w: Writer, v: WalletView): void {
+  w.enter();
+  w.u64(v.balance);
+  w.u64(v.points);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeWalletView(r: Reader): WalletView {
+  r.enter();
+  const balance = r.u64();
+  const points = r.u64();
+  const out: WalletView = { balance, points } as WalletView;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface GiftSend {
+  /** SKU slug */
+  gift: string;
+  recipient: Id;
+  conversationId?: Id;
+}
+
+export function encodeGiftSend(w: Writer, v: GiftSend): void {
+  w.enter();
+  w.str(v.gift);
+  w.id(v.recipient);
+  let present = 0;
+  if (v.conversationId !== undefined) present++;
+  w.u32(present);
+  if (v.conversationId !== undefined) { const value = v.conversationId; w.optional(1, (w) => { w.id(value); }); }
+  w.leave();
+}
+
+export function decodeGiftSend(r: Reader): GiftSend {
+  r.enter();
+  const gift = r.str();
+  const recipient = r.id();
+  const out: GiftSend = { gift, recipient } as GiftSend;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.conversationId = sub.id(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+export interface GiftSendResult {
+  ok: boolean;
+  txId?: Id;
+}
+
+export function encodeGiftSendResult(w: Writer, v: GiftSendResult): void {
+  w.enter();
+  w.bool(v.ok);
+  let present = 0;
+  if (v.txId !== undefined) present++;
+  w.u32(present);
+  if (v.txId !== undefined) { const value = v.txId; w.optional(1, (w) => { w.id(value); }); }
+  w.leave();
+}
+
+export function decodeGiftSendResult(r: Reader): GiftSendResult {
+  r.enter();
+  const ok = r.bool();
+  const out: GiftSendResult = { ok } as GiftSendResult;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.txId = sub.id(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** Empty request for the gift catalogue. */
+export interface CatalogueReq {
+}
+
+export function encodeCatalogueReq(w: Writer, v: CatalogueReq): void {
+  w.enter();
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCatalogueReq(r: Reader): CatalogueReq {
+  r.enter();
+  const out: CatalogueReq = {  } as CatalogueReq;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface GiftListing {
+  sku: string;
+  name: string;
+  price: number;
+  category: string;
+}
+
+export function encodeGiftListing(w: Writer, v: GiftListing): void {
+  w.enter();
+  w.str(v.sku);
+  w.str(v.name);
+  w.u64(v.price);
+  w.str(v.category);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeGiftListing(r: Reader): GiftListing {
+  r.enter();
+  const sku = r.str();
+  const name = r.str();
+  const price = r.u64();
+  const category = r.str();
+  const out: GiftListing = { sku, name, price, category } as GiftListing;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface CatalogueView {
+  items: GiftListing[];
+}
+
+export function encodeCatalogueView(w: Writer, v: CatalogueView): void {
+  w.enter();
+  { w.listLen(v.items.length); for (const item of v.items) { encodeGiftListing(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCatalogueView(r: Reader): CatalogueView {
+  r.enter();
+  const items = ((): GiftListing[] => { const n = r.listLen(); const v: GiftListing[] = []; for (let i = 0; i < n; i++) v.push(decodeGiftListing(r)); return v; })();
+  const out: CatalogueView = { items } as CatalogueView;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface BotRegister {
+  username: string;
+  displayName: string;
+}
+
+export function encodeBotRegister(w: Writer, v: BotRegister): void {
+  w.enter();
+  w.str(v.username);
+  w.str(v.displayName);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeBotRegister(r: Reader): BotRegister {
+  r.enter();
+  const username = r.str();
+  const displayName = r.str();
+  const out: BotRegister = { username, displayName } as BotRegister;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface BotView {
+  botId: Id;
+  username: string;
+  /** Present only on register/rotate; never logged */
+  token?: string;
+}
+
+export function encodeBotView(w: Writer, v: BotView): void {
+  w.enter();
+  w.id(v.botId);
+  w.str(v.username);
+  let present = 0;
+  if (v.token !== undefined) present++;
+  w.u32(present);
+  if (v.token !== undefined) { const value = v.token; w.optional(1, (w) => { w.str(value); }); }
+  w.leave();
+}
+
+export function decodeBotView(r: Reader): BotView {
+  r.enter();
+  const botId = r.id();
+  const username = r.str();
+  const out: BotView = { botId, username } as BotView;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.token = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+export interface BotAuth {
+  token: string;
+}
+
+export function encodeBotAuth(w: Writer, v: BotAuth): void {
+  w.enter();
+  w.str(v.token);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeBotAuth(r: Reader): BotAuth {
+  r.enter();
+  const token = r.str();
+  const out: BotAuth = { token } as BotAuth;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface BotRotate {
+  botId: Id;
+}
+
+export function encodeBotRotate(w: Writer, v: BotRotate): void {
+  w.enter();
+  w.id(v.botId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeBotRotate(r: Reader): BotRotate {
+  r.enter();
+  const botId = r.id();
+  const out: BotRotate = { botId } as BotRotate;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface ReportFile {
+  /** 0 user, 1 message, 2 room, 3 bot */
+  subjectKind: number;
+  subjectId: Id;
+  reason: number;
+  note?: string;
+}
+
+export function encodeReportFile(w: Writer, v: ReportFile): void {
+  w.enter();
+  w.u32(v.subjectKind);
+  w.id(v.subjectId);
+  w.u32(v.reason);
+  let present = 0;
+  if (v.note !== undefined) present++;
+  w.u32(present);
+  if (v.note !== undefined) { const value = v.note; w.optional(1, (w) => { w.str(value); }); }
+  w.leave();
+}
+
+export function decodeReportFile(r: Reader): ReportFile {
+  r.enter();
+  const subjectKind = r.u32();
+  const subjectId = r.id();
+  const reason = r.u32();
+  const out: ReportFile = { subjectKind, subjectId, reason } as ReportFile;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.note = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+export interface ModAction {
+  caseId: Id;
+  action: number;
+}
+
+export function encodeModAction(w: Writer, v: ModAction): void {
+  w.enter();
+  w.id(v.caseId);
+  w.u32(v.action);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeModAction(r: Reader): ModAction {
+  r.enter();
+  const caseId = r.id();
+  const action = r.u32();
+  const out: ModAction = { caseId, action } as ModAction;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface ModQueueReq {
+  limit: number;
+}
+
+export function encodeModQueueReq(w: Writer, v: ModQueueReq): void {
+  w.enter();
+  w.u32(v.limit);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeModQueueReq(r: Reader): ModQueueReq {
+  r.enter();
+  const limit = r.u32();
+  const out: ModQueueReq = { limit } as ModQueueReq;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface CaseView {
+  caseId: Id;
+  subjectKind: number;
+  subjectId: Id;
+  reason: number;
+  state: string;
+  filedAt: number;
+}
+
+export function encodeCaseView(w: Writer, v: CaseView): void {
+  w.enter();
+  w.id(v.caseId);
+  w.u32(v.subjectKind);
+  w.id(v.subjectId);
+  w.u32(v.reason);
+  w.str(v.state);
+  w.timestamp(v.filedAt);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCaseView(r: Reader): CaseView {
+  r.enter();
+  const caseId = r.id();
+  const subjectKind = r.u32();
+  const subjectId = r.id();
+  const reason = r.u32();
+  const state = r.str();
+  const filedAt = r.timestamp();
+  const out: CaseView = { caseId, subjectKind, subjectId, reason, state, filedAt } as CaseView;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface ModQueue {
+  items: CaseView[];
+}
+
+export function encodeModQueue(w: Writer, v: ModQueue): void {
+  w.enter();
+  { w.listLen(v.items.length); for (const item of v.items) { encodeCaseView(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeModQueue(r: Reader): ModQueue {
+  r.enter();
+  const items = ((): CaseView[] => { const n = r.listLen(); const v: CaseView[] = []; for (let i = 0; i < n; i++) v.push(decodeCaseView(r)); return v; })();
+  const out: ModQueue = { items } as ModQueue;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedPeerSpec {
+  nodeId: string;
+  region: string;
+  country: string;
+  publicKey: Uint8Array;
+}
+
+export function encodeFedPeerSpec(w: Writer, v: FedPeerSpec): void {
+  w.enter();
+  w.str(v.nodeId);
+  w.str(v.region);
+  w.str(v.country);
+  w.bytes(v.publicKey);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedPeerSpec(r: Reader): FedPeerSpec {
+  r.enter();
+  const nodeId = r.str();
+  const region = r.str();
+  const country = r.str();
+  const publicKey = r.bytes();
+  const out: FedPeerSpec = { nodeId, region, country, publicKey } as FedPeerSpec;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedPeerView {
+  nodeId: string;
+  region: string;
+  status: string;
+}
+
+export function encodeFedPeerView(w: Writer, v: FedPeerView): void {
+  w.enter();
+  w.str(v.nodeId);
+  w.str(v.region);
+  w.str(v.status);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedPeerView(r: Reader): FedPeerView {
+  r.enter();
+  const nodeId = r.str();
+  const region = r.str();
+  const status = r.str();
+  const out: FedPeerView = { nodeId, region, status } as FedPeerView;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedPeerId {
+  nodeId: string;
+}
+
+export function encodeFedPeerId(w: Writer, v: FedPeerId): void {
+  w.enter();
+  w.str(v.nodeId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedPeerId(r: Reader): FedPeerId {
+  r.enter();
+  const nodeId = r.str();
+  const out: FedPeerId = { nodeId } as FedPeerId;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedListReq {
+}
+
+export function encodeFedListReq(w: Writer, v: FedListReq): void {
+  w.enter();
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedListReq(r: Reader): FedListReq {
+  r.enter();
+  const out: FedListReq = {  } as FedListReq;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedPeerList {
+  peers: FedPeerView[];
+}
+
+export function encodeFedPeerList(w: Writer, v: FedPeerList): void {
+  w.enter();
+  { w.listLen(v.peers.length); for (const item of v.peers) { encodeFedPeerView(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedPeerList(r: Reader): FedPeerList {
+  r.enter();
+  const peers = ((): FedPeerView[] => { const n = r.listLen(); const v: FedPeerView[] = []; for (let i = 0; i < n; i++) v.push(decodeFedPeerView(r)); return v; })();
+  const out: FedPeerList = { peers } as FedPeerList;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedHello {
+  nodeId: string;
+  region: string;
+  epoch: number;
+  nonce: Uint8Array;
+}
+
+export function encodeFedHello(w: Writer, v: FedHello): void {
+  w.enter();
+  w.str(v.nodeId);
+  w.str(v.region);
+  w.u64(v.epoch);
+  w.bytes(v.nonce);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedHello(r: Reader): FedHello {
+  r.enter();
+  const nodeId = r.str();
+  const region = r.str();
+  const epoch = r.u64();
+  const nonce = r.bytes();
+  const out: FedHello = { nodeId, region, epoch, nonce } as FedHello;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedProof {
+  nodeId: string;
+  signature: Uint8Array;
+}
+
+export function encodeFedProof(w: Writer, v: FedProof): void {
+  w.enter();
+  w.str(v.nodeId);
+  w.bytes(v.signature);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedProof(r: Reader): FedProof {
+  r.enter();
+  const nodeId = r.str();
+  const signature = r.bytes();
+  const out: FedProof = { nodeId, signature } as FedProof;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedForward {
+  from: string;
+  to: string;
+  payload: Uint8Array;
+}
+
+export function encodeFedForward(w: Writer, v: FedForward): void {
+  w.enter();
+  w.str(v.from);
+  w.str(v.to);
+  w.bytes(v.payload);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedForward(r: Reader): FedForward {
+  r.enter();
+  const from = r.str();
+  const to = r.str();
+  const payload = r.bytes();
+  const out: FedForward = { from, to, payload } as FedForward;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedPresenceDigest {
+  region: string;
+  digest: Uint8Array;
+}
+
+export function encodeFedPresenceDigest(w: Writer, v: FedPresenceDigest): void {
+  w.enter();
+  w.str(v.region);
+  w.bytes(v.digest);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedPresenceDigest(r: Reader): FedPresenceDigest {
+  r.enter();
+  const region = r.str();
+  const digest = r.bytes();
+  const out: FedPresenceDigest = { region, digest } as FedPresenceDigest;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedRouting {
+  epoch: number;
+  homeRegion: string;
+  roomId: Id;
+}
+
+export function encodeFedRouting(w: Writer, v: FedRouting): void {
+  w.enter();
+  w.u64(v.epoch);
+  w.str(v.homeRegion);
+  w.id(v.roomId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedRouting(r: Reader): FedRouting {
+  r.enter();
+  const epoch = r.u64();
+  const homeRegion = r.str();
+  const roomId = r.id();
+  const out: FedRouting = { epoch, homeRegion, roomId } as FedRouting;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedEpoch {
+  epoch: number;
+}
+
+export function encodeFedEpoch(w: Writer, v: FedEpoch): void {
+  w.enter();
+  w.u64(v.epoch);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedEpoch(r: Reader): FedEpoch {
+  r.enter();
+  const epoch = r.u64();
+  const out: FedEpoch = { epoch } as FedEpoch;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedLinkState {
+  nodeId: string;
+  sequence: number;
+  healthy: boolean;
+}
+
+export function encodeFedLinkState(w: Writer, v: FedLinkState): void {
+  w.enter();
+  w.str(v.nodeId);
+  w.u64(v.sequence);
+  w.bool(v.healthy);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedLinkState(r: Reader): FedLinkState {
+  r.enter();
+  const nodeId = r.str();
+  const sequence = r.u64();
+  const healthy = r.bool();
+  const out: FedLinkState = { nodeId, sequence, healthy } as FedLinkState;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedHealth {
+  nodeId: string;
+  status: string;
+}
+
+export function encodeFedHealth(w: Writer, v: FedHealth): void {
+  w.enter();
+  w.str(v.nodeId);
+  w.str(v.status);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedHealth(r: Reader): FedHealth {
+  r.enter();
+  const nodeId = r.str();
+  const status = r.str();
+  const out: FedHealth = { nodeId, status } as FedHealth;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedEvent {
+  from: string;
+  kind: string;
+  payload: Uint8Array;
+}
+
+export function encodeFedEvent(w: Writer, v: FedEvent): void {
+  w.enter();
+  w.str(v.from);
+  w.str(v.kind);
+  w.bytes(v.payload);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedEvent(r: Reader): FedEvent {
+  r.enter();
+  const from = r.str();
+  const kind = r.str();
+  const payload = r.bytes();
+  const out: FedEvent = { from, kind, payload } as FedEvent;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FriendRespond {
+  userId: Id;
+  accept: boolean;
+}
+
+export function encodeFriendRespond(w: Writer, v: FriendRespond): void {
+  w.enter();
+  w.id(v.userId);
+  w.bool(v.accept);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFriendRespond(r: Reader): FriendRespond {
+  r.enter();
+  const userId = r.id();
+  const accept = r.bool();
+  const out: FriendRespond = { userId, accept } as FriendRespond;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FriendEvent {
+  userId: Id;
+  state: string;
+}
+
+export function encodeFriendEvent(w: Writer, v: FriendEvent): void {
+  w.enter();
+  w.id(v.userId);
+  w.str(v.state);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFriendEvent(r: Reader): FriendEvent {
+  r.enter();
+  const userId = r.id();
+  const state = r.str();
+  const out: FriendEvent = { userId, state } as FriendEvent;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface RelationshipListReq {
+  limit: number;
+}
+
+export function encodeRelationshipListReq(w: Writer, v: RelationshipListReq): void {
+  w.enter();
+  w.u32(v.limit);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeRelationshipListReq(r: Reader): RelationshipListReq {
+  r.enter();
+  const limit = r.u32();
+  const out: RelationshipListReq = { limit } as RelationshipListReq;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface RelationshipEntry {
+  userId: Id;
+  kind: number;
+}
+
+export function encodeRelationshipEntry(w: Writer, v: RelationshipEntry): void {
+  w.enter();
+  w.id(v.userId);
+  w.u32(v.kind);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeRelationshipEntry(r: Reader): RelationshipEntry {
+  r.enter();
+  const userId = r.id();
+  const kind = r.u32();
+  const out: RelationshipEntry = { userId, kind } as RelationshipEntry;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface RelationshipList {
+  entries: RelationshipEntry[];
+}
+
+export function encodeRelationshipList(w: Writer, v: RelationshipList): void {
+  w.enter();
+  { w.listLen(v.entries.length); for (const item of v.entries) { encodeRelationshipEntry(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeRelationshipList(r: Reader): RelationshipList {
+  r.enter();
+  const entries = ((): RelationshipEntry[] => { const n = r.listLen(); const v: RelationshipEntry[] = []; for (let i = 0; i < n; i++) v.push(decodeRelationshipEntry(r)); return v; })();
+  const out: RelationshipList = { entries } as RelationshipList;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface MediaStateEvent {
+  objectId: Id;
+  state: string;
+}
+
+export function encodeMediaStateEvent(w: Writer, v: MediaStateEvent): void {
+  w.enter();
+  w.id(v.objectId);
+  w.str(v.state);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeMediaStateEvent(r: Reader): MediaStateEvent {
+  r.enter();
+  const objectId = r.id();
+  const state = r.str();
+  const out: MediaStateEvent = { objectId, state } as MediaStateEvent;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface NotificationAck {
+  id: Id;
+}
+
+export function encodeNotificationAck(w: Writer, v: NotificationAck): void {
+  w.enter();
+  w.id(v.id);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeNotificationAck(r: Reader): NotificationAck {
+  r.enter();
+  const id = r.id();
+  const out: NotificationAck = { id } as NotificationAck;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface EconomyEvent {
+  kind: string;
+  amount: number;
+  currency: string;
+}
+
+export function encodeEconomyEvent(w: Writer, v: EconomyEvent): void {
+  w.enter();
+  w.str(v.kind);
+  w.u64(v.amount);
+  w.str(v.currency);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeEconomyEvent(r: Reader): EconomyEvent {
+  r.enter();
+  const kind = r.str();
+  const amount = r.u64();
+  const currency = r.str();
+  const out: EconomyEvent = { kind, amount, currency } as EconomyEvent;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface BotCommand {
+  botId: Id;
+  command: string;
+  args?: string[];
+}
+
+export function encodeBotCommand(w: Writer, v: BotCommand): void {
+  w.enter();
+  w.id(v.botId);
+  w.str(v.command);
+  let present = 0;
+  if (v.args !== undefined) present++;
+  w.u32(present);
+  if (v.args !== undefined) { const value = v.args; w.optional(1, (w) => { { w.listLen(value.length); for (const item of value) { w.str(item); } } }); }
+  w.leave();
+}
+
+export function decodeBotCommand(r: Reader): BotCommand {
+  r.enter();
+  const botId = r.id();
+  const command = r.str();
+  const out: BotCommand = { botId, command } as BotCommand;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.args = ((): string[] => { const n = sub.listLen(); const v: string[] = []; for (let i = 0; i < n; i++) v.push(sub.str()); return v; })(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+export interface BotEvent {
+  botId: Id;
+  event: string;
+  payload?: Uint8Array;
+}
+
+export function encodeBotEvent(w: Writer, v: BotEvent): void {
+  w.enter();
+  w.id(v.botId);
+  w.str(v.event);
+  let present = 0;
+  if (v.payload !== undefined) present++;
+  w.u32(present);
+  if (v.payload !== undefined) { const value = v.payload; w.optional(1, (w) => { w.bytes(value); }); }
+  w.leave();
+}
+
+export function decodeBotEvent(r: Reader): BotEvent {
+  r.enter();
+  const botId = r.id();
+  const event = r.str();
+  const out: BotEvent = { botId, event } as BotEvent;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.payload = sub.bytes(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+export interface FedAuth {
+  nodeId: string;
+  signature: Uint8Array;
+  epoch: number;
+}
+
+export function encodeFedAuth(w: Writer, v: FedAuth): void {
+  w.enter();
+  w.str(v.nodeId);
+  w.bytes(v.signature);
+  w.u64(v.epoch);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedAuth(r: Reader): FedAuth {
+  r.enter();
+  const nodeId = r.str();
+  const signature = r.bytes();
+  const epoch = r.u64();
+  const out: FedAuth = { nodeId, signature, epoch } as FedAuth;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedPing {
+  nodeId: string;
+  nonce: Uint8Array;
+}
+
+export function encodeFedPing(w: Writer, v: FedPing): void {
+  w.enter();
+  w.str(v.nodeId);
+  w.bytes(v.nonce);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedPing(r: Reader): FedPing {
+  r.enter();
+  const nodeId = r.str();
+  const nonce = r.bytes();
+  const out: FedPing = { nodeId, nonce } as FedPing;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedPong {
+  nonce: Uint8Array;
+}
+
+export function encodeFedPong(w: Writer, v: FedPong): void {
+  w.enter();
+  w.bytes(v.nonce);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedPong(r: Reader): FedPong {
+  r.enter();
+  const nonce = r.bytes();
+  const out: FedPong = { nonce } as FedPong;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedAck {
+  nodeId: string;
+  seq: number;
+}
+
+export function encodeFedAck(w: Writer, v: FedAck): void {
+  w.enter();
+  w.str(v.nodeId);
+  w.u64(v.seq);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedAck(r: Reader): FedAck {
+  r.enter();
+  const nodeId = r.str();
+  const seq = r.u64();
+  const out: FedAck = { nodeId, seq } as FedAck;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedRoomEvent {
+  roomId: Id;
+  payload: Uint8Array;
+}
+
+export function encodeFedRoomEvent(w: Writer, v: FedRoomEvent): void {
+  w.enter();
+  w.id(v.roomId);
+  w.bytes(v.payload);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedRoomEvent(r: Reader): FedRoomEvent {
+  r.enter();
+  const roomId = r.id();
+  const payload = r.bytes();
+  const out: FedRoomEvent = { roomId, payload } as FedRoomEvent;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedKeyRotate {
+  nodeId: string;
+  newPublicKey: Uint8Array;
+}
+
+export function encodeFedKeyRotate(w: Writer, v: FedKeyRotate): void {
+  w.enter();
+  w.str(v.nodeId);
+  w.bytes(v.newPublicKey);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedKeyRotate(r: Reader): FedKeyRotate {
+  r.enter();
+  const nodeId = r.str();
+  const newPublicKey = r.bytes();
+  const out: FedKeyRotate = { nodeId, newPublicKey } as FedKeyRotate;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedShardMap {
+  region: string;
+  nodes: FedPeerView[];
+}
+
+export function encodeFedShardMap(w: Writer, v: FedShardMap): void {
+  w.enter();
+  w.str(v.region);
+  { w.listLen(v.nodes.length); for (const item of v.nodes) { encodeFedPeerView(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedShardMap(r: Reader): FedShardMap {
+  r.enter();
+  const region = r.str();
+  const nodes = ((): FedPeerView[] => { const n = r.listLen(); const v: FedPeerView[] = []; for (let i = 0; i < n; i++) v.push(decodeFedPeerView(r)); return v; })();
+  const out: FedShardMap = { region, nodes } as FedShardMap;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedError {
+  nodeId: string;
+  code: number;
+  message: string;
+}
+
+export function encodeFedError(w: Writer, v: FedError): void {
+  w.enter();
+  w.str(v.nodeId);
+  w.u32(v.code);
+  w.str(v.message);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedError(r: Reader): FedError {
+  r.enter();
+  const nodeId = r.str();
+  const code = r.u32();
+  const message = r.str();
+  const out: FedError = { nodeId, code, message } as FedError;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedDirectoryReq {
+  query: string;
+}
+
+export function encodeFedDirectoryReq(w: Writer, v: FedDirectoryReq): void {
+  w.enter();
+  w.str(v.query);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedDirectoryReq(r: Reader): FedDirectoryReq {
+  r.enter();
+  const query = r.str();
+  const out: FedDirectoryReq = { query } as FedDirectoryReq;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface FedDirectory {
+  peers: FedPeerView[];
+}
+
+export function encodeFedDirectory(w: Writer, v: FedDirectory): void {
+  w.enter();
+  { w.listLen(v.peers.length); for (const item of v.peers) { encodeFedPeerView(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeFedDirectory(r: Reader): FedDirectory {
+  r.enter();
+  const peers = ((): FedPeerView[] => { const n = r.listLen(); const v: FedPeerView[] = []; for (let i = 0; i < n; i++) v.push(decodeFedPeerView(r)); return v; })();
+  const out: FedDirectory = { peers } as FedDirectory;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface ModerationEvent {
+  caseId: Id;
+  action: number;
+  state: string;
+}
+
+export function encodeModerationEvent(w: Writer, v: ModerationEvent): void {
+  w.enter();
+  w.id(v.caseId);
+  w.u32(v.action);
+  w.str(v.state);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeModerationEvent(r: Reader): ModerationEvent {
+  r.enter();
+  const caseId = r.id();
+  const action = r.u32();
+  const state = r.str();
+  const out: ModerationEvent = { caseId, action, state } as ModerationEvent;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
 export type DeliveryClass = 'Critical' | 'Coalescable' | 'Droppable';
 export type AuthLevel = 'None' | 'User' | 'Bot' | 'Server';
 export type Direction = 'client_to_server' | 'server_to_client' | 'both';
@@ -2372,6 +4234,42 @@ export const OP = {
   NOTIFICATION_EVENT: 144,
   GAME_ACTION: 176,
   GAME_EVENT: 177,
+  FRIEND_REQUEST: 113,
+  FRIEND_RESPOND: 114,
+  FRIEND_EVENT: 115,
+  BLOCK_SET: 116,
+  RELATIONSHIP_LIST: 117,
+  MEDIA_UPLOAD_BEGIN: 128,
+  MEDIA_UPLOAD_STATUS: 129,
+  MEDIA_UPLOAD_COMMIT: 130,
+  MEDIA_UPLOAD_ABORT: 131,
+  MEDIA_FETCH_URL: 132,
+  MEDIA_STATE_EVENT: 133,
+  NOTIFICATION_ACK: 145,
+  NOTIFICATION_LIST: 146,
+  GIFT_SEND: 160,
+  BALANCE_FETCH: 161,
+  ECONOMY_EVENT: 162,
+  BOT_COMMAND: 178,
+  BOT_EVENT: 179,
+  BOT_REGISTER: 180,
+  REPORT_CREATE: 192,
+  MODERATION_ACTION: 193,
+  MODERATION_EVENT: 194,
+  FED_HELLO: 208,
+  FED_AUTH: 209,
+  FED_PING: 210,
+  FED_FORWARD: 211,
+  FED_ACK: 212,
+  FED_ROOM_SUBSCRIBE: 213,
+  FED_ROOM_EVENT: 214,
+  FED_PRESENCE_DIGEST: 215,
+  FED_KEY_ROTATE: 216,
+  FED_HEALTH: 217,
+  FED_SHARD_MAP: 218,
+  FED_ERROR: 219,
+  FED_CALL_RELAY: 220,
+  FED_DIRECTORY: 221,
 } as const;
 export type OpcodeValue = (typeof OP)[keyof typeof OP];
 
@@ -2418,6 +4316,42 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   144: { code: 144, name: 'NOTIFICATION_EVENT', cost: 0, cls: 'Droppable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'NotificationEvent' },
   176: { code: 176, name: 'GAME_ACTION', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GameAction', response: 'Acknowledged' },
   177: { code: 177, name: 'GAME_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'GameEvent' },
+  113: { code: 113, name: 'FRIEND_REQUEST', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'FriendTarget', response: 'Acknowledged' },
+  114: { code: 114, name: 'FRIEND_RESPOND', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'FriendRespond', response: 'Acknowledged' },
+  115: { code: 115, name: 'FRIEND_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'FriendEvent' },
+  116: { code: 116, name: 'BLOCK_SET', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'FriendTarget', response: 'Acknowledged' },
+  117: { code: 117, name: 'RELATIONSHIP_LIST', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RelationshipListReq', response: 'RelationshipList' },
+  128: { code: 128, name: 'MEDIA_UPLOAD_BEGIN', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaBegin', response: 'MediaTicket' },
+  129: { code: 129, name: 'MEDIA_UPLOAD_STATUS', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaStatusReq', response: 'MediaProgress' },
+  130: { code: 130, name: 'MEDIA_UPLOAD_COMMIT', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaCommit', response: 'Acknowledged' },
+  131: { code: 131, name: 'MEDIA_UPLOAD_ABORT', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaAbort', response: 'Acknowledged' },
+  132: { code: 132, name: 'MEDIA_FETCH_URL', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaFetch', response: 'MediaUrl' },
+  133: { code: 133, name: 'MEDIA_STATE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'MediaStateEvent' },
+  145: { code: 145, name: 'NOTIFICATION_ACK', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'NotificationAck', response: 'Acknowledged' },
+  146: { code: 146, name: 'NOTIFICATION_LIST', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'InboxReq', response: 'InboxResponse' },
+  160: { code: 160, name: 'GIFT_SEND', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GiftSend', response: 'GiftSendResult' },
+  161: { code: 161, name: 'BALANCE_FETCH', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'WalletReq', response: 'WalletView' },
+  162: { code: 162, name: 'ECONOMY_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'EconomyEvent' },
+  178: { code: 178, name: 'BOT_COMMAND', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'BotCommand', response: 'Acknowledged' },
+  179: { code: 179, name: 'BOT_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'BotEvent' },
+  180: { code: 180, name: 'BOT_REGISTER', cost: 20, cls: 'Critical', auth: 'Bot', direction: 'client_to_server', ackRequired: false, payload: 'BotRegister', response: 'BotView' },
+  192: { code: 192, name: 'REPORT_CREATE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ReportFile', response: 'Acknowledged' },
+  193: { code: 193, name: 'MODERATION_ACTION', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ModAction', response: 'Acknowledged' },
+  194: { code: 194, name: 'MODERATION_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ModerationEvent' },
+  208: { code: 208, name: 'FED_HELLO', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedHello', response: 'FedHello' },
+  209: { code: 209, name: 'FED_AUTH', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedAuth', response: 'Acknowledged' },
+  210: { code: 210, name: 'FED_PING', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedPing', response: 'FedPong' },
+  211: { code: 211, name: 'FED_FORWARD', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedForward', response: 'Acknowledged' },
+  212: { code: 212, name: 'FED_ACK', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedAck', response: 'Acknowledged' },
+  213: { code: 213, name: 'FED_ROOM_SUBSCRIBE', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedRouting', response: 'Acknowledged' },
+  214: { code: 214, name: 'FED_ROOM_EVENT', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedRoomEvent', response: 'Acknowledged' },
+  215: { code: 215, name: 'FED_PRESENCE_DIGEST', cost: 0, cls: 'Coalescable', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedPresenceDigest', response: 'Acknowledged' },
+  216: { code: 216, name: 'FED_KEY_ROTATE', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedKeyRotate', response: 'Acknowledged' },
+  217: { code: 217, name: 'FED_HEALTH', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedHealth', response: 'FedHealth' },
+  218: { code: 218, name: 'FED_SHARD_MAP', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedShardMap', response: 'Acknowledged' },
+  219: { code: 219, name: 'FED_ERROR', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedError', response: 'Acknowledged' },
+  220: { code: 220, name: 'FED_CALL_RELAY', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedForward', response: 'Acknowledged' },
+  221: { code: 221, name: 'FED_DIRECTORY', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedDirectoryReq', response: 'FedDirectory' },
 };
 
 export function opcodeName(code: number): string {

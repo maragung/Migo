@@ -41,6 +41,8 @@ migo-notify     = { workspace = true }
 migo-economy    = { workspace = true }
 migo-games      = { workspace = true }
 migo-bots       = { workspace = true }
+migo-federation = { workspace = true }
+migo-crypto     = { workspace = true }
 # Layer 4: transports. The two front doors, mounted side by side; they never see each other.
 migo-gateway    = { workspace = true }
 migo-api        = { workspace = true }

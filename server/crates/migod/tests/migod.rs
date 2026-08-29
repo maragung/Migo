@@ -864,6 +864,12 @@ async fn dispatcher() -> DispatcherHarness {
         app.keys.clone(),
         app.social.clone(),
         app.games.clone(),
+        app.media.clone(),
+        app.economy.clone(),
+        app.moderation.clone(),
+        app.notify.clone(),
+        app.federation.clone(),
+        app.bots.clone(),
     );
     DispatcherHarness { app, dispatcher }
 }

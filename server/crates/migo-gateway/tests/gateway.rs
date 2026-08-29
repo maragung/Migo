@@ -1455,6 +1455,13 @@ fn the_wire_is_push_only_and_has_no_request_or_response_opcode() {
         Opcode::RoomStateEvent,
         Opcode::NotificationEvent,
         Opcode::GameEvent,
+        // SPEC server-to-client pushes (section 145): the wire shape for each is a one-way
+        // server-initiated event with no client request, so they belong in the push set.
+        Opcode::FriendEvent,
+        Opcode::MediaStateEvent,
+        Opcode::EconomyEvent,
+        Opcode::BotEvent,
+        Opcode::ModerationEvent,
     ];
     for opcode in server_only {
         assert!(

@@ -21,7 +21,7 @@ pub const ERROR: u8 = 1 << 3;
 pub const ACK_REQUIRED: u8 = 1 << 4;
 /// varint index, varint total follow; payload is a slice
 pub const FRAGMENT: u8 = 1 << 5;
-/// Must be zero in MWP/1
+/// Reserved. MUST be zero. Reserved in MWP/1 for a future METADATA block (section 141); a frame that sets it is rejected.
 pub const RESERVED_6: u8 = 1 << 6;
 /// A second flags byte follows (reserved for MWP/2)
 pub const FLAGS_EXT: u8 = 1 << 7;

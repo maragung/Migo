@@ -71,6 +71,16 @@ pub mod features {
     pub const RESUME: u64 = 1 << 14;
     /// Gifts and currency events
     pub const ECONOMY: u64 = 1 << 15;
+    /// Voice note attachments (section 167/179)
+    pub const VOICE_NOTE: u64 = 1 << 16;
+    /// 1:1 voice/video calls (section 165/166/180)
+    pub const CALLS: u64 = 1 << 17;
+    /// SFU group calls (section 166)
+    pub const GROUP_CALL: u64 = 1 << 18;
+    /// Server-to-server mesh (section 169/170)
+    pub const FEDERATION: u64 = 1 << 19;
+    /// Custom status and activity (section 26)
+    pub const RICH_PRESENCE: u64 = 1 << 20;
 
     /// Everything this build understands.
     pub const ALL: u64 = COMPRESSION
@@ -88,7 +98,12 @@ pub mod features {
         | QUIC
         | TRACING
         | RESUME
-        | ECONOMY;
+        | ECONOMY
+        | VOICE_NOTE
+        | CALLS
+        | GROUP_CALL
+        | FEDERATION
+        | RICH_PRESENCE;
 }
 
 /// Stable protocol error codes. Frozen once released.
@@ -3978,6 +3993,2581 @@ impl Decode for GameEvent {
     }
 }
 
+/// A single subject account for a social action.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FriendTarget {
+    pub user_id: Id,
+}
+
+impl Encode for FriendTarget {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.user_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FriendTarget {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.user_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Request for people the caller might know.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SocialSuggestReq {
+    pub limit: u32,
+}
+
+impl Encode for SocialSuggestReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u32(self.limit);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for SocialSuggestReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.limit = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Suggested account ids.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SocialSuggestions {
+    pub users: Vec<Id>,
+}
+
+impl Encode for SocialSuggestions {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.users.len())?;
+            for item in self.users.iter() {
+                w.write_id(item);
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for SocialSuggestions {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.users = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(r.read_id()?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Open an upload ticket for a media object.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MediaBegin {
+    /// Content kind, from the media domain enum
+    pub kind: u32,
+    pub content_type: String,
+    /// Declared total bytes
+    pub size: u64,
+    /// Present for conversation-scoped media; absent for profile media
+    pub conversation_id: Option<Id>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub duration_ms: Option<u64>,
+}
+
+impl Encode for MediaBegin {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u32(self.kind);
+        w.write_str(&self.content_type)?;
+        w.write_u64(self.size);
+        let present = usize::from(self.conversation_id.is_some())
+            + usize::from(self.width.is_some())
+            + usize::from(self.height.is_some())
+            + usize::from(self.duration_ms.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.conversation_id {
+            w.optional(1, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.width {
+            w.optional(2, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.height {
+            w.optional(3, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.duration_ms {
+            w.optional(4, |w| {
+                w.write_u64(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for MediaBegin {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.kind = r.read_u32()?;
+        out.content_type = r.read_string()?;
+        out.size = r.read_u64()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.conversation_id = Some(sub.read_id()?),
+                2 => out.width = Some(sub.read_u32()?),
+                3 => out.height = Some(sub.read_u32()?),
+                4 => out.duration_ms = Some(sub.read_u64()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Signed upload URL and the ticket that claims the object later.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MediaTicket {
+    pub upload_id: Id,
+    pub upload_url: String,
+    /// Headers the client must send with the PUT
+    pub headers: Vec<String>,
+}
+
+impl Encode for MediaTicket {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.upload_id);
+        w.write_str(&self.upload_url)?;
+        {
+            w.list_len(self.headers.len())?;
+            for item in self.headers.iter() {
+                w.write_str(item)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for MediaTicket {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.upload_id = r.read_id()?;
+        out.upload_url = r.read_string()?;
+        out.headers = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(r.read_string()?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MediaStatusReq {
+    pub upload_id: Id,
+}
+
+impl Encode for MediaStatusReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.upload_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for MediaStatusReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.upload_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MediaProgress {
+    pub received: u64,
+    pub expected: u64,
+}
+
+impl Encode for MediaProgress {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u64(self.received);
+        w.write_u64(self.expected);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for MediaProgress {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.received = r.read_u64()?;
+        out.expected = r.read_u64()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MediaCommit {
+    pub upload_id: Id,
+    /// SHA-256 of the uploaded bytes
+    pub digest: Vec<u8>,
+}
+
+impl Encode for MediaCommit {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.upload_id);
+        w.write_bytes(&self.digest)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for MediaCommit {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.upload_id = r.read_id()?;
+        out.digest = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MediaAbort {
+    pub upload_id: Id,
+}
+
+impl Encode for MediaAbort {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.upload_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for MediaAbort {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.upload_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MediaFetch {
+    pub object_id: Id,
+    pub conversation_id: Option<Id>,
+}
+
+impl Encode for MediaFetch {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.object_id);
+        let present = usize::from(self.conversation_id.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.conversation_id {
+            w.optional(1, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for MediaFetch {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.object_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.conversation_id = Some(sub.read_id()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MediaUrl {
+    pub url: String,
+    pub expires_at: Timestamp,
+}
+
+impl Encode for MediaUrl {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.url)?;
+        w.write_timestamp(self.expires_at);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for MediaUrl {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.url = r.read_string()?;
+        out.expires_at = r.read_timestamp()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MediaDelete {
+    pub object_id: Id,
+}
+
+impl Encode for MediaDelete {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.object_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for MediaDelete {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.object_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PushRegister {
+    pub token: String,
+    pub provider: u32,
+}
+
+impl Encode for PushRegister {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.token)?;
+        w.write_u32(self.provider);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for PushRegister {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.token = r.read_string()?;
+        out.provider = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct InboxReq {
+    pub limit: u32,
+    pub cursor: Option<String>,
+}
+
+impl Encode for InboxReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u32(self.limit);
+        let present = usize::from(self.cursor.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.cursor {
+            w.optional(1, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for InboxReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.limit = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.cursor = Some(sub.read_string()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct InboxItem {
+    pub id: Id,
+    pub kind: String,
+    pub at: Timestamp,
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub conversation_id: Option<Id>,
+    pub room_id: Option<Id>,
+    pub actor_id: Option<Id>,
+}
+
+impl Encode for InboxItem {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.id);
+        w.write_str(&self.kind)?;
+        w.write_timestamp(self.at);
+        let present = usize::from(self.title.is_some())
+            + usize::from(self.body.is_some())
+            + usize::from(self.conversation_id.is_some())
+            + usize::from(self.room_id.is_some())
+            + usize::from(self.actor_id.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.title {
+            w.optional(1, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.body {
+            w.optional(2, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.conversation_id {
+            w.optional(3, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.room_id {
+            w.optional(4, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.actor_id {
+            w.optional(5, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for InboxItem {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.id = r.read_id()?;
+        out.kind = r.read_string()?;
+        out.at = r.read_timestamp()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.title = Some(sub.read_string()?),
+                2 => out.body = Some(sub.read_string()?),
+                3 => out.conversation_id = Some(sub.read_id()?),
+                4 => out.room_id = Some(sub.read_id()?),
+                5 => out.actor_id = Some(sub.read_id()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct InboxResponse {
+    pub items: Vec<InboxItem>,
+    pub next_cursor: Option<String>,
+}
+
+impl Encode for InboxResponse {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.items.len())?;
+            for item in self.items.iter() {
+                item.encode(w)?;
+            }
+        }
+        let present = usize::from(self.next_cursor.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.next_cursor {
+            w.optional(1, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for InboxResponse {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.items = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(InboxItem::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.next_cursor = Some(sub.read_string()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Empty request; the caller's own wallet is implied by the session.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WalletReq {}
+
+impl Encode for WalletReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for WalletReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WalletView {
+    pub balance: u64,
+    pub points: u64,
+}
+
+impl Encode for WalletView {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u64(self.balance);
+        w.write_u64(self.points);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for WalletView {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.balance = r.read_u64()?;
+        out.points = r.read_u64()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GiftSend {
+    /// SKU slug
+    pub gift: String,
+    pub recipient: Id,
+    pub conversation_id: Option<Id>,
+}
+
+impl Encode for GiftSend {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.gift)?;
+        w.write_id(&self.recipient);
+        let present = usize::from(self.conversation_id.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.conversation_id {
+            w.optional(1, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for GiftSend {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.gift = r.read_string()?;
+        out.recipient = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.conversation_id = Some(sub.read_id()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GiftSendResult {
+    pub ok: bool,
+    pub tx_id: Option<Id>,
+}
+
+impl Encode for GiftSendResult {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_bool(self.ok);
+        let present = usize::from(self.tx_id.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.tx_id {
+            w.optional(1, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for GiftSendResult {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.ok = r.read_bool()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.tx_id = Some(sub.read_id()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Empty request for the gift catalogue.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CatalogueReq {}
+
+impl Encode for CatalogueReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CatalogueReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GiftListing {
+    pub sku: String,
+    pub name: String,
+    pub price: u64,
+    pub category: String,
+}
+
+impl Encode for GiftListing {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.sku)?;
+        w.write_str(&self.name)?;
+        w.write_u64(self.price);
+        w.write_str(&self.category)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for GiftListing {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.sku = r.read_string()?;
+        out.name = r.read_string()?;
+        out.price = r.read_u64()?;
+        out.category = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CatalogueView {
+    pub items: Vec<GiftListing>,
+}
+
+impl Encode for CatalogueView {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.items.len())?;
+            for item in self.items.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CatalogueView {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.items = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(GiftListing::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BotRegister {
+    pub username: String,
+    pub display_name: String,
+}
+
+impl Encode for BotRegister {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.username)?;
+        w.write_str(&self.display_name)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for BotRegister {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.username = r.read_string()?;
+        out.display_name = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BotView {
+    pub bot_id: Id,
+    pub username: String,
+    /// Present only on register/rotate; never logged
+    pub token: Option<String>,
+}
+
+impl Encode for BotView {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.bot_id);
+        w.write_str(&self.username)?;
+        let present = usize::from(self.token.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.token {
+            w.optional(1, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for BotView {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.bot_id = r.read_id()?;
+        out.username = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.token = Some(sub.read_string()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BotAuth {
+    pub token: String,
+}
+
+impl Encode for BotAuth {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.token)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for BotAuth {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.token = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BotRotate {
+    pub bot_id: Id,
+}
+
+impl Encode for BotRotate {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.bot_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for BotRotate {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.bot_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ReportFile {
+    /// 0 user, 1 message, 2 room, 3 bot
+    pub subject_kind: u32,
+    pub subject_id: Id,
+    pub reason: u32,
+    pub note: Option<String>,
+}
+
+impl Encode for ReportFile {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u32(self.subject_kind);
+        w.write_id(&self.subject_id);
+        w.write_u32(self.reason);
+        let present = usize::from(self.note.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.note {
+            w.optional(1, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ReportFile {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.subject_kind = r.read_u32()?;
+        out.subject_id = r.read_id()?;
+        out.reason = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.note = Some(sub.read_string()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ModAction {
+    pub case_id: Id,
+    pub action: u32,
+}
+
+impl Encode for ModAction {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.case_id);
+        w.write_u32(self.action);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ModAction {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.case_id = r.read_id()?;
+        out.action = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ModQueueReq {
+    pub limit: u32,
+}
+
+impl Encode for ModQueueReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u32(self.limit);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ModQueueReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.limit = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CaseView {
+    pub case_id: Id,
+    pub subject_kind: u32,
+    pub subject_id: Id,
+    pub reason: u32,
+    pub state: String,
+    pub filed_at: Timestamp,
+}
+
+impl Encode for CaseView {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.case_id);
+        w.write_u32(self.subject_kind);
+        w.write_id(&self.subject_id);
+        w.write_u32(self.reason);
+        w.write_str(&self.state)?;
+        w.write_timestamp(self.filed_at);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CaseView {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.case_id = r.read_id()?;
+        out.subject_kind = r.read_u32()?;
+        out.subject_id = r.read_id()?;
+        out.reason = r.read_u32()?;
+        out.state = r.read_string()?;
+        out.filed_at = r.read_timestamp()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ModQueue {
+    pub items: Vec<CaseView>,
+}
+
+impl Encode for ModQueue {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.items.len())?;
+            for item in self.items.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ModQueue {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.items = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(CaseView::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedPeerSpec {
+    pub node_id: String,
+    pub region: String,
+    pub country: String,
+    pub public_key: Vec<u8>,
+}
+
+impl Encode for FedPeerSpec {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.node_id)?;
+        w.write_str(&self.region)?;
+        w.write_str(&self.country)?;
+        w.write_bytes(&self.public_key)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedPeerSpec {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.node_id = r.read_string()?;
+        out.region = r.read_string()?;
+        out.country = r.read_string()?;
+        out.public_key = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedPeerView {
+    pub node_id: String,
+    pub region: String,
+    pub status: String,
+}
+
+impl Encode for FedPeerView {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.node_id)?;
+        w.write_str(&self.region)?;
+        w.write_str(&self.status)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedPeerView {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.node_id = r.read_string()?;
+        out.region = r.read_string()?;
+        out.status = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedPeerId {
+    pub node_id: String,
+}
+
+impl Encode for FedPeerId {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.node_id)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedPeerId {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.node_id = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedListReq {}
+
+impl Encode for FedListReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedListReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedPeerList {
+    pub peers: Vec<FedPeerView>,
+}
+
+impl Encode for FedPeerList {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.peers.len())?;
+            for item in self.peers.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedPeerList {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.peers = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(FedPeerView::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedHello {
+    pub node_id: String,
+    pub region: String,
+    pub epoch: u64,
+    pub nonce: Vec<u8>,
+}
+
+impl Encode for FedHello {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.node_id)?;
+        w.write_str(&self.region)?;
+        w.write_u64(self.epoch);
+        w.write_bytes(&self.nonce)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedHello {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.node_id = r.read_string()?;
+        out.region = r.read_string()?;
+        out.epoch = r.read_u64()?;
+        out.nonce = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedProof {
+    pub node_id: String,
+    pub signature: Vec<u8>,
+}
+
+impl Encode for FedProof {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.node_id)?;
+        w.write_bytes(&self.signature)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedProof {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.node_id = r.read_string()?;
+        out.signature = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedForward {
+    pub from: String,
+    pub to: String,
+    pub payload: Vec<u8>,
+}
+
+impl Encode for FedForward {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.from)?;
+        w.write_str(&self.to)?;
+        w.write_bytes(&self.payload)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedForward {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.from = r.read_string()?;
+        out.to = r.read_string()?;
+        out.payload = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedPresenceDigest {
+    pub region: String,
+    pub digest: Vec<u8>,
+}
+
+impl Encode for FedPresenceDigest {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.region)?;
+        w.write_bytes(&self.digest)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedPresenceDigest {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.region = r.read_string()?;
+        out.digest = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedRouting {
+    pub epoch: u64,
+    pub home_region: String,
+    pub room_id: Id,
+}
+
+impl Encode for FedRouting {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u64(self.epoch);
+        w.write_str(&self.home_region)?;
+        w.write_id(&self.room_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedRouting {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.epoch = r.read_u64()?;
+        out.home_region = r.read_string()?;
+        out.room_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedEpoch {
+    pub epoch: u64,
+}
+
+impl Encode for FedEpoch {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u64(self.epoch);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedEpoch {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.epoch = r.read_u64()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedLinkState {
+    pub node_id: String,
+    pub sequence: u64,
+    pub healthy: bool,
+}
+
+impl Encode for FedLinkState {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.node_id)?;
+        w.write_u64(self.sequence);
+        w.write_bool(self.healthy);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedLinkState {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.node_id = r.read_string()?;
+        out.sequence = r.read_u64()?;
+        out.healthy = r.read_bool()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedHealth {
+    pub node_id: String,
+    pub status: String,
+}
+
+impl Encode for FedHealth {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.node_id)?;
+        w.write_str(&self.status)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedHealth {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.node_id = r.read_string()?;
+        out.status = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedEvent {
+    pub from: String,
+    pub kind: String,
+    pub payload: Vec<u8>,
+}
+
+impl Encode for FedEvent {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.from)?;
+        w.write_str(&self.kind)?;
+        w.write_bytes(&self.payload)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedEvent {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.from = r.read_string()?;
+        out.kind = r.read_string()?;
+        out.payload = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FriendRespond {
+    pub user_id: Id,
+    pub accept: bool,
+}
+
+impl Encode for FriendRespond {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.user_id);
+        w.write_bool(self.accept);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FriendRespond {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.user_id = r.read_id()?;
+        out.accept = r.read_bool()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FriendEvent {
+    pub user_id: Id,
+    pub state: String,
+}
+
+impl Encode for FriendEvent {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.user_id);
+        w.write_str(&self.state)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FriendEvent {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.user_id = r.read_id()?;
+        out.state = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RelationshipListReq {
+    pub limit: u32,
+}
+
+impl Encode for RelationshipListReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u32(self.limit);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for RelationshipListReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.limit = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RelationshipEntry {
+    pub user_id: Id,
+    pub kind: u32,
+}
+
+impl Encode for RelationshipEntry {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.user_id);
+        w.write_u32(self.kind);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for RelationshipEntry {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.user_id = r.read_id()?;
+        out.kind = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RelationshipList {
+    pub entries: Vec<RelationshipEntry>,
+}
+
+impl Encode for RelationshipList {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.entries.len())?;
+            for item in self.entries.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for RelationshipList {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.entries = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(RelationshipEntry::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MediaStateEvent {
+    pub object_id: Id,
+    pub state: String,
+}
+
+impl Encode for MediaStateEvent {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.object_id);
+        w.write_str(&self.state)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for MediaStateEvent {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.object_id = r.read_id()?;
+        out.state = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct NotificationAck {
+    pub id: Id,
+}
+
+impl Encode for NotificationAck {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for NotificationAck {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct EconomyEvent {
+    pub kind: String,
+    pub amount: u64,
+    pub currency: String,
+}
+
+impl Encode for EconomyEvent {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.kind)?;
+        w.write_u64(self.amount);
+        w.write_str(&self.currency)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for EconomyEvent {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.kind = r.read_string()?;
+        out.amount = r.read_u64()?;
+        out.currency = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BotCommand {
+    pub bot_id: Id,
+    pub command: String,
+    pub args: Option<Vec<String>>,
+}
+
+impl Encode for BotCommand {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.bot_id);
+        w.write_str(&self.command)?;
+        let present = usize::from(self.args.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.args {
+            w.optional(1, |w| {
+                {
+                    w.list_len(v.len())?;
+                    for item in v.iter() {
+                        w.write_str(item)?;
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for BotCommand {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.bot_id = r.read_id()?;
+        out.command = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => {
+                    out.args = Some({
+                        let n = sub.read_list_len()?;
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(sub.read_string()?);
+                        }
+                        v
+                    })
+                }
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BotEvent {
+    pub bot_id: Id,
+    pub event: String,
+    pub payload: Option<Vec<u8>>,
+}
+
+impl Encode for BotEvent {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.bot_id);
+        w.write_str(&self.event)?;
+        let present = usize::from(self.payload.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.payload {
+            w.optional(1, |w| {
+                w.write_bytes(v)?;
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for BotEvent {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.bot_id = r.read_id()?;
+        out.event = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.payload = Some(sub.read_bytes()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedAuth {
+    pub node_id: String,
+    pub signature: Vec<u8>,
+    pub epoch: u64,
+}
+
+impl Encode for FedAuth {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.node_id)?;
+        w.write_bytes(&self.signature)?;
+        w.write_u64(self.epoch);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedAuth {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.node_id = r.read_string()?;
+        out.signature = r.read_bytes()?;
+        out.epoch = r.read_u64()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedPing {
+    pub node_id: String,
+    pub nonce: Vec<u8>,
+}
+
+impl Encode for FedPing {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.node_id)?;
+        w.write_bytes(&self.nonce)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedPing {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.node_id = r.read_string()?;
+        out.nonce = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedPong {
+    pub nonce: Vec<u8>,
+}
+
+impl Encode for FedPong {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_bytes(&self.nonce)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedPong {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.nonce = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedAck {
+    pub node_id: String,
+    pub seq: u64,
+}
+
+impl Encode for FedAck {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.node_id)?;
+        w.write_u64(self.seq);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedAck {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.node_id = r.read_string()?;
+        out.seq = r.read_u64()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedRoomEvent {
+    pub room_id: Id,
+    pub payload: Vec<u8>,
+}
+
+impl Encode for FedRoomEvent {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.room_id);
+        w.write_bytes(&self.payload)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedRoomEvent {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.room_id = r.read_id()?;
+        out.payload = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedKeyRotate {
+    pub node_id: String,
+    pub new_public_key: Vec<u8>,
+}
+
+impl Encode for FedKeyRotate {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.node_id)?;
+        w.write_bytes(&self.new_public_key)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedKeyRotate {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.node_id = r.read_string()?;
+        out.new_public_key = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedShardMap {
+    pub region: String,
+    pub nodes: Vec<FedPeerView>,
+}
+
+impl Encode for FedShardMap {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.region)?;
+        {
+            w.list_len(self.nodes.len())?;
+            for item in self.nodes.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedShardMap {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.region = r.read_string()?;
+        out.nodes = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(FedPeerView::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedError {
+    pub node_id: String,
+    pub code: u32,
+    pub message: String,
+}
+
+impl Encode for FedError {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.node_id)?;
+        w.write_u32(self.code);
+        w.write_str(&self.message)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedError {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.node_id = r.read_string()?;
+        out.code = r.read_u32()?;
+        out.message = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedDirectoryReq {
+    pub query: String,
+}
+
+impl Encode for FedDirectoryReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.query)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedDirectoryReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.query = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FedDirectory {
+    pub peers: Vec<FedPeerView>,
+}
+
+impl Encode for FedDirectory {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.peers.len())?;
+            for item in self.peers.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for FedDirectory {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.peers = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(FedPeerView::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ModerationEvent {
+    pub case_id: Id,
+    pub action: u32,
+    pub state: String,
+}
+
+impl Encode for ModerationEvent {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.case_id);
+        w.write_u32(self.action);
+        w.write_str(&self.state)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ModerationEvent {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.case_id = r.read_id()?;
+        out.action = r.read_u32()?;
+        out.state = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
 /// Delivery class, deciding what happens when a session queue is full (ADR-0008).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeliveryClass {
@@ -4047,6 +6637,42 @@ pub enum Opcode {
     NotificationEvent = 144,
     GameAction = 176,
     GameEvent = 177,
+    FriendRequest = 113,
+    FriendRespond = 114,
+    FriendEvent = 115,
+    BlockSet = 116,
+    RelationshipList = 117,
+    MediaUploadBegin = 128,
+    MediaUploadStatus = 129,
+    MediaUploadCommit = 130,
+    MediaUploadAbort = 131,
+    MediaFetchUrl = 132,
+    MediaStateEvent = 133,
+    NotificationAck = 145,
+    NotificationList = 146,
+    GiftSend = 160,
+    BalanceFetch = 161,
+    EconomyEvent = 162,
+    BotCommand = 178,
+    BotEvent = 179,
+    BotRegister = 180,
+    ReportCreate = 192,
+    ModerationAction = 193,
+    ModerationEvent = 194,
+    FedHello = 208,
+    FedAuth = 209,
+    FedPing = 210,
+    FedForward = 211,
+    FedAck = 212,
+    FedRoomSubscribe = 213,
+    FedRoomEvent = 214,
+    FedPresenceDigest = 215,
+    FedKeyRotate = 216,
+    FedHealth = 217,
+    FedShardMap = 218,
+    FedError = 219,
+    FedCallRelay = 220,
+    FedDirectory = 221,
 }
 
 impl Opcode {
@@ -4088,6 +6714,42 @@ impl Opcode {
             144 => Self::NotificationEvent,
             176 => Self::GameAction,
             177 => Self::GameEvent,
+            113 => Self::FriendRequest,
+            114 => Self::FriendRespond,
+            115 => Self::FriendEvent,
+            116 => Self::BlockSet,
+            117 => Self::RelationshipList,
+            128 => Self::MediaUploadBegin,
+            129 => Self::MediaUploadStatus,
+            130 => Self::MediaUploadCommit,
+            131 => Self::MediaUploadAbort,
+            132 => Self::MediaFetchUrl,
+            133 => Self::MediaStateEvent,
+            145 => Self::NotificationAck,
+            146 => Self::NotificationList,
+            160 => Self::GiftSend,
+            161 => Self::BalanceFetch,
+            162 => Self::EconomyEvent,
+            178 => Self::BotCommand,
+            179 => Self::BotEvent,
+            180 => Self::BotRegister,
+            192 => Self::ReportCreate,
+            193 => Self::ModerationAction,
+            194 => Self::ModerationEvent,
+            208 => Self::FedHello,
+            209 => Self::FedAuth,
+            210 => Self::FedPing,
+            211 => Self::FedForward,
+            212 => Self::FedAck,
+            213 => Self::FedRoomSubscribe,
+            214 => Self::FedRoomEvent,
+            215 => Self::FedPresenceDigest,
+            216 => Self::FedKeyRotate,
+            217 => Self::FedHealth,
+            218 => Self::FedShardMap,
+            219 => Self::FedError,
+            220 => Self::FedCallRelay,
+            221 => Self::FedDirectory,
             _ => return None,
         })
     }
@@ -4124,6 +6786,42 @@ impl Opcode {
             Self::NotificationEvent => "NOTIFICATION_EVENT",
             Self::GameAction => "GAME_ACTION",
             Self::GameEvent => "GAME_EVENT",
+            Self::FriendRequest => "FRIEND_REQUEST",
+            Self::FriendRespond => "FRIEND_RESPOND",
+            Self::FriendEvent => "FRIEND_EVENT",
+            Self::BlockSet => "BLOCK_SET",
+            Self::RelationshipList => "RELATIONSHIP_LIST",
+            Self::MediaUploadBegin => "MEDIA_UPLOAD_BEGIN",
+            Self::MediaUploadStatus => "MEDIA_UPLOAD_STATUS",
+            Self::MediaUploadCommit => "MEDIA_UPLOAD_COMMIT",
+            Self::MediaUploadAbort => "MEDIA_UPLOAD_ABORT",
+            Self::MediaFetchUrl => "MEDIA_FETCH_URL",
+            Self::MediaStateEvent => "MEDIA_STATE_EVENT",
+            Self::NotificationAck => "NOTIFICATION_ACK",
+            Self::NotificationList => "NOTIFICATION_LIST",
+            Self::GiftSend => "GIFT_SEND",
+            Self::BalanceFetch => "BALANCE_FETCH",
+            Self::EconomyEvent => "ECONOMY_EVENT",
+            Self::BotCommand => "BOT_COMMAND",
+            Self::BotEvent => "BOT_EVENT",
+            Self::BotRegister => "BOT_REGISTER",
+            Self::ReportCreate => "REPORT_CREATE",
+            Self::ModerationAction => "MODERATION_ACTION",
+            Self::ModerationEvent => "MODERATION_EVENT",
+            Self::FedHello => "FED_HELLO",
+            Self::FedAuth => "FED_AUTH",
+            Self::FedPing => "FED_PING",
+            Self::FedForward => "FED_FORWARD",
+            Self::FedAck => "FED_ACK",
+            Self::FedRoomSubscribe => "FED_ROOM_SUBSCRIBE",
+            Self::FedRoomEvent => "FED_ROOM_EVENT",
+            Self::FedPresenceDigest => "FED_PRESENCE_DIGEST",
+            Self::FedKeyRotate => "FED_KEY_ROTATE",
+            Self::FedHealth => "FED_HEALTH",
+            Self::FedShardMap => "FED_SHARD_MAP",
+            Self::FedError => "FED_ERROR",
+            Self::FedCallRelay => "FED_CALL_RELAY",
+            Self::FedDirectory => "FED_DIRECTORY",
         }
     }
 
@@ -4160,6 +6858,42 @@ impl Opcode {
             Self::NotificationEvent => 0,
             Self::GameAction => 2,
             Self::GameEvent => 0,
+            Self::FriendRequest => 10,
+            Self::FriendRespond => 5,
+            Self::FriendEvent => 0,
+            Self::BlockSet => 5,
+            Self::RelationshipList => 3,
+            Self::MediaUploadBegin => 10,
+            Self::MediaUploadStatus => 2,
+            Self::MediaUploadCommit => 5,
+            Self::MediaUploadAbort => 1,
+            Self::MediaFetchUrl => 3,
+            Self::MediaStateEvent => 0,
+            Self::NotificationAck => 1,
+            Self::NotificationList => 3,
+            Self::GiftSend => 20,
+            Self::BalanceFetch => 3,
+            Self::EconomyEvent => 0,
+            Self::BotCommand => 2,
+            Self::BotEvent => 0,
+            Self::BotRegister => 20,
+            Self::ReportCreate => 20,
+            Self::ModerationAction => 10,
+            Self::ModerationEvent => 0,
+            Self::FedHello => 5,
+            Self::FedAuth => 5,
+            Self::FedPing => 1,
+            Self::FedForward => 1,
+            Self::FedAck => 0,
+            Self::FedRoomSubscribe => 2,
+            Self::FedRoomEvent => 0,
+            Self::FedPresenceDigest => 0,
+            Self::FedKeyRotate => 5,
+            Self::FedHealth => 1,
+            Self::FedShardMap => 2,
+            Self::FedError => 0,
+            Self::FedCallRelay => 1,
+            Self::FedDirectory => 2,
         }
     }
 
@@ -4195,6 +6929,42 @@ impl Opcode {
             Self::NotificationEvent => DeliveryClass::Droppable,
             Self::GameAction => DeliveryClass::Critical,
             Self::GameEvent => DeliveryClass::Critical,
+            Self::FriendRequest => DeliveryClass::Critical,
+            Self::FriendRespond => DeliveryClass::Critical,
+            Self::FriendEvent => DeliveryClass::Critical,
+            Self::BlockSet => DeliveryClass::Critical,
+            Self::RelationshipList => DeliveryClass::Critical,
+            Self::MediaUploadBegin => DeliveryClass::Critical,
+            Self::MediaUploadStatus => DeliveryClass::Critical,
+            Self::MediaUploadCommit => DeliveryClass::Critical,
+            Self::MediaUploadAbort => DeliveryClass::Critical,
+            Self::MediaFetchUrl => DeliveryClass::Critical,
+            Self::MediaStateEvent => DeliveryClass::Coalescable,
+            Self::NotificationAck => DeliveryClass::Critical,
+            Self::NotificationList => DeliveryClass::Critical,
+            Self::GiftSend => DeliveryClass::Critical,
+            Self::BalanceFetch => DeliveryClass::Critical,
+            Self::EconomyEvent => DeliveryClass::Critical,
+            Self::BotCommand => DeliveryClass::Critical,
+            Self::BotEvent => DeliveryClass::Critical,
+            Self::BotRegister => DeliveryClass::Critical,
+            Self::ReportCreate => DeliveryClass::Critical,
+            Self::ModerationAction => DeliveryClass::Critical,
+            Self::ModerationEvent => DeliveryClass::Critical,
+            Self::FedHello => DeliveryClass::Critical,
+            Self::FedAuth => DeliveryClass::Critical,
+            Self::FedPing => DeliveryClass::Critical,
+            Self::FedForward => DeliveryClass::Critical,
+            Self::FedAck => DeliveryClass::Critical,
+            Self::FedRoomSubscribe => DeliveryClass::Critical,
+            Self::FedRoomEvent => DeliveryClass::Critical,
+            Self::FedPresenceDigest => DeliveryClass::Coalescable,
+            Self::FedKeyRotate => DeliveryClass::Critical,
+            Self::FedHealth => DeliveryClass::Critical,
+            Self::FedShardMap => DeliveryClass::Critical,
+            Self::FedError => DeliveryClass::Critical,
+            Self::FedCallRelay => DeliveryClass::Critical,
+            Self::FedDirectory => DeliveryClass::Critical,
         }
     }
 
@@ -4230,6 +7000,42 @@ impl Opcode {
             Self::NotificationEvent => AuthLevel::User,
             Self::GameAction => AuthLevel::User,
             Self::GameEvent => AuthLevel::User,
+            Self::FriendRequest => AuthLevel::User,
+            Self::FriendRespond => AuthLevel::User,
+            Self::FriendEvent => AuthLevel::User,
+            Self::BlockSet => AuthLevel::User,
+            Self::RelationshipList => AuthLevel::User,
+            Self::MediaUploadBegin => AuthLevel::User,
+            Self::MediaUploadStatus => AuthLevel::User,
+            Self::MediaUploadCommit => AuthLevel::User,
+            Self::MediaUploadAbort => AuthLevel::User,
+            Self::MediaFetchUrl => AuthLevel::User,
+            Self::MediaStateEvent => AuthLevel::User,
+            Self::NotificationAck => AuthLevel::User,
+            Self::NotificationList => AuthLevel::User,
+            Self::GiftSend => AuthLevel::User,
+            Self::BalanceFetch => AuthLevel::User,
+            Self::EconomyEvent => AuthLevel::User,
+            Self::BotCommand => AuthLevel::User,
+            Self::BotEvent => AuthLevel::User,
+            Self::BotRegister => AuthLevel::Bot,
+            Self::ReportCreate => AuthLevel::User,
+            Self::ModerationAction => AuthLevel::User,
+            Self::ModerationEvent => AuthLevel::User,
+            Self::FedHello => AuthLevel::Server,
+            Self::FedAuth => AuthLevel::Server,
+            Self::FedPing => AuthLevel::Server,
+            Self::FedForward => AuthLevel::Server,
+            Self::FedAck => AuthLevel::Server,
+            Self::FedRoomSubscribe => AuthLevel::Server,
+            Self::FedRoomEvent => AuthLevel::Server,
+            Self::FedPresenceDigest => AuthLevel::Server,
+            Self::FedKeyRotate => AuthLevel::Server,
+            Self::FedHealth => AuthLevel::Server,
+            Self::FedShardMap => AuthLevel::Server,
+            Self::FedError => AuthLevel::Server,
+            Self::FedCallRelay => AuthLevel::Server,
+            Self::FedDirectory => AuthLevel::Server,
         }
     }
 
@@ -4265,6 +7071,42 @@ impl Opcode {
             Self::NotificationEvent => Direction::ServerToClient,
             Self::GameAction => Direction::ClientToServer,
             Self::GameEvent => Direction::ServerToClient,
+            Self::FriendRequest => Direction::ClientToServer,
+            Self::FriendRespond => Direction::ClientToServer,
+            Self::FriendEvent => Direction::ServerToClient,
+            Self::BlockSet => Direction::ClientToServer,
+            Self::RelationshipList => Direction::ClientToServer,
+            Self::MediaUploadBegin => Direction::ClientToServer,
+            Self::MediaUploadStatus => Direction::ClientToServer,
+            Self::MediaUploadCommit => Direction::ClientToServer,
+            Self::MediaUploadAbort => Direction::ClientToServer,
+            Self::MediaFetchUrl => Direction::ClientToServer,
+            Self::MediaStateEvent => Direction::ServerToClient,
+            Self::NotificationAck => Direction::ClientToServer,
+            Self::NotificationList => Direction::ClientToServer,
+            Self::GiftSend => Direction::ClientToServer,
+            Self::BalanceFetch => Direction::ClientToServer,
+            Self::EconomyEvent => Direction::ServerToClient,
+            Self::BotCommand => Direction::ClientToServer,
+            Self::BotEvent => Direction::ServerToClient,
+            Self::BotRegister => Direction::ClientToServer,
+            Self::ReportCreate => Direction::ClientToServer,
+            Self::ModerationAction => Direction::ClientToServer,
+            Self::ModerationEvent => Direction::ServerToClient,
+            Self::FedHello => Direction::Both,
+            Self::FedAuth => Direction::Both,
+            Self::FedPing => Direction::Both,
+            Self::FedForward => Direction::Both,
+            Self::FedAck => Direction::Both,
+            Self::FedRoomSubscribe => Direction::Both,
+            Self::FedRoomEvent => Direction::Both,
+            Self::FedPresenceDigest => Direction::Both,
+            Self::FedKeyRotate => Direction::Both,
+            Self::FedHealth => Direction::Both,
+            Self::FedShardMap => Direction::Both,
+            Self::FedError => Direction::Both,
+            Self::FedCallRelay => Direction::Both,
+            Self::FedDirectory => Direction::Both,
         }
     }
 
@@ -4301,6 +7143,42 @@ impl Opcode {
             Self::NotificationEvent => false,
             Self::GameAction => false,
             Self::GameEvent => false,
+            Self::FriendRequest => false,
+            Self::FriendRespond => false,
+            Self::FriendEvent => false,
+            Self::BlockSet => false,
+            Self::RelationshipList => false,
+            Self::MediaUploadBegin => false,
+            Self::MediaUploadStatus => false,
+            Self::MediaUploadCommit => false,
+            Self::MediaUploadAbort => false,
+            Self::MediaFetchUrl => false,
+            Self::MediaStateEvent => false,
+            Self::NotificationAck => false,
+            Self::NotificationList => false,
+            Self::GiftSend => false,
+            Self::BalanceFetch => false,
+            Self::EconomyEvent => false,
+            Self::BotCommand => false,
+            Self::BotEvent => false,
+            Self::BotRegister => false,
+            Self::ReportCreate => false,
+            Self::ModerationAction => false,
+            Self::ModerationEvent => false,
+            Self::FedHello => false,
+            Self::FedAuth => false,
+            Self::FedPing => false,
+            Self::FedForward => false,
+            Self::FedAck => false,
+            Self::FedRoomSubscribe => false,
+            Self::FedRoomEvent => false,
+            Self::FedPresenceDigest => false,
+            Self::FedKeyRotate => false,
+            Self::FedHealth => false,
+            Self::FedShardMap => false,
+            Self::FedError => false,
+            Self::FedCallRelay => false,
+            Self::FedDirectory => false,
         }
     }
 
@@ -4344,5 +7222,41 @@ impl Opcode {
         Self::NotificationEvent,
         Self::GameAction,
         Self::GameEvent,
+        Self::FriendRequest,
+        Self::FriendRespond,
+        Self::FriendEvent,
+        Self::BlockSet,
+        Self::RelationshipList,
+        Self::MediaUploadBegin,
+        Self::MediaUploadStatus,
+        Self::MediaUploadCommit,
+        Self::MediaUploadAbort,
+        Self::MediaFetchUrl,
+        Self::MediaStateEvent,
+        Self::NotificationAck,
+        Self::NotificationList,
+        Self::GiftSend,
+        Self::BalanceFetch,
+        Self::EconomyEvent,
+        Self::BotCommand,
+        Self::BotEvent,
+        Self::BotRegister,
+        Self::ReportCreate,
+        Self::ModerationAction,
+        Self::ModerationEvent,
+        Self::FedHello,
+        Self::FedAuth,
+        Self::FedPing,
+        Self::FedForward,
+        Self::FedAck,
+        Self::FedRoomSubscribe,
+        Self::FedRoomEvent,
+        Self::FedPresenceDigest,
+        Self::FedKeyRotate,
+        Self::FedHealth,
+        Self::FedShardMap,
+        Self::FedError,
+        Self::FedCallRelay,
+        Self::FedDirectory,
     ];
 }

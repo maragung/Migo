@@ -398,6 +398,257 @@
         { "name": "payload", "type": "bytes", "optional": true, "id": 1, "doc": "Delta, never a full state snapshot" },
         { "name": "actor_id", "type": "id", "optional": true, "id": 2 },
         { "name": "text", "type": "string", "optional": true, "id": 3, "doc": "Pre-rendered bot line for thin clients" }
+      ] },
+
+    { "name": "FriendTarget", "doc": "A single subject account for a social action.",
+      "fields": [ { "name": "user_id", "type": "id" } ] },
+
+    { "name": "SocialSuggestReq", "doc": "Request for people the caller might know.",
+      "fields": [ { "name": "limit", "type": "u32" } ] },
+    { "name": "SocialSuggestions", "doc": "Suggested account ids.",
+      "fields": [ { "name": "users", "type": "list<id>" } ] },
+
+    { "name": "MediaBegin", "doc": "Open an upload ticket for a media object.",
+      "fields": [
+        { "name": "kind", "type": "u32", "doc": "Content kind, from the media domain enum" },
+        { "name": "content_type", "type": "string" },
+        { "name": "size", "type": "u64", "doc": "Declared total bytes" },
+        { "name": "conversation_id", "type": "id", "optional": true, "id": 1, "doc": "Present for conversation-scoped media; absent for profile media" },
+        { "name": "width", "type": "u32", "optional": true, "id": 2 },
+        { "name": "height", "type": "u32", "optional": true, "id": 3 },
+        { "name": "duration_ms", "type": "u64", "optional": true, "id": 4 }
+      ] },
+    { "name": "MediaTicket", "doc": "Signed upload URL and the ticket that claims the object later.",
+      "fields": [
+        { "name": "upload_id", "type": "id" },
+        { "name": "upload_url", "type": "string" },
+        { "name": "headers", "type": "list<string>", "doc": "Headers the client must send with the PUT" }
+      ] },
+    { "name": "MediaStatusReq", "fields": [ { "name": "upload_id", "type": "id" } ] },
+    { "name": "MediaProgress", "fields": [
+        { "name": "received", "type": "u64" },
+        { "name": "expected", "type": "u64" }
+      ] },
+    { "name": "MediaCommit", "fields": [
+        { "name": "upload_id", "type": "id" },
+        { "name": "digest", "type": "bytes", "doc": "SHA-256 of the uploaded bytes" }
+      ] },
+    { "name": "MediaAbort", "fields": [ { "name": "upload_id", "type": "id" } ] },
+    { "name": "MediaFetch", "fields": [
+        { "name": "object_id", "type": "id" },
+        { "name": "conversation_id", "type": "id", "optional": true, "id": 1 }
+      ] },
+    { "name": "MediaUrl", "fields": [
+        { "name": "url", "type": "string" },
+        { "name": "expires_at", "type": "timestamp" }
+      ] },
+    { "name": "MediaDelete", "fields": [ { "name": "object_id", "type": "id" } ] },
+
+    { "name": "PushRegister", "fields": [
+        { "name": "token", "type": "string" },
+        { "name": "provider", "type": "u32" }
+      ] },
+    { "name": "InboxReq", "fields": [
+        { "name": "limit", "type": "u32" },
+        { "name": "cursor", "type": "string", "optional": true, "id": 1 }
+      ] },
+    { "name": "InboxItem", "fields": [
+        { "name": "id", "type": "id" },
+        { "name": "kind", "type": "string" },
+        { "name": "at", "type": "timestamp" },
+        { "name": "title", "type": "string", "optional": true, "id": 1 },
+        { "name": "body", "type": "string", "optional": true, "id": 2 },
+        { "name": "conversation_id", "type": "id", "optional": true, "id": 3 },
+        { "name": "room_id", "type": "id", "optional": true, "id": 4 },
+        { "name": "actor_id", "type": "id", "optional": true, "id": 5 }
+      ] },
+    { "name": "InboxResponse", "fields": [
+        { "name": "items", "type": "list<InboxItem>" },
+        { "name": "next_cursor", "type": "string", "optional": true, "id": 1 }
+      ] },
+
+    { "name": "WalletReq", "doc": "Empty request; the caller's own wallet is implied by the session.",
+      "fields": [] },
+    { "name": "WalletView", "fields": [
+        { "name": "balance", "type": "u64" },
+        { "name": "points", "type": "u64" }
+      ] },
+    { "name": "GiftSend", "fields": [
+        { "name": "gift", "type": "string", "doc": "SKU slug" },
+        { "name": "recipient", "type": "id" },
+        { "name": "conversation_id", "type": "id", "optional": true, "id": 1 }
+      ] },
+    { "name": "GiftSendResult", "fields": [
+        { "name": "ok", "type": "bool" },
+        { "name": "tx_id", "type": "id", "optional": true, "id": 1 }
+      ] },
+    { "name": "CatalogueReq", "doc": "Empty request for the gift catalogue.", "fields": [] },
+    { "name": "GiftListing", "fields": [
+        { "name": "sku", "type": "string" },
+        { "name": "name", "type": "string" },
+        { "name": "price", "type": "u64" },
+        { "name": "category", "type": "string" }
+      ] },
+    { "name": "CatalogueView", "fields": [ { "name": "items", "type": "list<GiftListing>" } ] },
+
+    { "name": "BotRegister", "fields": [
+        { "name": "username", "type": "string" },
+        { "name": "display_name", "type": "string" }
+      ] },
+    { "name": "BotView", "fields": [
+        { "name": "bot_id", "type": "id" },
+        { "name": "username", "type": "string" },
+        { "name": "token", "type": "string", "optional": true, "id": 1, "doc": "Present only on register/rotate; never logged" }
+      ] },
+    { "name": "BotAuth", "fields": [ { "name": "token", "type": "string" } ] },
+    { "name": "BotRotate", "fields": [ { "name": "bot_id", "type": "id" } ] },
+
+    { "name": "ReportFile", "fields": [
+        { "name": "subject_kind", "type": "u32", "doc": "0 user, 1 message, 2 room, 3 bot" },
+        { "name": "subject_id", "type": "id" },
+        { "name": "reason", "type": "u32" },
+        { "name": "note", "type": "string", "optional": true, "id": 1 }
+      ] },
+    { "name": "ModAction", "fields": [
+        { "name": "case_id", "type": "id" },
+        { "name": "action", "type": "u32" }
+      ] },
+    { "name": "ModQueueReq", "fields": [ { "name": "limit", "type": "u32" } ] },
+    { "name": "CaseView", "fields": [
+        { "name": "case_id", "type": "id" },
+        { "name": "subject_kind", "type": "u32" },
+        { "name": "subject_id", "type": "id" },
+        { "name": "reason", "type": "u32" },
+        { "name": "state", "type": "string" },
+        { "name": "filed_at", "type": "timestamp" }
+      ] },
+    { "name": "ModQueue", "fields": [ { "name": "items", "type": "list<CaseView>" } ] },
+
+    { "name": "FedPeerSpec", "fields": [
+        { "name": "node_id", "type": "string" },
+        { "name": "region", "type": "string" },
+        { "name": "country", "type": "string" },
+        { "name": "public_key", "type": "bytes" }
+      ] },
+    { "name": "FedPeerView", "fields": [
+        { "name": "node_id", "type": "string" },
+        { "name": "region", "type": "string" },
+        { "name": "status", "type": "string" }
+      ] },
+    { "name": "FedPeerId", "fields": [ { "name": "node_id", "type": "string" } ] },
+    { "name": "FedListReq", "fields": [] },
+    { "name": "FedPeerList", "fields": [ { "name": "peers", "type": "list<FedPeerView>" } ] },
+    { "name": "FedHello", "fields": [
+        { "name": "node_id", "type": "string" },
+        { "name": "region", "type": "string" },
+        { "name": "epoch", "type": "u64" },
+        { "name": "nonce", "type": "bytes" }
+      ] },
+    { "name": "FedProof", "fields": [
+        { "name": "node_id", "type": "string" },
+        { "name": "signature", "type": "bytes" }
+      ] },
+    { "name": "FedForward", "fields": [
+        { "name": "from", "type": "string" },
+        { "name": "to", "type": "string" },
+        { "name": "payload", "type": "bytes" }
+      ] },
+    { "name": "FedPresenceDigest", "fields": [
+        { "name": "region", "type": "string" },
+        { "name": "digest", "type": "bytes" }
+      ] },
+    { "name": "FedRouting", "fields": [
+        { "name": "epoch", "type": "u64" },
+        { "name": "home_region", "type": "string" },
+        { "name": "room_id", "type": "id" }
+      ] },
+    { "name": "FedEpoch", "fields": [ { "name": "epoch", "type": "u64" } ] },
+    { "name": "FedLinkState", "fields": [
+        { "name": "node_id", "type": "string" },
+        { "name": "sequence", "type": "u64" },
+        { "name": "healthy", "type": "bool" }
+      ] },
+    { "name": "FedHealth", "fields": [
+        { "name": "node_id", "type": "string" },
+        { "name": "status", "type": "string" }
+      ] },
+    { "name": "FedEvent", "fields": [
+        { "name": "from", "type": "string" },
+        { "name": "kind", "type": "string" },
+        { "name": "payload", "type": "bytes" }
+      ] },
+
+    { "name": "FriendRespond", "fields": [
+        { "name": "user_id", "type": "id" },
+        { "name": "accept", "type": "bool" }
+      ] },
+    { "name": "FriendEvent", "fields": [
+        { "name": "user_id", "type": "id" },
+        { "name": "state", "type": "string" }
+      ] },
+    { "name": "RelationshipListReq", "fields": [ { "name": "limit", "type": "u32" } ] },
+    { "name": "RelationshipEntry", "fields": [
+        { "name": "user_id", "type": "id" },
+        { "name": "kind", "type": "u32" }
+      ] },
+    { "name": "RelationshipList", "fields": [ { "name": "entries", "type": "list<RelationshipEntry>" } ] },
+    { "name": "MediaStateEvent", "fields": [
+        { "name": "object_id", "type": "id" },
+        { "name": "state", "type": "string" }
+      ] },
+    { "name": "NotificationAck", "fields": [ { "name": "id", "type": "id" } ] },
+    { "name": "EconomyEvent", "fields": [
+        { "name": "kind", "type": "string" },
+        { "name": "amount", "type": "u64" },
+        { "name": "currency", "type": "string" }
+      ] },
+    { "name": "BotCommand", "fields": [
+        { "name": "bot_id", "type": "id" },
+        { "name": "command", "type": "string" },
+        { "name": "args", "type": "list<string>", "optional": true, "id": 1 }
+      ] },
+    { "name": "BotEvent", "fields": [
+        { "name": "bot_id", "type": "id" },
+        { "name": "event", "type": "string" },
+        { "name": "payload", "type": "bytes", "optional": true, "id": 1 }
+      ] },
+    { "name": "FedAuth", "fields": [
+        { "name": "node_id", "type": "string" },
+        { "name": "signature", "type": "bytes" },
+        { "name": "epoch", "type": "u64" }
+      ] },
+    { "name": "FedPing", "fields": [
+        { "name": "node_id", "type": "string" },
+        { "name": "nonce", "type": "bytes" }
+      ] },
+    { "name": "FedPong", "fields": [ { "name": "nonce", "type": "bytes" } ] },
+    { "name": "FedAck", "fields": [
+        { "name": "node_id", "type": "string" },
+        { "name": "seq", "type": "u64" }
+      ] },
+    { "name": "FedRoomEvent", "fields": [
+        { "name": "room_id", "type": "id" },
+        { "name": "payload", "type": "bytes" }
+      ] },
+    { "name": "FedKeyRotate", "fields": [
+        { "name": "node_id", "type": "string" },
+        { "name": "new_public_key", "type": "bytes" }
+      ] },
+    { "name": "FedShardMap", "fields": [
+        { "name": "region", "type": "string" },
+        { "name": "nodes", "type": "list<FedPeerView>" }
+      ] },
+    { "name": "FedError", "fields": [
+        { "name": "node_id", "type": "string" },
+        { "name": "code", "type": "u32" },
+        { "name": "message", "type": "string" }
+      ] },
+    { "name": "FedDirectoryReq", "fields": [ { "name": "query", "type": "string" } ] },
+    { "name": "FedDirectory", "fields": [ { "name": "peers", "type": "list<FedPeerView>" } ] },
+    { "name": "ModerationEvent", "fields": [
+        { "name": "case_id", "type": "id" },
+        { "name": "action", "type": "u32" },
+        { "name": "state", "type": "string" }
       ] }
   ]
 }

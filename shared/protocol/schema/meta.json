@@ -28,7 +28,7 @@
     { "name": "ERROR",        "bit": 3, "description": "Payload is Error instead of the opcode response type" },
     { "name": "ACK_REQUIRED", "bit": 4, "description": "Receiver must acknowledge by cumulative watermark" },
     { "name": "FRAGMENT",     "bit": 5, "description": "varint index, varint total follow; payload is a slice" },
-    { "name": "RESERVED_6",   "bit": 6, "description": "Must be zero in MWP/1" },
+    { "name": "RESERVED_6",   "bit": 6, "description": "Reserved. MUST be zero. Reserved in MWP/1 for a future METADATA block (section 141); a frame that sets it is rejected." },
     { "name": "FLAGS_EXT",    "bit": 7, "description": "A second flags byte follows (reserved for MWP/2)" }
   ],
   "features": [
@@ -47,7 +47,12 @@
     { "name": "QUIC",           "bit": 12, "description": "QUIC transport upgrade offer" },
     { "name": "TRACING",        "bit": 13, "description": "Accepts TRACED frames" },
     { "name": "RESUME",         "bit": 14, "description": "Session resume by frame watermark" },
-    { "name": "ECONOMY",        "bit": 15, "description": "Gifts and currency events" }
+    { "name": "ECONOMY",        "bit": 15, "description": "Gifts and currency events" },
+    { "name": "VOICE_NOTE",     "bit": 16, "description": "Voice note attachments (section 167/179)" },
+    { "name": "CALLS",          "bit": 17, "description": "1:1 voice/video calls (section 165/166/180)" },
+    { "name": "GROUP_CALL",     "bit": 18, "description": "SFU group calls (section 166)" },
+    { "name": "FEDERATION",     "bit": 19, "description": "Server-to-server mesh (section 169/170)" },
+    { "name": "RICH_PRESENCE",  "bit": 20, "description": "Custom status and activity (section 26)" }
   ],
   "delivery_classes": [
     { "name": "Critical",    "description": "Never dropped. Lagging session is closed with RESUME_REQUIRED instead" },
