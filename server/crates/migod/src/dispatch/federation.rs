@@ -38,14 +38,14 @@
 //! `FED_DIRECTORY` are the read side of the same allow-list the operator administers, answered with
 //! the peer list `Mesh::peers` returns.
 
-use migo_core::Id;
 use migo_core::Error;
+use migo_core::Id;
 use migo_federation::{PeerView, SharedMesh};
 use migo_gateway::ClientContext;
 use migo_protocol::{
-    fault, from_frame, Frame, Acknowledged, FedAck, FedAuth, FedDirectory, FedDirectoryReq, FedError,
-    FedEvent, FedForward, FedHealth, FedHello, FedKeyRotate, FedPeerView, FedPing,
-    FedPong, FedPresenceDigest, FedRoomEvent, FedRouting, FedShardMap,
+    fault, from_frame, Acknowledged, FedAck, FedAuth, FedDirectory, FedDirectoryReq, FedError,
+    FedEvent, FedForward, FedHealth, FedHello, FedKeyRotate, FedPeerView, FedPing, FedPong,
+    FedPresenceDigest, FedRoomEvent, FedRouting, FedShardMap, Frame,
 };
 
 /// The default page clamp handed to `Mesh::peers` when a directory or shard-map view is requested.
@@ -129,7 +129,8 @@ pub(crate) async fn handle_ack(
     svc: &SharedMesh,
 ) -> Result<(), Error> {
     let ack: FedAck = from_frame(frame).map_err(fault::from_wire)?;
-    let node = Id::parse(&ack.node_id).map_err(|_| fault::validation("node_id", "invalid node id"))?;
+    let node =
+        Id::parse(&ack.node_id).map_err(|_| fault::validation("node_id", "invalid node id"))?;
     svc.check_sequence(node, ack.seq);
     ctx.reply(&Acknowledged { ok: true })
 }
@@ -286,4 +287,3 @@ fn peer_to_view(peer: PeerView) -> FedPeerView {
         status: peer.status.slug().to_string(),
     }
 }
-

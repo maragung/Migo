@@ -22,9 +22,7 @@
 //! session, never the frame.
 
 use migo_core::Error;
-use migo_economy::{
-    Caller as EconomyCaller, Gift, SendGift, SharedTreasurer,
-};
+use migo_economy::{Caller as EconomyCaller, Gift, SendGift, SharedTreasurer};
 use migo_gateway::ClientContext;
 use migo_protocol::{fault, from_frame, Frame, GiftSend, GiftSendResult, WalletReq, WalletView};
 
@@ -47,8 +45,8 @@ pub(crate) async fn handle_gift_send(
         request_id: None,
     };
     let request: GiftSend = from_frame(frame).map_err(fault::from_wire)?;
-    let gift = Gift::from_slug(&request.gift)
-        .ok_or_else(|| fault::validation("gift", "unknown gift"))?;
+    let gift =
+        Gift::from_slug(&request.gift).ok_or_else(|| fault::validation("gift", "unknown gift"))?;
     // The wire carries no client idempotency key, so one is derived from the recipient and the
     // sampled `now`. Stamping it with `now` keeps a fresh attempt from collapsing into a prior
     // one; a client that genuinely retries must send within the same instant to dedupe.
@@ -94,4 +92,3 @@ pub(crate) async fn handle_balance_fetch(
         points: wallet.points.max(0) as u64,
     })
 }
-

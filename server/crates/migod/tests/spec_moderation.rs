@@ -15,8 +15,8 @@ use migo_core::random::OsRandom;
 use migo_core::{Id, Result, Timestamp};
 use migo_moderation::Caller as WardenCaller;
 use migo_moderation::{
-    open, ModerationConfig, Operator, Powers, Resolution, Roster, SharedRoster, SharedWarden,
-    Subject, Filing, Reason, Warden,
+    open, Filing, ModerationConfig, Operator, Powers, Reason, Resolution, Roster, SharedRoster,
+    SharedWarden, Subject, Warden,
 };
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 use migo_store::MemoryStore;
@@ -37,7 +37,8 @@ impl Roster for AllStaff {
 fn warden() -> SharedWarden {
     let store: Arc<MemoryStore> = Arc::new(MemoryStore::new());
     let registry = Registry::new();
-    let policies = Policies::from_config(&Config::default().rate_limit).expect("default policies are valid");
+    let policies =
+        Policies::from_config(&Config::default().rate_limit).expect("default policies are valid");
     let limiter: Arc<CacheRateLimiter<MemoryCache>> = Arc::new(CacheRateLimiter::new(
         Arc::new(MemoryCache::new()),
         policies,
@@ -65,7 +66,10 @@ async fn report_creates_a_case() {
         Timestamp::from_millis(NOW),
     );
     let filed = svc
-        .file_report(&reporter, Filing::new(Subject::User(Id::from(2u128)), Reason::Spam))
+        .file_report(
+            &reporter,
+            Filing::new(Subject::User(Id::from(2u128)), Reason::Spam),
+        )
         .await
         .expect("the report files");
     assert!(!filed.duplicate);
@@ -82,7 +86,10 @@ async fn action_resolves_the_case() {
         Timestamp::from_millis(NOW),
     );
     let filed = svc
-        .file_report(&reporter, Filing::new(Subject::User(Id::from(2u128)), Reason::Spam))
+        .file_report(
+            &reporter,
+            Filing::new(Subject::User(Id::from(2u128)), Reason::Spam),
+        )
         .await
         .expect("the report files");
 

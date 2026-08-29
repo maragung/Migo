@@ -20,10 +20,10 @@
 
 use migo_core::Error;
 use migo_gateway::ClientContext;
-use migo_notify::SharedNotifier;
 use migo_notify::Caller as NotifyCaller;
+use migo_notify::SharedNotifier;
 use migo_protocol::{
-    from_frame, fault, Acknowledged, Frame, InboxItem, InboxReq, InboxResponse, NotificationAck,
+    fault, from_frame, Acknowledged, Frame, InboxItem, InboxReq, InboxResponse, NotificationAck,
 };
 
 /// Marks every notification up to the one the client named as read.
@@ -86,4 +86,3 @@ pub(crate) async fn handle_list(
         next_cursor: None,
     })
 }
-

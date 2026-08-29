@@ -11,9 +11,7 @@ use migo_cache::MemoryCache;
 use migo_core::config::Config;
 use migo_core::metrics::Registry;
 use migo_core::{Id, Secret, Timestamp};
-use migo_economy::{
-    Catalogue, EconomyConfig, Gift, Grant, Reason, SendGift, Treasurer,
-};
+use migo_economy::{Catalogue, EconomyConfig, Gift, Grant, Reason, SendGift, Treasurer};
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 use migo_store::model::{Currency, NewAccount};
 use migo_store::traits::AccountStore;
@@ -119,5 +117,8 @@ async fn gift_send_spends_the_sender_coins() {
         .expect("gift sent");
     assert!(!outcome.duplicate);
     let after = svc.wallet(&sender).await.expect("wallet read").coins;
-    assert!(after < before, "the sender's coins decreased by the gift price");
+    assert!(
+        after < before,
+        "the sender's coins decreased by the gift price"
+    );
 }

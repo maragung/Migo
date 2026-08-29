@@ -26,7 +26,7 @@ use migo_bots::model::{Caller as BotCaller, NewBotSpec, Scopes};
 use migo_bots::SharedBots;
 use migo_core::Error;
 use migo_gateway::ClientContext;
-use migo_protocol::{fault, from_frame, Frame, Acknowledged, BotCommand, BotRegister, BotView};
+use migo_protocol::{fault, from_frame, Acknowledged, BotCommand, BotRegister, BotView, Frame};
 
 /// Registers a new bot owned by the authenticated caller and replies with its `BotView`.
 ///
@@ -83,4 +83,3 @@ pub(crate) async fn handle_command(
     let _request: BotCommand = from_frame(frame).map_err(fault::from_wire)?;
     ctx.reply(&Acknowledged { ok: true })
 }
-

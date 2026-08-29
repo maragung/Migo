@@ -59,7 +59,12 @@ async fn in_memory() -> SharedNotifier {
 }
 
 fn caller(account: u128, device: u128, now: Timestamp) -> Caller {
-    Caller::new(Id::from(account), Id::from(device), TrustTier::Established, now)
+    Caller::new(
+        Id::from(account),
+        Id::from(device),
+        TrustTier::Established,
+        now,
+    )
 }
 
 /// `NOTIFICATION_ACK` resolves to `Notifier::acknowledge`; on an empty inbox it returns Ok with zero

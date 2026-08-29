@@ -25,7 +25,7 @@
 use migo_core::Error;
 use migo_gateway::ClientContext;
 use migo_protocol::{
-    fault, from_frame, Frame, Acknowledged, FriendRespond, FriendTarget, RelationshipEntry,
+    fault, from_frame, Acknowledged, Frame, FriendRespond, FriendTarget, RelationshipEntry,
     RelationshipList, RelationshipListReq,
 };
 use migo_social::model::{Edge, MAX_PAGE};
@@ -168,4 +168,3 @@ async fn collect_relationships(
     }
     entries
 }
-

@@ -11,15 +11,15 @@
 use migo_core::Error;
 use migo_core::Id;
 use migo_gateway::ClientContext;
-use migo_moderation::SharedWarden;
 use migo_moderation::Caller as WardenCaller;
 use migo_moderation::Filing;
 use migo_moderation::Operator;
 use migo_moderation::Powers;
 use migo_moderation::Reason;
 use migo_moderation::Resolution;
+use migo_moderation::SharedWarden;
 use migo_moderation::Subject;
-use migo_protocol::{from_frame, fault, Acknowledged, Frame, ModAction, ReportFile};
+use migo_protocol::{fault, from_frame, Acknowledged, Frame, ModAction, ReportFile};
 
 /// Files a report on behalf of the authenticated account.
 ///
@@ -36,7 +36,12 @@ pub(crate) async fn handle_report(
     let identity = ctx.identity();
     let now = ctx.now();
 
-    let caller = WardenCaller::new(identity.account_id(), identity.device_id(), identity.tier, now);
+    let caller = WardenCaller::new(
+        identity.account_id(),
+        identity.device_id(),
+        identity.tier,
+        now,
+    );
 
     let request: ReportFile = from_frame(frame).map_err(fault::from_wire)?;
     let subject = subject_from_wire(request.subject_kind, request.subject_id)?;
@@ -66,16 +71,27 @@ pub(crate) async fn handle_action(
     let now = ctx.now();
 
     let operator = if identity.is_fresh(now) {
-        Operator::new(identity.account_id(), identity.device_id(), Powers::NONE, now)
-            .reauthenticated()
+        Operator::new(
+            identity.account_id(),
+            identity.device_id(),
+            Powers::NONE,
+            now,
+        )
+        .reauthenticated()
     } else {
-        Operator::new(identity.account_id(), identity.device_id(), Powers::NONE, now)
+        Operator::new(
+            identity.account_id(),
+            identity.device_id(),
+            Powers::NONE,
+            now,
+        )
     };
 
     let request: ModAction = from_frame(frame).map_err(fault::from_wire)?;
     let resolution = Resolution::of_i16(request.action as i16);
 
-    svc.resolve(&operator, request.case_id, resolution, None).await?;
+    svc.resolve(&operator, request.case_id, resolution, None)
+        .await?;
     ctx.reply(&Acknowledged { ok: true })
 }
 
@@ -97,4 +113,3 @@ fn subject_from_wire(kind: u32, id: Id) -> Result<Subject, Error> {
         _ => Err(fault::validation("subject_kind", "unknown subject kind")),
     }
 }
-

@@ -39,13 +39,13 @@ use anyhow::{bail, Context};
 
 use migo_auth::{captcha::CaptchaGate, ConcreteAuth, SharedAuth};
 use migo_bots::SharedBots;
-use migo_crypto::NodeSecret;
-use migo_federation::{MeshConfig, SharedMesh};
 use migo_captcha::{CaptchaService, InMemoryStore as CaptchaInMemoryStore};
 use migo_core::config::Environment;
 use migo_core::metrics::Registry;
 use migo_core::{Clock, Config, Id, OsRandom, Random, Shutdown, SystemClock};
+use migo_crypto::NodeSecret;
 use migo_economy::{Catalogue, SharedAnnouncer, SharedTreasurer, Silent};
+use migo_federation::{MeshConfig, SharedMesh};
 use migo_games::{SharedReferee, SharedRewards};
 use migo_gateway::{Dispatcher, Gateway, GatewayServices};
 use migo_keys::SharedKeyring;

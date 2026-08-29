@@ -16,14 +16,13 @@
 //! received the ticket, carries the same `upload_id` it was given; this handler is the
 //! bridge between the wire's id-shaped field and the library's token-shaped argument.
 
-
 use migo_core::Error;
 use migo_gateway::ClientContext;
 use migo_media::model::{Commit, Destination, MediaKind, UploadRequest};
 use migo_media::{Caller as MediaCaller, SharedLibrary};
 use migo_protocol::{
-    fault, from_frame, Frame, Acknowledged, MediaAbort, MediaBegin, MediaCommit, MediaFetch, MediaProgress,
-    MediaStatusReq, MediaTicket, MediaUrl,
+    fault, from_frame, Acknowledged, Frame, MediaAbort, MediaBegin, MediaCommit, MediaFetch,
+    MediaProgress, MediaStatusReq, MediaTicket, MediaUrl,
 };
 
 /// Builds the caller every media handler needs: the authenticated account and device, the
@@ -31,7 +30,12 @@ use migo_protocol::{
 #[must_use]
 fn caller(ctx: &ClientContext<'_>) -> MediaCaller {
     let identity = ctx.identity();
-    MediaCaller::new(identity.account_id(), identity.device_id(), identity.tier, ctx.now())
+    MediaCaller::new(
+        identity.account_id(),
+        identity.device_id(),
+        identity.tier,
+        ctx.now(),
+    )
 }
 
 /// `MEDIA_UPLOAD_BEGIN` (113) → a signed upload URL and the ticket that claims it later.
@@ -55,7 +59,9 @@ pub(crate) async fn handle_upload_begin(
         // The wire carries a `u64`; the domain caps duration at `u32`. A value past the
         // ceiling is rejected later by `Policy`, so dropping the high bits here only loses
         // a duration the policy would have refused anyway.
-        duration_ms: request.duration_ms.and_then(|value| u32::try_from(value).ok()),
+        duration_ms: request
+            .duration_ms
+            .and_then(|value| u32::try_from(value).ok()),
     };
     let ticket = svc.begin(&call, upload).await?;
     let response = MediaTicket {
@@ -100,7 +106,8 @@ pub(crate) async fn handle_upload_commit(
         byte_size: 0,
         checksum: Some(request.digest),
     };
-    svc.commit(&call, request.upload_id.as_bytes(), commit).await?;
+    svc.commit(&call, request.upload_id.as_bytes(), commit)
+        .await?;
     ctx.reply(&Acknowledged { ok: true })?;
     Ok(())
 }
@@ -134,4 +141,3 @@ pub(crate) async fn handle_fetch_url(
     ctx.reply(&response)?;
     Ok(())
 }
-

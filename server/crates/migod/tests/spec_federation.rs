@@ -39,7 +39,10 @@ fn harness() -> migo_federation::SharedMesh {
 async fn directory_and_shard_map_list_no_peers() {
     let mesh = harness();
     let peers = mesh.peers(256).await.expect("peers are readable");
-    assert!(peers.is_empty(), "no peers are allow-listed on a fresh mesh");
+    assert!(
+        peers.is_empty(),
+        "no peers are allow-listed on a fresh mesh"
+    );
 }
 
 /// `handle_health` reports this node's own region and epoch; both are readable and stable.
@@ -56,7 +59,10 @@ async fn health_reports_region_and_epoch() {
 async fn ping_equivalent_hello_is_issuable() {
     let mesh = harness();
     let hello = mesh.hello();
-    assert!(!hello.nonce.is_empty(), "the mesh issues a nonce-bearing hello");
+    assert!(
+        !hello.nonce.is_empty(),
+        "the mesh issues a nonce-bearing hello"
+    );
 }
 
 /// `handle_hello`/`handle_auth` gate on `check_epoch`; the current epoch is accepted and a request
@@ -74,5 +80,9 @@ async fn ack_sequence_is_observed() {
     let mesh = harness();
     // A sequence of 1 is the first packet after a handshake; it must be judged `Accept`.
     let verdict = mesh.check_sequence(Id::from(1u128), 1);
-    assert_eq!(verdict, SequenceVerdict::Accept, "the first packet is in order");
+    assert_eq!(
+        verdict,
+        SequenceVerdict::Accept,
+        "the first packet is in order"
+    );
 }
