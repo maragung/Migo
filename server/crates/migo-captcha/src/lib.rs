@@ -4,7 +4,7 @@
 //! an alphabet that leaves out the characters a screen renders ambiguously — `I`, `O`, `S`
 //! and the digits `0`, `1`, `5` — over a noisy ground, with per-character rotation, scale,
 //! and baseline jitter, and a single interference curve threaded through every character
-//! (the renderer in [`render`] owns the whole pipeline and its guarantees). The user reads
+//! (the renderer module in this crate owns the whole pipeline and its guarantees). The user reads
 //! the picture and types what they see; the server holds only an HMAC tag of the answer,
 //! never the answer, and the challenge dies the moment it is answered.
 //!
