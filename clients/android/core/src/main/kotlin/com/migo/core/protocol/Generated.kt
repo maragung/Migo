@@ -3812,7 +3812,7 @@ data class InboxResponse(
 }
 
 /** Empty request; the caller's own wallet is implied by the session. */
-data class WalletReq(
+class WalletReq(
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -3941,7 +3941,7 @@ data class GiftSendResult(
 }
 
 /** Empty request for the gift catalogue. */
-data class CatalogueReq(
+class CatalogueReq(
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -4384,7 +4384,7 @@ data class FedPeerId(
     }
 }
 
-data class FedListReq(
+class FedListReq(
 ) {
     fun encode(w: Writer) {
         w.enter()

@@ -70,6 +70,20 @@ function makeFetchDouble(calls: CapturedCall[]): typeof fetch {
   };
 }
 
+/**
+ * A socket factory that refuses, so the post-grant handshake fails here rather than on the network.
+ *
+ * These tests assert on the REST body `register` sends, and the handshake that follows it is not
+ * under test. Leaving it to the global `WebSocket` made the outcome depend on the host: node 22 and
+ * later ship one, so the transport really tried to resolve the test hostname and left a promise
+ * pending after the assertions had run, which the test runner reports as a failure in the test that
+ * happened to be open. Refusing synchronously keeps the failure inside the `catch` the test already
+ * has, and keeps the suite off the network.
+ */
+function refusingSocket(): never {
+  throw new Error('the handshake is not under test in this file');
+}
+
 test('the captcha widget renders the question, the answer input, and a refresh control', async () => {
   const { CaptchaWidget } = await import('../src/components/captcha-widget.js');
   const markup = renderToStaticMarkup(
@@ -106,6 +120,7 @@ test('MigoClient.register sends a captcha proof in the body when one is supplied
     },
     deviceDisplayName: 'Test Browser',
     fetch: makeFetchDouble(calls),
+    webSocketFactory: refusingSocket,
   });
 
   try {
@@ -155,6 +170,7 @@ test('MigoClient.register omits the captcha block when no proof is supplied', as
     },
     deviceDisplayName: 'Test Browser',
     fetch: makeFetchDouble(calls),
+    webSocketFactory: refusingSocket,
   });
   try {
     await client.register({

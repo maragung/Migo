@@ -905,7 +905,10 @@ function genKotlin() {
     const opt = s.fields.filter((f) => f.optional);
     const all = [...req, ...opt];
     out += kdoc(s.doc);
-    out += `data class ${s.name}(\n`;
+    // An empty struct would compile in Rust and TypeScript, but Kotlin refuses a `data class`
+    // with no primary constructor parameters — the grammar demands at least one. A plain
+    // `class` with the empty constructor that the body already emits works.
+    out += `${all.length === 0 ? 'class' : 'data class'} ${s.name}(\n`;
     for (const f of req) {
       out += kdoc(f.doc, '    ');
       out += `    val ${camel(f.name)}: ${kotlinType(f.type)},\n`;
