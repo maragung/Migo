@@ -581,12 +581,17 @@ function genTs() {
       out += `  ${camel(f.name)}${f.optional ? '?' : ''}: ${tsType(f.type)};\n`;
     }
     out += `}\n\n`;
-    out += `export function encode${s.name}(w: Writer, v: ${s.name}): void {\n  w.enter();\n`;
-    for (const f of req) out += `  ${tsWrite(f.type, `v.${camel(f.name)}`)}\n`;
+    // A struct with no fields never reads its value parameter, and `tsc`'s
+    // noUnusedParameters rejects that unless the name carries the underscore
+    // exemption. The wire shape is unchanged: an empty struct still encodes as
+    // its zero optional count.
+    const valueParam = req.length + opt.length === 0 ? '_v' : 'v';
+    out += `export function encode${s.name}(w: Writer, ${valueParam}: ${s.name}): void {\n  w.enter();\n`;
+    for (const f of req) out += `  ${tsWrite(f.type, `${valueParam}.${camel(f.name)}`)}\n`;
     if (opt.length) {
-      out += `  let present = 0;\n${opt.map((f) => `  if (v.${camel(f.name)} !== undefined) present++;`).join('\n')}\n  w.u32(present);\n`;
+      out += `  let present = 0;\n${opt.map((f) => `  if (${valueParam}.${camel(f.name)} !== undefined) present++;`).join('\n')}\n  w.u32(present);\n`;
       for (const f of opt) {
-        out += `  if (v.${camel(f.name)} !== undefined) { const value = v.${camel(f.name)}; w.optional(${f.id}, (w) => { ${tsWrite(f.type, 'value')} }); }\n`;
+        out += `  if (${valueParam}.${camel(f.name)} !== undefined) { const value = ${valueParam}.${camel(f.name)}; w.optional(${f.id}, (w) => { ${tsWrite(f.type, 'value')} }); }\n`;
       }
     } else {
       out += `  w.u32(0);\n`;

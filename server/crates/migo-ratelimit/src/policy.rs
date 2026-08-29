@@ -246,13 +246,22 @@ impl Policies {
         for &tier in TrustTier::ALL {
             let ceiling = max_cost_at(tier.auth_level());
             for &scope in Scope::ALL {
+                // The account surface is billed by two layers for the opcodes whose
+                // owning domain meters its own write — the gateway edge takes the
+                // frame, then the service takes the same opcode again on the way in.
+                // A bucket sized for one charge would let the first through and refuse
+                // the second forever, which is a lockout rather than a limit, so the
+                // account surface must afford the ceiling twice. The endpoint surface
+                // no longer carries that problem: the edge and the service bill
+                // separate buckets on it, each sized for its own single charge.
+                let charges = if scope == Scope::Account { 2 } else { 1 };
                 // A shared surface carries traffic from every tier, so it is checked
                 // against the most expensive opcode any caller can send rather than
                 // against the tier being iterated.
                 let needed = if scope.scales_with_tier() {
-                    ceiling
+                    ceiling * charges
                 } else {
-                    max_cost_at(AuthLevel::Bot)
+                    max_cost_at(AuthLevel::Bot) * charges
                 };
                 let spec = self.resolve(scope, tier);
                 if spec.capacity() < needed {

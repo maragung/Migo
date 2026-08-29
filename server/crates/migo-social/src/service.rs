@@ -192,7 +192,7 @@ where
     /// an edit to this file.
     async fn charge_opcode(&self, caller: &Caller, opcode: Opcode) -> Result<()> {
         let keys = [
-            BucketKey::endpoint_of_account(caller.account_id, opcode),
+            BucketKey::endpoint_write_of_account(caller.account_id, opcode),
             BucketKey::account(caller.account_id),
         ];
         self.limiter

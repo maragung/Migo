@@ -909,10 +909,12 @@ async fn a_publication_is_charged_to_the_endpoint_and_the_account_but_never_the_
     assert_eq!(
         charge.keys,
         vec![
-            BucketKey::endpoint_of_account(id(ALICE), Opcode::KeyPublish),
+            BucketKey::endpoint_write_of_account(id(ALICE), Opcode::KeyPublish),
             BucketKey::account(id(ALICE)),
         ],
-        "the endpoint first because it is the tightest surface, then the account"
+        "the service's write endpoint first because it is the tightest surface, then the \
+         account; the edge's endpoint bucket is a separate one, so the two layers never \
+         empty each other's budget"
     );
     assert!(
         !charge
@@ -1029,7 +1031,7 @@ async fn a_fetch_is_charged_to_the_endpoint_and_the_account_before_the_read() {
     assert_eq!(
         fetch.keys,
         vec![
-            BucketKey::endpoint_of_account(id(BOB), Opcode::KeyBundleFetch),
+            BucketKey::endpoint_write_of_account(id(BOB), Opcode::KeyBundleFetch),
             BucketKey::account(id(BOB)),
         ],
         "the fetcher pays, not the subject"

@@ -229,6 +229,21 @@ impl BucketKey {
         )
     }
 
+    /// One opcode for one account, billed to the service that does the work.
+    ///
+    /// The gateway edge charges every frame on [`Self::endpoint_of_account`]; the owning
+    /// domain then meters its own write on the way in. Both layers billing one bucket
+    /// meant the second charge met a bucket the first had already emptied, and the most
+    /// expensive opcodes refused forever for the newest accounts. The write surface is a
+    /// separate bucket with the same policy shape, so each layer pays its own way.
+    #[must_use]
+    pub fn endpoint_write_of_account(account_id: Id, opcode: Opcode) -> Self {
+        Self::at(
+            Scope::Endpoint,
+            &format!("{}/{}/write", account_id.to_text(), opcode.name()),
+        )
+    }
+
     /// One opcode for one network. The pre-authentication form: before a session has
     /// an account there is still something to limit per operation, and it is the only
     /// thing the server knows about the caller.

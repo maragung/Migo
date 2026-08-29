@@ -353,3 +353,27 @@ sesuai desain `Mesh` (section 169). Alur server-ke-server penuh (handshake, forw
 node) memerlukan transport mesh terpisah yang belum diarahkan lewat gateway klien; arm dispatcher
 ada dan terkompilasi, namun lalu lintas FED_* dari soket klien akan ditolak gate autentikasi
 sebagai `auth: Server`.
+
+## 11. Perbaikan lockout KEY_PUBLISH (v0.2.1)
+
+Laporan pengguna: "The server rejected the request." pada pendaftaran baru. Akar masalah:
+`KEY_PUBLISH` (harga 20) ditagih dua kali ke bucket endpoint yang SAMA — sekali per frame di
+tepi gateway (`migo-gateway` `charge_or_reject`), lalu lagi di dalam service pemiliknya
+(`migo-keys` `Keys::charge`). Bucket endpoint akun baru (tier New, umur < 7 hari) hanya memuat
+25 token, sehingga tagihan kedua (20) tidak pernah terbayar — setiap akun baru ditolak
+`RATE_LIMITED` pada koneksi pertamanya, sebelum satu pesan pun terkirim. Opcode lain berharga
+>= 13 (ROOM_JOIN, GIFT_SEND, REPORT_CREATE) terkena tembok yang sama.
+
+Perbaikan: tagihan milik service kini mendarat di bucket terpisah
+(`BucketKey::endpoint_write_of_account`, scope Endpoint dengan tail `/write`), sehingga tepi
+gateway dan service masing-masing membayar bucket sendiri; ukuran bucket tidak berubah.
+`Policies::validate` kini menuntut permukaan Account mampu membayar plafon biaya DUA kali
+(karena tepi dan service sama-sama menagih account), dan limiter menolak boot bila tidak.
+Test regresi `a_probationary_account_can_pay_for_its_first_publish_twice` di
+`migo-ratelimit/tests/limiter.rs` menyematkan kedua invarian itu, terverifikasi end-to-end:
+register → connect → KEY_PUBLISH → SUBSCRIBE lulus pada konfigurasi bawaan.
+
+Catatan jujur: cacat ini sudah ada sejak layer charge gateway dan service digabungkan dan lolos
+karena test gateway memakai dispatcher palsu sementara test domain menggerakkan service secara
+langsung — tidak ada test yang menjalankan kedua layer di atas limiter sungguhan dengan akun
+tier New. Pelajarannya tercatat di test regresinya.

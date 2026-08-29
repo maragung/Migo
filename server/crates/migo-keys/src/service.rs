@@ -122,7 +122,7 @@ where
     /// Charges an operation, priced from the IDL.
     async fn charge(&self, caller: &Caller, opcode: Opcode) -> Result<()> {
         let keys = [
-            BucketKey::endpoint_of_account(caller.account_id, opcode),
+            BucketKey::endpoint_write_of_account(caller.account_id, opcode),
             BucketKey::account(caller.account_id),
         ];
         self.limiter

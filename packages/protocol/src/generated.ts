@@ -2824,7 +2824,7 @@ export function decodeInboxResponse(r: Reader): InboxResponse {
 export interface WalletReq {
 }
 
-export function encodeWalletReq(w: Writer, v: WalletReq): void {
+export function encodeWalletReq(w: Writer, _v: WalletReq): void {
   w.enter();
   w.u32(0);
   w.leave();
@@ -2937,7 +2937,7 @@ export function decodeGiftSendResult(r: Reader): GiftSendResult {
 export interface CatalogueReq {
 }
 
-export function encodeCatalogueReq(w: Writer, v: CatalogueReq): void {
+export function encodeCatalogueReq(w: Writer, _v: CatalogueReq): void {
   w.enter();
   w.u32(0);
   w.leave();
@@ -3351,7 +3351,7 @@ export function decodeFedPeerId(r: Reader): FedPeerId {
 export interface FedListReq {
 }
 
-export function encodeFedListReq(w: Writer, v: FedListReq): void {
+export function encodeFedListReq(w: Writer, _v: FedListReq): void {
   w.enter();
   w.u32(0);
   w.leave();

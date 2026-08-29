@@ -115,7 +115,12 @@ pub struct AppDispatcher {
 
 impl AppDispatcher {
     /// Wires the dispatcher to every domain whose opcodes it routes.
+    ///
+    /// One argument per domain is the honest shape: a composition root that bundles the
+    /// services into a struct here would hide which dispatcher actually holds which
+    /// handle, and the count only grows when a new domain earns an opcode.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         messaging: SharedMessaging,
         presence: SharedPresence,

@@ -25,7 +25,7 @@ use migo_core::metrics::Registry;
 use migo_core::{ErrorKind, Id, Result, Timestamp};
 use migo_protocol::{fault, Opcode};
 use migo_ratelimit::{
-    BucketKey, CacheRateLimiter, Policies, RateLimiter, Scope, TrustTier, Verdict,
+    max_cost_at, BucketKey, CacheRateLimiter, Policies, RateLimiter, Scope, TrustTier, Verdict,
     FALLBACK_DIVISOR, MAX_KEYS_PER_CHARGE,
 };
 
@@ -471,13 +471,74 @@ fn a_shared_surface_ignores_the_callers_standing() {
     }
 }
 
+/// A probationary account can pay for its first publish through the whole stack.
+///
+/// The gateway edge bills the frame on `endpoint_of_account`, and the owning service
+/// then meters its own write. The first release that wired both layers billed them to
+/// the *same* endpoint bucket, and the second charge met a bucket the first had already
+/// emptied: every account younger than seven days was refused on its very first connect,
+/// `RATE_LIMITED` on `KEY_PUBLISH`, before a single message could be sent. This test
+/// pins the two invariants that keep that lockout impossible: the edge and the write
+/// bill separate buckets, and the account surface — which both layers still bill —
+/// affords the ceiling twice at every tier.
+#[tokio::test]
+async fn a_probationary_account_can_pay_for_its_first_publish_twice() {
+    let edge = BucketKey::endpoint_of_account(id(64), Opcode::KeyPublish);
+    let write = BucketKey::endpoint_write_of_account(id(64), Opcode::KeyPublish);
+    assert_ne!(
+        edge.cache_key(),
+        write.cache_key(),
+        "the gateway's per-frame charge and the service's own write charge must land \
+         on separate buckets, or the second charge meets a bucket the first emptied"
+    );
+
+    let policies = Policies::default();
+    for &tier in TrustTier::ALL {
+        let account = policies.resolve(Scope::Account, tier);
+        let ceiling = max_cost_at(tier.auth_level());
+        assert!(
+            account.capacity() >= 2 * ceiling,
+            "a {} caller's account bucket holds {}, but the most expensive opcode it may \
+             send costs {ceiling} and is billed twice (edge, then service): the second \
+             charge would refuse forever",
+            tier.name(),
+            account.capacity(),
+        );
+    }
+
+    // And the arithmetic end to end: a brand-new account pays KEY_PUBLISH at the edge,
+    // then again inside the service, and both go through.
+    let account_id = id(65);
+    let edge_keys = [
+        BucketKey::endpoint_of_account(account_id, Opcode::KeyPublish),
+        BucketKey::account(account_id),
+        BucketKey::ip(address(7)),
+    ];
+    let write_keys = [
+        BucketKey::endpoint_write_of_account(account_id, Opcode::KeyPublish),
+        BucketKey::account(account_id),
+    ];
+    let (limiter, _registry) = working();
+    limiter
+        .charge_opcode(&edge_keys, Opcode::KeyPublish, TrustTier::New, start())
+        .await
+        .expect("the limiter answers")
+        .into_result()
+        .expect("the gateway edge's charge of a new account's publish is payable");
+    limiter
+        .charge_opcode(&write_keys, Opcode::KeyPublish, TrustTier::New, start())
+        .await
+        .expect("the limiter answers")
+        .into_result()
+        .expect("the service's own write charge of the same publish is payable");
+}
 #[test]
 fn a_budget_too_small_to_pay_for_an_operation_is_refused_at_startup() {
-    // Eighty is chosen so that exactly one resolved bucket falls short, which is what
-    // makes this a test of the calculation and not just of the loop. A new account gets a
-    // quarter of the burst (twenty, enough for one KEY_PUBLISH) and the endpoint surface
-    // then halves it to ten, which can never hold one. Every other surface at every other
-    // tier clears the bar, so the message has to name the narrowest.
+    // Eighty is chosen so the binding constraint is a new account's surfaces: a quarter
+    // of the burst is twenty on the account, which must afford the ceiling twice because
+    // the gateway edge and the owning service both bill it, and the endpoint share of
+    // twenty cannot hold one KEY_PUBLISH on its own. The message has to name the tier
+    // and the number, or an operator cannot tell which knob to raise.
     let config = RateLimitConfig {
         user_burst: 80,
         ..RateLimitConfig::default()
@@ -487,10 +548,9 @@ fn a_budget_too_small_to_pay_for_an_operation_is_refused_at_startup() {
     assert_eq!(error.kind(), ErrorKind::Validation);
 
     let message = error.to_string();
-    assert!(message.contains("endpoint"), "{message}");
     assert!(message.contains("new"), "{message}");
     assert!(
-        message.contains("costs 20"),
+        message.contains("costs 40"),
         "the message has to say what it could not afford, or an operator cannot tell \
          which number to raise: {message}"
     );
@@ -501,7 +561,7 @@ fn a_budget_too_small_to_pay_for_an_operation_is_refused_at_startup() {
         user_burst: 160,
         ..RateLimitConfig::default()
     })
-    .expect("160 resolves to twenty on the narrowest surface, which is exactly enough");
+    .expect("160 puts forty on the account and twenty on the endpoint, both exactly enough");
 }
 
 #[test]
