@@ -337,7 +337,7 @@ Sub-modul per-domain yang menangani permintaan klien:
 - `moderation.rs` — REPORT_CREATE, MODERATION_ACTION → `migo_moderation::Warden`.
 - `federation.rs` — 14 opcode FED_* → `migo_federation::Mesh` (boundary: hello/auth periksa
   epoch, shard_map/directory jawab daftar peer, sisanya dekode lalu ack karena efek substansial
- nya mendarat di surface rooms/presence/messaging yang mesh hanya kirimkan).
+  nya mendarat di surface rooms/presence/messaging yang mesh hanya kirimkan).
 
 Opcode s2c murni (FRIEND_EVENT, MEDIA_STATE_EVENT, ECONOMY_EVENT, BOT_EVENT, MODERATION_EVENT)
 tidak punya arm handler klien: server memublikasikannya, bukan memintanya.
@@ -362,7 +362,8 @@ tepi gateway (`migo-gateway` `charge_or_reject`), lalu lagi di dalam service pem
 (`migo-keys` `Keys::charge`). Bucket endpoint akun baru (tier New, umur < 7 hari) hanya memuat
 25 token, sehingga tagihan kedua (20) tidak pernah terbayar — setiap akun baru ditolak
 `RATE_LIMITED` pada koneksi pertamanya, sebelum satu pesan pun terkirim. Opcode lain berharga
->= 13 (ROOM_JOIN, GIFT_SEND, REPORT_CREATE) terkena tembok yang sama.
+
+> = 13 (ROOM_JOIN, GIFT_SEND, REPORT_CREATE) terkena tembok yang sama.
 
 Perbaikan: tagihan milik service kini mendarat di bucket terpisah
 (`BucketKey::endpoint_write_of_account`, scope Endpoint dengan tail `/write`), sehingga tepi

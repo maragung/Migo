@@ -4699,7 +4699,7 @@ impl Encode for WalletReq {
 impl Decode for WalletReq {
     fn decode(r: &mut Reader) -> Result<Self> {
         r.enter()?;
-        let mut out = Self::default();
+        let out = Self::default();
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
             // No optional fields are defined for this struct in this
@@ -4849,7 +4849,7 @@ impl Encode for CatalogueReq {
 impl Decode for CatalogueReq {
     fn decode(r: &mut Reader) -> Result<Self> {
         r.enter()?;
-        let mut out = Self::default();
+        let out = Self::default();
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
             // No optional fields are defined for this struct in this
@@ -5412,7 +5412,7 @@ impl Encode for FedListReq {
 impl Decode for FedListReq {
     fn decode(r: &mut Reader) -> Result<Self> {
         r.enter()?;
-        let mut out = Self::default();
+        let out = Self::default();
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
             // No optional fields are defined for this struct in this

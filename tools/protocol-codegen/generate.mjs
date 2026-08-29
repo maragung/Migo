@@ -351,7 +351,13 @@ ${errorsDoc.errors.map((e) => `        codes::${e.symbol} => ${e.http},`).join('
     } else {
       out += `        w.write_u32(0);\n`;
     }
-    out += `        w.leave();\n        Ok(())\n    }\n}\n\nimpl Decode for ${s.name} {\n    fn decode(r: &mut Reader) -> Result<Self> {\n        r.enter()?;\n        let mut out = Self::default();\n`;
+    out += `        w.leave();\n        Ok(())\n    }\n}\n\nimpl Decode for ${s.name} {\n    fn decode(r: &mut Reader) -> Result<Self> {\n        r.enter()?;\n`;
+    // `mut` only when a field is actually assigned: a struct with no fields at all
+    // never mutates its accumulator, and clippy denies the unused-mut warning the
+    // other shape would raise.
+    out += req.length + opt.length
+      ? `        let mut out = Self::default();\n`
+      : `        let out = Self::default();\n`;
     for (const f of req) out += `        out.${f.name} = ${rustRead(f.type)};\n`;
     // The optional block is always read, even for a struct that currently has no
     // optional fields: a newer peer may send some, and skipping them by length is
