@@ -182,7 +182,7 @@ where
     /// has devices — which is the wrong shape for a limit whose purpose is bounding what
     /// one person can put on the disk.
     async fn charge(&self, caller: &Caller, cost: u32) -> Result<()> {
-        let keys = [BucketKey::account(caller.account_id)];
+        let keys = [BucketKey::account_write(caller.account_id)];
         self.limiter
             .charge(&keys, cost, caller.tier, caller.now)
             .await?

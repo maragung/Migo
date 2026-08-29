@@ -378,3 +378,33 @@ Catatan jujur: cacat ini sudah ada sejak layer charge gateway dan service digabu
 karena test gateway memakai dispatcher palsu sementara test domain menggerakkan service secara
 langsung — tidak ada test yang menjalankan kedua layer di atas limiter sungguhan dengan akun
 tier New. Pelajarannya tercatat di test regresinya.
+
+## 12. Dua lapisan tidak lagi menagih bucket yang sama (v0.2.4)
+
+Perbaikan di bagian 11 memisahkan bucket endpoint, tetapi permukaan **account** masih ditagih
+dua kali untuk satu permintaan: tepi gateway menagih frame, lalu service pemiliknya menagih
+kerja yang sama. Akibatnya satu opcode berharga dua kali lipat dari yang dinyatakan registry.
+Pada `KEY_PUBLISH` (harga 20) itu berarti 40 dari 50 token akun tier `New` habis hanya untuk
+menerbitkan kunci saat connect — sehingga aksi pertama pengguna sesudahnya (membuat percakapan,
+harga 10) ditolak `RATE_LIMITED`. Akun baru bisa masuk, lalu tidak bisa berbuat apa pun.
+
+Sekarang setiap lapisan menagih bucket sendiri: tepi pada `BucketKey::account` /
+`endpoint_of_account`, service pada `BucketKey::account_write` / `endpoint_write_of_account`.
+Ukuran bucket tidak berubah dan `Policies::validate` kembali menuntut plafon satu kali, karena
+tidak ada lagi bucket yang ditagih ganda. `migo-auth` tetap memakai permukaan kanonik: jalurnya
+REST, dan tepi REST hanya menagih bucket IP, jadi tidak ada tabrakan.
+
+Terverifikasi end-to-end pada konfigurasi bawaan, dua klien SDK sungguhan terhadap `migod`
+in-memory: dua akun mendaftar, keduanya connect, satu membuat percakapan langsung, mengirim
+pesan terenkripsi, dan klien kedua menerima serta mendekripsinya. Ini jalur produk yang
+sebenarnya, dan inilah pertama kali ia dijalankan utuh — sebelum perbaikan ini langkah
+"membuat percakapan" selalu gagal.
+
+Test regresi `a_probationary_account_can_connect_and_then_still_do_something` di
+`migo-ratelimit/tests/limiter.rs` menyematkan invariannya: kunci tepi dan kunci write berbeda
+pada kedua permukaan, dan seluruh urutan pembuka klien nyata (KEY_PUBLISH, SUBSCRIBE,
+CONVERSATION_CREATE, MESSAGE_SEND) terbayar pada kedua lapisan untuk akun yang baru mendaftar.
+
+Catatan jujur: biaya registrasi memang menghabiskan seluruh bucket anonim (satu pendaftaran per
+~5 detik per /24) — itu perilaku anti-spam yang disengaja dengan override
+`auth.registration_cost` untuk pengembangan lokal, bukan cacat.

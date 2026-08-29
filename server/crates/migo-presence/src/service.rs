@@ -150,7 +150,7 @@ where
     async fn charge(&self, caller: &Caller, opcode: Opcode) -> Result<()> {
         let keys = [
             BucketKey::endpoint_write_of_account(caller.account_id, opcode),
-            BucketKey::account(caller.account_id),
+            BucketKey::account_write(caller.account_id),
         ];
         // `charge_opcode` and not `charge`: ADR-0006 puts the price on the opcode, so
         // naming the opcode makes it impossible to charge the wrong amount, and a

@@ -207,7 +207,7 @@ impl<S: Store + ?Sized, L: RateLimiter + ?Sized, R: Roster + ?Sized> Moderation<
         now: Timestamp,
     ) -> Result<()> {
         self.limiter
-            .charge(&[BucketKey::account(account_id)], cost, tier, now)
+            .charge(&[BucketKey::account_write(account_id)], cost, tier, now)
             .await?
             .into_result()
     }

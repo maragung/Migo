@@ -178,7 +178,7 @@ where
     /// One bucket, the account's, because there is no endpoint identity to open a
     /// second one under. See the module docs for where the numbers come from.
     async fn charge(&self, caller: &Caller, cost: u32) -> Result<()> {
-        let keys = [BucketKey::account(caller.account_id)];
+        let keys = [BucketKey::account_write(caller.account_id)];
         self.limiter
             .charge(&keys, cost, caller.tier, caller.now)
             .await?
@@ -193,7 +193,7 @@ where
     async fn charge_opcode(&self, caller: &Caller, opcode: Opcode) -> Result<()> {
         let keys = [
             BucketKey::endpoint_write_of_account(caller.account_id, opcode),
-            BucketKey::account(caller.account_id),
+            BucketKey::account_write(caller.account_id),
         ];
         self.limiter
             .charge_opcode(&keys, opcode, caller.tier, caller.now)

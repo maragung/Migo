@@ -186,6 +186,20 @@ impl BucketKey {
         Self::at(Scope::Account, &account_id.to_text())
     }
 
+    /// One account, billed by the service that does the work.
+    ///
+    /// The companion of [`Self::endpoint_write_of_account`], and it exists for the same
+    /// reason: the gateway edge bills every frame on [`Self::account`], and the owning
+    /// domain then meters its own write. Sharing one bucket made a single expensive
+    /// opcode cost twice the price the IDL puts on it — a `KEY_PUBLISH` at twenty took
+    /// forty of a probationary account's fifty, so the first thing a new client does left
+    /// it nothing to send a message with. Two buckets, each sized for the opcode once,
+    /// keep both layers metering at the price the registry actually states.
+    #[must_use]
+    pub fn account_write(account_id: Id) -> Self {
+        Self::at(Scope::Account, &format!("{}/write", account_id.to_text()))
+    }
+
     /// One device.
     #[must_use]
     pub fn device(device_id: Id) -> Self {

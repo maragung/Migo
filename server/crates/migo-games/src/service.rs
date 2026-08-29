@@ -121,7 +121,7 @@ where
     async fn charge(&self, caller: &Caller, cost: u32) -> Result<()> {
         self.limiter
             .charge(
-                &[BucketKey::account(caller.account_id)],
+                &[BucketKey::account_write(caller.account_id)],
                 cost,
                 caller.tier,
                 caller.now,

@@ -208,10 +208,14 @@ impl Harness {
     }
 
     /// The account bucket's balance for a caller, in whole tokens.
+    ///
+    /// The write surface, because that is the one this crate bills: the gateway edge keeps
+    /// its own bucket on `BucketKey::account`, so peeking that one would read a balance
+    /// nothing here ever spends.
     async fn account_balance(&self, caller: &Caller) -> u32 {
         self.limiter
             .peek(
-                &BucketKey::account(caller.account_id),
+                &BucketKey::account_write(caller.account_id),
                 caller.tier,
                 caller.now,
             )
@@ -232,7 +236,7 @@ impl Harness {
         let verdict = self
             .limiter
             .charge(
-                &[BucketKey::account(caller.account_id)],
+                &[BucketKey::account_write(caller.account_id)],
                 balance,
                 caller.tier,
                 caller.now,

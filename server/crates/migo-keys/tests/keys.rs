@@ -910,7 +910,7 @@ async fn a_publication_is_charged_to_the_endpoint_and_the_account_but_never_the_
         charge.keys,
         vec![
             BucketKey::endpoint_write_of_account(id(ALICE), Opcode::KeyPublish),
-            BucketKey::account(id(ALICE)),
+            BucketKey::account_write(id(ALICE)),
         ],
         "the service's write endpoint first because it is the tightest surface, then the \
          account; the edge's endpoint bucket is a separate one, so the two layers never \
@@ -1032,7 +1032,7 @@ async fn a_fetch_is_charged_to_the_endpoint_and_the_account_before_the_read() {
         fetch.keys,
         vec![
             BucketKey::endpoint_write_of_account(id(BOB), Opcode::KeyBundleFetch),
-            BucketKey::account(id(BOB)),
+            BucketKey::account_write(id(BOB)),
         ],
         "the fetcher pays, not the subject"
     );

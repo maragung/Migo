@@ -196,7 +196,7 @@ where
     async fn charge(&self, caller: &Caller, opcode: Opcode) -> Result<()> {
         let keys = [
             BucketKey::endpoint_write_of_account(caller.account_id, opcode),
-            BucketKey::account(caller.account_id),
+            BucketKey::account_write(caller.account_id),
         ];
         // `charge_opcode` and not `charge`: ADR-0006 puts the price on the opcode, so
         // naming the opcode makes it impossible to charge the wrong amount, and a
@@ -212,7 +212,7 @@ where
     /// One bucket, the account's, because there is no endpoint identity to open a
     /// second one under. See the module docs for why these prices are constants.
     async fn charge_flat(&self, caller: &Caller, cost: u32) -> Result<()> {
-        let keys = [BucketKey::account(caller.account_id)];
+        let keys = [BucketKey::account_write(caller.account_id)];
         self.limiter
             .charge(&keys, cost, caller.tier, caller.now)
             .await?
