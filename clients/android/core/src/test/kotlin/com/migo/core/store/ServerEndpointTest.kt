@@ -94,10 +94,17 @@ class ServerEndpointTest {
     fun roundTrip_survivesParsingTheRestOrigin() {
         // The shape the form commits. The resume path bridges it through
         // [ServerEndpoint.fromRestUrl] and must end up with the same fields.
+        //
+        // The gateway shares the REST port here because that is the TLS posture every client
+        // agrees on: a deployment reachable from outside terminates both the origin and the
+        // socket on one ingress, so `defaultFor` derives `gatewayPort == port` for HTTPS and
+        // only steps to `port + 1` for the plain-HTTP dev policy. A fixture that stepped the
+        // port under TLS would assert a round trip no REST origin can carry, since the origin
+        // names one port and nothing else.
         val original = ServerEndpoint(
             host = "migo.example.com",
             port = 8443,
-            gatewayPort = 8444,
+            gatewayPort = 8443,
             transport = Transport.WebSocket,
             gatewayScheme = GatewayScheme.Wss,
             restScheme = RestScheme.Https,
