@@ -5,7 +5,7 @@
 //! there, and none of it touches a socket. This module is the other half — the two tokio
 //! tasks and the wire session that make the boundary reach another node:
 //!
-//! - a **listener**, bound when the operator configures [`Config::node`]`::mesh_bind`,
+//! - a **listener**, bound when the operator configures `node.mesh_bind`,
 //!   accepts connections and drives the server side of the handshake;
 //! - a **runner**, always spawned, drains the outbox (`Mesh::due`) and delivers each
 //!   pending event to its target node as `FED_FORWARD`, marking it delivered on the peer's
@@ -19,7 +19,7 @@
 //! starts at one on every link, increases strictly, and a gap tears the link down. The
 //! receiver answers with `FED_ACK { seq }`, a cumulative watermark — "everything up to and
 //! including this sequence is applied" — which is exactly the bookkeeping
-//! [`Mesh::mark_delivered`] needs, because delivery is at least once and the consuming
+//! [`migo_federation::Mesh::mark_delivered`] needs, because delivery is at least once and the consuming
 //! surfaces are idempotent (section 153).
 //!
 //! The handshake is the one [`migo_crypto`] already implements: both sides send
@@ -28,7 +28,7 @@
 //! transcript of both nonces and ids. The proof rides in the wire's `signature` field as
 //! `signed_at (8 bytes BE) || signature (64 bytes)`, because the transcript commits to the
 //! signing time and the wire struct has no separate clock field. Each side verifies the
-//! other's proof through [`Mesh::authenticate`], which refuses an unknown, paused, or
+//! other's proof through [`migo_federation::Mesh::authenticate`], which refuses an unknown, paused, or
 //! blocked peer *before* looking at the signature.
 //!
 //! # What arrives, and where it goes
@@ -36,7 +36,7 @@
 //! A `FED_FORWARD`'s payload is itself an encoded MWP frame — the original event, opcode
 //! and all, opaque to any node it merely passes through (section 169: a relay cannot read
 //! a private envelope). The listener parses only the outer frame, checks the sequence, and
-//! hands the inner one to [`IngestRouter`], which routes by opcode: room events are
+//! hands the inner one to the ingest router, which routes by opcode: room events are
 //! published into the local hub so subscribed sessions receive them exactly as if a local
 //! session had sent them; the rest are validated, counted, and logged, because their
 //! final-mile crates (presence digests, call relay) do not yet expose an ingest port, and
@@ -45,7 +45,7 @@
 //! # Testing
 //!
 //! The session runs over any `AsyncRead + AsyncWrite`, so a unit test drives two sessions
-//! across a [`tokio::io::duplex`] pair with two real [`MeshService`]s that have each other
+//! across a `tokio::io::duplex` pair with two real mesh services that have each other
 //! in their allow-lists — the full handshake, sequence, watermark, and ingest path, no
 //! sockets. One integration test binds a real loopback listener to port zero and walks a
 //! queued event from one node's outbox into the other's ingest, over TCP.
