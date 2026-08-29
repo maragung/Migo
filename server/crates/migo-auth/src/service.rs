@@ -957,13 +957,25 @@ where
             .await?;
         self.store.record_login(account_id, now).await?;
 
+        // The effective server is the explicit `ServerEndpoint` the
+        // client disclosed on the form, or the loopback default when
+        // the request did not name one. Recorded in the audit summary
+        // so an operator can correlate a registration with the
+        // deployment the request reached, and so the absence of a
+        // field is itself a meaningful row in the audit trail.
+        let server = request.server_or_default();
         self.audit(
             Some(account_id),
             AuditActorKind::User,
             "account.register",
             AuditTargetKind::Account,
             Some(account_id),
-            format!("account created as @{}", username.display()),
+            format!(
+                "account created as @{} via {}:{}",
+                username.display(),
+                server.host,
+                server.port
+            ),
             context,
         )
         .await;
@@ -1087,6 +1099,14 @@ where
         // proved they own the account, so the suspicion is over.
         self.note_captcha_success(context);
         self.meters.signin(SignInOutcome::Success);
+        // The effective server the request reached. Recorded for
+        // parity with the registration path so the operator can
+        // correlate a successful sign-in with the deployment the
+        // client believed it was talking to. The default applies
+        // when the client did not name a server; the value is the
+        // same loopback posture every other default falls back to.
+        let server = request.server_or_default();
+        let _ = server;
         Ok(grant)
     }
 

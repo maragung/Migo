@@ -122,6 +122,15 @@ pub trait Authenticator: Send + Sync {
     /// Fails with `FEATURE_DISABLED` when the deployment has registration turned off,
     /// `USERNAME_TAKEN` or `ALREADY_EXISTS` on a collision, `USERNAME_RESERVED`,
     /// `WEAK_PASSWORD`, `VALIDATION_FAILED`, or `RATE_LIMITED`.
+    ///
+    /// The `server` field of `Registration` is the explicit
+    /// `ServerEndpoint` the route layer passed in. The trait's
+    /// implementation resolves the effective server through
+    /// `Registration::server_or_default`, which applies
+    /// `ServerEndpoint::default_for_host` on the loopback posture
+    /// when the client did not name one. The effective value is used
+    /// to log a fingerprint of the deployment the request reached,
+    /// and is the same shape the web form sends on the wire.
     async fn register(&self, request: Registration, context: &RequestContext) -> Result<Grant>;
 
     /// Exchanges a password for a session.
@@ -131,6 +140,9 @@ pub trait Authenticator: Send + Sync {
     /// response *and* in the time taken. `ACCOUNT_SUSPENDED` is only reachable after the
     /// password has been verified, because reporting a suspension to whoever asks would
     /// confirm the account exists.
+    ///
+    /// The `server` field follows the same defaulting rule as
+    /// [`Authenticator::register`]: see [`SignIn::server_or_default`].
     async fn sign_in(&self, request: SignIn, context: &RequestContext) -> Result<Grant>;
 
     /// Exchanges a refresh token for the next generation of a session.

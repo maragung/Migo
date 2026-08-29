@@ -23,6 +23,7 @@ use migo_core::{Id, Secret, Timestamp};
 use migo_protocol::Platform;
 
 use crate::capability::Capabilities;
+use crate::endpoint::ServerEndpoint;
 
 /// Per-request facts that every operation needs and none of them computes.
 #[derive(Clone, Debug)]
@@ -178,6 +179,25 @@ pub struct Registration {
     /// `CAPTCHA_REQUIRED`; a present proof is consumed on the way in so
     /// the same `challenge_id` cannot be replayed across two attempts.
     pub captcha: Option<CaptchaProof>,
+    /// The server the client believes it is talking to, when it
+    /// disclosed one on the form. The route layer can leave this as
+    /// `None`; the authenticator resolves the effective server
+    /// through [`Registration::server_or_default`], which applies
+    /// [`ServerEndpoint::default_for_host`] for any `host` that
+    /// arrived in the request, or the loopback default when nothing
+    /// arrived at all.
+    pub server: Option<ServerEndpoint>,
+}
+
+impl Registration {
+    /// The server the request should be associated with, defaulting
+    /// to the loopback posture when the client did not name one.
+    #[must_use]
+    pub fn server_or_default(&self) -> ServerEndpoint {
+        self.server
+            .clone()
+            .unwrap_or_else(|| ServerEndpoint::default_for_host("localhost"))
+    }
 }
 
 /// An existing account signing in.
@@ -196,6 +216,21 @@ pub struct SignIn {
     /// account never needs one; a tenth attempt against the same
     /// network after nine wrong passwords always does.
     pub captcha: Option<CaptchaProof>,
+    /// The server the client believes it is talking to, when it
+    /// disclosed one on the form. Same defaulting rule as
+    /// [`Registration::server`].
+    pub server: Option<ServerEndpoint>,
+}
+
+impl SignIn {
+    /// The server the request should be associated with, defaulting
+    /// to the loopback posture when the client did not name one.
+    #[must_use]
+    pub fn server_or_default(&self) -> ServerEndpoint {
+        self.server
+            .clone()
+            .unwrap_or_else(|| ServerEndpoint::default_for_host("localhost"))
+    }
 }
 
 /// A refresh token being exchanged.

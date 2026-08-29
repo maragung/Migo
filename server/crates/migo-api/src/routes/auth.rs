@@ -20,7 +20,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use migo_auth::{DeviceClaim, Grant, Refresh, Registration, SignIn};
+use migo_auth::{DeviceClaim, Grant, Refresh, Registration, ServerEndpoint, SignIn};
 use migo_core::{Id, Secret};
 use migo_protocol::Platform;
 
@@ -123,6 +123,14 @@ struct RegisterRequest {
     /// `Authenticator` decides whether `None` is acceptable and answers
     /// `CAPTCHA_REQUIRED` when it is not.
     captcha: Option<CaptchaProofBody>,
+    /// The server the client believes it is talking to. Optional on
+    /// the wire: a self-hosted client that has not opened the
+    /// "Server" disclosure yet sends a body without a `server`
+    /// field, and the route layer fills the gap with
+    /// [`ServerEndpoint::default_for_host`] before the request
+    /// reaches the authenticator.
+    #[serde(default)]
+    server: Option<ServerEndpointBody>,
 }
 
 /// A sign-in request. One identifier field because a user does not think of a username and an
@@ -133,6 +141,103 @@ struct LoginRequest {
     password: String,
     device: DeviceRequest,
     captcha: Option<CaptchaProofBody>,
+    /// The server the client believes it is talking to. Same
+    /// defaulting rule as [`RegisterRequest::server`].
+    #[serde(default)]
+    server: Option<ServerEndpointBody>,
+}
+
+/// The wire shape of a [`ServerEndpoint`] on the bootstrap request body.
+/// Converted into the auth crate's `ServerEndpoint` at the handler
+/// boundary so the rest of the service never sees a
+/// `serde::Deserialize` type.
+#[derive(Deserialize)]
+struct ServerEndpointBody {
+    host: String,
+    port: u16,
+    #[serde(default)]
+    gateway_port: Option<u16>,
+    #[serde(default)]
+    transport: Option<String>,
+    #[serde(default)]
+    scheme: Option<String>,
+    #[serde(default)]
+    rest_scheme: Option<String>,
+}
+
+impl ServerEndpointBody {
+    /// Turns the wire shape into the auth crate's `ServerEndpoint`,
+    /// falling back to the standard defaults for any field the client
+    /// did not send. A malformed wire value is rejected with a
+    /// `VALIDATION_FAILED` envelope, not a panic, so a hand-rolled
+    /// client cannot trip the auth service with a bad field name.
+    fn into_endpoint(self) -> Result<ServerEndpoint, crate::ApiError> {
+        use migo_auth::{RestScheme, Scheme, Transport, WsScheme};
+
+        if self.host.trim().is_empty() {
+            return Err(crate::ApiError::from(migo_protocol::fault::validation(
+                "server.host",
+                "host is required",
+            )));
+        }
+        if self.port == 0 {
+            return Err(crate::ApiError::from(migo_protocol::fault::validation(
+                "server.port",
+                "port is required",
+            )));
+        }
+        let transport = match self.transport.as_deref() {
+            None | Some("WebSocket" | "websocket") => Transport::WebSocket,
+            Some("Quic" | "quic" | "QUIC") => Transport::Quic,
+            Some(_other) => {
+                return Err(crate::ApiError::from(migo_protocol::fault::validation(
+                    "server.transport",
+                    "unknown transport; expected WebSocket or Quic",
+                )));
+            }
+        };
+        let scheme = match self.scheme.as_deref() {
+            None => match transport {
+                Transport::WebSocket => Scheme::Ws(WsScheme::Wss),
+                Transport::Quic => Scheme::Quic(migo_auth::QuicScheme::QuicTls),
+            },
+            Some("Ws" | "ws" | "WS") => Scheme::Ws(WsScheme::Ws),
+            Some("Wss" | "wss" | "WSS") => Scheme::Ws(WsScheme::Wss),
+            Some("Quic" | "quic") => Scheme::Quic(migo_auth::QuicScheme::Quic),
+            Some("QuicTls" | "quic-tls" | "QUIC-TLS") => {
+                Scheme::Quic(migo_auth::QuicScheme::QuicTls)
+            }
+            Some(_) => {
+                return Err(crate::ApiError::from(migo_protocol::fault::validation(
+                    "server.scheme",
+                    "unknown scheme; expected Ws, Wss, Quic, or QuicTls",
+                )));
+            }
+        };
+        let rest_scheme = match self.rest_scheme.as_deref() {
+            None => match scheme {
+                Scheme::Ws(WsScheme::Wss) => RestScheme::Https,
+                _ => RestScheme::Http,
+            },
+            Some("Http" | "http") => RestScheme::Http,
+            Some("Https" | "https") => RestScheme::Https,
+            Some(_) => {
+                return Err(crate::ApiError::from(migo_protocol::fault::validation(
+                    "server.rest_scheme",
+                    "unknown rest scheme; expected Http or Https",
+                )));
+            }
+        };
+        let gateway_port = self.gateway_port.unwrap_or(self.port);
+        Ok(ServerEndpoint {
+            host: self.host.to_ascii_lowercase(),
+            port: self.port,
+            gateway_port,
+            transport,
+            scheme,
+            rest_scheme,
+        })
+    }
 }
 
 /// Wire shape of a captcha proof on a bootstrap request. Converts into the
@@ -207,6 +312,10 @@ async fn register(
 ) -> Result<(StatusCode, Json<GrantResponse>), crate::ApiError> {
     charge_ip(&state, facts.ip, BOOTSTRAP_COST).await?;
     let now = state.now();
+    let server = body
+        .server
+        .map(ServerEndpointBody::into_endpoint)
+        .transpose()?;
     let registration = Registration {
         username: body.username,
         email: body.email,
@@ -216,6 +325,7 @@ async fn register(
         country: body.country,
         device: body.device.into_claim(),
         captcha: body.captcha.map(migo_auth::CaptchaProof::from),
+        server,
     };
     let context = facts.context(now);
     let grant = state
@@ -233,11 +343,16 @@ async fn login(
 ) -> Result<Json<GrantResponse>, crate::ApiError> {
     charge_ip(&state, facts.ip, BOOTSTRAP_COST).await?;
     let now = state.now();
+    let server = body
+        .server
+        .map(ServerEndpointBody::into_endpoint)
+        .transpose()?;
     let sign_in = SignIn {
         identifier: body.identifier,
         password: Secret::new(body.password),
         device: body.device.into_claim(),
         captcha: body.captcha.map(migo_auth::CaptchaProof::from),
+        server,
     };
     let context = facts.context(now);
     let grant = state.authenticator().sign_in(sign_in, &context).await?;

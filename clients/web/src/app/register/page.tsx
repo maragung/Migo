@@ -9,6 +9,7 @@ import { CaptchaWidget } from '@/components/captcha-widget.js';
 import { ServerForm } from '@/components/server-form.js';
 import { Spinner } from '@/components/spinner.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
+import { defaultServerEndpoint } from '@/lib/config.js';
 import { loadServerEndpoint, saveServerEndpoint } from '@/lib/storage/server-endpoint-store.js';
 
 import type { CaptchaProof, ServerEndpoint } from '@migo/sdk';
@@ -37,7 +38,13 @@ export default function RegisterPage(): ReactNode {
     let cancelled = false;
     void loadServerEndpoint().then((stored) => {
       if (cancelled) return;
-      setEndpoint(stored ?? null);
+      // A fresh visitor (no stored endpoint) still gets a working form
+      // against the build's default host. The Server disclosure stays
+      // collapsed, the captcha widget mounts, and the submit button is
+      // enabled; the user can expand the disclosure to point at a
+      // self-hosted server without ever leaving the page in a disabled
+      // state.
+      setEndpoint(stored ?? defaultServerEndpoint());
       setEndpointReady(true);
     });
     return () => {

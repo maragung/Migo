@@ -634,6 +634,7 @@ async fn registered_account(app: &migod::App, username: &str) -> Id {
                 country: None,
                 device: DeviceClaim::new(Platform::Web, "integration test"),
                 captcha: None,
+                server: None,
             },
             &RequestContext::at(Timestamp::from_millis(1)),
         )
@@ -1186,6 +1187,7 @@ async fn emit_notification_reaches_a_subscribed_session_as_opcode_144() {
                 password: bob_password,
                 device: migo_auth::DeviceClaim::new(Platform::Web, "notif test"),
                 captcha: None,
+                server: None,
             },
             &migo_auth::RequestContext::at(now),
         )

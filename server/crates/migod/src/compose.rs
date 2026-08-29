@@ -72,12 +72,41 @@ const EPHEMERAL_SECRET_LEN: usize = 32;
 /// store is the right answer for a single-process migod; a multi-replica
 /// deployment would replace this with the `PostgresCaptchaStore` that lives
 /// in `migo-store`.
-fn migod_captcha_gate(threshold: u32, secret_root: &[u8]) -> Arc<CaptchaGate> {
+///
+/// A threshold of `0` is refused here: the gate's contract says
+/// `0 == "captcha on the first attempt"`, which is rarely what an operator
+/// wants and is exactly the posture the configuration validator already
+/// rejects. The check is duplicated at the composition root so a
+/// hand-rolled migod cannot sidestep it.
+fn migod_captcha_gate(threshold: u32, secret_root: &[u8]) -> migo_core::Result<Arc<CaptchaGate>> {
+    if threshold == 0 {
+        return Err(migo_protocol::fault::internal(
+            "captcha threshold of 0 would require a proof on the first attempt; \
+             set MIGO_AUTH__CAPTCHA_THRESHOLD to a positive integer or unset it to disable the gate",
+        ));
+    }
     let clock: Arc<dyn Clock + Send + Sync> = Arc::new(SystemClock);
     let service = Arc::new(CaptchaService::new(secret_root, clock.clone()));
     let store: Arc<dyn migo_captcha::CaptchaStore + Send + Sync> =
         Arc::new(CaptchaInMemoryStore::new());
-    Arc::new(CaptchaGate::new(service, store, threshold))
+    Ok(Arc::new(CaptchaGate::new(service, store, threshold)))
+}
+
+/// The threshold that gets fed to [`migod_captcha_gate`] when the
+/// configuration is absent or fails to parse. Three is the documented
+/// default in [`migo_core::config::AuthConfig`]; the value lives here as a
+/// named constant so the production and test wiring agree on a number.
+pub const DEFAULT_CAPTCHA_THRESHOLD: u32 = 3;
+
+/// The captcha gate builder, exposed for tests so a unit test can pin the
+/// threshold-zero rejection without standing up the full composition root.
+#[doc(hidden)]
+#[allow(dead_code)]
+pub(crate) fn captcha_gate_for_test(
+    threshold: u32,
+    secret_root: &[u8],
+) -> migo_core::Result<Arc<CaptchaGate>> {
+    migod_captcha_gate(threshold, secret_root)
 }
 
 /// Attaches the captcha gate to a `SharedAuth` whose internal type is
@@ -212,13 +241,17 @@ impl App {
         let auth: SharedAuth = attach_captcha(
             concrete,
             migod_captcha_gate(
-                config.auth.captcha_threshold.unwrap_or(3),
+                config
+                    .auth
+                    .captcha_threshold
+                    .unwrap_or(DEFAULT_CAPTCHA_THRESHOLD),
                 config
                     .auth
                     .token_key
                     .as_ref()
                     .map_or(&[], |s| s.expose().as_bytes()),
-            ),
+            )
+            .context("cannot build the captcha gate")?,
         )
         .context("cannot attach the captcha gate")?;
 
@@ -426,4 +459,66 @@ fn resolve_node_secret(config: &Config) -> anyhow::Result<Vec<u8>> {
     let mut random = OsRandom;
     random.fill_bytes(&mut secret);
     Ok(secret)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pinned the wiring the composition root owes the bootstrap surface.
+    //!
+    //! The end-to-end captcha+register path is covered by the API integration
+    //! test in `server/crates/migo-api/tests/auth-flow.rs`; this file pins the
+    //! thin invariants that are easier to break by accident in `compose.rs`
+    //! itself — the threshold-zero rejection at the gate builder and the
+    //! default the production wiring falls back to when the configuration is
+    //! silent.
+
+    use super::{captcha_gate_for_test, DEFAULT_CAPTCHA_THRESHOLD};
+    use migo_protocol::codes;
+
+    /// A threshold of `0` is a posture the gate's contract says means
+    /// "captcha on the first attempt". The configuration validator already
+    /// refuses that value at startup, and the gate builder duplicates the
+    /// check so a hand-rolled `migod_captcha_gate(threshold=0, ...)` cannot
+    /// sidestep it. A deployment that wants captcha off should leave
+    /// `MIGO_AUTH__CAPTCHA_THRESHOLD` unset (the route still issues
+    /// challenges, the gate just is not built).
+    #[test]
+    fn migod_captcha_gate_rejects_a_zero_threshold() {
+        match captcha_gate_for_test(0, b"a-test-secret") {
+            Ok(_) => panic!("threshold 0 is the captcha-on-first-attempt posture"),
+            Err(error) => {
+                assert_eq!(error.code(), codes::INTERNAL_ERROR);
+                // The message that the log captures names the field; the
+                // wire-shape (`public_message()`) is deliberately empty for
+                // an INTERNAL_ERROR, because the peer has nothing to do
+                // with the operator's misconfiguration.
+                let internal = error.internal_message();
+                assert!(
+                    internal.contains("captcha threshold of 0"),
+                    "the internal message names the field; got {internal:?}"
+                );
+            }
+        }
+    }
+
+    /// The default the production wiring falls back to when the operator
+    /// has not set `MIGO_AUTH__CAPTCHA_THRESHOLD`. Three is the documented
+    /// default in `migo_core::config::AuthConfig`; pinning the value here
+    /// means a future edit to either side that moves the number by one
+    /// trips this test rather than silently changing every fresh
+    /// deployment's posture.
+    #[test]
+    fn default_captcha_threshold_is_three() {
+        assert_eq!(DEFAULT_CAPTCHA_THRESHOLD, 3);
+    }
+
+    /// A positive threshold still builds a gate. A regression that returned
+    /// `Err` on every input would be caught at startup; this test pins the
+    /// happy path so a future edit cannot quietly drop it.
+    #[test]
+    fn migod_captcha_gate_builds_with_a_positive_threshold() {
+        let gate = captcha_gate_for_test(1, b"a-test-secret")
+            .expect("a positive threshold is the captcha-on posture");
+        assert_eq!(gate.threshold(), 1);
+    }
 }

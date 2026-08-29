@@ -26,6 +26,7 @@
 //!             country: None,
 //!             device: DeviceClaim::new(Platform::Web, "Firefox on Linux"),
 //!             captcha: None,
+//!             server: None,
 //!         },
 //!         &context,
 //!     )
@@ -80,6 +81,7 @@
 pub mod capability;
 pub mod captcha;
 pub mod credential;
+pub mod endpoint;
 pub mod metrics;
 pub mod model;
 pub mod service;
@@ -88,6 +90,9 @@ pub mod token;
 pub mod traits;
 
 pub use crate::capability::Capabilities;
+pub use crate::endpoint::{
+    is_loopback_host, QuicScheme, RestScheme, Scheme, ServerEndpoint, Transport, WsScheme,
+};
 pub use crate::model::{
     DeviceClaim, Grant, Refresh, Registration, RequestContext, SessionSummary, SignIn,
 };
