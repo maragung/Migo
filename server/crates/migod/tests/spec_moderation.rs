@@ -16,7 +16,7 @@ use migo_core::{Id, Result, Timestamp};
 use migo_moderation::Caller as WardenCaller;
 use migo_moderation::{
     open, Filing, ModerationConfig, Operator, Powers, Reason, Resolution, Roster, SharedRoster,
-    SharedWarden, Subject, Warden,
+    SharedWarden, Subject,
 };
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 use migo_store::MemoryStore;

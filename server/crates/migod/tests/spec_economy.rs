@@ -11,7 +11,7 @@ use migo_cache::MemoryCache;
 use migo_core::config::Config;
 use migo_core::metrics::Registry;
 use migo_core::{Id, Secret, Timestamp};
-use migo_economy::{Catalogue, EconomyConfig, Gift, Grant, Reason, SendGift, Treasurer};
+use migo_economy::{Catalogue, EconomyConfig, Gift, Grant, Reason, SendGift};
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 use migo_store::model::{Currency, NewAccount};
 use migo_store::traits::AccountStore;

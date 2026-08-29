@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 use migo_bots::model::{BotsConfig, Caller, NewBotSpec, Scopes};
 use migo_bots::open;
-use migo_bots::traits::Bots;
 use migo_cache::MemoryCache;
 use migo_core::config::Config;
 use migo_core::metrics::Registry;

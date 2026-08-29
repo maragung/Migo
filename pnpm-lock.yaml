@@ -35,6 +35,9 @@ importers:
       '@migo/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
+      '@migo/wire':
+        specifier: workspace:*
+        version: link:../../packages/wire
       next:
         specifier: ^15.1.6
         version: 15.5.23(react-dom@19.2.8(react@19.2.8))(react@19.2.8)

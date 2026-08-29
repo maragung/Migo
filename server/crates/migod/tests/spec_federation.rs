@@ -12,7 +12,7 @@ use std::sync::Arc;
 use migo_core::metrics::Registry;
 use migo_core::Id;
 use migo_crypto::NodeSecret;
-use migo_federation::{open, Mesh, MeshConfig, SequenceVerdict};
+use migo_federation::{open, MeshConfig, SequenceVerdict};
 use migo_store::memory::MemoryStore;
 use migo_store::SharedStore;
 

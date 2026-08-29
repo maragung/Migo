@@ -14,9 +14,8 @@ use migo_core::{Id, Secret, Timestamp};
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 use migo_social::model::{Caller, FriendOutcome, RespondOutcome, SocialConfig};
 use migo_social::open;
-use migo_social::traits::Graph;
 use migo_store::model::{NewAccount, Profile, Visibility};
-use migo_store::traits::{AccountStore, SocialStore};
+use migo_store::traits::AccountStore;
 use migo_store::MemoryStore;
 
 const NOW: i64 = 1_700_000_000_000;
