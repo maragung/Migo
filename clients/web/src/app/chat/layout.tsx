@@ -1,27 +1,63 @@
 'use client';
 
+import { useState } from 'react';
 import type { ReactNode } from 'react';
 
+import { DiscoverPanel } from '@/components/discover-panel.js';
+import { FriendsPanel } from '@/components/friends-panel.js';
+import { NotificationsPanel } from '@/components/notifications-panel.js';
+import { ProfilePanel } from '@/components/profile-panel.js';
 import { RequireReady } from '@/components/require-ready.js';
 import { Sidebar } from '@/components/sidebar.js';
+import { TabRail } from '@/components/tab-rail.js';
+import type { AppTab } from '@/components/tab-rail.js';
 import { ConversationsProvider } from '@/lib/migo/conversations-provider.js';
-import { useOpenConversation } from '@/lib/migo/use-open-conversation.js';
+import { openConversation, useOpenConversation } from '@/lib/migo/use-open-conversation.js';
 
 /**
- * The authenticated two-pane shell: a persistent sidebar and the open thread.
+ * The authenticated shell: a navigation rail and, per section, the chats two-pane view or a panel.
  *
- * On narrow screens the two panes collapse to one; `has-thread` tells the CSS to show the thread pane
- * (and hide the sidebar) whenever a conversation is open, which the URL fragment records.
+ * The chats view is the original shell untouched — sidebar plus thread pane, still collapsing to one
+ * pane on narrow screens via `has-thread` — now rendered as one section among several. Section state
+ * is plain client state rather than routes: the bundle is a static export, the open conversation
+ * already lives in the URL fragment, and a section switch should neither unload the session nor
+ * touch the URL. The one cross-section flow, joining a room in Discover, hands the opened
+ * conversation back through a callback that switches to the chats section.
  */
 export default function ChatLayout({ children }: { children: ReactNode }): ReactNode {
   const hasThread = useOpenConversation() !== null;
+  const [tab, setTab] = useState<AppTab>('chats');
 
   return (
     <RequireReady>
       <ConversationsProvider>
-        <div className={`shell ${hasThread ? 'has-thread' : ''}`}>
-          <Sidebar />
-          <main className="thread-area">{children}</main>
+        <div className="app">
+          <TabRail active={tab} onSelect={setTab} />
+          {tab === 'chats' ? (
+            <div className={`shell ${hasThread ? 'has-thread' : ''}`}>
+              <Sidebar />
+              <main className="thread-area">{children}</main>
+            </div>
+          ) : (
+            <main className="panel-area">
+              {tab === 'friends' ? (
+                <FriendsPanel />
+              ) : tab === 'notifications' ? (
+                <NotificationsPanel />
+              ) : tab === 'profile' ? (
+                <ProfilePanel />
+              ) : (
+                <DiscoverPanel
+                  onOpenConversation={(conversationId) => {
+                    // Switch first so the shell is mounted when the fragment lands; the thread's own
+                    // hook then subscribes and replays history as for any conversation.
+                    setTab('chats');
+                    openConversation(conversationId);
+                  }}
+                />
+              )}
+            </main>
+          )}
         </div>
       </ConversationsProvider>
     </RequireReady>

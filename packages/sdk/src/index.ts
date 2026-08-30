@@ -127,6 +127,8 @@ export { RoomsDomain } from './domains/rooms.js';
 export type { RoomListFilter } from './domains/rooms.js';
 export { ProfileDomain } from './domains/profile.js';
 export { NotificationsDomain } from './domains/notifications.js';
+export { SocialDomain } from './domains/social.js';
+export { EconomyDomain } from './domains/economy.js';
 export { GamesDomain } from './domains/games.js';
 export type { SubmitOptions } from './domains/games.js';
 
@@ -183,6 +185,7 @@ export {
   Platform,
   PresenceState,
   ReceiptKind,
+  RelationshipKind,
   RoomKind,
   RoomRole,
   SyncStatus,
@@ -191,23 +194,35 @@ export {
 } from '@migo/protocol';
 export type {
   Acknowledged,
+  BadgeWire,
   ConversationListResponse,
   ConversationSummary,
+  FriendEvent,
   GameEvent,
+  GiftListing,
+  GiftSendResult,
+  InboxItem,
+  LedgerEntryWire,
   MessageAccepted,
   MessageEvent,
   MessageReceipt,
   NotificationEvent,
   PresenceEvent,
+  ProfileUpdate,
+  ProgressionWire,
+  RelationshipEntry,
   RoomJoinResponse,
   RoomListResponse,
   RoomMemberEvent,
   RoomStateEvent,
   RoomSummary,
+  SearchResponse,
+  SuggestedUser,
   SyncResponse,
   Topic,
   TypingEvent,
   UserProfile,
+  WalletView,
 } from '@migo/protocol';
 export * as protocol from '@migo/protocol';
 

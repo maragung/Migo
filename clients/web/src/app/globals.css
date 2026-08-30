@@ -245,6 +245,171 @@ main {
   overflow: hidden;
 }
 
+/* --- section navigation (rail beside the shell on desktop, bottom bar on mobile) --- */
+
+.app {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  height: 100%;
+  overflow: hidden;
+}
+.tab-rail {
+  grid-column: 1;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 8px;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+}
+.tab-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 10px 2px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+}
+.tab-btn:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+.tab-btn.active {
+  background: var(--panel-2);
+  color: var(--text);
+}
+.tab-icon {
+  font-size: 18px;
+  line-height: 1;
+}
+.app > .shell,
+.app > .panel-area {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* --- section panels (friends, notifications, discover, profile) --- */
+
+.panel-area {
+  overflow-y: auto;
+}
+.panel {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 20px 18px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.panel-title {
+  margin: 0;
+  font-size: 20px;
+}
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.panel-search {
+  display: flex;
+  gap: 8px;
+}
+.panel-search .input {
+  flex: 1;
+  min-width: 0;
+}
+.panel-section {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.panel-heading {
+  margin: 6px 0 2px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-faint);
+}
+.person-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+.person-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.person-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.person-sub {
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.person-note {
+  font-size: 12px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.person-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.notification-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.notification-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+.profile-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.profile-id {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
 /* --- brand mark (sidebar + auth) --- */
 
 .brand {
@@ -946,9 +1111,27 @@ main {
   margin-top: 14px;
 }
 
-/* --- responsive: one pane at a time on narrow screens --- */
+/* --- responsive: one pane at a time on narrow screens, rail becomes a bottom bar --- */
 
 @media (max-width: 768px) {
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+  .tab-rail {
+    grid-column: 1;
+    grid-row: 2;
+    flex-direction: row;
+    justify-content: space-around;
+    padding: 4px 6px;
+    border-right: none;
+    border-top: 1px solid var(--border);
+  }
+  .app > .shell,
+  .app > .panel-area {
+    grid-column: 1;
+    grid-row: 1;
+  }
   .shell {
     grid-template-columns: 1fr;
   }

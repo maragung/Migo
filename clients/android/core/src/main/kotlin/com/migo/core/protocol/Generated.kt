@@ -5644,6 +5644,871 @@ data class ReactionEvent(
     }
 }
 
+/** Creates a room; the caller becomes its Owner. */
+data class RoomCreate(
+    val slug: String,
+    val name: String,
+    /** RoomKind: 1=Public, 2=Managed. */
+    val kind: Long,
+    val topic: String? = null,
+    val maxMembers: Long? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(slug)
+        w.str(name)
+        w.u32(kind)
+        var present = 0
+        if (topic != null) present++
+        if (maxMembers != null) present++
+        w.u32(present)
+        if (topic != null) {
+            val value = topic
+            w.optional(1) { w ->
+                w.str(value)
+            }
+        }
+        if (maxMembers != null) {
+            val value = maxMembers
+            w.optional(2) { w ->
+                w.u32(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): RoomCreate {
+            r.enter()
+            val slug = r.str()
+            val name = r.str()
+            val kind = r.u32()
+            var topic: String? = null
+            var maxMembers: Long? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> topic = sub.str()
+                    2L -> maxMembers = sub.u32()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return RoomCreate(slug, name, kind, topic, maxMembers)
+        }
+    }
+}
+
+/** One member of a room's roster. */
+data class RosterEntry(
+    val accountId: Id,
+    /** RoomRole. */
+    val role: Long,
+    val joinedAt: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(accountId)
+        w.u32(role)
+        w.timestamp(joinedAt)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): RosterEntry {
+            r.enter()
+            val accountId = r.id()
+            val role = r.u32()
+            val joinedAt = r.timestamp()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return RosterEntry(accountId, role, joinedAt)
+        }
+    }
+}
+
+/** Reads a room's roster, highest role first. */
+data class RosterReq(
+    val roomId: Id,
+    val limit: Long? = null,
+    /** Cursor: the last account_id of the previous page. */
+    val after: Id? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(roomId)
+        var present = 0
+        if (limit != null) present++
+        if (after != null) present++
+        w.u32(present)
+        if (limit != null) {
+            val value = limit
+            w.optional(1) { w ->
+                w.u32(value)
+            }
+        }
+        if (after != null) {
+            val value = after
+            w.optional(2) { w ->
+                w.id(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): RosterReq {
+            r.enter()
+            val roomId = r.id()
+            var limit: Long? = null
+            var after: Id? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> limit = sub.u32()
+                    2L -> after = sub.id()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return RosterReq(roomId, limit, after)
+        }
+    }
+}
+
+/** A page of a room's roster. */
+data class RosterResponse(
+    val members: List<RosterEntry>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(members.size)
+        for (item in members) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): RosterResponse {
+            r.enter()
+            val members = run { val n = r.listLen(); val acc = ArrayList<RosterEntry>(n); for (i in 0 until n) acc.add(RosterEntry.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return RosterResponse(members)
+        }
+    }
+}
+
+/** Changes a member's role. */
+data class RoomRoleSet(
+    val roomId: Id,
+    val member: Id,
+    /** RoomRole. */
+    val role: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(roomId)
+        w.id(member)
+        w.u32(role)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): RoomRoleSet {
+            r.enter()
+            val roomId = r.id()
+            val member = r.id()
+            val role = r.u32()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return RoomRoleSet(roomId, member, role)
+        }
+    }
+}
+
+/** Updates a room's settings. */
+data class RoomUpdate(
+    val roomId: Id,
+    val name: String? = null,
+    val topic: String? = null,
+    val slowModeMs: Long? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(roomId)
+        var present = 0
+        if (name != null) present++
+        if (topic != null) present++
+        if (slowModeMs != null) present++
+        w.u32(present)
+        if (name != null) {
+            val value = name
+            w.optional(1) { w ->
+                w.str(value)
+            }
+        }
+        if (topic != null) {
+            val value = topic
+            w.optional(2) { w ->
+                w.str(value)
+            }
+        }
+        if (slowModeMs != null) {
+            val value = slowModeMs
+            w.optional(3) { w ->
+                w.u32(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): RoomUpdate {
+            r.enter()
+            val roomId = r.id()
+            var name: String? = null
+            var topic: String? = null
+            var slowModeMs: Long? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> name = sub.str()
+                    2L -> topic = sub.str()
+                    3L -> slowModeMs = sub.u32()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return RoomUpdate(roomId, name, topic, slowModeMs)
+        }
+    }
+}
+
+/** Archives a room; only its Owner (or staff). */
+data class RoomArchive(
+    val roomId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(roomId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): RoomArchive {
+            r.enter()
+            val roomId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return RoomArchive(roomId)
+        }
+    }
+}
+
+/** Starts a game in a conversation. */
+data class GameStart(
+    val conversationId: Id,
+    /** Which game to start, from the catalogue. */
+    val slug: String,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(conversationId)
+        w.str(slug)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): GameStart {
+            r.enter()
+            val conversationId = r.id()
+            val slug = r.str()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return GameStart(conversationId, slug)
+        }
+    }
+}
+
+/** A game's state as one caller sees it. */
+data class GameViewWire(
+    val gameId: Id,
+    val kind: Long,
+    val conversationId: Id,
+    val status: Long,
+    val players: List<Id>,
+    val stateVersion: Long,
+    val board: String,
+    val turnOf: Id? = null,
+    val yourTurn: Boolean? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(gameId)
+        w.u32(kind)
+        w.id(conversationId)
+        w.u32(status)
+        w.listLen(players.size)
+        for (item in players) { w.id(item) }
+        w.u64(stateVersion)
+        w.str(board)
+        var present = 0
+        if (turnOf != null) present++
+        if (yourTurn != null) present++
+        w.u32(present)
+        if (turnOf != null) {
+            val value = turnOf
+            w.optional(1) { w ->
+                w.id(value)
+            }
+        }
+        if (yourTurn != null) {
+            val value = yourTurn
+            w.optional(2) { w ->
+                w.bool(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): GameViewWire {
+            r.enter()
+            val gameId = r.id()
+            val kind = r.u32()
+            val conversationId = r.id()
+            val status = r.u32()
+            val players = run { val n = r.listLen(); val acc = ArrayList<Id>(n); for (i in 0 until n) acc.add(r.id()); acc }
+            val stateVersion = r.u64()
+            val board = r.str()
+            var turnOf: Id? = null
+            var yourTurn: Boolean? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> turnOf = sub.id()
+                    2L -> yourTurn = sub.bool()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return GameViewWire(gameId, kind, conversationId, status, players, stateVersion, board, turnOf, yourTurn)
+        }
+    }
+}
+
+/** Identifies one game. */
+data class GameId(
+    val gameId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(gameId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): GameId {
+            r.enter()
+            val gameId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return GameId(gameId)
+        }
+    }
+}
+
+/** One game in the catalogue. */
+data class GameCatalogueEntry(
+    val slug: String,
+    val kind: Long,
+    val minPlayers: Long,
+    val maxPlayers: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(slug)
+        w.u32(kind)
+        w.u32(minPlayers)
+        w.u32(maxPlayers)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): GameCatalogueEntry {
+            r.enter()
+            val slug = r.str()
+            val kind = r.u32()
+            val minPlayers = r.u32()
+            val maxPlayers = r.u32()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return GameCatalogueEntry(slug, kind, minPlayers, maxPlayers)
+        }
+    }
+}
+
+/** The games this node can play. */
+data class GameCatalogueResponse(
+    val games: List<GameCatalogueEntry>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(games.size)
+        for (item in games) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): GameCatalogueResponse {
+            r.enter()
+            val games = run { val n = r.listLen(); val acc = ArrayList<GameCatalogueEntry>(n); for (i in 0 until n) acc.add(GameCatalogueEntry.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return GameCatalogueResponse(games)
+        }
+    }
+}
+
+/** Empty; the catalogue is the node's own. */
+class GiftCatalogueReq(
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): GiftCatalogueReq {
+            r.enter()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return GiftCatalogueReq()
+        }
+    }
+}
+
+/** The gift catalogue. */
+data class GiftCatalogueResponse(
+    val gifts: List<GiftListing>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(gifts.size)
+        for (item in gifts) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): GiftCatalogueResponse {
+            r.enter()
+            val gifts = run { val n = r.listLen(); val acc = ArrayList<GiftListing>(n); for (i in 0 until n) acc.add(GiftListing.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return GiftCatalogueResponse(gifts)
+        }
+    }
+}
+
+/** Reads the caller's statement. */
+data class LedgerReq(
+    val limit: Long? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        var present = 0
+        if (limit != null) present++
+        w.u32(present)
+        if (limit != null) {
+            val value = limit
+            w.optional(1) { w ->
+                w.u32(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): LedgerReq {
+            r.enter()
+            var limit: Long? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> limit = sub.u32()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return LedgerReq(limit)
+        }
+    }
+}
+
+/** One line of the caller's statement. */
+data class LedgerEntryWire(
+    val txId: Id,
+    val reason: String,
+    /** Magnitude; the reason's direction is the sign. */
+    val amount: Long,
+    val balanceAfter: Long,
+    val at: Long,
+    val refId: Id? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(txId)
+        w.str(reason)
+        w.u64(amount)
+        w.u64(balanceAfter)
+        w.timestamp(at)
+        var present = 0
+        if (refId != null) present++
+        w.u32(present)
+        if (refId != null) {
+            val value = refId
+            w.optional(1) { w ->
+                w.id(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): LedgerEntryWire {
+            r.enter()
+            val txId = r.id()
+            val reason = r.str()
+            val amount = r.u64()
+            val balanceAfter = r.u64()
+            val at = r.timestamp()
+            var refId: Id? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> refId = sub.id()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return LedgerEntryWire(txId, reason, amount, balanceAfter, at, refId)
+        }
+    }
+}
+
+/** A page of the caller's statement. */
+data class LedgerResponse(
+    val entries: List<LedgerEntryWire>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(entries.size)
+        for (item in entries) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): LedgerResponse {
+            r.enter()
+            val entries = run { val n = r.listLen(); val acc = ArrayList<LedgerEntryWire>(n); for (i in 0 until n) acc.add(LedgerEntryWire.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return LedgerResponse(entries)
+        }
+    }
+}
+
+/** Reads one account's XP, level, and progress bar. */
+data class ProgressionReq(
+    val ofAccount: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(ofAccount)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ProgressionReq {
+            r.enter()
+            val ofAccount = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return ProgressionReq(ofAccount)
+        }
+    }
+}
+
+/** XP standing and the progress bar. */
+data class ProgressionWire(
+    val accountId: Id,
+    val xp: Long,
+    val level: Long,
+    val xpIntoLevel: Long,
+    val xpForNextLevel: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(accountId)
+        w.u64(xp)
+        w.u32(level)
+        w.u64(xpIntoLevel)
+        w.u64(xpForNextLevel)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ProgressionWire {
+            r.enter()
+            val accountId = r.id()
+            val xp = r.u64()
+            val level = r.u32()
+            val xpIntoLevel = r.u64()
+            val xpForNextLevel = r.u64()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return ProgressionWire(accountId, xp, level, xpIntoLevel, xpForNextLevel)
+        }
+    }
+}
+
+/** One badge an account holds. */
+data class BadgeWire(
+    val badgeCode: String,
+    val awardedAt: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(badgeCode)
+        w.timestamp(awardedAt)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): BadgeWire {
+            r.enter()
+            val badgeCode = r.str()
+            val awardedAt = r.timestamp()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return BadgeWire(badgeCode, awardedAt)
+        }
+    }
+}
+
+/** Reads one account's badges. */
+data class BadgesReq(
+    val ofAccount: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(ofAccount)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): BadgesReq {
+            r.enter()
+            val ofAccount = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return BadgesReq(ofAccount)
+        }
+    }
+}
+
+/** The badges an account holds. */
+data class BadgesResponse(
+    val badges: List<BadgeWire>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(badges.size)
+        for (item in badges) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): BadgesResponse {
+            r.enter()
+            val badges = run { val n = r.listLen(); val acc = ArrayList<BadgeWire>(n); for (i in 0 until n) acc.add(BadgeWire.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return BadgesResponse(badges)
+        }
+    }
+}
+
+/** Reads a leaderboard. */
+data class LeaderboardReq(
+    /** Which board; e.g. 'xp' or 'reputation'. */
+    val board: String,
+    val limit: Long? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(board)
+        var present = 0
+        if (limit != null) present++
+        w.u32(present)
+        if (limit != null) {
+            val value = limit
+            w.optional(1) { w ->
+                w.u32(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): LeaderboardReq {
+            r.enter()
+            val board = r.str()
+            var limit: Long? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> limit = sub.u32()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return LeaderboardReq(board, limit)
+        }
+    }
+}
+
+/** One line of a leaderboard. */
+data class RankWire(
+    val position: Long,
+    val accountId: Id,
+    val xp: Long,
+    val level: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u32(position)
+        w.id(accountId)
+        w.u64(xp)
+        w.u32(level)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): RankWire {
+            r.enter()
+            val position = r.u32()
+            val accountId = r.id()
+            val xp = r.u64()
+            val level = r.u32()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return RankWire(position, accountId, xp, level)
+        }
+    }
+}
+
+/** A leaderboard page. */
+data class LeaderboardResponse(
+    val ranks: List<RankWire>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(ranks.size)
+        for (item in ranks) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): LeaderboardResponse {
+            r.enter()
+            val ranks = run { val n = r.listLen(); val acc = ArrayList<RankWire>(n); for (i in 0 until n) acc.add(RankWire.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return LeaderboardResponse(ranks)
+        }
+    }
+}
+
 /** Delivery class, deciding what happens when a session queue is full. */
 enum class DeliveryClass { Critical, Coalescable, Droppable }
 /** Minimum session state an opcode requires. */
@@ -5688,6 +6553,16 @@ object Op {
     const val ROOM_LIST: Long = 82L
     const val ROOM_MEMBER_EVENT: Long = 83L
     const val ROOM_STATE_EVENT: Long = 84L
+    /** Creates a room; the caller becomes its Owner. */
+    const val ROOM_CREATE: Long = 85L
+    /** Reads a room's roster, highest role first. */
+    const val ROOM_ROSTER: Long = 86L
+    /** Changes a member's role. */
+    const val ROOM_ROLE_SET: Long = 87L
+    /** Updates a room's settings. */
+    const val ROOM_UPDATE: Long = 88L
+    /** Archives a room. */
+    const val ROOM_ARCHIVE: Long = 89L
     /** Updates the caller's own profile and privacy settings. */
     const val PROFILE_UPDATE: Long = 111L
     const val PROFILE_FETCH: Long = 112L
@@ -5712,11 +6587,29 @@ object Op {
     const val GIFT_SEND: Long = 160L
     const val BALANCE_FETCH: Long = 161L
     const val ECONOMY_EVENT: Long = 162L
+    /** Lists the gift catalogue. */
+    const val GIFT_CATALOGUE: Long = 163L
+    /** Reads the caller's statement. */
+    const val LEDGER_HISTORY: Long = 164L
+    /** Reads one account's XP and level. */
+    const val PROGRESSION: Long = 165L
+    /** Reads one account's badges. */
+    const val BADGES: Long = 166L
+    /** Reads a leaderboard. */
+    const val LEADERBOARD: Long = 167L
     const val GAME_ACTION: Long = 176L
     const val GAME_EVENT: Long = 177L
     const val BOT_COMMAND: Long = 178L
     const val BOT_EVENT: Long = 179L
     const val BOT_REGISTER: Long = 180L
+    /** Starts a game in a conversation. */
+    const val GAME_START: Long = 183L
+    /** Reads a game's state as the caller sees it. */
+    const val GAME_VIEW: Long = 184L
+    /** Abandons an open game. */
+    const val GAME_ABANDON: Long = 185L
+    /** Lists the games this node can play. */
+    const val GAME_CATALOGUE: Long = 186L
     const val REPORT_CREATE: Long = 192L
     const val MODERATION_ACTION: Long = 193L
     const val MODERATION_EVENT: Long = 194L
@@ -5779,6 +6672,11 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     82L to OpcodeMeta(82L, "ROOM_LIST", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomListRequest", "RoomListResponse", null),
     83L to OpcodeMeta(83L, "ROOM_MEMBER_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "RoomMemberEvent", null, "room_id"),
     84L to OpcodeMeta(84L, "ROOM_STATE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "RoomStateEvent", null, "room_id"),
+    85L to OpcodeMeta(85L, "ROOM_CREATE", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomCreate", "RoomJoinResponse", null),
+    86L to OpcodeMeta(86L, "ROOM_ROSTER", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RosterReq", "RosterResponse", null),
+    87L to OpcodeMeta(87L, "ROOM_ROLE_SET", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomRoleSet", "Acknowledged", null),
+    88L to OpcodeMeta(88L, "ROOM_UPDATE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomUpdate", "Acknowledged", null),
+    89L to OpcodeMeta(89L, "ROOM_ARCHIVE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomArchive", "Acknowledged", null),
     111L to OpcodeMeta(111L, "PROFILE_UPDATE", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ProfileUpdate", "UserProfile", null),
     112L to OpcodeMeta(112L, "PROFILE_FETCH", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ProfileRequest", "ProfileResponse", null),
     113L to OpcodeMeta(113L, "FRIEND_REQUEST", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "FriendTarget", "Acknowledged", null),
@@ -5800,11 +6698,20 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     160L to OpcodeMeta(160L, "GIFT_SEND", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GiftSend", "GiftSendResult", null),
     161L to OpcodeMeta(161L, "BALANCE_FETCH", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "WalletReq", "WalletView", null),
     162L to OpcodeMeta(162L, "ECONOMY_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "EconomyEvent", null, null),
+    163L to OpcodeMeta(163L, "GIFT_CATALOGUE", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GiftCatalogueReq", "GiftCatalogueResponse", null),
+    164L to OpcodeMeta(164L, "LEDGER_HISTORY", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "LedgerReq", "LedgerResponse", null),
+    165L to OpcodeMeta(165L, "PROGRESSION", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ProgressionReq", "ProgressionWire", null),
+    166L to OpcodeMeta(166L, "BADGES", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "BadgesReq", "BadgesResponse", null),
+    167L to OpcodeMeta(167L, "LEADERBOARD", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "LeaderboardReq", "LeaderboardResponse", null),
     176L to OpcodeMeta(176L, "GAME_ACTION", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GameAction", "Acknowledged", null),
     177L to OpcodeMeta(177L, "GAME_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "GameEvent", null, null),
     178L to OpcodeMeta(178L, "BOT_COMMAND", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "BotCommand", "Acknowledged", null),
     179L to OpcodeMeta(179L, "BOT_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "BotEvent", null, null),
     180L to OpcodeMeta(180L, "BOT_REGISTER", 20, DeliveryClass.Critical, AuthLevel.Bot, Direction.ClientToServer, false, "BotRegister", "BotView", null),
+    183L to OpcodeMeta(183L, "GAME_START", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GameStart", "GameViewWire", null),
+    184L to OpcodeMeta(184L, "GAME_VIEW", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GameId", "GameViewWire", null),
+    185L to OpcodeMeta(185L, "GAME_ABANDON", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GameId", "Acknowledged", null),
+    186L to OpcodeMeta(186L, "GAME_CATALOGUE", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GiftCatalogueReq", "GameCatalogueResponse", null),
     192L to OpcodeMeta(192L, "REPORT_CREATE", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ReportFile", "Acknowledged", null),
     193L to OpcodeMeta(193L, "MODERATION_ACTION", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ModAction", "Acknowledged", null),
     194L to OpcodeMeta(194L, "MODERATION_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "ModerationEvent", null, null),

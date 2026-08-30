@@ -4484,6 +4484,767 @@ export function decodeReactionEvent(r: Reader): ReactionEvent {
   return out;
 }
 
+/** Creates a room; the caller becomes its Owner. */
+export interface RoomCreate {
+  slug: string;
+  name: string;
+  /** RoomKind: 1=Public, 2=Managed. */
+  kind: number;
+  topic?: string;
+  maxMembers?: number;
+}
+
+export function encodeRoomCreate(w: Writer, v: RoomCreate): void {
+  w.enter();
+  w.str(v.slug);
+  w.str(v.name);
+  w.u32(v.kind);
+  let present = 0;
+  if (v.topic !== undefined) present++;
+  if (v.maxMembers !== undefined) present++;
+  w.u32(present);
+  if (v.topic !== undefined) { const value = v.topic; w.optional(1, (w) => { w.str(value); }); }
+  if (v.maxMembers !== undefined) { const value = v.maxMembers; w.optional(2, (w) => { w.u32(value); }); }
+  w.leave();
+}
+
+export function decodeRoomCreate(r: Reader): RoomCreate {
+  r.enter();
+  const slug = r.str();
+  const name = r.str();
+  const kind = r.u32();
+  const out: RoomCreate = { slug, name, kind } as RoomCreate;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.topic = sub.str(); break;
+      case 2: out.maxMembers = sub.u32(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** One member of a room's roster. */
+export interface RosterEntry {
+  accountId: Id;
+  /** RoomRole. */
+  role: number;
+  joinedAt: number;
+}
+
+export function encodeRosterEntry(w: Writer, v: RosterEntry): void {
+  w.enter();
+  w.id(v.accountId);
+  w.u32(v.role);
+  w.timestamp(v.joinedAt);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeRosterEntry(r: Reader): RosterEntry {
+  r.enter();
+  const accountId = r.id();
+  const role = r.u32();
+  const joinedAt = r.timestamp();
+  const out: RosterEntry = { accountId, role, joinedAt } as RosterEntry;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Reads a room's roster, highest role first. */
+export interface RosterReq {
+  roomId: Id;
+  limit?: number;
+  /** Cursor: the last account_id of the previous page. */
+  after?: Id;
+}
+
+export function encodeRosterReq(w: Writer, v: RosterReq): void {
+  w.enter();
+  w.id(v.roomId);
+  let present = 0;
+  if (v.limit !== undefined) present++;
+  if (v.after !== undefined) present++;
+  w.u32(present);
+  if (v.limit !== undefined) { const value = v.limit; w.optional(1, (w) => { w.u32(value); }); }
+  if (v.after !== undefined) { const value = v.after; w.optional(2, (w) => { w.id(value); }); }
+  w.leave();
+}
+
+export function decodeRosterReq(r: Reader): RosterReq {
+  r.enter();
+  const roomId = r.id();
+  const out: RosterReq = { roomId } as RosterReq;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.limit = sub.u32(); break;
+      case 2: out.after = sub.id(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** A page of a room's roster. */
+export interface RosterResponse {
+  members: RosterEntry[];
+}
+
+export function encodeRosterResponse(w: Writer, v: RosterResponse): void {
+  w.enter();
+  { w.listLen(v.members.length); for (const item of v.members) { encodeRosterEntry(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeRosterResponse(r: Reader): RosterResponse {
+  r.enter();
+  const members = ((): RosterEntry[] => { const n = r.listLen(); const v: RosterEntry[] = []; for (let i = 0; i < n; i++) v.push(decodeRosterEntry(r)); return v; })();
+  const out: RosterResponse = { members } as RosterResponse;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Changes a member's role. */
+export interface RoomRoleSet {
+  roomId: Id;
+  member: Id;
+  /** RoomRole. */
+  role: number;
+}
+
+export function encodeRoomRoleSet(w: Writer, v: RoomRoleSet): void {
+  w.enter();
+  w.id(v.roomId);
+  w.id(v.member);
+  w.u32(v.role);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeRoomRoleSet(r: Reader): RoomRoleSet {
+  r.enter();
+  const roomId = r.id();
+  const member = r.id();
+  const role = r.u32();
+  const out: RoomRoleSet = { roomId, member, role } as RoomRoleSet;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Updates a room's settings. */
+export interface RoomUpdate {
+  roomId: Id;
+  name?: string;
+  topic?: string;
+  slowModeMs?: number;
+}
+
+export function encodeRoomUpdate(w: Writer, v: RoomUpdate): void {
+  w.enter();
+  w.id(v.roomId);
+  let present = 0;
+  if (v.name !== undefined) present++;
+  if (v.topic !== undefined) present++;
+  if (v.slowModeMs !== undefined) present++;
+  w.u32(present);
+  if (v.name !== undefined) { const value = v.name; w.optional(1, (w) => { w.str(value); }); }
+  if (v.topic !== undefined) { const value = v.topic; w.optional(2, (w) => { w.str(value); }); }
+  if (v.slowModeMs !== undefined) { const value = v.slowModeMs; w.optional(3, (w) => { w.u32(value); }); }
+  w.leave();
+}
+
+export function decodeRoomUpdate(r: Reader): RoomUpdate {
+  r.enter();
+  const roomId = r.id();
+  const out: RoomUpdate = { roomId } as RoomUpdate;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.name = sub.str(); break;
+      case 2: out.topic = sub.str(); break;
+      case 3: out.slowModeMs = sub.u32(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** Archives a room; only its Owner (or staff). */
+export interface RoomArchive {
+  roomId: Id;
+}
+
+export function encodeRoomArchive(w: Writer, v: RoomArchive): void {
+  w.enter();
+  w.id(v.roomId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeRoomArchive(r: Reader): RoomArchive {
+  r.enter();
+  const roomId = r.id();
+  const out: RoomArchive = { roomId } as RoomArchive;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Starts a game in a conversation. */
+export interface GameStart {
+  conversationId: Id;
+  /** Which game to start, from the catalogue. */
+  slug: string;
+}
+
+export function encodeGameStart(w: Writer, v: GameStart): void {
+  w.enter();
+  w.id(v.conversationId);
+  w.str(v.slug);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeGameStart(r: Reader): GameStart {
+  r.enter();
+  const conversationId = r.id();
+  const slug = r.str();
+  const out: GameStart = { conversationId, slug } as GameStart;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** A game's state as one caller sees it. */
+export interface GameViewWire {
+  gameId: Id;
+  kind: number;
+  conversationId: Id;
+  status: number;
+  players: Id[];
+  stateVersion: number;
+  board: string;
+  turnOf?: Id;
+  yourTurn?: boolean;
+}
+
+export function encodeGameViewWire(w: Writer, v: GameViewWire): void {
+  w.enter();
+  w.id(v.gameId);
+  w.u32(v.kind);
+  w.id(v.conversationId);
+  w.u32(v.status);
+  { w.listLen(v.players.length); for (const item of v.players) { w.id(item); } }
+  w.u64(v.stateVersion);
+  w.str(v.board);
+  let present = 0;
+  if (v.turnOf !== undefined) present++;
+  if (v.yourTurn !== undefined) present++;
+  w.u32(present);
+  if (v.turnOf !== undefined) { const value = v.turnOf; w.optional(1, (w) => { w.id(value); }); }
+  if (v.yourTurn !== undefined) { const value = v.yourTurn; w.optional(2, (w) => { w.bool(value); }); }
+  w.leave();
+}
+
+export function decodeGameViewWire(r: Reader): GameViewWire {
+  r.enter();
+  const gameId = r.id();
+  const kind = r.u32();
+  const conversationId = r.id();
+  const status = r.u32();
+  const players = ((): Id[] => { const n = r.listLen(); const v: Id[] = []; for (let i = 0; i < n; i++) v.push(r.id()); return v; })();
+  const stateVersion = r.u64();
+  const board = r.str();
+  const out: GameViewWire = { gameId, kind, conversationId, status, players, stateVersion, board } as GameViewWire;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.turnOf = sub.id(); break;
+      case 2: out.yourTurn = sub.bool(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** Identifies one game. */
+export interface GameId {
+  gameId: Id;
+}
+
+export function encodeGameId(w: Writer, v: GameId): void {
+  w.enter();
+  w.id(v.gameId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeGameId(r: Reader): GameId {
+  r.enter();
+  const gameId = r.id();
+  const out: GameId = { gameId } as GameId;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** One game in the catalogue. */
+export interface GameCatalogueEntry {
+  slug: string;
+  kind: number;
+  minPlayers: number;
+  maxPlayers: number;
+}
+
+export function encodeGameCatalogueEntry(w: Writer, v: GameCatalogueEntry): void {
+  w.enter();
+  w.str(v.slug);
+  w.u32(v.kind);
+  w.u32(v.minPlayers);
+  w.u32(v.maxPlayers);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeGameCatalogueEntry(r: Reader): GameCatalogueEntry {
+  r.enter();
+  const slug = r.str();
+  const kind = r.u32();
+  const minPlayers = r.u32();
+  const maxPlayers = r.u32();
+  const out: GameCatalogueEntry = { slug, kind, minPlayers, maxPlayers } as GameCatalogueEntry;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** The games this node can play. */
+export interface GameCatalogueResponse {
+  games: GameCatalogueEntry[];
+}
+
+export function encodeGameCatalogueResponse(w: Writer, v: GameCatalogueResponse): void {
+  w.enter();
+  { w.listLen(v.games.length); for (const item of v.games) { encodeGameCatalogueEntry(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeGameCatalogueResponse(r: Reader): GameCatalogueResponse {
+  r.enter();
+  const games = ((): GameCatalogueEntry[] => { const n = r.listLen(); const v: GameCatalogueEntry[] = []; for (let i = 0; i < n; i++) v.push(decodeGameCatalogueEntry(r)); return v; })();
+  const out: GameCatalogueResponse = { games } as GameCatalogueResponse;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Empty; the catalogue is the node's own. */
+export interface GiftCatalogueReq {
+}
+
+export function encodeGiftCatalogueReq(w: Writer, _v: GiftCatalogueReq): void {
+  w.enter();
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeGiftCatalogueReq(r: Reader): GiftCatalogueReq {
+  r.enter();
+  const out: GiftCatalogueReq = {  } as GiftCatalogueReq;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** The gift catalogue. */
+export interface GiftCatalogueResponse {
+  gifts: GiftListing[];
+}
+
+export function encodeGiftCatalogueResponse(w: Writer, v: GiftCatalogueResponse): void {
+  w.enter();
+  { w.listLen(v.gifts.length); for (const item of v.gifts) { encodeGiftListing(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeGiftCatalogueResponse(r: Reader): GiftCatalogueResponse {
+  r.enter();
+  const gifts = ((): GiftListing[] => { const n = r.listLen(); const v: GiftListing[] = []; for (let i = 0; i < n; i++) v.push(decodeGiftListing(r)); return v; })();
+  const out: GiftCatalogueResponse = { gifts } as GiftCatalogueResponse;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Reads the caller's statement. */
+export interface LedgerReq {
+  limit?: number;
+}
+
+export function encodeLedgerReq(w: Writer, v: LedgerReq): void {
+  w.enter();
+  let present = 0;
+  if (v.limit !== undefined) present++;
+  w.u32(present);
+  if (v.limit !== undefined) { const value = v.limit; w.optional(1, (w) => { w.u32(value); }); }
+  w.leave();
+}
+
+export function decodeLedgerReq(r: Reader): LedgerReq {
+  r.enter();
+  const out: LedgerReq = {  } as LedgerReq;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.limit = sub.u32(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** One line of the caller's statement. */
+export interface LedgerEntryWire {
+  txId: Id;
+  reason: string;
+  /** Magnitude; the reason's direction is the sign. */
+  amount: number;
+  balanceAfter: number;
+  at: number;
+  refId?: Id;
+}
+
+export function encodeLedgerEntryWire(w: Writer, v: LedgerEntryWire): void {
+  w.enter();
+  w.id(v.txId);
+  w.str(v.reason);
+  w.u64(v.amount);
+  w.u64(v.balanceAfter);
+  w.timestamp(v.at);
+  let present = 0;
+  if (v.refId !== undefined) present++;
+  w.u32(present);
+  if (v.refId !== undefined) { const value = v.refId; w.optional(1, (w) => { w.id(value); }); }
+  w.leave();
+}
+
+export function decodeLedgerEntryWire(r: Reader): LedgerEntryWire {
+  r.enter();
+  const txId = r.id();
+  const reason = r.str();
+  const amount = r.u64();
+  const balanceAfter = r.u64();
+  const at = r.timestamp();
+  const out: LedgerEntryWire = { txId, reason, amount, balanceAfter, at } as LedgerEntryWire;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.refId = sub.id(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** A page of the caller's statement. */
+export interface LedgerResponse {
+  entries: LedgerEntryWire[];
+}
+
+export function encodeLedgerResponse(w: Writer, v: LedgerResponse): void {
+  w.enter();
+  { w.listLen(v.entries.length); for (const item of v.entries) { encodeLedgerEntryWire(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeLedgerResponse(r: Reader): LedgerResponse {
+  r.enter();
+  const entries = ((): LedgerEntryWire[] => { const n = r.listLen(); const v: LedgerEntryWire[] = []; for (let i = 0; i < n; i++) v.push(decodeLedgerEntryWire(r)); return v; })();
+  const out: LedgerResponse = { entries } as LedgerResponse;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Reads one account's XP, level, and progress bar. */
+export interface ProgressionReq {
+  ofAccount: Id;
+}
+
+export function encodeProgressionReq(w: Writer, v: ProgressionReq): void {
+  w.enter();
+  w.id(v.ofAccount);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeProgressionReq(r: Reader): ProgressionReq {
+  r.enter();
+  const ofAccount = r.id();
+  const out: ProgressionReq = { ofAccount } as ProgressionReq;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** XP standing and the progress bar. */
+export interface ProgressionWire {
+  accountId: Id;
+  xp: number;
+  level: number;
+  xpIntoLevel: number;
+  xpForNextLevel: number;
+}
+
+export function encodeProgressionWire(w: Writer, v: ProgressionWire): void {
+  w.enter();
+  w.id(v.accountId);
+  w.u64(v.xp);
+  w.u32(v.level);
+  w.u64(v.xpIntoLevel);
+  w.u64(v.xpForNextLevel);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeProgressionWire(r: Reader): ProgressionWire {
+  r.enter();
+  const accountId = r.id();
+  const xp = r.u64();
+  const level = r.u32();
+  const xpIntoLevel = r.u64();
+  const xpForNextLevel = r.u64();
+  const out: ProgressionWire = { accountId, xp, level, xpIntoLevel, xpForNextLevel } as ProgressionWire;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** One badge an account holds. */
+export interface BadgeWire {
+  badgeCode: string;
+  awardedAt: number;
+}
+
+export function encodeBadgeWire(w: Writer, v: BadgeWire): void {
+  w.enter();
+  w.str(v.badgeCode);
+  w.timestamp(v.awardedAt);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeBadgeWire(r: Reader): BadgeWire {
+  r.enter();
+  const badgeCode = r.str();
+  const awardedAt = r.timestamp();
+  const out: BadgeWire = { badgeCode, awardedAt } as BadgeWire;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Reads one account's badges. */
+export interface BadgesReq {
+  ofAccount: Id;
+}
+
+export function encodeBadgesReq(w: Writer, v: BadgesReq): void {
+  w.enter();
+  w.id(v.ofAccount);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeBadgesReq(r: Reader): BadgesReq {
+  r.enter();
+  const ofAccount = r.id();
+  const out: BadgesReq = { ofAccount } as BadgesReq;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** The badges an account holds. */
+export interface BadgesResponse {
+  badges: BadgeWire[];
+}
+
+export function encodeBadgesResponse(w: Writer, v: BadgesResponse): void {
+  w.enter();
+  { w.listLen(v.badges.length); for (const item of v.badges) { encodeBadgeWire(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeBadgesResponse(r: Reader): BadgesResponse {
+  r.enter();
+  const badges = ((): BadgeWire[] => { const n = r.listLen(); const v: BadgeWire[] = []; for (let i = 0; i < n; i++) v.push(decodeBadgeWire(r)); return v; })();
+  const out: BadgesResponse = { badges } as BadgesResponse;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Reads a leaderboard. */
+export interface LeaderboardReq {
+  /** Which board; e.g. 'xp' or 'reputation'. */
+  board: string;
+  limit?: number;
+}
+
+export function encodeLeaderboardReq(w: Writer, v: LeaderboardReq): void {
+  w.enter();
+  w.str(v.board);
+  let present = 0;
+  if (v.limit !== undefined) present++;
+  w.u32(present);
+  if (v.limit !== undefined) { const value = v.limit; w.optional(1, (w) => { w.u32(value); }); }
+  w.leave();
+}
+
+export function decodeLeaderboardReq(r: Reader): LeaderboardReq {
+  r.enter();
+  const board = r.str();
+  const out: LeaderboardReq = { board } as LeaderboardReq;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.limit = sub.u32(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** One line of a leaderboard. */
+export interface RankWire {
+  position: number;
+  accountId: Id;
+  xp: number;
+  level: number;
+}
+
+export function encodeRankWire(w: Writer, v: RankWire): void {
+  w.enter();
+  w.u32(v.position);
+  w.id(v.accountId);
+  w.u64(v.xp);
+  w.u32(v.level);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeRankWire(r: Reader): RankWire {
+  r.enter();
+  const position = r.u32();
+  const accountId = r.id();
+  const xp = r.u64();
+  const level = r.u32();
+  const out: RankWire = { position, accountId, xp, level } as RankWire;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** A leaderboard page. */
+export interface LeaderboardResponse {
+  ranks: RankWire[];
+}
+
+export function encodeLeaderboardResponse(w: Writer, v: LeaderboardResponse): void {
+  w.enter();
+  { w.listLen(v.ranks.length); for (const item of v.ranks) { encodeRankWire(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeLeaderboardResponse(r: Reader): LeaderboardResponse {
+  r.enter();
+  const ranks = ((): RankWire[] => { const n = r.listLen(); const v: RankWire[] = []; for (let i = 0; i < n; i++) v.push(decodeRankWire(r)); return v; })();
+  const out: LeaderboardResponse = { ranks } as LeaderboardResponse;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
 export type DeliveryClass = 'Critical' | 'Coalescable' | 'Droppable';
 export type AuthLevel = 'None' | 'User' | 'Bot' | 'Server';
 export type Direction = 'client_to_server' | 'server_to_client' | 'both';
@@ -4524,6 +5285,16 @@ export const OP = {
   ROOM_LIST: 82,
   ROOM_MEMBER_EVENT: 83,
   ROOM_STATE_EVENT: 84,
+  /** Creates a room; the caller becomes its Owner. */
+  ROOM_CREATE: 85,
+  /** Reads a room's roster, highest role first. */
+  ROOM_ROSTER: 86,
+  /** Changes a member's role. */
+  ROOM_ROLE_SET: 87,
+  /** Updates a room's settings. */
+  ROOM_UPDATE: 88,
+  /** Archives a room. */
+  ROOM_ARCHIVE: 89,
   /** Updates the caller's own profile and privacy settings. */
   PROFILE_UPDATE: 111,
   PROFILE_FETCH: 112,
@@ -4548,11 +5319,29 @@ export const OP = {
   GIFT_SEND: 160,
   BALANCE_FETCH: 161,
   ECONOMY_EVENT: 162,
+  /** Lists the gift catalogue. */
+  GIFT_CATALOGUE: 163,
+  /** Reads the caller's statement. */
+  LEDGER_HISTORY: 164,
+  /** Reads one account's XP and level. */
+  PROGRESSION: 165,
+  /** Reads one account's badges. */
+  BADGES: 166,
+  /** Reads a leaderboard. */
+  LEADERBOARD: 167,
   GAME_ACTION: 176,
   GAME_EVENT: 177,
   BOT_COMMAND: 178,
   BOT_EVENT: 179,
   BOT_REGISTER: 180,
+  /** Starts a game in a conversation. */
+  GAME_START: 183,
+  /** Reads a game's state as the caller sees it. */
+  GAME_VIEW: 184,
+  /** Abandons an open game. */
+  GAME_ABANDON: 185,
+  /** Lists the games this node can play. */
+  GAME_CATALOGUE: 186,
   REPORT_CREATE: 192,
   MODERATION_ACTION: 193,
   MODERATION_EVENT: 194,
@@ -4615,6 +5404,11 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   82: { code: 82, name: 'ROOM_LIST', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomListRequest', response: 'RoomListResponse' },
   83: { code: 83, name: 'ROOM_MEMBER_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'RoomMemberEvent', coalesceKey: 'room_id' },
   84: { code: 84, name: 'ROOM_STATE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'RoomStateEvent', coalesceKey: 'room_id' },
+  85: { code: 85, name: 'ROOM_CREATE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomCreate', response: 'RoomJoinResponse' },
+  86: { code: 86, name: 'ROOM_ROSTER', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RosterReq', response: 'RosterResponse' },
+  87: { code: 87, name: 'ROOM_ROLE_SET', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomRoleSet', response: 'Acknowledged' },
+  88: { code: 88, name: 'ROOM_UPDATE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomUpdate', response: 'Acknowledged' },
+  89: { code: 89, name: 'ROOM_ARCHIVE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomArchive', response: 'Acknowledged' },
   111: { code: 111, name: 'PROFILE_UPDATE', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ProfileUpdate', response: 'UserProfile' },
   112: { code: 112, name: 'PROFILE_FETCH', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ProfileRequest', response: 'ProfileResponse' },
   113: { code: 113, name: 'FRIEND_REQUEST', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'FriendTarget', response: 'Acknowledged' },
@@ -4636,11 +5430,20 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   160: { code: 160, name: 'GIFT_SEND', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GiftSend', response: 'GiftSendResult' },
   161: { code: 161, name: 'BALANCE_FETCH', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'WalletReq', response: 'WalletView' },
   162: { code: 162, name: 'ECONOMY_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'EconomyEvent' },
+  163: { code: 163, name: 'GIFT_CATALOGUE', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GiftCatalogueReq', response: 'GiftCatalogueResponse' },
+  164: { code: 164, name: 'LEDGER_HISTORY', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'LedgerReq', response: 'LedgerResponse' },
+  165: { code: 165, name: 'PROGRESSION', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ProgressionReq', response: 'ProgressionWire' },
+  166: { code: 166, name: 'BADGES', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'BadgesReq', response: 'BadgesResponse' },
+  167: { code: 167, name: 'LEADERBOARD', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'LeaderboardReq', response: 'LeaderboardResponse' },
   176: { code: 176, name: 'GAME_ACTION', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GameAction', response: 'Acknowledged' },
   177: { code: 177, name: 'GAME_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'GameEvent' },
   178: { code: 178, name: 'BOT_COMMAND', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'BotCommand', response: 'Acknowledged' },
   179: { code: 179, name: 'BOT_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'BotEvent' },
   180: { code: 180, name: 'BOT_REGISTER', cost: 20, cls: 'Critical', auth: 'Bot', direction: 'client_to_server', ackRequired: false, payload: 'BotRegister', response: 'BotView' },
+  183: { code: 183, name: 'GAME_START', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GameStart', response: 'GameViewWire' },
+  184: { code: 184, name: 'GAME_VIEW', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GameId', response: 'GameViewWire' },
+  185: { code: 185, name: 'GAME_ABANDON', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GameId', response: 'Acknowledged' },
+  186: { code: 186, name: 'GAME_CATALOGUE', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GiftCatalogueReq', response: 'GameCatalogueResponse' },
   192: { code: 192, name: 'REPORT_CREATE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ReportFile', response: 'Acknowledged' },
   193: { code: 193, name: 'MODERATION_ACTION', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ModAction', response: 'Acknowledged' },
   194: { code: 194, name: 'MODERATION_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ModerationEvent' },

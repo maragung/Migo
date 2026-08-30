@@ -555,3 +555,33 @@ Messaging crate mendapat method `edit` + meter `migo_messaging_edits_total`.
 
 Opcode yang masih SPEC (rooms admin, games start/view, economy baca, calls) menyusul di
 batch berikutnya — schema dan service-nya sudah siap menampung.
+
+## 17. Fase 2 batch 2 + Fase 3 batch 1: 14 opcode server + navigasi web (v0.3.2)
+
+Batch 2 server: empat belas opcode baru menyentuh kabel, semuanya dengan handler di tiga
+modul dispatch baru (rooms_admin, games_admin, economy_read):
+
+- **Rooms admin (85-89)**: ROOM_CREATE (caller jadi Owner; conversation_id dari authorize
+  karena create hanya mengembalikan RoomSummary), ROOM_ROSTER (halaman, role tertinggi
+  dulu), ROOM_ROLE_SET, ROOM_UPDATE (topic kosong = hapus, sesuai bacaan service), dan
+  ROOM_ARCHIVE. Fanout room lewat publish_rooms yang kini pub(crate).
+- **Games (183-186)**: GAME_START (slug → GameKind via tiga nama tertutup; tanpa lawan di
+  wire, service yang menolak jumlah pemain yang salah), GAME_VIEW (GameView → GameViewWire
+  dengan render papan per-kind), GAME_ABANDON, GAME_CATALOGUE.
+- **Economy read (163-167)**: GIFT_CATALOGUE (listings() → nama slug), LEDGER_HISTORY
+  (statement coins; magnitude tanpa tanda, reason = arah), PROGRESSION, BADGES,
+  LEADERBOARD ("xp" → Global AllTime; "reputation" ditolak karena board-nya belum ada).
+
+Batch 1 web: kerangka navigasi dengan lima tab + domain SDK baru:
+
+- **Tab rail**: rail vertikal di desktop, bottom bar di mobile, aria-current untuk screen
+  reader. Chat view tidak tersentuh — hanya jadi salah satu tab.
+- **SDK**: SocialDomain (friend request/respond/block/list/suggest/search/onFriendEvent),
+  EconomyDomain (balance/gift/catalogue/ledger/progression/badges), updateProfile di
+  ProfileDomain, listNotifications + acknowledgeNotifications di NotificationsDomain.
+  13 test baru SDK.
+- **Panels**: FriendsPanel (permintaan + saran + cari), NotificationsPanel (inbox + mark
+  all read), ProfilePanel (edit nama/bio/privasi), DiscoverPanel (browse room + join →
+  hands-off ke chat). 6 test web baru.
+
+Verifikasi: 80 suite server, 102 test SDK, 85 test web, 14 gate CI, e2e dua-akun lulus.

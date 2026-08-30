@@ -93,6 +93,8 @@ import { PresenceDomain } from './domains/presence.js';
 import { RoomsDomain } from './domains/rooms.js';
 import { ProfileDomain } from './domains/profile.js';
 import { NotificationsDomain } from './domains/notifications.js';
+import { SocialDomain } from './domains/social.js';
+import { EconomyDomain } from './domains/economy.js';
 import { GamesDomain } from './domains/games.js';
 import type { DeviceAddress, DeviceDirectory } from './domains/messaging.js';
 import type { ConversationKind } from '@migo/protocol';
@@ -173,6 +175,8 @@ interface Connected {
   rooms: RoomsDomain;
   profile: ProfileDomain;
   notifications: NotificationsDomain;
+  social: SocialDomain;
+  economy: EconomyDomain;
   games: GamesDomain;
 }
 
@@ -294,6 +298,16 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     return this.#requireConnected().notifications;
   }
 
+  /** Manage friendships and blocks, and find people. */
+  get social(): SocialDomain {
+    return this.#requireConnected().social;
+  }
+
+  /** Read the wallet, send gifts, and follow XP, badges, and the statement. */
+  get economy(): EconomyDomain {
+    return this.#requireConnected().economy;
+  }
+
   /** Submit game actions and observe game events. */
   get games(): GamesDomain {
     return this.#requireConnected().games;
@@ -371,6 +385,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     ctx.presence.stop();
     ctx.rooms.stop();
     ctx.notifications.stop();
+    ctx.social.stop();
     ctx.games.stop();
     ctx.transport.close();
     this.#ctx = null;
@@ -763,6 +778,8 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
       rooms: new RoomsDomain(rpc, this.#options.onEventError),
       profile: new ProfileDomain(rpc),
       notifications: new NotificationsDomain(rpc, this.#options.onEventError),
+      social: new SocialDomain(rpc, this.#options.onEventError),
+      economy: new EconomyDomain(rpc),
       games: new GamesDomain(rpc, this.#options.onEventError),
     };
     this.#ctx = ctx;
@@ -773,6 +790,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     ctx.presence.start();
     ctx.rooms.start();
     ctx.notifications.start();
+    ctx.social.start();
     ctx.games.start();
 
     await keys.publish();

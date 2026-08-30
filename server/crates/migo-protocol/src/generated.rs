@@ -6979,6 +6979,1093 @@ impl Decode for ReactionEvent {
     }
 }
 
+/// Creates a room; the caller becomes its Owner.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RoomCreate {
+    pub slug: String,
+    pub name: String,
+    /// RoomKind: 1=Public, 2=Managed.
+    pub kind: u32,
+    pub topic: Option<String>,
+    pub max_members: Option<u32>,
+}
+
+impl Encode for RoomCreate {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.slug)?;
+        w.write_str(&self.name)?;
+        w.write_u32(self.kind);
+        let present = usize::from(self.topic.is_some()) + usize::from(self.max_members.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.topic {
+            w.optional(1, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.max_members {
+            w.optional(2, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for RoomCreate {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.slug = r.read_string()?;
+        out.name = r.read_string()?;
+        out.kind = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.topic = Some(sub.read_string()?),
+                2 => out.max_members = Some(sub.read_u32()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// One member of a room's roster.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RosterEntry {
+    pub account_id: Id,
+    /// RoomRole.
+    pub role: u32,
+    pub joined_at: Timestamp,
+}
+
+impl Encode for RosterEntry {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.account_id);
+        w.write_u32(self.role);
+        w.write_timestamp(self.joined_at);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for RosterEntry {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.account_id = r.read_id()?;
+        out.role = r.read_u32()?;
+        out.joined_at = r.read_timestamp()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Reads a room's roster, highest role first.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RosterReq {
+    pub room_id: Id,
+    pub limit: Option<u32>,
+    /// Cursor: the last account_id of the previous page.
+    pub after: Option<Id>,
+}
+
+impl Encode for RosterReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.room_id);
+        let present = usize::from(self.limit.is_some()) + usize::from(self.after.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.limit {
+            w.optional(1, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.after {
+            w.optional(2, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for RosterReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.room_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.limit = Some(sub.read_u32()?),
+                2 => out.after = Some(sub.read_id()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// A page of a room's roster.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RosterResponse {
+    pub members: Vec<RosterEntry>,
+}
+
+impl Encode for RosterResponse {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.members.len())?;
+            for item in self.members.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for RosterResponse {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.members = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(RosterEntry::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Changes a member's role.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RoomRoleSet {
+    pub room_id: Id,
+    pub member: Id,
+    /// RoomRole.
+    pub role: u32,
+}
+
+impl Encode for RoomRoleSet {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.room_id);
+        w.write_id(&self.member);
+        w.write_u32(self.role);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for RoomRoleSet {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.room_id = r.read_id()?;
+        out.member = r.read_id()?;
+        out.role = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Updates a room's settings.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RoomUpdate {
+    pub room_id: Id,
+    pub name: Option<String>,
+    pub topic: Option<String>,
+    pub slow_mode_ms: Option<u32>,
+}
+
+impl Encode for RoomUpdate {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.room_id);
+        let present = usize::from(self.name.is_some())
+            + usize::from(self.topic.is_some())
+            + usize::from(self.slow_mode_ms.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.name {
+            w.optional(1, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.topic {
+            w.optional(2, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.slow_mode_ms {
+            w.optional(3, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for RoomUpdate {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.room_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.name = Some(sub.read_string()?),
+                2 => out.topic = Some(sub.read_string()?),
+                3 => out.slow_mode_ms = Some(sub.read_u32()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Archives a room; only its Owner (or staff).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RoomArchive {
+    pub room_id: Id,
+}
+
+impl Encode for RoomArchive {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.room_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for RoomArchive {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.room_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Starts a game in a conversation.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GameStart {
+    pub conversation_id: Id,
+    /// Which game to start, from the catalogue.
+    pub slug: String,
+}
+
+impl Encode for GameStart {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.conversation_id);
+        w.write_str(&self.slug)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for GameStart {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.conversation_id = r.read_id()?;
+        out.slug = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// A game's state as one caller sees it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GameViewWire {
+    pub game_id: Id,
+    pub kind: u32,
+    pub conversation_id: Id,
+    pub status: u32,
+    pub players: Vec<Id>,
+    pub state_version: u64,
+    pub board: String,
+    pub turn_of: Option<Id>,
+    pub your_turn: Option<bool>,
+}
+
+impl Encode for GameViewWire {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.game_id);
+        w.write_u32(self.kind);
+        w.write_id(&self.conversation_id);
+        w.write_u32(self.status);
+        {
+            w.list_len(self.players.len())?;
+            for item in self.players.iter() {
+                w.write_id(item);
+            }
+        }
+        w.write_u64(self.state_version);
+        w.write_str(&self.board)?;
+        let present = usize::from(self.turn_of.is_some()) + usize::from(self.your_turn.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.turn_of {
+            w.optional(1, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.your_turn {
+            w.optional(2, |w| {
+                w.write_bool(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for GameViewWire {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.game_id = r.read_id()?;
+        out.kind = r.read_u32()?;
+        out.conversation_id = r.read_id()?;
+        out.status = r.read_u32()?;
+        out.players = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(r.read_id()?);
+            }
+            v
+        };
+        out.state_version = r.read_u64()?;
+        out.board = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.turn_of = Some(sub.read_id()?),
+                2 => out.your_turn = Some(sub.read_bool()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Identifies one game.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GameId {
+    pub game_id: Id,
+}
+
+impl Encode for GameId {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.game_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for GameId {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.game_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// One game in the catalogue.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GameCatalogueEntry {
+    pub slug: String,
+    pub kind: u32,
+    pub min_players: u32,
+    pub max_players: u32,
+}
+
+impl Encode for GameCatalogueEntry {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.slug)?;
+        w.write_u32(self.kind);
+        w.write_u32(self.min_players);
+        w.write_u32(self.max_players);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for GameCatalogueEntry {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.slug = r.read_string()?;
+        out.kind = r.read_u32()?;
+        out.min_players = r.read_u32()?;
+        out.max_players = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// The games this node can play.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GameCatalogueResponse {
+    pub games: Vec<GameCatalogueEntry>,
+}
+
+impl Encode for GameCatalogueResponse {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.games.len())?;
+            for item in self.games.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for GameCatalogueResponse {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.games = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(GameCatalogueEntry::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Empty; the catalogue is the node's own.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GiftCatalogueReq {}
+
+impl Encode for GiftCatalogueReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for GiftCatalogueReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let out = Self::default();
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// The gift catalogue.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GiftCatalogueResponse {
+    pub gifts: Vec<GiftListing>,
+}
+
+impl Encode for GiftCatalogueResponse {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.gifts.len())?;
+            for item in self.gifts.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for GiftCatalogueResponse {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.gifts = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(GiftListing::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Reads the caller's statement.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LedgerReq {
+    pub limit: Option<u32>,
+}
+
+impl Encode for LedgerReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        let present = usize::from(self.limit.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.limit {
+            w.optional(1, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for LedgerReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.limit = Some(sub.read_u32()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// One line of the caller's statement.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LedgerEntryWire {
+    pub tx_id: Id,
+    pub reason: String,
+    /// Magnitude; the reason's direction is the sign.
+    pub amount: u64,
+    pub balance_after: u64,
+    pub at: Timestamp,
+    pub ref_id: Option<Id>,
+}
+
+impl Encode for LedgerEntryWire {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.tx_id);
+        w.write_str(&self.reason)?;
+        w.write_u64(self.amount);
+        w.write_u64(self.balance_after);
+        w.write_timestamp(self.at);
+        let present = usize::from(self.ref_id.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.ref_id {
+            w.optional(1, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for LedgerEntryWire {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.tx_id = r.read_id()?;
+        out.reason = r.read_string()?;
+        out.amount = r.read_u64()?;
+        out.balance_after = r.read_u64()?;
+        out.at = r.read_timestamp()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.ref_id = Some(sub.read_id()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// A page of the caller's statement.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LedgerResponse {
+    pub entries: Vec<LedgerEntryWire>,
+}
+
+impl Encode for LedgerResponse {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.entries.len())?;
+            for item in self.entries.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for LedgerResponse {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.entries = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(LedgerEntryWire::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Reads one account's XP, level, and progress bar.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ProgressionReq {
+    pub of_account: Id,
+}
+
+impl Encode for ProgressionReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.of_account);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ProgressionReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.of_account = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// XP standing and the progress bar.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ProgressionWire {
+    pub account_id: Id,
+    pub xp: u64,
+    pub level: u32,
+    pub xp_into_level: u64,
+    pub xp_for_next_level: u64,
+}
+
+impl Encode for ProgressionWire {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.account_id);
+        w.write_u64(self.xp);
+        w.write_u32(self.level);
+        w.write_u64(self.xp_into_level);
+        w.write_u64(self.xp_for_next_level);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ProgressionWire {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.account_id = r.read_id()?;
+        out.xp = r.read_u64()?;
+        out.level = r.read_u32()?;
+        out.xp_into_level = r.read_u64()?;
+        out.xp_for_next_level = r.read_u64()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// One badge an account holds.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BadgeWire {
+    pub badge_code: String,
+    pub awarded_at: Timestamp,
+}
+
+impl Encode for BadgeWire {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.badge_code)?;
+        w.write_timestamp(self.awarded_at);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for BadgeWire {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.badge_code = r.read_string()?;
+        out.awarded_at = r.read_timestamp()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Reads one account's badges.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BadgesReq {
+    pub of_account: Id,
+}
+
+impl Encode for BadgesReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.of_account);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for BadgesReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.of_account = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// The badges an account holds.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BadgesResponse {
+    pub badges: Vec<BadgeWire>,
+}
+
+impl Encode for BadgesResponse {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.badges.len())?;
+            for item in self.badges.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for BadgesResponse {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.badges = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(BadgeWire::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Reads a leaderboard.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LeaderboardReq {
+    /// Which board; e.g. 'xp' or 'reputation'.
+    pub board: String,
+    pub limit: Option<u32>,
+}
+
+impl Encode for LeaderboardReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.board)?;
+        let present = usize::from(self.limit.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.limit {
+            w.optional(1, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for LeaderboardReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.board = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.limit = Some(sub.read_u32()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// One line of a leaderboard.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RankWire {
+    pub position: u32,
+    pub account_id: Id,
+    pub xp: u64,
+    pub level: u32,
+}
+
+impl Encode for RankWire {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u32(self.position);
+        w.write_id(&self.account_id);
+        w.write_u64(self.xp);
+        w.write_u32(self.level);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for RankWire {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.position = r.read_u32()?;
+        out.account_id = r.read_id()?;
+        out.xp = r.read_u64()?;
+        out.level = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// A leaderboard page.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LeaderboardResponse {
+    pub ranks: Vec<RankWire>,
+}
+
+impl Encode for LeaderboardResponse {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.ranks.len())?;
+            for item in self.ranks.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for LeaderboardResponse {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.ranks = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(RankWire::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
 /// Delivery class, deciding what happens when a session queue is full (ADR-0008).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeliveryClass {
@@ -7050,6 +8137,16 @@ pub enum Opcode {
     RoomList = 82,
     RoomMemberEvent = 83,
     RoomStateEvent = 84,
+    /// Creates a room; the caller becomes its Owner.
+    RoomCreate = 85,
+    /// Reads a room's roster, highest role first.
+    RoomRoster = 86,
+    /// Changes a member's role.
+    RoomRoleSet = 87,
+    /// Updates a room's settings.
+    RoomUpdate = 88,
+    /// Archives a room.
+    RoomArchive = 89,
     /// Updates the caller's own profile and privacy settings.
     ProfileUpdate = 111,
     ProfileFetch = 112,
@@ -7074,11 +8171,29 @@ pub enum Opcode {
     GiftSend = 160,
     BalanceFetch = 161,
     EconomyEvent = 162,
+    /// Lists the gift catalogue.
+    GiftCatalogue = 163,
+    /// Reads the caller's statement.
+    LedgerHistory = 164,
+    /// Reads one account's XP and level.
+    Progression = 165,
+    /// Reads one account's badges.
+    Badges = 166,
+    /// Reads a leaderboard.
+    Leaderboard = 167,
     GameAction = 176,
     GameEvent = 177,
     BotCommand = 178,
     BotEvent = 179,
     BotRegister = 180,
+    /// Starts a game in a conversation.
+    GameStart = 183,
+    /// Reads a game's state as the caller sees it.
+    GameView = 184,
+    /// Abandons an open game.
+    GameAbandon = 185,
+    /// Lists the games this node can play.
+    GameCatalogue = 186,
     ReportCreate = 192,
     ModerationAction = 193,
     ModerationEvent = 194,
@@ -7136,6 +8251,11 @@ impl Opcode {
             82 => Self::RoomList,
             83 => Self::RoomMemberEvent,
             84 => Self::RoomStateEvent,
+            85 => Self::RoomCreate,
+            86 => Self::RoomRoster,
+            87 => Self::RoomRoleSet,
+            88 => Self::RoomUpdate,
+            89 => Self::RoomArchive,
             111 => Self::ProfileUpdate,
             112 => Self::ProfileFetch,
             113 => Self::FriendRequest,
@@ -7157,11 +8277,20 @@ impl Opcode {
             160 => Self::GiftSend,
             161 => Self::BalanceFetch,
             162 => Self::EconomyEvent,
+            163 => Self::GiftCatalogue,
+            164 => Self::LedgerHistory,
+            165 => Self::Progression,
+            166 => Self::Badges,
+            167 => Self::Leaderboard,
             176 => Self::GameAction,
             177 => Self::GameEvent,
             178 => Self::BotCommand,
             179 => Self::BotEvent,
             180 => Self::BotRegister,
+            183 => Self::GameStart,
+            184 => Self::GameView,
+            185 => Self::GameAbandon,
+            186 => Self::GameCatalogue,
             192 => Self::ReportCreate,
             193 => Self::ModerationAction,
             194 => Self::ModerationEvent,
@@ -7214,6 +8343,11 @@ impl Opcode {
             Self::RoomList => "ROOM_LIST",
             Self::RoomMemberEvent => "ROOM_MEMBER_EVENT",
             Self::RoomStateEvent => "ROOM_STATE_EVENT",
+            Self::RoomCreate => "ROOM_CREATE",
+            Self::RoomRoster => "ROOM_ROSTER",
+            Self::RoomRoleSet => "ROOM_ROLE_SET",
+            Self::RoomUpdate => "ROOM_UPDATE",
+            Self::RoomArchive => "ROOM_ARCHIVE",
             Self::ProfileUpdate => "PROFILE_UPDATE",
             Self::ProfileFetch => "PROFILE_FETCH",
             Self::FriendRequest => "FRIEND_REQUEST",
@@ -7235,11 +8369,20 @@ impl Opcode {
             Self::GiftSend => "GIFT_SEND",
             Self::BalanceFetch => "BALANCE_FETCH",
             Self::EconomyEvent => "ECONOMY_EVENT",
+            Self::GiftCatalogue => "GIFT_CATALOGUE",
+            Self::LedgerHistory => "LEDGER_HISTORY",
+            Self::Progression => "PROGRESSION",
+            Self::Badges => "BADGES",
+            Self::Leaderboard => "LEADERBOARD",
             Self::GameAction => "GAME_ACTION",
             Self::GameEvent => "GAME_EVENT",
             Self::BotCommand => "BOT_COMMAND",
             Self::BotEvent => "BOT_EVENT",
             Self::BotRegister => "BOT_REGISTER",
+            Self::GameStart => "GAME_START",
+            Self::GameView => "GAME_VIEW",
+            Self::GameAbandon => "GAME_ABANDON",
+            Self::GameCatalogue => "GAME_CATALOGUE",
             Self::ReportCreate => "REPORT_CREATE",
             Self::ModerationAction => "MODERATION_ACTION",
             Self::ModerationEvent => "MODERATION_EVENT",
@@ -7292,6 +8435,11 @@ impl Opcode {
             Self::RoomList => 5,
             Self::RoomMemberEvent => 0,
             Self::RoomStateEvent => 0,
+            Self::RoomCreate => 20,
+            Self::RoomRoster => 3,
+            Self::RoomRoleSet => 5,
+            Self::RoomUpdate => 5,
+            Self::RoomArchive => 5,
             Self::ProfileUpdate => 3,
             Self::ProfileFetch => 3,
             Self::FriendRequest => 10,
@@ -7313,11 +8461,20 @@ impl Opcode {
             Self::GiftSend => 20,
             Self::BalanceFetch => 3,
             Self::EconomyEvent => 0,
+            Self::GiftCatalogue => 1,
+            Self::LedgerHistory => 3,
+            Self::Progression => 2,
+            Self::Badges => 2,
+            Self::Leaderboard => 5,
             Self::GameAction => 2,
             Self::GameEvent => 0,
             Self::BotCommand => 2,
             Self::BotEvent => 0,
             Self::BotRegister => 20,
+            Self::GameStart => 5,
+            Self::GameView => 2,
+            Self::GameAbandon => 2,
+            Self::GameCatalogue => 1,
             Self::ReportCreate => 20,
             Self::ModerationAction => 10,
             Self::ModerationEvent => 0,
@@ -7369,6 +8526,11 @@ impl Opcode {
             Self::RoomList => DeliveryClass::Critical,
             Self::RoomMemberEvent => DeliveryClass::Coalescable,
             Self::RoomStateEvent => DeliveryClass::Coalescable,
+            Self::RoomCreate => DeliveryClass::Critical,
+            Self::RoomRoster => DeliveryClass::Critical,
+            Self::RoomRoleSet => DeliveryClass::Critical,
+            Self::RoomUpdate => DeliveryClass::Critical,
+            Self::RoomArchive => DeliveryClass::Critical,
             Self::ProfileUpdate => DeliveryClass::Critical,
             Self::ProfileFetch => DeliveryClass::Critical,
             Self::FriendRequest => DeliveryClass::Critical,
@@ -7390,11 +8552,20 @@ impl Opcode {
             Self::GiftSend => DeliveryClass::Critical,
             Self::BalanceFetch => DeliveryClass::Critical,
             Self::EconomyEvent => DeliveryClass::Critical,
+            Self::GiftCatalogue => DeliveryClass::Critical,
+            Self::LedgerHistory => DeliveryClass::Critical,
+            Self::Progression => DeliveryClass::Critical,
+            Self::Badges => DeliveryClass::Critical,
+            Self::Leaderboard => DeliveryClass::Critical,
             Self::GameAction => DeliveryClass::Critical,
             Self::GameEvent => DeliveryClass::Critical,
             Self::BotCommand => DeliveryClass::Critical,
             Self::BotEvent => DeliveryClass::Critical,
             Self::BotRegister => DeliveryClass::Critical,
+            Self::GameStart => DeliveryClass::Critical,
+            Self::GameView => DeliveryClass::Critical,
+            Self::GameAbandon => DeliveryClass::Critical,
+            Self::GameCatalogue => DeliveryClass::Critical,
             Self::ReportCreate => DeliveryClass::Critical,
             Self::ModerationAction => DeliveryClass::Critical,
             Self::ModerationEvent => DeliveryClass::Critical,
@@ -7446,6 +8617,11 @@ impl Opcode {
             Self::RoomList => AuthLevel::User,
             Self::RoomMemberEvent => AuthLevel::User,
             Self::RoomStateEvent => AuthLevel::User,
+            Self::RoomCreate => AuthLevel::User,
+            Self::RoomRoster => AuthLevel::User,
+            Self::RoomRoleSet => AuthLevel::User,
+            Self::RoomUpdate => AuthLevel::User,
+            Self::RoomArchive => AuthLevel::User,
             Self::ProfileUpdate => AuthLevel::User,
             Self::ProfileFetch => AuthLevel::User,
             Self::FriendRequest => AuthLevel::User,
@@ -7467,11 +8643,20 @@ impl Opcode {
             Self::GiftSend => AuthLevel::User,
             Self::BalanceFetch => AuthLevel::User,
             Self::EconomyEvent => AuthLevel::User,
+            Self::GiftCatalogue => AuthLevel::User,
+            Self::LedgerHistory => AuthLevel::User,
+            Self::Progression => AuthLevel::User,
+            Self::Badges => AuthLevel::User,
+            Self::Leaderboard => AuthLevel::User,
             Self::GameAction => AuthLevel::User,
             Self::GameEvent => AuthLevel::User,
             Self::BotCommand => AuthLevel::User,
             Self::BotEvent => AuthLevel::User,
             Self::BotRegister => AuthLevel::Bot,
+            Self::GameStart => AuthLevel::User,
+            Self::GameView => AuthLevel::User,
+            Self::GameAbandon => AuthLevel::User,
+            Self::GameCatalogue => AuthLevel::User,
             Self::ReportCreate => AuthLevel::User,
             Self::ModerationAction => AuthLevel::User,
             Self::ModerationEvent => AuthLevel::User,
@@ -7523,6 +8708,11 @@ impl Opcode {
             Self::RoomList => Direction::ClientToServer,
             Self::RoomMemberEvent => Direction::ServerToClient,
             Self::RoomStateEvent => Direction::ServerToClient,
+            Self::RoomCreate => Direction::ClientToServer,
+            Self::RoomRoster => Direction::ClientToServer,
+            Self::RoomRoleSet => Direction::ClientToServer,
+            Self::RoomUpdate => Direction::ClientToServer,
+            Self::RoomArchive => Direction::ClientToServer,
             Self::ProfileUpdate => Direction::ClientToServer,
             Self::ProfileFetch => Direction::ClientToServer,
             Self::FriendRequest => Direction::ClientToServer,
@@ -7544,11 +8734,20 @@ impl Opcode {
             Self::GiftSend => Direction::ClientToServer,
             Self::BalanceFetch => Direction::ClientToServer,
             Self::EconomyEvent => Direction::ServerToClient,
+            Self::GiftCatalogue => Direction::ClientToServer,
+            Self::LedgerHistory => Direction::ClientToServer,
+            Self::Progression => Direction::ClientToServer,
+            Self::Badges => Direction::ClientToServer,
+            Self::Leaderboard => Direction::ClientToServer,
             Self::GameAction => Direction::ClientToServer,
             Self::GameEvent => Direction::ServerToClient,
             Self::BotCommand => Direction::ClientToServer,
             Self::BotEvent => Direction::ServerToClient,
             Self::BotRegister => Direction::ClientToServer,
+            Self::GameStart => Direction::ClientToServer,
+            Self::GameView => Direction::ClientToServer,
+            Self::GameAbandon => Direction::ClientToServer,
+            Self::GameCatalogue => Direction::ClientToServer,
             Self::ReportCreate => Direction::ClientToServer,
             Self::ModerationAction => Direction::ClientToServer,
             Self::ModerationEvent => Direction::ServerToClient,
@@ -7601,6 +8800,11 @@ impl Opcode {
             Self::RoomList => false,
             Self::RoomMemberEvent => false,
             Self::RoomStateEvent => false,
+            Self::RoomCreate => false,
+            Self::RoomRoster => false,
+            Self::RoomRoleSet => false,
+            Self::RoomUpdate => false,
+            Self::RoomArchive => false,
             Self::ProfileUpdate => false,
             Self::ProfileFetch => false,
             Self::FriendRequest => false,
@@ -7622,11 +8826,20 @@ impl Opcode {
             Self::GiftSend => false,
             Self::BalanceFetch => false,
             Self::EconomyEvent => false,
+            Self::GiftCatalogue => false,
+            Self::LedgerHistory => false,
+            Self::Progression => false,
+            Self::Badges => false,
+            Self::Leaderboard => false,
             Self::GameAction => false,
             Self::GameEvent => false,
             Self::BotCommand => false,
             Self::BotEvent => false,
             Self::BotRegister => false,
+            Self::GameStart => false,
+            Self::GameView => false,
+            Self::GameAbandon => false,
+            Self::GameCatalogue => false,
             Self::ReportCreate => false,
             Self::ModerationAction => false,
             Self::ModerationEvent => false,
@@ -7686,6 +8899,11 @@ impl Opcode {
         Self::RoomList,
         Self::RoomMemberEvent,
         Self::RoomStateEvent,
+        Self::RoomCreate,
+        Self::RoomRoster,
+        Self::RoomRoleSet,
+        Self::RoomUpdate,
+        Self::RoomArchive,
         Self::ProfileUpdate,
         Self::ProfileFetch,
         Self::FriendRequest,
@@ -7707,11 +8925,20 @@ impl Opcode {
         Self::GiftSend,
         Self::BalanceFetch,
         Self::EconomyEvent,
+        Self::GiftCatalogue,
+        Self::LedgerHistory,
+        Self::Progression,
+        Self::Badges,
+        Self::Leaderboard,
         Self::GameAction,
         Self::GameEvent,
         Self::BotCommand,
         Self::BotEvent,
         Self::BotRegister,
+        Self::GameStart,
+        Self::GameView,
+        Self::GameAbandon,
+        Self::GameCatalogue,
         Self::ReportCreate,
         Self::ModerationAction,
         Self::ModerationEvent,

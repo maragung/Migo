@@ -353,6 +353,61 @@
    "coalesce_key": "room_id"
   },
   {
+   "name": "ROOM_CREATE",
+   "code": 85,
+   "direction": "client_to_server",
+   "payload": "RoomCreate",
+   "response": "RoomJoinResponse",
+   "auth": "User",
+   "cost": 20,
+   "class": "Critical",
+   "doc": "Creates a room; the caller becomes its Owner."
+  },
+  {
+   "name": "ROOM_ROSTER",
+   "code": 86,
+   "direction": "client_to_server",
+   "payload": "RosterReq",
+   "response": "RosterResponse",
+   "auth": "User",
+   "cost": 3,
+   "class": "Critical",
+   "doc": "Reads a room's roster, highest role first."
+  },
+  {
+   "name": "ROOM_ROLE_SET",
+   "code": 87,
+   "direction": "client_to_server",
+   "payload": "RoomRoleSet",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "Changes a member's role."
+  },
+  {
+   "name": "ROOM_UPDATE",
+   "code": 88,
+   "direction": "client_to_server",
+   "payload": "RoomUpdate",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "Updates a room's settings."
+  },
+  {
+   "name": "ROOM_ARCHIVE",
+   "code": 89,
+   "direction": "client_to_server",
+   "payload": "RoomArchive",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "Archives a room."
+  },
+  {
    "name": "PROFILE_UPDATE",
    "code": 111,
    "direction": "client_to_server",
@@ -563,6 +618,61 @@
    "class": "Critical"
   },
   {
+   "name": "GIFT_CATALOGUE",
+   "code": 163,
+   "direction": "client_to_server",
+   "payload": "GiftCatalogueReq",
+   "response": "GiftCatalogueResponse",
+   "auth": "User",
+   "cost": 1,
+   "class": "Critical",
+   "doc": "Lists the gift catalogue."
+  },
+  {
+   "name": "LEDGER_HISTORY",
+   "code": 164,
+   "direction": "client_to_server",
+   "payload": "LedgerReq",
+   "response": "LedgerResponse",
+   "auth": "User",
+   "cost": 3,
+   "class": "Critical",
+   "doc": "Reads the caller's statement."
+  },
+  {
+   "name": "PROGRESSION",
+   "code": 165,
+   "direction": "client_to_server",
+   "payload": "ProgressionReq",
+   "response": "ProgressionWire",
+   "auth": "User",
+   "cost": 2,
+   "class": "Critical",
+   "doc": "Reads one account's XP and level."
+  },
+  {
+   "name": "BADGES",
+   "code": 166,
+   "direction": "client_to_server",
+   "payload": "BadgesReq",
+   "response": "BadgesResponse",
+   "auth": "User",
+   "cost": 2,
+   "class": "Critical",
+   "doc": "Reads one account's badges."
+  },
+  {
+   "name": "LEADERBOARD",
+   "code": 167,
+   "direction": "client_to_server",
+   "payload": "LeaderboardReq",
+   "response": "LeaderboardResponse",
+   "auth": "User",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "Reads a leaderboard."
+  },
+  {
    "name": "GAME_ACTION",
    "code": 176,
    "direction": "client_to_server",
@@ -609,6 +719,50 @@
    "auth": "Bot",
    "cost": 20,
    "class": "Critical"
+  },
+  {
+   "name": "GAME_START",
+   "code": 183,
+   "direction": "client_to_server",
+   "payload": "GameStart",
+   "response": "GameViewWire",
+   "auth": "User",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "Starts a game in a conversation."
+  },
+  {
+   "name": "GAME_VIEW",
+   "code": 184,
+   "direction": "client_to_server",
+   "payload": "GameId",
+   "response": "GameViewWire",
+   "auth": "User",
+   "cost": 2,
+   "class": "Critical",
+   "doc": "Reads a game's state as the caller sees it."
+  },
+  {
+   "name": "GAME_ABANDON",
+   "code": 185,
+   "direction": "client_to_server",
+   "payload": "GameId",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 2,
+   "class": "Critical",
+   "doc": "Abandons an open game."
+  },
+  {
+   "name": "GAME_CATALOGUE",
+   "code": 186,
+   "direction": "client_to_server",
+   "payload": "GiftCatalogueReq",
+   "response": "GameCatalogueResponse",
+   "auth": "User",
+   "cost": 1,
+   "class": "Critical",
+   "doc": "Lists the games this node can play."
   },
   {
    "name": "REPORT_CREATE",

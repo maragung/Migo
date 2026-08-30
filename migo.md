@@ -4111,12 +4111,21 @@ Opcode yang sudah ada di schema. STATUS: SCHEMA. Format setiap baris: nomor, nam
 80 ROOM_JOIN, client ke server, User, 20, Critical
 81 ROOM_LEAVE, client ke server, User, 5, Critical
 82 ROOM_LIST, client ke server, User, 5, Critical
+85 ROOM_CREATE, client ke server, User, 20, Critical
+86 ROOM_ROSTER, client ke server, User, 3, Critical
+87 ROOM_ROLE_SET, client ke server, User, 5, Critical
+88 ROOM_UPDATE, client ke server, User, 5, Critical
+89 ROOM_ARCHIVE, client ke server, User, 5, Critical
 83 ROOM_MEMBER_EVENT, server ke client, User, 0, Coalescable
 84 ROOM_STATE_EVENT, server ke client, User, 0, Coalescable
 112 PROFILE_FETCH, client ke server, User, 3, Critical
 144 NOTIFICATION_EVENT, server ke client, User, 0, Droppable
 176 GAME_ACTION, client ke server, User, 2, Critical
 177 GAME_EVENT, server ke client, User, 0, Critical
+183 GAME_START, client ke server, User, 5, Critical
+184 GAME_VIEW, client ke server, User, 2, Critical
+185 GAME_ABANDON, client ke server, User, 2, Critical
+186 GAME_CATALOGUE, client ke server, User, 1, Critical
 
 Opcode yang direncanakan. STATUS: BUILT untuk 40 sampai 42, 111, 118, dan 119; STATUS: SCHEMA untuk sisanya yang sudah masuk registri; STATUS: SPEC untuk yang masih dokumen. Setiap opcode ditambahkan ke opcodes.json bersamaan dengan implementasi handler-nya, sesuai aturan alokasi section 146.
 
@@ -4156,6 +4165,11 @@ Economy:
 160 GIFT_SEND, client ke server, User, 20, Critical
 161 BALANCE_FETCH, client ke server, User, 3, Critical
 162 ECONOMY_EVENT, server ke client, User, 0, Critical
+163 GIFT_CATALOGUE, client ke server, User, 1, Critical
+164 LEDGER_HISTORY, client ke server, User, 3, Critical
+165 PROGRESSION, client ke server, User, 2, Critical
+166 BADGES, client ke server, User, 2, Critical
+167 LEADERBOARD, client ke server, User, 5, Critical
 
 Bots:
 
@@ -5475,7 +5489,7 @@ Call signaling dan media architecture pada section 165 dan 166
 Voice note protocol pada section 167 beserta perekaman dan pemutaran di client
 Requirement produk voice note pada section 179 dan requirement produk call pada section 180
 
-Sudah meninggalkan SPEC dan menyentuh kabel: opcode messaging 40 sampai 42 (edit, reaksi), profile 111 dan 112, social 113 sampai 119 (termasuk suggestions dan search), media 128 sampai 133 (kini dengan data plane HTTP di migo-api untuk backend filesystem dan scan inline pada commit sehingga media non-E2E tidak lagi terkunci Pending), notification 145 dan 146 beserta penerbitnya, economy 160 sampai 162, bot 178 sampai 180, moderation 192 sampai 194, dan federation 208 sampai 221 dengan transport mesh di migod; feature bit 16 sampai 20 dinegosiasikan dan federasi memakainya
+Sudah meninggalkan SPEC dan menyentuh kabel: opcode messaging 40 sampai 42 (edit, reaksi), profile 111 dan 112, social 113 sampai 119 (termasuk suggestions dan search), room 80 sampai 89 (termasuk create, roster, role, update, archive), media 128 sampai 133, economy 160 sampai 167 (termasuk catalogue, ledger, progression, badges, leaderboard), games 176 sampai 186 (termasuk start, view, abandon, catalogue) (kini dengan data plane HTTP di migo-api untuk backend filesystem dan scan inline pada commit sehingga media non-E2E tidak lagi terkunci Pending), notification 145 dan 146 beserta penerbitnya, economy 160 sampai 162, bot 178 sampai 180, moderation 192 sampai 194, dan federation 208 sampai 221 dengan transport mesh di migod; feature bit 16 sampai 20 dinegosiasikan dan federasi memakainya
 
 KODE LENGKAP DI LUAR WORKSPACE CARGO, TEST BELUM DITULIS:
 

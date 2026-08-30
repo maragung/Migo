@@ -92,11 +92,14 @@ use migo_social::{Caller as SocialCaller, Interaction, ProfileCard, SharedSocial
 // per-feature detail. See each module's header for the exact opcode-to-method map.
 pub(crate) mod bots;
 pub(crate) mod economy;
+pub(crate) mod economy_read;
 pub(crate) mod federation;
+pub(crate) mod games_admin;
 pub(crate) mod media;
 pub(crate) mod moderation;
 pub(crate) mod notify;
 pub(crate) mod profile;
+pub(crate) mod rooms_admin;
 pub(crate) mod social;
 
 /// A stable key that groups the frames of one Coalescable stream by an id.
@@ -392,6 +395,17 @@ impl Dispatcher for AppDispatcher {
                 let response = self.rooms.list(&caller, request).await?;
                 context.reply(&response)
             }
+            Opcode::RoomCreate => {
+                rooms_admin::handle_room_create(context, frame, &self.rooms).await
+            }
+            Opcode::RoomRoster => rooms_admin::handle_roster(context, frame, &self.rooms).await,
+            Opcode::RoomRoleSet => rooms_admin::handle_role_set(context, frame, &self.rooms).await,
+            Opcode::RoomUpdate => {
+                rooms_admin::handle_room_update(context, frame, &self.rooms).await
+            }
+            Opcode::RoomArchive => {
+                rooms_admin::handle_room_archive(context, frame, &self.rooms).await
+            }
 
             // --- key material ---
             Opcode::KeyPublish => {
@@ -498,6 +512,14 @@ impl Dispatcher for AppDispatcher {
                 context.reply(&Acknowledged { ok: true })?;
                 publish_game(context, &result.view, &result.events)
             }
+            Opcode::GameStart => games_admin::handle_game_start(context, frame, &self.games).await,
+            Opcode::GameView => games_admin::handle_game_view(context, frame, &self.games).await,
+            Opcode::GameAbandon => {
+                games_admin::handle_game_abandon(context, frame, &self.games).await
+            }
+            Opcode::GameCatalogue => {
+                games_admin::handle_game_catalogue(context, frame, &self.games).await
+            }
 
             // --- media ---
             Opcode::MediaUploadBegin => {
@@ -534,6 +556,19 @@ impl Dispatcher for AppDispatcher {
             Opcode::GiftSend => economy::handle_gift_send(context, frame, &self.economy).await,
             Opcode::BalanceFetch => {
                 economy::handle_balance_fetch(context, frame, &self.economy).await
+            }
+            Opcode::GiftCatalogue => {
+                economy_read::handle_gift_catalogue(context, frame, &self.economy).await
+            }
+            Opcode::LedgerHistory => {
+                economy_read::handle_ledger_history(context, frame, &self.economy).await
+            }
+            Opcode::Progression => {
+                economy_read::handle_progression(context, frame, &self.economy).await
+            }
+            Opcode::Badges => economy_read::handle_badges(context, frame, &self.economy).await,
+            Opcode::Leaderboard => {
+                economy_read::handle_leaderboard(context, frame, &self.economy).await
             }
 
             // --- bots ---
@@ -705,7 +740,10 @@ fn publish_messaging(
 /// A membership event (join, leave, role change) is not coalesced: collapsing two joins would lose
 /// one arrival. A state event (a counter or a setting moving) is Coalescable, keyed by room, so
 /// three counter updates about one room collapse to the last one for a backed-up consumer.
-fn publish_rooms(context: &ClientContext<'_>, fanout: RoomFanout) -> Result<(), Error> {
+///
+/// Shared with the rooms dispatch module, whose role and settings handlers fan out through the
+/// same match so a member event and a state event keep one encoder and one exclusion rule.
+pub(crate) fn publish_rooms(context: &ClientContext<'_>, fanout: RoomFanout) -> Result<(), Error> {
     let topic = Topic {
         kind: TopicKind::Room,
         id: fanout.room_id,

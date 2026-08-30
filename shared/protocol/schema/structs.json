@@ -2481,6 +2481,438 @@
      "doc": "True when the reaction was removed."
     }
    ]
+  },
+  {
+   "name": "RoomCreate",
+   "doc": "Creates a room; the caller becomes its Owner.",
+   "fields": [
+    {
+     "name": "slug",
+     "type": "string"
+    },
+    {
+     "name": "name",
+     "type": "string"
+    },
+    {
+     "name": "kind",
+     "type": "u32",
+     "doc": "RoomKind: 1=Public, 2=Managed."
+    },
+    {
+     "name": "topic",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "max_members",
+     "type": "u32",
+     "optional": true,
+     "id": 2
+    }
+   ]
+  },
+  {
+   "name": "RosterEntry",
+   "doc": "One member of a room's roster.",
+   "fields": [
+    {
+     "name": "account_id",
+     "type": "id"
+    },
+    {
+     "name": "role",
+     "type": "u32",
+     "doc": "RoomRole."
+    },
+    {
+     "name": "joined_at",
+     "type": "timestamp"
+    }
+   ]
+  },
+  {
+   "name": "RosterReq",
+   "doc": "Reads a room's roster, highest role first.",
+   "fields": [
+    {
+     "name": "room_id",
+     "type": "id"
+    },
+    {
+     "name": "limit",
+     "type": "u32",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "after",
+     "type": "id",
+     "optional": true,
+     "id": 2,
+     "doc": "Cursor: the last account_id of the previous page."
+    }
+   ]
+  },
+  {
+   "name": "RosterResponse",
+   "doc": "A page of a room's roster.",
+   "fields": [
+    {
+     "name": "members",
+     "type": "list<RosterEntry>"
+    }
+   ]
+  },
+  {
+   "name": "RoomRoleSet",
+   "doc": "Changes a member's role.",
+   "fields": [
+    {
+     "name": "room_id",
+     "type": "id"
+    },
+    {
+     "name": "member",
+     "type": "id"
+    },
+    {
+     "name": "role",
+     "type": "u32",
+     "doc": "RoomRole."
+    }
+   ]
+  },
+  {
+   "name": "RoomUpdate",
+   "doc": "Updates a room's settings.",
+   "fields": [
+    {
+     "name": "room_id",
+     "type": "id"
+    },
+    {
+     "name": "name",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "topic",
+     "type": "string",
+     "optional": true,
+     "id": 2
+    },
+    {
+     "name": "slow_mode_ms",
+     "type": "u32",
+     "optional": true,
+     "id": 3
+    }
+   ]
+  },
+  {
+   "name": "RoomArchive",
+   "doc": "Archives a room; only its Owner (or staff).",
+   "fields": [
+    {
+     "name": "room_id",
+     "type": "id"
+    }
+   ]
+  },
+  {
+   "name": "GameStart",
+   "doc": "Starts a game in a conversation.",
+   "fields": [
+    {
+     "name": "conversation_id",
+     "type": "id"
+    },
+    {
+     "name": "slug",
+     "type": "string",
+     "doc": "Which game to start, from the catalogue."
+    }
+   ]
+  },
+  {
+   "name": "GameViewWire",
+   "doc": "A game's state as one caller sees it.",
+   "fields": [
+    {
+     "name": "game_id",
+     "type": "id"
+    },
+    {
+     "name": "kind",
+     "type": "u32"
+    },
+    {
+     "name": "conversation_id",
+     "type": "id"
+    },
+    {
+     "name": "status",
+     "type": "u32"
+    },
+    {
+     "name": "players",
+     "type": "list<id>"
+    },
+    {
+     "name": "state_version",
+     "type": "u64"
+    },
+    {
+     "name": "board",
+     "type": "string"
+    },
+    {
+     "name": "turn_of",
+     "type": "id",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "your_turn",
+     "type": "bool",
+     "optional": true,
+     "id": 2
+    }
+   ]
+  },
+  {
+   "name": "GameId",
+   "doc": "Identifies one game.",
+   "fields": [
+    {
+     "name": "game_id",
+     "type": "id"
+    }
+   ]
+  },
+  {
+   "name": "GameCatalogueEntry",
+   "doc": "One game in the catalogue.",
+   "fields": [
+    {
+     "name": "slug",
+     "type": "string"
+    },
+    {
+     "name": "kind",
+     "type": "u32"
+    },
+    {
+     "name": "min_players",
+     "type": "u32"
+    },
+    {
+     "name": "max_players",
+     "type": "u32"
+    }
+   ]
+  },
+  {
+   "name": "GameCatalogueResponse",
+   "doc": "The games this node can play.",
+   "fields": [
+    {
+     "name": "games",
+     "type": "list<GameCatalogueEntry>"
+    }
+   ]
+  },
+  {
+   "name": "GiftCatalogueReq",
+   "doc": "Empty; the catalogue is the node's own.",
+   "fields": []
+  },
+  {
+   "name": "GiftCatalogueResponse",
+   "doc": "The gift catalogue.",
+   "fields": [
+    {
+     "name": "gifts",
+     "type": "list<GiftListing>"
+    }
+   ]
+  },
+  {
+   "name": "LedgerReq",
+   "doc": "Reads the caller's statement.",
+   "fields": [
+    {
+     "name": "limit",
+     "type": "u32",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "LedgerEntryWire",
+   "doc": "One line of the caller's statement.",
+   "fields": [
+    {
+     "name": "tx_id",
+     "type": "id"
+    },
+    {
+     "name": "reason",
+     "type": "string"
+    },
+    {
+     "name": "amount",
+     "type": "u64",
+     "doc": "Magnitude; the reason's direction is the sign."
+    },
+    {
+     "name": "balance_after",
+     "type": "u64"
+    },
+    {
+     "name": "at",
+     "type": "timestamp"
+    },
+    {
+     "name": "ref_id",
+     "type": "id",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "LedgerResponse",
+   "doc": "A page of the caller's statement.",
+   "fields": [
+    {
+     "name": "entries",
+     "type": "list<LedgerEntryWire>"
+    }
+   ]
+  },
+  {
+   "name": "ProgressionReq",
+   "doc": "Reads one account's XP, level, and progress bar.",
+   "fields": [
+    {
+     "name": "of_account",
+     "type": "id"
+    }
+   ]
+  },
+  {
+   "name": "ProgressionWire",
+   "doc": "XP standing and the progress bar.",
+   "fields": [
+    {
+     "name": "account_id",
+     "type": "id"
+    },
+    {
+     "name": "xp",
+     "type": "u64"
+    },
+    {
+     "name": "level",
+     "type": "u32"
+    },
+    {
+     "name": "xp_into_level",
+     "type": "u64"
+    },
+    {
+     "name": "xp_for_next_level",
+     "type": "u64"
+    }
+   ]
+  },
+  {
+   "name": "BadgeWire",
+   "doc": "One badge an account holds.",
+   "fields": [
+    {
+     "name": "badge_code",
+     "type": "string"
+    },
+    {
+     "name": "awarded_at",
+     "type": "timestamp"
+    }
+   ]
+  },
+  {
+   "name": "BadgesReq",
+   "doc": "Reads one account's badges.",
+   "fields": [
+    {
+     "name": "of_account",
+     "type": "id"
+    }
+   ]
+  },
+  {
+   "name": "BadgesResponse",
+   "doc": "The badges an account holds.",
+   "fields": [
+    {
+     "name": "badges",
+     "type": "list<BadgeWire>"
+    }
+   ]
+  },
+  {
+   "name": "LeaderboardReq",
+   "doc": "Reads a leaderboard.",
+   "fields": [
+    {
+     "name": "board",
+     "type": "string",
+     "doc": "Which board; e.g. 'xp' or 'reputation'."
+    },
+    {
+     "name": "limit",
+     "type": "u32",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "RankWire",
+   "doc": "One line of a leaderboard.",
+   "fields": [
+    {
+     "name": "position",
+     "type": "u32"
+    },
+    {
+     "name": "account_id",
+     "type": "id"
+    },
+    {
+     "name": "xp",
+     "type": "u64"
+    },
+    {
+     "name": "level",
+     "type": "u32"
+    }
+   ]
+  },
+  {
+   "name": "LeaderboardResponse",
+   "doc": "A leaderboard page.",
+   "fields": [
+    {
+     "name": "ranks",
+     "type": "list<RankWire>"
+    }
+   ]
   }
  ]
 }
