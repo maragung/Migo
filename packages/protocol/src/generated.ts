@@ -6060,7 +6060,7 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   235: { code: 235, name: 'CALL_STATS', cost: 1, cls: 'Droppable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallStats', response: 'Acknowledged' },
   236: { code: 236, name: 'CALL_TURN_FETCH', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallTurnFetch', response: 'CallTurnResponse' },
   237: { code: 237, name: 'CALL_SFU_JOIN', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallInvite', response: 'CallTurnResponse' },
-  238: { code: 238, name: 'CALL_SFU_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallStateEvent' },
+  238: { code: 238, name: 'CALL_SFU_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallStateEvent', coalesceKey: 'call_id' },
 };
 
 export function opcodeName(code: number): string {

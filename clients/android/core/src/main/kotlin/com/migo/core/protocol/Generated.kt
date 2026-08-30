@@ -7382,7 +7382,7 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     235L to OpcodeMeta(235L, "CALL_STATS", 1, DeliveryClass.Droppable, AuthLevel.User, Direction.ClientToServer, false, "CallStats", "Acknowledged", null),
     236L to OpcodeMeta(236L, "CALL_TURN_FETCH", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallTurnFetch", "CallTurnResponse", null),
     237L to OpcodeMeta(237L, "CALL_SFU_JOIN", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallInvite", "CallTurnResponse", null),
-    238L to OpcodeMeta(238L, "CALL_SFU_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "CallStateEvent", null, null),
+    238L to OpcodeMeta(238L, "CALL_SFU_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "CallStateEvent", null, "call_id"),
 )
 
 /** Human name for an opcode, for logs and errors. Never used on the wire. */

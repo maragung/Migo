@@ -1097,7 +1097,8 @@
    "auth": "User",
    "cost": 0,
    "class": "Coalescable",
-   "doc": "SFU group call state."
+   "doc": "SFU group call state.",
+   "coalesce_key": "call_id"
   }
  ]
 }
