@@ -585,3 +585,38 @@ Batch 1 web: kerangka navigasi dengan lima tab + domain SDK baru:
   hands-off ke chat). 6 test web baru.
 
 Verifikasi: 80 suite server, 102 test SDK, 85 test web, 14 gate CI, e2e dua-akun lulus.
+
+## 18. Fase 3 batch 2: pengalaman chat lengkap + media (v0.3.3)
+
+Chat web naik dari slice teks minimum ke pengalaman lengkap, semua di atas SDK yang sudah
+ada — tak ada perubahan protocol:
+
+- **Tombstone hapus**: onDeletion menandai pesan `deleted`; baris tetap di posisinya dengan
+  gaya redup miring dan tanpa konten. Tombol hapus di hover pesan sendiri.
+- **Read marker dua arah**: onReceipt merekam watermark `readUpTo`; pesan sendiri
+  menampilkan ✓ (terkirim) / ✓✓ (dibaca).
+- **Nama + avatar pengirim di grup**: per-run (nama hanya saat ganti pengirim), batch-fetch
+  via useProfiles.
+- **Reply**: tombol Reply di hover → bar pratinjau di composer → `replyTo` di SendOptions →
+  snippet ter-kutip di gelembung (target di-resolve in-thread, [deleted] bila hilang).
+- **Pratinjau pesan-terakhir di daftar percakapan**: lastMessage di-dekripsi via ingest
+  (pola yang sama dengan desktop), "Nama: isi" untuk grup / isi untuk direct, placeholder
+  per kind (📎/🎤/🎉), [deleted] untuk tombstone, fallback ke subtitle lama.
+- **Label enkripsi dari EncryptionMode** (bukan lagi dari kind): EndToEnd → 🔒, Transport →
+  "server dapat membaca untuk moderasi", None → tanpa label. Tidak pernah ditebak.
+- **Muat lebih lama**: tombol "Load earlier messages" dengan paging backwards via
+  sync.fetch + ingest; replay awal tetap maju dari seq 1 karena membangun ulang state
+  receiver sender-key (hanya in-memory di SDK).
+
+Media SDK + web:
+
+- **MediaDomain** (SDK): begin/uploadBytes(PUT HTTP)/status/commit(SHA-256 digest)/abort/
+  fetchUrl, plus convenience upload() dan download() dengan cache URL per sesi. 12 test.
+  Catatan penting: MediaKind mengikuti diskriminan server (0=Avatar, 1=Image, 2=Video,
+  3=Audio, 4=VoiceNote, 5=Document) — bukan urutan di teks tugas.
+- **Lampiran gambar di web**: tombol 📎 di composer → unggah → kirim MediaRefContent;
+  render `<img>` maks 300×300 dengan placeholder dan lightbox klik-untuk-zoom. Mime dari
+  pengirim tidak pernah dipercaya untuk render (test XSS tetap hijau).
+- **Unggah avatar**: di panel profil → unggah media kind Avatar → updateProfile.
+
+Verifikasi: 80 suite server, 114 test SDK, 108 test web, 14 gate CI, e2e dua-akun lulus.

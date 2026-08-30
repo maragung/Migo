@@ -8,12 +8,20 @@
  * its topic (that is what {@link MigoClient.loadConversations} does), so messages start arriving without
  * any extra step. Live inbound messages reorder the list and set an unread mark; opening a conversation
  * clears it. Nothing polls — reordering is driven by the SDK's message stream.
+ *
+ * The provider also owns the sidebar's last-message previews. A summary's `lastMessage` is a sealed
+ * `MessageEvent`; the only way to read it is the SDK's decrypt-and-deliver path, so each page's
+ * lastMessages are replayed through {@link MessagingDomain.ingest} and whatever opens is captured from
+ * the same message stream the rest of the app listens to. An event that cannot open yet (its sender's
+ * key distribution has not replayed on this fresh session) is buffered by the messaging layer and
+ * surfaces through this same handler once it does — so the preview simply appears when it becomes
+ * readable, with no second pipeline to keep in step.
  */
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import type { ConversationSummary, Id } from '@migo/sdk';
+import type { ConversationSummary, Id, IncomingMessage } from '@migo/sdk';
 
 import { useMigo } from './use-migo.js';
 
@@ -30,6 +38,11 @@ export interface ConversationsContextValue {
   markRead: (conversationId: Id) => void;
   /** Insert a just-created conversation at the top if it is not already present. */
   noteConversation: (summary: ConversationSummary) => void;
+  /**
+   * The newest decrypted message per conversation, for the sidebar's preview line. Sparse by
+   * design: a conversation whose last message has not opened (or was deleted) is simply absent.
+   */
+  lastPreviews: ReadonlyMap<Id, IncomingMessage>;
 }
 
 const ConversationsContext = createContext<ConversationsContextValue | null>(null);
@@ -42,11 +55,14 @@ export function ConversationsProvider({ children }: { children: ReactNode }): Re
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [unread, setUnread] = useState<ReadonlySet<Id>>(new Set());
+  const [lastPreviews, setLastPreviews] = useState<ReadonlyMap<Id, IncomingMessage>>(new Map());
 
   const itemsRef = useRef<ConversationSummary[]>([]);
   const accountIdRef = useRef<Id | null>(accountId);
   itemsRef.current = items;
   accountIdRef.current = accountId;
+  /** True while replaying summaries' lastMessages for preview, so the live handler can tell a replay from traffic. */
+  const previewReplayRef = useRef(false);
 
   const load = useCallback(
     async (reset: boolean): Promise<void> => {
@@ -61,6 +77,20 @@ export function ConversationsProvider({ children }: { children: ReactNode }): Re
           reset ? response.conversations : mergeById(prev, response.conversations),
         );
         setCursor(response.nextCursor);
+        // Replay each sealed lastMessage through the decrypt path to prime the preview map. Delivery
+        // is synchronous and reaches every message listener; the flag keeps this provider's own
+        // live-stream handling (reorder, unread) from firing for a replay, since the summary already
+        // fixes the row's position and the unread badge is computed from its cursors.
+        previewReplayRef.current = true;
+        try {
+          for (const summary of response.conversations) {
+            if (summary.lastMessage !== undefined) {
+              client.messaging.ingest(summary.lastMessage);
+            }
+          }
+        } finally {
+          previewReplayRef.current = false;
+        }
       } catch {
         setError('Could not load conversations.');
       } finally {
@@ -110,12 +140,25 @@ export function ConversationsProvider({ children }: { children: ReactNode }): Re
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, resetNonce]);
 
-  // Live reordering and unread marks from the message stream.
+  // Live reordering, unread marks, and preview updates from the message stream.
   useEffect(() => {
     if (!client) {
       return;
     }
     const off = client.messaging.onMessage((message) => {
+      // Whatever opened is, by delivery order, the conversation's newest readable message — true
+      // for live traffic and for the preview replay alike, so both record it here.
+      setLastPreviews((prev) => {
+        if (prev.get(message.conversationId)?.messageId === message.messageId) {
+          return prev;
+        }
+        const next = new Map(prev);
+        next.set(message.conversationId, message);
+        return next;
+      });
+      if (previewReplayRef.current) {
+        return;
+      }
       const index = itemsRef.current.findIndex(
         (item) => item.conversationId === message.conversationId,
       );
@@ -139,7 +182,24 @@ export function ConversationsProvider({ children }: { children: ReactNode }): Re
         });
       }
     });
-    return off;
+
+    // A deleted last message must not keep previewing its (now gone) content: drop the preview so
+    // the row falls back to the summary's sealed event, which the server has already tombstoned.
+    const offDeletion = client.messaging.onDeletion((deletion) => {
+      setLastPreviews((prev) => {
+        if (prev.get(deletion.conversationId)?.messageId !== deletion.messageId) {
+          return prev;
+        }
+        const next = new Map(prev);
+        next.delete(deletion.conversationId);
+        return next;
+      });
+    });
+
+    return () => {
+      off();
+      offDeletion();
+    };
   }, [client, load]);
 
   const value: ConversationsContextValue = {
@@ -152,6 +212,7 @@ export function ConversationsProvider({ children }: { children: ReactNode }): Re
     unread,
     markRead,
     noteConversation,
+    lastPreviews,
   };
 
   return <ConversationsContext.Provider value={value}>{children}</ConversationsContext.Provider>;

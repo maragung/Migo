@@ -92,6 +92,7 @@ import { TypingDomain } from './domains/typing.js';
 import { PresenceDomain } from './domains/presence.js';
 import { RoomsDomain } from './domains/rooms.js';
 import { ProfileDomain } from './domains/profile.js';
+import { MediaDomain } from './domains/media.js';
 import { NotificationsDomain } from './domains/notifications.js';
 import { SocialDomain } from './domains/social.js';
 import { EconomyDomain } from './domains/economy.js';
@@ -174,6 +175,7 @@ interface Connected {
   presence: PresenceDomain;
   rooms: RoomsDomain;
   profile: ProfileDomain;
+  media: MediaDomain;
   notifications: NotificationsDomain;
   social: SocialDomain;
   economy: EconomyDomain;
@@ -291,6 +293,11 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   /** Look up public account profiles. */
   get profile(): ProfileDomain {
     return this.#requireConnected().profile;
+  }
+
+  /** Upload and download media objects: the attachments and avatars messages point at. */
+  get media(): MediaDomain {
+    return this.#requireConnected().media;
   }
 
   /** Receive server-pushed notification events. */
@@ -777,6 +784,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
       presence: new PresenceDomain(rpc, this.#options.onEventError),
       rooms: new RoomsDomain(rpc, this.#options.onEventError),
       profile: new ProfileDomain(rpc),
+      media: new MediaDomain(rpc, this.#options.fetch),
       notifications: new NotificationsDomain(rpc, this.#options.onEventError),
       social: new SocialDomain(rpc, this.#options.onEventError),
       economy: new EconomyDomain(rpc),

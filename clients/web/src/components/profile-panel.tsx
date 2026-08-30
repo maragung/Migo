@@ -1,11 +1,12 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
-import type { ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ChangeEvent, ReactNode } from 'react';
 
 import type { ProfileUpdate, UserProfile } from '@migo/sdk';
 
 import { friendlyError } from '@/lib/migo/errors.js';
+import { uploadAvatarMedia } from '@/lib/migo/media.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 
 import { Avatar } from './avatar.js';
@@ -73,8 +74,10 @@ export function ProfilePanel(): ReactNode {
   });
   const [primed, setPrimed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [avatarBusy, setAvatarBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const avatarInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!client || !accountId) {
@@ -140,6 +143,47 @@ export function ProfilePanel(): ReactNode {
     }
   }, [client, profile, busy, displayName, bio, privacy]);
 
+  /**
+   * Uploads a picked image as the new avatar, then patches the profile to point at it.
+   *
+   * The two steps are one action to the user, so the busy state covers both and a failure anywhere
+   * surfaces beside the picker that started it. The reply is the authoritative profile, adopted
+   * wholesale exactly like {@link save} does.
+   */
+  const changeAvatar = useCallback(
+    async (file: File): Promise<void> => {
+      if (!client || avatarBusy) {
+        return;
+      }
+      setAvatarBusy(true);
+      setError(null);
+      setSaved(false);
+      try {
+        const mediaId = await uploadAvatarMedia(client, file);
+        const updated = await client.profile.updateProfile({ avatarMediaId: mediaId });
+        setProfile(updated);
+        setDisplayName(updated.displayName);
+        setBio(updated.bio ?? '');
+        setSaved(true);
+      } catch (cause) {
+        setError(friendlyError(cause));
+      } finally {
+        setAvatarBusy(false);
+      }
+    },
+    [client, avatarBusy],
+  );
+
+  function onAvatarChange(event: ChangeEvent<HTMLInputElement>): void {
+    const file = event.target.files?.[0];
+    // Reset the input so picking the same file again still fires a change event.
+    event.target.value = '';
+    if (file === undefined) {
+      return;
+    }
+    void changeAvatar(file);
+  }
+
   const dirty =
     profile !== null &&
     (displayName.trim() !== profile.displayName ||
@@ -174,6 +218,24 @@ export function ProfilePanel(): ReactNode {
             <span className="person-name">{profile.displayName}</span>
             {profile.username ? <span className="person-sub">@{profile.username}</span> : null}
             <span className="person-note">{profile.publicId}</span>
+          </div>
+          <div className="avatar-actions">
+            <input
+              ref={avatarInputRef}
+              type="file"
+              accept="image/*"
+              onChange={onAvatarChange}
+              hidden
+              aria-label="Upload a new avatar"
+            />
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => avatarInputRef.current?.click()}
+              disabled={avatarBusy}
+            >
+              {avatarBusy ? <Spinner /> : 'Change photo'}
+            </button>
           </div>
         </div>
       ) : null}

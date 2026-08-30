@@ -126,6 +126,8 @@ export type { PresenceOptions } from './domains/presence.js';
 export { RoomsDomain } from './domains/rooms.js';
 export type { RoomListFilter } from './domains/rooms.js';
 export { ProfileDomain } from './domains/profile.js';
+export { MediaDomain, MediaKind } from './domains/media.js';
+export type { UploadOptions, UploadResult } from './domains/media.js';
 export { NotificationsDomain } from './domains/notifications.js';
 export { SocialDomain } from './domains/social.js';
 export { EconomyDomain } from './domains/economy.js';
@@ -203,6 +205,9 @@ export type {
   GiftSendResult,
   InboxItem,
   LedgerEntryWire,
+  MediaProgress,
+  MediaTicket,
+  MediaUrl,
   MessageAccepted,
   MessageEvent,
   MessageReceipt,

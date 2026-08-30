@@ -404,6 +404,11 @@ main {
   align-items: center;
   gap: 12px;
 }
+.avatar-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+}
 .profile-id {
   display: flex;
   flex-direction: column;
@@ -621,6 +626,20 @@ main {
   display: flex;
   align-items: center;
   gap: 6px;
+  text-align: right;
+}
+
+/* Screen-reader-only text: labels state (read/sent ticks) that the glyph alone cannot convey. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .message-list {
@@ -631,6 +650,12 @@ main {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+.load-earlier {
+  align-self: center;
+  margin: 2px 0 10px;
+  padding: 6px 14px;
+  font-size: 12.5px;
 }
 .day-divider {
   align-self: center;
@@ -644,13 +669,59 @@ main {
 }
 .bubble-row {
   display: flex;
+  align-items: flex-end;
   margin-top: 2px;
 }
 .bubble-row.out {
   justify-content: flex-end;
 }
-.bubble {
+/* The stack holds a run header (group sender name), an optional reply quote, and the bubble line,
+   and carries the width cap so every part of one message shares the same bound. */
+.bubble-stack {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
   max-width: min(680px, 76%);
+}
+.sender-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin: 6px 0 2px 4px;
+}
+.reply-quote {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 2px;
+  padding: 4px 10px;
+  border-left: 3px solid var(--accent);
+  border-radius: 7px;
+  background: var(--bubble-in);
+  font-size: 12.5px;
+  min-width: 0;
+}
+.reply-quote-name {
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.reply-quote-text {
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bubble-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+/* Hover actions sit beside the bubble: after it for incoming, before it (row-reverse) for outgoing. */
+.bubble-row.out .bubble-line {
+  flex-direction: row-reverse;
+}
+.bubble {
+  max-width: 100%;
   padding: 8px 12px;
   border-radius: 16px;
   word-wrap: break-word;
@@ -676,6 +747,104 @@ main {
 .bubble.placeholder {
   font-style: italic;
   opacity: 0.85;
+}
+/* Read ticks share the meta line; bold and tight so the two glyphs read as one mark. */
+.bubble .meta .ticks {
+  margin-left: 5px;
+  font-weight: 700;
+  letter-spacing: -1.5px;
+}
+.bubble .meta .ticks.sent {
+  opacity: 0.75;
+}
+/* A tombstone is proof a message existed, not content: neutral, italic, dimmed. */
+.bubble.tombstone {
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+  border-radius: 12px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+.bubble-row.out .bubble.tombstone {
+  background: transparent;
+  color: var(--text-dim);
+}
+/* Hover actions are invisible until the row is hovered or focused, so the transcript stays quiet. */
+.row-actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.bubble-row:hover .row-actions,
+.row-actions:focus-within {
+  opacity: 1;
+}
+.row-action-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1;
+}
+.row-action-btn:hover {
+  color: var(--text);
+  filter: brightness(1.1);
+}
+
+/* --- media attachments --- */
+
+/*
+ * The frame is a button so the image is keyboard-reachable, styled down to a bare clickable
+ * image; the dimensions cap lives on the img so the browser scales the intrinsic aspect ratio.
+ */
+.media-frame {
+  padding: 0;
+  border: none;
+  background: none;
+  display: block;
+  border-radius: 10px;
+  overflow: hidden;
+  cursor: zoom-in;
+}
+.media-frame img {
+  display: block;
+  max-width: 300px;
+  max-height: 300px;
+}
+.media-attachment {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 100%;
+}
+.media-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.media-caption {
+  font-size: 13px;
+  opacity: 0.9;
+}
+.lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 7, 18, 0.88);
+  display: grid;
+  place-items: center;
+  z-index: 60;
+  cursor: zoom-out;
+}
+.lightbox-image {
+  max-width: 92vw;
+  max-height: 92vh;
+  border-radius: 8px;
 }
 
 .typing-indicator {
@@ -717,13 +886,51 @@ main {
   }
 }
 
+/* The wrap stacks whatever sits above or below the input row: the reply bar, the upload line. */
+.composer-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+/* The reply bar quotes the message a send will answer; the X clears the target. */
+.reply-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-dim);
+  min-width: 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--accent);
+  border-radius: 7px;
+  background: var(--bg-input);
+}
+.reply-bar-label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.reply-bar-label strong {
+  color: var(--text);
+}
+.reply-bar-snippet {
+  color: var(--text-faint);
+}
+.reply-cancel {
+  width: 28px;
+  height: 28px;
+  font-size: 13px;
+  flex-shrink: 0;
+}
 .composer {
   display: flex;
   align-items: flex-end;
   gap: 10px;
-  padding: 12px 16px;
-  border-top: 1px solid var(--border);
-  background: var(--panel);
 }
 .composer textarea {
   flex: 1;
@@ -756,6 +963,37 @@ main {
 .send-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+.attach-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 17px;
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+.attach-btn:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+.attach-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.composer-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  padding: 0 4px;
+}
+.composer-error {
+  color: var(--danger);
 }
 
 /* --- empty / centered states --- */
@@ -825,6 +1063,15 @@ main {
   border: 3px solid var(--border-strong);
   border-top-color: var(--accent);
   animation: spin 0.8s linear infinite;
+  display: inline-block;
+  flex-shrink: 0;
+}
+/* The same spinner at row height, for the composer's upload line and a media placeholder. */
+.composer-meta .spinner,
+.media-pending .spinner {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
 }
 @keyframes spin {
   to {

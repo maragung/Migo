@@ -83,7 +83,21 @@ const messages: IncomingMessage[] = [
   msg({ type: ContentType.ControlEvent, event: 'sender-key', data: new Uint8Array([9, 9]) }),
 ];
 
-const markup = renderToStaticMarkup(<MessageList messages={messages} selfId={'me' as Id} />);
+const markup = renderToStaticMarkup(
+  <MessageList
+    messages={messages}
+    selfId={'me' as Id}
+    showSenders={false}
+    profiles={new Map()}
+    readUpTo={0}
+    onReply={() => {}}
+    onDelete={() => {}}
+    deleting={false}
+    hasEarlier={false}
+    loadingEarlier={false}
+    onLoadEarlier={() => {}}
+  />,
+);
 
 test('no server-controlled string is ever rendered as a live HTML element', () => {
   // Because every hostile `<` is escaped to `&lt;`, the literal `<tag` opener only appears if a REAL
