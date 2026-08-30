@@ -16,12 +16,13 @@ import test from 'node:test';
 import { config, defaultServerEndpoint } from '../src/lib/config.js';
 import type { WebConfig } from '../src/lib/config.js';
 
-test('the configuration exposes exactly the two public fields, each a non-empty string', () => {
+test('the configuration exposes exactly the two public fields', () => {
   assert.deepEqual(Object.keys(config).sort(), ['appVersion', 'defaultApiUrl']);
-  for (const value of Object.values(config)) {
-    assert.equal(typeof value, 'string');
-    assert.ok((value as string).length > 0);
-  }
+  assert.equal(typeof config.appVersion, 'string');
+  assert.ok(config.appVersion.length > 0);
+  // defaultApiUrl may be undefined when the build was made without one — the same-origin
+  // detector fills the gap at runtime, which is the fix for the fresh-visit "could not
+  // reach the server" that a burned-in localhost default produced.
 });
 
 test('no configuration value carries anything shaped like a credential', () => {
@@ -31,13 +32,14 @@ test('no configuration value carries anything shaped like a credential', () => {
   }
 });
 
-test('with no build environment set, the default endpoint falls back to localhost:18080', () => {
-  assert.equal(config.defaultApiUrl, 'http://localhost:18080');
+test('with no build environment and no window, the endpoint falls back to localhost:8080', () => {
+  // Node has no window, so the same-origin detector cannot run; the last-resort
+  // fallback is the development server's port.
   assert.equal(config.appVersion, '0.1.0');
   const endpoint = defaultServerEndpoint();
   assert.equal(endpoint.host, 'localhost');
-  assert.equal(endpoint.port, 18080);
-  assert.equal(endpoint.gatewayPort, 18081);
+  assert.equal(endpoint.port, 8080);
+  assert.equal(endpoint.gatewayPort, 8080);
   assert.equal(endpoint.transport, 'WebSocket');
   assert.equal(endpoint.scheme, 'Ws');
   assert.equal(endpoint.restScheme, 'Http');

@@ -18,9 +18,9 @@
 //! theme override and no accent picker: a messenger is read for hours at a time, and the useful
 //! knob is the one the operating system already provides.
 //!
-//! # The dark theme is the mig33 theme
+//! # The dark theme is the neon theme
 //!
-//! Dark is not a neutral grey scale but the mig33 palette: near-black surfaces with a faint
+//! Dark is not a neutral grey scale but the neon palette: near-black surfaces with a faint
 //! violet cast, one neon cyan accent, neon green for "online" and success, and a red kept well
 //! away from the accent so a failure can never be mistaken for a highlight. The light theme
 //! stays the quiet one it always was, because a neon palette on white is unreadable, not
@@ -107,7 +107,7 @@ pub struct Palette {
     pub verified: Color32,
 }
 
-/// The mig33 neon dark theme, and the default.
+/// The neon dark theme, and the default.
 ///
 /// The surfaces sit almost at black with a violet cast (`#0a0a12` window, `#111118` panel) so the
 /// cyan accent is the brightest saturated thing on screen by a wide margin — the neon effect the
@@ -367,12 +367,12 @@ pub fn install(ctx: &egui::Context, theme: Theme) {
 mod tests {
     use super::*;
 
-    /// The mig33 palette as specified, spelled out once so a regression is a diff against the
+    /// The neon palette as specified, spelled out once so a regression is a diff against the
     /// spec rather than against itself. Only the roles the spec names are asserted; the derived
     /// surfaces (overlay, hover, selected, borders) are free to move as the theme is tuned, and
     /// pinning them here would turn every polish into a test failure.
     #[test]
-    fn dark_is_the_mig33_palette() {
+    fn dark_is_the_neon_palette() {
         let p = palette(Theme::Dark);
         assert_eq!(p.surface, Color32::from_rgb(0x0a, 0x0a, 0x12));
         assert_eq!(p.surface_raised, Color32::from_rgb(0x11, 0x11, 0x18));
@@ -383,7 +383,7 @@ mod tests {
         assert_eq!(p.text_muted, Color32::from_rgb(0x88, 0x88, 0xa0));
     }
 
-    /// The light theme is untouched by the mig33 rework: its job is to stay the quiet one.
+    /// The light theme is untouched by the neon rework: its job is to stay the quiet one.
     #[test]
     fn light_keeps_its_own_palette() {
         let p = palette(Theme::Light);

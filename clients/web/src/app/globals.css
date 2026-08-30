@@ -2053,7 +2053,7 @@ main {
   color: var(--text-dim);
 }
 
-/* --- settings, profiles, rooms, presence, gifts: the mig33 feature surfaces --- */
+/* --- settings, profiles, rooms, presence, gifts: the expanded feature surfaces --- */
 
 /* A small pill tag: the current-device mark, the chosen recipient mark. */
 .tag {

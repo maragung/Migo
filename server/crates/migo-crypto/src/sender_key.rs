@@ -1,7 +1,7 @@
 //! Sender keys — group messaging without quadratic cost.
 //!
 //! A pairwise Double Ratchet in a 200-member group means encrypting every message
-//! 199 times. At mig33-era group sizes that is the difference between a message
+//! 199 times. At messenger-era group sizes that is the difference between a message
 //! that sends and a message that times out on a 2G connection.
 //!
 //! Instead, each sender keeps one symmetric chain per group. The chain key is

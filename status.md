@@ -723,9 +723,9 @@ dan P1 diperbaiki:
 Verifikasi: 83 suite server, 132 test SDK, 187 test web, 14 gate, doc-link bersih,
 e2e dua-akun lulus.
 
-## 22. mig33 alen v2 theme + integrasi penuh + port 19992 (v0.6.0)
+## 22. Tema neon dark + integrasi penuh + port 19992 (v0.6.0)
 
-**Tema mig33 neon**: seluruh globals.css di-retheme ke estetika mig33 alen v2 — latar
+**Tema neon dark**: seluruh globals.css di-retheme ke estetika neon messenger — latar
 `#0a0a12` (hitam pekat), aksen neon cyan `#00d4ff` / hijau `#00ff88`, radius 6px (kompak),
 font 14px, glow effects pada hover/focus, backdrop-filter blur pada tab rail dan modal,
 scrollbar cyan-tipis, bubble outgoing dengan gradient cyan, tab rail semi-transparan.
@@ -756,7 +756,7 @@ server hanya memanggil `Graph::block` — tak ada jalur wire untuk unblock.
   sidebar header, **blocked section** di friends panel.
 - Tab rail kini 7 tab: Chats, Friends, Notifications, Discover, Gifts, Profile, Settings.
 
-**Desktop client** (mig33 + fitur): tema dark neon cyan di theme.rs (13 test),
+**Desktop client** (tema neon + fitur): tema dark neon cyan di theme.rs (13 test),
 navigasi rail dengan 3 tab (Chat/Friends/Settings), friends panel dengan search +
 accept/decline + presence, settings panel dengan device list + revoke + theme toggle,
 chat dengan avatar peer + label enkripsi + unread badge. 31 test desktop total.
