@@ -1,6 +1,6 @@
 Kode program memakai bahasa English.
 
-Migo adalah platform komunikasi dan social community modern yang terinspirasi dari konsep mig33, tetapi dibangun ulang dari nol dengan arsitektur modern, hemat bandwidth, aman, scalable, multi-region, dan mendukung Public Room, Managed Room, private chat, group chat, social system, virtual economy, mini games, serta game bots. Nama produk: Migo.
+Migo adalah platform komunikasi dan social community modern yang terinspirasi dari konsep messenger komunitas klasik, tetapi dibangun ulang dari nol dengan arsitektur modern, hemat bandwidth, aman, scalable, multi-region, dan mendukung Public Room, Managed Room, private chat, group chat, social system, virtual economy, mini games, serta game bots. Nama produk: Migo.
 
 0. STATUS DOKUMEN DAN KONVENSI
 
@@ -3675,7 +3675,7 @@ Bandwidth behavior sesuai target
 
 135. FINAL OBJECTIVE
 
-Bangun Migo sebagai platform messenger dan community global modern yang mempertahankan konsep terbaik mig33:
+Bangun Migo sebagai platform messenger dan community global modern yang mempertahankan konsep terbaik messenger komunitas klasik:
 
 Chat 1-on-1
 Group Chat
@@ -3718,7 +3718,7 @@ Bot sandbox
 Game engine
 Modern security
 
-Tujuan akhirnya adalah Migo terasa ringan seperti messenger era mig33, tetapi secara arsitektur mampu berkembang menjadi platform global dengan jutaan pengguna, ribuan Public Room, Managed Room berskala besar, game bots, voice note, voice call, video call, dan komunikasi terenkripsi yang aman.
+Tujuan akhirnya adalah Migo terasa ringan seperti messenger era klasik, tetapi secara arsitektur mampu berkembang menjadi platform global dengan jutaan pengguna, ribuan Public Room, Managed Room berskala besar, game bots, voice note, voice call, video call, dan komunikasi terenkripsi yang aman.
 
 Spesifikasi protocol yang menjadi dasar seluruh poin di atas ada pada bagian 136 sampai 178. Bagian tersebut bersifat normative: jika bagian produk 1 sampai 135 dan bagian protocol 136 sampai 178 berbeda mengenai perilaku protocol, bagian protocol yang berlaku. Aturan lengkapnya ada pada bagian 0.
 

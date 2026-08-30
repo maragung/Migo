@@ -48,11 +48,25 @@ export function defaultServerEndpoint(): ServerEndpoint {
   }
   if (typeof window !== 'undefined' && window.location) {
     const { protocol, hostname } = window.location;
-    const scheme = protocol === 'https:' ? 'https' : 'http';
+    const isSecure = protocol === 'https:';
+    const scheme = isSecure ? 'https' : 'http';
     const endpoint = serverEndpointFromUrl(`${scheme}://${hostname}:8080`);
     // The gateway rides the same port as REST (migod serves /ws on its HTTP listener),
     // not the REST port + 1 the URL helper assumes for split-port deployments.
-    return { ...endpoint, gatewayPort: endpoint.port };
+    // The schemes follow the page's own protocol: a server that served this page over
+    // plain HTTP has no TLS certificate, so the SDK's non-loopback default of
+    // Wss/Https would try to open a TLS connection to a plain-HTTP port and fail.
+    return {
+      ...endpoint,
+      scheme: isSecure ? 'Wss' : 'Ws',
+      restScheme: isSecure ? 'Https' : 'Http',
+      gatewayPort: endpoint.port,
+    };
   }
-  return { ...serverEndpointFromUrl('http://localhost:8080'), gatewayPort: 8080 };
+  return {
+    ...serverEndpointFromUrl('http://localhost:8080'),
+    scheme: 'Ws',
+    restScheme: 'Http',
+    gatewayPort: 8080,
+  };
 }
