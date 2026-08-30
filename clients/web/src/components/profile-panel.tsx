@@ -13,7 +13,8 @@ import type { ResolvedProfile } from '@/lib/migo/use-profiles.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 
 import { Avatar } from './avatar.js';
-import { ProgressionCard } from './gifts-panel.js';
+import { Icon } from './icons.js';
+import { ProgressionCard } from './wallet-panel.js';
 import { Spinner } from './spinner.js';
 
 /**
@@ -320,7 +321,7 @@ export function ProfilePanel({ onOpenSettings }: { onOpenSettings?: () => void }
                 onClick={onOpenSettings}
                 aria-label="Open settings"
               >
-                ⚙️ Settings
+                <Icon name="settings" size={16} /> Settings
               </button>
             ) : null}
           </div>

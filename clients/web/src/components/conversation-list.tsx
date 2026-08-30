@@ -23,6 +23,7 @@ import type { ResolvedProfile } from '@/lib/migo/use-profiles.js';
 import { conversationHref, useOpenConversation } from '@/lib/migo/use-open-conversation.js';
 
 import { Avatar } from './avatar.js';
+import { Icon } from './icons.js';
 import { Spinner } from './spinner.js';
 
 /** The sidebar's preview line is a fixed-height row; anything longer is noise next to a title. */
@@ -135,7 +136,9 @@ export function ConversationList(): ReactNode {
     return (
       <div className="center-fill">
         <div>
-          <div className="emoji">💬</div>
+          <div className="emoji">
+            <Icon name="chats" size={24} />
+          </div>
           {error ?? 'No conversations yet. Start one with the + button.'}
         </div>
       </div>

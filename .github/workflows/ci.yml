@@ -323,6 +323,12 @@ jobs:
       - name: Cross-language conformance vectors, TypeScript side
         run: make test-vectors-ts
 
+      # The full static-export build runs in CI — where every heavy build belongs — so a
+      # Next.js regression (a bad route, a client-only API on the server path) fails the
+      # pipeline before it can reach a release, without costing the dev machine anything.
+      - name: Web production build
+        run: make build-web
+
   # ------------------------------------------------------------------ audit
   # Advisories are news, not a reason to block an unrelated change: a CVE published
   # this morning against a transitive dependency would otherwise stop every pull

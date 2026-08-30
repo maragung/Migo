@@ -11,6 +11,7 @@ import { useMigo } from '@/lib/migo/use-migo.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
 
 import { Avatar } from './avatar.js';
+import { Icon } from './icons.js';
 import { Spinner } from './spinner.js';
 
 /** The inbox page the panel asks for; the server owns the ceiling it clamps this to. */
@@ -111,7 +112,9 @@ export function NotificationsPanel(): ReactNode {
       ) : items.length === 0 ? (
         <div className="center-fill">
           <div>
-            <div className="emoji">🔔</div>
+            <div className="emoji">
+              <Icon name="bell" size={24} />
+            </div>
             You are all caught up.
           </div>
         </div>

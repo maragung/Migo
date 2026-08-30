@@ -35,8 +35,10 @@ use std::time::Duration;
 
 use migo_core::{Id, OsRandom, Random, Timestamp};
 use migo_protocol::{
-    features, ClientInfo, ConversationKind, EncryptionMode, FriendRespond, FriendTarget,
-    MessageKind, Opcode, RelationshipListReq, SubscribeRequest, Topic, TopicKind,
+    features, BadgesReq, ClientInfo, ConversationKind, EncryptionMode, FriendRespond, FriendTarget,
+    GiftCatalogueReq, GiftSend, InboxReq, LeaderboardReq, LedgerReq, MessageKind, NotificationAck,
+    Opcode, ProgressionReq, RelationshipListReq, RoomJoinRequest, RoomListRequest, SearchReq,
+    SubscribeRequest, SuggestReq, Topic, TopicKind, WalletReq,
 };
 use tokio::sync::mpsc;
 
@@ -45,8 +47,9 @@ use crate::crypto::content::{self, Content};
 use crate::crypto::envelope::Envelope;
 use crate::crypto::session::{DeviceKeys, SessionStore, ONE_TIME_PREKEY_COUNT};
 use crate::model::{
-    self, Account, Body, Connection, Conversation, Delivery, Message, Relationship,
-    RelationshipKind, SessionRow, ToastKind,
+    self, Account, AlertRow, Body, Connection, Conversation, Delivery, GiftRow, LeaderRow,
+    LedgerRow, Message, PersonRow, Progression, Relationship, RelationshipKind, RoomRow,
+    SessionRow, ToastKind,
 };
 use crate::net::gateway::{Gateway, GatewayError};
 use crate::net::rest::{CaptchaChallenge, CaptchaProof, DeviceRequest, Rest, RestError};
@@ -136,6 +139,8 @@ pub enum Command {
     SendText { conversation_id: Id, text: String },
     /// Start a direct conversation with one username.
     StartDirect { username: String },
+    /// Start a direct conversation with an account id already held — a search hit, a suggestion.
+    StartDirectById { peer: Id },
     /// Report typing state. Best effort; dropped silently when offline.
     Typing { conversation_id: Id, typing: bool },
     /// Mark everything up to `seq` as read.
@@ -159,6 +164,24 @@ pub enum Command {
     Sessions,
     /// End one session of the account, by the id the list reported.
     RevokeSession { session_id: Id },
+    /// Refresh the public room directory, optionally narrowed by a query.
+    Rooms { query: String },
+    /// Join a room, whose conversation opens like any other when the join is accepted.
+    JoinRoom { room_id: Id },
+    /// Read the durable notification inbox.
+    Notifications,
+    /// Mark every notification at or before one instant read.
+    AcknowledgeAlerts { through_unix_ms: i64 },
+    /// Read the wallet's whole economy: balance, statement, progression, badges, leaderboard,
+    /// and the gift catalogue — six reads fired together, each arriving as its own event.
+    Wallet,
+    /// Buy and deliver a gift; the wallet re-reads after, because the server's arithmetic is the
+    /// only arithmetic worth showing.
+    SendGift { sku: String, recipient: Id },
+    /// Search public profiles by username prefix.
+    SearchPeople { query: String },
+    /// Ask the social graph for its own suggestions.
+    Suggestions,
     /// Stop the worker. Sent on window close.
     Shutdown,
 }
@@ -243,6 +266,28 @@ pub enum Event {
     /// devices" are different states and only one of them should reassure anybody — so it rides
     /// the same event rather than dying as a toast.
     Sessions(Result<Vec<SessionRow>, String>),
+    /// The public room directory, reduced to rows.
+    Rooms(Vec<RoomRow>),
+    /// A join was accepted and its conversation is ready to open.
+    RoomJoined { conversation_id: Id, title: String },
+    /// The durable notification inbox, newest first.
+    Alerts(Vec<AlertRow>),
+    /// A notification was pushed: the cue to re-read whatever inbox-shaped surface is showing.
+    AlertPushed,
+    /// The caller's wallet: the MIG coin balance and the points balance.
+    Balance { coins: u64, points: u64 },
+    /// The wallet's statement, newest first.
+    Ledger(Vec<LedgerRow>),
+    /// The caller's XP progression.
+    ProgressionArrived(Progression),
+    /// The caller's badges, by code.
+    Badges(Vec<String>),
+    /// The XP leaderboard page.
+    Leaderboard(Vec<LeaderRow>),
+    /// The gift catalogue: SKU, name, price, category.
+    Gifts(Vec<GiftRow>),
+    /// Accounts found by search or offered as suggestions.
+    People(Vec<PersonRow>),
     /// Something worth a line at the bottom of the window.
     Toast { text: String, kind: ToastKind },
 }
@@ -545,6 +590,7 @@ impl Worker {
                 self.send_text(conversation_id, text).await;
             }
             Command::StartDirect { username } => self.start_direct(username).await,
+            Command::StartDirectById { peer } => self.start_direct_by_id(peer).await,
             Command::Typing {
                 conversation_id,
                 typing,
@@ -566,6 +612,18 @@ impl Worker {
             Command::RevokeSession { session_id } => {
                 self.revoke_session(session_id).await;
             }
+            Command::Rooms { query } => self.request_rooms(query).await,
+            Command::JoinRoom { room_id } => self.join_room(room_id).await,
+            Command::Notifications => self.request_notifications().await,
+            Command::AcknowledgeAlerts { through_unix_ms } => {
+                self.acknowledge_alerts(through_unix_ms).await;
+            }
+            Command::Wallet => self.request_wallet().await,
+            Command::SendGift { sku, recipient } => {
+                self.send_gift(sku, recipient).await;
+            }
+            Command::SearchPeople { query } => self.search_people(query).await,
+            Command::Suggestions => self.request_suggestions().await,
             Command::Shutdown => {}
         }
     }
@@ -807,6 +865,13 @@ impl Worker {
                 // list is: the other devices of this account act on it too, and a client that
                 // never re-reads shows a friendship that ended an hour ago.
                 self.request_relationships().await;
+                // The dashboard's own facts ride the same reconnect: the rooms, the suggestions,
+                // the inbox, and the wallet are the session's other four screens' first reads,
+                // and a reconnect is a session boundary to them too.
+                self.request_rooms(String::new()).await;
+                self.request_suggestions().await;
+                self.request_notifications().await;
+                self.request_wallet().await;
             }
             Err(error) => {
                 self.sink
@@ -921,6 +986,23 @@ impl Worker {
                 ToastKind::Info,
             ),
         }
+    }
+
+    /// Starts a direct conversation with an account id already held.
+    ///
+    /// The parsed-id path of [`Self::start_direct`] without the parsing: a search hit or a
+    /// suggestion already names an account, and round-tripping its text form would be a parse of
+    /// a value this worker minted.
+    async fn start_direct_by_id(&mut self, peer: Id) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let create = migo_protocol::ConversationCreateRequest {
+            kind: ConversationKind::Direct,
+            members: vec![signed.account.account_id, peer],
+            title: None,
+        };
+        self.request(Opcode::ConversationCreate, &create).await;
     }
 
     async fn send_typing(&mut self, conversation_id: Id, typing: bool) {
@@ -1220,6 +1302,294 @@ impl Worker {
         }
     }
 
+    /// Requests the public room directory, narrowed by a query when one is held.
+    async fn request_rooms(&mut self, query: String) {
+        let query = query.trim().to_owned();
+        let message = RoomListRequest {
+            limit: 50,
+            query: (!query.is_empty()).then_some(query),
+            category: None,
+            language: None,
+            country: None,
+            cursor: None,
+        };
+        self.request(Opcode::RoomList, &message).await;
+    }
+
+    /// Joins a room. The reply names both halves — the room and the conversation — and the
+    /// conversation list re-reads behind it, exactly as a started direct chat does.
+    async fn join_room(&mut self, room_id: Id) {
+        let message = RoomJoinRequest {
+            room_id,
+            invite_code: None,
+        };
+        self.request(Opcode::RoomJoin, &message).await;
+    }
+
+    /// Requests the durable notification inbox.
+    async fn request_notifications(&mut self) {
+        // The server keeps no pagination cursor for the inbox, so the page is asked for plainly.
+        let message = InboxReq {
+            limit: 50,
+            cursor: None,
+        };
+        self.request(Opcode::NotificationList, &message).await;
+    }
+
+    /// Marks every notification at or before one instant read.
+    ///
+    /// The wire carries an id rather than a timestamp, and the server reads the id's embedded time
+    /// prefix as the watermark — so this synthesises an id whose prefix *is* the instant: the six
+    /// leading bytes of the millisecond count, then zeros. It names an instant, not an entity.
+    async fn acknowledge_alerts(&mut self, through_unix_ms: i64) {
+        let ms = through_unix_ms.max(0) as u64;
+        let mut bytes = [0u8; 16];
+        bytes[0] = (ms >> 40) as u8;
+        bytes[1] = (ms >> 32) as u8;
+        bytes[2] = (ms >> 24) as u8;
+        bytes[3] = (ms >> 16) as u8;
+        bytes[4] = (ms >> 8) as u8;
+        bytes[5] = ms as u8;
+        let message = NotificationAck {
+            id: migo_core::Id::from_bytes(bytes),
+        };
+        self.request(Opcode::NotificationAck, &message).await;
+    }
+
+    /// Fires the wallet's whole economy: six reads, each arriving as its own event.
+    async fn request_wallet(&mut self) {
+        self.request(Opcode::BalanceFetch, &WalletReq {}).await;
+        let ledger = LedgerReq { limit: Some(10) };
+        self.request(Opcode::LedgerHistory, &ledger).await;
+        if let Some(signed) = self.signed.as_ref() {
+            let me = signed.account.account_id;
+            self.request(Opcode::Progression, &ProgressionReq { of_account: me })
+                .await;
+            self.request(Opcode::Badges, &BadgesReq { of_account: me })
+                .await;
+        }
+        let board = LeaderboardReq {
+            board: "xp".to_owned(),
+            limit: Some(10),
+        };
+        self.request(Opcode::Leaderboard, &board).await;
+        self.request(Opcode::GiftCatalogue, &GiftCatalogueReq {})
+            .await;
+    }
+
+    /// Buys and delivers a gift. On acceptance the wallet re-reads, so the balance and the
+    /// statement move to the server's arithmetic rather than a local guess.
+    async fn send_gift(&mut self, sku: String, recipient: Id) {
+        let message = GiftSend {
+            gift: sku,
+            recipient,
+            conversation_id: None,
+        };
+        self.request(Opcode::GiftSend, &message).await;
+    }
+
+    /// Searches public profiles by username prefix.
+    async fn search_people(&mut self, query: String) {
+        let message = SearchReq {
+            query: query.trim().to_owned(),
+            limit: Some(10),
+        };
+        self.request(Opcode::Search, &message).await;
+    }
+
+    /// Asks the social graph for its own suggestions.
+    async fn request_suggestions(&mut self) {
+        let message = SuggestReq { limit: Some(8) };
+        self.request(Opcode::Suggestions, &message).await;
+    }
+
+    /// The room directory came back: reduce it to rows.
+    fn on_rooms(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(response) = gateway::decode::<migo_protocol::RoomListResponse>(frame) else {
+            return;
+        };
+        let rows = response
+            .rooms
+            .into_iter()
+            .map(|room| RoomRow {
+                room_id: room.room_id,
+                name: room.name,
+                topic: room.topic.filter(|topic| !topic.is_empty()),
+                member_count: room.member_count,
+                online_count: room.online_count,
+                category: room.category,
+                verified: room.verified.unwrap_or(false),
+            })
+            .collect();
+        self.sink.send(Event::Rooms(rows));
+    }
+
+    /// A join was accepted: note the conversation's (empty) member set, re-read the list, and tell
+    /// the UI which thread to open.
+    async fn on_room_joined(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(joined) = gateway::decode::<migo_protocol::RoomJoinResponse>(frame) else {
+            return;
+        };
+        if let Some(signed) = self.signed.as_mut() {
+            // A room's member set is served by the roster, not the join; the empty set here only
+            // seeds the map so a send before the list re-reads does not mis-address.
+            signed.members.entry(joined.conversation_id).or_default();
+        }
+        self.sink.send(Event::RoomJoined {
+            conversation_id: joined.conversation_id,
+            title: joined.room.name,
+        });
+        self.request_conversations().await;
+    }
+
+    /// The inbox came back: reduce it to rows.
+    fn on_alerts(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(response) = gateway::decode::<migo_protocol::InboxResponse>(frame) else {
+            return;
+        };
+        let rows = response
+            .items
+            .into_iter()
+            .map(|item| AlertRow {
+                id: item.id,
+                kind: item.kind,
+                title: item.title.filter(|title| !title.is_empty()),
+                at: item.at,
+            })
+            .collect();
+        self.sink.send(Event::Alerts(rows));
+    }
+
+    /// A notification was pushed. The push is droppable by design and carries no plaintext, so it
+    /// is a cue to re-read, never a row: the event says "look again" and nothing more.
+    fn on_alert_pushed(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(_event) = gateway::decode::<migo_protocol::NotificationEvent>(frame) else {
+            return;
+        };
+        self.sink.send(Event::AlertPushed);
+    }
+
+    /// The wallet came back.
+    fn on_balance(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(wallet) = gateway::decode::<migo_protocol::WalletView>(frame) else {
+            return;
+        };
+        self.sink.send(Event::Balance {
+            coins: wallet.balance,
+            points: wallet.points,
+        });
+    }
+
+    /// The statement came back: the sign comes from each line's reason, never its amount.
+    fn on_ledger(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(response) = gateway::decode::<migo_protocol::LedgerResponse>(frame) else {
+            return;
+        };
+        let rows = response
+            .entries
+            .into_iter()
+            .map(|entry| LedgerRow {
+                credit: model::ledger_credit(&entry.reason),
+                reason: entry.reason,
+                amount: entry.amount,
+                balance_after: entry.balance_after,
+                at: entry.at,
+            })
+            .collect();
+        self.sink.send(Event::Ledger(rows));
+    }
+
+    /// The progression came back.
+    fn on_progression(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(wire) = gateway::decode::<migo_protocol::ProgressionWire>(frame) else {
+            return;
+        };
+        self.sink.send(Event::ProgressionArrived(Progression {
+            level: wire.level,
+            xp_into_level: wire.xp_into_level,
+            xp_for_next_level: wire.xp_for_next_level,
+        }));
+    }
+
+    /// The badges came back, by code.
+    fn on_badges(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(response) = gateway::decode::<migo_protocol::BadgesResponse>(frame) else {
+            return;
+        };
+        let codes = response
+            .badges
+            .into_iter()
+            .map(|badge| badge.badge_code)
+            .collect();
+        self.sink.send(Event::Badges(codes));
+    }
+
+    /// The leaderboard came back.
+    fn on_leaderboard(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(response) = gateway::decode::<migo_protocol::LeaderboardResponse>(frame) else {
+            return;
+        };
+        let rows = response
+            .ranks
+            .into_iter()
+            .map(|rank| LeaderRow {
+                position: rank.position,
+                account_id: rank.account_id,
+                xp: rank.xp,
+                level: rank.level,
+            })
+            .collect();
+        self.sink.send(Event::Leaderboard(rows));
+    }
+
+    /// The gift catalogue came back.
+    fn on_gifts(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(response) = gateway::decode::<migo_protocol::GiftCatalogueResponse>(frame) else {
+            return;
+        };
+        let rows = response
+            .gifts
+            .into_iter()
+            .map(|gift| GiftRow {
+                sku: gift.sku,
+                name: gift.name,
+                price: gift.price,
+                category: gift.category,
+            })
+            .collect();
+        self.sink.send(Event::Gifts(rows));
+    }
+
+    /// A gift was sent (or refused): toast the outcome, then re-read the money-side facts.
+    async fn on_gift_sent(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(result) = gateway::decode::<migo_protocol::GiftSendResult>(frame) else {
+            return;
+        };
+        if result.ok {
+            self.sink.toast("Gift sent", ToastKind::Success);
+            self.request_wallet().await;
+        }
+    }
+
+    /// People came back, from search or suggestions: one event for both, because a row cannot tell
+    /// them apart and neither can the screen that draws it.
+    fn on_people(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(response) = gateway::decode::<migo_protocol::SearchResponse>(frame) else {
+            return;
+        };
+        let rows = response
+            .results
+            .into_iter()
+            .map(|person| PersonRow {
+                account_id: person.account_id,
+                username: person.username,
+                display_name: person.display_name,
+                mutual_friends: person.mutual_friends,
+            })
+            .collect();
+        self.sink.send(Event::People(rows));
+    }
+
     /// Signs out: forgets the keys locally first, then tells the server.
     ///
     /// The order matters. Local first means an unreachable server cannot leave a signed-out client
@@ -1284,6 +1654,18 @@ impl Worker {
             Opcode::FriendRequest | Opcode::FriendRespond => self.on_social_ack(&frame).await,
             Opcode::FriendEvent => self.on_friend_event(&frame),
             Opcode::PresenceEvent => self.on_presence(&frame),
+            Opcode::RoomList => self.on_rooms(&frame),
+            Opcode::RoomJoin => self.on_room_joined(&frame).await,
+            Opcode::NotificationList => self.on_alerts(&frame),
+            Opcode::NotificationEvent => self.on_alert_pushed(&frame),
+            Opcode::BalanceFetch => self.on_balance(&frame),
+            Opcode::LedgerHistory => self.on_ledger(&frame),
+            Opcode::Progression => self.on_progression(&frame),
+            Opcode::Badges => self.on_badges(&frame),
+            Opcode::Leaderboard => self.on_leaderboard(&frame),
+            Opcode::GiftCatalogue => self.on_gifts(&frame),
+            Opcode::GiftSend => self.on_gift_sent(&frame).await,
+            Opcode::Search | Opcode::Suggestions => self.on_people(&frame),
             // Everything else is either an acknowledgement with nothing to show or a feature this
             // client did not negotiate.
             _ => {}

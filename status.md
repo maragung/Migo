@@ -799,3 +799,77 @@ Verifikasi: 83 suite server, 141 test SDK, 220 test web, 31 test desktop,
 
 Verifikasi: 83 suite server, 141 test SDK, 226 test web, 33 test desktop, 14 gate CI,
 e2e dua-akun lulus, deploy live di port 19992.
+
+## 24. Redesign menyeluruh: satu design system lintas platform (v0.8.0)
+
+**Migo Design System** — sumber kebenaran kanonik baru:
+
+- `shared/design/tokens.json`: warna (light/dark), tipografi, spacing 4px, radius,
+  elevation, ikon (16/20/24px, stroke 1.75), touch target 44px, motion 120/180/240ms,
+  z-index, breakpoint. Diterapkan ke tiga client: web (CSS custom properties +
+  skala baru --sp-*/--fs-*/--motion-*/--z-*), Android (Theme.kt palet Migo +
+  MigoExtra CompositionLocal), desktop (theme.rs — palet light kini biru kanonik
+  #0077e6, bukan hijau). `docs/design-system.md` mendokumentasikan; route `/design`
+  merender sistem sebagai dokumentasi hidup.
+
+**Web client** — AppShell tiga komposisi, sepuluh section:
+
+- **AppShell** menggantikan TopNav: rail penuh (≥1024px), rail ikon (768–1023px),
+  header 44px + bottom bar lima slot Home/Chats/Rooms/Space/More (<768px; More =
+  bottom sheet). Thread terbuka melipat header global. Prefers-reduced-motion dihormati.
+- **Section baru**: Home (dashboard realtime: saldo $MIG, chat terbaru, trending
+  rooms, suggestions, digest alerts, top XP), Rooms (direktori + kategori + sort
+  Popular/New + join bersama via useJoinRoom), Space (feed aktivitas: inbox +
+  ledger gift + event live, filter Social/Rooms/Games/Economy), Search (terpadu:
+  people+rooms di wire, chats lokal, debounce 300ms, recent searches di localStorage),
+  Wallet (saldo MIG, progression, badges, gift shop + kirim gift, ledger, leaderboard).
+- **$MIG token reference**: `$MIG` word-bounded di teks pesan jadi chip yang membuka
+  Wallet (TokenText, pre-test regex murah).
+- **Tema Light/Dark/System**: pilihan system mengikuti prefers-color-scheme lewat
+  matchMedia + ThemeFollower; script pre-paint me-resolve 'system'.
+- **Komponen baru**: icons.tsx (31 ikon SVG stroke satu keluarga — menggantikan glyph
+  emoji), BottomSheet, ContextMenu (right-click desktop / long-press 450ms mobile),
+  Skeleton, EmptyState, ErrorState, conversationTitle helper.
+- **Restyle**: composer (ikon attach/gift/mic/send), sidebar (header section Chats),
+  friends (context menu + aksi Message), settings (Appearance + About + link /design),
+  notifications. Discover & Gifts panel dilebur ke Rooms & Wallet.
+- 235 test web (+9: AppShell 7, theme 2, wallet-badge; TopNav/Gifts dihapus).
+
+**Android client** — paritas penuh, bottom navigation:
+
+- **Core domain baru**: Social.kt (search/suggestions/relationships/friend ops/block
+  + FRIEND_EVENT), Economy.kt (balance/ledger/progression/badges/leaderboard/catalogue/
+  sendGift), Notifications ditambah listNotifications/acknowledgeNotifications
+  (watermark id 6-byte). Semua terwire ke MigoClient (+aksesor social/economy +
+  onFriendEvent bridging reconnect).
+- **UI**: shell bottom bar lima slot + sheet More, HomeScreen (hero saldo MIG, quick
+  actions, recent chats, trending, suggestions, digest), RoomsScreen (search
+  debounce + direktori + join), SpaceScreen (filter kategori), FriendsScreen (requests/
+  friends/suggestions + search), SearchScreen, WalletScreen (saldo/level/badges/gift
+  picker/ledger/leaderboard), AlertsScreen (mark all read), ProfileScreen. AppState
+  bertambah 7 holder state; AppViewModel bertambah ~20 action + debounce search/rooms.
+
+**Desktop client** — paritas penuh, sembilan place:
+
+- **Net layer**: Command/Event baru (Rooms/JoinRoom/Notifications/AcknowledgeAlerts/
+  Wallet/SendGift/SearchPeople/Suggestions/StartDirectById) + 13 handler frame
+  (RoomList/RoomJoin/NotificationList/NotificationEvent/BalanceFetch/LedgerHistory/
+  Progression/Badges/Leaderboard/GiftCatalogue/GiftSend/Search/Suggestions). Reconnect
+  mem-fire bundle dashboard (rooms+suggestions+inbox+wallet).
+- **UI**: Place::ALL sembilan tab (Home/Chat/Rooms/Space/Friends/Alerts/Search/Wallet/
+  Settings) dengan refresh per-place; home.rs (dashboard dari state place lain),
+  rooms.rs, space.rs (merge inbox+ledger, dedupe by key), alerts.rs, search.rs
+  (people/rooms/chats), wallet.rs (fact card, XP bar, badges, gift picker window).
+- model.rs: RoomRow/AlertRow/LedgerRow/LeaderRow/GiftRow/PersonRow/Progression/
+  ActivityRow + ledger_credit/spaced_words. Context bertambah open_place.
+- 33 test desktop (light palette test di-update ke kanonik). clippy & fmt bersih.
+
+**CI/CD**: job web di ci.yml menambah `make build-web` — build statis Next.js penuh
+kini diverifikasi di GitHub Actions sebelum merge; VPS tetap ringan (build berat
+semua di Actions). Release v0.8.0 lewat release.yml: image GHCR migo-web+migo-migod,
+binary server, APK Android, tarball web+desktop.
+
+Verifikasi lokal (ringan): tsc bersih, 141+235 test TS, 33 test desktop, clippy 0
+warning, fmt bersih, 7 gate statis (brief/infra/pydeps/protocol/entity/vector/
+kotlin) hijau, build statis web sukses (8 route, /chat 184kB First Load). Compile
+Android diverifikasi android.yml di CI.

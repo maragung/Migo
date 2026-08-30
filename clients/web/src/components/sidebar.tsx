@@ -11,6 +11,8 @@ import { useProfile } from '@/lib/migo/use-profiles.js';
 import { Avatar } from './avatar.js';
 import { ConnectionBadge } from './connection-badge.js';
 import { ConversationList } from './conversation-list.js';
+import { CoinMark } from './icons.js';
+import { Icon } from './icons.js';
 import { NewConversationDialog } from './new-conversation-dialog.js';
 import { PresencePicker } from './presence-picker.js';
 
@@ -85,13 +87,10 @@ export function Sidebar(): ReactNode {
   return (
     <aside className="sidebar">
       <header className="sidebar-header">
-        <div className="brand">
-          <span className="brand-mark">◆</span>
-          <span className="brand-name">Migo</span>
-        </div>
+        <h2 className="sidebar-title">Chats</h2>
         {coins !== null ? (
           <span className="coin-badge" title="Coin balance" aria-label={`Coin balance: ${coins}`}>
-            🪙 {coins}
+            ◆ {coins.toLocaleString()}
           </span>
         ) : null}
         <button
@@ -101,7 +100,7 @@ export function Sidebar(): ReactNode {
           title="New conversation"
           onClick={() => setDialogOpen(true)}
         >
-          ＋
+          <Icon name="plus" size={20} />
         </button>
       </header>
 
@@ -128,14 +127,14 @@ export function Sidebar(): ReactNode {
             title="Sign out"
             onClick={() => void logout()}
           >
-            ⏻
+            <Icon name="signout" size={20} />
           </button>
         </div>
         <PresencePicker state={presence} status={status} onChange={onPresenceChange} />
         <div className="sidebar-status" aria-label="Account status">
           {coins !== null ? (
             <span className="sidebar-status-item">
-              <span aria-hidden="true">🪙</span>
+              <CoinMark size={14} />
               <span>
                 {coins.toLocaleString()} coin{coins === 1 ? '' : 's'}
               </span>

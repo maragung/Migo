@@ -22,7 +22,7 @@ import { ConversationKind, EncryptionMode } from '@migo/sdk';
 import type { Id, RoomJoinResponse, RoomSummary, UserProfile } from '@migo/sdk';
 
 import { buildProfilePatch } from '../src/components/profile-panel.js';
-import { joinedRoomSummary } from '../src/components/discover-panel.js';
+import { joinedRoomSummary } from '../src/lib/migo/use-join-room.js';
 
 const PROFILE: UserProfile = {
   userId: 'user_1' as Id,

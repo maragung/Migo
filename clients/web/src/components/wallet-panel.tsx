@@ -1,15 +1,18 @@
 'use client';
 
 /**
- * The Gifts tab: the balance, the gift shop, the statement, and XP standing.
+ * The Wallet section: the MIG balance, the gift shop, the statement, XP standing, badges, and
+ * the leaderboard — the caller's whole virtual economy under one address.
  *
- * Everything on this panel is the caller's own virtual economy — balance, ledger, progression —
+ * Everything on this panel is the caller's own economy — balance, ledger, progression, badges —
  * or a global catalogue, so every fetch is a plain read on mount plus a refresh after the one
  * mutation ({@link sendGift} moves the balance and appends a ledger line; the panel re-reads
  * both rather than patching local state, because the server's arithmetic is the only arithmetic
  * worth showing).
  *
- * The send flow is a picker, not a prompt: a gift is addressed to a friend from the relationship
+ * The coin is $MIG — the same ticker message text highlights as a token reference — so the
+ * balance card leads with the mark and the statement's lines are plain facts about it. The
+ * send flow is a picker, not a prompt: a gift is addressed to a friend from the relationship
  * graph, or to anyone found by username search, and the panel states the price before the
  * recipient is chosen so the spend is never a surprise. Feedback is a single line — success
  * names the gift and the recipient, failure carries the server's reason through {@link
@@ -25,6 +28,7 @@ import type { FormEvent, ReactNode } from 'react';
 
 import { RelationshipKind } from '@migo/sdk';
 import type {
+  BadgeWire,
   GiftListing,
   Id,
   LedgerEntryWire,
@@ -42,6 +46,7 @@ import { useMigo } from '@/lib/migo/use-migo.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
 
 import { Avatar } from './avatar.js';
+import { CoinMark } from './icons.js';
 import { Spinner } from './spinner.js';
 
 /**
@@ -73,14 +78,53 @@ export function xpFraction(into: number, total: number): number {
   return Math.min(1, Math.max(0, into / total));
 }
 
-/** The wallet as two plain facts: the coin balance and the points balance. */
+/** The wallet as two plain facts: the $MIG coin balance and the points balance. */
 export function BalanceCard({ balance }: { balance: WalletView }): ReactNode {
   return (
     <div className="balance-card">
-      <span className="balance-fact">🪙 {balance.balance} coins</span>
-      <span className="balance-fact">⭐ {balance.points} points</span>
+      <span className="balance-fact balance-fact-coins">
+        <CoinMark size={16} />
+        <span className="balance-amount">{balance.balance.toLocaleString()}</span>
+        <span className="balance-unit">$MIG</span>
+      </span>
+      <span className="balance-fact balance-fact-points">
+        <span className="balance-amount">{balance.points.toLocaleString()}</span>
+        <span className="balance-unit">points</span>
+      </span>
     </div>
   );
+}
+
+/**
+ * The badge shelf: the honours the server has awarded, one chip per badge.
+ *
+ * A badge is a code and a date and nothing else on the wire, so the chip states exactly that —
+ * the code in humanised words, the date relative — and an empty shelf is stated honestly rather
+ * than hidden, because a hidden section reads as a broken one.
+ */
+export function BadgeShelf({ badges }: { badges: BadgeWire[] }): ReactNode {
+  if (badges.length === 0) {
+    return <p className="muted">No badges yet — earn XP to collect them.</p>;
+  }
+  return (
+    <ul className="badge-shelf" aria-label="Badges">
+      {badges.map((badge) => (
+        <li
+          key={badge.badgeCode}
+          className="badge-chip"
+          title={`Awarded ${formatRelative(badge.awardedAt)}`}
+        >
+          {badgeCodeLabel(badge.badgeCode)}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** The wire's snake_case badge code as readable words (`welcome_user` → `Welcome user`). */
+function badgeCodeLabel(code: string): string {
+  const spaced = code.replaceAll('_', ' ');
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
 /**
@@ -383,16 +427,17 @@ export function RecipientPicker({
 }
 
 /**
- * The Gifts tab panel: loads the wallet, catalogue, statement, progression, and friends on
- * mount, and refreshes the money-side facts after a send.
+ * The Wallet section panel: loads the balance, catalogue, statement, progression, badges, and
+ * friends on mount, and refreshes the money-side facts after a send.
  */
-export function GiftsPanel(): ReactNode {
+export function WalletPanel(): ReactNode {
   const { client, accountId } = useMigo();
 
   const [balance, setBalance] = useState<WalletView | null>(null);
   const [catalogue, setCatalogue] = useState<GiftListing[] | null>(null);
   const [ledger, setLedger] = useState<LedgerEntryWire[] | null>(null);
   const [progression, setProgression] = useState<ProgressionWire | null>(null);
+  const [badges, setBadges] = useState<BadgeWire[] | null>(null);
   const [friends, setFriends] = useState<RelationshipEntry[] | null>(null);
   const [leaderboard, setLeaderboard] = useState<RankWire[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -425,8 +470,8 @@ export function GiftsPanel(): ReactNode {
     }
   }, [client]);
 
-  // Progression, the friends list, and the XP leaderboard are standing facts, not money: they load
-  // once and are not part of the post-send refresh.
+  // Progression, badges, the friends list, and the XP leaderboard are standing facts, not money:
+  // they load once and are not part of the post-send refresh.
   useEffect(() => {
     if (!client || accountId === null) {
       return;
@@ -434,13 +479,15 @@ export function GiftsPanel(): ReactNode {
     let cancelled = false;
     void (async (): Promise<void> => {
       try {
-        const [standing, relationships, top] = await Promise.all([
+        const [standing, honours, relationships, top] = await Promise.all([
           client.economy.getProgression(accountId),
+          client.economy.getBadges(accountId),
           client.social.listRelationships(),
           client.economy.getLeaderboard('xp', LEADERBOARD_ROWS),
         ]);
         if (!cancelled) {
           setProgression(standing);
+          setBadges(honours);
           setFriends(relationships.filter((entry) => entry.kind === KIND_FRIEND));
           setLeaderboard(top);
         }
@@ -520,7 +567,13 @@ export function GiftsPanel(): ReactNode {
 
   return (
     <div className="panel">
-      <h1 className="panel-title">Gifts</h1>
+      <header className="panel-head">
+        <h1 className="panel-title">Wallet</h1>
+        <span className="mig-chip" title="Migo's coin">
+          <CoinMark size={14} />
+          $MIG
+        </span>
+      </header>
 
       {error !== null ? <p className="form-error">{error}</p> : null}
       {notice !== null ? <p className="hint">{notice}</p> : null}
@@ -535,6 +588,20 @@ export function GiftsPanel(): ReactNode {
             <h2 className="panel-heading">Balance</h2>
             <BalanceCard balance={balance} />
           </section>
+
+          {progression !== null ? (
+            <section className="panel-section" aria-label="Progression">
+              <h2 className="panel-heading">Progress</h2>
+              <ProgressionCard progression={progression} />
+            </section>
+          ) : null}
+
+          {badges !== null ? (
+            <section className="panel-section" aria-label="Badges">
+              <h2 className="panel-heading">Badges</h2>
+              <BadgeShelf badges={badges} />
+            </section>
+          ) : null}
 
           <section className="panel-section" aria-label="Gift shop">
             <h2 className="panel-heading">Send a gift</h2>
@@ -551,13 +618,6 @@ export function GiftsPanel(): ReactNode {
               />
             )}
           </section>
-
-          {progression !== null ? (
-            <section className="panel-section" aria-label="Progression">
-              <h2 className="panel-heading">Progress</h2>
-              <ProgressionCard progression={progression} />
-            </section>
-          ) : null}
 
           <section className="panel-section" aria-label="Recent activity">
             <h2 className="panel-heading">Recent activity</h2>

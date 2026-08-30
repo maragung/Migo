@@ -282,6 +282,157 @@ pub struct SessionRow {
     pub current: bool,
 }
 
+/// One room in the public directory, reduced to what a join decision needs.
+///
+/// The wire's [`migo_protocol::RoomSummary`] carries more (public id, kind, language, country);
+/// this is the projection a row draws, taken once where the wire answer is reduced so no UI code
+/// touches protocol types.
+#[derive(Debug, Clone)]
+pub struct RoomRow {
+    pub room_id: Id,
+    pub name: String,
+    pub topic: Option<String>,
+    pub member_count: u32,
+    pub online_count: u32,
+    pub category: Option<String>,
+    pub verified: bool,
+}
+
+/// One row of the durable notification inbox.
+#[derive(Debug, Clone)]
+pub struct AlertRow {
+    pub id: Id,
+    /// The wire's snake_case kind word, as-is: a closed server vocabulary.
+    pub kind: String,
+    pub title: Option<String>,
+    pub at: Timestamp,
+}
+
+/// One line of the wallet's statement.
+///
+/// `credit` is the *reason's* direction, never a sign read off the amount: the wire's amount is a
+/// magnitude, and a regression that guessed the direction would show money moving the wrong way.
+#[derive(Debug, Clone)]
+pub struct LedgerRow {
+    pub reason: String,
+    pub amount: u64,
+    pub credit: bool,
+    pub balance_after: u64,
+    pub at: Timestamp,
+}
+
+/// One standing on the XP leaderboard.
+#[derive(Debug, Clone)]
+pub struct LeaderRow {
+    pub position: u32,
+    pub account_id: Id,
+    pub xp: u64,
+    pub level: u32,
+}
+
+/// One listing in the gift shop.
+#[derive(Debug, Clone)]
+pub struct GiftRow {
+    pub sku: String,
+    pub name: String,
+    pub price: u64,
+    pub category: String,
+}
+
+/// One account found by search or offered as a suggestion.
+#[derive(Debug, Clone)]
+pub struct PersonRow {
+    pub account_id: Id,
+    pub username: String,
+    pub display_name: String,
+    pub mutual_friends: u32,
+}
+
+/// The account's XP progression, for the wallet's level card.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Progression {
+    pub level: u32,
+    pub xp_into_level: u64,
+    pub xp_for_next_level: u64,
+}
+
+impl Progression {
+    /// The XP bar's filled fraction, clamped into 0..=1.
+    ///
+    /// A total of zero (or a negative a hostile node sent) renders an empty bar rather than `NaN`
+    /// or `Infinity` — an unfilled bar is honest, a broken one is not.
+    #[must_use]
+    pub fn fraction(&self) -> f32 {
+        if self.xp_for_next_level == 0 {
+            return 0.0;
+        }
+        (self.xp_into_level as f32 / self.xp_for_next_level as f32).clamp(0.0, 1.0)
+    }
+}
+
+/// One row of the Space activity stream.
+///
+/// A synthesis, not a wire type: a notification and a ledger line can describe the same gift, and
+/// the merge happens once, in the app, where the two sources meet.
+#[derive(Debug, Clone)]
+pub struct ActivityRow {
+    pub key: String,
+    pub category: ActivityCategory,
+    pub title: String,
+    pub at: Timestamp,
+}
+
+/// The activity stream's categories, each a filter over the merged rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityCategory {
+    Social,
+    Rooms,
+    Games,
+    Economy,
+}
+
+impl ActivityCategory {
+    /// The filter's own word.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Social => "Social",
+            Self::Rooms => "Rooms",
+            Self::Games => "Games",
+            Self::Economy => "Economy",
+        }
+    }
+}
+
+/// The closed reason-to-direction mapping for the ledger, identical to the web client's.
+///
+/// The spends debit, the receipts credit; an operator adjustment or an unknown word from a newer
+/// node renders unsigned rather than guessing a direction for money.
+#[must_use]
+pub fn ledger_credit(reason: &str) -> bool {
+    matches!(
+        reason,
+        "grant" | "gift_reputation" | "refund" | "game_payout"
+    )
+}
+
+/// A snake_case wire word as readable words (`friend_request` → `Friend request`).
+#[must_use]
+pub fn spaced_words(word: &str) -> String {
+    let mut out = String::with_capacity(word.len() + 4);
+    for (index, part) in word.split('_').enumerate() {
+        if index > 0 {
+            out.push(' ');
+        }
+        out.push_str(part);
+    }
+    let mut chars = out.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => out,
+    }
+}
+
 /// A transient message shown in the corner: a send failure, a rate limit, a bad password.
 #[derive(Debug, Clone)]
 pub struct Toast {

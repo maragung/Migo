@@ -13,12 +13,18 @@
 //! click that changes the conversation list cannot mutate the list a later widget in the same frame
 //! is still iterating.
 
+pub mod alerts;
 pub mod auth;
 pub mod captcha;
 pub mod chat;
 pub mod friends;
+pub mod home;
+pub mod rooms;
+pub mod search;
 pub mod server_form;
 pub mod settings;
+pub mod space;
+pub mod wallet;
 pub mod widgets;
 
 use crate::config::ServerEndpoint;
@@ -51,14 +57,61 @@ pub enum Screen {
 /// gate), while a place is where a signed-in person already is. Folding friends into `Screen`
 /// would let the auth flow "navigate" to it, and a sign-out would have to remember to reset it
 /// rather than it simply being unreachable without an account.
+///
+/// The order is the information architecture — the same list the web client's rail and the
+/// Android client's bottom bar carry, in the same order, because it is one product.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Place {
+    /// The realtime dashboard: a glance at everything, doors into all of it.
+    Home,
     /// Conversations and threads.
     Chat,
+    /// The public room directory and the way in.
+    Rooms,
+    /// The activity stream.
+    Space,
     /// The social graph: friends, requests, adding by id.
     Friends,
+    /// The durable notification inbox.
+    Alerts,
+    /// One box, everything it can honestly find.
+    Search,
+    /// The MIG balance, the gift shop, the statement, progression, badges, leaderboard.
+    Wallet,
     /// Server, theme, devices, sign-out.
     Settings,
+}
+
+impl Place {
+    /// The tab's own word, in the bar and nowhere else.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Home => "Home",
+            Self::Chat => "Chats",
+            Self::Rooms => "Rooms",
+            Self::Space => "Space",
+            Self::Friends => "Friends",
+            Self::Alerts => "Alerts",
+            Self::Search => "Search",
+            Self::Wallet => "Wallet",
+            Self::Settings => "Settings",
+        }
+    }
+
+    /// Every place, in information-architecture order — the bar is drawn from this list so the
+    /// offer and the order can never drift apart.
+    pub const ALL: [Place; 9] = [
+        Place::Home,
+        Place::Chat,
+        Place::Rooms,
+        Place::Space,
+        Place::Friends,
+        Place::Alerts,
+        Place::Search,
+        Place::Wallet,
+        Place::Settings,
+    ];
 }
 
 /// Everything a screen may read, and the things it may write.
@@ -84,6 +137,12 @@ pub struct Context<'a> {
     /// settings panel that had to round-trip the network thread to flip a palette would feel broken
     /// on a bad link.
     pub theme_choice: &'a mut Option<Theme>,
+    /// A place change requested by a link on the screen, applied after the frame.
+    ///
+    /// The same reasoning as [`Context::navigate`] again: a search hit that opens a chat moves the
+    /// window, not the socket, and routing that through the worker would make a click's
+    /// responsiveness depend on the network thread.
+    pub open_place: &'a mut Option<Place>,
 }
 
 impl Context<'_> {
@@ -100,5 +159,10 @@ impl Context<'_> {
     /// Asks to redraw the whole window in the other theme once this frame is finished.
     pub fn want_theme(&mut self, theme: Theme) {
         *self.theme_choice = Some(theme);
+    }
+
+    /// Asks to show a different place once this frame is finished.
+    pub fn go_place(&mut self, place: Place) {
+        *self.open_place = Some(place);
     }
 }

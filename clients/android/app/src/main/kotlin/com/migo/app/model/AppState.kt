@@ -1,7 +1,16 @@
 package com.migo.app.model
 
 import com.migo.core.ConnectionState
+import com.migo.core.protocol.BadgeWire
 import com.migo.core.protocol.ConversationKind
+import com.migo.core.protocol.GiftListing
+import com.migo.core.protocol.InboxItem
+import com.migo.core.protocol.LedgerEntryWire
+import com.migo.core.protocol.ProgressionWire
+import com.migo.core.protocol.RankWire
+import com.migo.core.protocol.RelationshipEntry
+import com.migo.core.protocol.RoomSummary
+import com.migo.core.protocol.SuggestedUser
 import com.migo.core.store.ServerEndpoint
 import com.migo.core.wire.Id
 
@@ -48,7 +57,14 @@ sealed interface AppState {
         val failure: String? = null,
     ) : AppState
 
-    /** Signed in. The conversation list is always present; [open] is the chat on top of it. */
+    /**
+     * Signed in. The conversation list is always present; [open] is the chat on top of it.
+     *
+     * The [section] is which destination the shell is showing — the same information architecture
+     * the web client's rail carries, composed as a bottom bar here. Each section's data lives in its
+     * own holder below, loaded on first entry and reloaded on demand; a section never yet visited
+     * holds nulls, and its screen draws its skeleton.
+     */
     data class SignedIn(
         val username: String,
         val accountId: Id,
@@ -56,12 +72,129 @@ sealed interface AppState {
         val conversations: List<ConversationRow> = emptyList(),
         /** True while the first page of conversations is loading. */
         val loading: Boolean = false,
-        /** The conversation the user is reading, or null when the list is on top. */
+        /** The conversation the user is reading, or null when the list is on top of it. */
         val open: ChatState? = null,
         /** A transient failure banner: a send that did not go, a page that did not load. */
         val failure: String? = null,
+        /** The destination on screen; Home is where a session starts. */
+        val section: Section = Section.HOME,
+        val home: HomeState = HomeState(),
+        val rooms: RoomsState = RoomsState(),
+        val space: SpaceState = SpaceState(),
+        val friends: FriendsState = FriendsState(),
+        val search: SearchState = SearchState(),
+        val wallet: WalletState = WalletState(),
+        val alerts: AlertsState = AlertsState(),
     ) : AppState
+
+    /** The shell's destinations, in information-architecture order. */
+    enum class Section { HOME, CHATS, ROOMS, SPACE, FRIENDS, ALERTS, SEARCH, WALLET, PROFILE }
 }
+
+/**
+ * The Home dashboard's facts: one read per block, refreshed together.
+ *
+ * Every field is null until its read lands — the screen draws a placeholder per block, not one
+ * spinner over the whole dashboard, because the blocks arrive independently and a dashboard that
+ * waits for all of them shows nothing when any one is slow.
+ */
+data class HomeState(
+    /** The caller's wallet, for the $MIG chip on the hero. */
+    val balance: Long? = null,
+    /** The social graph's own suggestions, offered as doors. */
+    val suggestions: List<SuggestedUser> = emptyList(),
+    /** The inbox's first page, as the alerts digest. */
+    val notifications: List<InboxItem> = emptyList(),
+    /** The leaderboard's top three. */
+    val leaders: List<RankWire> = emptyList(),
+    /** The room catalogue's liveliest page, offered for a join. */
+    val trending: List<RoomSummary> = emptyList(),
+    /** True while the dashboard's one combined read is in flight. */
+    val loading: Boolean = false,
+)
+
+/** The Rooms directory: the server's catalogue plus the browsing state around it. */
+data class RoomsState(
+    /** The page held; null until the first read lands. */
+    val rooms: List<RoomSummary>? = null,
+    /** The live query text, debounced by the view model before it reaches the wire. */
+    val query: String = "",
+    /** True while a page (first or refresh) is in flight. */
+    val loading: Boolean = false,
+    /** Room ids with a join in flight, so their rows can disable their buttons. */
+    val joining: Set<Id> = emptySet(),
+)
+
+/**
+ * The Space activity stream: the inbox and the wallet's statement merged, newest first.
+ *
+ * Rows are plain display values — icon kind, headline, time — rather than wire types, because a
+ * stream row is a synthesis (a ledger line and a notification can describe the same gift) and the
+ * merge happens once, in the view model, where the two sources meet.
+ */
+data class SpaceState(
+    val rows: List<ActivityRow> = emptyList(),
+    /** True while the durable halves (inbox + ledger) are being read. */
+    val loading: Boolean = false,
+)
+
+/** One row of the activity stream. */
+data class ActivityRow(
+    val key: String,
+    /** The category filter the row belongs to. */
+    val category: ActivityCategory,
+    val title: String,
+    /** Unix milliseconds — the event's own time, or its arrival time for live-only sources. */
+    val at: Long,
+)
+
+/** The stream's categories, each a filter over the merged rows. */
+enum class ActivityCategory { SOCIAL, ROOMS, GAMES, ECONOMY }
+
+/** The Friends section: the relationship graph, the suggestions, and the acting state. */
+data class FriendsState(
+    /** All relationships; the screens filter by kind the way the web client does. */
+    val entries: List<RelationshipEntry> = emptyList(),
+    val suggestions: List<SuggestedUser> = emptyList(),
+    /** True while the graph is being read. */
+    val loading: Boolean = false,
+    /** Account ids with a social action in flight. */
+    val busy: Set<Id> = emptySet(),
+)
+
+/** The Search section: one query's answers across every surface that can honestly answer. */
+data class SearchState(
+    /** The live query text; the view model debounces it before the wire. */
+    val query: String = "",
+    /** Username-prefix matches, or null before the first query. */
+    val people: List<SuggestedUser>? = null,
+    /** Room name/topic matches, or null before the first query. */
+    val rooms: List<RoomSummary>? = null,
+    /** True while a query is in flight. */
+    val loading: Boolean = false,
+)
+
+/** The Wallet section: the caller's whole economy under one address. */
+data class WalletState(
+    val balance: Long? = null,
+    val points: Long? = null,
+    val ledger: List<LedgerEntryWire> = emptyList(),
+    val progression: ProgressionWire? = null,
+    val badges: List<BadgeWire> = emptyList(),
+    val leaders: List<RankWire> = emptyList(),
+    val catalogue: List<GiftListing> = emptyList(),
+    /** True while the wallet's combined read is in flight. */
+    val loading: Boolean = false,
+)
+
+/** The Alerts section: the durable inbox and its read state. */
+data class AlertsState(
+    val items: List<InboxItem> = emptyList(),
+    /** True while the inbox page is being read. */
+    val loading: Boolean = false,
+    /** True while a mark-all-read acknowledgement is in flight. */
+    val acknowledging: Boolean = false,
+)
 
 /** One row of the conversation list. */
 data class ConversationRow(

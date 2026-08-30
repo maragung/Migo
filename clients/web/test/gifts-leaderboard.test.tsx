@@ -19,7 +19,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import type { Id, RankWire, UserProfile } from '@migo/sdk';
 
-import { LeaderboardList } from '../src/components/gifts-panel.js';
+import { LeaderboardList } from '../src/components/wallet-panel.js';
 
 const PROFILES = new Map<Id, UserProfile>([
   [

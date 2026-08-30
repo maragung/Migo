@@ -3,6 +3,8 @@ package com.migo.app
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.migo.app.model.ActivityCategory
+import com.migo.app.model.ActivityRow
 import com.migo.app.model.AppState
 import com.migo.app.model.ChatMessage
 import com.migo.app.model.ChatState
@@ -17,7 +19,12 @@ import com.migo.core.domain.SendOptions
 import com.migo.core.domain.Subscription
 import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.ConversationSummary
+import com.migo.core.protocol.InboxItem
+import com.migo.core.protocol.LedgerEntryWire
+import com.migo.core.protocol.NotificationEvent
 import com.migo.core.protocol.ReceiptKind
+import com.migo.core.protocol.RoomJoinResponse
+import com.migo.core.protocol.RoomSummary
 import com.migo.core.protocol.TypingEvent
 import com.migo.core.protocol.TypingState
 import com.migo.core.store.ServerEndpoint
@@ -27,6 +34,8 @@ import com.migo.core.wire.WireError
 import com.migo.core.wire.parseId
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -347,6 +356,337 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // --- sections ---
+
+    /**
+     * Switches the shell to a section, loading its data on first entry.
+     *
+     * A section never yet visited holds nulls; this is the moment they become a read. Re-entering a
+     * section keeps what it holds (the conversations list refreshes through its own control), so a
+     * tour through the bottom bar costs one read per section, not one per visit.
+     */
+    fun selectSection(section: AppState.Section) {
+        signedIn { it.copy(section = section) }
+        when (section) {
+            AppState.Section.HOME -> if (!homeLoaded()) loadHome()
+            AppState.Section.ROOMS -> if (signedInState?.rooms?.rooms == null) loadRooms()
+            AppState.Section.SPACE -> if (!spaceLoaded()) loadSpace()
+            AppState.Section.FRIENDS -> if (!friendsLoaded()) loadFriends()
+            AppState.Section.SEARCH -> Unit
+            AppState.Section.WALLET -> if (!walletLoaded()) loadWallet()
+            AppState.Section.ALERTS -> if (!alertsLoaded()) loadAlerts()
+            AppState.Section.CHATS, AppState.Section.PROFILE -> Unit
+        }
+    }
+
+    /** The Home dashboard's one combined read; a block that fails alone renders its empty. */
+    fun loadHome() {
+        val live = session ?: return
+        signedIn { it.copy(home = it.home.copy(loading = true)) }
+        viewModelScope.launch {
+            val wallet = runCatching { live.client.economy.getBalance().balance }.getOrNull()
+            val suggested = runCatching { live.client.social.suggestions(6) }.getOrDefault(emptyList())
+            val inbox = runCatching { live.client.notifications.listNotifications(5) }.getOrDefault(emptyList())
+            val leaders = runCatching { live.client.economy.getLeaderboard("xp", 3) }.getOrDefault(emptyList())
+            val trending = runCatching {
+                live.client.rooms.list(20).rooms.sortedByDescending { it.onlineCount }.take(5)
+            }.getOrDefault(emptyList())
+            signedIn {
+                it.copy(home = it.home.copy(loading = false, balance = wallet, suggestions = suggested, notifications = inbox, leaders = leaders, trending = trending))
+            }
+        }
+    }
+
+    /** The Rooms directory read, with whatever query is held. */
+    fun loadRooms() {
+        val live = session ?: return
+        val query = signedInState?.rooms?.query?.trim().orEmpty()
+        signedIn { it.copy(rooms = it.rooms.copy(loading = true)) }
+        viewModelScope.launch {
+            try {
+                val response = live.client.rooms.list(30, query = query.ifEmpty { null })
+                signedIn { it.copy(rooms = it.rooms.copy(loading = false, rooms = response.rooms)) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(rooms = it.rooms.copy(loading = false), failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Records the directory's query text and re-reads the page after a pause.
+     *
+     * Debounced like the Search field: one round trip per question, not per keystroke, against a
+     * rate-limited endpoint.
+     */
+    fun setRoomsQuery(text: String) {
+        signedIn { it.copy(rooms = it.rooms.copy(query = text)) }
+        roomsJob?.cancel()
+        roomsJob = viewModelScope.launch {
+            delay(SEARCH_DEBOUNCE_MS)
+            if (session != null) loadRooms()
+        }
+    }
+
+    private var roomsJob: Job? = null
+
+    /**
+     * Joins a room and opens its conversation.
+     *
+     * The join reply is the one moment the wire names both halves — the room and the conversation —
+     * so the row is noted into the conversation list exactly as a started direct chat is, and the
+     * thread opens on top of the shell.
+     */
+    fun joinRoom(room: RoomSummary) {
+        val live = session ?: return
+        if (signedInState?.rooms?.joining?.contains(room.roomId) == true) return
+        signedIn { it.copy(rooms = it.rooms.copy(joining = it.rooms.joining + room.roomId)) }
+        viewModelScope.launch {
+            try {
+                val joined: RoomJoinResponse = live.client.rooms.join(room.roomId)
+                noteRoom(joined)
+                signedIn { current ->
+                    current.copy(
+                        section = AppState.Section.CHATS,
+                        rooms = current.rooms.copy(joining = current.rooms.joining - room.roomId),
+                    )
+                }
+                open(joined.conversationId, joined.room.name)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(rooms = it.rooms.copy(joining = it.rooms.joining - room.roomId), failure = readable(failure)) }
+            }
+        }
+    }
+
+    /** Projects a join reply into the conversation list, the same shape a started chat notes. */
+    private fun noteRoom(joined: RoomJoinResponse) {
+        val fresh = ConversationRow(
+            conversationId = joined.conversationId,
+            title = joined.room.name,
+            kind = ConversationKind.Room,
+            preview = null,
+            unread = 0,
+            updatedAt = 0,
+        )
+        signedIn { current ->
+            val absent = current.conversations.none { it.conversationId == fresh.conversationId }
+            current.copy(conversations = if (absent) listOf(fresh) + current.conversations else current.conversations)
+        }
+    }
+
+    /** The Space stream's durable halves: the inbox and the statement, merged newest first. */
+    fun loadSpace() {
+        val live = session ?: return
+        signedIn { it.copy(space = it.space.copy(loading = true)) }
+        viewModelScope.launch {
+            val inbox = runCatching { live.client.notifications.listNotifications(50) }.getOrDefault(emptyList())
+            val ledger = runCatching { live.client.economy.getLedger(20) }.getOrDefault(emptyList())
+            val rows = (inbox.map { inboxRow(it) } + ledger.map { ledgerRow(it) })
+                .sortedByDescending { it.at }
+            signedIn { it.copy(space = it.space.copy(loading = false, rows = rows)) }
+        }
+    }
+
+    /** The Friends section's read: the graph and the suggestions, together. */
+    fun loadFriends() {
+        val live = session ?: return
+        signedIn { it.copy(friends = it.friends.copy(loading = true)) }
+        viewModelScope.launch {
+            try {
+                val entries = live.client.social.listAllRelationships()
+                val suggested = runCatching { live.client.social.suggestions(8) }.getOrDefault(emptyList())
+                signedIn { it.copy(friends = it.friends.copy(loading = false, entries = entries, suggestions = suggested)) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(friends = it.friends.copy(loading = false), failure = readable(failure)) }
+            }
+        }
+    }
+
+    /** Sends a friend request to one account. */
+    fun friendRequest(userId: Id) = socialAction(userId) { it.friendRequest(userId) }
+
+    /** Answers a pending friend request. */
+    fun friendRespond(userId: Id, accept: Boolean) = socialAction(userId) { it.friendRespond(userId, accept) }
+
+    /** Blocks an account; the graph re-reads after, exactly as the web client does. */
+    fun blockUser(userId: Id) = socialAction(userId) { it.blockUser(userId) }
+
+    private fun socialAction(userId: Id, action: suspend (com.migo.core.domain.SocialDomain) -> Unit) {
+        val live = session ?: return
+        if (signedInState?.friends?.busy?.contains(userId) == true) return
+        signedIn { it.copy(friends = it.friends.copy(busy = it.friends.busy + userId)) }
+        viewModelScope.launch {
+            try {
+                action(live.client.social)
+                loadFriends()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(friends = it.friends.copy(busy = it.friends.busy - userId), failure = readable(failure)) }
+            }
+        }
+    }
+
+    /** Records the search field; the read is debounced, not per keystroke. */
+    fun setSearchQuery(text: String) {
+        signedIn { it.copy(search = it.search.copy(query = text)) }
+        searchJob?.cancel()
+        if (text.isBlank()) {
+            signedIn { it.copy(search = it.search.copy(people = null, rooms = null, loading = false)) }
+            return
+        }
+        searchJob = viewModelScope.launch {
+            delay(SEARCH_DEBOUNCE_MS)
+            runSearch(text.trim())
+        }
+    }
+
+    private var searchJob: Job? = null
+
+    private suspend fun runSearch(query: String) {
+        val live = session ?: return
+        signedIn { it.copy(search = it.search.copy(loading = true)) }
+        val people = runCatching { live.client.social.search(query, 10) }.getOrDefault(emptyList())
+        val rooms = runCatching {
+            live.client.rooms.list(10, query = query).rooms
+        }.getOrDefault(emptyList())
+        // The query may have moved on while the wire answered; only the answer to the current text lands.
+        if (signedInState?.search?.query?.trim() != query) return
+        signedIn { it.copy(search = it.search.copy(loading = false, people = people, rooms = rooms)) }
+    }
+
+    /** Starts a direct conversation with an account already held as an id (a search result). */
+    fun startDirectWith(peer: Id) {
+        val live = session ?: return
+        viewModelScope.launch {
+            try {
+                val summary = live.client.startConversation(
+                    ConversationKind.Direct,
+                    listOf(live.client.accountId, peer),
+                )
+                learnNames(live, listOf(summary))
+                val fresh = row(live, summary)
+                signedIn { current ->
+                    val absent = current.conversations.none { it.conversationId == fresh.conversationId }
+                    current.copy(
+                        section = AppState.Section.CHATS,
+                        conversations = if (absent) listOf(fresh) + current.conversations else current.conversations,
+                    )
+                }
+                open(fresh.conversationId, fresh.title)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /** The Wallet's combined read: balance, statement, progression, badges, leaders, catalogue. */
+    fun loadWallet() {
+        val live = session ?: return
+        signedIn { it.copy(wallet = it.wallet.copy(loading = true)) }
+        viewModelScope.launch {
+            val wallet = runCatching { live.client.economy.getBalance() }.getOrNull()
+            val ledger = runCatching { live.client.economy.getLedger(10) }.getOrDefault(emptyList())
+            val progression = runCatching { live.client.economy.getProgression(live.client.accountId) }.getOrNull()
+            val badges = runCatching { live.client.economy.getBadges(live.client.accountId) }.getOrDefault(emptyList())
+            val leaders = runCatching { live.client.economy.getLeaderboard("xp", 10) }.getOrDefault(emptyList())
+            val catalogue = runCatching { live.client.economy.getGiftCatalogue() }.getOrDefault(emptyList())
+            signedIn {
+                it.copy(
+                    wallet = it.wallet.copy(
+                        loading = false,
+                        balance = wallet?.balance,
+                        points = wallet?.points,
+                        ledger = ledger,
+                        progression = progression,
+                        badges = badges,
+                        leaders = leaders,
+                        catalogue = catalogue,
+                    ),
+                )
+            }
+        }
+    }
+
+    /**
+     * Sends a gift; the wallet re-reads after, because the server's arithmetic is the only arithmetic
+     * worth showing.
+     */
+    fun sendGift(sku: String, recipient: Id) {
+        val live = session ?: return
+        viewModelScope.launch {
+            try {
+                live.client.economy.sendGift(sku, recipient)
+                loadWallet()
+                signedIn { it.copy(failure = null) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /** The Alerts inbox read. */
+    fun loadAlerts() {
+        val live = session ?: return
+        signedIn { it.copy(alerts = it.alerts.copy(loading = true)) }
+        viewModelScope.launch {
+            try {
+                val items = live.client.notifications.listNotifications(50)
+                signedIn { it.copy(alerts = it.alerts.copy(loading = false, items = items)) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(alerts = it.alerts.copy(loading = false), failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Marks everything at or before the newest rendered item read.
+     *
+     * One watermark call, exactly like the web client: a notification landing mid-flight is left for
+     * the next acknowledgement rather than raced.
+     */
+    fun markAllRead() {
+        val live = session ?: return
+        val newest = signedInState?.alerts?.items?.maxOfOrNull { it.at } ?: return
+        signedIn { it.copy(alerts = it.alerts.copy(acknowledging = true)) }
+        viewModelScope.launch {
+            try {
+                live.client.notifications.acknowledgeNotifications(newest)
+                loadAlerts()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(alerts = it.alerts.copy(acknowledging = false), failure = readable(failure)) }
+            }
+        }
+    }
+
+    // The lazy-load questions: has a section's first read landed? A section answers false while
+    // its read is in flight or was never started, so re-entry re-reads only what never arrived.
+    private val signedInState: AppState.SignedIn?
+        get() = _state.value as? AppState.SignedIn
+
+    private fun homeLoaded(): Boolean = signedInState?.home?.loading == false && signedInState?.home?.notifications?.isNotEmpty() == true
+
+    private fun spaceLoaded(): Boolean = signedInState?.space?.loading == false && signedInState?.space?.rows?.isNotEmpty() == true
+
+    private fun friendsLoaded(): Boolean = signedInState?.friends?.loading == false && signedInState?.friends?.entries?.isNotEmpty() == true
+
+    private fun walletLoaded(): Boolean = signedInState?.wallet?.balance != null
+
+    private fun alertsLoaded(): Boolean = signedInState?.alerts?.loading == false && signedInState?.alerts?.items?.isNotEmpty() == true
+
     // --- lifecycle ---
 
     /**
@@ -403,7 +743,56 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         subscriptions.add(opened.client.onMessage { arrived(it) })
         subscriptions.add(opened.client.onDeletion { removed(it) })
         subscriptions.add(opened.client.onTyping { typing(it) })
+        // A pushed notification is a cue to reconcile every inbox-shaped surface, and a friend
+        // event a cue to re-read the graph -- the same reconcile-don't-trust rule each section
+        // applies on its own refresh button.
+        subscriptions.add(opened.client.onNotification { pushed(it) })
+        subscriptions.add(opened.client.onFriendEvent {
+            if ((_state.value as? AppState.SignedIn)?.section == AppState.Section.FRIENDS) loadFriends()
+        })
         refreshConversations()
+        loadHome()
+    }
+
+    /** A pushed notification: the Space stream and the Alerts inbox re-read, the digest follows. */
+    private fun pushed(event: NotificationEvent) {
+        val current = _state.value as? AppState.SignedIn ?: return
+        when (current.section) {
+            AppState.Section.SPACE -> loadSpace()
+            AppState.Section.ALERTS -> loadAlerts()
+            AppState.Section.HOME -> loadHome()
+            else -> Unit
+        }
+    }
+
+    /** An inbox row as a stream row: category and headline from the kind's own words. */
+    private fun inboxRow(item: InboxItem): ActivityRow {
+        val kind = item.kind
+        val spaced = kind.replace('_', ' ').replaceFirstChar { it.uppercase() }
+        val category = when {
+            kind.contains("friend") -> ActivityCategory.SOCIAL
+            kind.contains("gift") || kind.contains("coin") || kind.contains("ledger") -> ActivityCategory.ECONOMY
+            kind.contains("game") -> ActivityCategory.GAMES
+            kind.contains("room") -> ActivityCategory.ROOMS
+            else -> ActivityCategory.SOCIAL
+        }
+        return ActivityRow(key = "notif-" + item.id.value, category = category, title = item.title ?: spaced, at = item.at)
+    }
+
+    /** A ledger line as a stream row: the money-side fact, signed by its reason. */
+    private fun ledgerRow(entry: LedgerEntryWire): ActivityRow {
+        val credits = entry.reason == "grant" ||
+            entry.reason == "gift_reputation" ||
+            entry.reason == "refund" ||
+            entry.reason == "game_payout"
+        val signed = if (credits) "+" else "-"
+        val label = entry.reason.replace('_', ' ').replaceFirstChar { it.uppercase() }
+        return ActivityRow(
+            key = "ledger-" + entry.txId.value,
+            category = ActivityCategory.ECONOMY,
+            title = label + " " + signed + entry.amount + " MIG",
+            at = entry.at,
+        )
     }
 
     private fun detach() {
@@ -663,6 +1052,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private companion object {
+        /** How long the search field must be quiet before its query reaches the wire. */
+        const val SEARCH_DEBOUNCE_MS = 300L
         /** One screen of conversations, and more on demand rather than a list nobody scrolls. */
         const val CONVERSATION_PAGE = 50L
 

@@ -12,6 +12,7 @@ import { useChat } from '@/lib/migo/use-chat.js';
 import { useGameEvents } from '@/lib/migo/use-game-events.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
+import { useSectionNav } from '@/lib/migo/section-nav.js';
 import { useRooms } from '@/lib/migo/rooms-provider.js';
 import { resolveMediaUrl } from '@/lib/migo/media.js';
 import { presenceLabel, usePresence } from '@/lib/migo/use-presence.js';
@@ -26,6 +27,7 @@ import { GiftPicker } from './gift-picker.js';
 import { MessageComposer } from './message-composer.js';
 import { MessageList, senderNameOf } from './message-list.js';
 import { RoomInfoPanel } from './room-info-panel.js';
+import { Icon } from './icons.js';
 import { Spinner } from './spinner.js';
 import { TypingIndicator } from './typing-indicator.js';
 import { UserProfileModal } from './user-profile-modal.js';
@@ -76,6 +78,7 @@ export function callPeerFor(
 
 export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNode {
   const { client, accountId } = useMigo();
+  const navigate = useSectionNav();
   const { items, markRead } = useConversations();
   const rooms = useRooms();
   const {
@@ -371,7 +374,9 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
       ) : error ? (
         <div className="center-fill">
           <div>
-            <div className="emoji">⚠️</div>
+            <div className="emoji">
+              <Icon name="shield" size={24} />
+            </div>
             {error}
           </div>
         </div>
@@ -404,6 +409,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
             />
           }
           liveRowCount={game.rows.length + (game.activeGuess !== null ? 1 : 0)}
+          onOpenWallet={() => navigate('wallet')}
         />
       ) : null}
 

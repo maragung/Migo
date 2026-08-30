@@ -44,6 +44,7 @@ import { MISSED_CALL_MESSAGE } from '@/lib/migo/call-manager.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
 
 import { Avatar } from './avatar.js';
+import { Icon } from './icons.js';
 
 /** Everything the pure call screen needs; every callback is the manager's, already bound. */
 export interface CallScreenProps {
@@ -284,7 +285,7 @@ export function CallErrorCard({
     <div className="call-overlay error" role="alertdialog" aria-modal="true" aria-label={label}>
       <div className="call-identity">
         <div className="emoji" aria-hidden="true">
-          ⚠️
+          <Icon name="shield" size={24} />
         </div>
         <div className="call-status">{message}</div>
       </div>

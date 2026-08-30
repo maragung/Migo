@@ -1,16 +1,20 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent, ReactNode } from 'react';
 
-import { RelationshipKind } from '@migo/sdk';
+import { ConversationKind, RelationshipKind } from '@migo/sdk';
 import type { Id, RelationshipEntry, SuggestedUser } from '@migo/sdk';
 
+import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
 
 import { Avatar } from './avatar.js';
+import { ContextMenu } from './context-menu.js';
+import { useContextMenu } from './context-menu.js';
+import type { ContextAction } from './context-menu.js';
 import { Spinner } from './spinner.js';
 import { UserProfileModal } from './user-profile-modal.js';
 
@@ -45,8 +49,13 @@ const KIND_BLOCK: number = RelationshipKind.Block;
  * A friend row is a door: clicking it opens that person's profile modal, where blocking (and
  * messaging) live — the list rows stay clean of per-row block controls on purpose.
  */
-export function FriendsPanel(): ReactNode {
+export function FriendsPanel({
+  onOpenConversation,
+}: {
+  onOpenConversation: (conversationId: Id) => void;
+}): ReactNode {
   const { client } = useMigo();
+  const { noteConversation } = useConversations();
 
   const [entries, setEntries] = useState<RelationshipEntry[] | null>(null);
   const [blocked, setBlocked] = useState<RelationshipEntry[]>([]);
@@ -90,6 +99,24 @@ export function FriendsPanel(): ReactNode {
       void reload();
     });
   }, [client, reload]);
+
+  // The Message action: an existing direct conversation opens; otherwise one is created. The
+  // created summary is noted into the shared list so the chats shell can open it like any other.
+  const startDirect = useCallback(
+    async (userId: Id): Promise<void> => {
+      if (!client) {
+        return;
+      }
+      try {
+        const summary = await client.conversations.create(ConversationKind.Direct, [userId]);
+        noteConversation(summary);
+        onOpenConversation(summary.conversationId);
+      } catch (cause) {
+        setError(friendlyError(cause));
+      }
+    },
+    [client, noteConversation, onOpenConversation],
+  );
 
   // One stable action per button, so `act` can disable a single person's row while it is in flight.
   const request = useCallback(
@@ -252,6 +279,7 @@ export function FriendsPanel(): ReactNode {
                   username={profiles.get(entry.userId)?.username}
                   avatarUrl={profiles.get(entry.userId)?.avatarUrl}
                   onSelect={() => setSelected(entry.userId)}
+                  onMessage={() => void startDirect(entry.userId)}
                 />
               ))
             )}
@@ -327,6 +355,10 @@ export function FriendsPanel(): ReactNode {
           blocked={blocked.some((entry) => entry.userId === selected)}
           onClose={() => setSelected(null)}
           onBlock={blockFromModal}
+          onMessage={(userId) => {
+            setSelected(null);
+            void startDirect(userId);
+          }}
         />
       ) : null}
     </div>
@@ -391,9 +423,17 @@ interface PersonRowProps {
   actions?: ReactNode;
   /** Opens this person's profile; rows without it (requests, results) are not doors. */
   onSelect?: () => void;
+  /** Starts (or opens) a direct conversation with the person; offered where a DM makes sense. */
+  onMessage?: () => void;
 }
 
-/** One person in a list: avatar, name, @username, an optional note, and optional actions. */
+/**
+ * One person in a list: avatar, name, @username, an optional note, and optional actions.
+ *
+ * A row with both a profile and a message affordance also carries the context menu — right-click
+ * on desktop, long-press on touch — with the same actions the row's own controls offer. A tap
+ * still opens the profile; the long-press that opens the menu suppresses the tap that follows it.
+ */
 function PersonRow({
   id,
   name,
@@ -402,7 +442,23 @@ function PersonRow({
   avatarUrl,
   actions,
   onSelect,
+  onMessage,
 }: PersonRowProps): ReactNode {
+  const [menu, setMenu] = useState<{ x: number; y: number; touch: boolean } | null>(null);
+  const suppressClick = useRef(false);
+  const gestures = useContextMenu((at) => {
+    suppressClick.current = at.touch;
+    setMenu(at);
+  });
+
+  const contextActions: ContextAction[] = [];
+  if (onSelect !== undefined) {
+    contextActions.push({ id: 'profile', label: 'View profile', icon: 'user', onRun: onSelect });
+  }
+  if (onMessage !== undefined) {
+    contextActions.push({ id: 'message', label: 'Message', icon: 'chats', onRun: onMessage });
+  }
+
   return (
     <div
       className={`person-row ${onSelect ? 'person-row-clickable' : ''}`}
@@ -411,13 +467,28 @@ function PersonRow({
             role: 'button',
             tabIndex: 0,
             'aria-label': `View ${name}'s profile`,
-            onClick: onSelect,
+            onClick: () => {
+              if (suppressClick.current) {
+                suppressClick.current = false;
+                return;
+              }
+              onSelect();
+            },
             onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
               if (event.key === 'Enter' || event.key === ' ') {
                 event.preventDefault();
                 onSelect();
               }
             },
+          }
+        : {})}
+      {...(contextActions.length > 0
+        ? {
+            onPointerDown: gestures.onPointerDown,
+            onPointerMove: gestures.onPointerMove,
+            onPointerUp: gestures.onPointerUp,
+            onPointerCancel: gestures.onPointerCancel,
+            onContextMenu: gestures.onContextMenu,
           }
         : {})}
     >
@@ -428,6 +499,14 @@ function PersonRow({
         {note ? <span className="person-note">{note}</span> : null}
       </div>
       {actions ? <div className="person-actions">{actions}</div> : null}
+      {menu !== null && contextActions.length > 0 ? (
+        <ContextMenu
+          at={menu}
+          title={name}
+          actions={contextActions}
+          onClose={() => setMenu(null)}
+        />
+      ) : null}
     </div>
   );
 }

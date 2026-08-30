@@ -23,10 +23,15 @@ use crate::model::{Account, Connection, Toast, ToastKind};
 use crate::net::{Command, Event, Net};
 use crate::settings::{self, Settings};
 use crate::theme::{self, palette, space, Theme};
+use crate::ui::alerts::AlertsState;
 use crate::ui::auth::AuthState;
 use crate::ui::chat::ChatState;
 use crate::ui::friends::FriendsState;
+use crate::ui::rooms::RoomsState;
+use crate::ui::search::SearchState;
 use crate::ui::settings::SettingsState;
+use crate::ui::space::SpaceState;
+use crate::ui::wallet::WalletState;
 use crate::ui::{widgets, Context, Place, Screen};
 
 /// The whole application state.
@@ -42,6 +47,13 @@ pub struct App {
     chat: ChatState,
     friends: FriendsState,
     settings_panel: SettingsState,
+    rooms: RoomsState,
+    space: SpaceState,
+    alerts: AlertsState,
+    search: SearchState,
+    wallet: WalletState,
+    /// The merged activity stream, rebuilt whenever either durable half moves.
+    activity: Vec<crate::model::ActivityRow>,
     toasts: Vec<Toast>,
     /// Reused each frame so a screen's command buffer costs no allocation per frame.
     commands: Vec<Command>,
@@ -93,13 +105,19 @@ impl App {
             theme,
             net,
             screen: Screen::Opening,
-            place: Place::Chat,
+            place: Place::Home,
             connection: Connection::Offline,
             account: None,
             auth,
             chat: ChatState::default(),
             friends: FriendsState::default(),
             settings_panel: SettingsState::default(),
+            rooms: RoomsState::default(),
+            space: SpaceState::default(),
+            alerts: AlertsState::default(),
+            search: SearchState::default(),
+            wallet: WalletState::default(),
+            activity: Vec::new(),
             toasts: Vec::new(),
             commands: Vec::new(),
             settings,
@@ -148,12 +166,18 @@ impl App {
                     // succeeded; the next sign-in starts from a fresh fetch, not a stale image.
                     self.auth.captcha.reset();
                     self.account = Some(account);
-                    // A session starts at its conversations, and with none of the previous
-                    // session's graph or device list: those describe an account, and this may be
-                    // a different one signing in over the same window.
-                    self.place = Place::Chat;
+                    // A session starts at its dashboard, and with none of the previous session's
+                    // graph or device list: those describe an account, and this may be a
+                    // different one signing in over the same window.
+                    self.place = Place::Home;
                     self.friends = FriendsState::default();
                     self.settings_panel = SettingsState::default();
+                    self.rooms = RoomsState::default();
+                    self.space = SpaceState::default();
+                    self.alerts = AlertsState::default();
+                    self.search = SearchState::default();
+                    self.wallet = WalletState::default();
+                    self.activity.clear();
                     self.screen = Screen::Chat;
                 }
                 Event::SignedOut => {
@@ -170,7 +194,13 @@ impl App {
                     // reason the threads do, and the pane starts its next session NotAsked.
                     self.friends = FriendsState::default();
                     self.settings_panel = SettingsState::default();
-                    self.place = Place::Chat;
+                    self.rooms = RoomsState::default();
+                    self.space = SpaceState::default();
+                    self.alerts = AlertsState::default();
+                    self.search = SearchState::default();
+                    self.wallet = WalletState::default();
+                    self.activity.clear();
+                    self.place = Place::Home;
                     self.screen = Screen::Unlock;
                 }
                 Event::CaptchaChallenge(challenge) => self.auth.captcha.hold(challenge),
@@ -266,6 +296,55 @@ impl App {
                     self.settings_panel.sessions =
                         crate::ui::settings::SessionsView::from_result(result);
                 }
+                Event::Rooms(rows) => {
+                    self.rooms.rooms = rows;
+                    self.rooms.loaded = true;
+                }
+                Event::RoomJoined {
+                    conversation_id,
+                    title,
+                } => {
+                    self.toasts.push(Toast::success(format!("Joined {title}")));
+                    self.open_conversation(conversation_id);
+                }
+                Event::Alerts(rows) => {
+                    self.alerts.items = rows;
+                    self.alerts.loaded = true;
+                    self.rebuild_activity();
+                }
+                Event::AlertPushed => {
+                    // The push is the cue to re-read whatever inbox-shaped surface is showing.
+                    self.commands.push(Command::Notifications);
+                }
+                Event::Balance { coins, points } => {
+                    self.wallet.coins = Some(coins);
+                    self.wallet.points = Some(points);
+                }
+                Event::Ledger(rows) => {
+                    self.wallet.ledger = rows;
+                    self.rebuild_activity();
+                }
+                Event::ProgressionArrived(progression) => {
+                    self.wallet.progression = Some(progression);
+                }
+                Event::Badges(codes) => {
+                    self.wallet.badges = codes;
+                }
+                Event::Leaderboard(rows) => {
+                    self.wallet.leaders = rows;
+                }
+                Event::Gifts(rows) => {
+                    self.wallet.gifts = rows;
+                }
+                Event::People(rows) => {
+                    if self.search.query.trim().is_empty() {
+                        // The graph's own suggestions, kept for the pre-query state.
+                        self.search.suggestions = rows;
+                    } else {
+                        self.search.people = Some(rows);
+                        self.search.busy = false;
+                    }
+                }
                 Event::Toast { text, kind } => self.toasts.push(match kind {
                     ToastKind::Info => Toast::info(text),
                     ToastKind::Success => Toast::success(text),
@@ -342,30 +421,90 @@ impl App {
     }
 
     /// The signed-in places, laid out horizontally in the top bar.
+    ///
+    /// Every place in [`Place::ALL`], in information-architecture order — the same list the web
+    /// client's rail and the Android client's bottom bar carry, because it is one product. A
+    /// place whose facts are the server's re-reads on entry, for the same reason the friends
+    /// graph does: the other devices of this account act on it too.
     fn nav_tabs(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme;
         // Summed before the buttons, because the chat pane the badge describes is not the pane
         // being drawn when the tab is clicked from elsewhere.
         let unread: u32 = self.chat.conversations.iter().map(|c| c.unread).sum();
         let mut place = self.place;
-        let mut refresh_friends = false;
-        if widgets::tab_button(ui, theme, "Chat", place == Place::Chat, unread) {
-            place = Place::Chat;
-        }
-        if widgets::tab_button(ui, theme, "Friends", place == Place::Friends, 0) {
-            place = Place::Friends;
-            // The graph is the server's, and the other devices of this account act on it too.
-            // Opening the tab re-reads it — one cheap request per click, rather than a pane
-            // faithfully showing a friendship that ended while nobody was looking.
-            refresh_friends = true;
-        }
-        if widgets::tab_button(ui, theme, "Settings", place == Place::Settings, 0) {
-            place = Place::Settings;
+        let mut entered: Option<Place> = None;
+        for candidate in Place::ALL {
+            let badge = if candidate == Place::Chat { unread } else { 0 };
+            if widgets::tab_button(ui, theme, candidate.label(), place == candidate, badge) {
+                place = candidate;
+                entered = Some(candidate);
+            }
         }
         self.place = place;
-        if refresh_friends {
-            self.commands.push(Command::Friends);
+        if let Some(target) = entered {
+            // The per-place first reads. A place that keeps what it holds does not re-read, so a
+            // tour through the bar costs one read per place, not one per visit.
+            match target {
+                Place::Friends => self.commands.push(Command::Friends),
+                Place::Rooms => self.commands.push(Command::Rooms {
+                    query: self.rooms.query.clone(),
+                }),
+                Place::Alerts | Place::Space => self.commands.push(Command::Notifications),
+                Place::Wallet => self.commands.push(Command::Wallet),
+                Place::Search => {
+                    if self.search.suggestions.is_empty() {
+                        self.commands.push(Command::Suggestions);
+                    }
+                }
+                Place::Home => {
+                    if self.search.suggestions.is_empty() {
+                        self.commands.push(Command::Suggestions);
+                    }
+                    if self.rooms.rooms.is_empty() {
+                        self.commands.push(Command::Rooms {
+                            query: String::new(),
+                        });
+                    }
+                    if self.alerts.items.is_empty() {
+                        self.commands.push(Command::Notifications);
+                    }
+                    if self.wallet.coins.is_none() {
+                        self.commands.push(Command::Wallet);
+                    }
+                }
+                Place::Chat | Place::Settings => {}
+            }
         }
+    }
+
+    /// Opens a conversation from outside the chat pane — a Home row, a joined room, a search hit.
+    ///
+    /// The same [`crate::ui::chat::open`] the sidebar uses, driven with a scratch command buffer
+    /// because the event that calls this arrives outside the frame that owns the real one.
+    fn open_conversation(&mut self, conversation_id: migo_core::Id) {
+        let mut commands = std::mem::take(&mut self.commands);
+        let mut navigate = None;
+        let mut theme_choice = None;
+        let mut open_place = Some(Place::Chat);
+        let server = self.auth.server.clone();
+        let mut context = Context {
+            theme: self.theme,
+            connection: &self.connection,
+            account: self.account.as_ref(),
+            server: &server,
+            commands: &mut commands,
+            navigate: &mut navigate,
+            theme_choice: &mut theme_choice,
+            open_place: &mut open_place,
+        };
+        crate::ui::chat::open(&mut context, &mut self.chat, conversation_id);
+        self.commands = commands;
+        self.place = Place::Chat;
+    }
+
+    /// Rebuilds the merged activity stream from its durable halves.
+    fn rebuild_activity(&mut self) {
+        self.activity = crate::ui::space::rebuild(&self.alerts.items, &self.wallet.ledger);
     }
 }
 
@@ -414,6 +553,7 @@ impl eframe::App for App {
                     // The pane fills the whole central panel. The navigation that once claimed a
                     // fixed strip on the left lives in the top bar now, so the thing being
                     // switched to gets every pixel the window can spare.
+                    let mut open_place = None;
                     let mut context = Context {
                         theme: self.theme,
                         connection: &self.connection,
@@ -422,15 +562,47 @@ impl eframe::App for App {
                         commands: &mut self.commands,
                         navigate: &mut navigate,
                         theme_choice: &mut theme_choice,
+                        open_place: &mut open_place,
                     };
                     match self.place {
+                        Place::Home => {
+                            let data = crate::ui::home::HomeData {
+                                rooms: &self.rooms.rooms,
+                                people: &self.search.suggestions,
+                                alerts: &self.alerts.items,
+                                leaders: &self.wallet.leaders,
+                                coins: self.wallet.coins,
+                            };
+                            crate::ui::home::show(ui, &mut context, &mut self.chat, data);
+                        }
                         Place::Chat => crate::ui::chat::show(ui, &mut context, &mut self.chat),
+                        Place::Rooms => crate::ui::rooms::show(ui, &mut context, &mut self.rooms),
+                        Place::Space => {
+                            let activity = std::mem::take(&mut self.activity);
+                            crate::ui::space::show(ui, &mut context, &mut self.space, &activity);
+                            self.activity = activity;
+                        }
                         Place::Friends => {
                             crate::ui::friends::show(ui, &mut context, &mut self.friends)
+                        }
+                        Place::Alerts => {
+                            crate::ui::alerts::show(ui, &mut context, &mut self.alerts)
+                        }
+                        Place::Search => crate::ui::search::show(
+                            ui,
+                            &mut context,
+                            &mut self.search,
+                            &mut self.chat,
+                        ),
+                        Place::Wallet => {
+                            crate::ui::wallet::show(ui, &mut context, &mut self.wallet)
                         }
                         Place::Settings => {
                             crate::ui::settings::show(ui, &mut context, &mut self.settings_panel)
                         }
+                    }
+                    if let Some(place) = open_place {
+                        self.place = place;
                     }
                 } else {
                     // The server is cloned for the context because the auth screen holds the
@@ -438,6 +610,7 @@ impl eframe::App for App {
                     // struct per frame on the one screen that has a form, rather than reworking
                     // the context the other three panes share.
                     let server = self.auth.server.clone();
+                    let mut open_place = None;
                     let mut context = Context {
                         theme: self.theme,
                         connection: &self.connection,
@@ -446,6 +619,7 @@ impl eframe::App for App {
                         commands: &mut self.commands,
                         navigate: &mut navigate,
                         theme_choice: &mut theme_choice,
+                        open_place: &mut open_place,
                     };
                     crate::ui::auth::show(ui, &mut context, &mut self.auth, screen);
                 }

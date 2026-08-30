@@ -24,6 +24,8 @@ import type { ReactNode } from 'react';
 import type { AccountSession, Id } from '@migo/sdk';
 
 import { formatRelative } from '@/lib/format.js';
+import { getChoice, setChoice } from '@/lib/theme.js';
+import type { ThemeChoice } from '@/lib/theme.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { saveSession } from '@/lib/storage/session-store.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
@@ -324,7 +326,7 @@ export function SettingsPanel(): ReactNode {
       </section>
 
       <section className="panel-section" aria-label="Change password">
-        <h2 className="panel-heading">Change password</h2>
+        <h2 className="panel-heading">Account</h2>
         <PasswordFormView
           current={current}
           next={next}
@@ -336,6 +338,57 @@ export function SettingsPanel(): ReactNode {
           onSubmit={changePassword}
         />
       </section>
+
+      <AppearanceSection />
+      <AboutSection />
     </div>
+  );
+}
+
+/**
+ * The Appearance section: the theme, stated as three named choices rather than a toggle.
+ *
+ * System is offered first because it is the choice that keeps itself correct; light and dark
+ * exist for the times a room's lighting argues with the OS.
+ */
+function AppearanceSection(): ReactNode {
+  const [choice, setChoiceState] = useState<ThemeChoice>(() => getChoice());
+  function pick(next: ThemeChoice): void {
+    setChoice(next);
+    setChoiceState(next);
+  }
+  return (
+    <section className="panel-section" aria-label="Appearance">
+      <h2 className="panel-heading">Appearance</h2>
+      <div className="chip-row" role="group" aria-label="Theme">
+        {(['system', 'dark', 'light'] as const).map((option) => (
+          <button
+            key={option}
+            type="button"
+            className={`chip ${choice === option ? 'chip-active' : ''}`}
+            aria-pressed={choice === option}
+            onClick={() => pick(option)}
+          >
+            {option.charAt(0).toUpperCase() + option.slice(1)}
+          </button>
+        ))}
+      </div>
+      <p className="muted">System follows this device's colour scheme; dark is Migo's home skin.</p>
+    </section>
+  );
+}
+
+/** The About section: what this build is, and the door to the design system. */
+function AboutSection(): ReactNode {
+  return (
+    <section className="panel-section" aria-label="About">
+      <h2 className="panel-heading">About</h2>
+      <p className="muted">
+        Migo — compact, social, realtime. One design system across every screen size.
+      </p>
+      <a className="btn btn-ghost" href="/design/">
+        Design system
+      </a>
+    </section>
   );
 }

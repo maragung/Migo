@@ -125,15 +125,28 @@ fun Monogram(name: String, size: Dp = 44.dp, modifier: Modifier = Modifier) {
  * A stable colour for a name.
  *
  * `hashCode` rather than anything cryptographic: this picks one of eight colours for a monogram, and
- * nothing about it needs to be unpredictable. The palette is fixed and every entry carries white text.
+ * nothing about it needs to be unpredictable. The palette is drawn from the Migo design system's
+ * accent family and status hues, and every entry carries white text.
  */
 private fun tintFor(name: String): Color {
     val palette = listOf(
-        Color(0xFF4338CA), Color(0xFF0F766E), Color(0xFFB45309), Color(0xFF9D174D),
+        Color(0xFF005CB8), Color(0xFF00875A), Color(0xFF9A6700), Color(0xFF9D174D),
         Color(0xFF1D4ED8), Color(0xFF15803D), Color(0xFF7E22CE), Color(0xFFC2410C),
     )
     val index = (name.hashCode().toLong() and 0xffffffffL).mod(palette.size.toLong()).toInt()
     return palette[index]
+}
+
+/** A compact section label: the micro type step, uppercase, in the tertiary ink. */
+@Composable
+fun SectionLabel(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelMedium,
+        color = MigoExtra.current.faint,
+        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+        modifier = modifier.padding(start = 16.dp, top = 12.dp, bottom = 4.dp),
+    )
 }
 
 /**

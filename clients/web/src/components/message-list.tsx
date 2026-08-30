@@ -12,10 +12,17 @@ import type { ThreadMessage } from '@/lib/migo/use-chat.js';
 
 import { Avatar } from './avatar.js';
 import { Spinner } from './spinner.js';
+import { TokenText } from './token-reference.js';
 import { VoiceNoteBubble } from './voice-player.js';
 
 /** How much of a quoted message the reply snippet above a bubble shows. */
 const QUOTE_CHARS = 60;
+
+/**
+ * The cheap pre-test a message's text must pass before the token splitter runs — one regex test
+ * instead of a split on every message, so threads without a $MIG mention pay nothing.
+ */
+const TICKER_EARLY = /\$mig\b/i;
 
 /** The quick reactions the hover bar offers, in order. */
 export const QUICK_REACTIONS: readonly string[] = ['👍', '❤️', '😂'];
@@ -122,10 +129,21 @@ function MediaAttachment({
 function renderBody(
   content: MessageContent,
   mediaUrlFor: MediaUrlResolver | undefined,
+  onOpenWallet: (() => void) | undefined,
 ): { node: ReactNode; placeholder: boolean } {
   switch (content.type) {
     case ContentType.Text:
-      return { node: content.text, placeholder: false };
+      // A $MIG mention is a live reference to the wallet; without the handler the text renders
+      // exactly as it did before — a context with no wallet section loses nothing.
+      return {
+        node:
+          onOpenWallet !== undefined && TICKER_EARLY.test(content.text) ? (
+            <TokenText text={content.text} onOpenWallet={onOpenWallet} />
+          ) : (
+            content.text
+          ),
+        placeholder: false,
+      };
     case ContentType.MediaRef:
       return mediaUrlFor === undefined
         ? { node: `📎 ${mediaLabel(content)}`, placeholder: true }
@@ -221,6 +239,11 @@ export interface MessageListProps {
   liveSlot?: ReactNode;
   /** How many rows the live slot holds, so auto-scroll follows their arrival too. */
   liveRowCount?: number;
+  /**
+   * Opens the Wallet section for a $MIG token reference in message text. Optional: without it
+   * the text renders without the chips, which is how a context with no wallet section renders.
+   */
+  onOpenWallet?: () => void;
 }
 
 export function MessageList({
@@ -240,6 +263,7 @@ export function MessageList({
   mediaUrlFor,
   liveSlot,
   liveRowCount,
+  onOpenWallet,
 }: MessageListProps): ReactNode {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const visible = useMemo(() => messages.filter(isVisible), [messages]);
@@ -299,7 +323,7 @@ export function MessageList({
         const quoted = message.replyTo ? (byId.get(message.replyTo) ?? null) : null;
         const quoteText =
           quoted && !quoted.deleted ? messagePreview(quoted.content, QUOTE_CHARS) : '[deleted]';
-        const { node, placeholder } = renderBody(message.content, mediaUrlFor);
+        const { node, placeholder } = renderBody(message.content, mediaUrlFor, onOpenWallet);
         const editable = mine && message.content.type === ContentType.Text && onEdit !== undefined;
         const editing = editingId === message.messageId && editable;
 

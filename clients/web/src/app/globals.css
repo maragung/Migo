@@ -77,7 +77,61 @@
   /* theme-independent tokens */
   --radius: 6px;
   --radius-sm: 4px;
+  --radius-lg: 8px;
   --font: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+
+  /*
+   * Design-system scales (see shared/design/tokens.json — the canonical cross-platform source).
+   * Components compose from these instead of naming one-off values; anything that cannot be
+   * expressed as a scale step needs a reason in the comment next to it.
+   */
+  /* spacing: multiples of the 4px base */
+  --sp-0: 0px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /* typography scale */
+  --fs-micro: 11px;
+  --fs-meta: 12px;
+  --fs-body-sm: 13px;
+  --fs-body: 14px;
+  --fs-title-sm: 16px;
+  --fs-title: 18px;
+  --fs-display: 22px;
+
+  /* icon sizes and the minimum touch target every interactive element must clear */
+  --icon-sm: 16px;
+  --icon-md: 20px;
+  --icon-lg: 24px;
+  --touch: 44px;
+
+  /* motion: short, functional, subtle — and collapsed under prefers-reduced-motion */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 240ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-enter: cubic-bezier(0, 0, 0.2, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+
+  /* elevation ladder: nothing paints above a toast */
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-overlay: 300;
+  --z-modal: 400;
+  --z-toast: 500;
+
+  /* layout: content never stretches edge-to-edge on a monitor */
+  --content-max: 1280px;
+  --panel-max: 640px;
+  --rail-w: 232px;
+  --rail-w-compact: 64px;
 }
 
 [data-theme='dark'] {
@@ -438,173 +492,171 @@ main {
   overflow: hidden;
 }
 
-/* --- section navigation (a bar across the top on desktop, a bottom bar on mobile) --- */
+/* --- the app shell: rail on wide screens, header + bottom bar on phones --- */
 
+/*
+ * One grid, three compositions. Desktop is a two-column grid (rail + body). Mobile is a
+ * three-row grid (header, body, bottom bar) — the rail hides. The body hosts either the chats
+ * two-pane shell or a section panel; both scroll within it.
+ */
 .app {
   display: grid;
-  grid-template-rows: 48px minmax(0, 1fr);
+  grid-template-columns: var(--rail-w) minmax(0, 1fr);
   height: 100%;
   overflow: hidden;
 }
 
-/* New top navigation */
-.top-nav {
+/* The rail: brand, the primary sections, the account foot. Icon + label on desktop. */
+.rail {
+  grid-column: 1;
   grid-row: 1;
   display: flex;
-  align-items: center;
-  gap: 0;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--nav-bg, var(--panel));
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  overflow-x: auto;
-  white-space: nowrap;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
 }
-.top-nav-brand {
+.rail-brand {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  padding: 12px 14px 10px;
   font-size: 15px;
   font-weight: 700;
   color: var(--accent);
-  margin-right: 16px;
-  flex-shrink: 0;
 }
-.top-nav-brand .brand-mark {
-  font-size: 18px;
+.rail-brand .brand-mark {
+  display: inline-flex;
 }
-.top-nav-tabs {
+.rail-brand-name {
+  letter-spacing: 0.2px;
+}
+.rail-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 8px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.rail-btn {
   display: flex;
   align-items: center;
-  gap: 2px;
-  flex: 1;
-  min-width: 0;
-}
-.top-nav-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
+  gap: 10px;
+  min-height: 36px;
+  padding: 7px 10px;
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-dim);
   font-size: 13px;
   font-weight: 600;
-  cursor: pointer;
+  text-align: left;
   transition:
-    color 0.15s,
-    background 0.15s;
+    color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard);
 }
-.top-nav-tab-icon {
-  font-size: 14px;
-  line-height: 1;
-}
-.top-nav-tab:hover {
+.rail-btn:hover {
   color: var(--text);
-  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
-.top-nav-tab:focus-visible {
+.rail-btn:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
-.top-nav-tab.active {
+.rail-btn.active {
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-  /* The active mark: an underline inset into the bar, so the accent reads at a glance. */
-  box-shadow: inset 0 -2px 0 var(--accent);
-  text-shadow: 0 0 10px var(--accent-glow);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
-.top-nav-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
+.rail-btn-icon {
+  display: inline-flex;
   flex-shrink: 0;
 }
-/* The account chip: avatar and name, one click from the profile section. */
-.top-nav-user {
-  display: inline-flex;
+.rail-btn-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rail-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+}
+.rail-user {
+  display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 3px 10px 3px 4px;
+  gap: 10px;
+  padding: 6px 8px;
   border: none;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text);
   font-size: 13px;
   font-weight: 600;
+  text-align: left;
   transition:
-    color 0.15s,
-    background 0.15s;
+    color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard);
 }
-.top-nav-user:hover {
+.rail-user:hover {
   color: var(--accent);
   background: var(--accent-soft);
 }
-.top-nav-user:focus-visible {
+.rail-user:focus-visible {
   outline: 1px solid var(--accent);
-  outline-offset: 1px;
+  outline-offset: -1px;
 }
-.top-nav-user-name {
-  max-width: 140px;
+.rail-user.active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.rail-user-name {
+  max-width: 120px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* The mobile half of the navigation: hidden on desktop, a thumb-reachable bar on a phone. */
+/* The mobile header and bottom bar exist only under 768px (rules near the end of the sheet). */
+.mobile-header,
 .bottom-nav {
   display: none;
 }
-.bottom-nav-btn {
+
+/* The body hosts the current section. */
+.app-body {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  padding: 4px 10px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 11px;
-  font-weight: 600;
+  overflow: hidden;
 }
-.bottom-nav-btn:hover {
-  color: var(--text);
-}
-.bottom-nav-btn:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: -1px;
-}
-.bottom-nav-btn.active {
-  color: var(--accent);
-}
-.bottom-nav-icon {
-  font-size: 18px;
-  line-height: 1;
-}
-
-.app > .shell,
-.app > .panel-area {
-  grid-row: 2;
-  min-width: 0;
+.app-body > .shell,
+.app-body > .panel {
+  flex: 1;
   min-height: 0;
 }
 
-/* --- section panels (friends, notifications, discover, profile) --- */
+/* --- section panels (home, rooms, space, friends, alerts, search, wallet, profile, settings) --- */
 
-.panel-area {
-  overflow-y: auto;
-}
+/* A panel is its own scroll container: the shell never scrolls, the section does. */
 .panel {
   max-width: 640px;
+  width: 100%;
   margin: 0 auto;
   padding: 16px 14px 24px;
   display: flex;
   flex-direction: column;
   gap: 12px;
+  overflow-y: auto;
+}
+.panel-wide {
+  max-width: 760px;
 }
 .panel-title {
   margin: 0;
@@ -2164,28 +2216,109 @@ main {
   text-overflow: ellipsis;
 }
 
-/* --- responsive: one pane at a time on narrow screens, tabs move to a bottom bar --- */
+/* --- responsive: the shell's three compositions --- */
 
+/*
+ * Mobile (<768px): the rail folds away, the header and the five-slot bottom bar fold out, and
+ * the chats shell keeps its one-pane-at-a-time behaviour. With a thread open the global header
+ * folds away too — the thread's own header, with its back button, is the only chrome that pane
+ * needs.
+ */
 @media (max-width: 768px) {
   .app {
-    grid-template-rows: 44px minmax(0, 1fr) 52px;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 44px minmax(0, 1fr) calc(52px + env(safe-area-inset-bottom, 0px));
   }
-  .top-nav-tabs {
+  .rail {
     display: none;
   }
-  .top-nav-user-name {
+  .mobile-header {
+    display: flex;
+    grid-column: 1;
+    grid-row: 1;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--nav-bg, var(--panel));
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+  .app.app-thread-open .mobile-header {
     display: none;
+  }
+  .app.app-thread-open {
+    grid-template-rows: minmax(0, 1fr) calc(52px + env(safe-area-inset-bottom, 0px));
+  }
+  .app.app-thread-open .app-body {
+    grid-row: 1;
+  }
+  .mobile-header .brand-mark {
+    display: inline-flex;
+    color: var(--accent);
+  }
+  .mobile-brand-name {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+  }
+  .mobile-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+  }
+  .mobile-header-avatar {
+    display: inline-flex;
+    align-items: center;
+    border: none;
+    padding: 2px;
+    border-radius: 999px;
+    background: transparent;
+  }
+  .mobile-header-avatar:focus-visible {
+    outline: 1px solid var(--accent);
   }
   .bottom-nav {
     display: flex;
+    grid-column: 1;
     grid-row: 3;
-    align-items: center;
+    align-items: stretch;
     justify-content: space-around;
     border-top: 1px solid var(--border);
     background: var(--panel);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
-  .app > .shell,
-  .app > .panel-area {
+  .bottom-nav-btn {
+    flex: 1;
+    min-height: var(--touch);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    padding: 4px 8px;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: var(--fs-micro);
+    font-weight: 600;
+  }
+  .bottom-nav-btn:hover {
+    color: var(--text);
+  }
+  .bottom-nav-btn:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: -2px;
+  }
+  .bottom-nav-btn.active {
+    color: var(--accent);
+  }
+  .bottom-nav-icon {
+    display: inline-flex;
+    line-height: 1;
+  }
+  .app-body {
     grid-column: 1;
     grid-row: 2;
   }
@@ -2213,6 +2346,52 @@ main {
   }
   .games-btn {
     padding: 5px 8px;
+  }
+}
+
+/*
+ * Tablet (768–1023px): the rail collapses to icons, so the content keeps the room. Labels come
+ * back at the desktop width below.
+ */
+@media (min-width: 768px) and (max-width: 1023px) {
+  .app {
+    grid-template-columns: var(--rail-w-compact) minmax(0, 1fr);
+  }
+  .rail-btn-label,
+  .rail-user-name,
+  .rail-brand-name {
+    display: none;
+  }
+  .rail-btn,
+  .rail-user {
+    justify-content: center;
+    padding: 9px 0;
+  }
+  .rail-brand {
+    justify-content: center;
+    padding: 12px 0 10px;
+  }
+}
+
+/* Desktop (≥1024px): the full rail. Wide monitors keep the content out of the margins. */
+@media (min-width: 1440px) {
+  .panel {
+    max-width: 760px;
+  }
+  .panel-wide {
+    max-width: 860px;
+  }
+}
+
+/* Reduced motion: animations collapse to opacity-only or none, per the design tokens. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 
@@ -2703,4 +2882,818 @@ main {
   .presence-current {
     display: none;
   }
+}
+
+/* =========================================================================
+ * The redesign's new surfaces: chips, digest rows, the activity stream, the
+ * bottom sheet, the shared states, the token reference, and the Home blocks.
+ * Every value composes from the token scales; anything one-off says why.
+ * ========================================================================= */
+
+/* --- chips: filter and category selectors --- */
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 30px;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text-dim);
+  font-size: var(--fs-body-sm);
+  font-weight: 600;
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard);
+}
+.chip:hover {
+  color: var(--text);
+  border-color: var(--accent-border-soft);
+}
+.chip:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+.chip-active {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+/* The $MIG mark: the coin's own chip, used beside titles and on the hero. */
+.mig-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 4px 12px;
+  border: 1px solid var(--accent-border-soft);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: var(--fs-body-sm);
+  font-weight: 700;
+}
+.mig-chip:hover {
+  border-color: var(--accent-border);
+}
+.mig-chip:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* --- digest rows: the compact lists Home, Search, and Space render --- */
+
+.digest-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.digest-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+button.digest-row {
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+button.digest-row:hover {
+  background: var(--accent-soft);
+}
+button.digest-row:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.digest-row-static {
+  background: transparent;
+}
+.digest-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.digest-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.digest-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--panel-alt);
+  color: var(--text-dim);
+}
+.digest-rank {
+  width: 32px;
+  flex-shrink: 0;
+  text-align: center;
+  font-size: var(--fs-meta);
+  font-weight: 700;
+  color: var(--text-faint);
+}
+.unread-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: var(--glow);
+}
+.link-btn {
+  border: none;
+  padding: 2px 4px;
+  background: transparent;
+  color: var(--accent);
+  font-size: var(--fs-meta);
+  font-weight: 600;
+}
+.link-btn:hover {
+  text-decoration: underline;
+}
+.link-btn:focus-visible {
+  outline: 1px solid var(--accent);
+}
+.btn-sm {
+  padding: 4px 10px;
+  font-size: var(--fs-body-sm);
+}
+
+/* --- the room rows (directory + joined) --- */
+
+.room-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.room-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+.room-row:hover {
+  border-color: var(--accent-border-soft);
+  background: var(--accent-soft);
+}
+.room-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.verified-mark {
+  display: inline-flex;
+  color: var(--accent);
+}
+
+/* --- the activity stream (Space) --- */
+
+.activity-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.activity-row {
+  display: flex;
+}
+.activity-row-btn,
+.activity-row-static {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+button.activity-row-btn {
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+button.activity-row-btn:hover {
+  background: var(--accent-soft);
+}
+button.activity-row-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.activity-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--panel-alt);
+  color: var(--text-dim);
+}
+.activity-glyph[data-category='social'] {
+  color: var(--accent);
+}
+.activity-glyph[data-category='rooms'] {
+  color: var(--positive);
+}
+.activity-glyph[data-category='games'] {
+  color: var(--warning);
+}
+.activity-glyph[data-category='economy'] {
+  color: var(--gold);
+}
+
+/* --- the bottom sheet and its menu --- */
+
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: var(--backdrop);
+}
+.sheet {
+  width: 100%;
+  max-width: 480px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  animation: sheet-rise var(--motion-base) var(--ease-enter);
+}
+@keyframes sheet-rise {
+  from {
+    transform: translateY(24px);
+    opacity: 0.6;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+.sheet-handle {
+  width: 36px;
+  height: 4px;
+  margin: 8px auto 4px;
+  border-radius: 999px;
+  background: var(--border-strong);
+}
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 14px 8px;
+}
+.sheet-title {
+  margin: 0;
+  font-size: var(--fs-title-sm);
+}
+.sheet-body {
+  padding: 0 14px calc(14px + env(safe-area-inset-bottom, 0px));
+  overflow-y: auto;
+  min-height: 0;
+}
+.sheet-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sheet-menu-btn {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 10px 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-body);
+  font-weight: 600;
+  text-align: left;
+}
+.sheet-menu-btn:hover {
+  background: var(--accent-soft);
+}
+.sheet-menu-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.sheet-menu-btn.active {
+  color: var(--accent);
+}
+.sheet-menu-icon {
+  display: inline-flex;
+  color: var(--text-dim);
+}
+.sheet-menu-btn.active .sheet-menu-icon {
+  color: var(--accent);
+}
+.sheet-menu-current {
+  display: inline-flex;
+  margin-left: auto;
+  color: var(--accent);
+}
+
+/* On tablet/desktop widths the sheet is a small centred dialog instead. */
+@media (min-width: 768px) {
+  .sheet-backdrop {
+    align-items: center;
+  }
+  .sheet {
+    border-radius: var(--radius-lg);
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+/* --- the shared states: skeleton, empty, error --- */
+
+.skeleton-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+}
+.skeleton-avatar {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--panel-alt);
+  animation: skeleton-pulse 1.2s var(--ease-standard) infinite;
+}
+.skeleton-lines {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.skeleton-line {
+  height: 10px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-alt);
+  animation: skeleton-pulse 1.2s var(--ease-standard) infinite;
+}
+.skeleton-w60 {
+  width: 60%;
+}
+.skeleton-w40 {
+  width: 40%;
+}
+@keyframes skeleton-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.state-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 28px 16px;
+  text-align: center;
+}
+.state-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  background: var(--panel-alt);
+  color: var(--text-faint);
+}
+.state-title {
+  margin: 0;
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.state-hint {
+  margin: 0;
+  font-size: var(--fs-meta);
+  color: var(--text-faint);
+}
+.state-error .state-icon {
+  color: var(--danger);
+}
+.state-action {
+  display: flex;
+  gap: 8px;
+}
+
+/* --- the $MIG token reference --- */
+
+.token-ref {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  margin: 0 1px;
+  border: 1px solid var(--accent-border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 0.92em;
+  font-weight: 700;
+  line-height: 1.5;
+  vertical-align: baseline;
+  transition:
+    border-color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard);
+}
+.token-ref:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-soft-strong);
+}
+.token-ref:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* --- the Home dashboard --- */
+
+.home-panel {
+  gap: 14px;
+}
+.home-hero {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+.home-hero-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.home-hero-name {
+  margin: 0;
+  font-size: var(--fs-title-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.home-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.home-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-height: 64px;
+  justify-content: center;
+  padding: 10px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text-dim);
+  font-size: var(--fs-body-sm);
+  font-weight: 600;
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard);
+}
+.home-action:hover {
+  color: var(--accent);
+  border-color: var(--accent-border-soft);
+}
+.home-action:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+.home-action-icon {
+  display: inline-flex;
+  color: var(--accent);
+}
+.home-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* --- the search box --- */
+
+.search-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--input);
+}
+.search-box:focus-within {
+  border-color: var(--accent-border);
+  box-shadow: var(--glow);
+}
+.search-box-icon {
+  display: inline-flex;
+  color: var(--text-faint);
+}
+.search-box-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  padding: 10px 0;
+}
+.search-box-input:focus {
+  outline: none;
+}
+
+/* --- the wallet's $MIG balance and badges --- */
+
+.balance-card {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.balance-fact {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+.balance-fact-coins {
+  border-color: var(--accent-border-soft);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.balance-fact .icon {
+  align-self: center;
+}
+.balance-amount {
+  font-size: var(--fs-title-sm);
+  font-weight: 700;
+}
+.balance-unit {
+  font-size: var(--fs-meta);
+  font-weight: 600;
+  opacity: 0.8;
+}
+.badge-shelf {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.badge-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-alt);
+  color: var(--gold);
+  font-size: var(--fs-meta);
+  font-weight: 600;
+}
+
+/* --- the design system page (/design) --- */
+
+.ds-swatches {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 6px;
+}
+.ds-swatch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.ds-swatch-chip {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+.ds-swatch-name {
+  font-family: ui-monospace, monospace;
+  font-size: var(--fs-meta);
+  font-weight: 600;
+}
+.ds-swatch-note {
+  margin-left: auto;
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+}
+.ds-type {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ds-type-step {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.ds-type-name {
+  width: 64px;
+  flex-shrink: 0;
+  font-family: ui-monospace, monospace;
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+}
+.ds-spacing {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 8px 0;
+}
+.ds-spacing-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+}
+.ds-spacing-bar {
+  height: 12px;
+  background: var(--accent-soft-strong);
+  border: 1px solid var(--accent-border-soft);
+}
+.ds-radius-box {
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--accent-border-soft);
+  background: var(--accent-soft);
+}
+.ds-icons {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 6px;
+}
+.ds-icon {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+}
+.ds-icon-name {
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+  font-family: ui-monospace, monospace;
+}
+.ds-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* --- the context menu (right-click on desktop, long-press on touch) --- */
+
+.context-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-dropdown);
+}
+.context-menu {
+  position: fixed;
+  z-index: calc(var(--z-dropdown) + 1);
+  min-width: 180px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-overlay);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: var(--shadow);
+  animation: menu-pop var(--motion-fast) var(--ease-enter);
+}
+@keyframes menu-pop {
+  from {
+    transform: scale(0.96);
+    opacity: 0.5;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.context-menu-items {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-body-sm);
+  font-weight: 600;
+  text-align: left;
+}
+.context-menu-item:hover {
+  background: var(--accent-soft);
+}
+.context-menu-item:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.context-menu-danger {
+  color: var(--danger);
+}
+.context-menu-danger:hover {
+  background: var(--danger-soft);
+}
+.context-menu-icon {
+  display: inline-flex;
+  color: var(--text-dim);
+}
+.context-menu-danger .context-menu-icon {
+  color: var(--danger);
 }

@@ -293,7 +293,10 @@ fn sidebar_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState) {
 }
 
 /// Opens a conversation and asks for anything missing from its history.
-fn open(context: &mut Context<'_>, state: &mut ChatState, conversation_id: Id) {
+///
+/// Public because the shell's other places are doors into threads too: a Home digest row, a
+/// joined room, a search hit. All of them open a conversation the one way there is.
+pub fn open(context: &mut Context<'_>, state: &mut ChatState, conversation_id: Id) {
     state.selected = Some(conversation_id);
     state.draft.clear();
     state.scroll_to_end = true;

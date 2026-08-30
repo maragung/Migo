@@ -6,78 +6,127 @@ import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
 /**
- * The app's colours and type.
+ * The app's colours and type — the Migo design system, mapped to Material.
  *
- * Two schemes written out rather than derived from one seed. Dynamic colour would hand the palette to
- * whatever wallpaper is set, and this app has one place where colour carries meaning rather than
- * decoration: an outgoing message is the primary colour and an incoming one is the surface, which is
- * how somebody reads a thread at a glance. A wallpaper that flattened that contrast would make the
- * conversation harder to read, so the two are fixed here and checked against each other.
+ * The canonical source is `shared/design/tokens.json`, mirrored into the web client's CSS variables
+ * and the desktop client's `theme.rs`. The values here are the same palette: one accent (blue in
+ * light, cyan in dark), the same ink ladder, the same status colours. Dynamic colour would hand the
+ * palette to whatever wallpaper is set, and this app has one place where colour carries meaning
+ * rather than decoration: an outgoing message is the primary colour and an incoming one is the
+ * surface, which is how somebody reads a thread at a glance. A wallpaper that flattened that
+ * contrast would make the conversation harder to read, so the two schemes are fixed here and checked
+ * against each other.
  *
- * Both schemes keep body text on its container above the 4.5:1 contrast ratio, which is the reason the
- * dark scheme's primary is lighter than the light scheme's rather than the same hue dimmed.
+ * # The colours Material has no slot for
+ *
+ * [MigoExtra] carries the tokens the Material scheme has no role for — the hairline border, the
+ * tertiary ink, the gold the badges and honours use — through a CompositionLocal, so a composable
+ * reads them exactly like a `colorScheme` colour instead of reaching for a hardcoded value that
+ * would not follow the theme.
  */
 
-// The brand hue: indigo, dark enough in the light scheme to carry white text, light enough in the
-// dark scheme to carry near-black text.
-private val IndigoLight = Color(0xFF4338CA)
-private val IndigoDark = Color(0xFFA5B4FC)
+// The accent. Light carries white text on the stronger blue (above 4.5:1); dark carries near-black
+// text on the cyan.
+private val AccentLight = Color(0xFF005CB8)
+private val AccentDark = Color(0xFF00D4FF)
 
-// Teal, used only for the presence dot and the unread badge: one accent, so it means something.
-private val TealLight = Color(0xFF0F766E)
-private val TealDark = Color(0xFF5EEAD4)
+// The Migo surfaces, straight from the token table.
+private val SurfaceLight = Color(0xFFFFFFFF)
+private val SurfaceDimLight = Color(0xFFF0F2F5)
+private val SurfaceSunkenLight = Color(0xFFF5F6F8)
+private val SurfaceDark = Color(0xFF111118)
+private val SurfaceDimDark = Color(0xFF0A0A12)
+private val SurfaceSunkenDark = Color(0xFF1A1A28)
 
 private val LightScheme = lightColorScheme(
-    primary = IndigoLight,
+    primary = AccentLight,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFE0E7FF),
-    onPrimaryContainer = Color(0xFF1E1B4B),
-    secondary = TealLight,
+    primaryContainer = Color(0xFFDCEBFA),
+    onPrimaryContainer = Color(0xFF00284F),
+    secondary = Color(0xFF00A85A),
     onSecondary = Color.White,
-    secondaryContainer = Color(0xFFCCFBF1),
-    onSecondaryContainer = Color(0xFF042F2E),
-    background = Color(0xFFFBFBFE),
-    onBackground = Color(0xFF15161B),
-    surface = Color(0xFFFBFBFE),
-    onSurface = Color(0xFF15161B),
-    surfaceVariant = Color(0xFFE7E7EF),
-    onSurfaceVariant = Color(0xFF44464F),
-    outline = Color(0xFF757780),
-    outlineVariant = Color(0xFFC6C6D0),
-    error = Color(0xFFB3261E),
+    secondaryContainer = Color(0xFFD3F5E4),
+    onSecondaryContainer = Color(0xFF00391D),
+    tertiary = Color(0xFF9A6700),
+    onTertiary = Color.White,
+    tertiaryContainer = Color(0xFFF7E8C8),
+    onTertiaryContainer = Color(0xFF2E2000),
+    background = SurfaceDimLight,
+    onBackground = Color(0xFF1A1D24),
+    surface = SurfaceLight,
+    onSurface = Color(0xFF1A1D24),
+    surfaceVariant = SurfaceSunkenLight,
+    onSurfaceVariant = Color(0xFF5C6370),
+    outline = Color(0xFFC5CAD0),
+    outlineVariant = Color(0xFFE0E3E8),
+    error = Color(0xFFE04050),
     onError = Color.White,
-    errorContainer = Color(0xFFF9DEDC),
-    onErrorContainer = Color(0xFF410E0B),
+    errorContainer = Color(0xFFFBE3E6),
+    onErrorContainer = Color(0xFFC22837),
 )
 
 private val DarkScheme = darkColorScheme(
-    primary = IndigoDark,
-    onPrimary = Color(0xFF1E1B4B),
-    primaryContainer = Color(0xFF3730A3),
-    onPrimaryContainer = Color(0xFFE0E7FF),
-    secondary = TealDark,
-    onSecondary = Color(0xFF042F2E),
-    secondaryContainer = Color(0xFF115E59),
-    onSecondaryContainer = Color(0xFFCCFBF1),
-    background = Color(0xFF111318),
-    onBackground = Color(0xFFE3E2E9),
-    surface = Color(0xFF111318),
-    onSurface = Color(0xFFE3E2E9),
-    surfaceVariant = Color(0xFF44464F),
-    onSurfaceVariant = Color(0xFFC5C6D0),
-    outline = Color(0xFF8F909A),
-    outlineVariant = Color(0xFF44464F),
-    error = Color(0xFFF2B8B5),
-    onError = Color(0xFF601410),
-    errorContainer = Color(0xFF8C1D18),
-    onErrorContainer = Color(0xFFF9DEDC),
+    primary = AccentDark,
+    onPrimary = Color(0xFF051018),
+    primaryContainer = Color(0xFF003B4D),
+    onPrimaryContainer = Color(0xFFC5F0FF),
+    secondary = Color(0xFF00FF88),
+    onSecondary = Color(0xFF002412),
+    secondaryContainer = Color(0xFF004D28),
+    onSecondaryContainer = Color(0xFFB8FFD9),
+    tertiary = Color(0xFFFFD166),
+    onTertiary = Color(0xFF332800),
+    tertiaryContainer = Color(0xFF55430F),
+    onTertiaryContainer = Color(0xFFFFE2A6),
+    background = SurfaceDimDark,
+    onBackground = Color(0xFFE8E8F0),
+    surface = SurfaceDark,
+    onSurface = Color(0xFFE8E8F0),
+    surfaceVariant = SurfaceSunkenDark,
+    onSurfaceVariant = Color(0xFF8888A0),
+    outline = Color(0xFF2E2E4A),
+    outlineVariant = Color(0xFF1A1A2E),
+    error = Color(0xFFFF4466),
+    onError = Color(0xFF2B060D),
+    errorContainer = Color(0xFF5C1120),
+    onErrorContainer = Color(0xFFFFB3C1),
 )
+
+/** The tokens Material's scheme has no slot for, themed light and dark like the rest. */
+data class MigoExtra(
+    /** The tertiary ink: hints, placeholders, timestamps' fainter sibling. */
+    val faint: Color,
+    /** The gold of badges and honours — tertiary's own colour, stated as a plain value. */
+    val gold: Color,
+    /** The bubble an incoming message sits in: the sunken surface. */
+    val bubbleIn: Color,
+    /** The $MIG coin accent on the wallet's cards. */
+    val coin: Color,
+)
+
+private val ExtraLight = MigoExtra(
+    faint = Color(0xFF9AA1AD),
+    gold = Color(0xFF9A6700),
+    bubbleIn = SurfaceSunkenLight,
+    coin = AccentLight,
+)
+
+private val ExtraDark = MigoExtra(
+    faint = Color(0xFF555570),
+    gold = Color(0xFFFFD166),
+    bubbleIn = SurfaceSunkenDark,
+    coin = AccentDark,
+)
+
+/** Reads the extra tokens like a `colorScheme` colour: `MigoExtra.current.gold`. */
+val LocalMigoExtra = staticCompositionLocalOf { ExtraDark }
 
 /**
  * Material 3's type scale, with the three styles this app actually sets adjusted.
@@ -104,6 +153,11 @@ fun MigoTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> 
     MaterialTheme(
         colorScheme = if (dark) DarkScheme else LightScheme,
         typography = MigoTypography,
-        content = content,
-    )
+    ) {
+        androidx.compose.runtime.CompositionLocalProvider(
+            LocalMigoExtra provides if (dark) ExtraDark else ExtraLight,
+        ) {
+            content()
+        }
+    }
 }

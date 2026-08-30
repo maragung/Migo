@@ -32,7 +32,7 @@ import {
   RecipientPicker,
   ledgerAmountLabel,
   xpFraction,
-} from '../src/components/gifts-panel.js';
+} from '../src/components/wallet-panel.js';
 
 const AT = Date.parse('2026-08-26T12:00:00Z');
 
@@ -55,8 +55,17 @@ function entry(reason: string, amount: number, balanceAfter: number): LedgerEntr
 
 test('the balance card shows the coin balance and the points balance', () => {
   const markup = renderToStaticMarkup(<BalanceCard balance={{ balance: 120, points: 5 }} />);
-  assert.ok(markup.includes('120 coins'), 'the coin balance is missing');
-  assert.ok(markup.includes('5 points'), 'the points balance is missing');
+  // The coin is $MIG: the number in the amount, the ticker beside it, on the coins fact.
+  assert.ok(
+    markup.includes('balance-amount">120<') || markup.includes('balance-amount">120</span>'),
+    'the coin balance is missing',
+  );
+  assert.ok(markup.includes('$MIG'), 'the coin fact lost its $MIG unit');
+  assert.ok(
+    markup.includes('balance-amount">5<') || markup.includes('balance-amount">5</span>'),
+    'the points balance is missing',
+  );
+  assert.ok(markup.includes('points'), 'the points fact lost its unit');
 });
 
 test('the gift grid renders every catalogue entry with its price, category, and a send control', () => {

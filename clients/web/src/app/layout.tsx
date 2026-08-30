@@ -5,6 +5,7 @@ import { MigoProvider } from '@/lib/migo/provider.js';
 import { themeInitScript } from '@/lib/theme.js';
 
 import { SwRegister } from './sw-register.js';
+import { ThemeFollower } from './theme-follower.js';
 
 import './globals.css';
 
@@ -42,6 +43,7 @@ export default function RootLayout({ children }: { children: ReactNode }): React
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
         <MigoProvider>{children}</MigoProvider>
         <SwRegister />
+        <ThemeFollower />
       </body>
     </html>
   );

@@ -6,6 +6,8 @@ import type { ReactNode } from 'react';
 import { getTheme, toggleTheme } from '@/lib/theme.js';
 import type { Theme } from '@/lib/theme.js';
 
+import { Icon } from './icons.js';
+
 /**
  * The light/dark switch: a single round button that flips {@link Theme} and persists it.
  *
@@ -51,7 +53,9 @@ export function ThemeToggle({
       title={`Switch to ${next} theme`}
       onClick={handle}
     >
-      <span aria-hidden="true">{theme === 'dark' ? '☀️' : '🌙'}</span>
+      <span aria-hidden="true">
+        <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={20} />
+      </span>
     </button>
   );
 }

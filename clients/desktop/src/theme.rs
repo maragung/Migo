@@ -112,7 +112,8 @@ pub struct Palette {
     pub verified: Color32,
 }
 
-/// The neon dark theme, and the default.
+/// The neon dark theme, and the default — the canonical Migo dark palette, from
+/// `shared/design/tokens.json`.
 ///
 /// The surfaces sit almost at black with a violet cast (`#0a0a12` window, `#111118` panel) so the
 /// cyan accent is the brightest saturated thing on screen by a wide margin — the neon effect the
@@ -141,25 +142,28 @@ const DARK: Palette = Palette {
     verified: Color32::from_rgb(0x77, 0xb6, 0xf0),
 };
 
-/// Light. Not an inversion of [`DARK`] — the borders carry more of the structure here, because a
-/// light interface cannot lean on fill contrast the way a dark one can.
+/// Light — the canonical Migo light palette, from `shared/design/tokens.json`.
+///
+/// Not an inversion of [`DARK`]: the borders carry more of the structure here, because a light
+/// interface cannot lean on fill contrast the way a dark one can. The accent is the blue the web
+/// client's light theme carries, strong enough to hold white text above the 4.5:1 contrast bar.
 const LIGHT: Palette = Palette {
-    surface: Color32::from_rgb(0xf7, 0xf8, 0xfa),
+    surface: Color32::from_rgb(0xf0, 0xf2, 0xf5),
     surface_raised: Color32::from_rgb(0xff, 0xff, 0xff),
     surface_overlay: Color32::from_rgb(0xff, 0xff, 0xff),
-    surface_hover: Color32::from_rgb(0xed, 0xef, 0xf3),
-    surface_selected: Color32::from_rgb(0xe2, 0xe7, 0xef),
-    border: Color32::from_rgb(0xdd, 0xe1, 0xe8),
-    border_strong: Color32::from_rgb(0xb4, 0xbb, 0xc7),
-    text: Color32::from_rgb(0x14, 0x17, 0x1c),
-    text_muted: Color32::from_rgb(0x5f, 0x67, 0x74),
+    surface_hover: Color32::from_rgb(0xe9, 0xed, 0xf3),
+    surface_selected: Color32::from_rgb(0xdc, 0xeb, 0xfa),
+    border: Color32::from_rgb(0xe0, 0xe3, 0xe8),
+    border_strong: Color32::from_rgb(0xc5, 0xca, 0xd0),
+    text: Color32::from_rgb(0x1a, 0x1d, 0x24),
+    text_muted: Color32::from_rgb(0x5c, 0x63, 0x70),
     text_on_accent: Color32::from_rgb(0xff, 0xff, 0xff),
-    accent: Color32::from_rgb(0x0f, 0x9d, 0x74),
-    accent_hover: Color32::from_rgb(0x14, 0xae, 0x81),
-    accent_active: Color32::from_rgb(0x0b, 0x82, 0x60),
-    positive: Color32::from_rgb(0x0f, 0x9d, 0x74),
-    warning: Color32::from_rgb(0xa8, 0x71, 0x00),
-    danger: Color32::from_rgb(0xc9, 0x33, 0x3f),
+    accent: Color32::from_rgb(0x00, 0x77, 0xe6),
+    accent_hover: Color32::from_rgb(0x1a, 0x86, 0xee),
+    accent_active: Color32::from_rgb(0x00, 0x5c, 0xb8),
+    positive: Color32::from_rgb(0x00, 0xa8, 0x5a),
+    warning: Color32::from_rgb(0xe6, 0xa1, 0x00),
+    danger: Color32::from_rgb(0xe0, 0x40, 0x50),
     verified: Color32::from_rgb(0x1f, 0x6f, 0xd0),
 };
 
@@ -388,14 +392,16 @@ mod tests {
         assert_eq!(p.text_muted, Color32::from_rgb(0x88, 0x88, 0xa0));
     }
 
-    /// The light theme is untouched by the neon rework: its job is to stay the quiet one.
+    /// The light theme is the canonical Migo light palette: the same token table the web client
+    /// and the Android client read, so one identity follows the account across every device.
     #[test]
-    fn light_keeps_its_own_palette() {
+    fn light_is_the_canonical_migo_palette() {
         let p = palette(Theme::Light);
-        assert_eq!(p.surface, Color32::from_rgb(0xf7, 0xf8, 0xfa));
+        assert_eq!(p.surface, Color32::from_rgb(0xf0, 0xf2, 0xf5));
         assert_eq!(p.surface_raised, Color32::from_rgb(0xff, 0xff, 0xff));
-        assert_eq!(p.accent, Color32::from_rgb(0x0f, 0x9d, 0x74));
-        assert_eq!(p.text, Color32::from_rgb(0x14, 0x17, 0x1c));
+        assert_eq!(p.accent, Color32::from_rgb(0x00, 0x77, 0xe6));
+        assert_eq!(p.text, Color32::from_rgb(0x1a, 0x1d, 0x24));
+        assert_eq!(p.danger, Color32::from_rgb(0xe0, 0x40, 0x50));
     }
 
     /// The toggle must remain an involution: flipping twice lands where flipping once did, and

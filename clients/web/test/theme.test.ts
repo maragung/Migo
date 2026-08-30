@@ -18,7 +18,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { getTheme, setTheme, themeInitScript, toggleTheme } from '../src/lib/theme.js';
+import {
+  getChoice,
+  getTheme,
+  resolveChoice,
+  setChoice,
+  setTheme,
+  themeInitScript,
+  toggleTheme,
+} from '../src/lib/theme.js';
 
 /** A writable `localStorage` double backed by a plain map. */
 function fakeLocalStorage(): Storage {
@@ -122,6 +130,37 @@ test('toggleTheme flips both ways and reports what it chose', () => {
     assert.equal(toggleTheme(), 'dark');
     assert.equal(dom.store.getItem('migo:theme'), 'dark');
     assert.equal(dom.attributes.at(-1), 'dark');
+  } finally {
+    dom.restore();
+  }
+});
+
+test('the system choice resolves through the OS scheme and degrades to dark', () => {
+  const dom = installThemeDom();
+  try {
+    // No matchMedia on the double: every path that needs it lands on the shared default.
+    assert.equal(resolveChoice('system'), 'dark');
+    assert.equal(resolveChoice('light'), 'light');
+    assert.equal(resolveChoice('dark'), 'dark');
+
+    dom.store.setItem('migo:theme', 'system');
+    assert.equal(getChoice(), 'system');
+    assert.equal(getTheme(), 'dark', 'without matchMedia, system resolves dark');
+  } finally {
+    dom.restore();
+  }
+});
+
+test('setChoice persists the choice and applies its resolution', () => {
+  const dom = installThemeDom();
+  try {
+    setChoice('system');
+    assert.equal(dom.store.getItem('migo:theme'), 'system', 'the choice itself is what persists');
+    assert.equal(dom.attributes.at(-1), 'dark', 'without matchMedia, system applies dark');
+
+    setChoice('light');
+    assert.equal(dom.store.getItem('migo:theme'), 'light');
+    assert.equal(dom.attributes.at(-1), 'light');
   } finally {
     dom.restore();
   }

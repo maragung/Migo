@@ -6,6 +6,7 @@ import type { ChangeEvent, KeyboardEvent, ReactNode } from 'react';
 import { VOICE_NOTE_MAX_MS } from '@/lib/migo/voice.js';
 import type { VoiceRecording } from '@/lib/migo/voice.js';
 
+import { Icon } from './icons.js';
 import { Spinner } from './spinner.js';
 import { VoiceRecorder } from './voice-recorder.js';
 
@@ -250,7 +251,7 @@ export function MessageComposer({
             disabled={disabled || uploading}
             aria-label="Attach an image"
           >
-            📎
+            <Icon name="attach" size={20} />
           </button>
           {onGift !== undefined ? (
             <button
@@ -261,7 +262,7 @@ export function MessageComposer({
               aria-label={giftOpen ? 'Close gift picker' : 'Send a gift'}
               aria-pressed={giftOpen}
             >
-              🎁
+              <Icon name="gift" size={20} />
             </button>
           ) : null}
           {onVoiceNote !== undefined ? (
@@ -272,7 +273,7 @@ export function MessageComposer({
               disabled={disabled || uploading || sending || sendingVoice}
               aria-label="Record a voice note"
             >
-              🎤
+              <Icon name="mic" size={20} />
             </button>
           ) : null}
           <button
@@ -282,7 +283,7 @@ export function MessageComposer({
             disabled={disabled || sending || uploading || text.trim().length === 0}
             aria-label="Send"
           >
-            ➤
+            <Icon name="send" size={20} />
           </button>
         </div>
       )}

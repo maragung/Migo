@@ -4,6 +4,7 @@ import com.migo.core.crypto.PrekeyBundle
 import com.migo.core.domain.ConversationsDomain
 import com.migo.core.domain.DeviceAddress
 import com.migo.core.domain.DeviceDirectory
+import com.migo.core.domain.EconomyDomain
 import com.migo.core.domain.EventErrorHandler
 import com.migo.core.domain.GamesDomain
 import com.migo.core.domain.IncomingMessage
@@ -19,6 +20,7 @@ import com.migo.core.domain.ProfileDomain
 import com.migo.core.domain.RoomsDomain
 import com.migo.core.domain.Rpc
 import com.migo.core.domain.SdkError
+import com.migo.core.domain.SocialDomain
 import com.migo.core.domain.Subscription
 import com.migo.core.domain.SyncDomain
 import com.migo.core.domain.TypingDomain
@@ -33,6 +35,7 @@ import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.ConversationListResponse
 import com.migo.core.protocol.ConversationSummary
 import com.migo.core.protocol.Feature
+import com.migo.core.protocol.FriendEvent
 import com.migo.core.protocol.GameEvent
 import com.migo.core.protocol.Hello
 import com.migo.core.protocol.MessageReceipt
@@ -298,6 +301,7 @@ class MigoClient private constructor(
     private val receiptListeners = ListenerSet<MessageReceipt>(Op.MESSAGE_RECEIPT, options.onEventError)
     private val typingListeners = ListenerSet<TypingEvent>(Op.TYPING, options.onEventError)
     private val presenceListeners = ListenerSet<PresenceEvent>(Op.PRESENCE_EVENT, options.onEventError)
+    private val friendListeners = ListenerSet<FriendEvent>(Op.FRIEND_EVENT, options.onEventError)
     private val memberListeners =
         ListenerSet<RoomMemberEvent>(Op.ROOM_MEMBER_EVENT, options.onEventError)
     private val roomStateListeners =
@@ -385,6 +389,15 @@ class MigoClient private constructor(
 
     /** Submit game actions and observe game events. */
     val games: GamesDomain get() = requireConnected().games
+
+    /** The social graph domain of the live session. */
+    val social: SocialDomain get() = requireConnected().social
+
+    /** The economy domain of the live session. */
+    val economy: EconomyDomain get() = requireConnected().economy
+
+    /** Friendship changes, bridged across reconnects like every application-facing stream. */
+    fun onFriendEvent(listener: Listener<FriendEvent>): Subscription = friendListeners.add(listener)
 
     // --- application-facing streams (survive reconnects) ---
 
@@ -859,6 +872,8 @@ class MigoClient private constructor(
             profile = ProfileDomain(rpc),
             notifications = NotificationsDomain(rpc, options.onEventError),
             games = GamesDomain(rpc, options.onEventError),
+            social = SocialDomain(rpc, options.onEventError),
+            economy = EconomyDomain(rpc),
         )
         session.startAll()
         bridge(session)
@@ -881,6 +896,7 @@ class MigoClient private constructor(
         session.rooms.onState { roomStateListeners.deliver(it) }
         session.notifications.onNotification { notificationListeners.deliver(it) }
         session.games.onEvent { gameListeners.deliver(it) }
+        session.social.onFriendEvent { friendListeners.deliver(it) }
     }
 
     /**
@@ -1049,6 +1065,8 @@ private class Session(
     val profile: ProfileDomain,
     val notifications: NotificationsDomain,
     val games: GamesDomain,
+    val social: SocialDomain,
+    val economy: EconomyDomain,
 ) {
     /** Registers every inbound handler. Called before the pump starts. */
     fun startAll() {
@@ -1058,6 +1076,7 @@ private class Session(
         rooms.start()
         notifications.start()
         games.start()
+        social.start()
     }
 
     /** Unregisters them. The stateless domains have nothing to stop. */
@@ -1068,6 +1087,7 @@ private class Session(
         rooms.stop()
         notifications.stop()
         games.stop()
+        social.stop()
     }
 }
 
