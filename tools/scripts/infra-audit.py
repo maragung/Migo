@@ -32,7 +32,7 @@ import yaml
 # plus the well-known local database password. Anything else in a secret-named field
 # or a URL credential is a finding.
 ALLOWED_SECRET_VALUES = {"migo", "development-only-insecure-token-key"}
-WEB_PORT = 19991  # the web client's fixed port; see Dockerfile.web / README.
+WEB_PORT = 19992  # the web client's fixed port; see Dockerfile.web / README.
 
 SECRET_KEY_RE = re.compile(
     r"(?i)(?:^|[_.\-])(?:password|passwd|pwd|secret|token|api[_-]?key|apikey"

@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { FormEvent, ReactNode } from 'react';
+import type { FormEvent, KeyboardEvent, ReactNode } from 'react';
 
 import { RelationshipKind } from '@migo/sdk';
 import type { Id, RelationshipEntry, SuggestedUser } from '@migo/sdk';
@@ -12,6 +12,7 @@ import { useProfiles } from '@/lib/migo/use-profiles.js';
 
 import { Avatar } from './avatar.js';
 import { Spinner } from './spinner.js';
+import { UserProfileModal } from './user-profile-modal.js';
 
 /**
  * The relationship kinds this panel files people under, as the plain numbers the wire carries.
@@ -25,36 +26,50 @@ import { Spinner } from './spinner.js';
 const KIND_FRIEND: number = RelationshipKind.Friend;
 const KIND_PENDING_INCOMING: number = RelationshipKind.PendingIncoming;
 const KIND_PENDING_OUTGOING: number = RelationshipKind.PendingOutgoing;
+const KIND_BLOCK: number = RelationshipKind.Block;
 
 /**
- * The Friends tab: the relationship graph, pending requests, suggestions, and people search.
+ * The Friends tab: the relationship graph, pending requests, suggestions, people search, and the
+ * block list.
  *
  * The graph is server-owned — every mutation here asks the server and re-reads the result, because a
  * local mirror would drift the moment either party acted from another device. {@link
  * SocialDomain.onFriendEvent} is the signal to re-read: it says the graph moved, not how, so the
  * panel refreshes both the relationships and the suggestions (a new friend changes what is
  * suggested) rather than patching local state.
+ *
+ * The full graph ({@link SocialDomain.listAllRelationships}) is what feeds the Blocked section:
+ * the bounded read is the panel's working list, but blocks live outside its default page, so the
+ * two reads happen together on every refresh.
+ *
+ * A friend row is a door: clicking it opens that person's profile modal, where blocking (and
+ * messaging) live — the list rows stay clean of per-row block controls on purpose.
  */
 export function FriendsPanel(): ReactNode {
   const { client } = useMigo();
 
   const [entries, setEntries] = useState<RelationshipEntry[] | null>(null);
+  const [blocked, setBlocked] = useState<RelationshipEntry[]>([]);
   const [suggestions, setSuggestions] = useState<SuggestedUser[]>([]);
   const [results, setResults] = useState<SuggestedUser[] | null>(null);
   const [query, setQuery] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<ReadonlySet<Id>>(new Set());
+  // The person whose profile modal is open, if any.
+  const [selected, setSelected] = useState<Id | null>(null);
 
   const reload = useCallback(async (): Promise<void> => {
     if (!client) {
       return;
     }
     try {
-      const [relationships, suggested] = await Promise.all([
+      const [relationships, all, suggested] = await Promise.all([
         client.social.listRelationships(),
+        client.social.listAllRelationships(),
         client.social.suggestions(),
       ]);
       setEntries(relationships);
+      setBlocked(all.filter((entry) => entry.kind === KIND_BLOCK));
       setSuggestions(suggested);
       setError(null);
     } catch (cause) {
@@ -129,10 +144,24 @@ export function FriendsPanel(): ReactNode {
 
   // Resolve the relationship rows to names once, through the shared profile cache.
   const relatedIds = useMemo(
-    () => [...friends, ...incoming, ...outgoing].map((entry) => entry.userId),
-    [friends, incoming, outgoing],
+    () => [...friends, ...incoming, ...outgoing, ...blocked].map((entry) => entry.userId),
+    [friends, incoming, outgoing, blocked],
   );
   const profiles = useProfiles(relatedIds);
+
+  // A block from the open modal is the panel's graph moving: run it as a busy action, then close.
+  const blockFromModal = useCallback(
+    async (userId: Id): Promise<void> => {
+      if (!client) {
+        return;
+      }
+      await act(userId, () => client.social.blockUser(userId));
+      setSelected(null);
+    },
+    // `act` is a stable-shape closure over state setters only; the client is the live dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [client],
+  );
 
   return (
     <div className="panel">
@@ -222,10 +251,17 @@ export function FriendsPanel(): ReactNode {
                   name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
                   username={profiles.get(entry.userId)?.username}
                   avatarUrl={profiles.get(entry.userId)?.avatarUrl}
+                  onSelect={() => setSelected(entry.userId)}
                 />
               ))
             )}
           </section>
+
+          <BlockedSection
+            entries={blocked}
+            profiles={profiles}
+            onSelect={(userId) => setSelected(userId)}
+          />
 
           {results !== null ? (
             <section className="panel-section" aria-label="Search results">
@@ -284,6 +320,15 @@ export function FriendsPanel(): ReactNode {
           </section>
         </>
       )}
+
+      {selected !== null ? (
+        <UserProfileModal
+          userId={selected}
+          blocked={blocked.some((entry) => entry.userId === selected)}
+          onClose={() => setSelected(null)}
+          onBlock={blockFromModal}
+        />
+      ) : null}
     </div>
   );
 }
@@ -291,6 +336,45 @@ export function FriendsPanel(): ReactNode {
 /** The mutual-friends line under a suggested person, omitted when the count is zero. */
 function mutualNote(person: SuggestedUser): string | undefined {
   return person.mutualFriends > 0 ? `${person.mutualFriends} mutual friends` : undefined;
+}
+
+/**
+ * The Blocked section: the block list the whole-graph read surfaced, each row a door to the
+ * person's profile (where the block state is stated).
+ *
+ * Exported presentational over plain data, so the section's rules — an honest empty state, one
+ * row per blocked account, every row opening the profile — are testable without a live client.
+ */
+export function BlockedSection({
+  entries,
+  profiles,
+  onSelect,
+}: {
+  entries: RelationshipEntry[];
+  /** Resolved profiles through the shared cache; an unresolved account keeps a stable fallback. */
+  profiles: ReadonlyMap<Id, { displayName: string; username?: string; avatarUrl?: string }>;
+  onSelect: (userId: Id) => void;
+}): ReactNode {
+  return (
+    <section className="panel-section" aria-label="Blocked accounts">
+      <h2 className="panel-heading">Blocked</h2>
+      {entries.length === 0 ? (
+        <p className="muted">No blocked accounts.</p>
+      ) : (
+        entries.map((entry) => (
+          <PersonRow
+            key={entry.userId}
+            id={entry.userId}
+            name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
+            username={profiles.get(entry.userId)?.username}
+            avatarUrl={profiles.get(entry.userId)?.avatarUrl}
+            note="blocked"
+            onSelect={() => onSelect(entry.userId)}
+          />
+        ))
+      )}
+    </section>
+  );
 }
 
 interface PersonRowProps {
@@ -305,12 +389,38 @@ interface PersonRowProps {
    */
   avatarUrl?: string;
   actions?: ReactNode;
+  /** Opens this person's profile; rows without it (requests, results) are not doors. */
+  onSelect?: () => void;
 }
 
 /** One person in a list: avatar, name, @username, an optional note, and optional actions. */
-function PersonRow({ id, name, username, note, avatarUrl, actions }: PersonRowProps): ReactNode {
+function PersonRow({
+  id,
+  name,
+  username,
+  note,
+  avatarUrl,
+  actions,
+  onSelect,
+}: PersonRowProps): ReactNode {
   return (
-    <div className="person-row">
+    <div
+      className={`person-row ${onSelect ? 'person-row-clickable' : ''}`}
+      {...(onSelect
+        ? {
+            role: 'button',
+            tabIndex: 0,
+            'aria-label': `View ${name}'s profile`,
+            onClick: onSelect,
+            onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                onSelect();
+              }
+            },
+          }
+        : {})}
+    >
       <Avatar name={name} id={id} size={36} avatarUrl={avatarUrl} />
       <div className="person-main">
         <span className="person-name">{name}</span>

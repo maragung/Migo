@@ -33,6 +33,94 @@ pub fn header(ui: &mut Ui, theme: Theme, title: &str, subtitle: Option<&str>) {
     }
 }
 
+/// A small label above one group of related settings.
+///
+/// Quieter than [`header`] on purpose: a settings pane with four headers would look like four
+/// screens stapled together, while four overlines read as one screen with four parts.
+pub fn subheader(ui: &mut Ui, theme: Theme, text: &str) {
+    let colors = palette(theme);
+    ui.label(
+        RichText::new(text)
+            .text_style(crate::theme::named(text_style::OVERLINE))
+            .color(colors.text_muted),
+    );
+}
+
+/// One item of the navigation rail: a glyph button that stays highlighted while its pane is open.
+///
+/// `badge` is the count drawn at the button's corner — the unread total on Chat, zero elsewhere.
+/// Returns whether it was clicked. The highlight is an accent-tinted surface rather than the
+/// accent itself — a solid neon bar down the rail would out-shout everything the pane it points
+/// at is trying to show.
+pub fn rail_button(
+    ui: &mut Ui,
+    theme: Theme,
+    glyph: &str,
+    label: &str,
+    selected: bool,
+    badge: u32,
+) -> bool {
+    let colors = palette(theme);
+    let size = Vec2::new(44.0, 44.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let background = if selected {
+        colors.surface_selected
+    } else if response.hovered() {
+        colors.surface_hover
+    } else {
+        Color32::TRANSPARENT
+    };
+    if background != Color32::TRANSPARENT {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(radius::MD), background);
+    }
+    if selected {
+        // A two-pixel accent tick on the leading edge, the one marker that survives
+        // colour-blind viewing of a neon palette.
+        let tick = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.top() + 8.0),
+            egui::pos2(rect.left() + 2.0, rect.bottom() - 8.0),
+        );
+        ui.painter()
+            .rect_filled(tick, CornerRadius::ZERO, colors.accent);
+    }
+    let galley = ui.painter().layout_no_wrap(
+        glyph.to_owned(),
+        FontId::proportional(font::SUBTITLE),
+        if selected {
+            colors.accent
+        } else {
+            colors.text_muted
+        },
+    );
+    let at = rect.center() - galley.size() / 2.0;
+    ui.painter().galley(at, galley, colors.text);
+    if badge > 0 {
+        // Overlaid on the button's corner rather than given its own row: a badge that changes
+        // the rail's height as the count appears and disappears would make every button below
+        // it shift, and a moving target is the one thing a navigation rail must not be.
+        let text = if badge > 99 {
+            "99+".to_owned()
+        } else {
+            badge.to_string()
+        };
+        let mini = ui.painter().layout_no_wrap(
+            text,
+            FontId::proportional(font::TINY),
+            colors.text_on_accent,
+        );
+        let padding = Vec2::new(space::XS, space::XS * 0.5);
+        let size = mini.size() + padding * 2.0;
+        let top_right = rect.right_top() + Vec2::new(space::XS, -space::XS);
+        let badge_rect = egui::Rect::from_min_size(top_right - egui::vec2(size.x, 0.0), size);
+        ui.painter()
+            .rect_filled(badge_rect, CornerRadius::same(radius::FULL), colors.accent);
+        ui.painter()
+            .galley(badge_rect.min + padding, mini, colors.text_on_accent);
+    }
+    response.on_hover_text(label).clicked()
+}
+
 /// A hairline separator that respects the palette instead of egui's default grey.
 pub fn divider(ui: &mut Ui, theme: Theme) {
     let colors = palette(theme);

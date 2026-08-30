@@ -39,6 +39,11 @@ export interface ConversationsContextValue {
   /** Insert a just-created conversation at the top if it is not already present. */
   noteConversation: (summary: ConversationSummary) => void;
   /**
+   * Drops a conversation from the shared list — the local echo of leaving a room, whose
+   * conversation the server has closed for this account and the sidebar must stop offering.
+   */
+  forgetConversation: (conversationId: Id) => void;
+  /**
    * The newest decrypted message per conversation, for the sidebar's preview line. Sparse by
    * design: a conversation whose last message has not opened (or was deleted) is simply absent.
    */
@@ -130,6 +135,18 @@ export function ConversationsProvider({ children }: { children: ReactNode }): Re
     });
   }, []);
 
+  const forgetConversation = useCallback((conversationId: Id): void => {
+    setItems((prev) => prev.filter((item) => item.conversationId !== conversationId));
+    setUnread((prev) => {
+      if (!prev.has(conversationId)) {
+        return prev;
+      }
+      const next = new Set(prev);
+      next.delete(conversationId);
+      return next;
+    });
+  }, []);
+
   // Initial load, and a full resync whenever the session resets (topics were re-subscribed by the SDK).
   useEffect(() => {
     if (!client) {
@@ -212,6 +229,7 @@ export function ConversationsProvider({ children }: { children: ReactNode }): Re
     unread,
     markRead,
     noteConversation,
+    forgetConversation,
     lastPreviews,
   };
 

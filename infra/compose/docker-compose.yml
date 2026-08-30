@@ -71,8 +71,8 @@ services:
       # --- listeners ---
       MIGO_HTTP__BIND: 0.0.0.0:8080
       MIGO_HTTP__PUBLIC_URL: http://localhost:8080
-      # The web client is a static bundle served on 19991; see Dockerfile.web.
-      MIGO_HTTP__CORS_ORIGINS: http://localhost:19991
+      # The web client is a static bundle served on 19992; see Dockerfile.web.
+      MIGO_HTTP__CORS_ORIGINS: http://localhost:19992
       # --- durable store (migod runs SeaORM migrations against this on boot) ---
       MIGO_STORE__BACKEND: postgres
       MIGO_STORE__URL: postgres://migo:migo@postgres:5432/migo
@@ -106,7 +106,7 @@ services:
       migod:
         condition: service_healthy
     ports:
-      - '19991:19991'
+      - '19992:19992'
     restart: unless-stopped
 
 volumes:

@@ -32,15 +32,18 @@ import {
   decodeFriendTarget,
   decodeGiftSend,
   decodeInboxReq,
+  decodeLeaderboardReq,
   decodeLedgerReq,
   decodeNotificationAck,
   decodeProfileUpdate,
+  decodeRelationshipListReq,
   decodeSearchReq,
   encodeAcknowledged,
   encodeFriendEvent,
   encodeGiftCatalogueResponse,
   encodeGiftSendResult,
   encodeInboxResponse,
+  encodeLeaderboardResponse,
   encodeLedgerResponse,
   encodeProfileResponse,
   encodeProgressionWire,
@@ -168,6 +171,37 @@ test('social: suggestions and search both decode a SearchResponse', async () => 
   // server applies its own default rather than a client-guessed zero.
   const request = decodeBody(decodeSearchReq, sentAt(transport, 1).body);
   assert.deepEqual(request, { query: 'ad', limit: 5 });
+});
+
+test('social: listAllRelationships asks for the server page and returns every kind', async () => {
+  const { transport, social } = rig(
+    new Map([
+      [
+        OP.RELATIONSHIP_LIST,
+        () =>
+          encodeBody(encodeRelationshipList, {
+            entries: [
+              { userId: OTHER, kind: 1 },
+              { userId: idOf(10), kind: 4 },
+              { userId: idOf(11), kind: 5 },
+              { userId: idOf(12), kind: 6 },
+            ],
+          }),
+      ],
+    ]),
+  );
+  const entries = await social.listAllRelationships();
+
+  // Zero is the wire's "no client bound": the server applies its own page, so every kind the
+  // graph holds — friends, follows, blocks, favourites — comes back mixed for the caller to
+  // filter, rather than truncated to a client-guessed ceiling.
+  assert.deepEqual(decodeBody(decodeRelationshipListReq, sentAt(transport, 0).body), { limit: 0 });
+  assert.deepEqual(entries, [
+    { userId: OTHER, kind: 1 },
+    { userId: idOf(10), kind: 4 },
+    { userId: idOf(11), kind: 5 },
+    { userId: idOf(12), kind: 6 },
+  ]);
 });
 
 test('social: onFriendEvent delivers decoded events once started, and stops cleanly', () => {
@@ -305,6 +339,36 @@ test('economy: getProgression and getBadges answer for any account', async () =>
     xpForNextLevel: 400,
   });
   assert.deepEqual(await economy.getBadges(OTHER), [{ badgeCode: 'early', awardedAt: AT }]);
+});
+
+test('economy: getLeaderboard reads a board page, strongest first', async () => {
+  const ranks = [
+    { position: 1, accountId: OTHER, xp: 9000, level: 9 },
+    { position: 2, accountId: idOf(11), xp: 8000, level: 8 },
+  ];
+  const { transport, economy } = rig(
+    new Map([[OP.LEADERBOARD, () => encodeBody(encodeLeaderboardResponse, { ranks })]]),
+  );
+  const read = await economy.getLeaderboard('xp', 10);
+
+  assert.equal(sentAt(transport, 0).opcode, OP.LEADERBOARD);
+  assert.deepEqual(decodeBody(decodeLeaderboardReq, sentAt(transport, 0).body), {
+    board: 'xp',
+    limit: 10,
+  });
+  assert.deepEqual(read, ranks);
+});
+
+test('economy: getLeaderboard without a limit leaves it off the wire', async () => {
+  const { transport, economy } = rig(
+    new Map([[OP.LEADERBOARD, () => encodeBody(encodeLeaderboardResponse, { ranks: [] })]]),
+  );
+  await economy.getLeaderboard('reputation');
+  // The limit encodes by presence, so an omitted one must stay absent: the server's own page —
+  // not a client-guessed zero — is what bounds the read.
+  assert.deepEqual(decodeBody(decodeLeaderboardReq, sentAt(transport, 0).body), {
+    board: 'reputation',
+  });
 });
 
 test('profile: updateProfile sends only the fields the patch carries', async () => {

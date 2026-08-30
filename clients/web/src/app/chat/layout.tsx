@@ -9,6 +9,7 @@ import { GiftsPanel } from '@/components/gifts-panel.js';
 import { NotificationsPanel } from '@/components/notifications-panel.js';
 import { ProfilePanel } from '@/components/profile-panel.js';
 import { RequireReady } from '@/components/require-ready.js';
+import { SettingsPanel } from '@/components/settings-panel.js';
 import { Sidebar } from '@/components/sidebar.js';
 import { TabRail } from '@/components/tab-rail.js';
 import type { AppTab } from '@/components/tab-rail.js';
@@ -61,7 +62,9 @@ export default function ChatLayout({ children }: { children: ReactNode }): React
                   ) : tab === 'gifts' ? (
                     <GiftsPanel />
                   ) : tab === 'profile' ? (
-                    <ProfilePanel />
+                    <ProfilePanel onOpenSettings={() => setTab('settings')} />
+                  ) : tab === 'settings' ? (
+                    <SettingsPanel />
                   ) : (
                     <DiscoverPanel
                       onOpenConversation={(conversationId) => {

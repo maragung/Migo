@@ -11,7 +11,7 @@
 // and it never reads a request body. There is no server-side state to attack because there is no
 // server-side state: every byte it can return is already public, sitting in `out/`.
 //
-// Usage: node tools/serve.mjs [--port 19991] [--host 0.0.0.0] [--dir out]
+// Usage: node tools/serve.mjs [--port 19992] [--host 0.0.0.0] [--dir out]
 //        MIGO_WEB_PORT / PORT, MIGO_WEB_HOST / HOST, MIGO_WEB_DIR override the defaults.
 
 import { createReadStream } from 'node:fs';
@@ -21,7 +21,7 @@ import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /** The port Migo's web client is served on. */
-const DEFAULT_PORT = 19991;
+const DEFAULT_PORT = 19992;
 
 /** Bind on every interface: inside a container, localhost would be unreachable from outside it. */
 const DEFAULT_HOST = '0.0.0.0';

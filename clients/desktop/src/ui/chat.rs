@@ -434,11 +434,23 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState) {
 
     // Read before the scroll area borrows `state`, and by member count rather than by conversation
     // kind: a group of two reads like a direct chat and should look like one.
-    let group = state
+    let conversation = state
         .conversations
         .iter()
-        .find(|c| c.conversation_id == conversation_id)
-        .is_some_and(|c| c.members.len() > 2);
+        .find(|c| c.conversation_id == conversation_id);
+    let group = conversation.is_some_and(|c| c.members.len() > 2);
+    // The monogram a direct chat's incoming bubbles carry: the peer's title, resolved the same
+    // way the header resolves it so the two never disagree about who is who.
+    let peer_seed = (!group)
+        .then(|| {
+            context
+                .account
+                .zip(conversation)
+                .map(|(account, conversation)| {
+                    conversation.display_title(account.account_id, &state.names)
+                })
+        })
+        .flatten();
 
     let composer_height = 64.0;
     let typing_height = if state
@@ -487,7 +499,16 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState) {
                         .cloned()
                         .unwrap_or_else(|| model::short_id(message.sender_id))
                 });
-                message_row(ui, context, message, sender.as_deref());
+                // An avatar on the incoming side only. Outgoing bubbles are already anchored by
+                // their alignment and accent fill; a self-avatar beside them would be decoration.
+                let avatar_seed = if message.outgoing {
+                    None
+                } else if group {
+                    sender.as_deref()
+                } else {
+                    peer_seed.as_deref()
+                };
+                message_row(ui, context, message, sender.as_deref(), avatar_seed);
                 ui.add_space(space::SM);
             }
             ui.add_space(space::SM);
@@ -531,8 +552,9 @@ fn thread_header(ui: &mut Ui, context: &Context<'_>, state: &ChatState, conversa
                 "End-to-end encrypted".to_owned()
             } else {
                 // Said plainly rather than left blank. A user who cannot tell an encrypted
-                // conversation from an unencrypted one has no way to act on the difference.
-                "Not end-to-end encrypted".to_owned()
+                // conversation from an unencrypted one has no way to act on the difference, and
+                // the honest name for what remains is the transport's own encryption.
+                "Transport encryption only".to_owned()
             };
             ui.label(
                 RichText::new(detail)
@@ -570,7 +592,17 @@ fn day_separator(ui: &mut Ui, context: &Context<'_>, day: &str) {
 }
 
 /// One message, as a bubble with its delivery state.
-fn message_row(ui: &mut Ui, context: &Context<'_>, message: &Message, sender: Option<&str>) {
+///
+/// Incoming messages carry a small avatar beside the bubble — the peer's monogram in a direct
+/// chat, the sender's in a group — because with avatars the eye tracks who said what by colour
+/// instead of by reading a name, and a thread that can be followed peripherally reads faster.
+fn message_row(
+    ui: &mut Ui,
+    context: &Context<'_>,
+    message: &Message,
+    sender: Option<&str>,
+    avatar_seed: Option<&str>,
+) {
     let (text, tone) = match &message.body {
         Body::Text(text) => (text.clone(), BubbleTone::Normal),
         Body::Media {
@@ -624,6 +656,10 @@ fn message_row(ui: &mut Ui, context: &Context<'_>, message: &Message, sender: Op
     }
     ui.horizontal(|ui| {
         ui.add_space(space::LG);
+        if let Some(seed) = avatar_seed {
+            widgets::avatar(ui, context.theme, seed, 24.0);
+            ui.add_space(space::SM);
+        }
         ui.allocate_ui_with_layout(
             egui::vec2(ui.available_width() - space::LG, 0.0),
             Layout::top_down(Align::Min),
@@ -763,28 +799,8 @@ fn day_label(at: migo_core::Timestamp) -> String {
         0 => "Today".to_owned(),
         1 => "Yesterday".to_owned(),
         n if n < 7 => format!("{n} days ago"),
-        _ => civil_date(at.as_millis()),
+        _ => model::date(at),
     }
-}
-
-/// A `YYYY-MM-DD` date from a Unix millisecond timestamp.
-///
-/// Implemented directly because the alternative is a date-time crate for one function. The algorithm
-/// is the standard days-from-civil inverse; it is exact for every date this program will ever show.
-fn civil_date(unix_ms: i64) -> String {
-    let days = unix_ms.div_euclid(86_400_000);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let day_of_era = z - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let mp = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if month <= 2 { year + 1 } else { year };
-    format!("{year:04}-{month:02}-{day:02}")
 }
 
 /// A byte count in the largest unit that keeps it under four digits.

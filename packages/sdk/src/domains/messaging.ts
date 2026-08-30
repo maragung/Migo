@@ -38,6 +38,9 @@ import {
   encodeMessageDelete,
   encodeMessageReceipt,
   decodeMessageReceipt,
+  encodeMessageEdit,
+  encodeReactionSet,
+  decodeAcknowledged,
 } from '@migo/protocol';
 import type {
   MessageAccepted,
@@ -45,6 +48,8 @@ import type {
   MessageReceipt,
   MessageSend,
   MessageDelete,
+  MessageEdit,
+  ReactionSet,
   ReceiptKind,
 } from '@migo/protocol';
 
@@ -256,6 +261,32 @@ export class MessagingDomain {
   ): Promise<MessageAccepted> {
     const request: MessageDelete = { messageId, conversationId, forEveryone };
     return this.#rpc.call(OP.MESSAGE_DELETE, encodeMessageDelete, decodeMessageAccepted, request);
+  }
+
+  /**
+   * Edits a message in place: replaces its sealed envelope while keeping the message's seq.
+   *
+   * The caller seals the replacement exactly as it sealed the original — the same sender key, the
+   * same padding policy — and the server stores the new envelope under the existing id, so
+   * receivers see the message again with an `editedAt` stamp rather than as a new message. The
+   * bytes pass through verbatim; sealing is the caller's crypto, never re-done here.
+   */
+  async editMessage(conversationId: Id, messageId: Id, envelope: Uint8Array): Promise<void> {
+    const request: MessageEdit = { messageId, conversationId, envelope };
+    await this.#rpc.call(OP.MESSAGE_EDIT, encodeMessageEdit, decodeAcknowledged, request);
+  }
+
+  /**
+   * Sends a reaction to a message.
+   *
+   * The `envelope` is the sealed reaction content — the server learns only that *some* reaction
+   * was set on `targetMessageId`, never which emoji — and setting a different reaction or the
+   * same one again is a server-side replace. A reaction reaches the conversation's other
+   * participants as a {@link protocol.ReactionEvent}, coalesced per target message.
+   */
+  async sendReaction(targetMessageId: Id, conversationId: Id, envelope: Uint8Array): Promise<void> {
+    const request: ReactionSet = { targetMessageId, conversationId, envelope };
+    await this.#rpc.call(OP.REACTION_SET, encodeReactionSet, decodeAcknowledged, request);
   }
 
   /**

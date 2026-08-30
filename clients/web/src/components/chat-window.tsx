@@ -1,10 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import { ConversationKind, EncryptionMode } from '@migo/sdk';
-import type { ConversationSummary, Id } from '@migo/sdk';
+import type { ConversationSummary, GiftListing, Id } from '@migo/sdk';
 
 import { messagePreview } from '@/lib/message-preview.js';
 import { useCall } from '@/lib/migo/call-manager.js';
@@ -22,13 +22,19 @@ import { Avatar } from './avatar.js';
 import { CallButtons } from './call-buttons.js';
 import { GameEventList } from './game-events.js';
 import { GameLauncher } from './game-launcher.js';
+import { GiftPicker } from './gift-picker.js';
 import { MessageComposer } from './message-composer.js';
 import { MessageList, senderNameOf } from './message-list.js';
+import { RoomInfoPanel } from './room-info-panel.js';
 import { Spinner } from './spinner.js';
 import { TypingIndicator } from './typing-indicator.js';
+import { UserProfileModal } from './user-profile-modal.js';
 
 /** How much of the message being replied to the composer's preview bar quotes. */
 const REPLY_PREVIEW_CHARS = 50;
+
+/** How many gifts the composer's inline picker offers. */
+const GIFT_PICKER_COUNT = 6;
 
 /**
  * The lock label the header may claim, from the summary's {@link EncryptionMode}.
@@ -85,6 +91,8 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
     setTyping,
     deleting,
     deleteMessage,
+    editMessage,
+    react,
     hasEarlier,
     loadingEarlier,
     loadEarlier,
@@ -92,6 +100,16 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   } = useChat(conversationId);
   const game = useGameEvents(conversationId);
   const { startCall } = useCall();
+
+  // The thread's overlays: the peer's profile (a direct chat), the room's details (a room), and
+  // the composer's gift picker. Each is plain open/closed state over the same conversation.
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [roomInfoOpen, setRoomInfoOpen] = useState(false);
+  const [giftOpen, setGiftOpen] = useState(false);
+  const [giftCatalogue, setGiftCatalogue] = useState<GiftListing[] | null>(null);
+  const [giftRecipient, setGiftRecipient] = useState<Id | null>(null);
+  const [giftBusy, setGiftBusy] = useState(false);
+  const [giftError, setGiftError] = useState<string | null>(null);
 
   /**
    * The media resolver the message list embeds images through. A failure resolves to `null` rather
@@ -120,7 +138,9 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   // a notification generator, not a pastime.
   const supportsGames =
     summary?.kind === ConversationKind.Group || summary?.kind === ConversationKind.Room;
-  const members = summary?.members ?? [];
+  // A memo, because the fallback's `?? []` would otherwise mint a fresh array per render and
+  // make every hook that depends on the membership re-run forever.
+  const members = useMemo(() => summary?.members ?? [], [summary]);
   const peerId = callPeerFor(summary, accountId);
   // The room behind this conversation, when the shell knows one (from this session's joins, or
   // the account's remembered rooms): the header's live counters and topic come from it, because
@@ -205,6 +225,69 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
         }
       : null;
 
+  // The gift picker's catalogue loads once, on first open — the shop is not worth a fetch for
+  // every thread that never sends one.
+  useEffect(() => {
+    if (!client || !giftOpen || giftCatalogue !== null) {
+      return;
+    }
+    let cancelled = false;
+    client.economy
+      .getGiftCatalogue()
+      .then((catalogue) => {
+        if (!cancelled) {
+          setGiftCatalogue(catalogue.slice(0, GIFT_PICKER_COUNT));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setGiftCatalogue([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, giftOpen, giftCatalogue]);
+
+  // A gift from the composer: the conversation rides along so the server can attach the transfer
+  // to this thread for both ledgers.
+  const sendGift = useCallback(
+    (gift: GiftListing, recipient: Id): void => {
+      if (!client || giftBusy) {
+        return;
+      }
+      setGiftBusy(true);
+      setGiftError(null);
+      client.economy
+        .sendGift(gift.sku, recipient, conversationId)
+        .then(() => {
+          setGiftOpen(false);
+        })
+        .catch(() => {
+          setGiftError('That gift could not be sent.');
+        })
+        .finally(() => {
+          setGiftBusy(false);
+        });
+    },
+    [client, giftBusy, conversationId],
+  );
+
+  // The gift picker's candidate recipients: the conversation's other members with resolved
+  // names. A direct chat has exactly one; a room without a known member list offers none, and
+  // the picker says so rather than guessing a recipient.
+  const giftRecipients = useMemo(() => {
+    if (accountId === null) {
+      return [];
+    }
+    return members
+      .filter((member) => member !== accountId)
+      .map((member) => ({
+        id: member,
+        name: profiles.get(member)?.displayName ?? 'Someone',
+      }));
+  }, [members, accountId, profiles]);
+
   return (
     <div className="thread-pane" style={{ height: '100%' }}>
       <header className="thread-header">
@@ -216,35 +299,70 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
         >
           ‹
         </button>
-        <Avatar
-          name={title}
-          id={avatarId}
-          size={38}
-          avatarUrl={peerProfile?.avatarUrl}
-          presence={presence}
-        />
-        <div className="thread-heading">
-          <div className="name">
-            {isRoom ? (
-              <span className="room-glyph" aria-hidden="true">
-                #
-              </span>
-            ) : null}
-            {title}
-          </div>
-          <div className="status">{subtitle}</div>
-          {isRoom && roomInfo?.topic ? <div className="thread-topic">{roomInfo.topic}</div> : null}
-        </div>
+        {isDirect && peerId !== null ? (
+          <button
+            type="button"
+            className="thread-identity"
+            onClick={() => setProfileOpen(true)}
+            aria-label={`View ${title}'s profile`}
+          >
+            <Avatar
+              name={title}
+              id={peerId}
+              size={38}
+              avatarUrl={peerProfile?.avatarUrl}
+              presence={presence}
+            />
+            <div className="thread-heading">
+              <div className="name">{title}</div>
+              <div className="status">{subtitle}</div>
+            </div>
+          </button>
+        ) : (
+          <>
+            <Avatar name={title} id={avatarId} size={38} />
+            <div className="thread-heading">
+              <div className="name">
+                {isRoom ? (
+                  <span className="room-glyph" aria-hidden="true">
+                    #
+                  </span>
+                ) : null}
+                {title}
+              </div>
+              <div className="status">{subtitle}</div>
+              {isRoom && roomInfo?.topic ? (
+                <div className="thread-topic">{roomInfo.topic}</div>
+              ) : null}
+            </div>
+          </>
+        )}
         {encryptionLabel ? (
           <span className="thread-lock" title={encryptionLabel}>
             {encryptionLabel}
           </span>
+        ) : null}
+        {isRoom && roomInfo !== null ? (
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => setRoomInfoOpen((open) => !open)}
+            aria-label={roomInfoOpen ? 'Hide room details' : 'Show room details'}
+            aria-expanded={roomInfoOpen}
+            title="Room details"
+          >
+            ⓘ
+          </button>
         ) : null}
         {/* A 1:1 is the one conversation this build can call: the wire's invite names a single
             callee, and a group call needs the SFU this build does not have. */}
         <CallButtons conversationId={conversationId} peerId={peerId} onStartCall={startCall} />
         {supportsGames ? <GameLauncher onStart={game.startGame} /> : null}
       </header>
+
+      {isRoom && roomInfoOpen && roomInfo !== null ? (
+        <RoomInfoPanel roomId={roomInfo.roomId} conversationId={conversationId} />
+      ) : null}
 
       {loading && messages.length === 0 ? (
         <div className="center-fill">
@@ -266,6 +384,8 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
           readUpTo={readUpTo}
           onReply={setReplyTo}
           onDelete={deleteMessage}
+          onEdit={(message, text) => editMessage(message.messageId, text)}
+          onReact={(message, emoji) => react(message.messageId, emoji)}
           deleting={deleting}
           hasEarlier={hasEarlier}
           loadingEarlier={loadingEarlier}
@@ -288,6 +408,27 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
       ) : null}
 
       <TypingIndicator userId={typingUser} />
+      {giftOpen ? (
+        giftCatalogue === null ? (
+          <div className="center-fill">
+            <Spinner />
+          </div>
+        ) : (
+          <GiftPicker
+            gifts={giftCatalogue}
+            recipients={giftRecipients}
+            selectedRecipient={giftRecipient}
+            onSelectRecipient={setGiftRecipient}
+            onSend={sendGift}
+            onClose={() => {
+              setGiftOpen(false);
+              setGiftError(null);
+            }}
+            busy={giftBusy}
+          />
+        )
+      ) : null}
+      {giftError ? <p className="composer-meta composer-error">{giftError}</p> : null}
       <MessageComposer
         onSend={send}
         onAttach={sendAttachment}
@@ -296,7 +437,13 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
         disabled={!!error}
         replyPreview={replyPreview}
         onCancelReply={() => setReplyTo(null)}
+        onGift={() => setGiftOpen((open) => !open)}
+        giftOpen={giftOpen}
       />
+
+      {profileOpen && peerId !== null ? (
+        <UserProfileModal userId={peerId} onClose={() => setProfileOpen(false)} />
+      ) : null}
     </div>
   );
 }

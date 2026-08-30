@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use migo_core::Id;
+use migo_core::{Id, Timestamp};
 use serde::{Deserialize, Serialize};
 
 /// A REST failure, already reduced to something worth showing a person.
@@ -227,6 +227,44 @@ struct ErrorBody {
     message: String,
 }
 
+/// One device of the signed-in account, as `GET /v1/auth/sessions` reports it.
+///
+/// Every field but the id is optional on purpose: the listing is a security feature the user
+/// reads to spot a session they do not recognise, and a missing field should read as "not
+/// disclosed" rather than fail the whole list. `current` is the server's own marker for the
+/// session making the request.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionSummary {
+    pub session_id: Id,
+    #[serde(default)]
+    pub device: Option<DeviceSummary>,
+    #[serde(default)]
+    pub created_at: Option<Timestamp>,
+    #[serde(default)]
+    pub last_active_at: Option<Timestamp>,
+    #[serde(default)]
+    pub current: bool,
+}
+
+/// The device half of a session row.
+///
+/// Only the fields this client reads are declared: serde ignores what it is not asked for, and a
+/// field that is never read is a field that drifts out of step with the server without anything
+/// noticing. `platform` is the fallback name when the row carries no display name.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeviceSummary {
+    #[serde(default)]
+    pub platform: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionsBody {
+    #[serde(default)]
+    sessions: Vec<SessionSummary>,
+}
+
 /// An HTTP client bound to one server.
 pub struct Rest {
     http: reqwest::Client,
@@ -353,6 +391,56 @@ impl Rest {
             .post(url)
             .bearer_auth(access_token)
             .json(&LogoutRequest { session_id })
+            .send()
+            .await
+            .map_err(|_| RestError::Transport)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(self.failure(response).await)
+        }
+    }
+
+    /// Lists every session of the signed-in account: `GET /v1/auth/sessions`.
+    ///
+    /// Used by the settings screen's device list. A server that does not expose the route
+    /// surfaces as an ordinary [`RestError`] — the panel shows the message rather than an empty
+    /// list, because "no other devices" and "could not check" are different facts and only one
+    /// of them is reassuring.
+    pub async fn sessions(&self, access_token: &str) -> Result<Vec<SessionSummary>, RestError> {
+        let url = format!("{}/v1/auth/sessions", self.base);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|_| RestError::Transport)?;
+        if !response.status().is_success() {
+            return Err(self.failure(response).await);
+        }
+        response
+            .json::<SessionsBody>()
+            .await
+            .map(|body| body.sessions)
+            .map_err(|_| RestError::Malformed)
+    }
+
+    /// Ends one session of the signed-in account by id: `DELETE /v1/auth/sessions/{id}`.
+    ///
+    /// Revoking the session this request rides on is the server's business to refuse or honour;
+    /// the settings panel never offers the button for it, because sign-out is the honest name
+    /// for that action.
+    pub async fn revoke_session(
+        &self,
+        access_token: &str,
+        session_id: Id,
+    ) -> Result<(), RestError> {
+        let url = format!("{}/v1/auth/sessions/{}", self.base, session_id.to_text());
+        let response = self
+            .http
+            .delete(url)
+            .bearer_auth(access_token)
             .send()
             .await
             .map_err(|_| RestError::Transport)?;

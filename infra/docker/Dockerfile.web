@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # =============================================================================
-# Migo web client — a statically exported PWA over @migo/sdk, served on 19991.
+# Migo web client — a statically exported PWA over @migo/sdk, served on 19992.
 #
 # The workspace SDK chain (@migo/wire -> @migo/protocol -> @migo/crypto ->
 # @migo/sdk) ships as compiled ESM whose package `exports` resolve to dist/, so
@@ -69,11 +69,11 @@ RUN pnpm --filter @migo/web build
 
 # --- runtime -----------------------------------------------------------------
 FROM node:${NODE_VERSION}-${DEBIAN_RELEASE}-slim AS runtime
-# 19991 is Migo's web client port. PORT is honoured too, so a platform that
+# 19992 is Migo's web client port. PORT is honoured too, so a platform that
 # injects one still works, but nothing here needs to be told where to listen.
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
-    MIGO_WEB_PORT=19991 \
+    MIGO_WEB_PORT=19992 \
     MIGO_WEB_HOST=0.0.0.0
 RUN useradd --system --create-home --uid 10001 migoweb
 WORKDIR /app
@@ -85,11 +85,11 @@ COPY --from=builder --chown=migoweb:migoweb /app/clients/web/out ./out
 COPY --from=builder --chown=migoweb:migoweb /app/clients/web/tools ./tools
 
 USER migoweb
-EXPOSE 19991
+EXPOSE 19992
 
 # The server answers /healthz before touching the filesystem, so this probe stays
 # meaningful even when the bundle directory is the thing that is wrong.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
-    CMD node -e "fetch('http://127.0.0.1:'+(process.env.MIGO_WEB_PORT||19991)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+    CMD node -e "fetch('http://127.0.0.1:'+(process.env.MIGO_WEB_PORT||19992)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["node", "tools/serve.mjs"]

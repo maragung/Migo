@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { ChangeEvent, KeyboardEvent, ReactNode } from 'react';
 
 import { ContentType } from '@migo/sdk';
 import type { Id, IncomingMessage, MediaRefContent, MessageContent, UserProfile } from '@migo/sdk';
@@ -16,6 +16,9 @@ import { VoiceNoteBubble } from './voice-player.js';
 
 /** How much of a quoted message the reply snippet above a bubble shows. */
 const QUOTE_CHARS = 60;
+
+/** The quick reactions the hover bar offers, in order. */
+export const QUICK_REACTIONS: readonly string[] = ['👍', '❤️', '😂'];
 
 /**
  * Resolves a media object to a short-lived URL the list may embed, or `null` when the object has
@@ -187,6 +190,17 @@ export interface MessageListProps {
   onReply: (message: ThreadMessage) => void;
   /** Requests a delete-for-everyone for one of our own messages. */
   onDelete: (messageId: Id) => void;
+  /**
+   * Commits an edit of one of our own text messages with the replacement text; the caller owns
+   * the re-sealing and the `editMessage` call. Optional: without it the Edit control is not
+   * offered, which is how a context with no client renders.
+   */
+  onEdit?: (message: ThreadMessage, text: string) => void;
+  /**
+   * Sends one of {@link QUICK_REACTIONS} onto a message; the caller owns the sealed reaction
+   * envelope. Optional for the same reason as {@link onEdit}.
+   */
+  onReact?: (message: ThreadMessage, emoji: string) => void;
   /** True while a deletion request is in flight, so its control can show the busy state. */
   deleting: boolean;
   /** Whether the thread holds less than its full history (the initial replay is page-bounded). */
@@ -217,6 +231,8 @@ export function MessageList({
   readUpTo,
   onReply,
   onDelete,
+  onEdit,
+  onReact,
   deleting,
   hasEarlier,
   loadingEarlier,
@@ -230,6 +246,9 @@ export function MessageList({
   // The scroll follows both surfaces that can grow: a new message and a new live row are each a
   // reason to bring the bottom into view.
   const liveCount = liveRowCount ?? 0;
+  // Which of our own text messages is open in the inline editor, if any. One at a time: an edit
+  // is a focused correction, and a second Edit click is a different message's turn.
+  const [editingId, setEditingId] = useState<Id | null>(null);
 
   // Reply quotes resolve their target in the same thread; a target that is absent (hard-deleted,
   // or never loaded) or since tombstoned renders as "[deleted]" rather than an empty quote.
@@ -281,6 +300,8 @@ export function MessageList({
         const quoteText =
           quoted && !quoted.deleted ? messagePreview(quoted.content, QUOTE_CHARS) : '[deleted]';
         const { node, placeholder } = renderBody(message.content, mediaUrlFor);
+        const editable = mine && message.content.type === ContentType.Text && onEdit !== undefined;
+        const editing = editingId === message.messageId && editable;
 
         return (
           <div key={message.messageId}>
@@ -314,17 +335,34 @@ export function MessageList({
                         <span className="reply-quote-text">{quoteText}</span>
                       </div>
                     ) : null}
-                    <BubbleLine
-                      message={message}
-                      mine={mine}
-                      placeholder={placeholder}
-                      body={node}
-                      read={message.seq <= readUpTo}
-                      senderName={senderName}
-                      onReply={onReply}
-                      onDelete={onDelete}
-                      deleting={deleting}
-                    />
+                    {editing ? (
+                      <MessageEditor
+                        initialText={
+                          message.content.type === ContentType.Text ? message.content.text : ''
+                        }
+                        busy={false}
+                        onSave={(text) => {
+                          setEditingId(null);
+                          onEdit?.(message, text);
+                        }}
+                        onCancel={() => setEditingId(null)}
+                      />
+                    ) : (
+                      <BubbleLine
+                        message={message}
+                        mine={mine}
+                        placeholder={placeholder}
+                        body={node}
+                        read={message.seq <= readUpTo}
+                        senderName={senderName}
+                        onReply={onReply}
+                        onDelete={onDelete}
+                        deleting={deleting}
+                        editable={editable}
+                        onEdit={() => setEditingId(message.messageId)}
+                        onReact={onReact}
+                      />
+                    )}
                   </>
                 )}
               </div>
@@ -338,7 +376,100 @@ export function MessageList({
   );
 }
 
-/** One bubble with its hover actions (Reply, and Delete on our own messages). */
+/**
+ * The inline editor for one of our own text messages: the bubble becomes a textarea with Save
+ * and Cancel. The draft starts as the message's current text, Save commits only a change (an
+ * untouched draft is a cancel in disguise), and Enter submits while Shift+Enter is a newline.
+ */
+export function MessageEditor({
+  initialText,
+  busy,
+  onSave,
+  onCancel,
+}: {
+  initialText: string;
+  busy: boolean;
+  onSave: (text: string) => void;
+  onCancel: () => void;
+}): ReactNode {
+  const [draft, setDraft] = useState(initialText);
+
+  function onChange(event: ChangeEvent<HTMLTextAreaElement>): void {
+    setDraft(event.target.value);
+  }
+
+  function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      submit();
+    }
+    if (event.key === 'Escape') {
+      onCancel();
+    }
+  }
+
+  function submit(): void {
+    if (busy) {
+      return;
+    }
+    const text = draft.trim();
+    if (text.length === 0 || text === initialText) {
+      onCancel();
+      return;
+    }
+    onSave(text);
+  }
+
+  return (
+    <div className="message-editor" aria-label="Edit message">
+      <textarea
+        className="input"
+        value={draft}
+        onChange={onChange}
+        onKeyDown={onKeyDown}
+        rows={2}
+        autoFocus
+        aria-label="Edited message text"
+      />
+      <div className="message-editor-actions">
+        <button type="button" className="btn btn-primary" onClick={submit} disabled={busy}>
+          {busy ? <Spinner /> : 'Save'}
+        </button>
+        <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={busy}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** The quick-reaction hover bar: one button per {@link QUICK_REACTIONS} emoji. */
+export function ReactionBar({
+  targetName,
+  onReact,
+}: {
+  /** Whose message the reaction lands on, for the accessible label. */
+  targetName: string;
+  onReact: (emoji: string) => void;
+}): ReactNode {
+  return (
+    <span className="reaction-bar" role="group" aria-label={`React to ${targetName}`}>
+      {QUICK_REACTIONS.map((emoji) => (
+        <button
+          key={emoji}
+          type="button"
+          className="row-action-btn reaction-btn"
+          onClick={() => onReact(emoji)}
+          aria-label={`React with ${emoji}`}
+        >
+          {emoji}
+        </button>
+      ))}
+    </span>
+  );
+}
+
+/** One bubble with its hover actions (Reply, reactions, and Delete/Edit on our own messages). */
 function BubbleLine({
   message,
   mine,
@@ -349,6 +480,9 @@ function BubbleLine({
   onReply,
   onDelete,
   deleting,
+  editable,
+  onEdit,
+  onReact,
 }: {
   message: ThreadMessage;
   mine: boolean;
@@ -359,6 +493,11 @@ function BubbleLine({
   onReply: (message: ThreadMessage) => void;
   onDelete: (messageId: Id) => void;
   deleting: boolean;
+  /** Whether the Edit control is offered at all (own text message, caller can commit edits). */
+  editable: boolean;
+  onEdit: () => void;
+  /** Sends a quick reaction; absent means the bar is not rendered. */
+  onReact?: (message: ThreadMessage, emoji: string) => void;
 }): ReactNode {
   return (
     <div className="bubble-line">
@@ -366,6 +505,7 @@ function BubbleLine({
         {body}
         <span className="meta">
           {formatClock(message.createdAt)}
+          {message.editedAt !== undefined ? <span className="edited-mark">edited</span> : null}
           {mine ? <ReadTicks read={read} /> : null}
         </span>
       </div>
@@ -379,6 +519,20 @@ function BubbleLine({
         >
           ↩
         </button>
+        {onReact !== undefined ? (
+          <ReactionBar targetName={senderName} onReact={(emoji) => onReact(message, emoji)} />
+        ) : null}
+        {editable ? (
+          <button
+            type="button"
+            className="row-action-btn"
+            onClick={onEdit}
+            aria-label="Edit message"
+            title="Edit"
+          >
+            ✎
+          </button>
+        ) : null}
         {mine ? (
           <button
             type="button"

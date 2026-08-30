@@ -28,20 +28,26 @@
 pub mod gateway;
 pub mod rest;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
 use migo_core::{Id, OsRandom, Random, Timestamp};
-use migo_protocol::{features, ClientInfo, ConversationKind, EncryptionMode, MessageKind, Opcode};
+use migo_protocol::{
+    features, ClientInfo, ConversationKind, EncryptionMode, FriendRespond, FriendTarget,
+    MessageKind, Opcode, RelationshipListReq, SubscribeRequest, Topic, TopicKind,
+};
 use tokio::sync::mpsc;
 
 use crate::config::ServerEndpoint;
 use crate::crypto::content::{self, Content};
 use crate::crypto::envelope::Envelope;
 use crate::crypto::session::{DeviceKeys, SessionStore, ONE_TIME_PREKEY_COUNT};
-use crate::model::{self, Account, Body, Connection, Conversation, Delivery, Message, ToastKind};
+use crate::model::{
+    self, Account, Body, Connection, Conversation, Delivery, Message, Relationship,
+    RelationshipKind, SessionRow, ToastKind,
+};
 use crate::net::gateway::{Gateway, GatewayError};
 use crate::net::rest::{CaptchaChallenge, CaptchaProof, DeviceRequest, Rest, RestError};
 use crate::vault::{self, SavedSession};
@@ -134,6 +140,25 @@ pub enum Command {
     Typing { conversation_id: Id, typing: bool },
     /// Mark everything up to `seq` as read.
     MarkRead { conversation_id: Id, seq: u64 },
+    /// Refresh the social graph: friends, pending requests, and the other relationship kinds.
+    ///
+    /// Follows the same shape as [`Command::Conversations`] because it is the same idea — a
+    /// screen asks for the list, the worker reduces the wire answer to model rows, the screen
+    /// gets one event.
+    Friends,
+    /// Send a friend request to an account id, typed by the user.
+    ///
+    /// Carries the raw text rather than an [`Id`] for the same reason [`Command::StartDirect`]
+    /// does: the input field is a person typing, and the worker is where "what they typed is not
+    /// an id" becomes a message worth reading instead of a parse panic.
+    AddFriend { user_id: String },
+    /// Accept or decline a pending request. The id comes from the relationship list, so it is
+    /// already parsed.
+    RespondFriend { user_id: Id, accept: bool },
+    /// Fetch the device/session list over REST for the settings screen.
+    Sessions,
+    /// End one session of the account, by the id the list reported.
+    RevokeSession { session_id: Id },
     /// Stop the worker. Sent on window close.
     Shutdown,
 }
@@ -196,6 +221,28 @@ pub enum Event {
     },
     /// Display names for account ids, so the UI can title a direct conversation.
     Names(HashMap<Id, String>),
+    /// The social graph moved: friendships and pending requests, reduced to model rows.
+    ///
+    /// Followed by names and presence for the same ids wherever the server discloses them,
+    /// because a friends list of bare ids is a list of strangers.
+    Relationships(Vec<Relationship>),
+    /// Someone acted on the social graph and this account was the audience: a request arrived,
+    /// or one of ours was accepted.
+    ///
+    /// Carries the actor and what the state string said, as far as it said anything: `Some(true)`
+    /// an acceptance, `Some(false)` a request, `None` a state this build has no name for. All
+    /// three mean the graph moved — the difference is only whether there is anything true to
+    /// say about it beyond "look again".
+    FriendChanged { user_id: Id, accepted: Option<bool> },
+    /// An account's presence changed, from a presence event or a profile fetch. `Unknown` is
+    /// never carried: unobserved is the absence of an event, not one.
+    PresenceChanged { user_id: Id, state: model::Presence },
+    /// The device/session list for the settings screen, or the reason it could not be had.
+    ///
+    /// A failure is a fact the panel must keep showing — "could not check" and "no other
+    /// devices" are different states and only one of them should reassure anybody — so it rides
+    /// the same event rather than dying as a toast.
+    Sessions(Result<Vec<SessionRow>, String>),
     /// Something worth a line at the bottom of the window.
     Toast { text: String, kind: ToastKind },
 }
@@ -311,6 +358,12 @@ struct Signed {
     devices: HashMap<Id, Vec<Id>>,
     /// Members of each conversation, from the conversation list.
     members: HashMap<Id, Vec<Id>>,
+    /// Account ids whose user topics this session has already subscribed to for presence.
+    ///
+    /// Tracked so a relationship refresh does not re-send a SUBSCRIBE for every friend on every
+    /// reconnect; cleared when the gateway reconnects, because subscriptions live and die with
+    /// the session that held them.
+    watched: HashSet<Id>,
 }
 
 /// The reconnect schedule after a lost gateway connection.
@@ -504,6 +557,15 @@ impl Worker {
             } => {
                 self.mark_read(conversation_id, seq).await;
             }
+            Command::Friends => self.request_relationships().await,
+            Command::AddFriend { user_id } => self.add_friend(user_id).await,
+            Command::RespondFriend { user_id, accept } => {
+                self.respond_friend(user_id, accept).await;
+            }
+            Command::Sessions => self.fetch_sessions().await,
+            Command::RevokeSession { session_id } => {
+                self.revoke_session(session_id).await;
+            }
             Command::Shutdown => {}
         }
     }
@@ -690,6 +752,7 @@ impl Worker {
             bundles: HashMap::new(),
             devices: HashMap::new(),
             members: HashMap::new(),
+            watched: HashSet::new(),
         });
 
         self.sink.send(Event::SignedIn(account));
@@ -731,7 +794,19 @@ impl Worker {
                 self.retry = None;
                 self.sink.send(Event::Connection(Connection::Online));
                 self.publish_keys().await;
+                // A fresh session holds no subscriptions, so the accounts this device watches for
+                // presence go back to "never subscribed" and the own-topic subscribe below is the
+                // only one that can be sent unconditionally.
+                if let Some(signed) = self.signed.as_mut() {
+                    signed.watched.clear();
+                }
+                self.subscribe_self().await;
+                self.announce_presence().await;
                 self.request_conversations().await;
+                // The graph is refreshed on every reconnect for the same reason the conversation
+                // list is: the other devices of this account act on it too, and a client that
+                // never re-reads shows a friendship that ended an hour ago.
+                self.request_relationships().await;
             }
             Err(error) => {
                 self.sink
@@ -872,6 +947,180 @@ impl Worker {
             at: None,
         };
         self.request(Opcode::MessageReceipt, &message).await;
+    }
+
+    /// Subscribes this session to its own account's user topic.
+    ///
+    /// That topic is where the server puts the events addressed to this account rather than to
+    /// one of its conversations: friend requests, acceptances, notifications. The gateway grants
+    /// it by right (a user's own presence stream is theirs), so a refusal here would mean the
+    /// session is not really authenticated — which the handshake would already have caught.
+    async fn subscribe_self(&mut self) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let request = SubscribeRequest {
+            topics: vec![Topic {
+                kind: TopicKind::User,
+                id: signed.account.account_id,
+            }],
+        };
+        self.request(Opcode::Subscribe, &request).await;
+    }
+
+    /// Announces this device as online.
+    ///
+    /// What the web client does after its connect, done here for the same reason: presence on
+    /// this server is per-device and client-reported, so a client that never speaks PRESENCE_SET
+    /// reads as unobserved to everyone watching. Best effort — a set that fails costs one green
+    /// dot, and the reconnect path will try again anyway.
+    async fn announce_presence(&mut self) {
+        let message = migo_protocol::PresenceUpdate {
+            state: migo_protocol::PresenceState::Online,
+            custom_status: None,
+        };
+        self.request(Opcode::PresenceSet, &message).await;
+    }
+
+    /// Subscribes to the user topics of accounts this device wants presence for.
+    ///
+    /// Only unwatched ids are sent, and the batch is capped so one refresh on a large graph
+    /// cannot produce an unbounded frame. A refusal is silent by design: the server answers
+    /// "no" without a reason so SUBSCRIBE cannot be used to probe, and a client that grilled
+    /// the user about every declined watch would be inventing reasons the server chose not to
+    /// give.
+    async fn watch_users(&mut self, ids: Vec<Id>) {
+        const WATCH_BATCH: usize = 128;
+        let topics: Vec<Topic> = {
+            let Some(signed) = self.signed.as_mut() else {
+                return;
+            };
+            ids.into_iter()
+                .filter(|id| signed.watched.insert(*id))
+                .take(WATCH_BATCH)
+                .map(|id| Topic {
+                    kind: TopicKind::User,
+                    id,
+                })
+                .collect()
+        };
+        if topics.is_empty() {
+            return;
+        }
+        let request = SubscribeRequest { topics };
+        self.request(Opcode::Subscribe, &request).await;
+    }
+
+    /// Requests the account's whole social graph.
+    async fn request_relationships(&mut self) {
+        let message = RelationshipListReq { limit: 200 };
+        self.request(Opcode::RelationshipList, &message).await;
+    }
+
+    /// Sends a friend request to whatever the user typed, if it names an account.
+    async fn add_friend(&mut self, user_id: String) {
+        match Id::parse(user_id.trim()) {
+            Ok(target) => {
+                let message = FriendTarget { user_id: target };
+                self.request(Opcode::FriendRequest, &message).await;
+            }
+            Err(_) => self
+                .sink
+                .toast("enter the account id of the person to add", ToastKind::Info),
+        }
+    }
+
+    /// Accepts or declines a pending request.
+    async fn respond_friend(&mut self, user_id: Id, accept: bool) {
+        let message = FriendRespond { user_id, accept };
+        self.request(Opcode::FriendRespond, &message).await;
+    }
+
+    /// Fetches names and presence for a set of accounts in one PROFILE_FETCH.
+    ///
+    /// The friends list and the direct-conversation titles both render through the names map, so
+    /// one fetch here serves two screens. Requests are capped because a profile answer costs the
+    /// server a row read per account, and an account with a thousand relationships should not
+    /// turn one refresh into a thousand-row fan-out.
+    async fn fetch_profiles(&mut self, ids: Vec<Id>) {
+        const PROFILE_BATCH: usize = 128;
+        if ids.is_empty() {
+            return;
+        }
+        // Deduped before the cap so one account holding two relationship kinds (a friend and a
+        // favourite, say) costs one profile read, not one of the batch's slots.
+        let mut ids = ids;
+        ids.sort_unstable();
+        ids.dedup();
+        ids.truncate(PROFILE_BATCH);
+        let message = migo_protocol::ProfileRequest { user_ids: ids };
+        self.request(Opcode::ProfileFetch, &message).await;
+    }
+
+    /// Fetches the device/session list over REST and reduces it to rows the settings screen can
+    /// draw without knowing what JSON is.
+    async fn fetch_sessions(&mut self) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let outcome = signed.rest.sessions(&signed.access_token).await;
+        let event = match outcome {
+            Ok(list) => {
+                let rows = list
+                    .into_iter()
+                    .map(|session| SessionRow {
+                        session_id: session.session_id,
+                        device: session
+                            .device
+                            .as_ref()
+                            .and_then(|device| {
+                                let name = device.display_name.as_deref();
+                                name.filter(|name| !name.is_empty()).or_else(|| {
+                                    device
+                                        .platform
+                                        .as_deref()
+                                        .filter(|platform| !platform.is_empty())
+                                })
+                            })
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| model::short_id(session.session_id)),
+                        created_at: session.created_at,
+                        last_active_at: session.last_active_at,
+                        current: session.current,
+                    })
+                    .collect::<Vec<_>>();
+                Event::Sessions(Ok(rows))
+            }
+            Err(error) => Event::Sessions(Err(error.to_string())),
+        };
+        self.sink.send(event);
+    }
+
+    /// Ends one session of the account, then re-reads the list.
+    ///
+    /// Revoking the session this window runs on would leave a signed-out client holding
+    /// decrypted history, so the settings panel does not offer the button for it; if a revoke
+    /// arrives here anyway (or the server ends the session out from under the list), the
+    /// refresh that follows is what reconciles the UI with the truth.
+    async fn revoke_session(&mut self, session_id: Id) {
+        let outcome = match self.signed.as_ref() {
+            Some(signed) => {
+                signed
+                    .rest
+                    .revoke_session(&signed.access_token, session_id)
+                    .await
+            }
+            None => return,
+        };
+        match outcome {
+            Ok(()) => {
+                self.sink.toast("Session ended", ToastKind::Success);
+                self.fetch_sessions().await;
+            }
+            Err(error) => {
+                self.sink.toast(error.to_string(), ToastKind::Error);
+            }
+        }
     }
 
     /// Encrypts one text message for every device of every other member, and sends it.
@@ -1023,12 +1272,18 @@ impl Worker {
             Opcode::Ping => self.on_ping(&frame).await,
             Opcode::MessageEvent => self.on_message(&frame),
             Opcode::MessageSend => self.on_accepted(&frame),
-            Opcode::ConversationList => self.on_conversations(&frame),
+            Opcode::ConversationList => self.on_conversations(&frame).await,
             Opcode::ConversationCreate => self.on_conversation_created(&frame).await,
             Opcode::Sync => self.on_history(&frame),
             Opcode::KeyBundleFetch => self.on_bundles(&frame),
             Opcode::Typing => self.on_typing(&frame),
             Opcode::ProfileFetch => self.on_profiles(&frame),
+            Opcode::RelationshipList => self.on_relationships(&frame).await,
+            // The acknowledgement of a FRIEND_REQUEST or FRIEND_RESPOND. Both mean the graph
+            // moved and the list in the UI is now stale, so both take the same action: re-read.
+            Opcode::FriendRequest | Opcode::FriendRespond => self.on_social_ack(&frame).await,
+            Opcode::FriendEvent => self.on_friend_event(&frame),
+            Opcode::PresenceEvent => self.on_presence(&frame),
             // Everything else is either an acknowledgement with nothing to show or a feature this
             // client did not negotiate.
             _ => {}
@@ -1070,13 +1325,28 @@ impl Worker {
         });
     }
 
-    fn on_conversations(&mut self, frame: &migo_protocol::Frame) {
+    async fn on_conversations(&mut self, frame: &migo_protocol::Frame) {
         let Ok(response) = gateway::decode::<migo_protocol::ConversationListResponse>(frame) else {
             return;
         };
+        let me = self.signed.as_ref().map(|signed| signed.account.account_id);
         let mut out = Vec::with_capacity(response.conversations.len());
+        // The peers whose names a direct conversation's title is drawn from. Gathered across the
+        // whole list so one PROFILE_FETCH titles every direct chat, rather than one fetch per
+        // row — the list arrives all at once, so the fetch is per-list.
+        let mut peers: Vec<Id> = Vec::new();
         for summary in response.conversations {
             let members = summary.members.clone().unwrap_or_default();
+            // A direct conversation's title is the peer's name and comes from a profile lookup
+            // (the server carries no `title` for it), so those are the members worth naming.
+            let untitled = summary.title.as_ref().is_none_or(|t| t.is_empty());
+            if untitled && members.len() == 2 {
+                if let Some(me) = me {
+                    if let Some(peer) = members.iter().find(|id| **id != me) {
+                        peers.push(*peer);
+                    }
+                }
+            }
             if let Some(signed) = self.signed.as_mut() {
                 signed
                     .members
@@ -1100,6 +1370,7 @@ impl Worker {
             });
         }
         self.sink.send(Event::Conversations(out));
+        self.fetch_profiles(peers).await;
     }
 
     async fn on_conversation_created(&mut self, frame: &migo_protocol::Frame) {
@@ -1183,19 +1454,104 @@ impl Worker {
         let Ok(response) = gateway::decode::<migo_protocol::ProfileResponse>(frame) else {
             return;
         };
-        let names = response
-            .profiles
+        let mut names = HashMap::with_capacity(response.profiles.len());
+        for profile in &response.profiles {
+            let name = if profile.display_name.is_empty() {
+                profile.username.clone()
+            } else {
+                profile.display_name.clone()
+            };
+            // Presence rides the same answer the names do: the profile row is the server's own
+            // statement of where the account stood when it was read, which is the best seed a
+            // presence UI can get before any event arrives. `Unknown` is skipped rather than
+            // sent — an event that says "never heard" is no event at all.
+            if let Some(state) = profile.presence {
+                let state = model::Presence::from_wire(state.to_wire());
+                if state != model::Presence::Unknown {
+                    self.sink.send(Event::PresenceChanged {
+                        user_id: profile.user_id,
+                        state,
+                    });
+                }
+            }
+            names.insert(profile.user_id, name);
+        }
+        self.sink.send(Event::Names(names));
+    }
+
+    /// The relationship list came back: reduce it to model rows, then ask for the two things a
+    /// list of ids cannot show on its own — the names and the live presence of those accounts.
+    async fn on_relationships(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(response) = gateway::decode::<migo_protocol::RelationshipList>(frame) else {
+            return;
+        };
+        let entries: Vec<Relationship> = response
+            .entries
             .into_iter()
-            .map(|profile| {
-                let name = if profile.display_name.is_empty() {
-                    profile.username
-                } else {
-                    profile.display_name
-                };
-                (profile.user_id, name)
+            .map(|entry| Relationship {
+                user_id: entry.user_id,
+                kind: RelationshipKind::from_wire(entry.kind),
             })
             .collect();
-        self.sink.send(Event::Names(names));
+        // Names for every edge, presence watches only for friendships: a pending request has no
+        // presence to show (the dot would say "stranger is offline" at best), and a block is
+        // exactly the account whose whereabouts this client must stop asking about.
+        let named: Vec<Id> = entries.iter().map(|entry| entry.user_id).collect();
+        let friends: Vec<Id> = entries
+            .iter()
+            .filter(|entry| entry.kind == RelationshipKind::Friend)
+            .map(|entry| entry.user_id)
+            .collect();
+        self.sink.send(Event::Relationships(entries));
+        self.fetch_profiles(named).await;
+        self.watch_users(friends).await;
+    }
+
+    /// A FRIEND_REQUEST or FRIEND_RESPOND was accepted by the server: the graph moved, so the
+    /// list the UI holds is stale whatever the specifics were.
+    async fn on_social_ack(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(acknowledged) = gateway::decode::<migo_protocol::Acknowledged>(frame) else {
+            return;
+        };
+        if acknowledged.ok {
+            self.request_relationships().await;
+        }
+    }
+
+    /// The other side of a social event this account was the audience of.
+    ///
+    /// The state string is a hint, not a source of truth (the server's own doc says so): the UI
+    /// learns the new shape of the graph from the re-read that follows, and this event exists to
+    /// say *that* something happened. An unknown state is still a graph movement, so it still
+    /// carries an event — just one with nothing to claim about what moved.
+    fn on_friend_event(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(event) = gateway::decode::<migo_protocol::FriendEvent>(frame) else {
+            return;
+        };
+        let accepted = match event.state.as_str() {
+            "request" => Some(false),
+            "accepted" => Some(true),
+            _ => None,
+        };
+        self.sink.send(Event::FriendChanged {
+            user_id: event.user_id,
+            accepted,
+        });
+    }
+
+    /// A presence event off a subscribed user topic.
+    fn on_presence(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(event) = gateway::decode::<migo_protocol::PresenceEvent>(frame) else {
+            return;
+        };
+        let state = model::Presence::from_wire(event.state.to_wire());
+        if state == model::Presence::Unknown {
+            return;
+        }
+        self.sink.send(Event::PresenceChanged {
+            user_id: event.user_id,
+            state,
+        });
     }
 
     /// Decrypts one MESSAGE_EVENT into something the UI can show.

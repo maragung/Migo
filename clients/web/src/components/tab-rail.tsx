@@ -9,7 +9,8 @@ import type { ReactNode } from 'react';
  * open conversation already lives in the URL fragment, so section switching is pure client state and
  * a tab change never unloads the session or the socket.
  */
-export type AppTab = 'chats' | 'friends' | 'notifications' | 'discover' | 'gifts' | 'profile';
+export type AppTab =
+  'chats' | 'friends' | 'notifications' | 'discover' | 'gifts' | 'profile' | 'settings';
 
 const TABS: ReadonlyArray<{ id: AppTab; label: string; icon: string }> = [
   { id: 'chats', label: 'Chats', icon: '💬' },
@@ -18,6 +19,7 @@ const TABS: ReadonlyArray<{ id: AppTab; label: string; icon: string }> = [
   { id: 'discover', label: 'Discover', icon: '🧭' },
   { id: 'gifts', label: 'Gifts', icon: '🎁' },
   { id: 'profile', label: 'Profile', icon: '👤' },
+  { id: 'settings', label: 'Settings', icon: '⚙️' },
 ];
 
 /**

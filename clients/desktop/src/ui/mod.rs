@@ -16,9 +16,12 @@
 pub mod auth;
 pub mod captcha;
 pub mod chat;
+pub mod friends;
 pub mod server_form;
+pub mod settings;
 pub mod widgets;
 
+use crate::config::ServerEndpoint;
 use crate::model::{Account, Connection};
 use crate::net::Command;
 use crate::theme::Theme;
@@ -42,11 +45,31 @@ pub enum Screen {
     Chat,
 }
 
-/// Everything a screen may read, and the two things it may write.
+/// Which pane a signed-in user is looking at, chosen from the navigation rail.
+///
+/// Deliberately separate from [`Screen`]: the screens are the auth *pipeline* (which form, which
+/// gate), while a place is where a signed-in person already is. Folding friends into `Screen`
+/// would let the auth flow "navigate" to it, and a sign-out would have to remember to reset it
+/// rather than it simply being unreachable without an account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    /// Conversations and threads.
+    Chat,
+    /// The social graph: friends, requests, adding by id.
+    Friends,
+    /// Server, theme, devices, sign-out.
+    Settings,
+}
+
+/// Everything a screen may read, and the things it may write.
 pub struct Context<'a> {
     pub theme: Theme,
     pub connection: &'a Connection,
     pub account: Option<&'a Account>,
+    /// The server the session lives on, for the settings panel's server section.
+    ///
+    /// Read-only: changing servers is an auth-form concern, because it means no session exists.
+    pub server: &'a ServerEndpoint,
     /// Intent pushed here is forwarded to the worker after the frame.
     pub commands: &'a mut Vec<Command>,
     /// A screen change requested by a link on the screen, applied after the frame.
@@ -55,6 +78,12 @@ pub struct Context<'a> {
     /// about: moving from the sign-in form to the register form touches no socket and no key, and
     /// routing it through the network thread would make the window's responsiveness depend on it.
     pub navigate: &'a mut Option<Screen>,
+    /// A theme change requested from a screen, applied after the frame.
+    ///
+    /// Same reasoning as [`Context::navigate`]: the worker has no business restyling a window, and a
+    /// settings panel that had to round-trip the network thread to flip a palette would feel broken
+    /// on a bad link.
+    pub theme_choice: &'a mut Option<Theme>,
 }
 
 impl Context<'_> {
@@ -66,5 +95,10 @@ impl Context<'_> {
     /// Asks to show a different screen once this frame is finished.
     pub fn go(&mut self, screen: Screen) {
         *self.navigate = Some(screen);
+    }
+
+    /// Asks to redraw the whole window in the other theme once this frame is finished.
+    pub fn want_theme(&mut self, theme: Theme) {
+        *self.theme_choice = Some(theme);
     }
 }

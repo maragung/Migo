@@ -37,6 +37,10 @@ interface ComposerProps {
   replyPreview?: ReplyPreview | null;
   /** Clears the reply target (the bar's X). */
   onCancelReply?: () => void;
+  /** Toggles the inline gift picker (the 🎁 beside the attach button). */
+  onGift?: () => void;
+  /** Whether the gift picker is open, so the control reflects it. */
+  giftOpen?: boolean;
 }
 
 export function MessageComposer({
@@ -47,6 +51,8 @@ export function MessageComposer({
   disabled,
   replyPreview,
   onCancelReply,
+  onGift,
+  giftOpen,
 }: ComposerProps): ReactNode {
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
@@ -246,6 +252,18 @@ export function MessageComposer({
           >
             📎
           </button>
+          {onGift !== undefined ? (
+            <button
+              type="button"
+              className={`attach-btn ${giftOpen ? 'active' : ''}`}
+              onClick={onGift}
+              disabled={disabled || uploading}
+              aria-label={giftOpen ? 'Close gift picker' : 'Send a gift'}
+              aria-pressed={giftOpen}
+            >
+              🎁
+            </button>
+          ) : null}
           {onVoiceNote !== undefined ? (
             <button
               type="button"

@@ -29,6 +29,7 @@ import type {
   Id,
   LedgerEntryWire,
   ProgressionWire,
+  RankWire,
   RelationshipEntry,
   SuggestedUser,
   UserProfile,
@@ -55,6 +56,9 @@ const KIND_FRIEND: number = RelationshipKind.Friend;
 
 /** How many statement lines the panel shows; the ledger endpoint holds the rest. */
 const LEDGER_ROWS = 10;
+
+/** How deep the XP leaderboard's top list reads. */
+const LEADERBOARD_ROWS = 10;
 
 /**
  * The XP bar's filled fraction: `into` of `total`, clamped into 0–1.
@@ -198,6 +202,47 @@ export function LedgerList({ entries }: { entries: LedgerEntryWire[] }): ReactNo
         </li>
       ))}
     </ul>
+  );
+}
+
+/**
+ * The XP leaderboard's ranked list: position, avatar, name, level, and XP per row.
+ *
+ * Names and avatars resolve through the caller's profile map (the panel passes the shared cache's),
+ * so a leaderboard row and a friend row show the same person the same way. An unresolved account
+ * keeps a stable fallback rather than a blank line — the rank is the fact, the name is its label.
+ */
+export function LeaderboardList({
+  ranks,
+  profiles,
+}: {
+  ranks: RankWire[];
+  /** Resolved profiles keyed by account id; entries may be missing, and the row degrades. */
+  profiles: ReadonlyMap<Id, UserProfile & { avatarUrl?: string }>;
+}): ReactNode {
+  if (ranks.length === 0) {
+    return <p className="muted">No one has earned XP yet.</p>;
+  }
+  return (
+    <ol className="leaderboard-list" aria-label="XP leaderboard">
+      {ranks.map((rank) => {
+        const profile = profiles.get(rank.accountId);
+        return (
+          <li key={rank.accountId} className="leaderboard-row">
+            <span className="leaderboard-position">#{rank.position}</span>
+            <Avatar
+              name={profile?.displayName ?? 'Someone'}
+              id={rank.accountId}
+              size={28}
+              avatarUrl={profile?.avatarUrl}
+            />
+            <span className="person-name">{profile?.displayName ?? 'Someone'}</span>
+            <span className="leaderboard-level">Level {rank.level}</span>
+            <span className="leaderboard-xp">{rank.xp} XP</span>
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 
@@ -349,6 +394,7 @@ export function GiftsPanel(): ReactNode {
   const [ledger, setLedger] = useState<LedgerEntryWire[] | null>(null);
   const [progression, setProgression] = useState<ProgressionWire | null>(null);
   const [friends, setFriends] = useState<RelationshipEntry[] | null>(null);
+  const [leaderboard, setLeaderboard] = useState<RankWire[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // The send flow: which gift is being addressed (the picker is open), and whether a send is in
@@ -379,8 +425,8 @@ export function GiftsPanel(): ReactNode {
     }
   }, [client]);
 
-  // Progression and the friends list are standing facts, not money: they load once and are not
-  // part of the post-send refresh.
+  // Progression, the friends list, and the XP leaderboard are standing facts, not money: they load
+  // once and are not part of the post-send refresh.
   useEffect(() => {
     if (!client || accountId === null) {
       return;
@@ -388,13 +434,15 @@ export function GiftsPanel(): ReactNode {
     let cancelled = false;
     void (async (): Promise<void> => {
       try {
-        const [standing, relationships] = await Promise.all([
+        const [standing, relationships, top] = await Promise.all([
           client.economy.getProgression(accountId),
           client.social.listRelationships(),
+          client.economy.getLeaderboard('xp', LEADERBOARD_ROWS),
         ]);
         if (!cancelled) {
           setProgression(standing);
           setFriends(relationships.filter((entry) => entry.kind === KIND_FRIEND));
+          setLeaderboard(top);
         }
       } catch (cause) {
         if (!cancelled) {
@@ -456,13 +504,18 @@ export function GiftsPanel(): ReactNode {
   );
 
   // The picker resolves names for friends and search results through the shared profile cache.
+  // The leaderboard's rows resolve through the same cache, so a ranked account and a friend show
+  // the same name and picture for the same person.
   const pickerIds = useMemo(() => {
     const ids: Id[] = (friends ?? []).map((entry) => entry.userId);
     for (const person of results ?? []) {
       ids.push(person.accountId);
     }
+    for (const rank of leaderboard ?? []) {
+      ids.push(rank.accountId);
+    }
     return ids;
-  }, [friends, results]);
+  }, [friends, results, leaderboard]);
   const profiles = useProfiles(pickerIds);
 
   return (
@@ -510,6 +563,13 @@ export function GiftsPanel(): ReactNode {
             <h2 className="panel-heading">Recent activity</h2>
             <LedgerList entries={ledger} />
           </section>
+
+          {leaderboard !== null ? (
+            <section className="panel-section" aria-label="Leaderboard">
+              <h2 className="panel-heading">Leaderboard</h2>
+              <LeaderboardList ranks={leaderboard} profiles={profiles} />
+            </section>
+          ) : null}
         </>
       )}
 

@@ -1,0 +1,341 @@
+'use client';
+
+/**
+ * The Settings tab: the account's active devices and the password.
+ *
+ * Sessions are server-owned facts — the list, each revocation, and the bulk sign-out all ask the
+ * server and re-read the result, because another device's login or logout is invisible to local
+ * state. The current session is identified by its own id (`grant.sessionId`), so it renders as
+ * "This device" with no revoke control: the server refuses to let a session revoke itself, and a
+ * button that always errors is a lie.
+ *
+ * Changing the password returns a fresh grant (new access and refresh tokens) that the SDK has
+ * already installed on the live client; the panel's one extra duty is to persist that grant, so a
+ * reload after the change resumes the session instead of dropping to the sign-in screen.
+ *
+ * The presentational halves are exported as controlled components over plain data, so the rules
+ * (the current-session badge, the disabled self-revoke, the confirm-match gate on the save
+ * button) are testable without a live client, exactly like the other panels' extracted pieces.
+ */
+
+import { useCallback, useEffect, useState } from 'react';
+import type { ReactNode } from 'react';
+
+import type { AccountSession, Id } from '@migo/sdk';
+
+import { formatRelative } from '@/lib/format.js';
+import { friendlyError } from '@/lib/migo/errors.js';
+import { saveSession } from '@/lib/storage/session-store.js';
+import { useMigo } from '@/lib/migo/use-migo.js';
+
+import { Spinner } from './spinner.js';
+
+/** The presentational row for one active session. */
+export function SessionRow({
+  session,
+  current,
+  busy,
+  onRevoke,
+}: {
+  /** The wire row. */
+  session: AccountSession;
+  /** True when this row is the session doing the viewing. */
+  current: boolean;
+  /** True while this row's revoke is in flight. */
+  busy: boolean;
+  /** Requests this session's revocation (never called for the current session). */
+  onRevoke: (sessionId: Id) => void;
+}): ReactNode {
+  return (
+    <div className="person-row session-row">
+      <div className="person-main">
+        <span className="person-name">
+          {session.device}
+          {current ? <span className="tag tag-current">This device</span> : null}
+        </span>
+        <span className="person-sub">last active {formatRelative(session.last_seen_at)}</span>
+      </div>
+      <div className="person-actions">
+        {current ? null : (
+          <button
+            type="button"
+            className="btn btn-ghost"
+            disabled={busy}
+            onClick={() => onRevoke(session.id)}
+            aria-label={`Revoke session on ${session.device}`}
+          >
+            {busy ? <Spinner /> : 'Revoke'}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** The device list: one row per session, the current one marked, others revocable. */
+export function SessionList({
+  sessions,
+  currentSessionId,
+  busyId,
+  onRevoke,
+}: {
+  sessions: AccountSession[];
+  /** The viewing session's own id, so its row is marked and not revocable. */
+  currentSessionId: Id | null;
+  /** The session whose revoke is in flight, so only its row shows the busy state. */
+  busyId: Id | null;
+  onRevoke: (sessionId: Id) => void;
+}): ReactNode {
+  if (sessions.length === 0) {
+    return <p className="muted">No active sessions.</p>;
+  }
+  return (
+    <div className="session-list">
+      {sessions.map((session) => (
+        <SessionRow
+          key={session.id}
+          session={session}
+          current={session.id === currentSessionId}
+          busy={busyId === session.id}
+          onRevoke={onRevoke}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** The three password fields as a controlled view; the panel owns the draft. */
+export function PasswordFormView({
+  current,
+  next,
+  confirm,
+  busy,
+  error,
+  saved,
+  onChange,
+  onSubmit,
+}: {
+  current: string;
+  next: string;
+  confirm: string;
+  busy: boolean;
+  error: string | null;
+  saved: boolean;
+  onChange: (field: 'current' | 'next' | 'confirm', value: string) => void;
+  onSubmit: () => void;
+}): ReactNode {
+  const canSubmit = current.length > 0 && next.length >= 8 && next === confirm && !busy;
+  return (
+    <form
+      className="password-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (canSubmit) {
+          onSubmit();
+        }
+      }}
+    >
+      <label className="field-label">
+        Current password
+        <input
+          type="password"
+          className="input"
+          autoComplete="current-password"
+          value={current}
+          onChange={(event) => onChange('current', event.target.value)}
+          aria-label="Current password"
+        />
+      </label>
+      <label className="field-label">
+        New password
+        <input
+          type="password"
+          className="input"
+          autoComplete="new-password"
+          value={next}
+          onChange={(event) => onChange('next', event.target.value)}
+          aria-label="New password"
+        />
+      </label>
+      <label className="field-label">
+        Confirm new password
+        <input
+          type="password"
+          className="input"
+          autoComplete="new-password"
+          value={confirm}
+          onChange={(event) => onChange('confirm', event.target.value)}
+          aria-label="Confirm new password"
+        />
+      </label>
+      {error ? <p className="form-error">{error}</p> : null}
+      {saved ? <p className="hint">Password changed.</p> : null}
+      <button type="submit" className="btn btn-primary" disabled={!canSubmit}>
+        {busy ? <Spinner /> : 'Change password'}
+      </button>
+    </form>
+  );
+}
+
+/** The Settings tab panel: loads the session list and owns the password draft. */
+export function SettingsPanel(): ReactNode {
+  const { client } = useMigo();
+
+  const [sessions, setSessions] = useState<AccountSession[] | null>(null);
+  const [revoking, setRevoking] = useState<Id | null>(null);
+  const [signingOut, setSigningOut] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const [current, setCurrent] = useState('');
+  const [next, setNext] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [changing, setChanging] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordSaved, setPasswordSaved] = useState(false);
+
+  const currentSessionId = client?.grant.sessionId ?? null;
+
+  const reload = useCallback(async (): Promise<void> => {
+    if (!client) {
+      return;
+    }
+    try {
+      setSessions(await client.sessions());
+      setError(null);
+    } catch (cause) {
+      setError(friendlyError(cause));
+    }
+  }, [client]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const revoke = useCallback(
+    (sessionId: Id): void => {
+      if (!client || revoking !== null) {
+        return;
+      }
+      setRevoking(sessionId);
+      setNotice(null);
+      client
+        .revokeSession({ session_id: sessionId })
+        .then(() => reload())
+        .catch((cause: unknown) => {
+          setError(friendlyError(cause));
+        })
+        .finally(() => {
+          setRevoking(null);
+        });
+    },
+    [client, revoking, reload],
+  );
+
+  const signOutOthers = useCallback((): void => {
+    if (!client || signingOut) {
+      return;
+    }
+    setSigningOut(true);
+    setNotice(null);
+    client
+      .signOutOthers()
+      .then((result) => {
+        setNotice(`Signed out ${result.revoked} other session${result.revoked === 1 ? '' : 's'}.`);
+        return reload();
+      })
+      .catch((cause: unknown) => {
+        setError(friendlyError(cause));
+      })
+      .finally(() => {
+        setSigningOut(false);
+      });
+  }, [client, signingOut, reload]);
+
+  const changePassword = useCallback((): void => {
+    if (!client || changing) {
+      return;
+    }
+    setChanging(true);
+    setPasswordError(null);
+    setPasswordSaved(false);
+    client
+      .changePassword({ current_password: current, new_password: next })
+      .then(async (grant) => {
+        // The SDK installed the fresh tokens on the live client; persist them so a reload
+        // resumes this session rather than dropping to the sign-in screen.
+        await saveSession({ grant }).catch(() => {});
+        setCurrent('');
+        setNext('');
+        setConfirm('');
+        setPasswordSaved(true);
+      })
+      .catch((cause: unknown) => {
+        setPasswordError(friendlyError(cause));
+      })
+      .finally(() => {
+        setChanging(false);
+      });
+  }, [client, changing, current, next]);
+
+  function onFieldChange(field: 'current' | 'next' | 'confirm', value: string): void {
+    setPasswordSaved(false);
+    if (field === 'current') {
+      setCurrent(value);
+    } else if (field === 'next') {
+      setNext(value);
+    } else {
+      setConfirm(value);
+    }
+  }
+
+  return (
+    <div className="panel">
+      <h1 className="panel-title">Settings</h1>
+
+      {error ? <p className="form-error">{error}</p> : null}
+      {notice ? <p className="hint">{notice}</p> : null}
+
+      <section className="panel-section" aria-label="Devices">
+        <h2 className="panel-heading">Devices</h2>
+        <p className="hint">Every session currently signed in to your account.</p>
+        {sessions === null ? (
+          <div className="center-fill">
+            <Spinner />
+          </div>
+        ) : (
+          <>
+            <SessionList
+              sessions={sessions}
+              currentSessionId={currentSessionId}
+              busyId={revoking}
+              onRevoke={revoke}
+            />
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={signingOut}
+              onClick={signOutOthers}
+            >
+              {signingOut ? <Spinner /> : 'Sign out other devices'}
+            </button>
+          </>
+        )}
+      </section>
+
+      <section className="panel-section" aria-label="Change password">
+        <h2 className="panel-heading">Change password</h2>
+        <PasswordFormView
+          current={current}
+          next={next}
+          confirm={confirm}
+          busy={changing}
+          error={passwordError}
+          saved={passwordSaved}
+          onChange={onFieldChange}
+          onSubmit={changePassword}
+        />
+      </section>
+    </div>
+  );
+}

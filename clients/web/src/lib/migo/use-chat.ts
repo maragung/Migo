@@ -23,6 +23,7 @@ import type { Id, IncomingMessage, TextContent, TypingEvent } from '@migo/sdk';
 
 import { useMigo } from './use-migo.js';
 import { uploadImageAttachment } from './media.js';
+import { sealReaction, sealTextEdit } from './seal.js';
 import { uploadVoiceNote } from './voice.js';
 import type { VoiceRecording } from './voice.js';
 
@@ -67,6 +68,16 @@ export interface ChatThread {
   /** True while the deletion request for a message is still in flight. */
   deleting: boolean;
   deleteMessage: (messageId: Id) => void;
+  /**
+   * Replaces one of our own text messages' content: re-seals the replacement text exactly as a
+   * send would and hands the envelope to `editMessage`, which keeps the message's id and seq.
+   */
+  editMessage: (messageId: Id, text: string) => void;
+  /**
+   * Sets one of the quick reactions on a message: the emoji is sealed before it rides the wire,
+   * so the server learns only that *some* reaction was set, never which.
+   */
+  react: (messageId: Id, emoji: string) => void;
   /**
    * Whether the thread holds less than its full history: the initial replay is page-bounded, so a
    * long conversation can be cut short. `loadEarlier` is what reaches the rest.
@@ -416,6 +427,57 @@ export function useChat(conversationId: Id): ChatThread {
     [client, conversationId, deleting],
   );
 
+  /**
+   * Edits one of our own text messages in place. The replacement text is sealed through the same
+   * group-crypto layer a send uses (see lib/migo/seal.ts) and the server stores the new envelope
+   * under the existing id; on success the local copy is updated to the new text and stamped
+   * edited, because the edit echo comes back through the stream like any other redelivery.
+   */
+  const editMessage = useCallback(
+    (messageId: Id, text: string): void => {
+      const trimmed = text.trim();
+      if (!client || trimmed.length === 0) {
+        return;
+      }
+      const envelope = sealTextEdit(client, conversationId, trimmed);
+      client.messaging
+        .editMessage(conversationId, messageId, envelope)
+        .then(() => {
+          setMessages((prev) =>
+            prev.map((message) =>
+              message.messageId === messageId && message.content.type === ContentType.Text
+                ? {
+                    ...message,
+                    content: { type: ContentType.Text, text: trimmed },
+                    editedAt: Date.now(),
+                  }
+                : message,
+            ),
+          );
+        })
+        .catch(() => {
+          // A refused edit leaves the original message exactly as it was.
+        });
+    },
+    [client, conversationId],
+  );
+
+  /**
+   * Reacts to a message. The emoji is sealed before it is sent, and the send is fire-and-forget
+   * in the UI: the reaction surfaces through the thread's stream when the server broadcasts it,
+   * and a failure costs nothing to leave unshown — the control stays for a retry.
+   */
+  const react = useCallback(
+    (messageId: Id, emoji: string): void => {
+      if (!client) {
+        return;
+      }
+      const envelope = sealReaction(client, conversationId, messageId, emoji);
+      client.messaging.sendReaction(messageId, conversationId, envelope).catch(() => {});
+    },
+    [client, conversationId],
+  );
+
   const setTyping = useCallback(
     (isTyping: boolean): void => {
       if (!client) {
@@ -442,6 +504,8 @@ export function useChat(conversationId: Id): ChatThread {
     setTyping,
     deleting,
     deleteMessage,
+    editMessage,
+    react,
     hasEarlier,
     loadingEarlier,
     loadEarlier,

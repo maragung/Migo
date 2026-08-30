@@ -171,6 +171,117 @@ pub struct Account {
     pub safety_number: String,
 }
 
+/// One edge in the signed-in account's social graph, as the interface draws it.
+///
+/// The worker folds the server's relationship listing into these; the wire's `u32` kind has
+/// already been through [`RelationshipKind::from_wire`], so a kind this build has no name for
+/// arrives as [`RelationshipKind::Unknown`] rather than as a number the UI has to defend against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relationship {
+    pub user_id: Id,
+    pub kind: RelationshipKind,
+}
+
+/// The kinds of edge a social graph can hold.
+///
+/// A client-owned mirror of the wire enum rather than the wire enum itself, so that adding a
+/// variant server-side is a `Unknown` here to be filed or ignored — not a decode failure that
+/// would take the whole friends list down with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RelationshipKind {
+    Unknown,
+    Friend,
+    PendingOutgoing,
+    PendingIncoming,
+    Follow,
+    Block,
+    Favorite,
+}
+
+impl RelationshipKind {
+    /// Maps the wire's `u32` onto a kind. Unknown values collapse to [`Self::Unknown`], which the
+    /// friends panel files under "everything else" instead of rendering a number.
+    #[must_use]
+    pub const fn from_wire(kind: u32) -> Self {
+        match kind {
+            1 => Self::Friend,
+            2 => Self::PendingOutgoing,
+            3 => Self::PendingIncoming,
+            4 => Self::Follow,
+            5 => Self::Block,
+            6 => Self::Favorite,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Where an account stands, as far as this device has been told.
+///
+/// Seeded from profile fetches and corrected by presence events; `Unknown` means "never heard",
+/// which the interface draws as absence of a dot rather than as "offline" — claiming someone is
+/// offline when the truth is unobserved is exactly the mistake a presence UI must not make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Presence {
+    Unknown,
+    Offline,
+    Online,
+    Away,
+    Busy,
+}
+
+impl Presence {
+    /// Maps the wire's `u32` presence state onto a presence.
+    #[must_use]
+    pub const fn from_wire(state: u32) -> Self {
+        match state {
+            1 => Self::Offline,
+            2 => Self::Online,
+            3 => Self::Away,
+            4 => Self::Busy,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// The word drawn beside the dot. Empty for `Unknown`, so an unobserved account shows
+    /// nothing rather than a lie.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "",
+            Self::Offline => "Offline",
+            Self::Online => "Online",
+            Self::Away => "Away",
+            Self::Busy => "Busy",
+        }
+    }
+
+    /// Whether this state earns the green dot. Only `Online` does: away and busy are real
+    /// presences that are not "available now".
+    #[must_use]
+    pub const fn is_online(self) -> bool {
+        matches!(self, Self::Online)
+    }
+}
+
+/// One row of the device/session list on the settings screen.
+///
+/// Reduced by the worker from the REST answer, so the panel never sees JSON field names or
+/// missing-field shapes — only present facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRow {
+    pub session_id: Id,
+    /// What the device called itself when it signed in, e.g. "Migo Desktop (Linux)". Falls back
+    /// to a short id when the server's row carries nothing readable.
+    pub device: String,
+    /// When the session opened, if the server said.
+    pub created_at: Option<Timestamp>,
+    /// When the session was last seen active, if the server said.
+    pub last_active_at: Option<Timestamp>,
+    /// Whether this row is the session this window is running on. Revoking it is sign-out by
+    /// another name, so the panel refuses the button rather than offering it.
+    pub current: bool,
+}
+
 /// A transient message shown in the corner: a send failure, a rate limit, a bad password.
 #[derive(Debug, Clone)]
 pub struct Toast {
@@ -259,4 +370,80 @@ pub fn clock(ts: Timestamp) -> String {
     let seconds = ts.as_unix_ms().div_euclid(1000);
     let day_seconds = seconds.rem_euclid(86_400);
     format!("{:02}:{:02}", day_seconds / 3600, (day_seconds % 3600) / 60)
+}
+
+/// A `YYYY-MM-DD` date for a timestamp.
+///
+/// Implemented directly because the alternative is a date-time crate for one function. The
+/// algorithm is the standard days-from-civil inverse; it is exact for every date this program
+/// will ever show. Shared by the thread's day separators and the settings screen's session rows,
+/// which is why it lives in the model rather than in either screen.
+#[must_use]
+pub fn date(ts: Timestamp) -> String {
+    let days = ts.as_unix_ms().div_euclid(86_400_000);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let mp = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relationship_kind_maps_every_wire_value() {
+        assert_eq!(RelationshipKind::from_wire(1), RelationshipKind::Friend);
+        assert_eq!(
+            RelationshipKind::from_wire(2),
+            RelationshipKind::PendingOutgoing
+        );
+        assert_eq!(
+            RelationshipKind::from_wire(3),
+            RelationshipKind::PendingIncoming
+        );
+        assert_eq!(RelationshipKind::from_wire(4), RelationshipKind::Follow);
+        assert_eq!(RelationshipKind::from_wire(5), RelationshipKind::Block);
+        assert_eq!(RelationshipKind::from_wire(6), RelationshipKind::Favorite);
+        // A kind a newer server knows about collapses, never crashes.
+        assert_eq!(RelationshipKind::from_wire(99), RelationshipKind::Unknown);
+        assert_eq!(RelationshipKind::from_wire(0), RelationshipKind::Unknown);
+    }
+
+    #[test]
+    fn presence_maps_wire_values_and_labels_itself() {
+        assert_eq!(Presence::from_wire(2), Presence::Online);
+        assert_eq!(Presence::from_wire(3), Presence::Away);
+        assert_eq!(Presence::from_wire(4), Presence::Busy);
+        assert_eq!(Presence::from_wire(1), Presence::Offline);
+        assert_eq!(Presence::from_wire(0), Presence::Unknown);
+        assert_eq!(Presence::from_wire(77), Presence::Unknown);
+
+        assert_eq!(Presence::Online.label(), "Online");
+        assert_eq!(Presence::Offline.label(), "Offline");
+        // Unobserved is not "offline": no label, no dot.
+        assert_eq!(Presence::Unknown.label(), "");
+        assert!(Presence::Online.is_online());
+        assert!(!Presence::Away.is_online());
+        assert!(!Presence::Unknown.is_online());
+    }
+
+    #[test]
+    fn date_renders_known_days() {
+        // 2026-08-30 00:00:00 UTC = 1788048000 s.
+        let ts = Timestamp::from_unix_ms(1_788_048_000_000);
+        assert_eq!(date(ts), "2026-08-30");
+        // The Unix epoch itself.
+        assert_eq!(date(Timestamp::from_unix_ms(0)), "1970-01-01");
+        // A negative timestamp (pre-1970) must still come out a real date, not a panic.
+        assert_eq!(date(Timestamp::from_unix_ms(-86_400_000)), "1969-12-31");
+    }
 }

@@ -17,6 +17,14 @@
 //! Dark and light, following the desktop's own preference on first run. There is no per-widget
 //! theme override and no accent picker: a messenger is read for hours at a time, and the useful
 //! knob is the one the operating system already provides.
+//!
+//! # The dark theme is the mig33 theme
+//!
+//! Dark is not a neutral grey scale but the mig33 palette: near-black surfaces with a faint
+//! violet cast, one neon cyan accent, neon green for "online" and success, and a red kept well
+//! away from the accent so a failure can never be mistaken for a highlight. The light theme
+//! stays the quiet one it always was, because a neon palette on white is unreadable, not
+//! striking.
 
 use egui::{Color32, CornerRadius, FontFamily, FontId, Margin, Stroke, TextStyle, Vec2};
 
@@ -99,25 +107,32 @@ pub struct Palette {
     pub verified: Color32,
 }
 
-/// Dark, and the default. Neutral greys rather than blue-tinted ones so the accent stays the only
-/// saturated thing on screen.
+/// The mig33 neon dark theme, and the default.
+///
+/// The surfaces sit almost at black with a violet cast (`#0a0a12` window, `#111118` panel) so the
+/// cyan accent is the brightest saturated thing on screen by a wide margin — the neon effect the
+/// palette is named for comes from that contrast, not from any glow. Green is reserved for
+/// presence and success, red for failure; neither ever marks a selection or a primary action,
+/// because a user must not have to learn which "bright colour" means what.
 const DARK: Palette = Palette {
-    surface: Color32::from_rgb(0x0e, 0x0f, 0x12),
-    surface_raised: Color32::from_rgb(0x16, 0x18, 0x1d),
-    surface_overlay: Color32::from_rgb(0x1e, 0x21, 0x27),
-    surface_hover: Color32::from_rgb(0x25, 0x28, 0x30),
-    surface_selected: Color32::from_rgb(0x2a, 0x2f, 0x3a),
-    border: Color32::from_rgb(0x27, 0x2a, 0x32),
-    border_strong: Color32::from_rgb(0x3c, 0x41, 0x4d),
-    text: Color32::from_rgb(0xe8, 0xea, 0xed),
-    text_muted: Color32::from_rgb(0x8d, 0x93, 0xa1),
-    text_on_accent: Color32::from_rgb(0x08, 0x0a, 0x0c),
-    accent: Color32::from_rgb(0x5c, 0xd0, 0xa8),
-    accent_hover: Color32::from_rgb(0x72, 0xdd, 0xb8),
-    accent_active: Color32::from_rgb(0x46, 0xb8, 0x91),
-    positive: Color32::from_rgb(0x5c, 0xd0, 0xa8),
+    surface: Color32::from_rgb(0x0a, 0x0a, 0x12),
+    surface_raised: Color32::from_rgb(0x11, 0x11, 0x18),
+    surface_overlay: Color32::from_rgb(0x17, 0x17, 0x21),
+    surface_hover: Color32::from_rgb(0x1c, 0x1c, 0x29),
+    surface_selected: Color32::from_rgb(0x0f, 0x2b, 0x36),
+    border: Color32::from_rgb(0x22, 0x22, 0x30),
+    border_strong: Color32::from_rgb(0x38, 0x38, 0x50),
+    text: Color32::from_rgb(0xe8, 0xe8, 0xf0),
+    text_muted: Color32::from_rgb(0x88, 0x88, 0xa0),
+    // Near-black with a cyan cast rather than pure black: on `#00d4ff` the difference between
+    // `#000000` and this is what keeps the label from looking like a hole in the button.
+    text_on_accent: Color32::from_rgb(0x05, 0x14, 0x1c),
+    accent: Color32::from_rgb(0x00, 0xd4, 0xff),
+    accent_hover: Color32::from_rgb(0x33, 0xdd, 0xff),
+    accent_active: Color32::from_rgb(0x00, 0xaa, 0xcc),
+    positive: Color32::from_rgb(0x00, 0xff, 0x88),
     warning: Color32::from_rgb(0xe3, 0xb3, 0x41),
-    danger: Color32::from_rgb(0xe8, 0x6a, 0x6a),
+    danger: Color32::from_rgb(0xff, 0x44, 0x66),
     verified: Color32::from_rgb(0x77, 0xb6, 0xf0),
 };
 
@@ -346,4 +361,46 @@ pub fn install(ctx: &egui::Context, theme: Theme) {
     // than a flicker.
     style.animation_time = 0.10;
     ctx.set_global_style(style);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The mig33 palette as specified, spelled out once so a regression is a diff against the
+    /// spec rather than against itself. Only the roles the spec names are asserted; the derived
+    /// surfaces (overlay, hover, selected, borders) are free to move as the theme is tuned, and
+    /// pinning them here would turn every polish into a test failure.
+    #[test]
+    fn dark_is_the_mig33_palette() {
+        let p = palette(Theme::Dark);
+        assert_eq!(p.surface, Color32::from_rgb(0x0a, 0x0a, 0x12));
+        assert_eq!(p.surface_raised, Color32::from_rgb(0x11, 0x11, 0x18));
+        assert_eq!(p.accent, Color32::from_rgb(0x00, 0xd4, 0xff));
+        assert_eq!(p.positive, Color32::from_rgb(0x00, 0xff, 0x88));
+        assert_eq!(p.danger, Color32::from_rgb(0xff, 0x44, 0x66));
+        assert_eq!(p.text, Color32::from_rgb(0xe8, 0xe8, 0xf0));
+        assert_eq!(p.text_muted, Color32::from_rgb(0x88, 0x88, 0xa0));
+    }
+
+    /// The light theme is untouched by the mig33 rework: its job is to stay the quiet one.
+    #[test]
+    fn light_keeps_its_own_palette() {
+        let p = palette(Theme::Light);
+        assert_eq!(p.surface, Color32::from_rgb(0xf7, 0xf8, 0xfa));
+        assert_eq!(p.surface_raised, Color32::from_rgb(0xff, 0xff, 0xff));
+        assert_eq!(p.accent, Color32::from_rgb(0x0f, 0x9d, 0x74));
+        assert_eq!(p.text, Color32::from_rgb(0x14, 0x17, 0x1c));
+    }
+
+    /// The toggle must remain an involution: flipping twice lands where flipping once did, and
+    /// the label always names the theme the button would switch *to*.
+    #[test]
+    fn flipping_is_an_involution() {
+        assert_eq!(Theme::Dark.flipped(), Theme::Light);
+        assert_eq!(Theme::Light.flipped(), Theme::Dark);
+        assert_eq!(Theme::Dark.flipped().flipped(), Theme::Dark);
+        assert_eq!(Theme::Light.label(), "Light");
+        assert_eq!(Theme::Dark.label(), "Dark");
+    }
 }

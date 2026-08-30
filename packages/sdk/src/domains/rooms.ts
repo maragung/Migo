@@ -26,11 +26,15 @@ import {
   encodeRoomLeaveRequest,
   encodeRoomListRequest,
   decodeRoomListResponse,
+  encodeRoomCreate,
+  encodeRosterReq,
+  decodeRosterResponse,
   decodeRoomMemberEvent,
   decodeRoomStateEvent,
   decodeAcknowledged,
 } from '@migo/protocol';
 import type {
+  RoomCreate,
   RoomJoinRequest,
   RoomJoinResponse,
   RoomLeaveRequest,
@@ -38,7 +42,11 @@ import type {
   RoomListResponse,
   RoomMemberEvent,
   RoomStateEvent,
+  RosterEntry,
+  RosterReq,
+  RosterResponse,
   Acknowledged,
+  RoomKind,
 } from '@migo/protocol';
 
 import { ListenerSet } from './listeners.js';
@@ -142,6 +150,28 @@ export class RoomsDomain {
   }
 
   /**
+   * Creates a room and enters it, resolving with the same join handle {@link join} returns.
+   *
+   * The caller becomes the room's Owner ({@link RoomRole.Owner}): the one role that can appoint
+   * managers and the one a room cannot lose. `slug` is the room's permanent address and must be
+   * unique server-side; `kind` picks the governance line — {@link RoomKind.Public} for a
+   * community room, {@link RoomKind.Managed} for one under server moderation. The reply is a
+   * join response because creation is entry: the creator is the first member.
+   */
+  async create(
+    slug: string,
+    name: string,
+    kind: RoomKind,
+    topic?: string,
+  ): Promise<RoomJoinResponse> {
+    const request: RoomCreate = { slug, name, kind };
+    if (topic !== undefined) {
+      request.topic = topic;
+    }
+    return this.#rpc.call(OP.ROOM_CREATE, encodeRoomCreate, decodeRoomJoinResponse, request);
+  }
+
+  /**
    * Joins a room, optionally with an invite code for a non-public one.
    *
    * Resolves with the room summary plus the conversation handle to read and write it through the
@@ -166,5 +196,30 @@ export class RoomsDomain {
   async leave(roomId: Id): Promise<Acknowledged> {
     const request: RoomLeaveRequest = { roomId };
     return this.#rpc.call(OP.ROOM_LEAVE, encodeRoomLeaveRequest, decodeAcknowledged, request);
+  }
+
+  /**
+   * Reads a room's roster, highest role first.
+   *
+   * Each {@link RosterEntry} carries the account, its {@link RoomRole} as a number, and when it
+   * joined. `limit` bounds one page; `after` is the cursor — the last `accountId` of the previous
+   * page — so a caller pages until a short page arrives. Unlike the live {@link onMember} stream,
+   * this is a snapshot for rendering a member list, not a mirror to maintain.
+   */
+  async getRoster(roomId: Id, limit?: number, after?: Id): Promise<RosterEntry[]> {
+    const request: RosterReq = { roomId };
+    if (limit !== undefined) {
+      request.limit = limit;
+    }
+    if (after !== undefined) {
+      request.after = after;
+    }
+    const response: RosterResponse = await this.#rpc.call(
+      OP.ROOM_ROSTER,
+      encodeRosterReq,
+      decodeRosterResponse,
+      request,
+    );
+    return response.members;
   }
 }

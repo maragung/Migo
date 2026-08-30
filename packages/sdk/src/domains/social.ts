@@ -162,6 +162,27 @@ export class SocialDomain {
   }
 
   /**
+   * Reads the caller's whole relationship graph in one unfiltered list: friends, pending
+   * requests in both directions, follows and followers, blocks, and favourites.
+   *
+   * The wire is the same {@link RELATIONSHIP_LIST} call {@link listRelationships} makes, but the
+   * client bounds nothing: `limit` rides as zero, which the server reads as "apply your own page",
+   * so every kind the graph holds comes back mixed together and the *caller* filters by `kind`.
+   * This is the form for a caller that wants the blocks and favourites alongside the friends
+   * without naming a page size, where {@link listRelationships} is the form for a bounded read.
+   */
+  async listAllRelationships(): Promise<RelationshipEntry[]> {
+    const request: RelationshipListReq = { limit: 0 };
+    const response = await this.#rpc.call(
+      OP.RELATIONSHIP_LIST,
+      encodeRelationshipListReq,
+      decodeRelationshipList,
+      request,
+    );
+    return response.entries;
+  }
+
+  /**
    * Friend suggestions: accounts the graph considers relevant, strongest first.
    *
    * Each result carries a mutual-friend count, which is the only signal the server is willing to

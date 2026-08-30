@@ -38,6 +38,8 @@ import {
   decodeProgressionWire,
   encodeBadgesReq,
   decodeBadgesResponse,
+  encodeLeaderboardReq,
+  decodeLeaderboardResponse,
 } from '@migo/protocol';
 import type {
   BadgeWire,
@@ -48,8 +50,11 @@ import type {
   GiftSendResult,
   LedgerEntryWire,
   LedgerReq,
+  LeaderboardReq,
+  LeaderboardResponse,
   ProgressionReq,
   ProgressionWire,
+  RankWire,
   WalletReq,
   WalletView,
 } from '@migo/protocol';
@@ -159,5 +164,26 @@ export class EconomyDomain {
       request,
     );
     return response.badges;
+  }
+
+  /**
+   * Reads a leaderboard page, strongest first.
+   *
+   * `board` names which standing to read (the closed server-owned vocabulary, e.g. `"xp"` or
+   * `"reputation"`); each {@link RankWire} line carries the position, account, XP, and level.
+   * `limit` bounds the page and is clamped server-side — omit it for the server's default page.
+   */
+  async getLeaderboard(board: string, limit?: number): Promise<RankWire[]> {
+    const request: LeaderboardReq = { board };
+    if (limit !== undefined) {
+      request.limit = limit;
+    }
+    const response: LeaderboardResponse = await this.#rpc.call(
+      OP.LEADERBOARD,
+      encodeLeaderboardReq,
+      decodeLeaderboardResponse,
+      request,
+    );
+    return response.ranks;
   }
 }

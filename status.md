@@ -722,3 +722,48 @@ dan P1 diperbaiki:
 
 Verifikasi: 83 suite server, 132 test SDK, 187 test web, 14 gate, doc-link bersih,
 e2e dua-akun lulus.
+
+## 22. mig33 alen v2 theme + integrasi penuh + port 19992 (v0.6.0)
+
+**Tema mig33 neon**: seluruh globals.css di-retheme ke estetika mig33 alen v2 — latar
+`#0a0a12` (hitam pekat), aksen neon cyan `#00d4ff` / hijau `#00ff88`, radius 6px (kompak),
+font 14px, glow effects pada hover/focus, backdrop-filter blur pada tab rail dan modal,
+scrollbar cyan-tipis, bubble outgoing dengan gradient cyan, tab rail semi-transparan.
+PWA manifest theme_color disinkron.
+
+**SDK gap methods** (6 baru + 9 test): `rooms.create`, `rooms.getRoster`,
+`economy.getLeaderboard`, `messaging.editMessage`, `messaging.sendReaction`,
+`social.listAllRelationships` (semua kind termasuk blocks). Catatan jujur: `unblockUser`
+tidak ada karena wire `FriendTarget` tak punya field unblock dan `BLOCK_SET` handler
+server hanya memanggil `Graph::block` — tak ada jalur wire untuk unblock.
+
+**Web client integrasi penuh** (7 komponen baru, 12 dimodifikasi, 33 test baru):
+
+- **SettingsPanel**: daftar device/session dengan revoke per-session + sign out others,
+  form ganti password yang mempertahankan grant.
+- **UserProfileModal**: klik avatar/nama di chat header atau friends → popup dengan
+  avatar, bio, level+XP bar, badges, tombol Block/Send Message.
+- **RoomInfoPanel**: roster room dengan badge role (Owner/Admin/Member), Leave Room.
+- **PresencePicker**: dropdown Online/Away/Busy/Invisible + custom status (100 char)
+  di sidebar footer.
+- **GiftPicker**: tombol 🎁 di composer → katalog inline 6 gift teratas dengan
+  penerima auto-untuk Direct.
+- **New-conversation search**: 300ms-debounced `social.search` menggantikan paste-ID,
+  plus quick-pick dari friends.
+- **Message edit + reaction bar**: hover → Edit (inline editor dengan re-seal),
+  👍❤️😂 reaction bar, mark `edited`.
+- **Leaderboard** di gifts panel, **badges** di profile panel, **coin balance** di
+  sidebar header, **blocked section** di friends panel.
+- Tab rail kini 7 tab: Chats, Friends, Notifications, Discover, Gifts, Profile, Settings.
+
+**Desktop client** (mig33 + fitur): tema dark neon cyan di theme.rs (13 test),
+navigasi rail dengan 3 tab (Chat/Friends/Settings), friends panel dengan search +
+accept/decline + presence, settings panel dengan device list + revoke + theme toggle,
+chat dengan avatar peer + label enkripsi + unread badge. 31 test desktop total.
+
+**Deployment port 19992**: semua referensi 19991 → 19992 (package.json, serve.mjs,
+Dockerfile.web, docker-compose, infra-audit). Web client berjalan di `0.0.0.0:19992`,
+migod di `0.0.0.0:8080`, keduanya terverifikasi via IP publik 152.53.102.150.
+
+Verifikasi: 83 suite server, 141 test SDK, 220 test web, 31 test desktop,
+14 gate CI, e2e dua-akun lulus, tsc --noEmit bersih.

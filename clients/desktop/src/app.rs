@@ -23,17 +23,25 @@ use crate::model::{Account, Connection, Toast, ToastKind};
 use crate::net::{Command, Event, Net};
 use crate::settings::{self, Settings};
 use crate::theme::{self, palette, space, Theme};
-use crate::ui::{auth::AuthState, chat::ChatState, widgets, Context, Screen};
+use crate::ui::auth::AuthState;
+use crate::ui::chat::ChatState;
+use crate::ui::friends::FriendsState;
+use crate::ui::settings::SettingsState;
+use crate::ui::{widgets, Context, Place, Screen};
 
 /// The whole application state.
 pub struct App {
     theme: Theme,
     net: Net,
     screen: Screen,
+    /// Which signed-in pane the navigation rail has selected.
+    place: Place,
     connection: Connection,
     account: Option<Account>,
     auth: AuthState,
     chat: ChatState,
+    friends: FriendsState,
+    settings_panel: SettingsState,
     toasts: Vec<Toast>,
     /// Reused each frame so a screen's command buffer costs no allocation per frame.
     commands: Vec<Command>,
@@ -71,10 +79,13 @@ impl App {
             theme,
             net,
             screen: Screen::Opening,
+            place: Place::Chat,
             connection: Connection::Offline,
             account: None,
             auth,
             chat: ChatState::default(),
+            friends: FriendsState::default(),
+            settings_panel: SettingsState::default(),
             toasts: Vec::new(),
             commands: Vec::new(),
             settings_path,
@@ -126,6 +137,12 @@ impl App {
                     // succeeded; the next sign-in starts from a fresh fetch, not a stale image.
                     self.auth.captcha.reset();
                     self.account = Some(account);
+                    // A session starts at its conversations, and with none of the previous
+                    // session's graph or device list: those describe an account, and this may be
+                    // a different one signing in over the same window.
+                    self.place = Place::Chat;
+                    self.friends = FriendsState::default();
+                    self.settings_panel = SettingsState::default();
                     self.screen = Screen::Chat;
                 }
                 Event::SignedOut => {
@@ -137,6 +154,12 @@ impl App {
                     // sign-out would mean plaintext outliving the keys that produced it, which is the
                     // one thing a signed-out client must not do.
                     self.chat = ChatState::default();
+                    // The social graph is not secret in the way messages are, but it is an account's
+                    // business: names, requests, who is online. It goes with the session for the same
+                    // reason the threads do, and the pane starts its next session NotAsked.
+                    self.friends = FriendsState::default();
+                    self.settings_panel = SettingsState::default();
+                    self.place = Place::Chat;
                     self.screen = Screen::Unlock;
                 }
                 Event::CaptchaChallenge(challenge) => self.auth.captcha.hold(challenge),
@@ -195,7 +218,43 @@ impl App {
                         who.push(user_id);
                     }
                 }
-                Event::Names(names) => merge_names(&mut self.chat.names, names),
+                Event::Names(names) => {
+                    merge_names(&mut self.chat.names, names.clone());
+                    self.friends.merge_names(names);
+                }
+                Event::Relationships(entries) => {
+                    self.friends.set_relationships(entries);
+                }
+                Event::FriendChanged { user_id, accepted } => {
+                    // The event says the graph moved, not how, so the response is a re-read rather
+                    // than a patch: the refreshed list is the truth and the toast is the telling.
+                    // The name may not be resolved yet — the profile fetch that names a new
+                    // requester rides the same refresh this queues — so the id's tail stands in
+                    // for one toast's worth of time. A state this build cannot name is toasted
+                    // not at all: "something happened" is already what the refresh says.
+                    if let Some(accepted) = accepted {
+                        let who = self
+                            .friends
+                            .names
+                            .get(&user_id)
+                            .cloned()
+                            .unwrap_or_else(|| crate::model::short_id(user_id));
+                        let text = if accepted {
+                            format!("{who} is now a friend")
+                        } else {
+                            format!("New friend request from {who}")
+                        };
+                        self.toasts.push(Toast::info(text));
+                    }
+                    self.commands.push(Command::Friends);
+                }
+                Event::PresenceChanged { user_id, state } => {
+                    self.friends.set_presence(user_id, state);
+                }
+                Event::Sessions(result) => {
+                    self.settings_panel.sessions =
+                        crate::ui::settings::SessionsView::from_result(result);
+                }
                 Event::Toast { text, kind } => self.toasts.push(match kind {
                     ToastKind::Info => Toast::info(text),
                     ToastKind::Success => Toast::success(text),
@@ -256,6 +315,54 @@ impl App {
             });
         });
     }
+
+    /// The navigation rail: the signed-in places, stacked.
+    ///
+    /// Drawn here rather than inside any pane because it belongs to none of them — it is the only
+    /// widget that outlives a place switch, and letting a pane draw its own switcher is how the
+    /// "which pane am I in" state ends up maintained twice.
+    fn nav_rail(&mut self, ui: &mut egui::Ui) {
+        let theme = self.theme;
+        // Summed before the buttons, because the chat pane the badge describes is not the pane
+        // being drawn when the rail is clicked from elsewhere.
+        let unread: u32 = self.chat.conversations.iter().map(|c| c.unread).sum();
+        let mut place = self.place;
+        let mut refresh_friends = false;
+        ui.add_space(space::SM);
+        if widgets::rail_button(ui, theme, "\u{1F4AC}", "Chat", place == Place::Chat, unread) {
+            place = Place::Chat;
+        }
+        ui.add_space(space::SM);
+        if widgets::rail_button(
+            ui,
+            theme,
+            "\u{1F465}",
+            "Friends",
+            place == Place::Friends,
+            0,
+        ) {
+            place = Place::Friends;
+            // The graph is the server's, and the other devices of this account act on it too.
+            // Opening the tab re-reads it — one cheap request per click, rather than a pane
+            // faithfully showing a friendship that ended while nobody was looking.
+            refresh_friends = true;
+        }
+        ui.add_space(space::SM);
+        if widgets::rail_button(
+            ui,
+            theme,
+            "\u{2699}",
+            "Settings",
+            place == Place::Settings,
+            0,
+        ) {
+            place = Place::Settings;
+        }
+        self.place = place;
+        if refresh_friends {
+            self.commands.push(Command::Friends);
+        }
+    }
 }
 
 impl eframe::App for App {
@@ -293,20 +400,75 @@ impl eframe::App for App {
         // Screens are handed a context and a command buffer; nothing below this point can reach the
         // worker directly.
         let mut navigate: Option<Screen> = None;
+        let mut theme_choice: Option<Theme> = None;
         let screen = self.screen;
+        let signed_in = screen == Screen::Chat && self.account.is_some();
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(colors.surface))
             .show(ui, |ui| {
-                let mut context = Context {
-                    theme: self.theme,
-                    connection: &self.connection,
-                    account: self.account.as_ref(),
-                    commands: &mut self.commands,
-                    navigate: &mut navigate,
-                };
-                match screen {
-                    Screen::Chat => crate::ui::chat::show(ui, &mut context, &mut self.chat),
-                    other => crate::ui::auth::show(ui, &mut context, &mut self.auth, other),
+                if signed_in {
+                    // The rail is a fixed strip on the left, the pane fills the rest. Fixed rather
+                    // than proportional for the same reason the chat sidebar is: a switcher that
+                    // grows with the window only steals room from the thing being switched to.
+                    ui.horizontal_top(|ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(56.0, ui.available_height()),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| self.nav_rail(ui),
+                        );
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(1.0, ui.available_height()),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter()
+                            .rect_filled(rect, egui::CornerRadius::ZERO, colors.border);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), ui.available_height()),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                let mut context = Context {
+                                    theme: self.theme,
+                                    connection: &self.connection,
+                                    account: self.account.as_ref(),
+                                    server: &self.auth.server,
+                                    commands: &mut self.commands,
+                                    navigate: &mut navigate,
+                                    theme_choice: &mut theme_choice,
+                                };
+                                match self.place {
+                                    Place::Chat => {
+                                        crate::ui::chat::show(ui, &mut context, &mut self.chat)
+                                    }
+                                    Place::Friends => crate::ui::friends::show(
+                                        ui,
+                                        &mut context,
+                                        &mut self.friends,
+                                    ),
+                                    Place::Settings => crate::ui::settings::show(
+                                        ui,
+                                        &mut context,
+                                        &mut self.settings_panel,
+                                    ),
+                                }
+                            },
+                        );
+                    });
+                } else {
+                    // The server is cloned for the context because the auth screen holds the
+                    // endpoint mutably (its form edits it) and the context must not — one small
+                    // struct per frame on the one screen that has a form, rather than reworking
+                    // the context the other three panes share.
+                    let server = self.auth.server.clone();
+                    let mut context = Context {
+                        theme: self.theme,
+                        connection: &self.connection,
+                        account: self.account.as_ref(),
+                        server: &server,
+                        commands: &mut self.commands,
+                        navigate: &mut navigate,
+                        theme_choice: &mut theme_choice,
+                    };
+                    crate::ui::auth::show(ui, &mut context, &mut self.auth, screen);
                 }
             });
 
@@ -314,6 +476,14 @@ impl eframe::App for App {
 
         if let Some(target) = navigate {
             self.screen = target;
+        }
+
+        // A screen asked for the other theme. Applied here rather than at the click so the whole
+        // frame is drawn in one palette — flipping mid-frame would show a button drawn in the old
+        // colours sitting on a panel in the new ones.
+        if let Some(theme) = theme_choice {
+            self.theme = theme;
+            theme::install(&ctx, theme);
         }
 
         // The server disclosure commits a new value to `auth.server` only on a successful
