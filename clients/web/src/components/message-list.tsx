@@ -12,6 +12,7 @@ import type { ThreadMessage } from '@/lib/migo/use-chat.js';
 
 import { Avatar } from './avatar.js';
 import { Spinner } from './spinner.js';
+import { VoiceNoteBubble } from './voice-player.js';
 
 /** How much of a quoted message the reply snippet above a bubble shows. */
 const QUOTE_CHARS = 60;
@@ -110,8 +111,10 @@ function MediaAttachment({
 /**
  * Renders the visible text for a message, or a labelled placeholder for non-text content.
  *
- * A media reference with a resolver becomes the embedded image ({@link MediaAttachment}); without
- * one it stays the text placeholder, which is also its loading and failed state.
+ * A media reference with a resolver becomes the embedded image ({@link MediaAttachment}); a voice
+ * note becomes the playback bar ({@link VoiceNoteBubble}). Without a resolver both stay their text
+ * placeholders, which is also their loading and failed state — that is how a context with no client
+ * renders, and the safe fallback if resolving ever stops working.
  */
 function renderBody(
   content: MessageContent,
@@ -128,10 +131,15 @@ function renderBody(
             placeholder: false,
           };
     case ContentType.VoiceNoteRef:
-      return {
-        node: `🎤 Voice note (${Math.round(content.durationMs / 1000)}s)`,
-        placeholder: true,
-      };
+      return mediaUrlFor === undefined
+        ? {
+            node: `🎤 Voice note (${Math.round(content.durationMs / 1000)}s)`,
+            placeholder: true,
+          }
+        : {
+            node: <VoiceNoteBubble content={content} resolveUrl={mediaUrlFor} />,
+            placeholder: false,
+          };
     case ContentType.Reaction:
       return { node: `Reacted ${content.emoji}`, placeholder: true };
     default:
@@ -191,6 +199,14 @@ export interface MessageListProps {
    * placeholder, which is how a context with no client renders.
    */
   mediaUrlFor?: MediaUrlResolver;
+  /**
+   * Live rows rendered inside the transcript after the messages — the thread's non-message
+   * traffic, e.g. game activity. They scroll with the messages because they are part of the
+   * same reading surface; absent for contexts that have none.
+   */
+  liveSlot?: ReactNode;
+  /** How many rows the live slot holds, so auto-scroll follows their arrival too. */
+  liveRowCount?: number;
 }
 
 export function MessageList({
@@ -206,9 +222,14 @@ export function MessageList({
   loadingEarlier,
   onLoadEarlier,
   mediaUrlFor,
+  liveSlot,
+  liveRowCount,
 }: MessageListProps): ReactNode {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const visible = useMemo(() => messages.filter(isVisible), [messages]);
+  // The scroll follows both surfaces that can grow: a new message and a new live row are each a
+  // reason to bring the bottom into view.
+  const liveCount = liveRowCount ?? 0;
 
   // Reply quotes resolve their target in the same thread; a target that is absent (hard-deleted,
   // or never loaded) or since tombstoned renders as "[deleted]" rather than an empty quote.
@@ -220,9 +241,13 @@ export function MessageList({
     return map;
   }, [visible]);
 
+  // The scroll follows both surfaces that can grow: a new message and a new live row are each a
+  // reason to bring the bottom into view. An empty transcript has nothing to scroll to.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: 'end' });
-  }, [messages.length]);
+    if (visible.length > 0 || liveCount > 0) {
+      bottomRef.current?.scrollIntoView({ block: 'end' });
+    }
+  }, [visible.length, liveCount]);
 
   let lastDay = '';
   let lastSender: Id | null = null;
@@ -307,6 +332,7 @@ export function MessageList({
           </div>
         );
       })}
+      {liveSlot}
       <div ref={bottomRef} />
     </div>
   );

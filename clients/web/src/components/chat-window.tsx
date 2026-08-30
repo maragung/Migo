@@ -8,14 +8,18 @@ import type { Id } from '@migo/sdk';
 
 import { messagePreview } from '@/lib/message-preview.js';
 import { useChat } from '@/lib/migo/use-chat.js';
+import { useGameEvents } from '@/lib/migo/use-game-events.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
+import { useRooms } from '@/lib/migo/rooms-provider.js';
 import { resolveMediaUrl } from '@/lib/migo/media.js';
 import { presenceLabel, usePresence } from '@/lib/migo/use-presence.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
 import { closeConversation } from '@/lib/migo/use-open-conversation.js';
 
 import { Avatar } from './avatar.js';
+import { GameEventList } from './game-events.js';
+import { GameLauncher } from './game-launcher.js';
 import { MessageComposer } from './message-composer.js';
 import { MessageList, senderNameOf } from './message-list.js';
 import { Spinner } from './spinner.js';
@@ -47,6 +51,7 @@ export function encryptionLabelFor(mode: EncryptionMode | undefined): string | n
 export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNode {
   const { client, accountId } = useMigo();
   const { items, markRead } = useConversations();
+  const rooms = useRooms();
   const {
     messages,
     loading,
@@ -63,7 +68,9 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
     hasEarlier,
     loadingEarlier,
     loadEarlier,
+    sendVoiceNote,
   } = useChat(conversationId);
+  const game = useGameEvents(conversationId);
 
   /**
    * The media resolver the message list embeds images through. A failure resolves to `null` rather
@@ -86,25 +93,49 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
 
   const summary = items.find((item) => item.conversationId === conversationId);
   const isDirect = summary?.kind === ConversationKind.Direct;
+  const isRoom = summary?.kind === ConversationKind.Room;
+  // Games are offered where a game has an audience: groups and rooms. A 1:1 has exactly the two
+  // people the wire's GAME_START cannot name as opponents, and a solo game in a private chat is
+  // a notification generator, not a pastime.
+  const supportsGames =
+    summary?.kind === ConversationKind.Group || summary?.kind === ConversationKind.Room;
   const members = summary?.members ?? [];
   const peerId = isDirect ? (members.find((member) => member !== accountId) ?? null) : null;
+  // The room behind this conversation, when the shell knows one (from this session's joins, or
+  // the account's remembered rooms): the header's live counters and topic come from it, because
+  // the conversation summary carries neither.
+  const roomInfo = rooms.infoFor(conversationId);
 
   // Every sender in the thread resolves to a profile (names, avatars, reply quotes), plus the
-  // direct peer so the header shows a name even before they have spoken.
+  // direct peer so the header shows a name even before they have spoken, plus the players of any
+  // game seen in the thread, whose names the game rows quote.
   const senderIds = useMemo(() => {
     const ids: Id[] = [];
     const seen = new Set<Id>();
+    const push = (id: Id): void => {
+      if (!seen.has(id)) {
+        seen.add(id);
+        ids.push(id);
+      }
+    };
     for (const message of messages) {
-      if (!seen.has(message.senderId)) {
-        seen.add(message.senderId);
-        ids.push(message.senderId);
+      push(message.senderId);
+    }
+    if (peerId !== null) {
+      push(peerId);
+    }
+    for (const row of game.rows) {
+      if (row.actorId !== undefined) {
+        push(row.actorId);
       }
     }
-    if (peerId !== null && !seen.has(peerId)) {
-      ids.push(peerId);
+    for (const view of game.views.values()) {
+      for (const player of view.players) {
+        push(player);
+      }
     }
     return ids;
-  }, [messages, peerId]);
+  }, [messages, peerId, game.rows, game.views]);
   const profiles = useProfiles(senderIds);
   const presenceMap = usePresence();
 
@@ -125,8 +156,18 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
 
   const title = isDirect
     ? (peerProfile?.displayName ?? 'Direct message')
-    : (summary?.title ?? (summary?.kind === ConversationKind.Room ? 'Room' : 'Conversation'));
-  const subtitle = isDirect ? presenceLabel(presence) : `${members.length || 0} members`;
+    : (summary?.title ??
+      roomInfo?.name ??
+      (summary?.kind === ConversationKind.Room ? 'Room' : 'Conversation'));
+  // A room's status line is its live shape — how many are in, how many are here — with the topic
+  // as the header's second line when the room states one. Without room info the line is the
+  // conversation's own membership, which is the honest fallback for a room the shell has not
+  // joined in this session and does not remember.
+  const subtitle = isDirect
+    ? presenceLabel(presence)
+    : isRoom
+      ? `${roomInfo?.onlineCount ?? 0} online · ${roomInfo?.memberCount ?? members.length} members`
+      : `${members.length || 0} members`;
   const encryptionLabel = encryptionLabelFor(summary?.encryption);
   const avatarId = (peerId ?? conversationId) as string;
   // Sender names and avatars are for multi-party conversations; in a 1:1 the alignment already
@@ -162,14 +203,23 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
           presence={presence}
         />
         <div className="thread-heading">
-          <div className="name">{title}</div>
+          <div className="name">
+            {isRoom ? (
+              <span className="room-glyph" aria-hidden="true">
+                #
+              </span>
+            ) : null}
+            {title}
+          </div>
           <div className="status">{subtitle}</div>
+          {isRoom && roomInfo?.topic ? <div className="thread-topic">{roomInfo.topic}</div> : null}
         </div>
         {encryptionLabel ? (
           <span className="thread-lock" title={encryptionLabel}>
             {encryptionLabel}
           </span>
         ) : null}
+        {supportsGames ? <GameLauncher onStart={game.startGame} /> : null}
       </header>
 
       {loading && messages.length === 0 ? (
@@ -197,6 +247,19 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
           loadingEarlier={loadingEarlier}
           onLoadEarlier={loadEarlier}
           mediaUrlFor={mediaUrlFor}
+          liveSlot={
+            <GameEventList
+              rows={game.rows}
+              views={game.views}
+              selfId={accountId}
+              profiles={profiles}
+              activeGuess={game.activeGuess}
+              onSubmitGuess={(value) => void game.submitGuess(value)}
+              guessBusy={game.guessBusy}
+              guessError={game.guessError}
+            />
+          }
+          liveRowCount={game.rows.length + (game.activeGuess !== null ? 1 : 0)}
         />
       ) : null}
 
@@ -204,6 +267,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
       <MessageComposer
         onSend={send}
         onAttach={sendAttachment}
+        onVoiceNote={sendVoiceNote}
         onTyping={setTyping}
         disabled={!!error}
         replyPreview={replyPreview}

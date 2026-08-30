@@ -23,6 +23,8 @@ import type { Id, IncomingMessage, TextContent, TypingEvent } from '@migo/sdk';
 
 import { useMigo } from './use-migo.js';
 import { uploadImageAttachment } from './media.js';
+import { uploadVoiceNote } from './voice.js';
+import type { VoiceRecording } from './voice.js';
 
 /** How many pages of history to replay at most, so a very long conversation stays bounded. */
 const MAX_CATCHUP_PAGES = 5;
@@ -59,6 +61,8 @@ export interface ChatThread {
   send: (text: string) => Promise<void>;
   /** Uploads a picked image file and sends the message that references it. */
   sendAttachment: (file: File) => Promise<void>;
+  /** Uploads a finished voice note recording and sends the message that references it. */
+  sendVoiceNote: (recording: VoiceRecording) => Promise<void>;
   setTyping: (isTyping: boolean) => void;
   /** True while the deletion request for a message is still in flight. */
   deleting: boolean;
@@ -364,6 +368,37 @@ export function useChat(conversationId: Id): ChatThread {
   );
 
   /**
+   * Uploads a finished voice note recording and sends the voice message that references it.
+   *
+   * The same ordering rule as {@link sendAttachment}: the upload completes before any message is
+   * sent, so a failed upload rejects here without the conversation ever seeing a dangling
+   * reference — and the cap the recorder already enforced is checked again at the upload itself.
+   */
+  const sendVoiceNote = useCallback(
+    async (recording: VoiceRecording): Promise<void> => {
+      if (!client || !accountId) {
+        return;
+      }
+      const content = await uploadVoiceNote(client, conversationId, recording);
+      const options = replyTo ? { replyTo: replyTo.messageId } : {};
+      const accepted = await client.messaging.send(conversationId, content, options);
+      upsert({
+        messageId: accepted.messageId,
+        conversationId,
+        seq: accepted.seq,
+        senderId: accountId,
+        senderDevice: client.deviceId,
+        content,
+        createdAt: accepted.createdAt,
+        ...(replyTo ? { replyTo: replyTo.messageId } : {}),
+      });
+      setReplyTo(null);
+      void client.typing.setTyping(conversationId, TypingState.Stop).catch(() => {});
+    },
+    [client, accountId, conversationId, upsert, replyTo],
+  );
+
+  /**
    * Delete-for-everyone. The server only permits the sender to unsend, which is why the control is
    * only ever rendered on our own messages; a failure keeps the message (and its content) as-is.
    */
@@ -403,6 +438,7 @@ export function useChat(conversationId: Id): ChatThread {
     setReplyTo,
     send,
     sendAttachment,
+    sendVoiceNote,
     setTyping,
     deleting,
     deleteMessage,

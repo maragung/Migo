@@ -17,6 +17,8 @@ import { formatRelative } from '@/lib/format.js';
 import { messagePreview, truncate } from '@/lib/message-preview.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
+import { useRooms } from '@/lib/migo/rooms-provider.js';
+import type { RoomInfo } from '@/lib/migo/rooms-provider.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
 import { conversationHref, useOpenConversation } from '@/lib/migo/use-open-conversation.js';
 
@@ -78,9 +80,23 @@ export function lastMessagePreviewLine(
   return truncate(prefix + body, maxChars);
 }
 
+/**
+ * A room row's title: the `#` glyph and the room's name.
+ *
+ * The glyph is the row's only claim to be a room before it is opened (the kind drives styling
+ * hooks, but the glyph is what a reader sees), and the name prefers the shell's room record over
+ * the summary's `title`, which the conversation list leaves unset for rooms — the join flow and
+ * the remembered rooms are the only sources of a name this build's wire offers.
+ */
+export function roomRowTitle(summary: ConversationSummary, room: RoomInfo | null): string {
+  const name = room?.name ?? summary.title ?? 'Room';
+  return `# ${name}`;
+}
+
 export function ConversationList(): ReactNode {
   const { accountId } = useMigo();
   const { items, loading, error, hasMore, loadMore, unread, lastPreviews } = useConversations();
+  const rooms = useRooms();
   const openId = useOpenConversation();
 
   // Profiles resolve the sidebar's two name surfaces: the 1:1 peer (row title, avatar) and the
@@ -130,13 +146,15 @@ export function ConversationList(): ReactNode {
     <div className="conversation-list">
       {items.map((item) => {
         const active = openId === item.conversationId;
+        const room =
+          item.kind === ConversationKind.Room ? rooms.infoFor(item.conversationId) : null;
         return (
           <Row
             key={item.conversationId}
             summary={item}
-            peerName={peerNameFor(item, accountId, profiles)}
+            peerName={peerNameFor(item, accountId, profiles, room)}
             peerAvatarUrl={peerAvatarFor(item, accountId, profiles)}
-            subtitle={subtitleFor(item, accountId, profiles, lastPreviews)}
+            subtitle={subtitleFor(item, accountId, profiles, lastPreviews, room)}
             active={active}
             unread={!active && (unread.has(item.conversationId) || item.lastSeq > item.readSeq)}
           />
@@ -189,13 +207,16 @@ function Row({ summary, peerName, peerAvatarUrl, subtitle, active, unread }: Row
  * The row's second line: the last message when there is one, the membership subtitle otherwise.
  *
  * The preview falls back rather than blanks because a conversation with no `lastMessage` (a group
- * just created, or a room joined at its tip) still needs its subtitle to say what the row is.
+ * just created, or a room joined at its tip) still needs its subtitle to say what the row is. A
+ * room's fallback prefers the room record's member count: the summary's member preview is capped
+ * by the server and would call a thousand-member room a nine-member one.
  */
 function subtitleFor(
   summary: ConversationSummary,
   selfId: Id | null,
   profiles: ReadonlyMap<Id, UserProfile>,
   lastPreviews: ReadonlyMap<Id, IncomingMessage>,
+  room: RoomInfo | null = null,
 ): string {
   const last = lastPreviews.get(summary.conversationId) ?? null;
   const senderId = last?.senderId ?? summary.lastMessage?.senderId;
@@ -209,7 +230,9 @@ function subtitleFor(
     lastMessagePreviewLine(summary, last?.content ?? null, senderLabel) ??
     (summary.kind === ConversationKind.Direct
       ? 'Direct message'
-      : `${summary.members?.length ?? 0} members`)
+      : summary.kind === ConversationKind.Room
+        ? `${room?.memberCount ?? summary.members?.length ?? 0} members`
+        : `${summary.members?.length ?? 0} members`)
   );
 }
 
@@ -217,15 +240,19 @@ function peerNameFor(
   summary: ConversationSummary,
   selfId: Id | null,
   profiles: Map<Id, UserProfile>,
+  room: RoomInfo | null = null,
 ): string {
   if (summary.kind === ConversationKind.Direct) {
     const other = summary.members?.find((member) => member !== selfId);
     return (other && profiles.get(other)?.displayName) || 'Direct message';
   }
+  if (summary.kind === ConversationKind.Room) {
+    return roomRowTitle(summary, room);
+  }
   if (summary.title) {
     return summary.title;
   }
-  return summary.kind === ConversationKind.Room ? 'Room' : 'Group';
+  return 'Group';
 }
 
 function peerAvatarFor(

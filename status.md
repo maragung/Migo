@@ -620,3 +620,33 @@ Media SDK + web:
 - **Unggah avatar**: di panel profil → unggah media kind Avatar → updateProfile.
 
 Verifikasi: 80 suite server, 114 test SDK, 108 test web, 14 gate CI, e2e dua-akun lulus.
+
+## 19. Fase 3 batch 3: voice note lengkap + gifts + games + rooms chat (v0.4.0)
+
+Voice note (§179) kini pengalaman penuh di web:
+
+- **Rekaman**: tombol 🎤 di composer → getUserMedia → MediaRecorder (webm, fallback default),
+  indikator titik merah berdenyut + timer monospace, batas keras 5 menit (dengan clamp durasi),
+  teardown satu jalur untuk stop/unmount/cancel (track dihentikan, AudioContext ditutup).
+  Waveform ~50 bar dihitung dari sampel amplitudo puncak per 100ms (AnalyserNode).
+- **Pengiriman**: unggah via MediaDomain kind VoiceNote + durationMs, kirim VoiceNoteRefContent
+  (placeholder key/nonce 32+12 byte, pola yang sama dengan lampiran gambar).
+- **Pemutaran**: tombol play/pause + bar waveform SVG currentColor + label M:SS, progress
+  fallback saat webm melaporkan Infinity, re-fetch URL sekali saat kedaluwarsa, cleanup penuh.
+  Mime dari pengirim tidak pernah dipercaya. 18 test baru (formatDuration, downsampleWaveform,
+  pickRecorderMimeType, normalisasi mime, konstruksi konten, cap 5 menit, render).
+
+Gifts panel: saldo (coins + points), grid katalog dengan tombol kirim, penerima dari daftar
+teman + pencarian username, ledger 10 transaksi terakhir, kartu progress dengan bar XP
+(level, xp_into_level / xp_for_next_level). 9 test.
+
+Games di chat: tombol 🎮 di header (Group/Room saja) membuka popover katalog; game dua pemain
+disabled dengan alasan (GAME_START tak bisa menyebut lawan); baris game sebagai system line
+terpusat (bukan gelembung) dengan gaya selebrasi saat selesai; input tebakan inline untuk
+game single-player (1-100) dengan feedback higher/lower/correct. 13 test.
+
+Rooms di chat: room yang di-join muncul di daftar percakapan dengan glif # + jumlah anggota;
+header room menampilkan online_count dan topic; RoomsProvider menyimpan metadata room
+per akun di IndexedDB. 4 test.
+
+SDK: GamesDomain mendapat getCatalogue(), startGame(), getView() + 5 test.

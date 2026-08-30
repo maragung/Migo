@@ -8,6 +8,7 @@ import type { ConversationSummary, Id, RoomJoinResponse, RoomSummary } from '@mi
 
 import { friendlyError } from '@/lib/migo/errors.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
+import { roomInfoOf, useRooms } from '@/lib/migo/rooms-provider.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 
 import { Avatar } from './avatar.js';
@@ -32,6 +33,7 @@ export function DiscoverPanel({
 }): ReactNode {
   const { client } = useMigo();
   const { noteConversation } = useConversations();
+  const { noteRoom } = useRooms();
 
   const [rooms, setRooms] = useState<RoomSummary[] | null>(null);
   const [query, setQuery] = useState('');
@@ -70,8 +72,11 @@ export function DiscoverPanel({
     setJoining((prev) => new Set(prev).add(room.roomId));
     try {
       const joined = await client.rooms.join(room.roomId);
-      // Project the join handle into the shared list so the shell can open it like any conversation.
+      // Project the join handle into the shared list so the shell can open it like any
+      // conversation, and into the room registry so the row and header keep the room's name,
+      // topic, and counters — the join reply is the one moment the wire names both halves.
       noteConversation(joinedRoomSummary(joined));
+      noteRoom(roomInfoOf(joined));
       onOpenConversation(joined.conversationId);
     } catch (cause) {
       setError(friendlyError(cause));

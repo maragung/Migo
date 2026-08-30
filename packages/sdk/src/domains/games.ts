@@ -1,5 +1,6 @@
 /**
- * The games domain: submit game actions, and observe game state changes.
+ * The games domain: browse the catalogue, start a game, submit game actions, and observe game
+ * state changes.
  *
  * Games are room-scoped and server-authoritative. A client never computes an outcome; it submits an
  * *intent* ({@link GameAction}) — "I play this card", "I roll" — and the server decides what happens
@@ -18,11 +19,37 @@
  * `payload` describing the change, plus a `stateVersion` a client uses to detect a missed event and
  * resync. A pre-rendered `text` line is included for thin clients that render the game as chat rather
  * than interpreting the payload.
+ *
+ * # Why a move's result needs a second read
+ *
+ * `GAME_ACTION`'s reply is a bare ack and the published events say only *that* somebody moved, so
+ * the substance of a move — feedback on a guess, a board — is fetched with {@link getView} after the
+ * ack resolves. {@link startGame} answers with the full opening view directly, because a game that
+ * has not started has no deltas to publish.
  */
 
 import type { Id } from '@migo/wire';
-import { OP, encodeGameAction, decodeGameEvent, decodeAcknowledged } from '@migo/protocol';
-import type { GameAction, GameEvent, Acknowledged } from '@migo/protocol';
+import {
+  OP,
+  encodeGameAction,
+  decodeGameEvent,
+  decodeAcknowledged,
+  encodeGameStart,
+  decodeGameViewWire,
+  encodeGameId,
+  encodeGiftCatalogueReq,
+  decodeGameCatalogueResponse,
+} from '@migo/protocol';
+import type {
+  Acknowledged,
+  GameAction,
+  GameCatalogueEntry,
+  GameEvent,
+  GameId,
+  GiftCatalogueReq,
+  GameStart,
+  GameViewWire,
+} from '@migo/protocol';
 
 import { ListenerSet } from './listeners.js';
 import type { Listener } from './listeners.js';
@@ -64,6 +91,53 @@ export class GamesDomain {
   /** Registers a handler for inbound game events. Returns an unsubscribe function. */
   onGameEvent(handler: Listener<GameEvent>): () => void {
     return this.#listeners.add(handler);
+  }
+
+  /**
+   * Reads the node's game catalogue: one entry per kind it can referee.
+   *
+   * The catalogue is the node's own and versionless — the same posture as the gift catalogue — so
+   * a client re-reads it to build its menu each session rather than caching it. Each entry carries
+   * the slug {@link startGame} accepts and the player counts a client needs to know which games it
+   * can even offer.
+   */
+  async getCatalogue(): Promise<GameCatalogueEntry[]> {
+    const request: GiftCatalogueReq = {};
+    const response = await this.#rpc.call(
+      OP.GAME_CATALOGUE,
+      encodeGiftCatalogueReq,
+      decodeGameCatalogueResponse,
+      request,
+    );
+    return response.games;
+  }
+
+  /**
+   * Starts a game in a conversation and resolves with the opening view.
+   *
+   * `slug` is a catalogue entry's slug. The wire names no opponents, so in this build a start can
+   * open the single-player guessing game and nothing else — the server refuses a multi-player kind
+   * with "wrong number of players" rather than inventing an opponent on the caller's behalf, and
+   * that refusal is surfaced here as a {@link RemoteError}. Nothing is published to the
+   * conversation on start: the reply carries the opening view to the caller, and the other members
+   * hear of the game when its first move publishes a {@link GameEvent}.
+   */
+  async startGame(conversationId: Id, slug: string): Promise<GameViewWire> {
+    const request: GameStart = { conversationId, slug };
+    return this.#rpc.call(OP.GAME_START, encodeGameStart, decodeGameViewWire, request);
+  }
+
+  /**
+   * Reads one game's current view, as the caller is allowed to see it.
+   *
+   * The view is redacted per viewer by the server, so this is also how a player learns the outcome
+   * of their own move: {@link submit}'s reply is a bare ack, and a move's substance — a guess's
+   * higher/lower, a board — lives in the fresh view, not in the published events, which say only
+   * *that* somebody moved.
+   */
+  async getView(gameId: Id): Promise<GameViewWire> {
+    const request: GameId = { gameId };
+    return this.#rpc.call(OP.GAME_VIEW, encodeGameId, decodeGameViewWire, request);
   }
 
   /**

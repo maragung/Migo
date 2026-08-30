@@ -3,7 +3,11 @@
 import { useCallback, useRef, useState } from 'react';
 import type { ChangeEvent, KeyboardEvent, ReactNode } from 'react';
 
+import { VOICE_NOTE_MAX_MS } from '@/lib/migo/voice.js';
+import type { VoiceRecording } from '@/lib/migo/voice.js';
+
 import { Spinner } from './spinner.js';
+import { VoiceRecorder } from './voice-recorder.js';
 
 /** Stop signalling "typing" after this idle gap. */
 const TYPING_IDLE_MS = 2500;
@@ -21,6 +25,12 @@ interface ComposerProps {
    * composer can surface the error beside the input it belongs to.
    */
   onAttach: (file: File) => Promise<void>;
+  /**
+   * Uploads a finished voice note recording and sends the message that references it. Rejects on
+   * failure, so the composer can surface the error beside the mic that started it. Optional: a
+   * context without it (no client) renders no mic button at all.
+   */
+  onVoiceNote?: (recording: VoiceRecording) => Promise<void>;
   onTyping: (isTyping: boolean) => void;
   disabled?: boolean;
   /** The message a send will reply to; the bar is the only surface that shows this is set. */
@@ -32,6 +42,7 @@ interface ComposerProps {
 export function MessageComposer({
   onSend,
   onAttach,
+  onVoiceNote,
   onTyping,
   disabled,
   replyPreview,
@@ -41,6 +52,9 @@ export function MessageComposer({
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [voiceRecording, setVoiceRecording] = useState(false);
+  const [sendingVoice, setSendingVoice] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
   const typingActiveRef = useRef(false);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -101,6 +115,50 @@ export function MessageComposer({
     [onAttach, stopTyping],
   );
 
+  /**
+   * The finished-recording path: swap back to the text composer immediately, then upload and send.
+   * A failure keeps the recording's error beside the mic that started it, dismissible — unlike the
+   * image line, a voice note the user just recorded is worth an explicit dismissal, not an error
+   * that silently disappears on the next keystroke.
+   */
+  const sendVoiceNote = useCallback(
+    async (recording: VoiceRecording): Promise<void> => {
+      setSendingVoice(true);
+      setVoiceError(null);
+      try {
+        await onVoiceNote?.(recording);
+      } catch {
+        setVoiceError('That voice note could not be sent.');
+      } finally {
+        setSendingVoice(false);
+      }
+    },
+    [onVoiceNote],
+  );
+
+  const handleVoiceStop = useCallback(
+    (recording: VoiceRecording): void => {
+      setVoiceRecording(false);
+      void sendVoiceNote(recording);
+    },
+    [sendVoiceNote],
+  );
+
+  const handleVoiceError = useCallback((message: string): void => {
+    setVoiceRecording(false);
+    setVoiceError(message);
+  }, []);
+
+  const handleVoiceCancel = useCallback((): void => {
+    setVoiceRecording(false);
+  }, []);
+
+  function startVoiceNote(): void {
+    setVoiceError(null);
+    stopTyping();
+    setVoiceRecording(true);
+  }
+
   function onChange(event: ChangeEvent<HTMLTextAreaElement>): void {
     setText(event.target.value);
     setUploadError(null);
@@ -149,45 +207,68 @@ export function MessageComposer({
           </button>
         </div>
       ) : null}
-      <div className="composer">
-        <textarea
-          value={text}
-          onChange={onChange}
-          onKeyDown={onKeyDown}
-          onBlur={stopTyping}
-          placeholder="Write a message…"
-          rows={1}
-          disabled={disabled || uploading}
-          aria-label="Message"
+      {voiceRecording ? (
+        // While a note is captured, the recording bar replaces the input row entirely: no text can
+        // be typed into a moment that is being recorded. The reply bar above stays — a voice note
+        // replies exactly like an attachment does.
+        <VoiceRecorder
+          onStop={handleVoiceStop}
+          onError={handleVoiceError}
+          onCancel={handleVoiceCancel}
+          maxDurationMs={VOICE_NOTE_MAX_MS}
         />
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          onChange={onFileChange}
-          hidden
-          aria-label="Attach an image"
-        />
-        <button
-          type="button"
-          className="attach-btn"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={disabled || uploading}
-          aria-label="Attach an image"
-        >
-          📎
-        </button>
-        <button
-          type="button"
-          className="send-btn"
-          onClick={() => void submit()}
-          disabled={disabled || sending || uploading || text.trim().length === 0}
-          aria-label="Send"
-        >
-          ➤
-        </button>
-      </div>
-      {uploading || uploadError !== null ? (
+      ) : (
+        <div className="composer">
+          <textarea
+            value={text}
+            onChange={onChange}
+            onKeyDown={onKeyDown}
+            onBlur={stopTyping}
+            placeholder="Write a message…"
+            rows={1}
+            disabled={disabled || uploading}
+            aria-label="Message"
+          />
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            onChange={onFileChange}
+            hidden
+            aria-label="Attach an image"
+          />
+          <button
+            type="button"
+            className="attach-btn"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={disabled || uploading}
+            aria-label="Attach an image"
+          >
+            📎
+          </button>
+          {onVoiceNote !== undefined ? (
+            <button
+              type="button"
+              className="attach-btn"
+              onClick={startVoiceNote}
+              disabled={disabled || uploading || sending || sendingVoice}
+              aria-label="Record a voice note"
+            >
+              🎤
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="send-btn"
+            onClick={() => void submit()}
+            disabled={disabled || sending || uploading || text.trim().length === 0}
+            aria-label="Send"
+          >
+            ➤
+          </button>
+        </div>
+      )}
+      {uploading || sendingVoice || uploadError !== null || voiceError !== null ? (
         <div className="composer-meta">
           {uploading ? (
             <>
@@ -195,7 +276,26 @@ export function MessageComposer({
               <span>Uploading image…</span>
             </>
           ) : null}
+          {sendingVoice ? (
+            <>
+              <Spinner />
+              <span>Sending voice note…</span>
+            </>
+          ) : null}
           {uploadError !== null ? <span className="composer-error">{uploadError}</span> : null}
+          {voiceError !== null ? (
+            <span className="composer-error">
+              {voiceError}
+              <button
+                type="button"
+                className="error-dismiss"
+                onClick={() => setVoiceError(null)}
+                aria-label="Dismiss error"
+              >
+                ✕
+              </button>
+            </span>
+          ) : null}
         </div>
       ) : null}
     </div>
