@@ -63,3 +63,4 @@ Thumbs.db
 # of binary data under the name the docs tell people to use, so it is ignored here
 # rather than left to be noticed in a diff.
 .pgdata/
+var/

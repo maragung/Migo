@@ -488,3 +488,44 @@ cara test integrasi menyelesaikan tantangan gambarnya sendiri — fitur itu hany
 dev-dependencies dan tidak pernah ada di build produksi. Rate limit IP anonim di route
 captcha tetap lapisan pertama (biaya bootstrap per /24), captcha lapisan kedua, threshold
 kegagalan lapisan ketiga; captcha tidak pernah menjadi satu-satunya pertahanan.
+
+## 15. Fase 1: data plane media, scan inline, penerbit event, BandwidthMode (v0.3.0)
+
+Audit menyeluruh terhadap migo.md menemukan mesin-mesin tanpa setir: transport dan domain
+kokoh tetapi produknya terputus. Fase ini menyambungkan empat setir terpenting.
+
+Data plane media (section 168) kini ada: satu PUT dan satu GET di bawah `/media/{key}` pada
+migo-api, dipasang hanya ketika backend storage adalah filesystem (backend S3 melayani
+bytenya sendiri dan proses menjawab 404). PUT menegakkan `media.max_upload_bytes`, GET
+menyajikan content type dari magic byte lewat sniff dan menolak byte yang scanner tolak,
+keduanya menolak key yang mencoba keluar dari root media. Port `MediaFiles` didefinisikan
+di migo-api dan diimplementasikan migod atas FsStorage sehingga migo-media tetap tidak
+pernah melihat HTTP. Empat test api baru menutup round-trip, traversal, langit-langit, dan
+penolakan HTML polyglot.
+
+Scan media kini inline pada commit (bug deadlock): media server-readable tidak lagi
+diparkir `Pending` menunggu scanner yang tak pernah dikomposisi — verdict diambil dari
+sniff atas head yang sudah dibaca commit, HTML/SVG polyglot ditolak sebelum menjadi baris,
+dokumen tanpa magic (teks) tetap sah sebagai Clean, dan deployment dengan scanner yang
+lebih ketat dapat menurunkan verdict lewat `record_scan`. Avatar dan media room kini benar-
+benar tersaji ke pengguna lain; test lama yang mem-pin perilaku Pending ditulis ulang ke
+perilaku baru.
+
+Penerbit event yang hilang kini hidup, semuanya dari dispatcher yang memegang konteks
+koneksi: FRIEND_REQUEST/FRIEND_RESPOND menerbitkan `FRIEND_EVENT` ke topik User penerima
+plus notifikasi (baris inbox lewat Notifier + pencerminan realtime `NOTIFICATION_EVENT`
+dengan coalescing per penerima) memakai `Notice` dari migo-social yang sebelumnya dibuang;
+GIFT_SEND menerbitkan `ECONOMY_EVENT` ke topik pengirim dan `NOTIFICATION_EVENT` ke
+penerima, dengan baris inbox dari Announcer ekonomi yang kini diikat ke Notifier nyata
+(sebelumnya Silent); MEDIA_UPLOAD_COMMIT menerbitkan `MEDIA_STATE_EVENT` ke topik
+Conversation dengan coalescing per objek. Inbox notifikasi tidak lagi kosong secara
+struktural.
+
+BandwidthMode (section 75) kini dibaca gateway dari HELLO, disimpan pada session handle,
+diekspos `ClientContext::bandwidth_mode`, dan dipakai dispatcher presence — kadensi
+heartbeat menurut mode, bukan default untuk semua.
+
+Ditunda dengan sadar ke fase berikutnya: permukaan wire baru (PROFILE_UPDATE, edit pesan,
+reaksi, room admin, games start, economy baca, discovery), voice note perekaman/pemutaran,
+dan calls penuh (§165/§166/§180). §177 migo.md disinkronkan dengan kenyataan: blok SCHEMA
+dan SPEC kini membedakan yang sudah menyentuh kabel dari yang benar-benar masih dokumen.

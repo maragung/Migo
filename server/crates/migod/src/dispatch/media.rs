@@ -106,9 +106,31 @@ pub(crate) async fn handle_upload_commit(
         byte_size: 0,
         checksum: Some(request.digest),
     };
-    svc.commit(&call, request.upload_id.as_bytes(), commit)
+    let stored = svc
+        .commit(&call, request.upload_id.as_bytes(), commit)
         .await?;
     ctx.reply(&Acknowledged { ok: true })?;
+
+    // The conversation the object landed in learns the object exists — everyone except
+    // the uploader, who is holding the reply that says so. An avatar has no
+    // conversation and therefore nobody to tell: the profile it belongs to is fetched,
+    // not subscribed to. Coalesced per object: a re-commit racing a state change leaves
+    // the newest state for that object, which is the only one that matters.
+    if let Some(conversation) = stored.conversation_id {
+        let topic = migo_protocol::Topic {
+            kind: migo_protocol::TopicKind::Conversation,
+            id: conversation,
+        };
+        ctx.publish_excluding_self(
+            &topic,
+            migo_protocol::Opcode::MediaStateEvent,
+            &migo_protocol::MediaStateEvent {
+                object_id: stored.media_id,
+                state: "committed".to_string(),
+            },
+            Some(crate::dispatch::coalesce_key_of(&stored.media_id)),
+        )?;
+    }
     Ok(())
 }
 

@@ -44,12 +44,12 @@ use migo_core::config::Environment;
 use migo_core::metrics::Registry;
 use migo_core::{Clock, Config, Id, OsRandom, Random, Shutdown, SystemClock};
 use migo_crypto::NodeSecret;
-use migo_economy::{Catalogue, SharedAnnouncer, SharedTreasurer, Silent};
+use migo_economy::{Catalogue, SharedAnnouncer, SharedTreasurer};
 use migo_federation::{MeshConfig, SharedMesh};
 use migo_games::{SharedReferee, SharedRewards};
 use migo_gateway::{Dispatcher, Gateway, GatewayServices};
 use migo_keys::SharedKeyring;
-use migo_media::{SharedLibrary, SharedStorage};
+use migo_media::SharedLibrary;
 use migo_messaging::SharedMessaging;
 use migo_moderation::{SharedRoster, SharedWarden};
 use migo_notify::{NoPush, SharedNotifier, SharedPushSender};
@@ -317,14 +317,14 @@ impl App {
 
         // Media never holds a byte (brief section 168); the filesystem backend is the development
         // stand-in for an object store, minting unsigned URLs under the node's public media path.
-        let storage: SharedStorage = Arc::new(FsStorage::new(
+        let media_storage = Arc::new(FsStorage::new(
             config.media.local_dir.clone(),
             format!("{}/media", config.http.public_url.trim_end_matches('/')),
         ));
         let media = migo_media::open(
             store.clone(),
             limiter.clone(),
-            storage,
+            media_storage.clone(),
             Box::new(OsRandom),
             &node_secret,
             &config.media,
@@ -356,8 +356,13 @@ impl App {
             &registry,
         );
 
-        // The economy announces nothing to clients in this build; gifts are the standard catalogue.
-        let announcer: SharedAnnouncer = Arc::new(Silent);
+        // The economy's announcements become notification rows: a gift that arrives
+        // while its recipient is offline is waiting in their inbox, not lost. The push
+        // half is `NoPush` (above) and the realtime half is the dispatcher's to publish
+        // — this adapter only stores, because the Announcer port fires inside the
+        // service where no connection context exists to broadcast with.
+        let announcer: SharedAnnouncer =
+            Arc::new(crate::ports::NotifyingAnnouncer::new(notify.clone()));
         let economy = migo_economy::open(
             store.clone(),
             cache.clone(),
@@ -471,6 +476,17 @@ impl App {
         // The REST API renders the very registry every service just registered into, so wrapping it
         // in an `Arc` here must come after the last `&registry` borrow above.
         let registry = Arc::new(registry);
+        // The media data plane rides the API's byte routes when (and only when) this
+        // process is the storage backend's host: the filesystem backend mints URLs under
+        // this node's public path, so its bytes belong on this router. The S3 backend
+        // mints presigned URLs aimed at the object store, and this process mounts no
+        // byte routes at all rather than pretending to be one.
+        let media_files: Option<migo_api::SharedMediaFiles> = match config.media.backend {
+            migo_core::config::MediaBackend::Filesystem => {
+                Some(media_storage as migo_api::SharedMediaFiles)
+            }
+            migo_core::config::MediaBackend::S3 => None,
+        };
         let api_router = migo_api::router(
             config,
             migo_api::ApiServices {
@@ -480,6 +496,7 @@ impl App {
                 registry: registry.clone(),
                 node,
                 features: FEATURES,
+                media_files,
             },
         );
 

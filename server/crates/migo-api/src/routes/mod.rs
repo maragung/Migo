@@ -9,6 +9,7 @@
 mod auth;
 mod config;
 mod health;
+pub mod media;
 mod metrics;
 
 use axum::Router;
@@ -21,10 +22,19 @@ pub(crate) fn mount() -> Router<ApiState> {
     Router::new()
         .merge(health::routes())
         .merge(metrics::routes())
+        .merge(root())
         .nest("/v1", v1())
 }
 
 /// The versioned API surface.
 fn v1() -> Router<ApiState> {
     Router::new().merge(auth::routes()).merge(config::routes())
+}
+
+/// The media data plane. Mounted at the root, not under `/v1`: these are the byte
+/// routes the filesystem backend's URLs literally point at (`{public_url}/media/{key}`),
+/// and a version prefix inside a storage URL would change with every API version while
+/// the bytes behind a key never do. See [`media`](self::media) for what they enforce.
+fn root() -> Router<ApiState> {
+    Router::new().merge(media::routes())
 }

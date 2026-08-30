@@ -500,6 +500,13 @@ pub struct Stored {
     pub height: Option<u32>,
     /// Duration, if the client supplied one.
     pub duration_ms: Option<u32>,
+    /// The conversation the object was uploaded into, when it was uploaded into one.
+    ///
+    /// An avatar has none. A conversation attachment has one, and the committer's next
+    /// act is to tell that conversation the object exists — which is exactly why the
+    /// projection carries it: the reply's recipient is the uploader, and the uploader
+    /// is the one party that does not need telling.
+    pub conversation_id: Option<Id>,
     /// Whether it may be served to somebody other than its owner.
     pub scan: Scan,
     /// The content hash the client supplied.

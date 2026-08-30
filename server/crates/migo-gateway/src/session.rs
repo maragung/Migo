@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use migo_core::Id;
+use migo_protocol::BandwidthMode;
 
 use crate::outbound::Outbound;
 
@@ -38,14 +39,27 @@ pub(crate) enum Phase {
 pub(crate) struct SessionHandle {
     session_id: Id,
     outbound: Arc<Outbound>,
+    /// The bandwidth mode this session negotiated in its `HELLO`.
+    ///
+    /// Stored on the handle — the one per-session thing every later frame may need to
+    /// consult — so the dispatcher reads it off the context without the connection
+    /// having to thread it through every request (brief section 75: the server adapts
+    /// its event cadence to the mode the client declared, which only works if the mode
+    /// outlives the handshake that carried it).
+    bandwidth_mode: BandwidthMode,
 }
 
 impl SessionHandle {
-    /// Builds a handle around a mailbox.
-    pub(crate) fn new(session_id: Id, outbound: Arc<Outbound>) -> Self {
+    /// Builds a handle around a mailbox and the mode the session negotiated.
+    pub(crate) fn new(
+        session_id: Id,
+        outbound: Arc<Outbound>,
+        bandwidth_mode: BandwidthMode,
+    ) -> Self {
         Self {
             session_id,
             outbound,
+            bandwidth_mode,
         }
     }
 
@@ -57,5 +71,10 @@ impl SessionHandle {
     /// This session's mailbox.
     pub(crate) fn outbound(&self) -> &Arc<Outbound> {
         &self.outbound
+    }
+
+    /// The bandwidth mode the session negotiated in `HELLO`.
+    pub(crate) fn bandwidth_mode(&self) -> BandwidthMode {
+        self.bandwidth_mode
     }
 }

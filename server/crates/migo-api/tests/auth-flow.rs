@@ -210,6 +210,8 @@ impl Harness {
                 country: "ID".to_string(),
             },
             features: 0b101,
+            // The tests exercise the auth bootstrap surface, not the media byte routes.
+            media_files: None,
         };
         let app = router(&config, services);
         Self {

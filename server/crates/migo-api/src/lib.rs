@@ -67,6 +67,7 @@
 //!         registry,
 //!         node,
 //!         features: 0,
+//!         media_files: None,
 //!     },
 //! );
 //! // migod serves `app` on its HTTP listener, e.g. `axum::serve(listener, app)`.
@@ -100,6 +101,7 @@ use migo_ratelimit::SharedRateLimiter;
 pub use crate::error::ApiError;
 pub use crate::extract::{Authenticated, IdempotencyKey, RequestFacts};
 pub use crate::pagination::{Page, PageParams, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE};
+pub use crate::routes::media::{MediaFiles, SharedMediaFiles};
 
 /// The collaborators the REST surface needs, gathered so [`router`] takes one bundle rather than
 /// a long argument list.
@@ -120,6 +122,10 @@ pub struct ApiServices {
     pub node: NodeInfo,
     /// The feature bits this node advertises, reported by the `/v1/config` document.
     pub features: u64,
+    /// The media byte store behind the data-plane routes. `None` when the deployment's
+    /// storage serves its own bytes (the S3 backend): the routes answer `404` rather
+    /// than pretending to be an object store they are not.
+    pub media_files: Option<SharedMediaFiles>,
 }
 
 /// The shared state every handler borrows, behind one [`Arc`] so the router is cheap to clone.
@@ -141,6 +147,7 @@ struct Inner {
     node: NodeInfo,
     features: u64,
     policy: Policy,
+    media_files: Option<SharedMediaFiles>,
 }
 
 /// The configuration-derived values the REST surface reports and enforces.
@@ -157,6 +164,8 @@ struct Policy {
     /// Whether the accessible alternative captcha mode may be requested. Copied from
     /// `captcha.accessible_mode` so the route decides it without borrowing the whole tree.
     captcha_accessible_mode: bool,
+    /// The largest object one PUT may carry, from `media.max_upload_bytes`.
+    media_max_upload_bytes: u64,
 }
 
 impl ApiState {
@@ -169,6 +178,7 @@ impl ApiState {
             max_body_bytes: config.http.max_body_bytes,
             public_url: config.http.public_url.clone(),
             captcha_accessible_mode: config.captcha.accessible_mode,
+            media_max_upload_bytes: config.media.max_upload_bytes,
         };
         Self {
             inner: Arc::new(Inner {
@@ -179,6 +189,7 @@ impl ApiState {
                 node: services.node,
                 features: services.features,
                 policy,
+                media_files: services.media_files,
             }),
         }
     }
@@ -216,6 +227,15 @@ impl ApiState {
     /// The server's notion of now, sampled from the node clock.
     pub(crate) fn now(&self) -> Timestamp {
         self.inner.clock.now()
+    }
+
+    /// The media byte store, when this process serves the data plane.
+    ///
+    /// The handlers answer `404` rather than `500` when it is absent: a client fetching
+    /// an S3 URL from this node is holding a URL minted for another host, which is a
+    /// routing mistake the caller can fix, not a fault of this node.
+    pub(crate) fn media_files(&self) -> Option<&dyn crate::routes::media::MediaFiles> {
+        self.inner.media_files.as_deref()
     }
 }
 

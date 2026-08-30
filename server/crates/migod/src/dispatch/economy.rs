@@ -24,7 +24,10 @@
 use migo_core::Error;
 use migo_economy::{Caller as EconomyCaller, Gift, SendGift, SharedTreasurer};
 use migo_gateway::ClientContext;
-use migo_protocol::{fault, from_frame, Frame, GiftSend, GiftSendResult, WalletReq, WalletView};
+use migo_protocol::{
+    fault, from_frame, EconomyEvent, Frame, GiftSend, GiftSendResult, NotificationEvent,
+    NotificationKind, Opcode, Topic, TopicKind, WalletReq, WalletView,
+};
 
 /// Sends a gift from the session account to `GiftSend.recipient` and replies with the result.
 ///
@@ -65,7 +68,51 @@ pub(crate) async fn handle_gift_send(
     ctx.reply(&GiftSendResult {
         ok: !outcome.duplicate,
         tx_id: Some(outcome.gift_id),
-    })
+    })?;
+
+    // Two events, two audiences, and only on a first send — a retry that the service
+    // deduplicated must not buzz the recipient a second time for a gift they already
+    // have (the announcer inside the service holds the same rule for the row).
+    if !outcome.duplicate {
+        // The sender's own wallet changed, and their client may be watching for it:
+        // an ECONOMY_EVENT on the sender's own topic is the live balance tick.
+        let sender_topic = Topic {
+            kind: TopicKind::User,
+            id: caller.account_id,
+        };
+        ctx.publish(
+            &sender_topic,
+            Opcode::EconomyEvent,
+            &EconomyEvent {
+                kind: "gift_sent".to_string(),
+                amount: u64::try_from(outcome.price.amount).unwrap_or(0),
+                currency: "coins".to_string(),
+            },
+            None,
+        )?;
+        // The recipient's bell. The row is already stored by the announcer the
+        // composition root bound; this is the realtime mirror of it, coalesced per
+        // recipient the same way the out-of-band path coalesces.
+        let recipient_topic = Topic {
+            kind: TopicKind::User,
+            id: outcome.recipient_id,
+        };
+        ctx.publish(
+            &recipient_topic,
+            Opcode::NotificationEvent,
+            &NotificationEvent {
+                kind: NotificationKind::Gift,
+                at: ctx.now(),
+                title: None,
+                body: None,
+                conversation_id: request.conversation_id,
+                room_id: None,
+                actor_id: Some(caller.account_id),
+            },
+            Some(crate::dispatch::coalesce_key_of(&outcome.recipient_id)),
+        )?;
+    }
+    Ok(())
 }
 
 /// Reads the session account's wallet and replies with its balances.

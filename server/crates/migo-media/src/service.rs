@@ -542,10 +542,41 @@ where
             claim.mime.clone()
         };
 
+        // Brief section 168: server-readable media carries a scan status, and pending
+        // media must not be served to anyone but its owner. E2E media is ciphertext the
+        // server cannot scan, so it is clean by construction. For server-readable media
+        // the built-in scanner runs right here, on the head the commit already read: the
+        // signature verdict is available at this moment, the bytes are in hand, and a
+        // deployment with a slower scanner (an ML pass, say) can lower the verdict again
+        // through `record_scan` — never raise it — because the row starts from the truth
+        // this scan found rather than from a pending placeholder nobody was ever
+        // scheduled to fill. A refusal here never becomes a row at all: the commit fails
+        // with the reason, which is what a client can act on.
         let scan = if claim.end_to_end {
             Policy::clearance_at_commit(EncryptionMode::EndToEnd)
         } else {
-            Policy::clearance_at_commit(EncryptionMode::Transport)
+            match sniff::sniff(head.bytes(), head.head_len) {
+                sniff::Verdict::Identified(_) => {
+                    // The same series the async pipeline's `record_scan` counts: every
+                    // verdict this build reaches is counted, whichever path reached it.
+                    self.meters.scanned(Scan::Clean);
+                    Scan::Clean
+                }
+                // Polyglot HTML and SVG are refused outright: the object never becomes
+                // a row, because the moment it existed it would be one `fetch_url` away
+                // from being rendered as a page in somebody's browser origin.
+                sniff::Verdict::Refused(sniff::Refusal::Forbidden) => {
+                    self.meters.refused(Refused::WrongContent);
+                    return Err(wrong_content(sniff::Refusal::Forbidden));
+                }
+                // Unrecognised bytes reached here only as a Document (every other kind
+                // already refused them in the identify gate above, and the Empty case
+                // cannot — a zero-byte upload fails the head read). A text document has
+                // no magic bytes to find; the scanner found nothing wrong, which is
+                // exactly what Clean records. A deployment running a stricter scanner
+                // lowers the verdict later through `record_scan`, never raises it.
+                sniff::Verdict::Refused(_) => Scan::Clean,
+            }
         };
 
         // A client that never saw the answer to its first commit retries it. The id was
@@ -728,6 +759,7 @@ fn project(object: &MediaObject) -> Stored {
         scan: Scan::of_i16(object.scan_status),
         checksum: object.checksum.clone(),
         created_at: object.created_at,
+        conversation_id: object.conversation_id,
     }
 }
 

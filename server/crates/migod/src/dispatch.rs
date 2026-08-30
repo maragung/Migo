@@ -70,12 +70,11 @@ use migo_moderation::SharedWarden;
 use migo_notify::SharedNotifier;
 use migo_presence::{Caller as PresenceCaller, SharedPresence};
 use migo_protocol::{
-    fault, from_frame, Acknowledged, BandwidthMode, ConversationCreateRequest,
-    ConversationListRequest, Frame, GameAction, GameEvent, KeyBundle as WireBundle,
-    KeyBundleRequest, KeyBundleResponse, KeyPublish, KeyPublishResult, MessageDelete,
-    MessageReceipt, MessageSend, Opcode, PresenceUpdate, ProfileRequest, ProfileResponse,
-    RoomJoinRequest, RoomLeaveRequest, RoomListRequest, SyncRequest, Topic, TopicKind, TypingEvent,
-    UserProfile,
+    fault, from_frame, Acknowledged, ConversationCreateRequest, ConversationListRequest, Frame,
+    GameAction, GameEvent, KeyBundle as WireBundle, KeyBundleRequest, KeyBundleResponse,
+    KeyPublish, KeyPublishResult, MessageDelete, MessageReceipt, MessageSend, Opcode,
+    PresenceUpdate, ProfileRequest, ProfileResponse, RoomJoinRequest, RoomLeaveRequest,
+    RoomListRequest, SyncRequest, Topic, TopicKind, TypingEvent, UserProfile,
 };
 use migo_rooms::{
     Broadcast as RoomBroadcast, Caller as RoomCaller, Fanout as RoomFanout, SharedRooms,
@@ -97,6 +96,18 @@ pub(crate) mod media;
 pub(crate) mod moderation;
 pub(crate) mod notify;
 pub(crate) mod social;
+
+/// A stable key that groups the frames of one Coalescable stream by an id.
+///
+/// The gateway's out-of-band notification path derives its key the same way, so an
+/// in-band notification published here and an out-of-band one published there coalesce
+/// into the same stream for a subscriber watching both.
+pub(crate) fn coalesce_key_of(id: &Id) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut hasher);
+    hasher.finish()
+}
 
 pub struct AppDispatcher {
     messaging: SharedMessaging,
@@ -254,13 +265,15 @@ impl Dispatcher for AppDispatcher {
 
             // --- presence ---
             Opcode::PresenceSet => {
-                // The bandwidth mode only shapes heartbeat cadence, which `set` does not consult;
-                // the request itself carries the state being set. The default is fine here.
+                // The mode the session negotiated in its HELLO, at last reaching the
+                // crate it was meant for: presence stores it per device, because a
+                // LowData session's punctual heartbeats must not expire against a
+                // Normal cadence it never runs (section 75).
                 let caller = PresenceCaller::new(
                     identity.account_id(),
                     identity.device_id(),
                     identity.tier,
-                    BandwidthMode::default(),
+                    context.bandwidth_mode(),
                     now,
                 );
                 let request: PresenceUpdate = from_frame(frame).map_err(fault::from_wire)?;
@@ -438,10 +451,10 @@ impl Dispatcher for AppDispatcher {
 
             // --- social ---
             Opcode::FriendRequest => {
-                social::handle_friend_request(context, frame, &self.social).await
+                social::handle_friend_request(context, frame, &self.social, &self.notify).await
             }
             Opcode::FriendRespond => {
-                social::handle_friend_respond(context, frame, &self.social).await
+                social::handle_friend_respond(context, frame, &self.social, &self.notify).await
             }
             Opcode::BlockSet => social::handle_block_set(context, frame, &self.social).await,
             Opcode::RelationshipList => {

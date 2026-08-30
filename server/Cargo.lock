@@ -1884,19 +1884,23 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "bytes",
  "hex",
  "migo-auth",
  "migo-cache",
  "migo-captcha",
  "migo-core",
+ "migo-media",
  "migo-protocol",
  "migo-ratelimit",
  "migo-store",
+ "parking_lot",
  "serde",
  "serde_json",
  "tokio",
  "tower",
  "tower-http",
+ "tracing",
 ]
 
 [[package]]

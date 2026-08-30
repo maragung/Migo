@@ -1676,7 +1676,7 @@ async fn end_to_end_bytes_are_not_sniffed_and_are_cleared_at_once() {
 }
 
 #[tokio::test]
-async fn a_server_readable_object_is_pending_until_something_scans_it() {
+async fn a_server_readable_object_is_scanned_at_commit() {
     let harness = Harness::new();
     harness.cast().await;
     let alice = caller(ALICE, ALICE_PHONE);
@@ -1700,19 +1700,23 @@ async fn a_server_readable_object_is_pending_until_something_scans_it() {
         .await
         .expect("a real PNG commits");
 
-    assert_eq!(stored.scan, Scan::Pending);
+    // The built-in scanner runs on the head the commit already read, so a committed
+    // server-readable object is never left pending: the previous design parked every
+    // such object at Pending waiting for a scanner that no composition ever wired,
+    // which quietly made room media and avatars permanently unservable to anyone but
+    // the owner. The row starts from the verdict this scan found; a deployment running
+    // a stricter scanner lowers it through `record_scan` afterwards.
+    assert_eq!(stored.scan, Scan::Clean);
     assert_eq!(
         harness
             .media
             .status_of(stored.media_id)
             .await
             .expect("the queue answers"),
-        Some(Scan::Pending)
+        Some(Scan::Clean)
     );
-    // An avatar is a profile object and has no conversation, so there is no encryption
-    // mode to read. It is scannable and therefore pending too: an unknown mode counts
-    // as scannable, because a build must not clear an object on the strength of not
-    // understanding it.
+    // An avatar is a profile object with no conversation, so there is no encryption
+    // mode to read — it is scannable, and the same inline scan clears it.
     let profile = harness
         .media
         .begin(&alice, avatar())
@@ -1734,7 +1738,7 @@ async fn a_server_readable_object_is_pending_until_something_scans_it() {
         )
         .await
         .expect("an avatar commits");
-    assert_eq!(face.scan, Scan::Pending);
+    assert_eq!(face.scan, Scan::Clean);
 }
 
 // ---------------------------------------------------------------------------
@@ -1938,22 +1942,28 @@ async fn upload(harness: &Harness, who: &Caller, request: UploadRequest, bytes: 
 }
 
 #[tokio::test]
-async fn an_owner_can_read_their_own_object_before_it_is_cleared() {
+async fn an_owner_can_read_their_own_object_even_when_a_scanner_rejected_it() {
     let harness = Harness::new();
     harness.cast().await;
     let alice = caller(ALICE, ALICE_PHONE);
 
     let stored = upload(&harness, &alice, image_into(CHAT), &payload(PNG, 4_096)).await;
-    assert_eq!(stored.scan, Scan::Pending);
+    assert_eq!(stored.scan, Scan::Clean);
+    // The owner exemption has to survive a scanner's rejection, not just the pending
+    // window it used to cover: otherwise a false positive from a future scanner means
+    // sending a picture and never seeing the picture you sent. A rejection is lowered
+    // through the same `record_scan` a deployment's stricter scanner uses.
+    harness
+        .media
+        .record_scan(stored.media_id, Verdict::Rejected, ts(NOW + MINUTE))
+        .await
+        .expect("a scanner may record a rejection");
 
-    // The owner's exemption sits above the scan check, so somebody whose own upload is
-    // still being scanned can still see it. Otherwise sending a picture would mean not
-    // being able to see the picture you just sent.
     let grant = harness
         .media
         .fetch_url(&alice, stored.media_id)
         .await
-        .expect("the owner may fetch a pending object");
+        .expect("the owner may fetch their own rejected object");
     assert_eq!(
         grant.expires_at.as_millis(),
         NOW + harness.media.policy().download_ttl_ms
@@ -1970,7 +1980,7 @@ async fn an_owner_can_read_their_own_object_before_it_is_cleared() {
 }
 
 #[tokio::test]
-async fn a_member_waits_for_the_scan_and_is_told_to_come_back() {
+async fn a_member_is_served_a_committed_object_and_blocked_only_by_a_rejection() {
     let harness = Harness::new();
     harness.cast().await;
     let alice = caller(ALICE, ALICE_PHONE);
@@ -1978,33 +1988,36 @@ async fn a_member_waits_for_the_scan_and_is_told_to_come_back() {
 
     let stored = upload(&harness, &alice, image_into(CHAT), &payload(PNG, 4_096)).await;
 
-    // Bob is in the conversation, so he is authorised. The object is not cleared, so he
-    // is not served it -- and the refusal says "not yet", not "no such thing", because
-    // the answer will change on its own and a client that gives up permanently on a
-    // retryable refusal shows a broken image forever.
+    // Bob is in the conversation, so he is authorised, and the object was scanned at
+    // commit, so he is served it at once. This is the path the old design dead-ended:
+    // the object sat Pending forever and a member saw "come back later" for media that
+    // had already passed every check this build knows how to run.
+    harness
+        .media
+        .fetch_url(&bob, stored.media_id)
+        .await
+        .expect("a committed object is served to a member at once");
+    assert_eq!(harness.storage.download_count(), 1);
+
+    // A scanner's rejection puts it back out of reach for members, and the refusal
+    // says "not cleared" rather than "no such thing": the answer changed on its own
+    // once and can change again, so a client shows a retryable state, not a broken
+    // image forever.
+    harness
+        .media
+        .record_scan(stored.media_id, Verdict::Rejected, ts(NOW + MINUTE))
+        .await
+        .expect("a scanner may record a rejection");
     let error = harness
         .media
         .fetch_url(&bob, stored.media_id)
         .await
-        .expect_err("a pending object is not served to a member");
+        .expect_err("a rejected object is not served to a member");
     assert_eq!(error.code(), codes::MEDIA_UNAVAILABLE);
     assert_eq!(
         harness.counter("migo_media_url_grants_total", "outcome", "not_cleared"),
         1
     );
-    assert_eq!(harness.storage.download_count(), 0);
-
-    // Cleared, and now he is.
-    harness
-        .media
-        .record_scan(stored.media_id, Verdict::Clean, ts(NOW + MINUTE))
-        .await
-        .expect("a scanner may record a verdict");
-    harness
-        .media
-        .fetch_url(&bob, stored.media_id)
-        .await
-        .expect("a cleared object is served to a member");
     assert_eq!(harness.storage.download_count(), 1);
     assert_eq!(
         harness.counter("migo_media_scan_results_total", "status", "clean"),
@@ -2114,12 +2127,16 @@ async fn what_a_client_is_told_about_an_object_leaves_out_the_bucket() {
     assert_eq!(stored.width, Some(800));
     assert_eq!(stored.height, Some(600));
     assert_eq!(stored.duration_ms, None);
-    assert_eq!(stored.scan, Scan::Pending);
+    assert_eq!(stored.scan, Scan::Clean);
     assert_eq!(stored.checksum, None);
     assert_eq!(stored.created_at, ts(NOW));
 
-    // The row does carry both, because the server needs them; the projection is what
-    // drops them.
+    // The row does carry both, because the server needs them. The projection carries the
+    // conversation — the committer named it in their own upload, and the commit handler
+    // needs it to tell that conversation the object exists — but never the storage key,
+    // which is the private naming of a private bucket. Neither reaches the wire: the
+    // commit's wire reply is an `Acknowledged`, full stop.
+    assert_eq!(stored.conversation_id, Some(id(CHAT)));
     let row = harness
         .store
         .media(stored.media_id)
@@ -2130,7 +2147,6 @@ async fn what_a_client_is_told_about_an_object_leaves_out_the_bucket() {
     assert!(!row.storage_key.is_empty());
     let rendered = format!("{stored:?}");
     assert!(!rendered.contains(&row.storage_key));
-    assert!(!rendered.contains(&id(CHAT).to_text()));
 }
 
 // ---------------------------------------------------------------------------

@@ -570,10 +570,11 @@ mod tests {
             gateway.inner.settings.resume_buffer_frames,
             gateway.inner.settings.resume_window_ms,
         ));
-        gateway
-            .inner
-            .hub
-            .register(SessionHandle::new(session_id, Arc::clone(&outbound)));
+        gateway.inner.hub.register(SessionHandle::new(
+            session_id,
+            Arc::clone(&outbound),
+            migo_protocol::BandwidthMode::Normal,
+        ));
         let room = Topic {
             kind: TopicKind::Room,
             id: Id::from(0x00C3),

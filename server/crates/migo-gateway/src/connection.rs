@@ -196,7 +196,7 @@ impl<T: Transport> Connection<'_, T> {
             return None;
         }
 
-        let handle = SessionHandle::new(session_id, Arc::clone(&outbound));
+        let handle = SessionHandle::new(session_id, Arc::clone(&outbound), hello.bandwidth_mode);
         self.gateway.hub.register(handle.clone());
         self.gateway.meters.session_opened();
 

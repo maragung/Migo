@@ -107,14 +107,14 @@ impl Harness {
     /// The default surface: registration allowed, a 1 MiB body ceiling, real limiter shared
     /// between the edge and the domain, as `migod` wires it.
     fn new() -> Self {
-        Self::build(base_config(), None)
+        Self::build(base_config(), None, None)
     }
 
     /// A surface built from a caller-mutated config, for the body-ceiling and feature-flag tests.
     fn with(mutate: impl FnOnce(&mut Config)) -> Self {
         let mut config = base_config();
         mutate(&mut config);
-        Self::build(config, None)
+        Self::build(config, None, None)
     }
 
     /// A surface whose *edge* limiter always faults, so a bootstrap route is forced through the
@@ -124,10 +124,14 @@ impl Harness {
             policies: Policies::default(),
             boom: boom.to_string(),
         });
-        Self::build(base_config(), Some(edge))
+        Self::build(base_config(), Some(edge), None)
     }
 
-    fn build(mut config: Config, edge_limiter: Option<SharedRateLimiter>) -> Self {
+    fn build(
+        mut config: Config,
+        edge_limiter: Option<SharedRateLimiter>,
+        media_files: Option<migo_api::SharedMediaFiles>,
+    ) -> Self {
         if config.auth.token_key.is_none() {
             config.auth.token_key = Some(Secret::new(TEST_KEY));
         }
@@ -160,6 +164,7 @@ impl Harness {
                 country: NODE_COUNTRY.to_string(),
             },
             features: FEATURES,
+            media_files,
         };
         let app = router(&config, services);
         Self {
@@ -1199,7 +1204,9 @@ async fn there_is_no_debug_or_reset_route() {
 // --- no media proxy surface (invariant 6) -------------------------------------------------
 
 #[tokio::test]
-async fn there_is_no_media_or_file_proxy_route() {
+async fn there_is_no_media_or_file_proxy_route_when_the_data_plane_is_remote() {
+    // The default harness wires no byte store, which is the S3 posture: storage serves
+    // its own bytes, and this process must not pretend to be an object store it is not.
     let h = Harness::new();
     for path in [
         "/media/x",
@@ -1215,6 +1222,156 @@ async fn there_is_no_media_or_file_proxy_route() {
             "{path} should not exist"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The media data plane
+//
+// The filesystem backend's URLs point at this very process, so the byte routes are the
+// other half of section 168's split: control plane on the socket, bytes on HTTP. An
+// in-memory MediaFiles stand-in keeps the test off the disk while exercising the routes'
+// own rules — the size ceiling, the traversal guard, the sniff-served content type, and
+// the refusal to serve what the scanner refuses.
+// ---------------------------------------------------------------------------
+
+/// An in-memory byte store: one key, one blob. The mutex is `parking_lot`'s, like every
+/// other lock these tests hold, so `.lock()` is the value and not a `LockResult`.
+struct MemoryFiles {
+    objects: parking_lot::Mutex<std::collections::HashMap<String, bytes::Bytes>>,
+}
+
+#[async_trait::async_trait]
+impl migo_api::MediaFiles for MemoryFiles {
+    async fn write(&self, key: &str, bytes: bytes::Bytes) -> migo_core::Result<()> {
+        self.objects.lock().insert(key.to_string(), bytes);
+        Ok(())
+    }
+
+    async fn read(&self, key: &str) -> migo_core::Result<bytes::Bytes> {
+        self.objects
+            .lock()
+            .get(key)
+            .cloned()
+            .ok_or_else(|| migo_protocol::fault::not_found("media object"))
+    }
+}
+
+/// A harness whose data plane is local, over a recording byte store.
+fn media_harness() -> (Harness, Arc<MemoryFiles>) {
+    let files = Arc::new(MemoryFiles {
+        objects: parking_lot::Mutex::new(std::collections::HashMap::new()),
+    });
+    (
+        Harness::build(base_config(), None, Some(files.clone())),
+        files,
+    )
+}
+
+/// A local-data-plane harness whose upload ceiling is `ceiling` bytes.
+fn media_harness_capped(ceiling: u64) -> (Harness, Arc<MemoryFiles>) {
+    let mut config = base_config();
+    config.media.max_upload_bytes = ceiling;
+    let files = Arc::new(MemoryFiles {
+        objects: parking_lot::Mutex::new(std::collections::HashMap::new()),
+    });
+    (Harness::build(config, None, Some(files.clone())), files)
+}
+
+/// A minimal PNG: the eight-byte magic is what the sniff serves `image/png` on.
+fn png_bytes() -> bytes::Bytes {
+    bytes::Bytes::from_static(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A])
+}
+
+#[tokio::test]
+async fn a_media_object_round_trips_with_the_type_its_bytes_declare() {
+    let (h, _files) = media_harness();
+
+    let put = h
+        .send(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/media/c/2026/ab12.png")
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from(png_bytes()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(put.status, StatusCode::NO_CONTENT, "the upload lands");
+
+    let got = h.send(get("/media/c/2026/ab12.png")).await;
+    assert_eq!(got.status, StatusCode::OK, "the download answers");
+    let content_type = got
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    assert_eq!(
+        content_type, "image/png",
+        "the type comes from the bytes, not the upload's claim"
+    );
+    assert_eq!(got.bytes, png_bytes().to_vec(), "the bytes round-trip");
+}
+
+#[tokio::test]
+async fn a_key_that_tries_to_climb_out_of_the_media_root_is_refused() {
+    let (h, files) = media_harness();
+    for key in [
+        "/media/../secret",
+        "/media/a/../../etc/passwd",
+        "/media//double",
+        "/media/./dot",
+    ] {
+        let resp = h
+            .send(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri(key)
+                    .body(Body::from(png_bytes()))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::NOT_FOUND, "{key} is refused");
+    }
+    assert!(
+        files.objects.lock().is_empty(),
+        "nothing was written while probing the guard"
+    );
+}
+
+#[tokio::test]
+async fn an_upload_over_the_ceiling_is_refused_before_it_is_stored() {
+    // A one-kilobyte ceiling, and a body twice that.
+    let (h, files) = media_harness_capped(1_024);
+    let big = vec![0u8; 2_048];
+    let resp = h
+        .send(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/media/too-big")
+                .body(Body::from(big))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(
+        files.objects.lock().is_empty(),
+        "the refused bytes were never stored"
+    );
+}
+
+#[tokio::test]
+async fn bytes_the_scanner_refuses_are_never_served() {
+    let (h, files) = media_harness();
+    files.objects.lock().insert(
+        "html-ish".to_string(),
+        bytes::Bytes::from_static(b"<html><body>x"),
+    );
+    let resp = h.send(get("/media/html-ish")).await;
+    assert_eq!(
+        resp.status,
+        StatusCode::NOT_FOUND,
+        "polyglot HTML answers as if it were not there"
+    );
 }
 
 #[tokio::test]

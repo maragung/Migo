@@ -247,3 +247,92 @@ impl Rewards for EconomyRewards {
         Ok(())
     }
 }
+
+// --- the media data plane ---------------------------------------------------------
+//
+// The API's byte routes (PUT/GET under the public media path) need exactly two
+// operations on the filesystem backend — write the bytes where the key says, read them
+// back — and the media service's own `Storage` port deliberately has neither: grants and
+// heads are ticketing concerns, not transport. Implementing `MediaFiles` here keeps the
+// traversal rule in one place, next to the resolver it mirrors.
+
+#[async_trait]
+impl migo_api::MediaFiles for FsStorage {
+    async fn write(&self, key: &str, bytes: bytes::Bytes) -> migo_core::Result<()> {
+        use tokio::io::AsyncWriteExt as _;
+
+        let path = self.resolve(key)?;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|error| fault::storage(error.to_string()))?;
+        }
+        let mut file = tokio::fs::File::create(&path)
+            .await
+            .map_err(|error| fault::storage(error.to_string()))?;
+        file.write_all(&bytes)
+            .await
+            .map_err(|error| fault::storage(error.to_string()))?;
+        file.flush()
+            .await
+            .map_err(|error| fault::storage(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn read(&self, key: &str) -> migo_core::Result<bytes::Bytes> {
+        let path = self.resolve(key)?;
+        let bytes = tokio::fs::read(&path).await.map_err(|error| {
+            if error.kind() == IoErrorKind::NotFound {
+                fault::not_found("media object")
+            } else {
+                fault::storage(error.to_string())
+            }
+        })?;
+        Ok(bytes::Bytes::from(bytes))
+    }
+}
+
+// --- the economy's notifications --------------------------------------------------
+//
+// `migo-economy` tells the world what happened through its `Announcer` port; the
+// composition root decides what telling means here. This adapter stores a notification
+// row for every announcement — the inbox half. The realtime half (a `NOTIFICATION_EVENT`
+// broadcast) cannot live here: the port fires inside the service, mid-transaction, with
+// no connection context to publish from, so the dispatcher publishes it for the paths a
+// user can watch (gifts) and everything else waits in the inbox until the client asks.
+
+/// An [`Announcer`](migo_economy::Announcer) that stores every announcement as a
+/// notification row.
+pub struct NotifyingAnnouncer {
+    notifier: migo_notify::SharedNotifier,
+}
+
+impl NotifyingAnnouncer {
+    /// Builds the adapter over the process's notifier.
+    #[must_use]
+    pub fn new(notifier: migo_notify::SharedNotifier) -> Self {
+        Self { notifier }
+    }
+}
+
+#[async_trait]
+impl migo_economy::Announcer for NotifyingAnnouncer {
+    async fn announce(&self, announcement: migo_economy::Announcement) -> Result<()> {
+        let event = migo_notify::Event {
+            account_id: announcement.account_id,
+            kind: announcement.kind,
+            actor_id: announcement.actor_id,
+            room_id: None,
+            subject_id: announcement.subject_id,
+            at: announcement.at,
+        };
+        // The notifier treats a delivery failure as Ok (logged, counted); an Err here
+        // is the store being broken, and the economy's contract says that is logged and
+        // swallowed — the gift is recorded, the balance is right, and the row is what a
+        // missing buzz costs.
+        if let Err(error) = self.notifier.notify(event).await {
+            tracing::warn!(code = error.code(), "economy notification dropped");
+        }
+        Ok(())
+    }
+}

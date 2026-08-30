@@ -29,3 +29,4 @@ LICENSE
 .pgdata/
 .tmp/
 .commandcode/
+var/

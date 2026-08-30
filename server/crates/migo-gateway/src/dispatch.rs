@@ -99,6 +99,16 @@ impl<'a> ClientContext<'a> {
         self.session.session_id()
     }
 
+    /// The bandwidth mode the calling session negotiated in its `HELLO`.
+    ///
+    /// The one knob of section 75 a handler needs: presence paces itself by it, and any
+    /// future per-mode behaviour reads it from here rather than each domain rediscovering
+    /// the handshake.
+    #[must_use]
+    pub fn bandwidth_mode(&self) -> migo_protocol::BandwidthMode {
+        self.session.bandwidth_mode()
+    }
+
     /// The server's notion of now, sampled once when the frame arrived.
     #[must_use]
     pub fn now(&self) -> Timestamp {
