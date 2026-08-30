@@ -2913,6 +2913,361 @@
      "type": "list<RankWire>"
     }
    ]
+  },
+  {
+   "name": "CallInvite",
+   "doc": "Invites a callee to a call.",
+   "fields": [
+    {
+     "name": "call_id",
+     "type": "id",
+     "doc": "Client-minted; also the idempotency key."
+    },
+    {
+     "name": "conversation_id",
+     "type": "id"
+    },
+    {
+     "name": "callee_id",
+     "type": "id"
+    },
+    {
+     "name": "media_kind",
+     "type": "u32",
+     "doc": "0=Audio, 1=Video."
+    },
+    {
+     "name": "caller_device",
+     "type": "id"
+    },
+    {
+     "name": "capabilities",
+     "type": "bitmask64",
+     "doc": "Codec and feature negotiation."
+    },
+    {
+     "name": "sealed_offer",
+     "type": "bytes",
+     "doc": "E2E-sealed SDP offer; the server never reads it."
+    }
+   ]
+  },
+  {
+   "name": "CallInviteResult",
+   "doc": "The caller's answer to its own invite.",
+   "fields": [
+    {
+     "name": "call_id",
+     "type": "id"
+    },
+    {
+     "name": "status",
+     "type": "u32",
+     "doc": "0=Ringing, 1=Declined, 2=Expired, 3=Blocked."
+    },
+    {
+     "name": "expires_at",
+     "type": "timestamp"
+    }
+   ]
+  },
+  {
+   "name": "CallInviteEvent",
+   "doc": "Tells the callee a call is ringing.",
+   "fields": [
+    {
+     "name": "call_id",
+     "type": "id"
+    },
+    {
+     "name": "conversation_id",
+     "type": "id"
+    },
+    {
+     "name": "caller_id",
+     "type": "id"
+    },
+    {
+     "name": "caller_device",
+     "type": "id"
+    },
+    {
+     "name": "media_kind",
+     "type": "u32"
+    },
+    {
+     "name": "expires_at",
+     "type": "timestamp"
+    },
+    {
+     "name": "sealed_offer",
+     "type": "bytes"
+    }
+   ]
+  },
+  {
+   "name": "CallAnswer",
+   "doc": "The callee answers.",
+   "fields": [
+    {
+     "name": "call_id",
+     "type": "id"
+    },
+    {
+     "name": "callee_device",
+     "type": "id"
+    },
+    {
+     "name": "sealed_answer",
+     "type": "bytes",
+     "doc": "E2E-sealed SDP answer."
+    }
+   ]
+  },
+  {
+   "name": "CallDecline",
+   "doc": "The callee declines.",
+   "fields": [
+    {
+     "name": "call_id",
+     "type": "id"
+    },
+    {
+     "name": "reason",
+     "type": "u32",
+     "doc": "0=Busy, 1=Declined."
+    }
+   ]
+  },
+  {
+   "name": "CallCancel",
+   "doc": "The caller cancels before an answer.",
+   "fields": [
+    {
+     "name": "call_id",
+     "type": "id"
+    }
+   ]
+  },
+  {
+   "name": "CallEnd",
+   "doc": "Ends an established call; always with a reason.",
+   "fields": [
+    {
+     "name": "call_id",
+     "type": "id"
+    },
+    {
+     "name": "reason",
+     "type": "u32",
+     "doc": "0=ByCaller, 1=ByCallee, 2=Declined, 3=NoAnswer, 4=Failed, 5=Network."
+    }
+   ]
+  },
+  {
+   "name": "CallSdp",
+   "doc": "Relays a sealed SDP offer or answer between devices.",
+   "fields": [
+    {
+     "name": "call_id",
+     "type": "id"
+    },
+    {
+     "name": "from_device",
+     "type": "id"
+    },
+    {
+     "name": "to_device",
+     "type": "id"
+    },
+    {
+     "name": "sealed_sdp",
+     "type": "bytes",
+     "doc": "E2E-sealed SDP blob."
+    }
+   ]
+  },
+  {
+   "name": "CallIce",
+   "doc": "Relays a batch of sealed ICE candidates.",
+   "fields": [
+    {
+     "name": "call_id",
+     "type": "id"
+    },
+    {
+     "name": "from_device",
+     "type": "id"
+    },
+    {
+     "name": "to_device",
+     "type": "id"
+    },
+    {
+     "name": "sealed_candidates",
+     "type": "bytes",
+     "doc": "A batch of sealed ICE candidates, not one frame per candidate."
+    }
+   ]
+  },
+  {
+   "name": "CallStateEvent",
+   "doc": "A call's state change, pushed to participants.",
+   "fields": [
+    {
+     "name": "call_id",
+     "type": "id"
+    },
+    {
+     "name": "state",
+     "type": "u32",
+     "doc": "0=Ringing, 1=Connecting, 2=Connected, 3=Reconnecting, 4=Ended."
+    },
+    {
+     "name": "reason",
+     "type": "u32",
+     "optional": true,
+     "id": 1,
+     "doc": "Present when state is Ended."
+    }
+   ]
+  },
+  {
+   "name": "CallRenegotiate",
+   "doc": "Renegotiates codecs/streams mid-call (e.g. ICE restart, add video).",
+   "fields": [
+    {
+     "name": "call_id",
+     "type": "id"
+    },
+    {
+     "name": "from_device",
+     "type": "id"
+    },
+    {
+     "name": "to_device",
+     "type": "id"
+    },
+    {
+     "name": "sealed_sdp",
+     "type": "bytes"
+    }
+   ]
+  },
+  {
+   "name": "CallKeyUpdate",
+   "doc": "Re-keys the call's media encryption (e.g. membership change).",
+   "fields": [
+    {
+     "name": "call_id",
+     "type": "id"
+    },
+    {
+     "name": "epoch",
+     "type": "u64"
+    },
+    {
+     "name": "sealed_key_material",
+     "type": "bytes"
+    }
+   ]
+  },
+  {
+   "name": "CallStats",
+   "doc": "Aggregate quality numbers; Droppable; never call content.",
+   "fields": [
+    {
+     "name": "call_id",
+     "type": "id"
+    },
+    {
+     "name": "setup_ms",
+     "type": "u32",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "rtt_ms",
+     "type": "u32",
+     "optional": true,
+     "id": 2
+    },
+    {
+     "name": "packet_loss",
+     "type": "u32",
+     "optional": true,
+     "id": 3,
+     "doc": "Per-10000."
+    },
+    {
+     "name": "jitter_ms",
+     "type": "u32",
+     "optional": true,
+     "id": 4
+    },
+    {
+     "name": "used_turn",
+     "type": "bool",
+     "optional": true,
+     "id": 5
+    }
+   ]
+  },
+  {
+   "name": "TurnServer",
+   "doc": "One TURN relay with short-lived credentials.",
+   "fields": [
+    {
+     "name": "url",
+     "type": "string"
+    },
+    {
+     "name": "username",
+     "type": "string"
+    },
+    {
+     "name": "credential",
+     "type": "string"
+    },
+    {
+     "name": "ttl_seconds",
+     "type": "u32"
+    },
+    {
+     "name": "region",
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "name": "CallTurnFetch",
+   "doc": "Requests TURN credentials for a call.",
+   "fields": [
+    {
+     "name": "call_id",
+     "type": "id"
+    }
+   ]
+  },
+  {
+   "name": "CallTurnResponse",
+   "doc": "TURN servers with temporary credentials.",
+   "fields": [
+    {
+     "name": "servers",
+     "type": "list<TurnServer>"
+    }
+   ]
+  },
+  {
+   "name": "CallId",
+   "doc": "Identifies one call.",
+   "fields": [
+    {
+     "name": "call_id",
+     "type": "id"
+    }
+   ]
   }
  ]
 }

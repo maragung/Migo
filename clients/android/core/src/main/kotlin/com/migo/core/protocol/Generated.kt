@@ -6509,6 +6509,615 @@ data class LeaderboardResponse(
     }
 }
 
+/** Invites a callee to a call. */
+data class CallInvite(
+    /** Client-minted; also the idempotency key. */
+    val callId: Id,
+    val conversationId: Id,
+    val calleeId: Id,
+    /** 0=Audio, 1=Video. */
+    val mediaKind: Long,
+    val callerDevice: Id,
+    /** Codec and feature negotiation. */
+    val capabilities: ULong,
+    /** E2E-sealed SDP offer; the server never reads it. */
+    val sealedOffer: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(callId)
+        w.id(conversationId)
+        w.id(calleeId)
+        w.u32(mediaKind)
+        w.id(callerDevice)
+        w.u64big(capabilities)
+        w.bytes(sealedOffer)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallInvite {
+            r.enter()
+            val callId = r.id()
+            val conversationId = r.id()
+            val calleeId = r.id()
+            val mediaKind = r.u32()
+            val callerDevice = r.id()
+            val capabilities = r.u64big()
+            val sealedOffer = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CallInvite(callId, conversationId, calleeId, mediaKind, callerDevice, capabilities, sealedOffer)
+        }
+    }
+}
+
+/** The caller's answer to its own invite. */
+data class CallInviteResult(
+    val callId: Id,
+    /** 0=Ringing, 1=Declined, 2=Expired, 3=Blocked. */
+    val status: Long,
+    val expiresAt: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(callId)
+        w.u32(status)
+        w.timestamp(expiresAt)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallInviteResult {
+            r.enter()
+            val callId = r.id()
+            val status = r.u32()
+            val expiresAt = r.timestamp()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CallInviteResult(callId, status, expiresAt)
+        }
+    }
+}
+
+/** Tells the callee a call is ringing. */
+data class CallInviteEvent(
+    val callId: Id,
+    val conversationId: Id,
+    val callerId: Id,
+    val callerDevice: Id,
+    val mediaKind: Long,
+    val expiresAt: Long,
+    val sealedOffer: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(callId)
+        w.id(conversationId)
+        w.id(callerId)
+        w.id(callerDevice)
+        w.u32(mediaKind)
+        w.timestamp(expiresAt)
+        w.bytes(sealedOffer)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallInviteEvent {
+            r.enter()
+            val callId = r.id()
+            val conversationId = r.id()
+            val callerId = r.id()
+            val callerDevice = r.id()
+            val mediaKind = r.u32()
+            val expiresAt = r.timestamp()
+            val sealedOffer = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CallInviteEvent(callId, conversationId, callerId, callerDevice, mediaKind, expiresAt, sealedOffer)
+        }
+    }
+}
+
+/** The callee answers. */
+data class CallAnswer(
+    val callId: Id,
+    val calleeDevice: Id,
+    /** E2E-sealed SDP answer. */
+    val sealedAnswer: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(callId)
+        w.id(calleeDevice)
+        w.bytes(sealedAnswer)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallAnswer {
+            r.enter()
+            val callId = r.id()
+            val calleeDevice = r.id()
+            val sealedAnswer = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CallAnswer(callId, calleeDevice, sealedAnswer)
+        }
+    }
+}
+
+/** The callee declines. */
+data class CallDecline(
+    val callId: Id,
+    /** 0=Busy, 1=Declined. */
+    val reason: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(callId)
+        w.u32(reason)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallDecline {
+            r.enter()
+            val callId = r.id()
+            val reason = r.u32()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CallDecline(callId, reason)
+        }
+    }
+}
+
+/** The caller cancels before an answer. */
+data class CallCancel(
+    val callId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(callId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallCancel {
+            r.enter()
+            val callId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CallCancel(callId)
+        }
+    }
+}
+
+/** Ends an established call; always with a reason. */
+data class CallEnd(
+    val callId: Id,
+    /** 0=ByCaller, 1=ByCallee, 2=Declined, 3=NoAnswer, 4=Failed, 5=Network. */
+    val reason: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(callId)
+        w.u32(reason)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallEnd {
+            r.enter()
+            val callId = r.id()
+            val reason = r.u32()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CallEnd(callId, reason)
+        }
+    }
+}
+
+/** Relays a sealed SDP offer or answer between devices. */
+data class CallSdp(
+    val callId: Id,
+    val fromDevice: Id,
+    val toDevice: Id,
+    /** E2E-sealed SDP blob. */
+    val sealedSdp: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(callId)
+        w.id(fromDevice)
+        w.id(toDevice)
+        w.bytes(sealedSdp)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallSdp {
+            r.enter()
+            val callId = r.id()
+            val fromDevice = r.id()
+            val toDevice = r.id()
+            val sealedSdp = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CallSdp(callId, fromDevice, toDevice, sealedSdp)
+        }
+    }
+}
+
+/** Relays a batch of sealed ICE candidates. */
+data class CallIce(
+    val callId: Id,
+    val fromDevice: Id,
+    val toDevice: Id,
+    /** A batch of sealed ICE candidates, not one frame per candidate. */
+    val sealedCandidates: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(callId)
+        w.id(fromDevice)
+        w.id(toDevice)
+        w.bytes(sealedCandidates)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallIce {
+            r.enter()
+            val callId = r.id()
+            val fromDevice = r.id()
+            val toDevice = r.id()
+            val sealedCandidates = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CallIce(callId, fromDevice, toDevice, sealedCandidates)
+        }
+    }
+}
+
+/** A call's state change, pushed to participants. */
+data class CallStateEvent(
+    val callId: Id,
+    /** 0=Ringing, 1=Connecting, 2=Connected, 3=Reconnecting, 4=Ended. */
+    val state: Long,
+    /** Present when state is Ended. */
+    val reason: Long? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(callId)
+        w.u32(state)
+        var present = 0
+        if (reason != null) present++
+        w.u32(present)
+        if (reason != null) {
+            val value = reason
+            w.optional(1) { w ->
+                w.u32(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallStateEvent {
+            r.enter()
+            val callId = r.id()
+            val state = r.u32()
+            var reason: Long? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> reason = sub.u32()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return CallStateEvent(callId, state, reason)
+        }
+    }
+}
+
+/** Renegotiates codecs/streams mid-call (e.g. ICE restart, add video). */
+data class CallRenegotiate(
+    val callId: Id,
+    val fromDevice: Id,
+    val toDevice: Id,
+    val sealedSdp: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(callId)
+        w.id(fromDevice)
+        w.id(toDevice)
+        w.bytes(sealedSdp)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallRenegotiate {
+            r.enter()
+            val callId = r.id()
+            val fromDevice = r.id()
+            val toDevice = r.id()
+            val sealedSdp = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CallRenegotiate(callId, fromDevice, toDevice, sealedSdp)
+        }
+    }
+}
+
+/** Re-keys the call's media encryption (e.g. membership change). */
+data class CallKeyUpdate(
+    val callId: Id,
+    val epoch: Long,
+    val sealedKeyMaterial: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(callId)
+        w.u64(epoch)
+        w.bytes(sealedKeyMaterial)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallKeyUpdate {
+            r.enter()
+            val callId = r.id()
+            val epoch = r.u64()
+            val sealedKeyMaterial = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CallKeyUpdate(callId, epoch, sealedKeyMaterial)
+        }
+    }
+}
+
+/** Aggregate quality numbers; Droppable; never call content. */
+data class CallStats(
+    val callId: Id,
+    val setupMs: Long? = null,
+    val rttMs: Long? = null,
+    /** Per-10000. */
+    val packetLoss: Long? = null,
+    val jitterMs: Long? = null,
+    val usedTurn: Boolean? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(callId)
+        var present = 0
+        if (setupMs != null) present++
+        if (rttMs != null) present++
+        if (packetLoss != null) present++
+        if (jitterMs != null) present++
+        if (usedTurn != null) present++
+        w.u32(present)
+        if (setupMs != null) {
+            val value = setupMs
+            w.optional(1) { w ->
+                w.u32(value)
+            }
+        }
+        if (rttMs != null) {
+            val value = rttMs
+            w.optional(2) { w ->
+                w.u32(value)
+            }
+        }
+        if (packetLoss != null) {
+            val value = packetLoss
+            w.optional(3) { w ->
+                w.u32(value)
+            }
+        }
+        if (jitterMs != null) {
+            val value = jitterMs
+            w.optional(4) { w ->
+                w.u32(value)
+            }
+        }
+        if (usedTurn != null) {
+            val value = usedTurn
+            w.optional(5) { w ->
+                w.bool(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallStats {
+            r.enter()
+            val callId = r.id()
+            var setupMs: Long? = null
+            var rttMs: Long? = null
+            var packetLoss: Long? = null
+            var jitterMs: Long? = null
+            var usedTurn: Boolean? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> setupMs = sub.u32()
+                    2L -> rttMs = sub.u32()
+                    3L -> packetLoss = sub.u32()
+                    4L -> jitterMs = sub.u32()
+                    5L -> usedTurn = sub.bool()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return CallStats(callId, setupMs, rttMs, packetLoss, jitterMs, usedTurn)
+        }
+    }
+}
+
+/** One TURN relay with short-lived credentials. */
+data class TurnServer(
+    val url: String,
+    val username: String,
+    val credential: String,
+    val ttlSeconds: Long,
+    val region: String,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(url)
+        w.str(username)
+        w.str(credential)
+        w.u32(ttlSeconds)
+        w.str(region)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): TurnServer {
+            r.enter()
+            val url = r.str()
+            val username = r.str()
+            val credential = r.str()
+            val ttlSeconds = r.u32()
+            val region = r.str()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return TurnServer(url, username, credential, ttlSeconds, region)
+        }
+    }
+}
+
+/** Requests TURN credentials for a call. */
+data class CallTurnFetch(
+    val callId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(callId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallTurnFetch {
+            r.enter()
+            val callId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CallTurnFetch(callId)
+        }
+    }
+}
+
+/** TURN servers with temporary credentials. */
+data class CallTurnResponse(
+    val servers: List<TurnServer>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(servers.size)
+        for (item in servers) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallTurnResponse {
+            r.enter()
+            val servers = run { val n = r.listLen(); val acc = ArrayList<TurnServer>(n); for (i in 0 until n) acc.add(TurnServer.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CallTurnResponse(servers)
+        }
+    }
+}
+
+/** Identifies one call. */
+data class CallId(
+    val callId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(callId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): CallId {
+            r.enter()
+            val callId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return CallId(callId)
+        }
+    }
+}
+
 /** Delivery class, deciding what happens when a session queue is full. */
 enum class DeliveryClass { Critical, Coalescable, Droppable }
 /** Minimum session state an opcode requires. */
@@ -6627,6 +7236,36 @@ object Op {
     const val FED_ERROR: Long = 219L
     const val FED_CALL_RELAY: Long = 220L
     const val FED_DIRECTORY: Long = 221L
+    /** Invites a callee to a call. */
+    const val CALL_INVITE: Long = 224L
+    /** Tells the callee a call is ringing. */
+    const val CALL_INVITE_EVENT: Long = 225L
+    /** The callee answers. */
+    const val CALL_ANSWER: Long = 226L
+    /** The callee declines. */
+    const val CALL_DECLINE: Long = 227L
+    /** The caller cancels before an answer. */
+    const val CALL_CANCEL: Long = 228L
+    /** Ends a call; always with a reason. */
+    const val CALL_END: Long = 229L
+    /** Relays a sealed SDP offer or answer. */
+    const val CALL_SDP: Long = 230L
+    /** Relays a batch of sealed ICE candidates. */
+    const val CALL_ICE: Long = 231L
+    /** A call's state change. */
+    const val CALL_STATE_EVENT: Long = 232L
+    /** Renegotiates mid-call. */
+    const val CALL_RENEGOTIATE: Long = 233L
+    /** Re-keys call media. */
+    const val CALL_KEY_UPDATE: Long = 234L
+    /** Aggregate quality numbers. */
+    const val CALL_STATS: Long = 235L
+    /** Requests TURN credentials. */
+    const val CALL_TURN_FETCH: Long = 236L
+    /** Joins a group call via SFU. */
+    const val CALL_SFU_JOIN: Long = 237L
+    /** SFU group call state. */
+    const val CALL_SFU_EVENT: Long = 238L
 }
 
 /** Static metadata for one opcode: its rate-limit cost, delivery class, required auth, and shape. */
@@ -6729,6 +7368,21 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     219L to OpcodeMeta(219L, "FED_ERROR", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedError", "Acknowledged", null),
     220L to OpcodeMeta(220L, "FED_CALL_RELAY", 1, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedForward", "Acknowledged", null),
     221L to OpcodeMeta(221L, "FED_DIRECTORY", 2, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedDirectoryReq", "FedDirectory", null),
+    224L to OpcodeMeta(224L, "CALL_INVITE", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallInvite", "CallInviteResult", null),
+    225L to OpcodeMeta(225L, "CALL_INVITE_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "CallInviteEvent", null, null),
+    226L to OpcodeMeta(226L, "CALL_ANSWER", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallAnswer", "Acknowledged", null),
+    227L to OpcodeMeta(227L, "CALL_DECLINE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallDecline", "Acknowledged", null),
+    228L to OpcodeMeta(228L, "CALL_CANCEL", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallCancel", "Acknowledged", null),
+    229L to OpcodeMeta(229L, "CALL_END", 2, DeliveryClass.Critical, AuthLevel.User, Direction.Both, false, "CallEnd", "Acknowledged", null),
+    230L to OpcodeMeta(230L, "CALL_SDP", 3, DeliveryClass.Critical, AuthLevel.User, Direction.Both, false, "CallSdp", "Acknowledged", null),
+    231L to OpcodeMeta(231L, "CALL_ICE", 1, DeliveryClass.Critical, AuthLevel.User, Direction.Both, false, "CallIce", "Acknowledged", null),
+    232L to OpcodeMeta(232L, "CALL_STATE_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "CallStateEvent", null, null),
+    233L to OpcodeMeta(233L, "CALL_RENEGOTIATE", 3, DeliveryClass.Critical, AuthLevel.User, Direction.Both, false, "CallRenegotiate", "Acknowledged", null),
+    234L to OpcodeMeta(234L, "CALL_KEY_UPDATE", 3, DeliveryClass.Critical, AuthLevel.User, Direction.Both, false, "CallKeyUpdate", "Acknowledged", null),
+    235L to OpcodeMeta(235L, "CALL_STATS", 1, DeliveryClass.Droppable, AuthLevel.User, Direction.ClientToServer, false, "CallStats", "Acknowledged", null),
+    236L to OpcodeMeta(236L, "CALL_TURN_FETCH", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallTurnFetch", "CallTurnResponse", null),
+    237L to OpcodeMeta(237L, "CALL_SFU_JOIN", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallInvite", "CallTurnResponse", null),
+    238L to OpcodeMeta(238L, "CALL_SFU_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "CallStateEvent", null, null),
 )
 
 /** Human name for an opcode, for logs and errors. Never used on the wire. */

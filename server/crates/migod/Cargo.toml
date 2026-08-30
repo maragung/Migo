@@ -34,6 +34,7 @@ migo-keys       = { workspace = true }
 migo-messaging  = { workspace = true }
 migo-presence   = { workspace = true }
 migo-rooms      = { workspace = true }
+migo-calls      = { workspace = true }
 migo-social     = { workspace = true }
 migo-media      = { workspace = true }
 migo-moderation = { workspace = true }

@@ -1,0 +1,718 @@
+'use client';
+
+/**
+ * The call manager: one React context that owns a device's single live call.
+ *
+ * The SDK's calls domain is pure signaling — it sends what it is handed and delivers what arrives.
+ * This provider is the piece above it that a call UI actually needs: it drives a WebRTC peer
+ * connection in step with the signaling (offer on invite, answer on accept, candidates relaying in
+ * both directions), projects the tracked {@link ActiveCall} the overlay renders, and owns the
+ * teardown so no path — hang up, decline, cancel, expiry, a dropped session — leaves a microphone
+ * open or a peer connection half-alive.
+ *
+ * # Why the caller cannot send ICE until the answer arrives
+ *
+ * An invite names the callee *account*, and the server rings every device on it; which device
+ * answers is not knowable in advance. The answering device names itself in the answer relay's
+ * `fromDevice`, so until that arrives a caller's gathered candidates have nowhere to go — they
+ * batch here, and flush the moment the answer lands. A callee has no such wait: the invite event
+ * already carried `callerDevice`.
+ *
+ * # The reconnect window
+ *
+ * A transport blip must not end a call (section 180): the peer connection going `disconnected`
+ * shows *Reconnecting* and starts a window; media coming back cancels it; the window expiring ends
+ * the call with `Network`. This build does not yet attempt the ICE restart inside the window —
+ * that is `CALL_RENEGOTIATE`'s job and a future task — so the window is a grace period, not a
+ * recovery attempt.
+ *
+ * # The placeholder seal
+ *
+ * Every SDP and ICE blob this manager sends is wrapped by {@link sealCallSignal} — placeholder
+ * key material behind a real envelope shape, the same posture image attachments use. The server
+ * relays bytes it cannot read either way; swapping in real per-device sealing touches the seal
+ * module alone.
+ *
+ * Media content is never logged here — not the SDP, not the candidates, not the streams; failures
+ * are recorded as facts ("could not start the call"), not payloads.
+ */
+
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
+
+import { CallDeclineReason, CallEndReason, CallMediaKind, CallState } from '@migo/sdk';
+import type { ActiveCall, CallInviteEvent, CallStateEvent, CallSdp, CallIce, Id } from '@migo/sdk';
+
+import {
+  callEndReasonOf,
+  callMediaKindOf,
+  callStateOf,
+  decodeIceBatch,
+  decodeSdpDescription,
+  encodeIceBatch,
+  encodeSdpDescription,
+  openCallSignal,
+  sealCallSignal,
+} from './call-signal.js';
+import { useMigo } from './use-migo.js';
+
+/** How long gathered ICE candidates linger before one relay carries them (section 165: batch, briefly). */
+const ICE_LINGER_MS = 250;
+/** How long a disconnected transport gets before the call ends as a network failure. */
+const RECONNECT_WINDOW_MS = 30_000;
+/** The wire's `CallInviteResult.status` for "the callee is being rung". */
+const INVITE_RINGING = 0;
+/** The wire's `CallInviteResult.status` for "the invite expired before anyone answered". */
+const INVITE_EXPIRED = 2;
+
+/** What the rest of the app reads and calls. */
+export interface CallManagerValue {
+  /** The call this device is in, including one that just ended (until dismissed). */
+  activeCall: ActiveCall | null;
+  /** A ringing inbound call nobody has answered yet. */
+  incomingCall: CallInviteEvent | null;
+  /** Whether this side's microphone is muted. */
+  muted: boolean;
+  /**
+   * Whether a connected call's quality has fallen far enough to pause video. Always false in this
+   * build — the statistics feed that would flip it is future work — but the state it drives is the
+   * sixth screen state section 180 requires, so the plumbing is here for it to land in.
+   */
+  degraded: boolean;
+  /** This side's microphone/camera stream, for the small self-view. */
+  localStream: MediaStream | null;
+  /** The peer's stream once their tracks arrive, for the main view. */
+  remoteStream: MediaStream | null;
+  /** When the current (or just-ended) call ended, for the ended screen's duration. */
+  endedAt: number | null;
+  /** Why a call could not even be placed (permissions, no device), when nothing else is showing. */
+  callError: string | null;
+  /** Places a call: media, offer, invite. */
+  startCall: (conversationId: Id, calleeId: Id, mediaKind: CallMediaKind) => Promise<void>;
+  /** Answers the ringing inbound call: media, answer, and the relay that carries it. */
+  acceptCall: () => Promise<void>;
+  /**
+   * Sends a sealed SDP answer for the inbound call: `CALL_ANSWER` tells the server the call is
+   * answered, and `CALL_SDP` carries the answer itself to the caller's device.
+   */
+  answerCall: (sealedAnswer: Uint8Array) => Promise<void>;
+  /** Declines the ringing inbound call. */
+  declineCall: () => Promise<void>;
+  /** Cancels the call this device placed while it still rings. */
+  cancelCall: () => Promise<void>;
+  /** Ends the established call with a reason. */
+  endCall: (reason: CallEndReason) => Promise<void>;
+  /** Mutes or unmutes this side's microphone. */
+  toggleMute: () => void;
+  /** Dismisses the ended screen (or a placement error), leaving no call tracked. */
+  dismissCall: () => void;
+}
+
+const CallManagerContext = createContext<CallManagerValue | null>(null);
+
+export function CallManagerProvider({ children }: { children: ReactNode }): ReactNode {
+  const { client, accountId } = useMigo();
+
+  const [activeCall, setActiveCall] = useState<ActiveCall | null>(null);
+  const [incomingCall, setIncomingCall] = useState<CallInviteEvent | null>(null);
+  const [muted, setMuted] = useState(false);
+  const [degraded, setDegraded] = useState(false);
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const [endedAt, setEndedAt] = useState<number | null>(null);
+  const [callError, setCallError] = useState<string | null>(null);
+
+  // The event handlers are registered once per client, so everything they read must be a ref.
+  const clientRef = useRef(client);
+  clientRef.current = client;
+  const accountIdRef = useRef(accountId);
+  accountIdRef.current = accountId;
+
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const activeRef = useRef<ActiveCall | null>(null);
+  const incomingRef = useRef<CallInviteEvent | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const mutedRef = useRef(false);
+  /** The peer device relays are addressed to; null until the answer names it (or the invite did). */
+  const peerDeviceRef = useRef<Id | null>(null);
+  /** Candidates gathered but not yet relayed, waiting for the batch linger or a target device. */
+  const iceBatchRef = useRef<RTCIceCandidateInit[]>([]);
+  const iceTimerRef = useRef<number | null>(null);
+  /** Candidates the peer relayed before this side's remote description was set, applied after it is. */
+  const heldIceRef = useRef<RTCIceCandidateInit[]>([]);
+  const remoteDescriptionSetRef = useRef(false);
+  const reconnectTimerRef = useRef<number | null>(null);
+  /** When this side began setting the call up, for the one-time setupMs report. */
+  const setupStartRef = useRef<number | null>(null);
+
+  // --- tracked-state writers: ref first (handlers read it synchronously), then React state ---
+
+  const setActive = useCallback((call: ActiveCall | null): void => {
+    activeRef.current = call;
+    setActiveCall(call);
+  }, []);
+
+  const setIncoming = useCallback((event: CallInviteEvent | null): void => {
+    incomingRef.current = event;
+    setIncomingCall(event);
+  }, []);
+
+  /** Whether a call occupies this device — an ended call still on screen does not block a new one. */
+  const callInProgress = useCallback(
+    (): boolean => activeRef.current !== null && activeRef.current.state !== CallState.Ended,
+    [],
+  );
+
+  // --- teardown ---
+
+  /** Stops every resource a call held: timers, candidates, the peer connection, the local media. */
+  const teardownMedia = useCallback((): void => {
+    if (iceTimerRef.current !== null) {
+      clearTimeout(iceTimerRef.current);
+      iceTimerRef.current = null;
+    }
+    if (reconnectTimerRef.current !== null) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    iceBatchRef.current = [];
+    heldIceRef.current = [];
+    remoteDescriptionSetRef.current = false;
+    peerDeviceRef.current = null;
+    setupStartRef.current = null;
+
+    const pc = pcRef.current;
+    pcRef.current = null;
+    if (pc !== null) {
+      pc.onicecandidate = null;
+      pc.ontrack = null;
+      pc.onconnectionstatechange = null;
+      pc.close();
+    }
+
+    localStreamRef.current?.getTracks().forEach((track) => track.stop());
+    localStreamRef.current = null;
+    setLocalStream(null);
+    setRemoteStream(null);
+    mutedRef.current = false;
+    setMuted(false);
+    setDegraded(false);
+  }, []);
+
+  /** Ends the tracked call locally with a reason, keeping `startedAt` for the duration line. */
+  const finishCall = useCallback(
+    (reason: CallEndReason | undefined): void => {
+      const call = activeRef.current;
+      if (call === null || call.state === CallState.Ended) {
+        return;
+      }
+      teardownMedia();
+      const ended: ActiveCall = { ...call, state: CallState.Ended };
+      if (reason !== undefined) {
+        ended.endReason = reason;
+      }
+      setActive(ended);
+      setEndedAt(Date.now());
+    },
+    [setActive, teardownMedia],
+  );
+
+  /** Marks the call connected, zeroing the duration timer exactly once and reporting setup time. */
+  const markConnected = useCallback((): void => {
+    const call = activeRef.current;
+    if (call === null || call.state === CallState.Connected) {
+      return;
+    }
+    const now = Date.now();
+    setActive({ ...call, state: CallState.Connected, startedAt: call.startedAt ?? now });
+    const setupStart = setupStartRef.current;
+    if (setupStart !== null) {
+      setupStartRef.current = null;
+      clientRef.current?.calls.reportStats(call.callId, { setupMs: now - setupStart }).catch(() => {
+        // CALL_STATS is Droppable: a lost report costs nothing.
+      });
+    }
+  }, [setActive]);
+
+  // --- ICE, both directions ---
+
+  /** Sends the gathered candidate batch if it can be addressed; otherwise it stays queued. */
+  const flushIce = useCallback((): void => {
+    const call = activeRef.current;
+    const target = peerDeviceRef.current;
+    const batch = iceBatchRef.current;
+    if (call === null || target === null || batch.length === 0) {
+      return;
+    }
+    iceBatchRef.current = [];
+    clientRef.current?.calls
+      .sendIce(call.callId, target, sealCallSignal(encodeIceBatch(batch)))
+      .catch(() => {
+        // A lost batch is recovered by the next one (or the reconnect path); never fatal.
+      });
+  }, []);
+
+  /** Applies the candidates the peer sent before this side's remote description existed. */
+  const drainHeldIce = useCallback((): void => {
+    const pc = pcRef.current;
+    if (pc === null || !remoteDescriptionSetRef.current) {
+      return;
+    }
+    const held = heldIceRef.current;
+    heldIceRef.current = [];
+    for (const candidate of held) {
+      pc.addIceCandidate(candidate).catch(() => {
+        // A candidate the connection no longer wants is normal near the end of gathering.
+      });
+    }
+  }, []);
+
+  /** Batches one gathered candidate, lingering briefly so a trickle leaves as few frames as it can. */
+  const handleIceCandidate = useCallback(
+    (event: RTCPeerConnectionIceEvent): void => {
+      if (event.candidate === null) {
+        // Gathering finished: whatever is batched is all there will be.
+        flushIce();
+        return;
+      }
+      iceBatchRef.current.push(event.candidate.toJSON());
+      if (iceTimerRef.current === null) {
+        iceTimerRef.current = window.setTimeout(() => {
+          iceTimerRef.current = null;
+          flushIce();
+        }, ICE_LINGER_MS);
+      }
+    },
+    [flushIce],
+  );
+
+  // --- the peer connection ---
+
+  /** Builds this call's peer connection: v1 is direct P2P — TURN arrives with `CALL_TURN_FETCH`. */
+  const createPeer = useCallback((): RTCPeerConnection => {
+    const pc = new RTCPeerConnection();
+    pc.onicecandidate = handleIceCandidate;
+    pc.ontrack = (event: RTCTrackEvent): void => {
+      const stream = event.streams[0];
+      if (stream !== undefined) {
+        setRemoteStream(stream);
+      }
+    };
+    pc.onconnectionstatechange = (): void => {
+      const call = activeRef.current;
+      if (call === null || call.state === CallState.Ended) {
+        return;
+      }
+      if (pc.connectionState === 'connected') {
+        if (reconnectTimerRef.current !== null) {
+          clearTimeout(reconnectTimerRef.current);
+          reconnectTimerRef.current = null;
+        }
+        markConnected();
+      } else if (pc.connectionState === 'disconnected') {
+        // Section 180: a blip is not an end. Show Reconnecting and open the window; media back
+        // cancels it, the deadline ends the call as a network failure.
+        if (call.state !== CallState.Reconnecting) {
+          setActive({ ...call, state: CallState.Reconnecting });
+        }
+        if (reconnectTimerRef.current === null) {
+          reconnectTimerRef.current = window.setTimeout(() => {
+            reconnectTimerRef.current = null;
+            finishCall(CallEndReason.Network);
+          }, RECONNECT_WINDOW_MS);
+        }
+      } else if (pc.connectionState === 'failed') {
+        finishCall(CallEndReason.Network);
+      }
+    };
+    pcRef.current = pc;
+    return pc;
+  }, [finishCall, handleIceCandidate, markConnected, setActive]);
+
+  /** Acquires the mic (and camera, for a video call) the call needs. */
+  const acquireMedia = async (mediaKind: CallMediaKind): Promise<MediaStream> =>
+    navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: mediaKind === CallMediaKind.Video,
+    });
+
+  // --- the flows the UI calls ---
+
+  const answerCall = useCallback(async (sealedAnswer: Uint8Array): Promise<void> => {
+    const call = activeRef.current;
+    const target = peerDeviceRef.current;
+    const current = clientRef.current;
+    if (call === null || target === null || current === null) {
+      return;
+    }
+    await current.calls.answer(call.callId, sealedAnswer);
+    await current.calls.sendSdp(call.callId, target, sealedAnswer);
+  }, []);
+
+  /** Places a call: media, offer, invite — and tracks it under the id the reply echoes. */
+  const startCall = useCallback(
+    async (conversationId: Id, calleeId: Id, mediaKind: CallMediaKind): Promise<void> => {
+      const current = clientRef.current;
+      const me = accountIdRef.current;
+      if (current === null || me === null || callInProgress() || incomingRef.current !== null) {
+        return;
+      }
+      setupStartRef.current = Date.now();
+      setCallError(null);
+      try {
+        const stream = await acquireMedia(mediaKind);
+        localStreamRef.current = stream;
+        setLocalStream(stream);
+
+        const pc = createPeer();
+        for (const track of stream.getTracks()) {
+          pc.addTrack(track, stream);
+        }
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        const result = await current.calls.invite(
+          conversationId,
+          calleeId,
+          mediaKind,
+          sealCallSignal(encodeSdpDescription({ type: 'offer', sdp: offer.sdp ?? '' })),
+        );
+
+        if (result.status !== INVITE_RINGING) {
+          // Never rang: the callee's own settings (or the invite's expiry) answered first.
+          teardownMedia();
+          const reason =
+            result.status === INVITE_EXPIRED ? CallEndReason.NoAnswer : CallEndReason.Declined;
+          setActive({
+            callId: result.callId,
+            conversationId,
+            callerId: me,
+            calleeId,
+            mediaKind,
+            state: CallState.Ended,
+            endReason: reason,
+            isCaller: true,
+          });
+          setEndedAt(Date.now());
+          return;
+        }
+        setActive({
+          callId: result.callId,
+          conversationId,
+          callerId: me,
+          calleeId,
+          mediaKind,
+          state: CallState.Ringing,
+          isCaller: true,
+        });
+        // A previous call's ended screen may still be up; its timestamps belong to that call.
+        setEndedAt(null);
+      } catch (cause) {
+        // Nothing was invited (permissions, no device) or the invite never landed: no call exists
+        // to show, so state the failure as a fact instead of a dead button.
+        teardownMedia();
+        setCallError(placementErrorMessage(cause));
+      }
+    },
+    [callInProgress, createPeer, setActive, teardownMedia],
+  );
+
+  /** Answers the ringing call: media, the peer's offer applied, our answer sealed and relayed. */
+  const acceptCall = useCallback(async (): Promise<void> => {
+    const current = clientRef.current;
+    const incoming = incomingRef.current;
+    const me = accountIdRef.current;
+    if (current === null || incoming === null || me === null || callInProgress()) {
+      return;
+    }
+    const mediaKind = callMediaKindOf(incoming.mediaKind);
+    setupStartRef.current = Date.now();
+    setIncoming(null);
+    setEndedAt(null);
+    setActive({
+      callId: incoming.callId,
+      conversationId: incoming.conversationId,
+      callerId: incoming.callerId,
+      calleeId: me,
+      mediaKind,
+      state: CallState.Connecting,
+      isCaller: false,
+    });
+    // The invite already named the calling device, so this side's relays have a target at once.
+    peerDeviceRef.current = incoming.callerDevice;
+    try {
+      const stream = await acquireMedia(mediaKind);
+      localStreamRef.current = stream;
+      setLocalStream(stream);
+
+      const pc = createPeer();
+      for (const track of stream.getTracks()) {
+        pc.addTrack(track, stream);
+      }
+      const offer = decodeSdpDescription(openCallSignal(incoming.sealedOffer));
+      await pc.setRemoteDescription(offer);
+      remoteDescriptionSetRef.current = true;
+      drainHeldIce();
+
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await answerCall(
+        sealCallSignal(encodeSdpDescription({ type: 'answer', sdp: answer.sdp ?? '' })),
+      );
+      flushIce();
+    } catch {
+      // Could not answer (permissions, malformed offer): give the caller their "no" and show the
+      // failure here — a ring that can never be picked up is worse than a decline.
+      void current.calls.decline(incoming.callId, CallDeclineReason.Busy).catch(() => {});
+      finishCall(CallEndReason.Failed);
+    }
+  }, [
+    answerCall,
+    callInProgress,
+    createPeer,
+    drainHeldIce,
+    finishCall,
+    flushIce,
+    setActive,
+    setIncoming,
+  ]);
+
+  const declineCall = useCallback(async (): Promise<void> => {
+    const current = clientRef.current;
+    const incoming = incomingRef.current;
+    setIncoming(null);
+    if (current === null || incoming === null) {
+      return;
+    }
+    await current.calls.decline(incoming.callId).catch(() => {
+      // The invite expires on its own; a failed decline changes nothing on our side.
+    });
+  }, [setIncoming]);
+
+  const cancelCall = useCallback(async (): Promise<void> => {
+    const current = clientRef.current;
+    const call = activeRef.current;
+    if (current === null || call === null || call.state === CallState.Ended) {
+      return;
+    }
+    finishCall(CallEndReason.ByCaller);
+    await current.calls.cancel(call.callId).catch(() => {});
+  }, [finishCall]);
+
+  const endCall = useCallback(
+    async (reason: CallEndReason): Promise<void> => {
+      const current = clientRef.current;
+      const call = activeRef.current;
+      if (current === null || call === null || call.state === CallState.Ended) {
+        return;
+      }
+      finishCall(reason);
+      await current.calls.end(call.callId, reason).catch(() => {});
+    },
+    [finishCall],
+  );
+
+  const toggleMute = useCallback((): void => {
+    const next = !mutedRef.current;
+    mutedRef.current = next;
+    setMuted(next);
+    for (const track of localStreamRef.current?.getAudioTracks() ?? []) {
+      track.enabled = !next;
+    }
+  }, []);
+
+  const dismissCall = useCallback((): void => {
+    const call = activeRef.current;
+    if (call !== null && call.state !== CallState.Ended) {
+      return;
+    }
+    setActive(null);
+    setEndedAt(null);
+    setCallError(null);
+  }, [setActive]);
+
+  // --- the four SDK streams, registered once per session ---
+
+  /** A new invite: ring us, or answer Busy if this device already has a call. */
+  const handleIncoming = useCallback(
+    (event: CallInviteEvent): void => {
+      if (event.expiresAt <= Date.now()) {
+        // Expired in flight (a push that woke us too late): it rings nobody.
+        return;
+      }
+      if (callInProgress() || incomingRef.current !== null) {
+        clientRef.current?.calls.decline(event.callId, CallDeclineReason.Busy).catch(() => {});
+        return;
+      }
+      setIncoming(event);
+    },
+    [callInProgress, setIncoming],
+  );
+
+  /** The server's authoritative state transitions for the tracked call. */
+  const handleStateEvent = useCallback(
+    (event: CallStateEvent): void => {
+      const call = activeRef.current;
+      if (call === null || event.callId !== call.callId || call.state === CallState.Ended) {
+        return;
+      }
+      const state = callStateOf(event.state);
+      if (state === undefined) {
+        // A state a newer server added: not ours to guess at, and not ours to end a live call over.
+        return;
+      }
+      if (state === CallState.Ended) {
+        finishCall(callEndReasonOf(event.reason));
+        return;
+      }
+      if (state === CallState.Connected) {
+        markConnected();
+        return;
+      }
+      if (state !== call.state) {
+        setActive({ ...call, state });
+      }
+    },
+    [finishCall, markConnected, setActive],
+  );
+
+  /** An SDP relay: for a caller this is the answer naming the device everything now addresses. */
+  const handleSdp = useCallback(
+    (sdp: CallSdp): void => {
+      const call = activeRef.current;
+      const pc = pcRef.current;
+      if (call === null || sdp.callId !== call.callId || pc === null) {
+        return;
+      }
+      if (!call.isCaller || remoteDescriptionSetRef.current) {
+        // A renegotiated offer mid-call is CALL_RENEGOTIATE's flow, not this build's.
+        return;
+      }
+      let description: { type: 'offer' | 'answer' | 'pranswer' | 'rollback'; sdp: string };
+      try {
+        description = decodeSdpDescription(openCallSignal(sdp.sealedSdp));
+      } catch {
+        finishCall(CallEndReason.Failed);
+        return;
+      }
+      pc.setRemoteDescription(description)
+        .then(() => {
+          remoteDescriptionSetRef.current = true;
+          peerDeviceRef.current = sdp.fromDevice;
+          flushIce();
+          drainHeldIce();
+          if (call.state === CallState.Ringing) {
+            setActive({ ...call, state: CallState.Connecting });
+          }
+        })
+        .catch(() => {
+          finishCall(CallEndReason.Failed);
+        });
+    },
+    [finishCall, flushIce, drainHeldIce, setActive],
+  );
+
+  /** A batch of the peer's candidates, applied now or held until the remote description exists. */
+  const handleIceRelay = useCallback((ice: CallIce): void => {
+    const call = activeRef.current;
+    const pc = pcRef.current;
+    if (call === null || ice.callId !== call.callId || pc === null) {
+      return;
+    }
+    let candidates: RTCIceCandidateInit[];
+    try {
+      candidates = decodeIceBatch(openCallSignal(ice.sealedCandidates));
+    } catch {
+      // One malformed batch is dropped, not fatal: the next batch or the connection's own
+      // gathering carries the call.
+      return;
+    }
+    if (remoteDescriptionSetRef.current) {
+      for (const candidate of candidates) {
+        pc.addIceCandidate(candidate).catch(() => {});
+      }
+    } else {
+      heldIceRef.current.push(...candidates);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!client) {
+      // The session dropped mid-call: there is no signaling left to end it with, so end it here.
+      if (callInProgress()) {
+        finishCall(CallEndReason.Network);
+      }
+      return;
+    }
+    const offs = [
+      client.calls.onIncomingCall(handleIncoming),
+      client.calls.onCallState(handleStateEvent),
+      client.calls.onSdp(handleSdp),
+      client.calls.onIce(handleIceRelay),
+    ];
+    return () => {
+      for (const off of offs) {
+        off();
+      }
+    };
+  }, [
+    client,
+    callInProgress,
+    finishCall,
+    handleIncoming,
+    handleStateEvent,
+    handleSdp,
+    handleIceRelay,
+  ]);
+
+  // Unmounting the shell must not leave a microphone on.
+  useEffect(
+    () => (): void => {
+      teardownMedia();
+      setActive(null);
+      setIncoming(null);
+      setEndedAt(null);
+    },
+    [teardownMedia, setActive, setIncoming],
+  );
+
+  const value: CallManagerValue = {
+    activeCall,
+    incomingCall,
+    muted,
+    degraded,
+    localStream,
+    remoteStream,
+    endedAt,
+    callError,
+    startCall,
+    acceptCall,
+    answerCall,
+    declineCall,
+    cancelCall,
+    endCall,
+    toggleMute,
+    dismissCall,
+  };
+
+  return <CallManagerContext.Provider value={value}>{children}</CallManagerContext.Provider>;
+}
+
+/** Access to the call manager. Throws if used outside {@link CallManagerProvider}. */
+export function useCall(): CallManagerValue {
+  const value = useContext(CallManagerContext);
+  if (value === null) {
+    throw new Error('useCall must be used within a CallManagerProvider');
+  }
+  return value;
+}
+
+/** What went wrong before any call existed, said as a fact — never a payload or a stack trace. */
+function placementErrorMessage(cause: unknown): string {
+  if (
+    cause instanceof DOMException &&
+    (cause.name === 'NotAllowedError' || cause.name === 'NotFoundError')
+  ) {
+    return 'Microphone or camera unavailable. Check permissions and try again.';
+  }
+  return 'Could not start the call.';
+}

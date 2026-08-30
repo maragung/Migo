@@ -5245,6 +5245,561 @@ export function decodeLeaderboardResponse(r: Reader): LeaderboardResponse {
   return out;
 }
 
+/** Invites a callee to a call. */
+export interface CallInvite {
+  /** Client-minted; also the idempotency key. */
+  callId: Id;
+  conversationId: Id;
+  calleeId: Id;
+  /** 0=Audio, 1=Video. */
+  mediaKind: number;
+  callerDevice: Id;
+  /** Codec and feature negotiation. */
+  capabilities: bigint;
+  /** E2E-sealed SDP offer; the server never reads it. */
+  sealedOffer: Uint8Array;
+}
+
+export function encodeCallInvite(w: Writer, v: CallInvite): void {
+  w.enter();
+  w.id(v.callId);
+  w.id(v.conversationId);
+  w.id(v.calleeId);
+  w.u32(v.mediaKind);
+  w.id(v.callerDevice);
+  w.u64big(v.capabilities);
+  w.bytes(v.sealedOffer);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCallInvite(r: Reader): CallInvite {
+  r.enter();
+  const callId = r.id();
+  const conversationId = r.id();
+  const calleeId = r.id();
+  const mediaKind = r.u32();
+  const callerDevice = r.id();
+  const capabilities = r.u64big();
+  const sealedOffer = r.bytes();
+  const out: CallInvite = { callId, conversationId, calleeId, mediaKind, callerDevice, capabilities, sealedOffer } as CallInvite;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** The caller's answer to its own invite. */
+export interface CallInviteResult {
+  callId: Id;
+  /** 0=Ringing, 1=Declined, 2=Expired, 3=Blocked. */
+  status: number;
+  expiresAt: number;
+}
+
+export function encodeCallInviteResult(w: Writer, v: CallInviteResult): void {
+  w.enter();
+  w.id(v.callId);
+  w.u32(v.status);
+  w.timestamp(v.expiresAt);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCallInviteResult(r: Reader): CallInviteResult {
+  r.enter();
+  const callId = r.id();
+  const status = r.u32();
+  const expiresAt = r.timestamp();
+  const out: CallInviteResult = { callId, status, expiresAt } as CallInviteResult;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Tells the callee a call is ringing. */
+export interface CallInviteEvent {
+  callId: Id;
+  conversationId: Id;
+  callerId: Id;
+  callerDevice: Id;
+  mediaKind: number;
+  expiresAt: number;
+  sealedOffer: Uint8Array;
+}
+
+export function encodeCallInviteEvent(w: Writer, v: CallInviteEvent): void {
+  w.enter();
+  w.id(v.callId);
+  w.id(v.conversationId);
+  w.id(v.callerId);
+  w.id(v.callerDevice);
+  w.u32(v.mediaKind);
+  w.timestamp(v.expiresAt);
+  w.bytes(v.sealedOffer);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCallInviteEvent(r: Reader): CallInviteEvent {
+  r.enter();
+  const callId = r.id();
+  const conversationId = r.id();
+  const callerId = r.id();
+  const callerDevice = r.id();
+  const mediaKind = r.u32();
+  const expiresAt = r.timestamp();
+  const sealedOffer = r.bytes();
+  const out: CallInviteEvent = { callId, conversationId, callerId, callerDevice, mediaKind, expiresAt, sealedOffer } as CallInviteEvent;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** The callee answers. */
+export interface CallAnswer {
+  callId: Id;
+  calleeDevice: Id;
+  /** E2E-sealed SDP answer. */
+  sealedAnswer: Uint8Array;
+}
+
+export function encodeCallAnswer(w: Writer, v: CallAnswer): void {
+  w.enter();
+  w.id(v.callId);
+  w.id(v.calleeDevice);
+  w.bytes(v.sealedAnswer);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCallAnswer(r: Reader): CallAnswer {
+  r.enter();
+  const callId = r.id();
+  const calleeDevice = r.id();
+  const sealedAnswer = r.bytes();
+  const out: CallAnswer = { callId, calleeDevice, sealedAnswer } as CallAnswer;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** The callee declines. */
+export interface CallDecline {
+  callId: Id;
+  /** 0=Busy, 1=Declined. */
+  reason: number;
+}
+
+export function encodeCallDecline(w: Writer, v: CallDecline): void {
+  w.enter();
+  w.id(v.callId);
+  w.u32(v.reason);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCallDecline(r: Reader): CallDecline {
+  r.enter();
+  const callId = r.id();
+  const reason = r.u32();
+  const out: CallDecline = { callId, reason } as CallDecline;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** The caller cancels before an answer. */
+export interface CallCancel {
+  callId: Id;
+}
+
+export function encodeCallCancel(w: Writer, v: CallCancel): void {
+  w.enter();
+  w.id(v.callId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCallCancel(r: Reader): CallCancel {
+  r.enter();
+  const callId = r.id();
+  const out: CallCancel = { callId } as CallCancel;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Ends an established call; always with a reason. */
+export interface CallEnd {
+  callId: Id;
+  /** 0=ByCaller, 1=ByCallee, 2=Declined, 3=NoAnswer, 4=Failed, 5=Network. */
+  reason: number;
+}
+
+export function encodeCallEnd(w: Writer, v: CallEnd): void {
+  w.enter();
+  w.id(v.callId);
+  w.u32(v.reason);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCallEnd(r: Reader): CallEnd {
+  r.enter();
+  const callId = r.id();
+  const reason = r.u32();
+  const out: CallEnd = { callId, reason } as CallEnd;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Relays a sealed SDP offer or answer between devices. */
+export interface CallSdp {
+  callId: Id;
+  fromDevice: Id;
+  toDevice: Id;
+  /** E2E-sealed SDP blob. */
+  sealedSdp: Uint8Array;
+}
+
+export function encodeCallSdp(w: Writer, v: CallSdp): void {
+  w.enter();
+  w.id(v.callId);
+  w.id(v.fromDevice);
+  w.id(v.toDevice);
+  w.bytes(v.sealedSdp);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCallSdp(r: Reader): CallSdp {
+  r.enter();
+  const callId = r.id();
+  const fromDevice = r.id();
+  const toDevice = r.id();
+  const sealedSdp = r.bytes();
+  const out: CallSdp = { callId, fromDevice, toDevice, sealedSdp } as CallSdp;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Relays a batch of sealed ICE candidates. */
+export interface CallIce {
+  callId: Id;
+  fromDevice: Id;
+  toDevice: Id;
+  /** A batch of sealed ICE candidates, not one frame per candidate. */
+  sealedCandidates: Uint8Array;
+}
+
+export function encodeCallIce(w: Writer, v: CallIce): void {
+  w.enter();
+  w.id(v.callId);
+  w.id(v.fromDevice);
+  w.id(v.toDevice);
+  w.bytes(v.sealedCandidates);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCallIce(r: Reader): CallIce {
+  r.enter();
+  const callId = r.id();
+  const fromDevice = r.id();
+  const toDevice = r.id();
+  const sealedCandidates = r.bytes();
+  const out: CallIce = { callId, fromDevice, toDevice, sealedCandidates } as CallIce;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** A call's state change, pushed to participants. */
+export interface CallStateEvent {
+  callId: Id;
+  /** 0=Ringing, 1=Connecting, 2=Connected, 3=Reconnecting, 4=Ended. */
+  state: number;
+  /** Present when state is Ended. */
+  reason?: number;
+}
+
+export function encodeCallStateEvent(w: Writer, v: CallStateEvent): void {
+  w.enter();
+  w.id(v.callId);
+  w.u32(v.state);
+  let present = 0;
+  if (v.reason !== undefined) present++;
+  w.u32(present);
+  if (v.reason !== undefined) { const value = v.reason; w.optional(1, (w) => { w.u32(value); }); }
+  w.leave();
+}
+
+export function decodeCallStateEvent(r: Reader): CallStateEvent {
+  r.enter();
+  const callId = r.id();
+  const state = r.u32();
+  const out: CallStateEvent = { callId, state } as CallStateEvent;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.reason = sub.u32(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** Renegotiates codecs/streams mid-call (e.g. ICE restart, add video). */
+export interface CallRenegotiate {
+  callId: Id;
+  fromDevice: Id;
+  toDevice: Id;
+  sealedSdp: Uint8Array;
+}
+
+export function encodeCallRenegotiate(w: Writer, v: CallRenegotiate): void {
+  w.enter();
+  w.id(v.callId);
+  w.id(v.fromDevice);
+  w.id(v.toDevice);
+  w.bytes(v.sealedSdp);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCallRenegotiate(r: Reader): CallRenegotiate {
+  r.enter();
+  const callId = r.id();
+  const fromDevice = r.id();
+  const toDevice = r.id();
+  const sealedSdp = r.bytes();
+  const out: CallRenegotiate = { callId, fromDevice, toDevice, sealedSdp } as CallRenegotiate;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Re-keys the call's media encryption (e.g. membership change). */
+export interface CallKeyUpdate {
+  callId: Id;
+  epoch: number;
+  sealedKeyMaterial: Uint8Array;
+}
+
+export function encodeCallKeyUpdate(w: Writer, v: CallKeyUpdate): void {
+  w.enter();
+  w.id(v.callId);
+  w.u64(v.epoch);
+  w.bytes(v.sealedKeyMaterial);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCallKeyUpdate(r: Reader): CallKeyUpdate {
+  r.enter();
+  const callId = r.id();
+  const epoch = r.u64();
+  const sealedKeyMaterial = r.bytes();
+  const out: CallKeyUpdate = { callId, epoch, sealedKeyMaterial } as CallKeyUpdate;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Aggregate quality numbers; Droppable; never call content. */
+export interface CallStats {
+  callId: Id;
+  setupMs?: number;
+  rttMs?: number;
+  /** Per-10000. */
+  packetLoss?: number;
+  jitterMs?: number;
+  usedTurn?: boolean;
+}
+
+export function encodeCallStats(w: Writer, v: CallStats): void {
+  w.enter();
+  w.id(v.callId);
+  let present = 0;
+  if (v.setupMs !== undefined) present++;
+  if (v.rttMs !== undefined) present++;
+  if (v.packetLoss !== undefined) present++;
+  if (v.jitterMs !== undefined) present++;
+  if (v.usedTurn !== undefined) present++;
+  w.u32(present);
+  if (v.setupMs !== undefined) { const value = v.setupMs; w.optional(1, (w) => { w.u32(value); }); }
+  if (v.rttMs !== undefined) { const value = v.rttMs; w.optional(2, (w) => { w.u32(value); }); }
+  if (v.packetLoss !== undefined) { const value = v.packetLoss; w.optional(3, (w) => { w.u32(value); }); }
+  if (v.jitterMs !== undefined) { const value = v.jitterMs; w.optional(4, (w) => { w.u32(value); }); }
+  if (v.usedTurn !== undefined) { const value = v.usedTurn; w.optional(5, (w) => { w.bool(value); }); }
+  w.leave();
+}
+
+export function decodeCallStats(r: Reader): CallStats {
+  r.enter();
+  const callId = r.id();
+  const out: CallStats = { callId } as CallStats;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.setupMs = sub.u32(); break;
+      case 2: out.rttMs = sub.u32(); break;
+      case 3: out.packetLoss = sub.u32(); break;
+      case 4: out.jitterMs = sub.u32(); break;
+      case 5: out.usedTurn = sub.bool(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** One TURN relay with short-lived credentials. */
+export interface TurnServer {
+  url: string;
+  username: string;
+  credential: string;
+  ttlSeconds: number;
+  region: string;
+}
+
+export function encodeTurnServer(w: Writer, v: TurnServer): void {
+  w.enter();
+  w.str(v.url);
+  w.str(v.username);
+  w.str(v.credential);
+  w.u32(v.ttlSeconds);
+  w.str(v.region);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeTurnServer(r: Reader): TurnServer {
+  r.enter();
+  const url = r.str();
+  const username = r.str();
+  const credential = r.str();
+  const ttlSeconds = r.u32();
+  const region = r.str();
+  const out: TurnServer = { url, username, credential, ttlSeconds, region } as TurnServer;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Requests TURN credentials for a call. */
+export interface CallTurnFetch {
+  callId: Id;
+}
+
+export function encodeCallTurnFetch(w: Writer, v: CallTurnFetch): void {
+  w.enter();
+  w.id(v.callId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCallTurnFetch(r: Reader): CallTurnFetch {
+  r.enter();
+  const callId = r.id();
+  const out: CallTurnFetch = { callId } as CallTurnFetch;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** TURN servers with temporary credentials. */
+export interface CallTurnResponse {
+  servers: TurnServer[];
+}
+
+export function encodeCallTurnResponse(w: Writer, v: CallTurnResponse): void {
+  w.enter();
+  { w.listLen(v.servers.length); for (const item of v.servers) { encodeTurnServer(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCallTurnResponse(r: Reader): CallTurnResponse {
+  r.enter();
+  const servers = ((): TurnServer[] => { const n = r.listLen(); const v: TurnServer[] = []; for (let i = 0; i < n; i++) v.push(decodeTurnServer(r)); return v; })();
+  const out: CallTurnResponse = { servers } as CallTurnResponse;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Identifies one call. */
+export interface CallId {
+  callId: Id;
+}
+
+export function encodeCallId(w: Writer, v: CallId): void {
+  w.enter();
+  w.id(v.callId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeCallId(r: Reader): CallId {
+  r.enter();
+  const callId = r.id();
+  const out: CallId = { callId } as CallId;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
 export type DeliveryClass = 'Critical' | 'Coalescable' | 'Droppable';
 export type AuthLevel = 'None' | 'User' | 'Bot' | 'Server';
 export type Direction = 'client_to_server' | 'server_to_client' | 'both';
@@ -5359,6 +5914,36 @@ export const OP = {
   FED_ERROR: 219,
   FED_CALL_RELAY: 220,
   FED_DIRECTORY: 221,
+  /** Invites a callee to a call. */
+  CALL_INVITE: 224,
+  /** Tells the callee a call is ringing. */
+  CALL_INVITE_EVENT: 225,
+  /** The callee answers. */
+  CALL_ANSWER: 226,
+  /** The callee declines. */
+  CALL_DECLINE: 227,
+  /** The caller cancels before an answer. */
+  CALL_CANCEL: 228,
+  /** Ends a call; always with a reason. */
+  CALL_END: 229,
+  /** Relays a sealed SDP offer or answer. */
+  CALL_SDP: 230,
+  /** Relays a batch of sealed ICE candidates. */
+  CALL_ICE: 231,
+  /** A call's state change. */
+  CALL_STATE_EVENT: 232,
+  /** Renegotiates mid-call. */
+  CALL_RENEGOTIATE: 233,
+  /** Re-keys call media. */
+  CALL_KEY_UPDATE: 234,
+  /** Aggregate quality numbers. */
+  CALL_STATS: 235,
+  /** Requests TURN credentials. */
+  CALL_TURN_FETCH: 236,
+  /** Joins a group call via SFU. */
+  CALL_SFU_JOIN: 237,
+  /** SFU group call state. */
+  CALL_SFU_EVENT: 238,
 } as const;
 export type OpcodeValue = (typeof OP)[keyof typeof OP];
 
@@ -5461,6 +6046,21 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   219: { code: 219, name: 'FED_ERROR', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedError', response: 'Acknowledged' },
   220: { code: 220, name: 'FED_CALL_RELAY', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedForward', response: 'Acknowledged' },
   221: { code: 221, name: 'FED_DIRECTORY', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedDirectoryReq', response: 'FedDirectory' },
+  224: { code: 224, name: 'CALL_INVITE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallInvite', response: 'CallInviteResult' },
+  225: { code: 225, name: 'CALL_INVITE_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallInviteEvent' },
+  226: { code: 226, name: 'CALL_ANSWER', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallAnswer', response: 'Acknowledged' },
+  227: { code: 227, name: 'CALL_DECLINE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallDecline', response: 'Acknowledged' },
+  228: { code: 228, name: 'CALL_CANCEL', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallCancel', response: 'Acknowledged' },
+  229: { code: 229, name: 'CALL_END', cost: 2, cls: 'Critical', auth: 'User', direction: 'both', ackRequired: false, payload: 'CallEnd', response: 'Acknowledged' },
+  230: { code: 230, name: 'CALL_SDP', cost: 3, cls: 'Critical', auth: 'User', direction: 'both', ackRequired: false, payload: 'CallSdp', response: 'Acknowledged' },
+  231: { code: 231, name: 'CALL_ICE', cost: 1, cls: 'Critical', auth: 'User', direction: 'both', ackRequired: false, payload: 'CallIce', response: 'Acknowledged' },
+  232: { code: 232, name: 'CALL_STATE_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallStateEvent' },
+  233: { code: 233, name: 'CALL_RENEGOTIATE', cost: 3, cls: 'Critical', auth: 'User', direction: 'both', ackRequired: false, payload: 'CallRenegotiate', response: 'Acknowledged' },
+  234: { code: 234, name: 'CALL_KEY_UPDATE', cost: 3, cls: 'Critical', auth: 'User', direction: 'both', ackRequired: false, payload: 'CallKeyUpdate', response: 'Acknowledged' },
+  235: { code: 235, name: 'CALL_STATS', cost: 1, cls: 'Droppable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallStats', response: 'Acknowledged' },
+  236: { code: 236, name: 'CALL_TURN_FETCH', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallTurnFetch', response: 'CallTurnResponse' },
+  237: { code: 237, name: 'CALL_SFU_JOIN', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallInvite', response: 'CallTurnResponse' },
+  238: { code: 238, name: 'CALL_SFU_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallStateEvent' },
 };
 
 export function opcodeName(code: number): string {

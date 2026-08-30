@@ -1,0 +1,22 @@
+[package]
+name = "migo-calls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "1:1 call signalling: the ring lifecycle and the sealed SDP/ICE relay the server forwards but never reads."
+
+[dependencies]
+migo-core.workspace = true
+migo-protocol.workspace = true
+migo-ratelimit.workspace = true
+
+async-trait.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+migo-cache.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }

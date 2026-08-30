@@ -1839,3 +1839,128 @@ main {
     padding: 6px 9px;
   }
 }
+
+/* --- calls: header buttons and the full-screen overlay --- */
+
+/*
+ * The two call buttons sit after the encryption label in a thread header. They are offered only
+ * where the wire's 1:1 invite can name a callee (a Direct conversation); the component itself
+ * renders nothing without a peer, so the header needs no rule of its own here.
+ */
+.call-buttons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.call-btn {
+  font-size: 16px;
+}
+
+/*
+ * The overlay covers the whole shell whenever a call is ringing, live, or just ended. It is a
+ * flex column: identity (avatar, name, status) above, actions below, with a video stage behind
+ * everything on a connected video call.
+ */
+.call-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  padding: 24px;
+  background: radial-gradient(900px 600px at 50% -10%, #16203f 0%, rgba(7, 12, 28, 0.97) 60%);
+  color: var(--text);
+}
+.call-overlay.error {
+  gap: 14px;
+}
+.call-identity {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+  z-index: 1;
+}
+.call-name {
+  font-size: 22px;
+  font-weight: 700;
+}
+.call-status {
+  color: var(--text-dim);
+}
+.call-reason {
+  color: var(--text-dim);
+  font-size: 16px;
+}
+.call-timer {
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+/* The video stage fills the overlay; the identity and actions ride above it. */
+.call-video-stage {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+.call-video {
+  background: #05070f;
+}
+.call-video.remote {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.call-video.local {
+  position: absolute;
+  right: 14px;
+  bottom: 108px;
+  width: 132px;
+  max-width: 32vw;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow);
+}
+
+/* Circular action buttons: green takes a call, red ends one, the panel colour mutes. */
+.call-actions {
+  display: flex;
+  align-items: center;
+  gap: 26px;
+  z-index: 1;
+}
+.call-action {
+  width: 64px;
+  height: 64px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  font-size: 24px;
+  line-height: 1;
+  color: #ffffff;
+  transition: filter 0.15s ease;
+}
+.call-action:hover {
+  filter: brightness(1.1);
+}
+.call-action.accept {
+  background: var(--online);
+}
+.call-action.hang-up {
+  background: var(--danger);
+}
+.call-action.mute {
+  background: var(--panel-2);
+  border-color: var(--border-strong);
+}
+.call-action.mute.muted {
+  color: var(--text-dim);
+}

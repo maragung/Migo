@@ -874,6 +874,7 @@ async fn dispatcher() -> DispatcherHarness {
         app.notify.clone(),
         app.federation.clone(),
         app.bots.clone(),
+        app.calls.clone(),
     );
     DispatcherHarness { app, dispatcher }
 }

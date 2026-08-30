@@ -650,3 +650,39 @@ header room menampilkan online_count dan topic; RoomsProvider menyimpan metadata
 per akun di IndexedDB. 4 test.
 
 SDK: GamesDomain mendapat getCatalogue(), startGame(), getView() + 5 test.
+
+## 20. Calls: signaling penuh 1-on-1 (v0.5.0)
+
+Opcode call 224-238 (§145) masuk registri beserta 15 struct wire (§165) dan crate
+`migo-calls` (state machine signaling), membawa total ke 100 opcode dan 168 struct.
+
+**Server (migo-calls)**: Callkeeper dengan 11 metode — siklus hidup
+Ringing-Connecting-Connected-Ended dengan enam alasan Ended (§180), invite ber-idempotensi
+call_id dari client (retry tidak membunyikan dua kali; reuse dengan payload berbeda
+dijawab IDEMPOTENCY_MISMATCH), relay SDP dan ICE tersegel yang hanya membaca header routing
+tanpa pernah membuka byte tersegel (§165: "Server meneruskan blob tersegel dan tidak
+mengurainya"), gate keanggotaan+block dari store (gagal ke arah menolak), sweep invite
+kedaluwarsa di dalam invite (tanpa background task), TURN dari config (daftar kosong untuk
+sekarang), SFU group (237-238) dijawab FEATURE_DISABLED sampai deployment SFU tersedia.
+21 test.
+
+**Dispatch**: 13 handler di dispatch/calls.rs. Invite menerbitkan CALL_INVITE_EVENT ke topik
+User callee; answer/decline/cancel/end menerbitkan CALL_STATE_EVENT ke topik User pihak
+lainnya; SDP/ICE relay diteruskan ke topik User perangkat tujuan; sweep dijalankan di dalam
+invite. AppDispatcher kini 14 domain.
+
+**SDK**: CallsDomain dengan signaling penuh (invite/answer/decline/cancel/end/sendSdp/
+sendIce/getTurnServers/reportStats) dan empat listener (onIncomingCall/onCallState/onSdp/
+onIce) yang memfilter relay untuk perangkat ini. 12 test.
+
+**Web**: CallManagerProvider yang memiliki RTCPeerConnection — offer→invite, accept→answer
+
+- SDP, ICE batching dengan linger 250ms (caller menunggu sampai answer menyebut device
+  callee), jendela reconnect 30 detik → Network, mute, teardown di setiap jalur keluar,
+  auto-decline saat sibuk, CALL_STATS setup-time. CallOverlay layar penuh dengan keenam state
+  §180 (termasuk Degraded) dan sebab Ended yang dibedakan. Tombol telepon/video di header chat
+  direct. 18 test.
+
+Placeholder sealing (32-byte nol + 12-byte nol) untuk SDP/ICE — pola yang sama dengan
+lampiran gambar; enkripsi media E2E penuh adalah tugas tersendiri yang membutuhkan
+integrasi dengan session-crypto SDK.

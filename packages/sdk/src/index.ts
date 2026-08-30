@@ -125,6 +125,14 @@ export { PresenceDomain } from './domains/presence.js';
 export type { PresenceOptions } from './domains/presence.js';
 export { RoomsDomain } from './domains/rooms.js';
 export type { RoomListFilter } from './domains/rooms.js';
+export {
+  CallsDomain,
+  CallState,
+  CallMediaKind,
+  CallEndReason,
+  CallDeclineReason,
+} from './domains/calls.js';
+export type { ActiveCall } from './domains/calls.js';
 export { ProfileDomain } from './domains/profile.js';
 export { MediaDomain, MediaKind } from './domains/media.js';
 export type { UploadOptions, UploadResult } from './domains/media.js';
@@ -197,6 +205,12 @@ export {
 export type {
   Acknowledged,
   BadgeWire,
+  CallIce,
+  CallInviteEvent,
+  CallInviteResult,
+  CallSdp,
+  CallStateEvent,
+  CallStats,
   ConversationListResponse,
   ConversationSummary,
   FriendEvent,
@@ -227,6 +241,7 @@ export type {
   SuggestedUser,
   SyncResponse,
   Topic,
+  TurnServer,
   TypingEvent,
   UserProfile,
   WalletView,

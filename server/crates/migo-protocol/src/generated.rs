@@ -8066,6 +8066,735 @@ impl Decode for LeaderboardResponse {
     }
 }
 
+/// Invites a callee to a call.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallInvite {
+    /// Client-minted; also the idempotency key.
+    pub call_id: Id,
+    pub conversation_id: Id,
+    pub callee_id: Id,
+    /// 0=Audio, 1=Video.
+    pub media_kind: u32,
+    pub caller_device: Id,
+    /// Codec and feature negotiation.
+    pub capabilities: u64,
+    /// E2E-sealed SDP offer; the server never reads it.
+    pub sealed_offer: Vec<u8>,
+}
+
+impl Encode for CallInvite {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.call_id);
+        w.write_id(&self.conversation_id);
+        w.write_id(&self.callee_id);
+        w.write_u32(self.media_kind);
+        w.write_id(&self.caller_device);
+        w.write_u64(self.capabilities);
+        w.write_bytes(&self.sealed_offer)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallInvite {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.call_id = r.read_id()?;
+        out.conversation_id = r.read_id()?;
+        out.callee_id = r.read_id()?;
+        out.media_kind = r.read_u32()?;
+        out.caller_device = r.read_id()?;
+        out.capabilities = r.read_u64()?;
+        out.sealed_offer = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// The caller's answer to its own invite.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallInviteResult {
+    pub call_id: Id,
+    /// 0=Ringing, 1=Declined, 2=Expired, 3=Blocked.
+    pub status: u32,
+    pub expires_at: Timestamp,
+}
+
+impl Encode for CallInviteResult {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.call_id);
+        w.write_u32(self.status);
+        w.write_timestamp(self.expires_at);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallInviteResult {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.call_id = r.read_id()?;
+        out.status = r.read_u32()?;
+        out.expires_at = r.read_timestamp()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Tells the callee a call is ringing.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallInviteEvent {
+    pub call_id: Id,
+    pub conversation_id: Id,
+    pub caller_id: Id,
+    pub caller_device: Id,
+    pub media_kind: u32,
+    pub expires_at: Timestamp,
+    pub sealed_offer: Vec<u8>,
+}
+
+impl Encode for CallInviteEvent {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.call_id);
+        w.write_id(&self.conversation_id);
+        w.write_id(&self.caller_id);
+        w.write_id(&self.caller_device);
+        w.write_u32(self.media_kind);
+        w.write_timestamp(self.expires_at);
+        w.write_bytes(&self.sealed_offer)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallInviteEvent {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.call_id = r.read_id()?;
+        out.conversation_id = r.read_id()?;
+        out.caller_id = r.read_id()?;
+        out.caller_device = r.read_id()?;
+        out.media_kind = r.read_u32()?;
+        out.expires_at = r.read_timestamp()?;
+        out.sealed_offer = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// The callee answers.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallAnswer {
+    pub call_id: Id,
+    pub callee_device: Id,
+    /// E2E-sealed SDP answer.
+    pub sealed_answer: Vec<u8>,
+}
+
+impl Encode for CallAnswer {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.call_id);
+        w.write_id(&self.callee_device);
+        w.write_bytes(&self.sealed_answer)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallAnswer {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.call_id = r.read_id()?;
+        out.callee_device = r.read_id()?;
+        out.sealed_answer = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// The callee declines.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallDecline {
+    pub call_id: Id,
+    /// 0=Busy, 1=Declined.
+    pub reason: u32,
+}
+
+impl Encode for CallDecline {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.call_id);
+        w.write_u32(self.reason);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallDecline {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.call_id = r.read_id()?;
+        out.reason = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// The caller cancels before an answer.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallCancel {
+    pub call_id: Id,
+}
+
+impl Encode for CallCancel {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.call_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallCancel {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.call_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Ends an established call; always with a reason.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallEnd {
+    pub call_id: Id,
+    /// 0=ByCaller, 1=ByCallee, 2=Declined, 3=NoAnswer, 4=Failed, 5=Network.
+    pub reason: u32,
+}
+
+impl Encode for CallEnd {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.call_id);
+        w.write_u32(self.reason);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallEnd {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.call_id = r.read_id()?;
+        out.reason = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Relays a sealed SDP offer or answer between devices.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallSdp {
+    pub call_id: Id,
+    pub from_device: Id,
+    pub to_device: Id,
+    /// E2E-sealed SDP blob.
+    pub sealed_sdp: Vec<u8>,
+}
+
+impl Encode for CallSdp {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.call_id);
+        w.write_id(&self.from_device);
+        w.write_id(&self.to_device);
+        w.write_bytes(&self.sealed_sdp)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallSdp {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.call_id = r.read_id()?;
+        out.from_device = r.read_id()?;
+        out.to_device = r.read_id()?;
+        out.sealed_sdp = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Relays a batch of sealed ICE candidates.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallIce {
+    pub call_id: Id,
+    pub from_device: Id,
+    pub to_device: Id,
+    /// A batch of sealed ICE candidates, not one frame per candidate.
+    pub sealed_candidates: Vec<u8>,
+}
+
+impl Encode for CallIce {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.call_id);
+        w.write_id(&self.from_device);
+        w.write_id(&self.to_device);
+        w.write_bytes(&self.sealed_candidates)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallIce {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.call_id = r.read_id()?;
+        out.from_device = r.read_id()?;
+        out.to_device = r.read_id()?;
+        out.sealed_candidates = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// A call's state change, pushed to participants.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallStateEvent {
+    pub call_id: Id,
+    /// 0=Ringing, 1=Connecting, 2=Connected, 3=Reconnecting, 4=Ended.
+    pub state: u32,
+    /// Present when state is Ended.
+    pub reason: Option<u32>,
+}
+
+impl Encode for CallStateEvent {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.call_id);
+        w.write_u32(self.state);
+        let present = usize::from(self.reason.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.reason {
+            w.optional(1, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallStateEvent {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.call_id = r.read_id()?;
+        out.state = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.reason = Some(sub.read_u32()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Renegotiates codecs/streams mid-call (e.g. ICE restart, add video).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallRenegotiate {
+    pub call_id: Id,
+    pub from_device: Id,
+    pub to_device: Id,
+    pub sealed_sdp: Vec<u8>,
+}
+
+impl Encode for CallRenegotiate {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.call_id);
+        w.write_id(&self.from_device);
+        w.write_id(&self.to_device);
+        w.write_bytes(&self.sealed_sdp)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallRenegotiate {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.call_id = r.read_id()?;
+        out.from_device = r.read_id()?;
+        out.to_device = r.read_id()?;
+        out.sealed_sdp = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Re-keys the call's media encryption (e.g. membership change).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallKeyUpdate {
+    pub call_id: Id,
+    pub epoch: u64,
+    pub sealed_key_material: Vec<u8>,
+}
+
+impl Encode for CallKeyUpdate {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.call_id);
+        w.write_u64(self.epoch);
+        w.write_bytes(&self.sealed_key_material)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallKeyUpdate {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.call_id = r.read_id()?;
+        out.epoch = r.read_u64()?;
+        out.sealed_key_material = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Aggregate quality numbers; Droppable; never call content.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallStats {
+    pub call_id: Id,
+    pub setup_ms: Option<u32>,
+    pub rtt_ms: Option<u32>,
+    /// Per-10000.
+    pub packet_loss: Option<u32>,
+    pub jitter_ms: Option<u32>,
+    pub used_turn: Option<bool>,
+}
+
+impl Encode for CallStats {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.call_id);
+        let present = usize::from(self.setup_ms.is_some())
+            + usize::from(self.rtt_ms.is_some())
+            + usize::from(self.packet_loss.is_some())
+            + usize::from(self.jitter_ms.is_some())
+            + usize::from(self.used_turn.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.setup_ms {
+            w.optional(1, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.rtt_ms {
+            w.optional(2, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.packet_loss {
+            w.optional(3, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.jitter_ms {
+            w.optional(4, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.used_turn {
+            w.optional(5, |w| {
+                w.write_bool(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallStats {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.call_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.setup_ms = Some(sub.read_u32()?),
+                2 => out.rtt_ms = Some(sub.read_u32()?),
+                3 => out.packet_loss = Some(sub.read_u32()?),
+                4 => out.jitter_ms = Some(sub.read_u32()?),
+                5 => out.used_turn = Some(sub.read_bool()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// One TURN relay with short-lived credentials.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TurnServer {
+    pub url: String,
+    pub username: String,
+    pub credential: String,
+    pub ttl_seconds: u32,
+    pub region: String,
+}
+
+impl Encode for TurnServer {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.url)?;
+        w.write_str(&self.username)?;
+        w.write_str(&self.credential)?;
+        w.write_u32(self.ttl_seconds);
+        w.write_str(&self.region)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for TurnServer {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.url = r.read_string()?;
+        out.username = r.read_string()?;
+        out.credential = r.read_string()?;
+        out.ttl_seconds = r.read_u32()?;
+        out.region = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Requests TURN credentials for a call.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallTurnFetch {
+    pub call_id: Id,
+}
+
+impl Encode for CallTurnFetch {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.call_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallTurnFetch {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.call_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// TURN servers with temporary credentials.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallTurnResponse {
+    pub servers: Vec<TurnServer>,
+}
+
+impl Encode for CallTurnResponse {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.servers.len())?;
+            for item in self.servers.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallTurnResponse {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.servers = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(TurnServer::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Identifies one call.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CallId {
+    pub call_id: Id,
+}
+
+impl Encode for CallId {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.call_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for CallId {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.call_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
 /// Delivery class, deciding what happens when a session queue is full (ADR-0008).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeliveryClass {
@@ -8211,6 +8940,36 @@ pub enum Opcode {
     FedError = 219,
     FedCallRelay = 220,
     FedDirectory = 221,
+    /// Invites a callee to a call.
+    CallInvite = 224,
+    /// Tells the callee a call is ringing.
+    CallInviteEvent = 225,
+    /// The callee answers.
+    CallAnswer = 226,
+    /// The callee declines.
+    CallDecline = 227,
+    /// The caller cancels before an answer.
+    CallCancel = 228,
+    /// Ends a call; always with a reason.
+    CallEnd = 229,
+    /// Relays a sealed SDP offer or answer.
+    CallSdp = 230,
+    /// Relays a batch of sealed ICE candidates.
+    CallIce = 231,
+    /// A call's state change.
+    CallStateEvent = 232,
+    /// Renegotiates mid-call.
+    CallRenegotiate = 233,
+    /// Re-keys call media.
+    CallKeyUpdate = 234,
+    /// Aggregate quality numbers.
+    CallStats = 235,
+    /// Requests TURN credentials.
+    CallTurnFetch = 236,
+    /// Joins a group call via SFU.
+    CallSfuJoin = 237,
+    /// SFU group call state.
+    CallSfuEvent = 238,
 }
 
 impl Opcode {
@@ -8308,6 +9067,21 @@ impl Opcode {
             219 => Self::FedError,
             220 => Self::FedCallRelay,
             221 => Self::FedDirectory,
+            224 => Self::CallInvite,
+            225 => Self::CallInviteEvent,
+            226 => Self::CallAnswer,
+            227 => Self::CallDecline,
+            228 => Self::CallCancel,
+            229 => Self::CallEnd,
+            230 => Self::CallSdp,
+            231 => Self::CallIce,
+            232 => Self::CallStateEvent,
+            233 => Self::CallRenegotiate,
+            234 => Self::CallKeyUpdate,
+            235 => Self::CallStats,
+            236 => Self::CallTurnFetch,
+            237 => Self::CallSfuJoin,
+            238 => Self::CallSfuEvent,
             _ => return None,
         })
     }
@@ -8400,6 +9174,21 @@ impl Opcode {
             Self::FedError => "FED_ERROR",
             Self::FedCallRelay => "FED_CALL_RELAY",
             Self::FedDirectory => "FED_DIRECTORY",
+            Self::CallInvite => "CALL_INVITE",
+            Self::CallInviteEvent => "CALL_INVITE_EVENT",
+            Self::CallAnswer => "CALL_ANSWER",
+            Self::CallDecline => "CALL_DECLINE",
+            Self::CallCancel => "CALL_CANCEL",
+            Self::CallEnd => "CALL_END",
+            Self::CallSdp => "CALL_SDP",
+            Self::CallIce => "CALL_ICE",
+            Self::CallStateEvent => "CALL_STATE_EVENT",
+            Self::CallRenegotiate => "CALL_RENEGOTIATE",
+            Self::CallKeyUpdate => "CALL_KEY_UPDATE",
+            Self::CallStats => "CALL_STATS",
+            Self::CallTurnFetch => "CALL_TURN_FETCH",
+            Self::CallSfuJoin => "CALL_SFU_JOIN",
+            Self::CallSfuEvent => "CALL_SFU_EVENT",
         }
     }
 
@@ -8492,6 +9281,21 @@ impl Opcode {
             Self::FedError => 0,
             Self::FedCallRelay => 1,
             Self::FedDirectory => 2,
+            Self::CallInvite => 20,
+            Self::CallInviteEvent => 0,
+            Self::CallAnswer => 5,
+            Self::CallDecline => 5,
+            Self::CallCancel => 5,
+            Self::CallEnd => 2,
+            Self::CallSdp => 3,
+            Self::CallIce => 1,
+            Self::CallStateEvent => 0,
+            Self::CallRenegotiate => 3,
+            Self::CallKeyUpdate => 3,
+            Self::CallStats => 1,
+            Self::CallTurnFetch => 10,
+            Self::CallSfuJoin => 20,
+            Self::CallSfuEvent => 0,
         }
     }
 
@@ -8583,6 +9387,21 @@ impl Opcode {
             Self::FedError => DeliveryClass::Critical,
             Self::FedCallRelay => DeliveryClass::Critical,
             Self::FedDirectory => DeliveryClass::Critical,
+            Self::CallInvite => DeliveryClass::Critical,
+            Self::CallInviteEvent => DeliveryClass::Critical,
+            Self::CallAnswer => DeliveryClass::Critical,
+            Self::CallDecline => DeliveryClass::Critical,
+            Self::CallCancel => DeliveryClass::Critical,
+            Self::CallEnd => DeliveryClass::Critical,
+            Self::CallSdp => DeliveryClass::Critical,
+            Self::CallIce => DeliveryClass::Critical,
+            Self::CallStateEvent => DeliveryClass::Critical,
+            Self::CallRenegotiate => DeliveryClass::Critical,
+            Self::CallKeyUpdate => DeliveryClass::Critical,
+            Self::CallStats => DeliveryClass::Droppable,
+            Self::CallTurnFetch => DeliveryClass::Critical,
+            Self::CallSfuJoin => DeliveryClass::Critical,
+            Self::CallSfuEvent => DeliveryClass::Coalescable,
         }
     }
 
@@ -8674,6 +9493,21 @@ impl Opcode {
             Self::FedError => AuthLevel::Server,
             Self::FedCallRelay => AuthLevel::Server,
             Self::FedDirectory => AuthLevel::Server,
+            Self::CallInvite => AuthLevel::User,
+            Self::CallInviteEvent => AuthLevel::User,
+            Self::CallAnswer => AuthLevel::User,
+            Self::CallDecline => AuthLevel::User,
+            Self::CallCancel => AuthLevel::User,
+            Self::CallEnd => AuthLevel::User,
+            Self::CallSdp => AuthLevel::User,
+            Self::CallIce => AuthLevel::User,
+            Self::CallStateEvent => AuthLevel::User,
+            Self::CallRenegotiate => AuthLevel::User,
+            Self::CallKeyUpdate => AuthLevel::User,
+            Self::CallStats => AuthLevel::User,
+            Self::CallTurnFetch => AuthLevel::User,
+            Self::CallSfuJoin => AuthLevel::User,
+            Self::CallSfuEvent => AuthLevel::User,
         }
     }
 
@@ -8765,6 +9599,21 @@ impl Opcode {
             Self::FedError => Direction::Both,
             Self::FedCallRelay => Direction::Both,
             Self::FedDirectory => Direction::Both,
+            Self::CallInvite => Direction::ClientToServer,
+            Self::CallInviteEvent => Direction::ServerToClient,
+            Self::CallAnswer => Direction::ClientToServer,
+            Self::CallDecline => Direction::ClientToServer,
+            Self::CallCancel => Direction::ClientToServer,
+            Self::CallEnd => Direction::Both,
+            Self::CallSdp => Direction::Both,
+            Self::CallIce => Direction::Both,
+            Self::CallStateEvent => Direction::ServerToClient,
+            Self::CallRenegotiate => Direction::Both,
+            Self::CallKeyUpdate => Direction::Both,
+            Self::CallStats => Direction::ClientToServer,
+            Self::CallTurnFetch => Direction::ClientToServer,
+            Self::CallSfuJoin => Direction::ClientToServer,
+            Self::CallSfuEvent => Direction::ServerToClient,
         }
     }
 
@@ -8857,6 +9706,21 @@ impl Opcode {
             Self::FedError => false,
             Self::FedCallRelay => false,
             Self::FedDirectory => false,
+            Self::CallInvite => false,
+            Self::CallInviteEvent => false,
+            Self::CallAnswer => false,
+            Self::CallDecline => false,
+            Self::CallCancel => false,
+            Self::CallEnd => false,
+            Self::CallSdp => false,
+            Self::CallIce => false,
+            Self::CallStateEvent => false,
+            Self::CallRenegotiate => false,
+            Self::CallKeyUpdate => false,
+            Self::CallStats => false,
+            Self::CallTurnFetch => false,
+            Self::CallSfuJoin => false,
+            Self::CallSfuEvent => false,
         }
     }
 
@@ -8956,5 +9820,20 @@ impl Opcode {
         Self::FedError,
         Self::FedCallRelay,
         Self::FedDirectory,
+        Self::CallInvite,
+        Self::CallInviteEvent,
+        Self::CallAnswer,
+        Self::CallDecline,
+        Self::CallCancel,
+        Self::CallEnd,
+        Self::CallSdp,
+        Self::CallIce,
+        Self::CallStateEvent,
+        Self::CallRenegotiate,
+        Self::CallKeyUpdate,
+        Self::CallStats,
+        Self::CallTurnFetch,
+        Self::CallSfuJoin,
+        Self::CallSfuEvent,
     ];
 }

@@ -53,6 +53,7 @@ use async_trait::async_trait;
 
 use migo_auth::Identity;
 use migo_bots::SharedBots;
+use migo_calls::SharedCallkeeper;
 use migo_core::{Error, Id, PublicId, Timestamp};
 use migo_economy::SharedTreasurer;
 use migo_federation::SharedMesh;
@@ -91,6 +92,7 @@ use migo_social::{Caller as SocialCaller, Interaction, ProfileCard, SharedSocial
 // is written against the domain's own `Shared` handle, keeping `AppDispatcher` free of
 // per-feature detail. See each module's header for the exact opcode-to-method map.
 pub(crate) mod bots;
+pub(crate) mod calls;
 pub(crate) mod economy;
 pub(crate) mod economy_read;
 pub(crate) mod federation;
@@ -128,6 +130,7 @@ pub struct AppDispatcher {
     notify: SharedNotifier,
     federation: SharedMesh,
     bots: SharedBots,
+    calls: SharedCallkeeper,
 }
 
 impl AppDispatcher {
@@ -152,6 +155,7 @@ impl AppDispatcher {
         notify: SharedNotifier,
         federation: SharedMesh,
         bots: SharedBots,
+        calls: SharedCallkeeper,
     ) -> Self {
         Self {
             store,
@@ -167,6 +171,7 @@ impl AppDispatcher {
             notify,
             federation,
             bots,
+            calls,
         }
     }
 }
@@ -614,6 +619,23 @@ impl Dispatcher for AppDispatcher {
             Opcode::FedDirectory => {
                 federation::handle_directory(context, frame, &self.federation).await
             }
+
+            // --- calls ---
+            // Each handler replies to the sender and publishes the returned
+            // event to the other party's user topic; the service owns every
+            // rule and never sends a frame itself.
+            Opcode::CallInvite => calls::handle_invite(context, frame, &self.calls).await,
+            Opcode::CallAnswer => calls::handle_answer(context, frame, &self.calls).await,
+            Opcode::CallDecline => calls::handle_decline(context, frame, &self.calls).await,
+            Opcode::CallCancel => calls::handle_cancel(context, frame, &self.calls).await,
+            Opcode::CallEnd => calls::handle_end(context, frame, &self.calls).await,
+            Opcode::CallSdp => calls::handle_sdp(context, frame, &self.calls).await,
+            Opcode::CallIce => calls::handle_ice(context, frame, &self.calls).await,
+            Opcode::CallRenegotiate => calls::handle_renegotiate(context, frame, &self.calls).await,
+            Opcode::CallKeyUpdate => calls::handle_key_update(context, frame, &self.calls).await,
+            Opcode::CallStats => calls::handle_stats(context, frame).await,
+            Opcode::CallTurnFetch => calls::handle_turn_fetch(context, frame, &self.calls).await,
+            Opcode::CallSfuJoin => calls::refuse_sfu_join(),
 
             // Every other opcode is one this node speaks the transport for but does not route.
             other => Err(fault::feature_disabled(other.name())),

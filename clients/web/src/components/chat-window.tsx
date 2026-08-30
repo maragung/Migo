@@ -4,9 +4,10 @@ import { useCallback, useEffect, useMemo } from 'react';
 import type { ReactNode } from 'react';
 
 import { ConversationKind, EncryptionMode } from '@migo/sdk';
-import type { Id } from '@migo/sdk';
+import type { ConversationSummary, Id } from '@migo/sdk';
 
 import { messagePreview } from '@/lib/message-preview.js';
+import { useCall } from '@/lib/migo/call-manager.js';
 import { useChat } from '@/lib/migo/use-chat.js';
 import { useGameEvents } from '@/lib/migo/use-game-events.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
@@ -18,6 +19,7 @@ import { useProfiles } from '@/lib/migo/use-profiles.js';
 import { closeConversation } from '@/lib/migo/use-open-conversation.js';
 
 import { Avatar } from './avatar.js';
+import { CallButtons } from './call-buttons.js';
 import { GameEventList } from './game-events.js';
 import { GameLauncher } from './game-launcher.js';
 import { MessageComposer } from './message-composer.js';
@@ -48,6 +50,24 @@ export function encryptionLabelFor(mode: EncryptionMode | undefined): string | n
   }
 }
 
+/**
+ * The account a call from this thread would dial, or `null` when the thread cannot be called.
+ *
+ * Pure, so a test can pin the gate. A call is offered only for a `Direct` conversation with a
+ * second member: the wire's invite names exactly one callee, and a group or room call is the
+ * SFU flow this build does not have. A direct thread whose only member is ourselves (a note to
+ * self) has nobody to dial either.
+ */
+export function callPeerFor(
+  summary: ConversationSummary | undefined,
+  accountId: Id | null,
+): Id | null {
+  if (summary === undefined || summary.kind !== ConversationKind.Direct) {
+    return null;
+  }
+  return summary.members?.find((member) => member !== accountId) ?? null;
+}
+
 export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNode {
   const { client, accountId } = useMigo();
   const { items, markRead } = useConversations();
@@ -71,6 +91,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
     sendVoiceNote,
   } = useChat(conversationId);
   const game = useGameEvents(conversationId);
+  const { startCall } = useCall();
 
   /**
    * The media resolver the message list embeds images through. A failure resolves to `null` rather
@@ -100,7 +121,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   const supportsGames =
     summary?.kind === ConversationKind.Group || summary?.kind === ConversationKind.Room;
   const members = summary?.members ?? [];
-  const peerId = isDirect ? (members.find((member) => member !== accountId) ?? null) : null;
+  const peerId = callPeerFor(summary, accountId);
   // The room behind this conversation, when the shell knows one (from this session's joins, or
   // the account's remembered rooms): the header's live counters and topic come from it, because
   // the conversation summary carries neither.
@@ -219,6 +240,9 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
             {encryptionLabel}
           </span>
         ) : null}
+        {/* A 1:1 is the one conversation this build can call: the wire's invite names a single
+            callee, and a group call needs the SFU this build does not have. */}
+        <CallButtons conversationId={conversationId} peerId={peerId} onStartCall={startCall} />
         {supportsGames ? <GameLauncher onStart={game.startGame} /> : null}
       </header>
 

@@ -933,6 +933,171 @@
    "auth": "Server",
    "cost": 2,
    "class": "Critical"
+  },
+  {
+   "name": "CALL_INVITE",
+   "code": 224,
+   "direction": "client_to_server",
+   "payload": "CallInvite",
+   "response": "CallInviteResult",
+   "auth": "User",
+   "cost": 20,
+   "class": "Critical",
+   "doc": "Invites a callee to a call."
+  },
+  {
+   "name": "CALL_INVITE_EVENT",
+   "code": 225,
+   "direction": "server_to_client",
+   "payload": "CallInviteEvent",
+   "response": null,
+   "auth": "User",
+   "cost": 0,
+   "class": "Critical",
+   "doc": "Tells the callee a call is ringing."
+  },
+  {
+   "name": "CALL_ANSWER",
+   "code": 226,
+   "direction": "client_to_server",
+   "payload": "CallAnswer",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "The callee answers."
+  },
+  {
+   "name": "CALL_DECLINE",
+   "code": 227,
+   "direction": "client_to_server",
+   "payload": "CallDecline",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "The callee declines."
+  },
+  {
+   "name": "CALL_CANCEL",
+   "code": 228,
+   "direction": "client_to_server",
+   "payload": "CallCancel",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "The caller cancels before an answer."
+  },
+  {
+   "name": "CALL_END",
+   "code": 229,
+   "direction": "both",
+   "payload": "CallEnd",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 2,
+   "class": "Critical",
+   "doc": "Ends a call; always with a reason."
+  },
+  {
+   "name": "CALL_SDP",
+   "code": 230,
+   "direction": "both",
+   "payload": "CallSdp",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 3,
+   "class": "Critical",
+   "doc": "Relays a sealed SDP offer or answer."
+  },
+  {
+   "name": "CALL_ICE",
+   "code": 231,
+   "direction": "both",
+   "payload": "CallIce",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 1,
+   "class": "Critical",
+   "doc": "Relays a batch of sealed ICE candidates."
+  },
+  {
+   "name": "CALL_STATE_EVENT",
+   "code": 232,
+   "direction": "server_to_client",
+   "payload": "CallStateEvent",
+   "response": null,
+   "auth": "User",
+   "cost": 0,
+   "class": "Critical",
+   "doc": "A call's state change."
+  },
+  {
+   "name": "CALL_RENEGOTIATE",
+   "code": 233,
+   "direction": "both",
+   "payload": "CallRenegotiate",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 3,
+   "class": "Critical",
+   "doc": "Renegotiates mid-call."
+  },
+  {
+   "name": "CALL_KEY_UPDATE",
+   "code": 234,
+   "direction": "both",
+   "payload": "CallKeyUpdate",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 3,
+   "class": "Critical",
+   "doc": "Re-keys call media."
+  },
+  {
+   "name": "CALL_STATS",
+   "code": 235,
+   "direction": "client_to_server",
+   "payload": "CallStats",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 1,
+   "class": "Droppable",
+   "doc": "Aggregate quality numbers."
+  },
+  {
+   "name": "CALL_TURN_FETCH",
+   "code": 236,
+   "direction": "client_to_server",
+   "payload": "CallTurnFetch",
+   "response": "CallTurnResponse",
+   "auth": "User",
+   "cost": 10,
+   "class": "Critical",
+   "doc": "Requests TURN credentials."
+  },
+  {
+   "name": "CALL_SFU_JOIN",
+   "code": 237,
+   "direction": "client_to_server",
+   "payload": "CallInvite",
+   "response": "CallTurnResponse",
+   "auth": "User",
+   "cost": 20,
+   "class": "Critical",
+   "doc": "Joins a group call via SFU."
+  },
+  {
+   "name": "CALL_SFU_EVENT",
+   "code": 238,
+   "direction": "server_to_client",
+   "payload": "CallStateEvent",
+   "response": null,
+   "auth": "User",
+   "cost": 0,
+   "class": "Coalescable",
+   "doc": "SFU group call state."
   }
  ]
 }

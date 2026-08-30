@@ -4127,7 +4127,7 @@ Opcode yang sudah ada di schema. STATUS: SCHEMA. Format setiap baris: nomor, nam
 185 GAME_ABANDON, client ke server, User, 2, Critical
 186 GAME_CATALOGUE, client ke server, User, 1, Critical
 
-Opcode yang direncanakan. STATUS: BUILT untuk 40 sampai 42, 111, 118, dan 119; STATUS: SCHEMA untuk sisanya yang sudah masuk registri; STATUS: SPEC untuk yang masih dokumen. Setiap opcode ditambahkan ke opcodes.json bersamaan dengan implementasi handler-nya, sesuai aturan alokasi section 146.
+Opcode yang direncanakan. STATUS: BUILT untuk seluruh range yang tercantum di atas, termasuk call 224 sampai 238. STATUS: SCHEMA untuk metadata block section 141 dan flag bit 0x40 yang belum masuk registri. STATUS: SPEC untuk SFU group call penuh yang membutuhkan deployment terpisah. Setiap opcode ditambahkan ke opcodes.json bersamaan dengan implementasi handler-nya, sesuai aturan alokasi section 146.
 
 Messaging:
 
@@ -5462,6 +5462,17 @@ dan view yang tidak memuat jawaban di respons REST-nya; auth-flow menambah pin w
 berbeda, mode tak dikenal ditolak) dan desktop egui menampilkan tantangan sebagai texture dengan
 normalisasi yang sama.
 
+migo-calls, yaitu state machine signaling panggilan (section 165 dan 180): Callkeeper dengan
+11 metode yang mengelola siklus hidup Ringing-Connecting-Connected-Ended beserta enam alasan
+Ended, invite ber-idempotensi call_id dari client (retry tidak membunyikan dua kali,
+reuse dengan payload berbeda dijawab IDEMPOTENCY_MISMATCH), relay SDP dan ICE tersegel yang
+server hanya membaca header routing tanpa pernah membuka byte tersegel, gate panggilan
+(keanggotaan conversation dan status block dari store, gagal ke arah menolak), sweep invite
+kedaluwarsa yang dijalankan di dalam invite sehingga tidak butuh background task, dan
+metrik per-state. Store in-memory; TURN dari config (daftar kosong untuk sekarang).
+SFU group call (237-238) dijawab FEATURE_DISABLED sampai deployment SFU tersedia.
+21 test yang menutup siklus hidup penuh, idempotensi, relay, gate, dan sweep.
+
 tools/protocol-codegen, yaitu generator dan pemeriksa staleness
 tools/entity-codegen, yaitu generator entity SeaORM dari server/migrations dan pemeriksa staleness yang dijalankan lewat make entity-check, sehingga schema tetap menjadi satu sumber kebenaran dan entity tidak pernah boleh diedit tangan. Komentar pada file migration menjadi doc comment pada entity, dan komentar yang ditulis di ujung baris sebuah kolom melekat pada kolom yang ditulisi komentar itu, bukan pada kolom berikutnya. Sebelumnya melekat pada kolom berikutnya, sehingga 13 kolom di seluruh schema membawa penomoran enum milik kolom lain, yaitu doc comment yang bukan sekadar hilang melainkan salah dan menjelaskan kolom yang berbeda dari tempatnya duduk
 tools/chatbot, yaitu dua akun TypeScript yang dibangun di atas @migo/sdk: setelah register pada satu node, masing-masing membuka koneksi gateway sendiri, lalu keduanya subscribe ke satu conversation langsung, dan pertukaran teks sepuluh round-trip dihitung end-to-end. Test tidak pernah menghitung angka test case di Rust: tujuannya membuktikan bahwa satu node yang berdiri sendiri dapat meng-handle seluruh round-trip login, subscribe, send, dan receive. Server hanya menghitung bot sebagai smoke jalan, bukan test integrasi.
@@ -5484,12 +5495,9 @@ Feature bit 0 sampai 15, yaitu konstanta yang sudah di-codegen dan dinegosiasika
 SPEC, baru ada di dokumen:
 
 Metadata block pada section 141 dan flag bit 0x40
-Opcode call 224 sampai 238
-Call signaling dan media architecture pada section 165 dan 166
-Voice note protocol pada section 167 beserta perekaman dan pemutaran di client
 Requirement produk voice note pada section 179 dan requirement produk call pada section 180
 
-Sudah meninggalkan SPEC dan menyentuh kabel: opcode messaging 40 sampai 42 (edit, reaksi), profile 111 dan 112, social 113 sampai 119 (termasuk suggestions dan search), room 80 sampai 89 (termasuk create, roster, role, update, archive), media 128 sampai 133, economy 160 sampai 167 (termasuk catalogue, ledger, progression, badges, leaderboard), games 176 sampai 186 (termasuk start, view, abandon, catalogue) (kini dengan data plane HTTP di migo-api untuk backend filesystem dan scan inline pada commit sehingga media non-E2E tidak lagi terkunci Pending), notification 145 dan 146 beserta penerbitnya, economy 160 sampai 162, bot 178 sampai 180, moderation 192 sampai 194, dan federation 208 sampai 221 dengan transport mesh di migod; feature bit 16 sampai 20 dinegosiasikan dan federasi memakainya
+Sudah meninggalkan SPEC dan menyentuh kabel: opcode messaging 40 sampai 42 (edit, reaksi), profile 111 dan 112, social 113 sampai 119 (termasuk suggestions dan search), room 80 sampai 89 (termasuk create, roster, role, update, archive), media 128 sampai 133, economy 160 sampai 167 (termasuk catalogue, ledger, progression, badges, leaderboard), games 176 sampai 186 (termasuk start, view, abandon, catalogue), dan call 224 sampai 238 (kini dengan data plane HTTP di migo-api untuk backend filesystem dan scan inline pada commit sehingga media non-E2E tidak lagi terkunci Pending), notification 145 dan 146 beserta penerbitnya, economy 160 sampai 162, bot 178 sampai 180, moderation 192 sampai 194, dan federation 208 sampai 221 dengan transport mesh di migod; feature bit 16 sampai 20 dinegosiasikan dan federasi memakainya
 
 KODE LENGKAP DI LUAR WORKSPACE CARGO, TEST BELUM DITULIS:
 

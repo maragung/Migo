@@ -1956,6 +1956,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "migo-calls"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "migo-cache",
+ "migo-core",
+ "migo-protocol",
+ "migo-ratelimit",
+ "parking_lot",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "migo-captcha"
 version = "0.1.0"
 dependencies = [
@@ -2260,6 +2274,7 @@ dependencies = [
  "migo-auth",
  "migo-bots",
  "migo-cache",
+ "migo-calls",
  "migo-captcha",
  "migo-core",
  "migo-crypto",

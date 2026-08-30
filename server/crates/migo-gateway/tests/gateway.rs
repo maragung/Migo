@@ -1464,6 +1464,11 @@ fn the_wire_is_push_only_and_has_no_request_or_response_opcode() {
         Opcode::BotEvent,
         Opcode::ModerationEvent,
         Opcode::ReactionEvent,
+        // Call signaling pushes (section 165): invite events, state changes, and SFU
+        // events are all one-way server-initiated frames.
+        Opcode::CallInviteEvent,
+        Opcode::CallStateEvent,
+        Opcode::CallSfuEvent,
     ];
     for opcode in server_only {
         assert!(

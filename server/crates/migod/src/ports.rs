@@ -1,6 +1,6 @@
 //! The port adapters a composition root must supply.
 //!
-//! Three domain crates deliberately ship a *hole* rather than a default: an interface they need
+//! Four domain crates deliberately ship a *hole* rather than a default: an interface they need
 //! but refuse to decide the implementation of, because the choice is deployment policy, not domain
 //! logic. This module fills those holes for a running `migod`.
 //!
@@ -16,6 +16,9 @@
 //!   the seam that lets a finished game credit experience and a win confer a badge. It is the one
 //!   place two sibling domains (games and economy) meet, and by layering rule they meet only here,
 //!   in the composition root, never by depending on each other.
+//! - [`StoreCallGate`] implements [`migo_calls::CallGate`]: the membership and block questions the
+//!   call service must ask before it lets one account ring another. Calls cannot read those tables
+//!   themselves — same layering rule, same answer: the composition root decides, the domain asks.
 
 use std::collections::HashMap;
 use std::io::ErrorKind as IoErrorKind;
@@ -24,6 +27,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 
+use migo_calls::CallGate;
 use migo_core::{Id, Result, Timestamp};
 use migo_economy::{Award, Badge, BadgeGrant, SharedTreasurer, Source};
 use migo_games::Rewards;
@@ -289,6 +293,46 @@ impl migo_api::MediaFiles for FsStorage {
             }
         })?;
         Ok(bytes::Bytes::from(bytes))
+    }
+}
+
+// --- the calls service's questions -------------------------------------------------
+//
+// `migo-calls` refuses to read the membership and block tables itself: by the
+// layering rule it cannot depend on the crates that own them, and a call is
+// the one request whose every rule is about *somebody else*. It asks through
+// the `CallGate` port instead, and this adapter answers from the store.
+
+/// Answers the call service's gate questions from the process's own store.
+///
+/// Both questions fail closed, in the direction that refuses contact: a
+/// store that cannot answer a membership question is a store that has not
+/// said "member", and one that cannot answer a block question is a store
+/// that has not said "not blocked". An outage then costs a call invitation,
+/// never a ring through a block.
+pub struct StoreCallGate {
+    store: migo_store::SharedStore,
+}
+
+impl StoreCallGate {
+    /// Wraps the store the composition root already opened.
+    #[must_use]
+    pub fn new(store: migo_store::SharedStore) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl CallGate for StoreCallGate {
+    async fn may_invite(&self, conversation_id: Id, caller_id: Id) -> bool {
+        self.store
+            .is_member(conversation_id, caller_id)
+            .await
+            .unwrap_or(false)
+    }
+
+    async fn blocked_either_way(&self, a: Id, b: Id) -> bool {
+        self.store.is_blocked_either_way(a, b).await.unwrap_or(true)
     }
 }
 

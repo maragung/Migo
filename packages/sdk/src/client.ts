@@ -91,6 +91,7 @@ import { SyncDomain } from './domains/sync.js';
 import { TypingDomain } from './domains/typing.js';
 import { PresenceDomain } from './domains/presence.js';
 import { RoomsDomain } from './domains/rooms.js';
+import { CallsDomain } from './domains/calls.js';
 import { ProfileDomain } from './domains/profile.js';
 import { MediaDomain } from './domains/media.js';
 import { NotificationsDomain } from './domains/notifications.js';
@@ -174,6 +175,7 @@ interface Connected {
   typing: TypingDomain;
   presence: PresenceDomain;
   rooms: RoomsDomain;
+  calls: CallsDomain;
   profile: ProfileDomain;
   media: MediaDomain;
   notifications: NotificationsDomain;
@@ -290,6 +292,11 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     return this.#requireConnected().rooms;
   }
 
+  /** Place, answer, and observe 1:1 voice and video calls. */
+  get calls(): CallsDomain {
+    return this.#requireConnected().calls;
+  }
+
   /** Look up public account profiles. */
   get profile(): ProfileDomain {
     return this.#requireConnected().profile;
@@ -391,6 +398,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     ctx.typing.stop();
     ctx.presence.stop();
     ctx.rooms.stop();
+    ctx.calls.stop();
     ctx.notifications.stop();
     ctx.social.stop();
     ctx.games.stop();
@@ -783,6 +791,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
       typing: new TypingDomain(rpc, this.#options.onEventError),
       presence: new PresenceDomain(rpc, this.#options.onEventError),
       rooms: new RoomsDomain(rpc, this.#options.onEventError),
+      calls: new CallsDomain(rpc, grant.deviceId, this.#options.onEventError),
       profile: new ProfileDomain(rpc),
       media: new MediaDomain(rpc, this.#options.fetch),
       notifications: new NotificationsDomain(rpc, this.#options.onEventError),
@@ -797,6 +806,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     ctx.typing.start();
     ctx.presence.start();
     ctx.rooms.start();
+    ctx.calls.start();
     ctx.notifications.start();
     ctx.social.start();
     ctx.games.start();

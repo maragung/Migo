@@ -39,6 +39,7 @@ use anyhow::{bail, Context};
 
 use migo_auth::{captcha::CaptchaGate, ConcreteAuth, SharedAuth};
 use migo_bots::SharedBots;
+use migo_calls::{CallsConfig, MemoryCallStore, SharedCallkeeper};
 use migo_captcha::{CaptchaService, InMemoryStore as CaptchaInMemoryStore};
 use migo_core::config::Environment;
 use migo_core::metrics::Registry;
@@ -59,7 +60,7 @@ use migo_rooms::SharedRooms;
 use migo_social::SharedSocial;
 
 use crate::dispatch::AppDispatcher;
-use crate::ports::{EconomyRewards, FsStorage, StaffRoster};
+use crate::ports::{EconomyRewards, FsStorage, StaffRoster, StoreCallGate};
 
 /// The feature bits this node advertises to clients in the handshake and the `/v1/config`
 /// document. Zero for now: no optional protocol feature is gated behind a bit yet, so the node
@@ -191,6 +192,8 @@ pub struct App {
     pub bots: SharedBots,
     /// Federation: the server-to-server mesh of trusted, allow-listed peer nodes.
     pub federation: SharedMesh,
+    /// Calls: the 1:1 ring lifecycle and the sealed SDP/ICE relay.
+    pub calls: SharedCallkeeper,
 }
 
 impl App {
@@ -302,6 +305,19 @@ impl App {
             limiter.clone(),
             &registry,
             migo_social::SocialConfig::default(),
+        );
+
+        // Calls: the ring state machine over its own store, asking the gate (backed by the
+        // conversation and block tables above) before one account may ring another. The store is
+        // the in-memory one — a call row's useful life is one ring, and the production backend
+        // plugs in behind the same trait. Expired invites are swept inside each invite rather
+        // than by a background task, so v1 needs no timer to keep the store free of dead rings.
+        let calls = migo_calls::open(
+            Arc::new(MemoryCallStore::new()),
+            limiter.clone(),
+            Arc::new(StoreCallGate::new(store.clone())),
+            &registry,
+            CallsConfig::default(),
         );
 
         // The default policy serves a bundle without a one-time prekey rather than refusing it: a
@@ -439,6 +455,7 @@ impl App {
             notify.clone(),
             federation.clone(),
             bots.clone(),
+            calls.clone(),
         ));
 
         let gateway = Arc::new(Gateway::open(
@@ -521,6 +538,7 @@ impl App {
             games,
             bots,
             federation,
+            calls,
         })
     }
 }

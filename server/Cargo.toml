@@ -15,6 +15,7 @@ members = [
     "crates/migo-messaging",
     "crates/migo-presence",
     "crates/migo-rooms",
+    "crates/migo-calls",
     "crates/migo-social",
     "crates/migo-media",
     "crates/migo-moderation",
@@ -52,6 +53,7 @@ migo-keys       = { path = "crates/migo-keys" }
 migo-messaging  = { path = "crates/migo-messaging" }
 migo-presence   = { path = "crates/migo-presence" }
 migo-rooms      = { path = "crates/migo-rooms" }
+migo-calls      = { path = "crates/migo-calls" }
 migo-social     = { path = "crates/migo-social" }
 migo-media      = { path = "crates/migo-media" }
 migo-moderation = { path = "crates/migo-moderation" }
