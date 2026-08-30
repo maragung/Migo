@@ -56,7 +56,7 @@ fun AlertsScreen(
                     Text(
                         text = "Notifications carry no message text: the server never has any to show.",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MigoExtra.current.faint,
+                        color = LocalMigoExtra.current.faint,
                         modifier = Modifier.padding(16.dp),
                     )
                 }

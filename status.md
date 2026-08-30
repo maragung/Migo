@@ -807,7 +807,7 @@ e2e dua-akun lulus, deploy live di port 19992.
 - `shared/design/tokens.json`: warna (light/dark), tipografi, spacing 4px, radius,
   elevation, ikon (16/20/24px, stroke 1.75), touch target 44px, motion 120/180/240ms,
   z-index, breakpoint. Diterapkan ke tiga client: web (CSS custom properties +
-  skala baru --sp-*/--fs-*/--motion-*/--z-*), Android (Theme.kt palet Migo +
+  skala baru --sp-_/--fs-_/--motion-_/--z-_), Android (Theme.kt palet Migo +
   MigoExtra CompositionLocal), desktop (theme.rs — palet light kini biru kanonik
   #0077e6, bukan hijau). `docs/design-system.md` mendokumentasikan; route `/design`
   merender sistem sebagai dokumentasi hidup.
@@ -838,10 +838,10 @@ e2e dua-akun lulus, deploy live di port 19992.
 **Android client** — paritas penuh, bottom navigation:
 
 - **Core domain baru**: Social.kt (search/suggestions/relationships/friend ops/block
-  + FRIEND_EVENT), Economy.kt (balance/ledger/progression/badges/leaderboard/catalogue/
-  sendGift), Notifications ditambah listNotifications/acknowledgeNotifications
-  (watermark id 6-byte). Semua terwire ke MigoClient (+aksesor social/economy +
-  onFriendEvent bridging reconnect).
+  - FRIEND_EVENT), Economy.kt (balance/ledger/progression/badges/leaderboard/catalogue/
+    sendGift), Notifications ditambah listNotifications/acknowledgeNotifications
+    (watermark id 6-byte). Semua terwire ke MigoClient (+aksesor social/economy +
+    onFriendEvent bridging reconnect).
 - **UI**: shell bottom bar lima slot + sheet More, HomeScreen (hero saldo MIG, quick
   actions, recent chats, trending, suggestions, digest), RoomsScreen (search
   debounce + direktori + join), SpaceScreen (filter kategori), FriendsScreen (requests/

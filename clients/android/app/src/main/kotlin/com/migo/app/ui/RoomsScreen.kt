@@ -111,7 +111,10 @@ private fun DirectoryRow(room: RoomSummary, joining: Boolean, onJoin: () -> Unit
                 maxLines = 1,
             )
             OneLine(text = "${room.memberCount} members · ${room.onlineCount} online" + (room.category?.let { " · $it" } ?: ""))
-            if (!room.topic.isNullOrBlank()) OneLine(text = room.topic)
+            // Read once: the topic is a property of another module, and a smart cast of it is
+            // not something the compiler can promise across that boundary.
+            val topic = room.topic
+            if (!topic.isNullOrBlank()) OneLine(text = topic)
         }
         Button(onClick = onJoin, enabled = !joining) {
             Text(if (joining) "…" else "Join")

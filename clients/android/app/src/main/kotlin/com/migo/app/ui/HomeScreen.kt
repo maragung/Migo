@@ -155,7 +155,7 @@ private fun SectionHead(title: String, action: String, onAction: () -> Unit) {
         Text(
             text = title,
             style = MaterialTheme.typography.labelMedium,
-            color = MigoExtra.current.faint,
+            color = LocalMigoExtra.current.faint,
             fontWeight = FontWeight.Bold,
             modifier = Modifier.weight(1f),
         )
@@ -165,7 +165,11 @@ private fun SectionHead(title: String, action: String, onAction: () -> Unit) {
 
 /** One quick action: a labelled, equal-width door into a section. */
 @Composable
-private fun QuickAction(label: String, weight: Float, onClick: () -> Unit) {
+private fun androidx.compose.foundation.layout.RowScope.QuickAction(
+    label: String,
+    weight: Float,
+    onClick: () -> Unit,
+) {
     Surface(
         modifier = Modifier.weight(weight).clickable(onClick = onClick),
         color = MaterialTheme.colorScheme.surface,
@@ -205,7 +209,7 @@ private fun ConversationRowItem(row: ConversationRow, onOpen: () -> Unit) {
             Text(
                 text = clockTime(row.updatedAt),
                 style = MaterialTheme.typography.labelSmall,
-                color = MigoExtra.current.faint,
+                color = LocalMigoExtra.current.faint,
             )
             if (row.unread > 0) {
                 Spacer(modifier = Modifier.height(2.dp))
@@ -289,7 +293,7 @@ fun ActivityLine(title: String, at: Long?) {
             Text(
                 text = relativeTime(at),
                 style = MaterialTheme.typography.labelSmall,
-                color = MigoExtra.current.faint,
+                color = LocalMigoExtra.current.faint,
             )
         }
     }

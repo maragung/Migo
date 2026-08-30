@@ -143,7 +143,7 @@ fun SectionLabel(text: String, modifier: Modifier = Modifier) {
     Text(
         text = text,
         style = MaterialTheme.typography.labelMedium,
-        color = MigoExtra.current.faint,
+        color = LocalMigoExtra.current.faint,
         fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
         modifier = modifier.padding(start = 16.dp, top = 12.dp, bottom = 4.dp),
     )

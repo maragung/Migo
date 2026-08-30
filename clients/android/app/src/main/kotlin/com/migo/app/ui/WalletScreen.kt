@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -100,7 +101,7 @@ fun WalletScreen(
                             Text(
                                 text = "${progression.xpIntoLevel} / ${progression.xpForNextLevel} XP",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MigoExtra.current.faint,
+                                color = LocalMigoExtra.current.faint,
                             )
                         }
                     }
@@ -229,9 +230,13 @@ fun WalletScreen(
     }
 }
 
-/** One of the two balance facts, drawn compactly. */
+/** One of the two balance facts, drawn compactly. A RowScope member so it can weigh itself. */
 @Composable
-private fun BalanceFact(amount: String, unit: String, emphasise: Boolean) {
+private fun androidx.compose.foundation.layout.RowScope.BalanceFact(
+    amount: String,
+    unit: String,
+    emphasise: Boolean,
+) {
     Surface(
         color = if (emphasise) {
             MaterialTheme.colorScheme.primaryContainer
@@ -275,7 +280,7 @@ private fun LedgerLine(entry: LedgerEntryWire) {
             Text(
                 text = "balance " + entry.balanceAfter,
                 style = MaterialTheme.typography.labelSmall,
-                color = MigoExtra.current.faint,
+                color = LocalMigoExtra.current.faint,
             )
         }
         Text(

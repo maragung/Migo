@@ -125,7 +125,7 @@ private val ExtraDark = MigoExtra(
     coin = AccentDark,
 )
 
-/** Reads the extra tokens like a `colorScheme` colour: `MigoExtra.current.gold`. */
+/** Reads the extra tokens like a `colorScheme` colour: `LocalMigoExtra.current.gold`. */
 val LocalMigoExtra = staticCompositionLocalOf { ExtraDark }
 
 /**

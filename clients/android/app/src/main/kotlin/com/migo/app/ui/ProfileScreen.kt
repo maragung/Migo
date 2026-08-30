@@ -61,7 +61,7 @@ fun ProfileScreen(
                     Text(
                         text = state.accountId.value,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MigoExtra.current.faint,
+                        color = LocalMigoExtra.current.faint,
                     )
                 }
             }
