@@ -18,8 +18,23 @@ import { idbDelete, idbGet, idbSet } from './idb.js';
 const KEY = 'migo:server-endpoint:v1';
 
 /** Loads the persisted endpoint, or `undefined` on a first visit. */
-export function loadServerEndpoint(): Promise<ServerEndpoint | undefined> {
-  return idbGet<ServerEndpoint>(KEY);
+export async function loadServerEndpoint(): Promise<ServerEndpoint | undefined> {
+  const stored = await idbGet<ServerEndpoint>(KEY);
+  if (stored === undefined) {
+    return undefined;
+  }
+  // A snapshot saved by an earlier build (or by the SDK's non-loopback default) may carry
+  // Wss/Https against a server that serves plain HTTP. The page's own protocol is the
+  // ground truth for whether this deployment has TLS: if the page came over http:// and
+  // the stored endpoint says Wss, the stored scheme is a stale guess that would send the
+  // WebSocket into a TLS handshake the server cannot answer. Correct it in memory — the
+  // corrected endpoint is what the form shows and what the next save persists.
+  if (typeof window !== 'undefined' && window.location?.protocol === 'http:') {
+    if (stored.scheme === 'Wss' || stored.restScheme === 'Https') {
+      return { ...stored, scheme: 'Ws', restScheme: 'Http' };
+    }
+  }
+  return stored;
 }
 
 /** Persists the user's chosen endpoint so the next load picks it up. */
