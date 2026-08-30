@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from 'next';
 import type { ReactNode } from 'react';
 
 import { MigoProvider } from '@/lib/migo/provider.js';
+import { themeInitScript } from '@/lib/theme.js';
 
 import { SwRegister } from './sw-register.js';
 
@@ -33,8 +34,12 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: ReactNode }): ReactNode {
   return (
-    <html lang="en">
+    // `data-theme="dark"` is the server-rendered default; the inline script below restores the
+    // visitor's stored choice before first paint, so `suppressHydrationWarning` covers the one
+    // attribute the script may have rewritten by the time React hydrates.
+    <html lang="en" data-theme="dark" suppressHydrationWarning>
       <body>
+        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
         <MigoProvider>{children}</MigoProvider>
         <SwRegister />
       </body>

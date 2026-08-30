@@ -6,9 +6,10 @@
 //! separation is what keeps that true: a settings file that also held the refresh token would have
 //! to be sealed, and then a person could not change their server before unlocking their keys.
 //!
-//! The endpoint is the only field today; the file is JSON so a future field lands without a
-//! bespoke codec. The path lives under the platform data directory (XDG on Linux, the same path
-//! `directories::ProjectDataDir` would return) so it survives a vault rotation.
+//! The endpoint is one of two fields today, the other being the chosen theme; the file is JSON
+//! so a future field lands without a bespoke codec. The path lives under the platform data
+//! directory (XDG on Linux, the same path `directories::ProjectDataDir` would return) so it
+//! survives a vault rotation.
 
 use std::fs;
 use std::io;
@@ -18,18 +19,27 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{default_loopback_server_endpoint, ServerEndpoint};
+use crate::theme::Theme;
 
 const SETTINGS_FILE: &str = "settings.json";
 pub const SETTINGS_VERSION: u32 = 1;
 
 /// The on-disk settings record. Versioned so a future field that the older binary does not know
 /// about is at least an explicit migration rather than a silent misread.
+///
+/// Fields added after version 1 are `#[serde(default)]` rather than a version bump: refusing to
+/// load every pre-existing file would cost a user their saved server for the sake of a field
+/// they have never set, and an older binary simply ignores a field it does not know.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     /// The schema version. A reader that does not recognise the value refuses to load.
     pub version: u32,
     /// The user-configured server.
     pub server: ServerEndpoint,
+    /// The theme the user last chose with the toggle. Absent — a first run, or a file written
+    /// before the field existed — means "follow the desktop's own preference".
+    #[serde(default)]
+    pub theme: Option<Theme>,
 }
 
 impl Settings {
@@ -41,6 +51,7 @@ impl Settings {
         Self {
             version: SETTINGS_VERSION,
             server: default_loopback_server_endpoint("localhost", 18080),
+            theme: None,
         }
     }
 
@@ -100,10 +111,6 @@ pub fn load(path: &Path) -> Result<Settings, SettingsError> {
 
 /// Persists the record. The write is a single rename of a sibling temp file, so a half-written
 /// file can never be observed as the live one.
-///
-/// Reserved for the desktop settings UI; not yet wired in this build. The flag is
-/// here so the public API does not get pruned.
-#[allow(dead_code)]
 pub fn save(path: &Path, settings: &Settings) -> Result<(), SettingsError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -113,4 +120,52 @@ pub fn save(path: &Path, settings: &Settings) -> Result<(), SettingsError> {
     fs::write(&tmp, text)?;
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The theme round-trips through the file, because the whole point of storing it is that
+    /// the window starts the way it was left. The wire form is pinned too: a settings file is
+    /// user-readable, and `"dark"`/`"light"` is what a person expects to find in it.
+    #[test]
+    fn theme_round_trips() {
+        let path = std::env::temp_dir().join("migo-desktop-test-theme.json");
+        let record = Settings {
+            version: SETTINGS_VERSION,
+            server: Settings::default_for_dev().server,
+            theme: Some(Theme::Light),
+        };
+        save(&path, &record).expect("save");
+        let loaded = load(&path).expect("load");
+        assert_eq!(loaded.theme, Some(Theme::Light));
+        let text = fs::read_to_string(&path).expect("read");
+        assert!(text.contains("\"light\""));
+        let _ = fs::remove_file(&path);
+    }
+
+    /// A settings file written before the theme field existed still loads, with the theme
+    /// reading as "no preference": the user's saved server must survive the client learning a
+    /// new field.
+    #[test]
+    fn old_file_without_theme_still_loads() {
+        let path = std::env::temp_dir().join("migo-desktop-test-old.json");
+        let old = serde_json::json!({
+            "version": SETTINGS_VERSION,
+            "server": {
+                "host": "localhost",
+                "port": 18080,
+                "gateway_port": 18081,
+                "transport": "WebSocket",
+                "scheme": { "Ws": "Ws" },
+                "rest_scheme": "Http",
+            },
+        });
+        fs::write(&path, old.to_string()).expect("write");
+        let loaded = load(&path).expect("load");
+        assert_eq!(loaded.theme, None);
+        assert_eq!(loaded.server.host, "localhost");
+        let _ = fs::remove_file(&path);
+    }
 }

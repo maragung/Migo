@@ -1,43 +1,155 @@
+/*
+ * The theme system: every colour the client paints comes from the variables below, so the whole
+ * skin switches on one attribute — `<html data-theme="light|dark">`. `:root` carries the light
+ * values (and the theme-independent tokens: radii, the font stack); `[data-theme="dark"]` carries
+ * the dark ones. Nothing below the variable blocks names a colour: components reference variables
+ * only, which is what lets the light theme be a designed palette rather than an inversion.
+ *
+ * Accent-derived tints (hovers, active fills, soft borders) are mixed from the accent at paint
+ * time with `color-mix`, so they follow the accent across themes without a variable per tint.
+ */
+
 :root {
+  color-scheme: light;
+
+  /* surfaces */
+  --bg: #f0f2f5;
+  --bg-body: radial-gradient(1200px 800px at 80% -10%, #e9edf3 0%, var(--bg) 55%) fixed;
+  --bg-gradient: radial-gradient(500px 360px at 50% 8%, rgba(0, 120, 200, 0.05), transparent 70%);
+  --bg-elevated: #ffffff;
+  --panel: #ffffff;
+  --panel-alt: #f5f6f8;
+  --panel-overlay: rgba(255, 255, 255, 0.96);
+  --input: #ffffff;
+  --nav-bg: rgba(255, 255, 255, 0.95);
+
+  /* lines */
+  --border: #e0e3e8;
+  --border-strong: #c5cad0;
+  --border-soft: rgba(26, 29, 36, 0.08);
+
+  /* ink */
+  --text: #1a1d24;
+  --text-dim: #5c6370;
+  --text-faint: #9aa1ad;
+
+  /* accent */
+  --accent: #0077e6;
+  --accent-strong: #005cb8;
+  --accent-contrast: #ffffff;
+  --accent-glow: rgba(0, 119, 230, 0.25);
+  --accent-soft: rgba(0, 119, 230, 0.06);
+  --accent-soft-strong: rgba(0, 119, 230, 0.1);
+  --accent-border: rgba(0, 119, 230, 0.45);
+  --accent-border-soft: rgba(0, 119, 230, 0.3);
+
+  /* status colours */
+  --positive: #00a85a;
+  --warning: #e6a100;
+  --danger: #e04050;
+  --offline: #9aa1ad;
+  --positive-glow: rgba(0, 168, 90, 0.45);
+  --danger-glow: rgba(224, 64, 80, 0.3);
+  --danger-soft: rgba(224, 64, 80, 0.08);
+  --danger-border: rgba(224, 64, 80, 0.4);
+  --danger-text: #c22837;
+  --gold: #9a6700;
+
+  /* bubbles */
+  --bubble-in: #ffffff;
+  --bubble-out: linear-gradient(135deg, #0077e6, #0099ff);
+
+  /* effects and overlays */
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --glow: 0 0 12px rgba(0, 119, 230, 0.15);
+  --glow-strong: 0 0 16px rgba(0, 119, 230, 0.3);
+  --backdrop: rgba(15, 20, 30, 0.45);
+  --lightbox-bg: rgba(15, 20, 30, 0.9);
+  --overlay-bg: radial-gradient(900px 600px at 50% -10%, #e7edf5 0%, rgba(240, 242, 245, 0.97) 60%);
+  --video-bg: #10141c;
+  --ink-on-fill: #ffffff;
+
+  /* browser chrome */
+  --scrollbar-thumb: rgba(0, 0, 0, 0.18);
+  --scrollbar-track: #eef0f3;
+  --selection-bg: rgba(0, 119, 230, 0.22);
+
+  /* theme-independent tokens */
+  --radius: 6px;
+  --radius-sm: 4px;
+  --font: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}
+
+[data-theme='dark'] {
   color-scheme: dark;
 
+  /* surfaces */
   --bg: #0a0a12;
+  --bg-body: radial-gradient(1200px 800px at 80% -10%, #10101c 0%, var(--bg) 55%) fixed;
+  --bg-gradient: radial-gradient(500px 360px at 50% 8%, rgba(0, 212, 255, 0.05), transparent 70%);
   --bg-elevated: #14141e;
-  --bg-input: #0d0d16;
   --panel: #111118;
-  --panel-2: #1a1a28;
+  --panel-alt: #1a1a28;
+  --panel-overlay: rgba(17, 17, 24, 0.92);
+  --input: #0d0d16;
+  --nav-bg: rgba(10, 10, 18, 0.95);
+
+  /* lines */
   --border: #1a1a2e;
   --border-strong: #2e2e4a;
+  --border-soft: rgba(26, 26, 46, 0.6);
 
+  /* ink */
   --text: #e8e8f0;
   --text-dim: #8888a0;
   --text-faint: #555570;
 
+  /* accent */
   --accent: #00d4ff;
-  --accent-2: #0099cc;
+  --accent-strong: #0099cc;
   --accent-contrast: #051018;
+  --accent-glow: rgba(0, 212, 255, 0.25);
+  --accent-soft: rgba(0, 212, 255, 0.05);
+  --accent-soft-strong: rgba(0, 212, 255, 0.1);
+  --accent-border: rgba(0, 212, 255, 0.45);
+  --accent-border-soft: rgba(0, 212, 255, 0.3);
 
+  /* status colours */
+  --positive: #00ff88;
+  --warning: #ffaa00;
+  --danger: #ff4466;
+  --offline: #555570;
+  --positive-glow: rgba(0, 255, 136, 0.55);
+  --danger-glow: rgba(255, 68, 102, 0.3);
+  --danger-soft: rgba(255, 68, 102, 0.1);
+  --danger-border: rgba(255, 68, 102, 0.45);
+  --danger-text: #ffb3c1;
+  --gold: #ffd166;
+
+  /* bubbles */
   --bubble-in: #1a1a28;
   --bubble-out: linear-gradient(135deg, #0099cc, #00d4ff);
 
-  --online: #00ff88;
-  --away: #ffaa00;
-  --busy: #ff4466;
-  --offline: #555570;
-  --danger: #ff4466;
-
-  --radius: 6px;
-  --radius-sm: 4px;
+  /* effects and overlays */
   --shadow: 0 0 14px rgba(0, 0, 0, 0.45);
   --glow: 0 0 12px rgba(0, 212, 255, 0.15);
+  --glow-strong: 0 0 16px rgba(0, 212, 255, 0.35);
+  --backdrop: rgba(3, 3, 8, 0.7);
+  --lightbox-bg: rgba(3, 3, 8, 0.92);
+  --overlay-bg: radial-gradient(900px 600px at 50% -10%, #12121e 0%, rgba(6, 6, 12, 0.97) 60%);
+  --video-bg: #050508;
+  --ink-on-fill: #ffffff;
 
-  --font: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  /* browser chrome */
+  --scrollbar-thumb: rgba(0, 212, 255, 0.4);
+  --scrollbar-track: #0a0a12;
+  --selection-bg: rgba(0, 212, 255, 0.3);
 }
 
 * {
   box-sizing: border-box;
   scrollbar-width: thin;
-  scrollbar-color: rgba(0, 212, 255, 0.4) #0a0a12;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
 }
 
 ::-webkit-scrollbar {
@@ -45,18 +157,18 @@
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #0a0a12;
+  background: var(--scrollbar-track);
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(0, 212, 255, 0.4);
+  background: var(--scrollbar-thumb);
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #00d4ff;
+  background: var(--accent);
 }
 
 ::selection {
-  background: rgba(0, 212, 255, 0.3);
+  background: var(--selection-bg);
 }
 
 html,
@@ -67,7 +179,7 @@ body {
 }
 
 body {
-  background: radial-gradient(1200px 800px at 80% -10%, #10101c 0%, var(--bg) 55%) fixed;
+  background: var(--bg-body);
   color: var(--text);
   font-family: var(--font);
   font-size: 14px;
@@ -104,12 +216,12 @@ main {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  border: 1px solid rgba(0, 212, 255, 0.4);
+  border: 1px solid var(--accent-border);
   border-radius: var(--radius-sm);
   padding: 8px 12px;
   font-weight: 600;
   color: var(--text);
-  background: var(--bg-input);
+  background: var(--input);
   transition:
     border-color 0.15s ease,
     background 0.15s ease,
@@ -129,26 +241,26 @@ main {
   cursor: not-allowed;
 }
 .btn-primary {
-  background: linear-gradient(135deg, var(--accent-2), var(--accent));
+  background: linear-gradient(135deg, var(--accent-strong), var(--accent));
   color: var(--accent-contrast);
-  box-shadow: 0 0 12px rgba(0, 212, 255, 0.2);
+  box-shadow: var(--glow);
 }
 .btn-primary:hover {
   border-color: transparent;
-  box-shadow: 0 0 16px rgba(0, 212, 255, 0.35);
+  box-shadow: var(--glow-strong);
 }
 .btn-ghost {
   background: transparent;
-  border-color: rgba(0, 212, 255, 0.35);
+  border-color: var(--accent-border-soft);
 }
 .btn-danger {
   background: transparent;
-  border-color: rgba(255, 68, 102, 0.45);
+  border-color: var(--danger-border);
   color: var(--danger);
 }
 .btn-danger:hover {
   border-color: var(--danger);
-  box-shadow: 0 0 12px rgba(255, 68, 102, 0.2);
+  box-shadow: 0 0 12px var(--danger-glow);
 }
 .btn-block {
   width: 100%;
@@ -166,7 +278,7 @@ main {
   font-weight: 600;
 }
 .input {
-  background: var(--bg-input);
+  background: var(--input);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 9px 10px;
@@ -188,13 +300,44 @@ main {
   color: var(--text-faint);
 }
 .error-banner {
-  background: rgba(255, 68, 102, 0.1);
-  border: 1px solid rgba(255, 68, 102, 0.4);
-  color: #ffb3c1;
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
+  color: var(--danger-text);
   border-radius: var(--radius-sm);
   padding: 8px 10px;
   font-size: 13px;
   margin-bottom: 11px;
+}
+
+/* --- the light/dark switch --- */
+
+/*
+ * One round button, shared by the top navigation bar and the auth screens. The fixed corner
+ * placement on the auth screens rides `.auth-theme-toggle` below.
+ */
+.theme-toggle {
+  width: 32px;
+  height: 32px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.theme-toggle:hover {
+  border-color: var(--accent-border);
+  color: var(--accent);
+  box-shadow: var(--glow);
+}
+.theme-toggle:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--glow);
 }
 
 /* --- centered auth screens --- */
@@ -203,37 +346,47 @@ main {
   min-height: 100%;
   display: grid;
   place-items: center;
-  padding: 18px;
-  background: radial-gradient(500px 360px at 50% 8%, rgba(0, 212, 255, 0.05), transparent 70%);
+  padding: 20px;
+  background: var(--bg-gradient);
+}
+.auth-theme-toggle {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 10;
+  box-shadow: var(--shadow);
 }
 .auth-card {
   width: 100%;
-  max-width: 400px;
+  max-width: 420px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow:
-    var(--shadow),
-    0 0 24px rgba(0, 212, 255, 0.07);
-  padding: 22px;
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 32px 28px;
 }
 .auth-brand {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 6px;
+  gap: 8px;
+  margin-bottom: 8px;
 }
-.auth-brand img {
-  width: 34px;
-  height: 34px;
+.auth-brand .brand-mark {
+  font-size: 48px;
+  color: var(--accent);
+  text-shadow: 0 0 20px var(--accent-glow);
 }
 .auth-brand h1 {
-  font-size: 20px;
+  font-size: 28px;
+  font-weight: 800;
   margin: 0;
+  letter-spacing: -0.5px;
 }
 .auth-sub {
+  text-align: center;
   color: var(--text-dim);
-  margin: 0 0 18px;
+  margin: 0 0 24px;
   font-size: 14px;
 }
 .auth-alt {
@@ -285,32 +438,132 @@ main {
   overflow: hidden;
 }
 
-/* --- section navigation (rail beside the shell on desktop, bottom bar on mobile) --- */
+/* --- section navigation (a bar across the top on desktop, a bottom bar on mobile) --- */
 
 .app {
   display: grid;
-  grid-template-columns: 76px minmax(0, 1fr);
+  grid-template-rows: 48px minmax(0, 1fr);
   height: 100%;
   overflow: hidden;
 }
-.tab-rail {
-  grid-column: 1;
+
+/* New top navigation */
+.top-nav {
   grid-row: 1;
   display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 8px 6px;
-  border-right: 1px solid var(--border);
-  background: rgba(10, 10, 18, 0.95);
+  align-items: center;
+  gap: 0;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--nav-bg, var(--panel));
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
+  overflow-x: auto;
+  white-space: nowrap;
 }
-.tab-btn {
+.top-nav-brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-right: 16px;
+  flex-shrink: 0;
+}
+.top-nav-brand .brand-mark {
+  font-size: 18px;
+}
+.top-nav-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.top-nav-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    background 0.15s;
+}
+.top-nav-tab-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+.top-nav-tab:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+.top-nav-tab:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.top-nav-tab.active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  /* The active mark: an underline inset into the bar, so the accent reads at a glance. */
+  box-shadow: inset 0 -2px 0 var(--accent);
+  text-shadow: 0 0 10px var(--accent-glow);
+}
+.top-nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+/* The account chip: avatar and name, one click from the profile section. */
+.top-nav-user {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 10px 3px 4px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  transition:
+    color 0.15s,
+    background 0.15s;
+}
+.top-nav-user:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.top-nav-user:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+.top-nav-user-name {
+  max-width: 140px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The mobile half of the navigation: hidden on desktop, a thumb-reachable bar on a phone. */
+.bottom-nav {
+  display: none;
+}
+.bottom-nav-btn {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  padding: 8px 2px;
+  gap: 2px;
+  padding: 4px 10px;
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -318,25 +571,24 @@ main {
   font-size: 11px;
   font-weight: 600;
 }
-.tab-btn:hover {
-  background: rgba(0, 212, 255, 0.05);
+.bottom-nav-btn:hover {
   color: var(--text);
 }
-.tab-btn.active {
-  background: rgba(0, 212, 255, 0.08);
+.bottom-nav-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.bottom-nav-btn.active {
   color: var(--accent);
 }
-.tab-btn.active .tab-icon {
-  text-shadow: 0 0 10px rgba(0, 212, 255, 0.7);
-}
-.tab-icon {
+.bottom-nav-icon {
   font-size: 18px;
   line-height: 1;
 }
+
 .app > .shell,
 .app > .panel-area {
-  grid-column: 2;
-  grid-row: 1;
+  grid-row: 2;
   min-width: 0;
   min-height: 0;
 }
@@ -397,8 +649,8 @@ main {
   background: var(--panel);
 }
 .person-row:hover {
-  background: rgba(0, 212, 255, 0.04);
-  border-color: rgba(0, 212, 255, 0.3);
+  background: var(--accent-soft);
+  border-color: var(--accent-border-soft);
 }
 .person-main {
   flex: 1;
@@ -449,8 +701,8 @@ main {
   background: var(--panel);
 }
 .notification-row:hover {
-  background: rgba(0, 212, 255, 0.04);
-  border-color: rgba(0, 212, 255, 0.3);
+  background: var(--accent-soft);
+  border-color: var(--accent-border-soft);
 }
 .profile-head {
   display: flex;
@@ -513,6 +765,41 @@ main {
   font-size: 12px;
 }
 
+/* The status bar under the presence picker: coin balance and the presence being published. */
+.sidebar-status {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.sidebar-status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.sidebar-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--offline);
+}
+.sidebar-status-dot.sidebar-status-online {
+  background: var(--positive);
+}
+.sidebar-status-dot.sidebar-status-away {
+  background: var(--warning);
+}
+.sidebar-status-dot.sidebar-status-busy {
+  background: var(--danger);
+}
+
 .sidebar-header {
   display: flex;
   align-items: center;
@@ -544,13 +831,13 @@ main {
   place-items: center;
   border-radius: 6px;
   border: 1px solid var(--border);
-  background: var(--bg-input);
+  background: var(--input);
   color: var(--text);
   font-size: 16px;
   line-height: 1;
 }
 .icon-btn:hover {
-  border-color: rgba(0, 212, 255, 0.6);
+  border-color: var(--accent-border);
   color: var(--accent);
   box-shadow: var(--glow);
 }
@@ -570,14 +857,14 @@ main {
   align-items: center;
   gap: 10px;
   padding: 6px 10px;
-  border-bottom: 1px solid rgba(26, 26, 46, 0.6);
+  border-bottom: 1px solid var(--border-soft);
   cursor: pointer;
 }
 .conversation-row:hover {
-  background: rgba(0, 212, 255, 0.05);
+  background: var(--accent-soft);
 }
 .conversation-row.active {
-  background: rgba(0, 212, 255, 0.08);
+  background: var(--accent-soft-strong);
   box-shadow: inset 2px 0 0 var(--accent);
 }
 .conversation-main {
@@ -612,7 +899,7 @@ main {
   height: 10px;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 6px rgba(0, 212, 255, 0.6);
+  box-shadow: 0 0 6px var(--accent-glow);
 }
 
 /* --- avatar --- */
@@ -622,7 +909,7 @@ main {
   border-radius: 50%;
   display: inline-grid;
   place-items: center;
-  color: #fff;
+  color: var(--ink-on-fill);
   font-weight: 700;
   flex-shrink: 0;
   overflow: hidden;
@@ -643,14 +930,14 @@ main {
   border: 2px solid var(--panel);
 }
 .presence-online {
-  background: var(--online);
-  box-shadow: 0 0 6px rgba(0, 255, 136, 0.7);
+  background: var(--positive);
+  box-shadow: 0 0 6px var(--positive-glow);
 }
 .presence-away {
-  background: var(--away);
+  background: var(--warning);
 }
 .presence-busy {
-  background: var(--busy);
+  background: var(--danger);
 }
 .presence-offline {
   background: var(--offline);
@@ -725,7 +1012,7 @@ main {
   margin: 10px 0 6px;
   font-size: 12px;
   color: var(--text-faint);
-  background: var(--panel-2);
+  background: var(--panel-alt);
   border: 1px solid var(--border);
   padding: 2px 10px;
   border-radius: 999px;
@@ -791,8 +1078,11 @@ main {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
-.bubble-row.in .bubble {
+/* Incoming bubbles carry a hairline so a white-on-gray bubble keeps its edge in the light theme;
+   the tombstone is excluded because its dashed border is its own statement. */
+.bubble-row.in .bubble:not(.tombstone) {
   background: var(--bubble-in);
+  border: 1px solid var(--border);
   border-bottom-left-radius: 2px;
 }
 .bubble-row.out .bubble {
@@ -850,14 +1140,14 @@ main {
   place-items: center;
   border-radius: 4px;
   border: 1px solid var(--border);
-  background: var(--panel-2);
+  background: var(--panel-alt);
   color: var(--text-dim);
   font-size: 12px;
   line-height: 1;
 }
 .row-action-btn:hover {
   color: var(--accent);
-  border-color: rgba(0, 212, 255, 0.5);
+  border-color: var(--accent-border);
   box-shadow: var(--glow);
 }
 
@@ -899,7 +1189,7 @@ main {
 .lightbox {
   position: fixed;
   inset: 0;
-  background: rgba(3, 3, 8, 0.92);
+  background: var(--lightbox-bg);
   display: grid;
   place-items: center;
   z-index: 60;
@@ -970,7 +1260,7 @@ main {
   padding: 5px 8px;
   border-left: 2px solid var(--accent);
   border-radius: 4px;
-  background: var(--bg-input);
+  background: var(--input);
 }
 .reply-bar-label {
   flex: 1;
@@ -1001,7 +1291,7 @@ main {
   resize: none;
   max-height: 160px;
   min-height: 44px;
-  background: var(--bg-input);
+  background: var(--input);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 9px 11px;
@@ -1017,16 +1307,16 @@ main {
   height: 44px;
   border-radius: 50%;
   border: none;
-  background: linear-gradient(135deg, var(--accent-2), var(--accent));
+  background: linear-gradient(135deg, var(--accent-strong), var(--accent));
   color: var(--accent-contrast);
   font-size: 18px;
   display: inline-grid;
   place-items: center;
   flex-shrink: 0;
-  box-shadow: 0 0 12px rgba(0, 212, 255, 0.25);
+  box-shadow: var(--glow);
 }
 .send-btn:hover:not(:disabled) {
-  box-shadow: 0 0 16px rgba(0, 212, 255, 0.4);
+  box-shadow: var(--glow-strong);
 }
 .send-btn:disabled {
   opacity: 0.5;
@@ -1037,7 +1327,7 @@ main {
   height: 44px;
   border-radius: 50%;
   border: 1px solid var(--border);
-  background: var(--bg-input);
+  background: var(--input);
   color: var(--text);
   font-size: 16px;
   display: inline-grid;
@@ -1045,7 +1335,7 @@ main {
   flex-shrink: 0;
 }
 .attach-btn:hover:not(:disabled) {
-  border-color: rgba(0, 212, 255, 0.6);
+  border-color: var(--accent-border);
   box-shadow: var(--glow);
 }
 .attach-btn:disabled {
@@ -1130,12 +1420,12 @@ main {
   border-radius: 50%;
   border: none;
   background: var(--danger);
-  color: #fff;
+  color: var(--ink-on-fill);
   font-size: 14px;
   display: inline-grid;
   place-items: center;
   flex-shrink: 0;
-  box-shadow: 0 0 12px rgba(255, 68, 102, 0.3);
+  box-shadow: 0 0 12px var(--danger-glow);
 }
 .rec-stop-btn:hover:not(:disabled) {
   filter: brightness(1.1);
@@ -1161,7 +1451,7 @@ main {
   padding: 0;
   border-radius: 50%;
   border: 1px solid var(--border);
-  background: var(--bg-input);
+  background: var(--input);
   color: var(--text);
   font-size: 12px;
   line-height: 1;
@@ -1170,7 +1460,7 @@ main {
   flex-shrink: 0;
 }
 .voice-play-btn:hover:not(:disabled) {
-  border-color: rgba(0, 212, 255, 0.6);
+  border-color: var(--accent-border);
   color: var(--accent);
   box-shadow: var(--glow);
 }
@@ -1207,8 +1497,9 @@ main {
   background: currentColor;
 }
 .bubble-row.out .voice-play-btn {
-  background: rgba(5, 16, 24, 0.12);
-  border-color: rgba(5, 16, 24, 0.3);
+  /* Mixed from the bubble's own ink so the control reads on the gradient in either theme. */
+  background: color-mix(in srgb, var(--accent-contrast) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent-contrast) 35%, transparent);
   color: var(--accent-contrast);
 }
 /* The fallback when a note carries no waveform: a plain progress track. */
@@ -1217,7 +1508,7 @@ main {
   max-width: 45vw;
   height: 5px;
   border-radius: 3px;
-  background: rgba(136, 136, 160, 0.3);
+  background: color-mix(in srgb, var(--text-dim) 30%, transparent);
   overflow: hidden;
   flex: 0 1 auto;
 }
@@ -1270,7 +1561,7 @@ main {
   padding: 3px 8px;
   border-radius: 999px;
   border: 1px solid var(--border);
-  background: var(--panel-2);
+  background: var(--panel-alt);
 }
 .conn-badge .dot {
   width: 8px;
@@ -1278,15 +1569,15 @@ main {
   border-radius: 50%;
 }
 .conn-ok .dot {
-  background: var(--online);
-  box-shadow: 0 0 8px rgba(0, 255, 136, 0.6);
+  background: var(--positive);
+  box-shadow: 0 0 8px var(--positive-glow);
 }
 .conn-wait .dot {
-  background: var(--away);
+  background: var(--warning);
   animation: pulse 1.3s infinite;
 }
 .conn-down .dot {
-  background: var(--busy);
+  background: var(--danger);
 }
 @keyframes pulse {
   0%,
@@ -1328,7 +1619,7 @@ main {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(3, 3, 8, 0.7);
+  background: var(--backdrop);
   display: grid;
   place-items: center;
   padding: 16px;
@@ -1337,7 +1628,7 @@ main {
 .modal {
   width: 100%;
   max-width: 420px;
-  background: rgba(17, 17, 24, 0.92);
+  background: var(--panel-overlay);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   border: 1px solid var(--border-strong);
@@ -1363,10 +1654,6 @@ main {
 
 /* --- form fields used by auth forms and the new-conversation dialog --- */
 
-.auth-card h1 {
-  margin: 0 0 5px;
-  font-size: 20px;
-}
 .field-label {
   display: flex;
   flex-direction: column;
@@ -1378,7 +1665,7 @@ main {
 }
 .field-label input,
 .field-label textarea {
-  background: var(--bg-input);
+  background: var(--input);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 9px 10px;
@@ -1405,7 +1692,7 @@ main {
 }
 .form-error {
   margin: 0 0 12px;
-  color: #ffb3c1;
+  color: var(--danger-text);
   font-size: 13px;
 }
 
@@ -1415,7 +1702,7 @@ main {
   margin: 0 0 11px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  background: var(--bg-input);
+  background: var(--input);
 }
 .server-disclosure-toggle {
   display: flex;
@@ -1478,8 +1765,8 @@ main {
   color: var(--text);
 }
 .btn-secondary:hover {
-  background: var(--panel-2);
-  border-color: rgba(0, 212, 255, 0.5);
+  background: var(--panel-alt);
+  border-color: var(--accent-border);
 }
 
 /* --- captcha widget on the auth forms --- */
@@ -1489,7 +1776,7 @@ main {
   padding: 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  background: var(--bg-input);
+  background: var(--input);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1545,7 +1832,7 @@ main {
   gap: 3px;
   padding: 3px;
   margin-bottom: 12px;
-  background: var(--bg-input);
+  background: var(--input);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
 }
@@ -1559,7 +1846,7 @@ main {
   font-weight: 600;
 }
 .segmented button.active {
-  background: rgba(0, 212, 255, 0.12);
+  background: var(--accent-soft-strong);
   color: var(--accent);
 }
 
@@ -1616,7 +1903,7 @@ main {
   padding: 8px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  background: var(--panel-2);
+  background: var(--panel-alt);
   font-weight: 600;
 }
 .gift-grid {
@@ -1661,14 +1948,14 @@ main {
 .progress-bar {
   height: 6px;
   border-radius: 999px;
-  background: var(--bg-input);
+  background: var(--input);
   border: 1px solid var(--border);
   overflow: hidden;
 }
 .progress-fill {
   height: 100%;
   border-radius: 999px;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  background: linear-gradient(90deg, var(--accent), var(--accent-strong));
   transition: width 0.25s ease;
 }
 .progression-label {
@@ -1771,7 +2058,7 @@ main {
   text-align: left;
 }
 .game-menu-item:hover:not(:disabled) {
-  background: rgba(0, 212, 255, 0.06);
+  background: var(--accent-soft);
 }
 .game-menu-item:disabled {
   color: var(--text-faint);
@@ -1805,8 +2092,8 @@ main {
   max-width: 90%;
   padding: 3px 10px;
   border-radius: 999px;
-  border: 1px solid rgba(0, 212, 255, 0.35);
-  background: var(--bg-input);
+  border: 1px solid var(--accent-border-soft);
+  background: var(--input);
   color: var(--text-dim);
   font-size: 12px;
   text-align: center;
@@ -1814,7 +2101,7 @@ main {
 .game-event.game-over {
   color: var(--text);
   border-color: var(--accent);
-  background: rgba(0, 212, 255, 0.1);
+  background: var(--accent-soft-strong);
   box-shadow: var(--glow);
   font-weight: 600;
 }
@@ -1877,26 +2164,30 @@ main {
   text-overflow: ellipsis;
 }
 
-/* --- responsive: one pane at a time on narrow screens, rail becomes a bottom bar --- */
+/* --- responsive: one pane at a time on narrow screens, tabs move to a bottom bar --- */
 
 @media (max-width: 768px) {
   .app {
-    grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-rows: 44px minmax(0, 1fr) 52px;
   }
-  .tab-rail {
-    grid-column: 1;
-    grid-row: 2;
-    flex-direction: row;
+  .top-nav-tabs {
+    display: none;
+  }
+  .top-nav-user-name {
+    display: none;
+  }
+  .bottom-nav {
+    display: flex;
+    grid-row: 3;
+    align-items: center;
     justify-content: space-around;
-    padding: 4px 6px;
-    border-right: none;
     border-top: 1px solid var(--border);
+    background: var(--panel);
   }
   .app > .shell,
   .app > .panel-area {
     grid-column: 1;
-    grid-row: 1;
+    grid-row: 2;
   }
   .shell {
     grid-template-columns: 1fr;
@@ -1956,7 +2247,7 @@ main {
   justify-content: center;
   gap: 18px;
   padding: 18px;
-  background: radial-gradient(900px 600px at 50% -10%, #12121e 0%, rgba(6, 6, 12, 0.97) 60%);
+  background: var(--overlay-bg);
   color: var(--text);
 }
 .call-overlay.error {
@@ -1994,7 +2285,7 @@ main {
   overflow: hidden;
 }
 .call-video {
-  background: #050508;
+  background: var(--video-bg);
 }
 .call-video.remote {
   width: 100%;
@@ -2030,23 +2321,23 @@ main {
   border: 1px solid transparent;
   font-size: 24px;
   line-height: 1;
-  color: #ffffff;
+  color: var(--ink-on-fill);
   transition: filter 0.15s ease;
 }
 .call-action:hover {
   filter: brightness(1.1);
 }
 .call-action.accept {
-  background: var(--online);
-  box-shadow: 0 0 16px rgba(0, 255, 136, 0.35);
+  background: var(--positive);
+  box-shadow: 0 0 16px var(--positive-glow);
 }
 .call-action.hang-up {
   background: var(--danger);
-  box-shadow: 0 0 16px rgba(255, 68, 102, 0.35);
+  box-shadow: 0 0 16px var(--danger-glow);
 }
 .call-action.mute {
-  background: rgba(0, 212, 255, 0.1);
-  border-color: rgba(0, 212, 255, 0.45);
+  background: var(--accent-soft-strong);
+  border-color: var(--accent-border);
   color: var(--accent);
 }
 .call-action.mute.muted {
@@ -2069,8 +2360,8 @@ main {
 }
 .tag-current {
   color: var(--accent);
-  background: rgba(0, 212, 255, 0.12);
-  border: 1px solid rgba(0, 212, 255, 0.4);
+  background: var(--accent-soft-strong);
+  border: 1px solid var(--accent-border);
 }
 
 /* The session list and its rows live in the Settings tab's Devices section. */
@@ -2119,8 +2410,8 @@ main {
   border-radius: 999px;
   font-size: 12px;
   color: var(--accent);
-  background: rgba(0, 212, 255, 0.08);
-  border: 1px solid rgba(0, 212, 255, 0.35);
+  background: var(--accent-soft-strong);
+  border: 1px solid var(--accent-border-soft);
 }
 
 /* The room details drawer, expanded under a room thread's header. */
@@ -2150,14 +2441,14 @@ main {
   border: 1px solid var(--border-strong);
 }
 .role-badge.role-owner {
-  color: #ffd166;
-  border-color: rgba(255, 209, 102, 0.5);
-  background: rgba(255, 209, 102, 0.08);
+  color: var(--gold);
+  border-color: color-mix(in srgb, var(--gold) 50%, transparent);
+  background: color-mix(in srgb, var(--gold) 8%, transparent);
 }
 .role-badge.role-admin {
   color: var(--accent);
-  border-color: rgba(0, 212, 255, 0.5);
-  background: rgba(0, 212, 255, 0.08);
+  border-color: var(--accent-border);
+  background: var(--accent-soft-strong);
 }
 
 /* The presence picker in the sidebar footer (below the self row). */
@@ -2200,8 +2491,8 @@ main {
   font-size: 12px;
   font-weight: 600;
   color: var(--accent);
-  background: rgba(0, 212, 255, 0.1);
-  border: 1px solid rgba(0, 212, 255, 0.35);
+  background: var(--accent-soft-strong);
+  border: 1px solid var(--accent-border-soft);
   white-space: nowrap;
 }
 .sidebar-header .icon-btn {
@@ -2236,7 +2527,7 @@ main {
   border-radius: var(--radius-sm);
 }
 .leaderboard-row:hover {
-  background: var(--panel-2);
+  background: var(--panel-alt);
 }
 .leaderboard-position {
   width: 34px;
@@ -2275,8 +2566,8 @@ main {
   border-radius: 999px;
   font-size: 12px;
   color: var(--accent);
-  background: rgba(0, 212, 255, 0.1);
-  border: 1px solid rgba(0, 212, 255, 0.4);
+  background: var(--accent-soft-strong);
+  border: 1px solid var(--accent-border);
 }
 .chip-remove {
   padding: 0;
@@ -2296,7 +2587,7 @@ main {
   border-radius: var(--radius-sm);
 }
 .person-row-clickable:hover {
-  background: var(--panel-2);
+  background: var(--panel-alt);
 }
 .person-row-clickable:focus-visible {
   outline: 1px solid var(--accent);
@@ -2354,7 +2645,7 @@ main {
 }
 .recipient-option.selected {
   border-color: var(--accent);
-  background: rgba(0, 212, 255, 0.1);
+  background: var(--accent-soft-strong);
 }
 .attach-btn.active {
   border-color: var(--accent);

@@ -8,6 +8,7 @@ import { useRouter } from 'next/navigation';
 import { CaptchaWidget } from '@/components/captcha-widget.js';
 import { ServerForm } from '@/components/server-form.js';
 import { Spinner } from '@/components/spinner.js';
+import { ThemeToggle } from '@/components/theme-toggle.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { loadServerEndpoint, saveServerEndpoint } from '@/lib/storage/server-endpoint-store.js';
 
@@ -74,12 +75,14 @@ export default function LoginPage(): ReactNode {
 
   return (
     <main className="auth-screen">
+      <ThemeToggle className="auth-theme-toggle" />
       <form className="auth-card" onSubmit={(event) => void onSubmit(event)}>
         <div className="auth-brand">
-          <span className="brand-mark">◆</span>
-          <span className="brand-name">Migo</span>
+          <span className="brand-mark" aria-hidden="true">
+            ◆
+          </span>
+          <h1>Migo</h1>
         </div>
-        <h1>Welcome back</h1>
         <p className="auth-sub">Sign in to your private, end-to-end encrypted account.</p>
 
         {endpointReady && endpoint !== null ? (

@@ -45,7 +45,7 @@ pub enum Screen {
     Chat,
 }
 
-/// Which pane a signed-in user is looking at, chosen from the navigation rail.
+/// Which pane a signed-in user is looking at, chosen from the top navigation bar.
 ///
 /// Deliberately separate from [`Screen`]: the screens are the auth *pipeline* (which form, which
 /// gate), while a place is where a signed-in person already is. Folding friends into `Screen`

@@ -767,3 +767,35 @@ migod di `0.0.0.0:8080`, keduanya terverifikasi via IP publik 152.53.102.150.
 
 Verifikasi: 83 suite server, 141 test SDK, 220 test web, 31 test desktop,
 14 gate CI, e2e dua-akun lulus, tsc --noEmit bersih.
+
+## 23. Redesign layout: top navigation, dark/light theme, login card baru (v0.7.0)
+
+**Web client** — navigasi vertikal digantikan horizontal:
+
+- **TopNav** menggantikan TabRail: bar horizontal 48px dengan brand ◆ Migo di kiri,
+  7 tab fitur (Chat, Friends, Alerts, Discover, Gifts, Profile, Settings) di tengah,
+  chip akun (avatar + nama) + toggle tema di kanan. Tab aktif ber-underline accent
+  dengan glow. Mobile (≤768px): header 44px hanya brand+akun+toggles, navigasi fitur
+  pindah ke bottom bar 52px.
+- **Dark/light theme**: seluruh globals.css direstrukturisasi ke dua set CSS variable —
+  `:root` (light: putih panel, biru accent #0077e6, bubble putih) dan
+  `[data-theme="dark"]` (near-black, neon cyan #00d4ff, bubble gelap). Zero hardcoded
+  color di luar blok variable. Toggle 🌙/☀️ persist di localStorage; pre-paint script
+  mencegah flash tema salah. Auth screen juga punya toggle fixed top-right.
+- **Login/register card**: brand mark 48px glowing + nama 28px bold di atas (bukan
+  inline kecil), spacing lebih lega (32px padding), card 420px radius 12px.
+- **Sidebar footer**: bar status dengan saldo koin + presence dot berwarna.
+- 226 test web (+6 baru: 5 TopNav, 4 theme, -3 TabRail).
+
+**Desktop client** — rail kiri digantikan top bar:
+
+- **Top bar**: ◆ Migo brand di kiri, tab Chat|Friends|Settings horizontal di tengah,
+  connection dot + toggle tema (☀/🌙) di kanan. Panel type `egui::Panel::top`.
+- **Theme toggle** sekarang persist di settings file (serde `Theme`), kedua toggle
+  (top bar dan settings pane) lewat satu jalur deferred `theme_choice`.
+- **Chat header**: 🔒 encryption label lebih prominent (SMALL size, positive/warning
+  colored), members pill, unread badge di kanan.
+- 33 test desktop (+2 baru: theme round-trip, old settings file compatibility).
+
+Verifikasi: 83 suite server, 141 test SDK, 226 test web, 33 test desktop, 14 gate CI,
+e2e dua-akun lulus, deploy live di port 19992.

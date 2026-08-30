@@ -34,7 +34,7 @@ pub struct App {
     theme: Theme,
     net: Net,
     screen: Screen,
-    /// Which signed-in pane the navigation rail has selected.
+    /// Which signed-in pane the top navigation bar has selected.
     place: Place,
     connection: Connection,
     account: Option<Account>,
@@ -45,6 +45,11 @@ pub struct App {
     toasts: Vec<Toast>,
     /// Reused each frame so a screen's command buffer costs no allocation per frame.
     commands: Vec<Command>,
+    /// The persisted settings record: the source of truth for what gets written back to disk,
+    /// updated field by field as the user changes things. Kept apart from the live values so
+    /// that an environment override of the server (see `main`) never leaks into the file through
+    /// an unrelated save.
+    settings: Settings,
     /// The path the settings file lives at, when the platform data directory is reachable.
     /// None disables persistence; the form still works, the choice just does not survive a reload.
     settings_path: Option<PathBuf>,
@@ -57,10 +62,20 @@ impl App {
         vault_path: PathBuf,
         server: ServerEndpoint,
     ) -> Self {
-        // Follow the desktop's own light or dark setting on first run. Overriding it would mean a
-        // window that does not match every other window on the machine, and the user did not ask for
-        // that.
-        let theme = Theme::from_system(&cc.egui_ctx);
+        // The settings file is read here as well as in `main` (which wants only the server):
+        // the theme lives in the same small file, and one more read at startup is cheaper than
+        // a fifth parameter on `new`.
+        let settings_path = crate::settings::Settings::default_path();
+        let settings = settings_path
+            .as_deref()
+            .map(settings::load_or_default)
+            .unwrap_or_else(Settings::default_for_dev);
+        // Follow the desktop's own light or dark setting until the user has toggled a
+        // preference of their own. Overriding it before that would mean a window that does not
+        // match every other window on the machine, and the user did not ask for that.
+        let theme = settings
+            .theme
+            .unwrap_or_else(|| Theme::from_system(&cc.egui_ctx));
         theme::install(&cc.egui_ctx, theme);
 
         let net = Net::spawn(cc.egui_ctx.clone(), vault_path);
@@ -73,7 +88,6 @@ impl App {
             server: server.clone(),
             ..AuthState::default()
         };
-        let settings_path = crate::settings::Settings::default_path();
 
         Self {
             theme,
@@ -88,23 +102,20 @@ impl App {
             settings_panel: SettingsState::default(),
             toasts: Vec::new(),
             commands: Vec::new(),
+            settings,
             settings_path,
         }
     }
 
-    /// Persists the user's chosen server to the settings file, when the platform data directory
-    /// is reachable. Best-effort: a failed write is logged at warn level, never surfaced as a
-    /// toast, because the in-memory state is the source of truth for the current session.
-    fn persist_server(&self, endpoint: &ServerEndpoint) {
+    /// Persists the settings record, when the platform data directory is reachable.
+    /// Best-effort: a failed write is logged at warn level, never surfaced as a toast, because
+    /// the in-memory state is the source of truth for the current session.
+    fn persist_settings(&self) {
         let Some(path) = self.settings_path.as_ref() else {
             return;
         };
-        let record = Settings {
-            version: crate::settings::SETTINGS_VERSION,
-            server: endpoint.clone(),
-        };
-        if let Err(error) = settings::save(path, &record) {
-            tracing::warn!("migo-desktop: could not persist server endpoint: {error}");
+        if let Err(error) = settings::save(path, &self.settings) {
+            tracing::warn!("migo-desktop: could not persist settings: {error}");
         }
     }
 
@@ -278,30 +289,44 @@ impl App {
         !self.toasts.is_empty()
     }
 
-    /// The title bar strip: product name on the left, connection and theme on the right.
-    fn title_strip(&mut self, ui: &mut egui::Ui) {
+    /// The top bar: brand on the left, the signed-in places beside it, connection and theme on
+    /// the right.
+    ///
+    /// The navigation lives here rather than inside any pane because it belongs to none of
+    /// them — it is the only widget that outlives a place switch, and letting a pane draw its
+    /// own switcher is how the "which pane am I in" state ends up maintained twice.
+    fn top_bar(&mut self, ui: &mut egui::Ui, signed_in: bool, theme_choice: &mut Option<Theme>) {
         let colors = palette(self.theme);
         ui.horizontal(|ui| {
             ui.add_space(space::MD);
+            widgets::brand_mark(ui, self.theme);
             ui.label(
                 egui::RichText::new("Migo")
                     .text_style(crate::theme::named(crate::theme::text_style::TITLE))
                     .color(colors.text)
                     .strong(),
             );
+
+            if signed_in {
+                ui.separator();
+                self.nav_tabs(ui);
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(space::MD);
+                // Sun while dark, moon while light: the glyph names the theme one click would
+                // arrive at. 🌙 (`U+1F319`) rather than ☾ (`U+263D`) because only the emoji
+                // crescent is carried by any face in the font stack.
                 if ui
                     .button(if self.theme.is_dark() {
                         "\u{2600}"
                     } else {
-                        "\u{263D}"
+                        "\u{1F319}"
                     })
                     .on_hover_text(format!("Switch to {}", self.theme.flipped().label()))
                     .clicked()
                 {
-                    self.theme = self.theme.flipped();
-                    theme::install(ui.ctx(), self.theme);
+                    *theme_choice = Some(self.theme.flipped());
                 }
                 ui.add_space(space::MD);
                 let color = match &self.connection {
@@ -316,46 +341,25 @@ impl App {
         });
     }
 
-    /// The navigation rail: the signed-in places, stacked.
-    ///
-    /// Drawn here rather than inside any pane because it belongs to none of them — it is the only
-    /// widget that outlives a place switch, and letting a pane draw its own switcher is how the
-    /// "which pane am I in" state ends up maintained twice.
-    fn nav_rail(&mut self, ui: &mut egui::Ui) {
+    /// The signed-in places, laid out horizontally in the top bar.
+    fn nav_tabs(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme;
         // Summed before the buttons, because the chat pane the badge describes is not the pane
-        // being drawn when the rail is clicked from elsewhere.
+        // being drawn when the tab is clicked from elsewhere.
         let unread: u32 = self.chat.conversations.iter().map(|c| c.unread).sum();
         let mut place = self.place;
         let mut refresh_friends = false;
-        ui.add_space(space::SM);
-        if widgets::rail_button(ui, theme, "\u{1F4AC}", "Chat", place == Place::Chat, unread) {
+        if widgets::tab_button(ui, theme, "Chat", place == Place::Chat, unread) {
             place = Place::Chat;
         }
-        ui.add_space(space::SM);
-        if widgets::rail_button(
-            ui,
-            theme,
-            "\u{1F465}",
-            "Friends",
-            place == Place::Friends,
-            0,
-        ) {
+        if widgets::tab_button(ui, theme, "Friends", place == Place::Friends, 0) {
             place = Place::Friends;
             // The graph is the server's, and the other devices of this account act on it too.
             // Opening the tab re-reads it — one cheap request per click, rather than a pane
             // faithfully showing a friendship that ended while nobody was looking.
             refresh_friends = true;
         }
-        ui.add_space(space::SM);
-        if widgets::rail_button(
-            ui,
-            theme,
-            "\u{2699}",
-            "Settings",
-            place == Place::Settings,
-            0,
-        ) {
+        if widgets::tab_button(ui, theme, "Settings", place == Place::Settings, 0) {
             place = Place::Settings;
         }
         self.place = place;
@@ -370,8 +374,8 @@ impl eframe::App for App {
     ///
     /// eframe 0.36 hands the application a [`egui::Ui`] covering the whole viewport rather than a
     /// bare context, so panels are shown *inside* that ui. The consequence worth knowing is that the
-    /// order of the calls below is the layout: the title strip claims the top of the viewport first,
-    /// and the central panel then fills whatever is left. Reversing them would leave the strip
+    /// order of the calls below is the layout: the top bar claims the top of the viewport first,
+    /// and the central panel then fills whatever is left. Reversing them would leave the bar
     /// floating over the screen it is supposed to sit above.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain();
@@ -391,68 +395,43 @@ impl eframe::App for App {
         let server_before = self.auth.server.clone();
 
         let colors = palette(self.theme);
-        egui::Panel::top("title")
-            .exact_size(44.0)
-            .show_separator_line(false)
-            .frame(egui::Frame::new().fill(colors.surface_raised))
-            .show(ui, |ui| self.title_strip(ui));
-
         // Screens are handed a context and a command buffer; nothing below this point can reach the
         // worker directly.
         let mut navigate: Option<Screen> = None;
+        // A theme change requested by the top bar's toggle or by a screen, applied after the frame.
         let mut theme_choice: Option<Theme> = None;
         let screen = self.screen;
         let signed_in = screen == Screen::Chat && self.account.is_some();
+        egui::Panel::top("nav")
+            .exact_size(44.0)
+            .frame(egui::Frame::new().fill(colors.surface_raised))
+            .show(ui, |ui| self.top_bar(ui, signed_in, &mut theme_choice));
+
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(colors.surface))
             .show(ui, |ui| {
                 if signed_in {
-                    // The rail is a fixed strip on the left, the pane fills the rest. Fixed rather
-                    // than proportional for the same reason the chat sidebar is: a switcher that
-                    // grows with the window only steals room from the thing being switched to.
-                    ui.horizontal_top(|ui| {
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(56.0, ui.available_height()),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| self.nav_rail(ui),
-                        );
-                        let (rect, _) = ui.allocate_exact_size(
-                            egui::vec2(1.0, ui.available_height()),
-                            egui::Sense::hover(),
-                        );
-                        ui.painter()
-                            .rect_filled(rect, egui::CornerRadius::ZERO, colors.border);
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(ui.available_width(), ui.available_height()),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                let mut context = Context {
-                                    theme: self.theme,
-                                    connection: &self.connection,
-                                    account: self.account.as_ref(),
-                                    server: &self.auth.server,
-                                    commands: &mut self.commands,
-                                    navigate: &mut navigate,
-                                    theme_choice: &mut theme_choice,
-                                };
-                                match self.place {
-                                    Place::Chat => {
-                                        crate::ui::chat::show(ui, &mut context, &mut self.chat)
-                                    }
-                                    Place::Friends => crate::ui::friends::show(
-                                        ui,
-                                        &mut context,
-                                        &mut self.friends,
-                                    ),
-                                    Place::Settings => crate::ui::settings::show(
-                                        ui,
-                                        &mut context,
-                                        &mut self.settings_panel,
-                                    ),
-                                }
-                            },
-                        );
-                    });
+                    // The pane fills the whole central panel. The navigation that once claimed a
+                    // fixed strip on the left lives in the top bar now, so the thing being
+                    // switched to gets every pixel the window can spare.
+                    let mut context = Context {
+                        theme: self.theme,
+                        connection: &self.connection,
+                        account: self.account.as_ref(),
+                        server: &self.auth.server,
+                        commands: &mut self.commands,
+                        navigate: &mut navigate,
+                        theme_choice: &mut theme_choice,
+                    };
+                    match self.place {
+                        Place::Chat => crate::ui::chat::show(ui, &mut context, &mut self.chat),
+                        Place::Friends => {
+                            crate::ui::friends::show(ui, &mut context, &mut self.friends)
+                        }
+                        Place::Settings => {
+                            crate::ui::settings::show(ui, &mut context, &mut self.settings_panel)
+                        }
+                    }
                 } else {
                     // The server is cloned for the context because the auth screen holds the
                     // endpoint mutably (its form edits it) and the context must not — one small
@@ -478,18 +457,22 @@ impl eframe::App for App {
             self.screen = target;
         }
 
-        // A screen asked for the other theme. Applied here rather than at the click so the whole
-        // frame is drawn in one palette — flipping mid-frame would show a button drawn in the old
-        // colours sitting on a panel in the new ones.
+        // A screen or the top bar asked for the other theme. Applied here rather than at the
+        // click so the whole frame is drawn in one palette — flipping mid-frame would show a
+        // button drawn in the old colours sitting on a panel in the new ones. The choice is
+        // written back to the settings file, so it outlives the window.
         if let Some(theme) = theme_choice {
             self.theme = theme;
             theme::install(&ctx, theme);
+            self.settings.theme = Some(theme);
+            self.persist_settings();
         }
 
         // The server disclosure commits a new value to `auth.server` only on a successful
         // "Use this server" click, so detecting the change here is the right moment to persist.
         if self.auth.server != server_before {
-            self.persist_server(&self.auth.server);
+            self.settings.server = self.auth.server.clone();
+            self.persist_settings();
         }
 
         for command in self.commands.drain(..) {

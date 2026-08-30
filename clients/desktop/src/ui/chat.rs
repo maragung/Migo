@@ -521,7 +521,8 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState) {
     composer(ui, context, state, conversation_id);
 }
 
-/// The conversation's title, member count, and encryption state.
+/// The compact header over the open conversation: title, encryption state, and the counts that
+/// are true of the whole thread rather than of any one message in it.
 fn thread_header(ui: &mut Ui, context: &Context<'_>, state: &ChatState, conversation_id: Id) {
     let colors = palette(context.theme);
     let Some(conversation) = state
@@ -548,17 +549,20 @@ fn thread_header(ui: &mut Ui, context: &Context<'_>, state: &ChatState, conversa
                     .color(colors.text)
                     .strong(),
             );
+            // The lock travels with the words: a padlock floating alone is decoration, and the
+            // pair together is the one thing about a conversation a reader must be able to
+            // find without hunting for it.
             let detail = if conversation.encrypted {
-                "End-to-end encrypted".to_owned()
+                "\u{1F512} End-to-end encrypted"
             } else {
                 // Said plainly rather than left blank. A user who cannot tell an encrypted
                 // conversation from an unencrypted one has no way to act on the difference, and
                 // the honest name for what remains is the transport's own encryption.
-                "Transport encryption only".to_owned()
+                "Transport encryption only"
             };
             ui.label(
                 RichText::new(detail)
-                    .font(egui::FontId::proportional(font::TINY))
+                    .font(egui::FontId::proportional(font::SMALL))
                     .color(if conversation.encrypted {
                         colors.positive
                     } else {
@@ -568,6 +572,10 @@ fn thread_header(ui: &mut Ui, context: &Context<'_>, state: &ChatState, conversa
         });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(space::LG);
+            // The unread count comes from the server's read watermark, which can lag the thread
+            // open on screen, so the badge appears here whenever it does.
+            widgets::unread_badge(ui, context.theme, conversation.unread);
+            ui.add_space(space::XS);
             if conversation.members.len() > 2 {
                 widgets::pill(
                     ui,

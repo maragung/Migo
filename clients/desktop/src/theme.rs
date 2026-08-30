@@ -27,9 +27,14 @@
 //! striking.
 
 use egui::{Color32, CornerRadius, FontFamily, FontId, Margin, Stroke, TextStyle, Vec2};
+use serde::{Deserialize, Serialize};
 
 /// Which of the two themes the interface is drawn in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` so the user's choice can live in the settings file; the wire form
+/// is `"dark"`/`"light"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Theme {
     Dark,
     Light,
@@ -44,7 +49,7 @@ impl Theme {
         }
     }
 
-    /// The other theme, for the toggle in the title bar.
+    /// The other theme, for the toggle in the top bar.
     #[must_use]
     pub fn flipped(self) -> Self {
         match self {

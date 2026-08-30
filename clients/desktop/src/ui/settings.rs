@@ -126,7 +126,7 @@ fn server_section(ui: &mut Ui, context: &mut Context<'_>) {
 
 /// The theme, with the toggle.
 ///
-/// The title bar keeps its own toggle; this is the same action with room to explain itself, which
+/// The top bar keeps its own toggle; this is the same action with room to explain itself, which
 /// is also why the button names the theme it switches *to* rather than the one it is leaving.
 fn theme_section(ui: &mut Ui, context: &mut Context<'_>) {
     let colors = palette(context.theme);

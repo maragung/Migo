@@ -14,14 +14,31 @@ import { ConversationList } from './conversation-list.js';
 import { NewConversationDialog } from './new-conversation-dialog.js';
 import { PresencePicker } from './presence-picker.js';
 
+/** The self-reportable states as footer labels, mirroring the picker's wording. */
+const PRESENCE_LABELS: Readonly<Record<number, string>> = {
+  [PresenceState.Online]: 'Online',
+  [PresenceState.Away]: 'Away',
+  [PresenceState.Busy]: 'Busy',
+  [PresenceState.Invisible]: 'Invisible',
+  [PresenceState.Offline]: 'Offline',
+};
+
+/** The label for a presence state, falling back to Offline for a state this build cannot name. */
+function presenceLabel(state: PresenceState): string {
+  return PRESENCE_LABELS[state] ?? 'Offline';
+}
+
 /**
  * The persistent left column: brand header, connection status, conversation list, and account footer.
  *
  * The footer is also where the account's own presence is published from ({@link PresencePicker}):
  * the sidebar holds the current state and performs the `setPresence` call, so the picker stays a
- * controlled view of the truth rather than a second source of it. The header's coin badge is the
- * wallet read once per session ({@link EconomyDomain.getBalance}) — the Gifts tab owns the live
- * money-side refresh after a spend, so the badge is the resting glance, not the ledger.
+ * controlled view of the truth rather than a second source of it. Beneath the picker, the status
+ * bar restates the two facts worth a glance on the way out — the coin balance and the presence
+ * the account is currently publishing — as plain text, so the footer doubles as its own summary.
+ * The header's coin badge is the wallet read once per session ({@link EconomyDomain.getBalance})
+ * — the Gifts tab owns the live money-side refresh after a spend, so the badge is the resting
+ * glance, not the ledger.
  */
 export function Sidebar(): ReactNode {
   const { client, accountId, logout } = useMigo();
@@ -115,6 +132,23 @@ export function Sidebar(): ReactNode {
           </button>
         </div>
         <PresencePicker state={presence} status={status} onChange={onPresenceChange} />
+        <div className="sidebar-status" aria-label="Account status">
+          {coins !== null ? (
+            <span className="sidebar-status-item">
+              <span aria-hidden="true">🪙</span>
+              <span>
+                {coins.toLocaleString()} coin{coins === 1 ? '' : 's'}
+              </span>
+            </span>
+          ) : null}
+          <span className="sidebar-status-item">
+            <span
+              className={`sidebar-status-dot sidebar-status-${PresenceState[presence]?.toLowerCase() ?? 'offline'}`}
+              aria-hidden="true"
+            />
+            <span>{presenceLabel(presence)}</span>
+          </span>
+        </div>
       </footer>
 
       {dialogOpen ? <NewConversationDialog onClose={() => setDialogOpen(false)} /> : null}

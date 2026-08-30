@@ -46,22 +46,50 @@ pub fn subheader(ui: &mut Ui, theme: Theme, text: &str) {
     );
 }
 
-/// One item of the navigation rail: a glyph button that stays highlighted while its pane is open.
+/// The brand mark: a filled diamond in the accent colour.
 ///
-/// `badge` is the count drawn at the button's corner — the unread total on Chat, zero elsewhere.
-/// Returns whether it was clicked. The highlight is an accent-tinted surface rather than the
-/// accent itself — a solid neon bar down the rail would out-shout everything the pane it points
-/// at is trying to show.
-pub fn rail_button(
-    ui: &mut Ui,
-    theme: Theme,
-    glyph: &str,
-    label: &str,
-    selected: bool,
-    badge: u32,
-) -> bool {
+/// Painted rather than typed, because the character it stands in for (`U+25C6`) is carried by
+/// none of the proportional font stack's faces — a mark that renders as tofu on a stock install
+/// is worse than no mark. A painted shape is also sized to the bar rather than to a font.
+pub fn brand_mark(ui: &mut Ui, theme: Theme) {
     let colors = palette(theme);
-    let size = Vec2::new(44.0, 44.0);
+    let side = 12.0;
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
+    let center = rect.center();
+    let half = side / 2.0;
+    let points = vec![
+        egui::pos2(center.x, center.y - half),
+        egui::pos2(center.x + half, center.y),
+        egui::pos2(center.x, center.y + half),
+        egui::pos2(center.x - half, center.y),
+    ];
+    ui.painter().add(egui::Shape::convex_polygon(
+        points,
+        colors.accent,
+        egui::Stroke::NONE,
+    ));
+}
+
+/// One tab of the top navigation bar: a text button that stays marked while its pane is open.
+///
+/// `badge` is the count drawn at the tab's corner — the unread total on Chat, zero elsewhere.
+/// Returns whether it was clicked. The open tab is marked two ways on purpose: an accent-tinted
+/// surface, and a two-pixel accent underline — the one marker that survives colour-blind
+/// viewing of a neon palette. A solid accent fill is deliberately avoided: a bar of neon cyan
+/// across the top of the window would out-shout the pane it points at.
+pub fn tab_button(ui: &mut Ui, theme: Theme, label: &str, selected: bool, badge: u32) -> bool {
+    let colors = palette(theme);
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        FontId::proportional(font::BODY),
+        if selected {
+            colors.accent
+        } else {
+            colors.text_muted
+        },
+    );
+    let padding = Vec2::new(space::LG, space::SM);
+    let size = galley.size() + padding * 2.0;
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let background = if selected {
         colors.surface_selected
@@ -72,33 +100,22 @@ pub fn rail_button(
     };
     if background != Color32::TRANSPARENT {
         ui.painter()
-            .rect_filled(rect, CornerRadius::same(radius::MD), background);
+            .rect_filled(rect, CornerRadius::same(radius::SM), background);
     }
     if selected {
-        // A two-pixel accent tick on the leading edge, the one marker that survives
-        // colour-blind viewing of a neon palette.
-        let tick = egui::Rect::from_min_max(
-            egui::pos2(rect.left(), rect.top() + 8.0),
-            egui::pos2(rect.left() + 2.0, rect.bottom() - 8.0),
+        let underline = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + space::SM, rect.bottom() - 2.0),
+            egui::pos2(rect.right() - space::SM, rect.bottom()),
         );
         ui.painter()
-            .rect_filled(tick, CornerRadius::ZERO, colors.accent);
+            .rect_filled(underline, CornerRadius::ZERO, colors.accent);
     }
-    let galley = ui.painter().layout_no_wrap(
-        glyph.to_owned(),
-        FontId::proportional(font::SUBTITLE),
-        if selected {
-            colors.accent
-        } else {
-            colors.text_muted
-        },
-    );
     let at = rect.center() - galley.size() / 2.0;
     ui.painter().galley(at, galley, colors.text);
     if badge > 0 {
-        // Overlaid on the button's corner rather than given its own row: a badge that changes
-        // the rail's height as the count appears and disappears would make every button below
-        // it shift, and a moving target is the one thing a navigation rail must not be.
+        // Overlaid on the tab's corner rather than given its own slot: a badge that changes
+        // the bar's layout as the count appears and disappears would make every tab shift,
+        // and a moving target is the one thing a navigation bar must not be.
         let text = if badge > 99 {
             "99+".to_owned()
         } else {
@@ -118,7 +135,7 @@ pub fn rail_button(
         ui.painter()
             .galley(badge_rect.min + padding, mini, colors.text_on_accent);
     }
-    response.on_hover_text(label).clicked()
+    response.clicked()
 }
 
 /// A hairline separator that respects the palette instead of egui's default grey.
@@ -162,7 +179,7 @@ pub fn unread_badge(ui: &mut Ui, theme: Theme, count: u32) {
     pill(ui, &text, colors.text_on_accent, colors.accent);
 }
 
-/// A coloured dot plus a word, for the connection state in the title bar.
+/// A coloured dot plus a word, for the connection state in the top bar.
 pub fn status_dot(ui: &mut Ui, theme: Theme, color: Color32, label: &str) {
     let colors = palette(theme);
     let diameter = 8.0;
