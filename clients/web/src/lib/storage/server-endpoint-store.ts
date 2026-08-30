@@ -31,7 +31,9 @@ export async function loadServerEndpoint(): Promise<ServerEndpoint | undefined> 
   // corrected endpoint is what the form shows and what the next save persists.
   if (typeof window !== 'undefined' && window.location?.protocol === 'http:') {
     if (stored.scheme === 'Wss' || stored.restScheme === 'Https') {
-      return { ...stored, scheme: 'Ws', restScheme: 'Http' };
+      // Also pin the gateway port to the REST port: migod serves /ws on its HTTP listener,
+      // and an older snapshot may carry the REST port + 1 the SDK's URL helper assumed.
+      return { ...stored, scheme: 'Ws', restScheme: 'Http', gatewayPort: stored.port };
     }
   }
   return stored;
