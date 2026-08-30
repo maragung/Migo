@@ -279,7 +279,8 @@
    "auth": "User",
    "cost": 0,
    "class": "Coalescable",
-   "doc": "A reaction was added or removed."
+   "doc": "A reaction was added or removed.",
+   "coalesce_key": "target_message_id"
   },
   {
    "name": "PRESENCE_SET",

@@ -4607,7 +4607,7 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   39: { code: 39, name: 'TYPING', cost: 1, cls: 'Coalescable', auth: 'User', direction: 'both', ackRequired: false, payload: 'TypingEvent', coalesceKey: 'conversation_id' },
   40: { code: 40, name: 'MESSAGE_EDIT', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MessageEdit', response: 'Acknowledged' },
   41: { code: 41, name: 'REACTION_SET', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ReactionSet', response: 'Acknowledged' },
-  42: { code: 42, name: 'REACTION_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ReactionEvent' },
+  42: { code: 42, name: 'REACTION_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ReactionEvent', coalesceKey: 'target_message_id' },
   64: { code: 64, name: 'PRESENCE_SET', cost: 1, cls: 'Coalescable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'PresenceUpdate', response: 'Acknowledged' },
   65: { code: 65, name: 'PRESENCE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'PresenceEvent', coalesceKey: 'user_id' },
   80: { code: 80, name: 'ROOM_JOIN', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomJoinRequest', response: 'RoomJoinResponse' },

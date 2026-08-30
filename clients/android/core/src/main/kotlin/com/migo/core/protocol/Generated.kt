@@ -5771,7 +5771,7 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     39L to OpcodeMeta(39L, "TYPING", 1, DeliveryClass.Coalescable, AuthLevel.User, Direction.Both, false, "TypingEvent", null, "conversation_id"),
     40L to OpcodeMeta(40L, "MESSAGE_EDIT", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MessageEdit", "Acknowledged", null),
     41L to OpcodeMeta(41L, "REACTION_SET", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ReactionSet", "Acknowledged", null),
-    42L to OpcodeMeta(42L, "REACTION_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ReactionEvent", null, null),
+    42L to OpcodeMeta(42L, "REACTION_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ReactionEvent", null, "target_message_id"),
     64L to OpcodeMeta(64L, "PRESENCE_SET", 1, DeliveryClass.Coalescable, AuthLevel.User, Direction.ClientToServer, false, "PresenceUpdate", "Acknowledged", null),
     65L to OpcodeMeta(65L, "PRESENCE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "PresenceEvent", null, "user_id"),
     80L to OpcodeMeta(80L, "ROOM_JOIN", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomJoinRequest", "RoomJoinResponse", null),
