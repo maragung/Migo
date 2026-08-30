@@ -6568,6 +6568,417 @@ impl Decode for ModerationEvent {
     }
 }
 
+/// A profile patch: every field optional, absent means leave alone.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ProfileUpdate {
+    /// New display name, or absent to leave it.
+    pub display_name: Option<String>,
+    /// New bio, or absent to leave it.
+    pub bio: Option<String>,
+    /// New avatar object, or absent to leave it.
+    pub avatar_media_id: Option<Id>,
+    /// New birth year, or absent.
+    pub birth_year: Option<u32>,
+    /// New last-seen visibility.
+    pub show_last_seen: Option<u32>,
+    /// New messaging visibility.
+    pub who_can_message: Option<u32>,
+    /// New friend-request visibility.
+    pub who_can_add: Option<u32>,
+    /// New search visibility.
+    pub searchable: Option<bool>,
+}
+
+impl Encode for ProfileUpdate {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        let present = usize::from(self.display_name.is_some())
+            + usize::from(self.bio.is_some())
+            + usize::from(self.avatar_media_id.is_some())
+            + usize::from(self.birth_year.is_some())
+            + usize::from(self.show_last_seen.is_some())
+            + usize::from(self.who_can_message.is_some())
+            + usize::from(self.who_can_add.is_some())
+            + usize::from(self.searchable.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.display_name {
+            w.optional(1, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.bio {
+            w.optional(2, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.avatar_media_id {
+            w.optional(3, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.birth_year {
+            w.optional(4, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.show_last_seen {
+            w.optional(5, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.who_can_message {
+            w.optional(6, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.who_can_add {
+            w.optional(7, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.searchable {
+            w.optional(8, |w| {
+                w.write_bool(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ProfileUpdate {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.display_name = Some(sub.read_string()?),
+                2 => out.bio = Some(sub.read_string()?),
+                3 => out.avatar_media_id = Some(sub.read_id()?),
+                4 => out.birth_year = Some(sub.read_u32()?),
+                5 => out.show_last_seen = Some(sub.read_u32()?),
+                6 => out.who_can_message = Some(sub.read_u32()?),
+                7 => out.who_can_add = Some(sub.read_u32()?),
+                8 => out.searchable = Some(sub.read_bool()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Edits a message in place: the sealed replacement envelope, preserving its seq.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MessageEdit {
+    pub message_id: Id,
+    pub conversation_id: Id,
+    /// The sealed replacement content, opaque to the server.
+    pub envelope: Vec<u8>,
+}
+
+impl Encode for MessageEdit {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.message_id);
+        w.write_id(&self.conversation_id);
+        w.write_bytes(&self.envelope)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for MessageEdit {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.message_id = r.read_id()?;
+        out.conversation_id = r.read_id()?;
+        out.envelope = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Sets or removes the caller's reaction to a message.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ReactionSet {
+    pub target_message_id: Id,
+    pub conversation_id: Id,
+    /// The sealed reaction content, opaque to the server.
+    pub envelope: Vec<u8>,
+}
+
+impl Encode for ReactionSet {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.target_message_id);
+        w.write_id(&self.conversation_id);
+        w.write_bytes(&self.envelope)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ReactionSet {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.target_message_id = r.read_id()?;
+        out.conversation_id = r.read_id()?;
+        out.envelope = r.read_bytes()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Asks for friend suggestions.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SuggestReq {
+    /// Maximum suggestions; server clamps.
+    pub limit: Option<u32>,
+}
+
+impl Encode for SuggestReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        let present = usize::from(self.limit.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.limit {
+            w.optional(1, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for SuggestReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.limit = Some(sub.read_u32()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// One suggested account.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SuggestedUser {
+    pub account_id: Id,
+    pub username: String,
+    pub display_name: String,
+    pub mutual_friends: u32,
+}
+
+impl Encode for SuggestedUser {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.account_id);
+        w.write_str(&self.username)?;
+        w.write_str(&self.display_name)?;
+        w.write_u32(self.mutual_friends);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for SuggestedUser {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.account_id = r.read_id()?;
+        out.username = r.read_string()?;
+        out.display_name = r.read_string()?;
+        out.mutual_friends = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Searches public profiles by username or display name.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SearchReq {
+    pub query: String,
+    pub limit: Option<u32>,
+}
+
+impl Encode for SearchReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.query)?;
+        let present = usize::from(self.limit.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.limit {
+            w.optional(1, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for SearchReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.query = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.limit = Some(sub.read_u32()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Search results.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SearchResponse {
+    pub results: Vec<SuggestedUser>,
+}
+
+impl Encode for SearchResponse {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.results.len())?;
+            for item in self.results.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for SearchResponse {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.results = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(SuggestedUser::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// A reaction was added or removed on a message.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ReactionEvent {
+    pub conversation_id: Id,
+    pub target_message_id: Id,
+    pub actor_id: Id,
+    pub emoji: String,
+    /// True when the reaction was removed.
+    pub remove: Option<bool>,
+}
+
+impl Encode for ReactionEvent {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.conversation_id);
+        w.write_id(&self.target_message_id);
+        w.write_id(&self.actor_id);
+        w.write_str(&self.emoji)?;
+        let present = usize::from(self.remove.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.remove {
+            w.optional(1, |w| {
+                w.write_bool(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ReactionEvent {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.conversation_id = r.read_id()?;
+        out.target_message_id = r.read_id()?;
+        out.actor_id = r.read_id()?;
+        out.emoji = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.remove = Some(sub.read_bool()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
 /// Delivery class, deciding what happens when a session queue is full (ADR-0008).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeliveryClass {
@@ -6626,6 +7037,12 @@ pub enum Opcode {
     ConversationList = 37,
     ConversationCreate = 38,
     Typing = 39,
+    /// Edits a message's text in place.
+    MessageEdit = 40,
+    /// Sets or removes the caller's reaction to a message.
+    ReactionSet = 41,
+    /// A reaction was added or removed.
+    ReactionEvent = 42,
     PresenceSet = 64,
     PresenceEvent = 65,
     RoomJoin = 80,
@@ -6633,26 +7050,32 @@ pub enum Opcode {
     RoomList = 82,
     RoomMemberEvent = 83,
     RoomStateEvent = 84,
+    /// Updates the caller's own profile and privacy settings.
+    ProfileUpdate = 111,
     ProfileFetch = 112,
-    NotificationEvent = 144,
-    GameAction = 176,
-    GameEvent = 177,
     FriendRequest = 113,
     FriendRespond = 114,
     FriendEvent = 115,
     BlockSet = 116,
     RelationshipList = 117,
+    /// Friend suggestions from the social graph.
+    Suggestions = 118,
+    /// Searches public profiles.
+    Search = 119,
     MediaUploadBegin = 128,
     MediaUploadStatus = 129,
     MediaUploadCommit = 130,
     MediaUploadAbort = 131,
     MediaFetchUrl = 132,
     MediaStateEvent = 133,
+    NotificationEvent = 144,
     NotificationAck = 145,
     NotificationList = 146,
     GiftSend = 160,
     BalanceFetch = 161,
     EconomyEvent = 162,
+    GameAction = 176,
+    GameEvent = 177,
     BotCommand = 178,
     BotEvent = 179,
     BotRegister = 180,
@@ -6703,6 +7126,9 @@ impl Opcode {
             37 => Self::ConversationList,
             38 => Self::ConversationCreate,
             39 => Self::Typing,
+            40 => Self::MessageEdit,
+            41 => Self::ReactionSet,
+            42 => Self::ReactionEvent,
             64 => Self::PresenceSet,
             65 => Self::PresenceEvent,
             80 => Self::RoomJoin,
@@ -6710,26 +7136,29 @@ impl Opcode {
             82 => Self::RoomList,
             83 => Self::RoomMemberEvent,
             84 => Self::RoomStateEvent,
+            111 => Self::ProfileUpdate,
             112 => Self::ProfileFetch,
-            144 => Self::NotificationEvent,
-            176 => Self::GameAction,
-            177 => Self::GameEvent,
             113 => Self::FriendRequest,
             114 => Self::FriendRespond,
             115 => Self::FriendEvent,
             116 => Self::BlockSet,
             117 => Self::RelationshipList,
+            118 => Self::Suggestions,
+            119 => Self::Search,
             128 => Self::MediaUploadBegin,
             129 => Self::MediaUploadStatus,
             130 => Self::MediaUploadCommit,
             131 => Self::MediaUploadAbort,
             132 => Self::MediaFetchUrl,
             133 => Self::MediaStateEvent,
+            144 => Self::NotificationEvent,
             145 => Self::NotificationAck,
             146 => Self::NotificationList,
             160 => Self::GiftSend,
             161 => Self::BalanceFetch,
             162 => Self::EconomyEvent,
+            176 => Self::GameAction,
+            177 => Self::GameEvent,
             178 => Self::BotCommand,
             179 => Self::BotEvent,
             180 => Self::BotRegister,
@@ -6775,6 +7204,9 @@ impl Opcode {
             Self::ConversationList => "CONVERSATION_LIST",
             Self::ConversationCreate => "CONVERSATION_CREATE",
             Self::Typing => "TYPING",
+            Self::MessageEdit => "MESSAGE_EDIT",
+            Self::ReactionSet => "REACTION_SET",
+            Self::ReactionEvent => "REACTION_EVENT",
             Self::PresenceSet => "PRESENCE_SET",
             Self::PresenceEvent => "PRESENCE_EVENT",
             Self::RoomJoin => "ROOM_JOIN",
@@ -6782,26 +7214,29 @@ impl Opcode {
             Self::RoomList => "ROOM_LIST",
             Self::RoomMemberEvent => "ROOM_MEMBER_EVENT",
             Self::RoomStateEvent => "ROOM_STATE_EVENT",
+            Self::ProfileUpdate => "PROFILE_UPDATE",
             Self::ProfileFetch => "PROFILE_FETCH",
-            Self::NotificationEvent => "NOTIFICATION_EVENT",
-            Self::GameAction => "GAME_ACTION",
-            Self::GameEvent => "GAME_EVENT",
             Self::FriendRequest => "FRIEND_REQUEST",
             Self::FriendRespond => "FRIEND_RESPOND",
             Self::FriendEvent => "FRIEND_EVENT",
             Self::BlockSet => "BLOCK_SET",
             Self::RelationshipList => "RELATIONSHIP_LIST",
+            Self::Suggestions => "SUGGESTIONS",
+            Self::Search => "SEARCH",
             Self::MediaUploadBegin => "MEDIA_UPLOAD_BEGIN",
             Self::MediaUploadStatus => "MEDIA_UPLOAD_STATUS",
             Self::MediaUploadCommit => "MEDIA_UPLOAD_COMMIT",
             Self::MediaUploadAbort => "MEDIA_UPLOAD_ABORT",
             Self::MediaFetchUrl => "MEDIA_FETCH_URL",
             Self::MediaStateEvent => "MEDIA_STATE_EVENT",
+            Self::NotificationEvent => "NOTIFICATION_EVENT",
             Self::NotificationAck => "NOTIFICATION_ACK",
             Self::NotificationList => "NOTIFICATION_LIST",
             Self::GiftSend => "GIFT_SEND",
             Self::BalanceFetch => "BALANCE_FETCH",
             Self::EconomyEvent => "ECONOMY_EVENT",
+            Self::GameAction => "GAME_ACTION",
+            Self::GameEvent => "GAME_EVENT",
             Self::BotCommand => "BOT_COMMAND",
             Self::BotEvent => "BOT_EVENT",
             Self::BotRegister => "BOT_REGISTER",
@@ -6847,6 +7282,9 @@ impl Opcode {
             Self::ConversationList => 3,
             Self::ConversationCreate => 10,
             Self::Typing => 1,
+            Self::MessageEdit => 2,
+            Self::ReactionSet => 1,
+            Self::ReactionEvent => 0,
             Self::PresenceSet => 1,
             Self::PresenceEvent => 0,
             Self::RoomJoin => 20,
@@ -6854,26 +7292,29 @@ impl Opcode {
             Self::RoomList => 5,
             Self::RoomMemberEvent => 0,
             Self::RoomStateEvent => 0,
+            Self::ProfileUpdate => 3,
             Self::ProfileFetch => 3,
-            Self::NotificationEvent => 0,
-            Self::GameAction => 2,
-            Self::GameEvent => 0,
             Self::FriendRequest => 10,
             Self::FriendRespond => 5,
             Self::FriendEvent => 0,
             Self::BlockSet => 5,
             Self::RelationshipList => 3,
+            Self::Suggestions => 3,
+            Self::Search => 3,
             Self::MediaUploadBegin => 10,
             Self::MediaUploadStatus => 2,
             Self::MediaUploadCommit => 5,
             Self::MediaUploadAbort => 1,
             Self::MediaFetchUrl => 3,
             Self::MediaStateEvent => 0,
+            Self::NotificationEvent => 0,
             Self::NotificationAck => 1,
             Self::NotificationList => 3,
             Self::GiftSend => 20,
             Self::BalanceFetch => 3,
             Self::EconomyEvent => 0,
+            Self::GameAction => 2,
+            Self::GameEvent => 0,
             Self::BotCommand => 2,
             Self::BotEvent => 0,
             Self::BotRegister => 20,
@@ -6918,6 +7359,9 @@ impl Opcode {
             Self::ConversationList => DeliveryClass::Critical,
             Self::ConversationCreate => DeliveryClass::Critical,
             Self::Typing => DeliveryClass::Coalescable,
+            Self::MessageEdit => DeliveryClass::Critical,
+            Self::ReactionSet => DeliveryClass::Critical,
+            Self::ReactionEvent => DeliveryClass::Coalescable,
             Self::PresenceSet => DeliveryClass::Coalescable,
             Self::PresenceEvent => DeliveryClass::Coalescable,
             Self::RoomJoin => DeliveryClass::Critical,
@@ -6925,26 +7369,29 @@ impl Opcode {
             Self::RoomList => DeliveryClass::Critical,
             Self::RoomMemberEvent => DeliveryClass::Coalescable,
             Self::RoomStateEvent => DeliveryClass::Coalescable,
+            Self::ProfileUpdate => DeliveryClass::Critical,
             Self::ProfileFetch => DeliveryClass::Critical,
-            Self::NotificationEvent => DeliveryClass::Droppable,
-            Self::GameAction => DeliveryClass::Critical,
-            Self::GameEvent => DeliveryClass::Critical,
             Self::FriendRequest => DeliveryClass::Critical,
             Self::FriendRespond => DeliveryClass::Critical,
             Self::FriendEvent => DeliveryClass::Critical,
             Self::BlockSet => DeliveryClass::Critical,
             Self::RelationshipList => DeliveryClass::Critical,
+            Self::Suggestions => DeliveryClass::Critical,
+            Self::Search => DeliveryClass::Critical,
             Self::MediaUploadBegin => DeliveryClass::Critical,
             Self::MediaUploadStatus => DeliveryClass::Critical,
             Self::MediaUploadCommit => DeliveryClass::Critical,
             Self::MediaUploadAbort => DeliveryClass::Critical,
             Self::MediaFetchUrl => DeliveryClass::Critical,
             Self::MediaStateEvent => DeliveryClass::Coalescable,
+            Self::NotificationEvent => DeliveryClass::Droppable,
             Self::NotificationAck => DeliveryClass::Critical,
             Self::NotificationList => DeliveryClass::Critical,
             Self::GiftSend => DeliveryClass::Critical,
             Self::BalanceFetch => DeliveryClass::Critical,
             Self::EconomyEvent => DeliveryClass::Critical,
+            Self::GameAction => DeliveryClass::Critical,
+            Self::GameEvent => DeliveryClass::Critical,
             Self::BotCommand => DeliveryClass::Critical,
             Self::BotEvent => DeliveryClass::Critical,
             Self::BotRegister => DeliveryClass::Critical,
@@ -6989,6 +7436,9 @@ impl Opcode {
             Self::ConversationList => AuthLevel::User,
             Self::ConversationCreate => AuthLevel::User,
             Self::Typing => AuthLevel::User,
+            Self::MessageEdit => AuthLevel::User,
+            Self::ReactionSet => AuthLevel::User,
+            Self::ReactionEvent => AuthLevel::User,
             Self::PresenceSet => AuthLevel::User,
             Self::PresenceEvent => AuthLevel::User,
             Self::RoomJoin => AuthLevel::User,
@@ -6996,26 +7446,29 @@ impl Opcode {
             Self::RoomList => AuthLevel::User,
             Self::RoomMemberEvent => AuthLevel::User,
             Self::RoomStateEvent => AuthLevel::User,
+            Self::ProfileUpdate => AuthLevel::User,
             Self::ProfileFetch => AuthLevel::User,
-            Self::NotificationEvent => AuthLevel::User,
-            Self::GameAction => AuthLevel::User,
-            Self::GameEvent => AuthLevel::User,
             Self::FriendRequest => AuthLevel::User,
             Self::FriendRespond => AuthLevel::User,
             Self::FriendEvent => AuthLevel::User,
             Self::BlockSet => AuthLevel::User,
             Self::RelationshipList => AuthLevel::User,
+            Self::Suggestions => AuthLevel::User,
+            Self::Search => AuthLevel::User,
             Self::MediaUploadBegin => AuthLevel::User,
             Self::MediaUploadStatus => AuthLevel::User,
             Self::MediaUploadCommit => AuthLevel::User,
             Self::MediaUploadAbort => AuthLevel::User,
             Self::MediaFetchUrl => AuthLevel::User,
             Self::MediaStateEvent => AuthLevel::User,
+            Self::NotificationEvent => AuthLevel::User,
             Self::NotificationAck => AuthLevel::User,
             Self::NotificationList => AuthLevel::User,
             Self::GiftSend => AuthLevel::User,
             Self::BalanceFetch => AuthLevel::User,
             Self::EconomyEvent => AuthLevel::User,
+            Self::GameAction => AuthLevel::User,
+            Self::GameEvent => AuthLevel::User,
             Self::BotCommand => AuthLevel::User,
             Self::BotEvent => AuthLevel::User,
             Self::BotRegister => AuthLevel::Bot,
@@ -7060,6 +7513,9 @@ impl Opcode {
             Self::ConversationList => Direction::ClientToServer,
             Self::ConversationCreate => Direction::ClientToServer,
             Self::Typing => Direction::Both,
+            Self::MessageEdit => Direction::ClientToServer,
+            Self::ReactionSet => Direction::ClientToServer,
+            Self::ReactionEvent => Direction::ServerToClient,
             Self::PresenceSet => Direction::ClientToServer,
             Self::PresenceEvent => Direction::ServerToClient,
             Self::RoomJoin => Direction::ClientToServer,
@@ -7067,26 +7523,29 @@ impl Opcode {
             Self::RoomList => Direction::ClientToServer,
             Self::RoomMemberEvent => Direction::ServerToClient,
             Self::RoomStateEvent => Direction::ServerToClient,
+            Self::ProfileUpdate => Direction::ClientToServer,
             Self::ProfileFetch => Direction::ClientToServer,
-            Self::NotificationEvent => Direction::ServerToClient,
-            Self::GameAction => Direction::ClientToServer,
-            Self::GameEvent => Direction::ServerToClient,
             Self::FriendRequest => Direction::ClientToServer,
             Self::FriendRespond => Direction::ClientToServer,
             Self::FriendEvent => Direction::ServerToClient,
             Self::BlockSet => Direction::ClientToServer,
             Self::RelationshipList => Direction::ClientToServer,
+            Self::Suggestions => Direction::ClientToServer,
+            Self::Search => Direction::ClientToServer,
             Self::MediaUploadBegin => Direction::ClientToServer,
             Self::MediaUploadStatus => Direction::ClientToServer,
             Self::MediaUploadCommit => Direction::ClientToServer,
             Self::MediaUploadAbort => Direction::ClientToServer,
             Self::MediaFetchUrl => Direction::ClientToServer,
             Self::MediaStateEvent => Direction::ServerToClient,
+            Self::NotificationEvent => Direction::ServerToClient,
             Self::NotificationAck => Direction::ClientToServer,
             Self::NotificationList => Direction::ClientToServer,
             Self::GiftSend => Direction::ClientToServer,
             Self::BalanceFetch => Direction::ClientToServer,
             Self::EconomyEvent => Direction::ServerToClient,
+            Self::GameAction => Direction::ClientToServer,
+            Self::GameEvent => Direction::ServerToClient,
             Self::BotCommand => Direction::ClientToServer,
             Self::BotEvent => Direction::ServerToClient,
             Self::BotRegister => Direction::ClientToServer,
@@ -7132,6 +7591,9 @@ impl Opcode {
             Self::ConversationList => false,
             Self::ConversationCreate => false,
             Self::Typing => false,
+            Self::MessageEdit => false,
+            Self::ReactionSet => false,
+            Self::ReactionEvent => false,
             Self::PresenceSet => false,
             Self::PresenceEvent => false,
             Self::RoomJoin => false,
@@ -7139,26 +7601,29 @@ impl Opcode {
             Self::RoomList => false,
             Self::RoomMemberEvent => false,
             Self::RoomStateEvent => false,
+            Self::ProfileUpdate => false,
             Self::ProfileFetch => false,
-            Self::NotificationEvent => false,
-            Self::GameAction => false,
-            Self::GameEvent => false,
             Self::FriendRequest => false,
             Self::FriendRespond => false,
             Self::FriendEvent => false,
             Self::BlockSet => false,
             Self::RelationshipList => false,
+            Self::Suggestions => false,
+            Self::Search => false,
             Self::MediaUploadBegin => false,
             Self::MediaUploadStatus => false,
             Self::MediaUploadCommit => false,
             Self::MediaUploadAbort => false,
             Self::MediaFetchUrl => false,
             Self::MediaStateEvent => false,
+            Self::NotificationEvent => false,
             Self::NotificationAck => false,
             Self::NotificationList => false,
             Self::GiftSend => false,
             Self::BalanceFetch => false,
             Self::EconomyEvent => false,
+            Self::GameAction => false,
+            Self::GameEvent => false,
             Self::BotCommand => false,
             Self::BotEvent => false,
             Self::BotRegister => false,
@@ -7211,6 +7676,9 @@ impl Opcode {
         Self::ConversationList,
         Self::ConversationCreate,
         Self::Typing,
+        Self::MessageEdit,
+        Self::ReactionSet,
+        Self::ReactionEvent,
         Self::PresenceSet,
         Self::PresenceEvent,
         Self::RoomJoin,
@@ -7218,26 +7686,29 @@ impl Opcode {
         Self::RoomList,
         Self::RoomMemberEvent,
         Self::RoomStateEvent,
+        Self::ProfileUpdate,
         Self::ProfileFetch,
-        Self::NotificationEvent,
-        Self::GameAction,
-        Self::GameEvent,
         Self::FriendRequest,
         Self::FriendRespond,
         Self::FriendEvent,
         Self::BlockSet,
         Self::RelationshipList,
+        Self::Suggestions,
+        Self::Search,
         Self::MediaUploadBegin,
         Self::MediaUploadStatus,
         Self::MediaUploadCommit,
         Self::MediaUploadAbort,
         Self::MediaFetchUrl,
         Self::MediaStateEvent,
+        Self::NotificationEvent,
         Self::NotificationAck,
         Self::NotificationList,
         Self::GiftSend,
         Self::BalanceFetch,
         Self::EconomyEvent,
+        Self::GameAction,
+        Self::GameEvent,
         Self::BotCommand,
         Self::BotEvent,
         Self::BotRegister,

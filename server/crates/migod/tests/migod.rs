@@ -857,7 +857,11 @@ struct DispatcherHarness {
 
 async fn dispatcher() -> DispatcherHarness {
     let app = build_default_app().await;
+    // The dispatcher's own store handle: a fresh in-memory store is correct here, because
+    // the profile-update path is the only consumer and the test seeds its own account.
+    let app_store: migo_store::SharedStore = std::sync::Arc::new(migo_store::MemoryStore::new());
     let dispatcher = AppDispatcher::new(
+        app_store.clone(),
         app.messaging.clone(),
         app.presence.clone(),
         app.rooms.clone(),

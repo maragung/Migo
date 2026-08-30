@@ -72,9 +72,10 @@ use migo_presence::{Caller as PresenceCaller, SharedPresence};
 use migo_protocol::{
     fault, from_frame, Acknowledged, ConversationCreateRequest, ConversationListRequest, Frame,
     GameAction, GameEvent, KeyBundle as WireBundle, KeyBundleRequest, KeyBundleResponse,
-    KeyPublish, KeyPublishResult, MessageDelete, MessageReceipt, MessageSend, Opcode,
-    PresenceUpdate, ProfileRequest, ProfileResponse, RoomJoinRequest, RoomLeaveRequest,
-    RoomListRequest, SyncRequest, Topic, TopicKind, TypingEvent, UserProfile,
+    KeyPublish, KeyPublishResult, MessageDelete, MessageEdit, MessageKind, MessageReceipt,
+    MessageSend, Opcode, PresenceUpdate, ProfileRequest, ProfileResponse, ReactionSet,
+    RoomJoinRequest, RoomLeaveRequest, RoomListRequest, SyncRequest, Topic, TopicKind, TypingEvent,
+    UserProfile,
 };
 use migo_rooms::{
     Broadcast as RoomBroadcast, Caller as RoomCaller, Fanout as RoomFanout, SharedRooms,
@@ -95,6 +96,7 @@ pub(crate) mod federation;
 pub(crate) mod media;
 pub(crate) mod moderation;
 pub(crate) mod notify;
+pub(crate) mod profile;
 pub(crate) mod social;
 
 /// A stable key that groups the frames of one Coalescable stream by an id.
@@ -110,6 +112,7 @@ pub(crate) fn coalesce_key_of(id: &Id) -> u64 {
 }
 
 pub struct AppDispatcher {
+    store: migo_store::SharedStore,
     messaging: SharedMessaging,
     presence: SharedPresence,
     rooms: SharedRooms,
@@ -133,6 +136,7 @@ impl AppDispatcher {
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        store: migo_store::SharedStore,
         messaging: SharedMessaging,
         presence: SharedPresence,
         rooms: SharedRooms,
@@ -147,6 +151,7 @@ impl AppDispatcher {
         bots: SharedBots,
     ) -> Self {
         Self {
+            store,
             messaging,
             presence,
             rooms,
@@ -181,6 +186,59 @@ impl Dispatcher for AppDispatcher {
                 let request: MessageSend = from_frame(frame).map_err(fault::from_wire)?;
                 let (accepted, fanout) = self.messaging.send(&caller, request).await?;
                 context.reply(&accepted)?;
+                if let Some(fanout) = fanout {
+                    publish_messaging(context, caller.account_id, fanout)?;
+                }
+                Ok(())
+            }
+            Opcode::MessageEdit => {
+                let caller = MessageCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
+                let request: MessageEdit = from_frame(frame).map_err(fault::from_wire)?;
+                // The envelope is ciphertext the client sealed; the server never sees the
+                // text. What the service enforces is ownership and membership, and the
+                // edit lands under the message's original seq.
+                let (accepted, fanout) = self
+                    .messaging
+                    .edit(
+                        &caller,
+                        request.conversation_id,
+                        request.message_id,
+                        request.envelope,
+                    )
+                    .await?;
+                context.reply(&accepted)?;
+                if let Some(fanout) = fanout {
+                    publish_messaging(context, caller.account_id, fanout)?;
+                }
+                Ok(())
+            }
+            Opcode::ReactionSet => {
+                // A reaction is a message: kind Reaction, sealed like any other content,
+                // sent through the ordinary path. The handler's translation is exactly
+                // the composition a client would otherwise do itself.
+                let caller = MessageCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
+                let request: ReactionSet = from_frame(frame).map_err(fault::from_wire)?;
+                let send = MessageSend {
+                    message_id: migo_core::Id::generate_at(now, &mut migo_core::OsRandom),
+                    conversation_id: request.conversation_id,
+                    kind: MessageKind::Text, // reactions ride a Text envelope; the Reaction discriminator is inside the ciphertext (SDK kindForContent)
+                    envelope: request.envelope,
+                    sender_key_id: None,
+                    reply_to: Some(request.target_message_id),
+                    expires_in_ms: None,
+                };
+                let (_accepted, fanout) = self.messaging.send(&caller, send).await?;
+                context.reply(&Acknowledged { ok: true })?;
                 if let Some(fanout) = fanout {
                     publish_messaging(context, caller.account_id, fanout)?;
                 }
@@ -411,6 +469,13 @@ impl Dispatcher for AppDispatcher {
                     profiles: cards.into_iter().map(wire_profile).collect(),
                 })
             }
+
+            // --- profile ---
+            Opcode::ProfileUpdate => {
+                profile::handle_profile_update(context, frame, &self.social, &self.store).await
+            }
+            Opcode::Suggestions => profile::handle_suggestions(context, frame, &self.social).await,
+            Opcode::Search => profile::handle_search(context, frame, &self.social).await,
 
             // --- games ---
             Opcode::GameAction => {

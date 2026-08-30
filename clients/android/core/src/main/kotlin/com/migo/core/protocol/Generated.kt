@@ -5281,6 +5281,369 @@ data class ModerationEvent(
     }
 }
 
+/** A profile patch: every field optional, absent means leave alone. */
+data class ProfileUpdate(
+    /** New display name, or absent to leave it. */
+    val displayName: String? = null,
+    /** New bio, or absent to leave it. */
+    val bio: String? = null,
+    /** New avatar object, or absent to leave it. */
+    val avatarMediaId: Id? = null,
+    /** New birth year, or absent. */
+    val birthYear: Long? = null,
+    /** New last-seen visibility. */
+    val showLastSeen: Long? = null,
+    /** New messaging visibility. */
+    val whoCanMessage: Long? = null,
+    /** New friend-request visibility. */
+    val whoCanAdd: Long? = null,
+    /** New search visibility. */
+    val searchable: Boolean? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        var present = 0
+        if (displayName != null) present++
+        if (bio != null) present++
+        if (avatarMediaId != null) present++
+        if (birthYear != null) present++
+        if (showLastSeen != null) present++
+        if (whoCanMessage != null) present++
+        if (whoCanAdd != null) present++
+        if (searchable != null) present++
+        w.u32(present)
+        if (displayName != null) {
+            val value = displayName
+            w.optional(1) { w ->
+                w.str(value)
+            }
+        }
+        if (bio != null) {
+            val value = bio
+            w.optional(2) { w ->
+                w.str(value)
+            }
+        }
+        if (avatarMediaId != null) {
+            val value = avatarMediaId
+            w.optional(3) { w ->
+                w.id(value)
+            }
+        }
+        if (birthYear != null) {
+            val value = birthYear
+            w.optional(4) { w ->
+                w.u32(value)
+            }
+        }
+        if (showLastSeen != null) {
+            val value = showLastSeen
+            w.optional(5) { w ->
+                w.u32(value)
+            }
+        }
+        if (whoCanMessage != null) {
+            val value = whoCanMessage
+            w.optional(6) { w ->
+                w.u32(value)
+            }
+        }
+        if (whoCanAdd != null) {
+            val value = whoCanAdd
+            w.optional(7) { w ->
+                w.u32(value)
+            }
+        }
+        if (searchable != null) {
+            val value = searchable
+            w.optional(8) { w ->
+                w.bool(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ProfileUpdate {
+            r.enter()
+            var displayName: String? = null
+            var bio: String? = null
+            var avatarMediaId: Id? = null
+            var birthYear: Long? = null
+            var showLastSeen: Long? = null
+            var whoCanMessage: Long? = null
+            var whoCanAdd: Long? = null
+            var searchable: Boolean? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> displayName = sub.str()
+                    2L -> bio = sub.str()
+                    3L -> avatarMediaId = sub.id()
+                    4L -> birthYear = sub.u32()
+                    5L -> showLastSeen = sub.u32()
+                    6L -> whoCanMessage = sub.u32()
+                    7L -> whoCanAdd = sub.u32()
+                    8L -> searchable = sub.bool()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return ProfileUpdate(displayName, bio, avatarMediaId, birthYear, showLastSeen, whoCanMessage, whoCanAdd, searchable)
+        }
+    }
+}
+
+/** Edits a message in place: the sealed replacement envelope, preserving its seq. */
+data class MessageEdit(
+    val messageId: Id,
+    val conversationId: Id,
+    /** The sealed replacement content, opaque to the server. */
+    val envelope: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(messageId)
+        w.id(conversationId)
+        w.bytes(envelope)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): MessageEdit {
+            r.enter()
+            val messageId = r.id()
+            val conversationId = r.id()
+            val envelope = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return MessageEdit(messageId, conversationId, envelope)
+        }
+    }
+}
+
+/** Sets or removes the caller's reaction to a message. */
+data class ReactionSet(
+    val targetMessageId: Id,
+    val conversationId: Id,
+    /** The sealed reaction content, opaque to the server. */
+    val envelope: ByteArray,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(targetMessageId)
+        w.id(conversationId)
+        w.bytes(envelope)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ReactionSet {
+            r.enter()
+            val targetMessageId = r.id()
+            val conversationId = r.id()
+            val envelope = r.bytes()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return ReactionSet(targetMessageId, conversationId, envelope)
+        }
+    }
+}
+
+/** Asks for friend suggestions. */
+data class SuggestReq(
+    /** Maximum suggestions; server clamps. */
+    val limit: Long? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        var present = 0
+        if (limit != null) present++
+        w.u32(present)
+        if (limit != null) {
+            val value = limit
+            w.optional(1) { w ->
+                w.u32(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): SuggestReq {
+            r.enter()
+            var limit: Long? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> limit = sub.u32()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return SuggestReq(limit)
+        }
+    }
+}
+
+/** One suggested account. */
+data class SuggestedUser(
+    val accountId: Id,
+    val username: String,
+    val displayName: String,
+    val mutualFriends: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(accountId)
+        w.str(username)
+        w.str(displayName)
+        w.u32(mutualFriends)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): SuggestedUser {
+            r.enter()
+            val accountId = r.id()
+            val username = r.str()
+            val displayName = r.str()
+            val mutualFriends = r.u32()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return SuggestedUser(accountId, username, displayName, mutualFriends)
+        }
+    }
+}
+
+/** Searches public profiles by username or display name. */
+data class SearchReq(
+    val query: String,
+    val limit: Long? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(query)
+        var present = 0
+        if (limit != null) present++
+        w.u32(present)
+        if (limit != null) {
+            val value = limit
+            w.optional(1) { w ->
+                w.u32(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): SearchReq {
+            r.enter()
+            val query = r.str()
+            var limit: Long? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> limit = sub.u32()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return SearchReq(query, limit)
+        }
+    }
+}
+
+/** Search results. */
+data class SearchResponse(
+    val results: List<SuggestedUser>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(results.size)
+        for (item in results) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): SearchResponse {
+            r.enter()
+            val results = run { val n = r.listLen(); val acc = ArrayList<SuggestedUser>(n); for (i in 0 until n) acc.add(SuggestedUser.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return SearchResponse(results)
+        }
+    }
+}
+
+/** A reaction was added or removed on a message. */
+data class ReactionEvent(
+    val conversationId: Id,
+    val targetMessageId: Id,
+    val actorId: Id,
+    val emoji: String,
+    /** True when the reaction was removed. */
+    val remove: Boolean? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(conversationId)
+        w.id(targetMessageId)
+        w.id(actorId)
+        w.str(emoji)
+        var present = 0
+        if (remove != null) present++
+        w.u32(present)
+        if (remove != null) {
+            val value = remove
+            w.optional(1) { w ->
+                w.bool(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ReactionEvent {
+            r.enter()
+            val conversationId = r.id()
+            val targetMessageId = r.id()
+            val actorId = r.id()
+            val emoji = r.str()
+            var remove: Boolean? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> remove = sub.bool()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return ReactionEvent(conversationId, targetMessageId, actorId, emoji, remove)
+        }
+    }
+}
+
 /** Delivery class, deciding what happens when a session queue is full. */
 enum class DeliveryClass { Critical, Coalescable, Droppable }
 /** Minimum session state an opcode requires. */
@@ -5312,6 +5675,12 @@ object Op {
     const val CONVERSATION_LIST: Long = 37L
     const val CONVERSATION_CREATE: Long = 38L
     const val TYPING: Long = 39L
+    /** Edits a message's text in place. */
+    const val MESSAGE_EDIT: Long = 40L
+    /** Sets or removes the caller's reaction to a message. */
+    const val REACTION_SET: Long = 41L
+    /** A reaction was added or removed. */
+    const val REACTION_EVENT: Long = 42L
     const val PRESENCE_SET: Long = 64L
     const val PRESENCE_EVENT: Long = 65L
     const val ROOM_JOIN: Long = 80L
@@ -5319,26 +5688,32 @@ object Op {
     const val ROOM_LIST: Long = 82L
     const val ROOM_MEMBER_EVENT: Long = 83L
     const val ROOM_STATE_EVENT: Long = 84L
+    /** Updates the caller's own profile and privacy settings. */
+    const val PROFILE_UPDATE: Long = 111L
     const val PROFILE_FETCH: Long = 112L
-    const val NOTIFICATION_EVENT: Long = 144L
-    const val GAME_ACTION: Long = 176L
-    const val GAME_EVENT: Long = 177L
     const val FRIEND_REQUEST: Long = 113L
     const val FRIEND_RESPOND: Long = 114L
     const val FRIEND_EVENT: Long = 115L
     const val BLOCK_SET: Long = 116L
     const val RELATIONSHIP_LIST: Long = 117L
+    /** Friend suggestions from the social graph. */
+    const val SUGGESTIONS: Long = 118L
+    /** Searches public profiles. */
+    const val SEARCH: Long = 119L
     const val MEDIA_UPLOAD_BEGIN: Long = 128L
     const val MEDIA_UPLOAD_STATUS: Long = 129L
     const val MEDIA_UPLOAD_COMMIT: Long = 130L
     const val MEDIA_UPLOAD_ABORT: Long = 131L
     const val MEDIA_FETCH_URL: Long = 132L
     const val MEDIA_STATE_EVENT: Long = 133L
+    const val NOTIFICATION_EVENT: Long = 144L
     const val NOTIFICATION_ACK: Long = 145L
     const val NOTIFICATION_LIST: Long = 146L
     const val GIFT_SEND: Long = 160L
     const val BALANCE_FETCH: Long = 161L
     const val ECONOMY_EVENT: Long = 162L
+    const val GAME_ACTION: Long = 176L
+    const val GAME_EVENT: Long = 177L
     const val BOT_COMMAND: Long = 178L
     const val BOT_EVENT: Long = 179L
     const val BOT_REGISTER: Long = 180L
@@ -5394,6 +5769,9 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     37L to OpcodeMeta(37L, "CONVERSATION_LIST", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationListRequest", "ConversationListResponse", null),
     38L to OpcodeMeta(38L, "CONVERSATION_CREATE", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationCreateRequest", "ConversationSummary", null),
     39L to OpcodeMeta(39L, "TYPING", 1, DeliveryClass.Coalescable, AuthLevel.User, Direction.Both, false, "TypingEvent", null, "conversation_id"),
+    40L to OpcodeMeta(40L, "MESSAGE_EDIT", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MessageEdit", "Acknowledged", null),
+    41L to OpcodeMeta(41L, "REACTION_SET", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ReactionSet", "Acknowledged", null),
+    42L to OpcodeMeta(42L, "REACTION_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ReactionEvent", null, null),
     64L to OpcodeMeta(64L, "PRESENCE_SET", 1, DeliveryClass.Coalescable, AuthLevel.User, Direction.ClientToServer, false, "PresenceUpdate", "Acknowledged", null),
     65L to OpcodeMeta(65L, "PRESENCE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "PresenceEvent", null, "user_id"),
     80L to OpcodeMeta(80L, "ROOM_JOIN", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomJoinRequest", "RoomJoinResponse", null),
@@ -5401,26 +5779,29 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     82L to OpcodeMeta(82L, "ROOM_LIST", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomListRequest", "RoomListResponse", null),
     83L to OpcodeMeta(83L, "ROOM_MEMBER_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "RoomMemberEvent", null, "room_id"),
     84L to OpcodeMeta(84L, "ROOM_STATE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "RoomStateEvent", null, "room_id"),
+    111L to OpcodeMeta(111L, "PROFILE_UPDATE", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ProfileUpdate", "UserProfile", null),
     112L to OpcodeMeta(112L, "PROFILE_FETCH", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ProfileRequest", "ProfileResponse", null),
-    144L to OpcodeMeta(144L, "NOTIFICATION_EVENT", 0, DeliveryClass.Droppable, AuthLevel.User, Direction.ServerToClient, false, "NotificationEvent", null, null),
-    176L to OpcodeMeta(176L, "GAME_ACTION", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GameAction", "Acknowledged", null),
-    177L to OpcodeMeta(177L, "GAME_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "GameEvent", null, null),
     113L to OpcodeMeta(113L, "FRIEND_REQUEST", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "FriendTarget", "Acknowledged", null),
     114L to OpcodeMeta(114L, "FRIEND_RESPOND", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "FriendRespond", "Acknowledged", null),
     115L to OpcodeMeta(115L, "FRIEND_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "FriendEvent", null, null),
     116L to OpcodeMeta(116L, "BLOCK_SET", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "FriendTarget", "Acknowledged", null),
     117L to OpcodeMeta(117L, "RELATIONSHIP_LIST", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RelationshipListReq", "RelationshipList", null),
+    118L to OpcodeMeta(118L, "SUGGESTIONS", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "SuggestReq", "SearchResponse", null),
+    119L to OpcodeMeta(119L, "SEARCH", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "SearchReq", "SearchResponse", null),
     128L to OpcodeMeta(128L, "MEDIA_UPLOAD_BEGIN", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaBegin", "MediaTicket", null),
     129L to OpcodeMeta(129L, "MEDIA_UPLOAD_STATUS", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaStatusReq", "MediaProgress", null),
     130L to OpcodeMeta(130L, "MEDIA_UPLOAD_COMMIT", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaCommit", "Acknowledged", null),
     131L to OpcodeMeta(131L, "MEDIA_UPLOAD_ABORT", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaAbort", "Acknowledged", null),
     132L to OpcodeMeta(132L, "MEDIA_FETCH_URL", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaFetch", "MediaUrl", null),
     133L to OpcodeMeta(133L, "MEDIA_STATE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "MediaStateEvent", null, "object_id"),
+    144L to OpcodeMeta(144L, "NOTIFICATION_EVENT", 0, DeliveryClass.Droppable, AuthLevel.User, Direction.ServerToClient, false, "NotificationEvent", null, null),
     145L to OpcodeMeta(145L, "NOTIFICATION_ACK", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "NotificationAck", "Acknowledged", null),
     146L to OpcodeMeta(146L, "NOTIFICATION_LIST", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "InboxReq", "InboxResponse", null),
     160L to OpcodeMeta(160L, "GIFT_SEND", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GiftSend", "GiftSendResult", null),
     161L to OpcodeMeta(161L, "BALANCE_FETCH", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "WalletReq", "WalletView", null),
     162L to OpcodeMeta(162L, "ECONOMY_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "EconomyEvent", null, null),
+    176L to OpcodeMeta(176L, "GAME_ACTION", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GameAction", "Acknowledged", null),
+    177L to OpcodeMeta(177L, "GAME_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "GameEvent", null, null),
     178L to OpcodeMeta(178L, "BOT_COMMAND", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "BotCommand", "Acknowledged", null),
     179L to OpcodeMeta(179L, "BOT_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "BotEvent", null, null),
     180L to OpcodeMeta(180L, "BOT_REGISTER", 20, DeliveryClass.Critical, AuthLevel.Bot, Direction.ClientToServer, false, "BotRegister", "BotView", null),

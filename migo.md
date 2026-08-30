@@ -4118,7 +4118,7 @@ Opcode yang sudah ada di schema. STATUS: SCHEMA. Format setiap baris: nomor, nam
 176 GAME_ACTION, client ke server, User, 2, Critical
 177 GAME_EVENT, server ke client, User, 0, Critical
 
-Opcode yang direncanakan. STATUS: SPEC. Ditambahkan ke opcodes.json bersamaan dengan implementasi handler-nya.
+Opcode yang direncanakan. STATUS: BUILT untuk 40 sampai 42, 111, 118, dan 119; STATUS: SCHEMA untuk sisanya yang sudah masuk registri; STATUS: SPEC untuk yang masih dokumen. Setiap opcode ditambahkan ke opcodes.json bersamaan dengan implementasi handler-nya, sesuai aturan alokasi section 146.
 
 Messaging:
 
@@ -4128,11 +4128,14 @@ Messaging:
 
 Social:
 
+111 PROFILE_UPDATE, client ke server, User, 3, Critical
 113 FRIEND_REQUEST, client ke server, User, 10, Critical
 114 FRIEND_RESPOND, client ke server, User, 5, Critical
 115 FRIEND_EVENT, server ke client, User, 0, Critical
 116 BLOCK_SET, client ke server, User, 5, Critical
 117 RELATIONSHIP_LIST, client ke server, User, 3, Critical
+118 SUGGESTIONS, client ke server, User, 3, Critical
+119 SEARCH, client ke server, User, 3, Critical
 
 Media:
 
@@ -5467,13 +5470,12 @@ Feature bit 0 sampai 15, yaitu konstanta yang sudah di-codegen dan dinegosiasika
 SPEC, baru ada di dokumen:
 
 Metadata block pada section 141 dan flag bit 0x40
-Opcode messaging tambahan yaitu 40 sampai 42, yaitu MESSAGE_EDIT, REACTION_SET, dan REACTION_EVENT
 Opcode call 224 sampai 238
 Call signaling dan media architecture pada section 165 dan 166
 Voice note protocol pada section 167 beserta perekaman dan pemutaran di client
 Requirement produk voice note pada section 179 dan requirement produk call pada section 180
 
-Sudah meninggalkan SPEC dan menyentuh kabel: opcode social 113 sampai 117, media 128 sampai 133 (kini dengan data plane HTTP di migo-api untuk backend filesystem dan scan inline pada commit sehingga media non-E2E tidak lagi terkunci Pending), notification 145 dan 146 beserta penerbitnya, economy 160 sampai 162, bot 178 sampai 180, moderation 192 sampai 194, dan federation 208 sampai 221 dengan transport mesh di migod; feature bit 16 sampai 20 dinegosiasikan dan federasi memakainya
+Sudah meninggalkan SPEC dan menyentuh kabel: opcode messaging 40 sampai 42 (edit, reaksi), profile 111 dan 112, social 113 sampai 119 (termasuk suggestions dan search), media 128 sampai 133 (kini dengan data plane HTTP di migo-api untuk backend filesystem dan scan inline pada commit sehingga media non-E2E tidak lagi terkunci Pending), notification 145 dan 146 beserta penerbitnya, economy 160 sampai 162, bot 178 sampai 180, moderation 192 sampai 194, dan federation 208 sampai 221 dengan transport mesh di migod; feature bit 16 sampai 20 dinegosiasikan dan federasi memakainya
 
 KODE LENGKAP DI LUAR WORKSPACE CARGO, TEST BELUM DITULIS:
 

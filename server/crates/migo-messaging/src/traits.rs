@@ -73,6 +73,20 @@ pub trait Messaging: Send + Sync {
     /// Returns `None` when nothing moved.
     async fn receipt(&self, caller: &Caller, request: MessageReceipt) -> Result<Option<Fanout>>;
 
+    /// Edits a message's envelope in place, preserving its sequence number.
+    ///
+    /// Only the sender may edit. The envelope is opaque ciphertext the server cannot
+    /// read; what the server enforces is ownership, the conversation's membership, and
+    /// that the edit lands atomically under the message's original seq so every client's
+    /// ordering stays intact.
+    async fn edit(
+        &self,
+        caller: &Caller,
+        conversation_id: Id,
+        message_id: Id,
+        envelope: Vec<u8>,
+    ) -> Result<(MessageAccepted, Option<Fanout>)>;
+
     /// Tombstones a message for everyone in the conversation.
     ///
     /// The tombstone keeps the message's sequence (brief section 67) and loses its

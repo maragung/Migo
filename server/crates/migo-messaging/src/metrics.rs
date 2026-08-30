@@ -132,6 +132,7 @@ pub(crate) struct Meters {
     receipts: Arc<Counter>,
     receipts_ignored: Arc<Counter>,
     deletes: Arc<Counter>,
+    edits: Arc<Counter>,
     typing: Arc<Counter>,
     conversations_created: Arc<Counter>,
     conversations_listed: Arc<Counter>,
@@ -189,6 +190,11 @@ impl Meters {
                 "Messages tombstoned for everyone.",
                 &[],
             ),
+            edits: registry.counter(
+                "migo_messaging_edits_total",
+                "Messages edited in place.",
+                &[],
+            ),
             typing: registry.counter(
                 "migo_messaging_typing_total",
                 "Typing marks set or cleared.",
@@ -236,6 +242,10 @@ impl Meters {
 
     pub(crate) fn deleted(&self) {
         self.deletes.inc();
+    }
+
+    pub(crate) fn edited(&self) {
+        self.edits.inc();
     }
 
     pub(crate) fn typed(&self) {

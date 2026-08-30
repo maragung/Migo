@@ -1,654 +1,2486 @@
 {
-  "$comment": "MSE structs. RULES: (1) required fields are positional and frozen for the life of MWP/1; (2) optional fields carry a stable id, may be added any time, and are skippable by old peers; (3) never reuse an optional id.",
-  "structs": [
-    { "name": "ClientInfo", "doc": "Who is connecting. Used for feature gating and abuse triage, never for tracking.",
-      "fields": [
-        { "name": "platform", "type": "Platform" },
-        { "name": "app_version", "type": "string" },
-        { "name": "os_version", "type": "string", "optional": true, "id": 1 },
-        { "name": "device_model", "type": "string", "optional": true, "id": 2 }
-      ] },
-
-    { "name": "ResumeRequest", "doc": "Resume an existing session instead of a full re-sync.",
-      "fields": [
-        { "name": "session_id", "type": "id" },
-        { "name": "last_frame_seq", "type": "u64" }
-      ] },
-
-    { "name": "Hello", "doc": "First frame on every connection.",
-      "fields": [
-        { "name": "protocol_version", "type": "u32" },
-        { "name": "client", "type": "ClientInfo" },
-        { "name": "features", "type": "bitmask64", "doc": "Client feature bitmask; the session uses the intersection with the server's" },
-        { "name": "locale", "type": "string" },
-        { "name": "bandwidth_mode", "type": "BandwidthMode" },
-        { "name": "access_token", "type": "string", "optional": true, "id": 1, "doc": "Saves a round trip: authenticate inside HELLO" },
-        { "name": "device_id", "type": "id", "optional": true, "id": 2 },
-        { "name": "resume", "type": "ResumeRequest", "optional": true, "id": 3 }
-      ] },
-
-    { "name": "Limits", "doc": "Server-dictated limits. The client must respect these, not its own constants.",
-      "fields": [
-        { "name": "max_frame_bytes", "type": "u32" },
-        { "name": "max_batch_items", "type": "u32" },
-        { "name": "max_subscriptions", "type": "u32" },
-        { "name": "heartbeat_ms", "type": "u32" }
-      ] },
-
-    { "name": "NodeInfo",
-      "fields": [
-        { "name": "node_id", "type": "string" },
-        { "name": "region", "type": "string" },
-        { "name": "country", "type": "string" }
-      ] },
-
-    { "name": "Welcome",
-      "fields": [
-        { "name": "session_id", "type": "id" },
-        { "name": "node", "type": "NodeInfo" },
-        { "name": "features", "type": "bitmask64" },
-        { "name": "server_time", "type": "timestamp" },
-        { "name": "limits", "type": "Limits" },
-        { "name": "resumed", "type": "bool", "optional": true, "id": 1 },
-        { "name": "resume_from_seq", "type": "u64", "optional": true, "id": 2 },
-        { "name": "authenticated_user", "type": "id", "optional": true, "id": 3, "doc": "Present when HELLO carried a valid access token" }
-      ] },
-
-    { "name": "Authenticate",
-      "fields": [
-        { "name": "access_token", "type": "string" },
-        { "name": "device_id", "type": "id" }
-      ] },
-
-    { "name": "UserProfile",
-      "fields": [
-        { "name": "user_id", "type": "id" },
-        { "name": "public_id", "type": "string", "doc": "MGO-XXXXXXXX, immutable, shareable" },
-        { "name": "username", "type": "string" },
-        { "name": "display_name", "type": "string" },
-        { "name": "avatar_url", "type": "string", "optional": true, "id": 1 },
-        { "name": "bio", "type": "string", "optional": true, "id": 2 },
-        { "name": "country", "type": "string", "optional": true, "id": 3 },
-        { "name": "language", "type": "string", "optional": true, "id": 4 },
-        { "name": "level", "type": "u32", "optional": true, "id": 5 },
-        { "name": "presence", "type": "PresenceState", "optional": true, "id": 6 },
-        { "name": "badges", "type": "list<string>", "optional": true, "id": 7 },
-        { "name": "verified", "type": "bool", "optional": true, "id": 8 },
-        { "name": "custom_status", "type": "string", "optional": true, "id": 9 }
-      ] },
-
-    { "name": "Authenticated",
-      "fields": [
-        { "name": "user_id", "type": "id" },
-        { "name": "device_id", "type": "id" },
-        { "name": "capabilities", "type": "bitmask64", "doc": "Capability bitmask for this session" },
-        { "name": "profile", "type": "UserProfile", "optional": true, "id": 1 }
-      ] },
-
-    { "name": "Error", "doc": "Carried with the ERROR flag on any opcode, or standalone.",
-      "fields": [
-        { "name": "code", "type": "u32" },
-        { "name": "symbol", "type": "string", "doc": "Stable machine-readable symbol; clients localise from this, never from message" },
-        { "name": "message", "type": "string", "optional": true, "id": 1, "doc": "Developer-facing detail. Never shown verbatim to users" },
-        { "name": "retry_after_ms", "type": "u32", "optional": true, "id": 2 },
-        { "name": "field", "type": "string", "optional": true, "id": 3, "doc": "Offending field for validation errors" }
-      ] },
-
-    { "name": "Acknowledged", "fields": [ { "name": "ok", "type": "bool" } ] },
-
-    { "name": "Ping", "fields": [ { "name": "client_time", "type": "timestamp" } ] },
-
-    { "name": "Pong",
-      "fields": [
-        { "name": "client_time", "type": "timestamp", "doc": "Echoed so the client can compute RTT without keeping state" },
-        { "name": "server_time", "type": "timestamp" }
-      ] },
-
-    { "name": "Ack", "doc": "Cumulative watermark. One ACK retires every held frame at or below it.",
-      "fields": [ { "name": "frame_seq", "type": "u64" } ] },
-
-    { "name": "ReconnectHint", "doc": "Planned drain. after_ms is randomised per session to avoid a thundering herd.",
-      "fields": [
-        { "name": "reason", "type": "CloseReason" },
-        { "name": "after_ms", "type": "u32" },
-        { "name": "endpoint", "type": "string", "optional": true, "id": 1 }
-      ] },
-
-    { "name": "Topic",
-      "fields": [
-        { "name": "kind", "type": "TopicKind" },
-        { "name": "id", "type": "id" }
-      ] },
-
-    { "name": "SubscribeRequest", "fields": [ { "name": "topics", "type": "list<Topic>" } ] },
-
-    { "name": "SubscribeResponse",
-      "fields": [
-        { "name": "accepted", "type": "list<Topic>" },
-        { "name": "rejected", "type": "list<Topic>", "optional": true, "id": 1 }
-      ] },
-
-    { "name": "MessageSend",
-      "fields": [
-        { "name": "message_id", "type": "id", "doc": "Client-generated ULID. Makes retry idempotent" },
-        { "name": "conversation_id", "type": "id" },
-        { "name": "kind", "type": "MessageKind" },
-        { "name": "envelope", "type": "bytes", "doc": "E2E ciphertext for private conversations; MSE room payload for rooms" },
-        { "name": "reply_to", "type": "id", "optional": true, "id": 1 },
-        { "name": "expires_in_ms", "type": "u32", "optional": true, "id": 2, "doc": "Disappearing messages" },
-        { "name": "sender_key_id", "type": "u32", "optional": true, "id": 3 }
-      ] },
-
-    { "name": "MessageAccepted",
-      "fields": [
-        { "name": "message_id", "type": "id" },
-        { "name": "conversation_id", "type": "id" },
-        { "name": "seq", "type": "u64" },
-        { "name": "created_at", "type": "timestamp" },
-        { "name": "duplicate", "type": "bool", "optional": true, "id": 1, "doc": "True when dedup matched an earlier send. Success, not an error" }
-      ] },
-
-    { "name": "MessageEvent",
-      "fields": [
-        { "name": "message_id", "type": "id" },
-        { "name": "conversation_id", "type": "id" },
-        { "name": "seq", "type": "u64" },
-        { "name": "sender_id", "type": "id" },
-        { "name": "sender_device", "type": "id" },
-        { "name": "kind", "type": "MessageKind" },
-        { "name": "envelope", "type": "bytes" },
-        { "name": "created_at", "type": "timestamp" },
-        { "name": "reply_to", "type": "id", "optional": true, "id": 1 },
-        { "name": "edited_at", "type": "timestamp", "optional": true, "id": 2 },
-        { "name": "deleted", "type": "bool", "optional": true, "id": 3, "doc": "Tombstone, so offline clients converge instead of keeping ghosts" },
-        { "name": "sender_key_id", "type": "u32", "optional": true, "id": 4 }
-      ] },
-
-    { "name": "MessageDelete",
-      "fields": [
-        { "name": "message_id", "type": "id" },
-        { "name": "conversation_id", "type": "id" },
-        { "name": "for_everyone", "type": "bool" }
-      ] },
-
-    { "name": "MessageReceipt",
-      "fields": [
-        { "name": "conversation_id", "type": "id" },
-        { "name": "kind", "type": "ReceiptKind" },
-        { "name": "seq", "type": "u64", "doc": "Cumulative: everything up to seq is delivered/read" },
-        { "name": "user_id", "type": "id", "optional": true, "id": 1 },
-        { "name": "at", "type": "timestamp", "optional": true, "id": 2 }
-      ] },
-
-    { "name": "SyncRequest",
-      "fields": [
-        { "name": "conversation_id", "type": "id" },
-        { "name": "have_seq", "type": "u64", "doc": "Highest contiguous seq the client holds" },
-        { "name": "limit", "type": "u32" },
-        { "name": "to_seq", "type": "u64", "optional": true, "id": 1, "doc": "Ranged fetch for a detected gap" },
-        { "name": "backwards", "type": "bool", "optional": true, "id": 2, "doc": "Paging older history" }
-      ] },
-
-    { "name": "SyncResponse",
-      "fields": [
-        { "name": "conversation_id", "type": "id" },
-        { "name": "status", "type": "SyncStatus" },
-        { "name": "from_seq", "type": "u64" },
-        { "name": "to_seq", "type": "u64" },
-        { "name": "more", "type": "bool" },
-        { "name": "messages", "type": "list<MessageEvent>" }
-      ] },
-
-    { "name": "ConversationSummary",
-      "fields": [
-        { "name": "conversation_id", "type": "id" },
-        { "name": "kind", "type": "ConversationKind" },
-        { "name": "encryption", "type": "EncryptionMode" },
-        { "name": "last_seq", "type": "u64" },
-        { "name": "read_seq", "type": "u64" },
-        { "name": "title", "type": "string", "optional": true, "id": 1 },
-        { "name": "avatar_url", "type": "string", "optional": true, "id": 2 },
-        { "name": "members", "type": "list<id>", "optional": true, "id": 3 },
-        { "name": "last_message", "type": "MessageEvent", "optional": true, "id": 4 },
-        { "name": "muted_until", "type": "timestamp", "optional": true, "id": 5 },
-        { "name": "pinned", "type": "bool", "optional": true, "id": 6 },
-        { "name": "archived", "type": "bool", "optional": true, "id": 7 }
-      ] },
-
-    { "name": "ConversationListRequest",
-      "fields": [
-        { "name": "limit", "type": "u32" },
-        { "name": "cursor", "type": "string", "optional": true, "id": 1 }
-      ] },
-
-    { "name": "ConversationListResponse",
-      "fields": [
-        { "name": "conversations", "type": "list<ConversationSummary>" },
-        { "name": "next_cursor", "type": "string", "optional": true, "id": 1 }
-      ] },
-
-    { "name": "ConversationCreateRequest", "doc": "Direct conversations are deterministic in their member set, so creation is idempotent.",
-      "fields": [
-        { "name": "kind", "type": "ConversationKind" },
-        { "name": "members", "type": "list<id>" },
-        { "name": "title", "type": "string", "optional": true, "id": 1 }
-      ] },
-
-    { "name": "TypingEvent",
-      "fields": [
-        { "name": "conversation_id", "type": "id" },
-        { "name": "state", "type": "TypingState" },
-        { "name": "user_id", "type": "id", "optional": true, "id": 1 }
-      ] },
-
-    { "name": "PresenceUpdate",
-      "fields": [
-        { "name": "state", "type": "PresenceState" },
-        { "name": "custom_status", "type": "string", "optional": true, "id": 1 }
-      ] },
-
-    { "name": "PresenceEvent",
-      "fields": [
-        { "name": "user_id", "type": "id" },
-        { "name": "state", "type": "PresenceState" },
-        { "name": "custom_status", "type": "string", "optional": true, "id": 1 },
-        { "name": "last_seen", "type": "timestamp", "optional": true, "id": 2 }
-      ] },
-
-    { "name": "PrekeyEntry",
-      "fields": [
-        { "name": "key_id", "type": "u32" },
-        { "name": "public_key", "type": "bytes" }
-      ] },
-
-    { "name": "KeyPublish", "doc": "Public halves only. The server never receives private key material.",
-      "fields": [
-        { "name": "identity_key", "type": "bytes" },
-        { "name": "signed_prekey_id", "type": "u32" },
-        { "name": "signed_prekey", "type": "bytes" },
-        { "name": "signed_prekey_signature", "type": "bytes" },
-        { "name": "one_time_prekeys", "type": "list<PrekeyEntry>" }
-      ] },
-
-    { "name": "KeyPublishResult",
-      "fields": [
-        { "name": "accepted_prekeys", "type": "u32" },
-        { "name": "identity_fingerprint", "type": "string", "doc": "Shown in the UI for out-of-band verification" }
-      ] },
-
-    { "name": "KeyBundleRequest",
-      "fields": [
-        { "name": "user_id", "type": "id" },
-        { "name": "device_id", "type": "id", "optional": true, "id": 1, "doc": "Omit to fetch a bundle for every device of the user" }
-      ] },
-
-    { "name": "KeyBundle",
-      "fields": [
-        { "name": "user_id", "type": "id" },
-        { "name": "device_id", "type": "id" },
-        { "name": "identity_key", "type": "bytes" },
-        { "name": "signed_prekey_id", "type": "u32" },
-        { "name": "signed_prekey", "type": "bytes" },
-        { "name": "signed_prekey_signature", "type": "bytes" },
-        { "name": "one_time_prekey_id", "type": "u32", "optional": true, "id": 1 },
-        { "name": "one_time_prekey", "type": "bytes", "optional": true, "id": 2 }
-      ] },
-
-    { "name": "KeyBundleResponse", "fields": [ { "name": "bundles", "type": "list<KeyBundle>" } ] },
-
-    { "name": "ProfileRequest", "fields": [ { "name": "user_ids", "type": "list<id>" } ] },
-
-    { "name": "ProfileResponse", "fields": [ { "name": "profiles", "type": "list<UserProfile>" } ] },
-
-    { "name": "RoomSummary",
-      "fields": [
-        { "name": "room_id", "type": "id" },
-        { "name": "public_id", "type": "string" },
-        { "name": "kind", "type": "RoomKind" },
-        { "name": "name", "type": "string" },
-        { "name": "member_count", "type": "u32" },
-        { "name": "online_count", "type": "u32" },
-        { "name": "topic", "type": "string", "optional": true, "id": 1 },
-        { "name": "description", "type": "string", "optional": true, "id": 2 },
-        { "name": "avatar_url", "type": "string", "optional": true, "id": 3 },
-        { "name": "category", "type": "string", "optional": true, "id": 4 },
-        { "name": "language", "type": "string", "optional": true, "id": 5 },
-        { "name": "country", "type": "string", "optional": true, "id": 6 },
-        { "name": "verified", "type": "bool", "optional": true, "id": 7 },
-        { "name": "my_role", "type": "RoomRole", "optional": true, "id": 8 },
-        { "name": "slow_mode_ms", "type": "u32", "optional": true, "id": 9 }
-      ] },
-
-    { "name": "RoomJoinRequest",
-      "fields": [
-        { "name": "room_id", "type": "id" },
-        { "name": "invite_code", "type": "string", "optional": true, "id": 1 }
-      ] },
-
-    { "name": "RoomJoinResponse",
-      "fields": [
-        { "name": "room", "type": "RoomSummary" },
-        { "name": "conversation_id", "type": "id" },
-        { "name": "encryption", "type": "EncryptionMode" },
-        { "name": "last_seq", "type": "u64" }
-      ] },
-
-    { "name": "RoomLeaveRequest", "fields": [ { "name": "room_id", "type": "id" } ] },
-
-    { "name": "RoomListRequest",
-      "fields": [
-        { "name": "limit", "type": "u32" },
-        { "name": "query", "type": "string", "optional": true, "id": 1 },
-        { "name": "category", "type": "string", "optional": true, "id": 2 },
-        { "name": "language", "type": "string", "optional": true, "id": 3 },
-        { "name": "country", "type": "string", "optional": true, "id": 4 },
-        { "name": "cursor", "type": "string", "optional": true, "id": 5 }
-      ] },
-
-    { "name": "RoomListResponse",
-      "fields": [
-        { "name": "rooms", "type": "list<RoomSummary>" },
-        { "name": "next_cursor", "type": "string", "optional": true, "id": 1 }
-      ] },
-
-    { "name": "RoomMemberEvent",
-      "fields": [
-        { "name": "room_id", "type": "id" },
-        { "name": "user_id", "type": "id" },
-        { "name": "joined", "type": "bool" },
-        { "name": "role", "type": "RoomRole", "optional": true, "id": 1 },
-        { "name": "member_count", "type": "u32", "optional": true, "id": 2 }
-      ] },
-
-    { "name": "RoomStateEvent", "doc": "Coalesced room counters and metadata. Deltas only.",
-      "fields": [
-        { "name": "room_id", "type": "id" },
-        { "name": "online_count", "type": "u32", "optional": true, "id": 1 },
-        { "name": "member_count", "type": "u32", "optional": true, "id": 2 },
-        { "name": "topic", "type": "string", "optional": true, "id": 3 },
-        { "name": "slow_mode_ms", "type": "u32", "optional": true, "id": 4 }
-      ] },
-
-    { "name": "NotificationEvent", "doc": "Never carries private plaintext. Push payloads are generic (brief 77).",
-      "fields": [
-        { "name": "kind", "type": "NotificationKind" },
-        { "name": "at", "type": "timestamp" },
-        { "name": "title", "type": "string", "optional": true, "id": 1 },
-        { "name": "body", "type": "string", "optional": true, "id": 2 },
-        { "name": "conversation_id", "type": "id", "optional": true, "id": 3 },
-        { "name": "room_id", "type": "id", "optional": true, "id": 4 },
-        { "name": "actor_id", "type": "id", "optional": true, "id": 5 }
-      ] },
-
-    { "name": "GameAction", "doc": "An intent. The server decides the outcome (brief 89).",
-      "fields": [
-        { "name": "game_id", "type": "id" },
-        { "name": "room_id", "type": "id" },
-        { "name": "action_id", "type": "u64", "doc": "Monotonic per game per player; replays are detected" },
-        { "name": "action", "type": "string" },
-        { "name": "args", "type": "list<string>", "optional": true, "id": 1 }
-      ] },
-
-    { "name": "GameEvent",
-      "fields": [
-        { "name": "game_id", "type": "id" },
-        { "name": "room_id", "type": "id" },
-        { "name": "state_version", "type": "u64" },
-        { "name": "event", "type": "string" },
-        { "name": "payload", "type": "bytes", "optional": true, "id": 1, "doc": "Delta, never a full state snapshot" },
-        { "name": "actor_id", "type": "id", "optional": true, "id": 2 },
-        { "name": "text", "type": "string", "optional": true, "id": 3, "doc": "Pre-rendered bot line for thin clients" }
-      ] },
-
-    { "name": "FriendTarget", "doc": "A single subject account for a social action.",
-      "fields": [ { "name": "user_id", "type": "id" } ] },
-
-    { "name": "SocialSuggestReq", "doc": "Request for people the caller might know.",
-      "fields": [ { "name": "limit", "type": "u32" } ] },
-    { "name": "SocialSuggestions", "doc": "Suggested account ids.",
-      "fields": [ { "name": "users", "type": "list<id>" } ] },
-
-    { "name": "MediaBegin", "doc": "Open an upload ticket for a media object.",
-      "fields": [
-        { "name": "kind", "type": "u32", "doc": "Content kind, from the media domain enum" },
-        { "name": "content_type", "type": "string" },
-        { "name": "size", "type": "u64", "doc": "Declared total bytes" },
-        { "name": "conversation_id", "type": "id", "optional": true, "id": 1, "doc": "Present for conversation-scoped media; absent for profile media" },
-        { "name": "width", "type": "u32", "optional": true, "id": 2 },
-        { "name": "height", "type": "u32", "optional": true, "id": 3 },
-        { "name": "duration_ms", "type": "u64", "optional": true, "id": 4 }
-      ] },
-    { "name": "MediaTicket", "doc": "Signed upload URL and the ticket that claims the object later.",
-      "fields": [
-        { "name": "upload_id", "type": "id" },
-        { "name": "upload_url", "type": "string" },
-        { "name": "headers", "type": "list<string>", "doc": "Headers the client must send with the PUT" }
-      ] },
-    { "name": "MediaStatusReq", "fields": [ { "name": "upload_id", "type": "id" } ] },
-    { "name": "MediaProgress", "fields": [
-        { "name": "received", "type": "u64" },
-        { "name": "expected", "type": "u64" }
-      ] },
-    { "name": "MediaCommit", "fields": [
-        { "name": "upload_id", "type": "id" },
-        { "name": "digest", "type": "bytes", "doc": "SHA-256 of the uploaded bytes" }
-      ] },
-    { "name": "MediaAbort", "fields": [ { "name": "upload_id", "type": "id" } ] },
-    { "name": "MediaFetch", "fields": [
-        { "name": "object_id", "type": "id" },
-        { "name": "conversation_id", "type": "id", "optional": true, "id": 1 }
-      ] },
-    { "name": "MediaUrl", "fields": [
-        { "name": "url", "type": "string" },
-        { "name": "expires_at", "type": "timestamp" }
-      ] },
-    { "name": "MediaDelete", "fields": [ { "name": "object_id", "type": "id" } ] },
-
-    { "name": "PushRegister", "fields": [
-        { "name": "token", "type": "string" },
-        { "name": "provider", "type": "u32" }
-      ] },
-    { "name": "InboxReq", "fields": [
-        { "name": "limit", "type": "u32" },
-        { "name": "cursor", "type": "string", "optional": true, "id": 1 }
-      ] },
-    { "name": "InboxItem", "fields": [
-        { "name": "id", "type": "id" },
-        { "name": "kind", "type": "string" },
-        { "name": "at", "type": "timestamp" },
-        { "name": "title", "type": "string", "optional": true, "id": 1 },
-        { "name": "body", "type": "string", "optional": true, "id": 2 },
-        { "name": "conversation_id", "type": "id", "optional": true, "id": 3 },
-        { "name": "room_id", "type": "id", "optional": true, "id": 4 },
-        { "name": "actor_id", "type": "id", "optional": true, "id": 5 }
-      ] },
-    { "name": "InboxResponse", "fields": [
-        { "name": "items", "type": "list<InboxItem>" },
-        { "name": "next_cursor", "type": "string", "optional": true, "id": 1 }
-      ] },
-
-    { "name": "WalletReq", "doc": "Empty request; the caller's own wallet is implied by the session.",
-      "fields": [] },
-    { "name": "WalletView", "fields": [
-        { "name": "balance", "type": "u64" },
-        { "name": "points", "type": "u64" }
-      ] },
-    { "name": "GiftSend", "fields": [
-        { "name": "gift", "type": "string", "doc": "SKU slug" },
-        { "name": "recipient", "type": "id" },
-        { "name": "conversation_id", "type": "id", "optional": true, "id": 1 }
-      ] },
-    { "name": "GiftSendResult", "fields": [
-        { "name": "ok", "type": "bool" },
-        { "name": "tx_id", "type": "id", "optional": true, "id": 1 }
-      ] },
-    { "name": "CatalogueReq", "doc": "Empty request for the gift catalogue.", "fields": [] },
-    { "name": "GiftListing", "fields": [
-        { "name": "sku", "type": "string" },
-        { "name": "name", "type": "string" },
-        { "name": "price", "type": "u64" },
-        { "name": "category", "type": "string" }
-      ] },
-    { "name": "CatalogueView", "fields": [ { "name": "items", "type": "list<GiftListing>" } ] },
-
-    { "name": "BotRegister", "fields": [
-        { "name": "username", "type": "string" },
-        { "name": "display_name", "type": "string" }
-      ] },
-    { "name": "BotView", "fields": [
-        { "name": "bot_id", "type": "id" },
-        { "name": "username", "type": "string" },
-        { "name": "token", "type": "string", "optional": true, "id": 1, "doc": "Present only on register/rotate; never logged" }
-      ] },
-    { "name": "BotAuth", "fields": [ { "name": "token", "type": "string" } ] },
-    { "name": "BotRotate", "fields": [ { "name": "bot_id", "type": "id" } ] },
-
-    { "name": "ReportFile", "fields": [
-        { "name": "subject_kind", "type": "u32", "doc": "0 user, 1 message, 2 room, 3 bot" },
-        { "name": "subject_id", "type": "id" },
-        { "name": "reason", "type": "u32" },
-        { "name": "note", "type": "string", "optional": true, "id": 1 }
-      ] },
-    { "name": "ModAction", "fields": [
-        { "name": "case_id", "type": "id" },
-        { "name": "action", "type": "u32" }
-      ] },
-    { "name": "ModQueueReq", "fields": [ { "name": "limit", "type": "u32" } ] },
-    { "name": "CaseView", "fields": [
-        { "name": "case_id", "type": "id" },
-        { "name": "subject_kind", "type": "u32" },
-        { "name": "subject_id", "type": "id" },
-        { "name": "reason", "type": "u32" },
-        { "name": "state", "type": "string" },
-        { "name": "filed_at", "type": "timestamp" }
-      ] },
-    { "name": "ModQueue", "fields": [ { "name": "items", "type": "list<CaseView>" } ] },
-
-    { "name": "FedPeerSpec", "fields": [
-        { "name": "node_id", "type": "string" },
-        { "name": "region", "type": "string" },
-        { "name": "country", "type": "string" },
-        { "name": "public_key", "type": "bytes" }
-      ] },
-    { "name": "FedPeerView", "fields": [
-        { "name": "node_id", "type": "string" },
-        { "name": "region", "type": "string" },
-        { "name": "status", "type": "string" }
-      ] },
-    { "name": "FedPeerId", "fields": [ { "name": "node_id", "type": "string" } ] },
-    { "name": "FedListReq", "fields": [] },
-    { "name": "FedPeerList", "fields": [ { "name": "peers", "type": "list<FedPeerView>" } ] },
-    { "name": "FedHello", "fields": [
-        { "name": "node_id", "type": "string" },
-        { "name": "region", "type": "string" },
-        { "name": "epoch", "type": "u64" },
-        { "name": "nonce", "type": "bytes" }
-      ] },
-    { "name": "FedProof", "fields": [
-        { "name": "node_id", "type": "string" },
-        { "name": "signature", "type": "bytes" }
-      ] },
-    { "name": "FedForward", "fields": [
-        { "name": "from", "type": "string" },
-        { "name": "to", "type": "string" },
-        { "name": "payload", "type": "bytes" }
-      ] },
-    { "name": "FedPresenceDigest", "fields": [
-        { "name": "region", "type": "string" },
-        { "name": "digest", "type": "bytes" }
-      ] },
-    { "name": "FedRouting", "fields": [
-        { "name": "epoch", "type": "u64" },
-        { "name": "home_region", "type": "string" },
-        { "name": "room_id", "type": "id" }
-      ] },
-    { "name": "FedEpoch", "fields": [ { "name": "epoch", "type": "u64" } ] },
-    { "name": "FedLinkState", "fields": [
-        { "name": "node_id", "type": "string" },
-        { "name": "sequence", "type": "u64" },
-        { "name": "healthy", "type": "bool" }
-      ] },
-    { "name": "FedHealth", "fields": [
-        { "name": "node_id", "type": "string" },
-        { "name": "status", "type": "string" }
-      ] },
-    { "name": "FedEvent", "fields": [
-        { "name": "from", "type": "string" },
-        { "name": "kind", "type": "string" },
-        { "name": "payload", "type": "bytes" }
-      ] },
-
-    { "name": "FriendRespond", "fields": [
-        { "name": "user_id", "type": "id" },
-        { "name": "accept", "type": "bool" }
-      ] },
-    { "name": "FriendEvent", "fields": [
-        { "name": "user_id", "type": "id" },
-        { "name": "state", "type": "string" }
-      ] },
-    { "name": "RelationshipListReq", "fields": [ { "name": "limit", "type": "u32" } ] },
-    { "name": "RelationshipEntry", "fields": [
-        { "name": "user_id", "type": "id" },
-        { "name": "kind", "type": "u32" }
-      ] },
-    { "name": "RelationshipList", "fields": [ { "name": "entries", "type": "list<RelationshipEntry>" } ] },
-    { "name": "MediaStateEvent", "fields": [
-        { "name": "object_id", "type": "id" },
-        { "name": "state", "type": "string" }
-      ] },
-    { "name": "NotificationAck", "fields": [ { "name": "id", "type": "id" } ] },
-    { "name": "EconomyEvent", "fields": [
-        { "name": "kind", "type": "string" },
-        { "name": "amount", "type": "u64" },
-        { "name": "currency", "type": "string" }
-      ] },
-    { "name": "BotCommand", "fields": [
-        { "name": "bot_id", "type": "id" },
-        { "name": "command", "type": "string" },
-        { "name": "args", "type": "list<string>", "optional": true, "id": 1 }
-      ] },
-    { "name": "BotEvent", "fields": [
-        { "name": "bot_id", "type": "id" },
-        { "name": "event", "type": "string" },
-        { "name": "payload", "type": "bytes", "optional": true, "id": 1 }
-      ] },
-    { "name": "FedAuth", "fields": [
-        { "name": "node_id", "type": "string" },
-        { "name": "signature", "type": "bytes" },
-        { "name": "epoch", "type": "u64" }
-      ] },
-    { "name": "FedPing", "fields": [
-        { "name": "node_id", "type": "string" },
-        { "name": "nonce", "type": "bytes" }
-      ] },
-    { "name": "FedPong", "fields": [ { "name": "nonce", "type": "bytes" } ] },
-    { "name": "FedAck", "fields": [
-        { "name": "node_id", "type": "string" },
-        { "name": "seq", "type": "u64" }
-      ] },
-    { "name": "FedRoomEvent", "fields": [
-        { "name": "room_id", "type": "id" },
-        { "name": "payload", "type": "bytes" }
-      ] },
-    { "name": "FedKeyRotate", "fields": [
-        { "name": "node_id", "type": "string" },
-        { "name": "new_public_key", "type": "bytes" }
-      ] },
-    { "name": "FedShardMap", "fields": [
-        { "name": "region", "type": "string" },
-        { "name": "nodes", "type": "list<FedPeerView>" }
-      ] },
-    { "name": "FedError", "fields": [
-        { "name": "node_id", "type": "string" },
-        { "name": "code", "type": "u32" },
-        { "name": "message", "type": "string" }
-      ] },
-    { "name": "FedDirectoryReq", "fields": [ { "name": "query", "type": "string" } ] },
-    { "name": "FedDirectory", "fields": [ { "name": "peers", "type": "list<FedPeerView>" } ] },
-    { "name": "ModerationEvent", "fields": [
-        { "name": "case_id", "type": "id" },
-        { "name": "action", "type": "u32" },
-        { "name": "state", "type": "string" }
-      ] }
-  ]
+ "$comment": "MSE structs. RULES: (1) required fields are positional and frozen for the life of MWP/1; (2) optional fields carry a stable id, may be added any time, and are skippable by old peers; (3) never reuse an optional id.",
+ "structs": [
+  {
+   "name": "ClientInfo",
+   "doc": "Who is connecting. Used for feature gating and abuse triage, never for tracking.",
+   "fields": [
+    {
+     "name": "platform",
+     "type": "Platform"
+    },
+    {
+     "name": "app_version",
+     "type": "string"
+    },
+    {
+     "name": "os_version",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "device_model",
+     "type": "string",
+     "optional": true,
+     "id": 2
+    }
+   ]
+  },
+  {
+   "name": "ResumeRequest",
+   "doc": "Resume an existing session instead of a full re-sync.",
+   "fields": [
+    {
+     "name": "session_id",
+     "type": "id"
+    },
+    {
+     "name": "last_frame_seq",
+     "type": "u64"
+    }
+   ]
+  },
+  {
+   "name": "Hello",
+   "doc": "First frame on every connection.",
+   "fields": [
+    {
+     "name": "protocol_version",
+     "type": "u32"
+    },
+    {
+     "name": "client",
+     "type": "ClientInfo"
+    },
+    {
+     "name": "features",
+     "type": "bitmask64",
+     "doc": "Client feature bitmask; the session uses the intersection with the server's"
+    },
+    {
+     "name": "locale",
+     "type": "string"
+    },
+    {
+     "name": "bandwidth_mode",
+     "type": "BandwidthMode"
+    },
+    {
+     "name": "access_token",
+     "type": "string",
+     "optional": true,
+     "id": 1,
+     "doc": "Saves a round trip: authenticate inside HELLO"
+    },
+    {
+     "name": "device_id",
+     "type": "id",
+     "optional": true,
+     "id": 2
+    },
+    {
+     "name": "resume",
+     "type": "ResumeRequest",
+     "optional": true,
+     "id": 3
+    }
+   ]
+  },
+  {
+   "name": "Limits",
+   "doc": "Server-dictated limits. The client must respect these, not its own constants.",
+   "fields": [
+    {
+     "name": "max_frame_bytes",
+     "type": "u32"
+    },
+    {
+     "name": "max_batch_items",
+     "type": "u32"
+    },
+    {
+     "name": "max_subscriptions",
+     "type": "u32"
+    },
+    {
+     "name": "heartbeat_ms",
+     "type": "u32"
+    }
+   ]
+  },
+  {
+   "name": "NodeInfo",
+   "fields": [
+    {
+     "name": "node_id",
+     "type": "string"
+    },
+    {
+     "name": "region",
+     "type": "string"
+    },
+    {
+     "name": "country",
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "name": "Welcome",
+   "fields": [
+    {
+     "name": "session_id",
+     "type": "id"
+    },
+    {
+     "name": "node",
+     "type": "NodeInfo"
+    },
+    {
+     "name": "features",
+     "type": "bitmask64"
+    },
+    {
+     "name": "server_time",
+     "type": "timestamp"
+    },
+    {
+     "name": "limits",
+     "type": "Limits"
+    },
+    {
+     "name": "resumed",
+     "type": "bool",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "resume_from_seq",
+     "type": "u64",
+     "optional": true,
+     "id": 2
+    },
+    {
+     "name": "authenticated_user",
+     "type": "id",
+     "optional": true,
+     "id": 3,
+     "doc": "Present when HELLO carried a valid access token"
+    }
+   ]
+  },
+  {
+   "name": "Authenticate",
+   "fields": [
+    {
+     "name": "access_token",
+     "type": "string"
+    },
+    {
+     "name": "device_id",
+     "type": "id"
+    }
+   ]
+  },
+  {
+   "name": "UserProfile",
+   "fields": [
+    {
+     "name": "user_id",
+     "type": "id"
+    },
+    {
+     "name": "public_id",
+     "type": "string",
+     "doc": "MGO-XXXXXXXX, immutable, shareable"
+    },
+    {
+     "name": "username",
+     "type": "string"
+    },
+    {
+     "name": "display_name",
+     "type": "string"
+    },
+    {
+     "name": "avatar_url",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "bio",
+     "type": "string",
+     "optional": true,
+     "id": 2
+    },
+    {
+     "name": "country",
+     "type": "string",
+     "optional": true,
+     "id": 3
+    },
+    {
+     "name": "language",
+     "type": "string",
+     "optional": true,
+     "id": 4
+    },
+    {
+     "name": "level",
+     "type": "u32",
+     "optional": true,
+     "id": 5
+    },
+    {
+     "name": "presence",
+     "type": "PresenceState",
+     "optional": true,
+     "id": 6
+    },
+    {
+     "name": "badges",
+     "type": "list<string>",
+     "optional": true,
+     "id": 7
+    },
+    {
+     "name": "verified",
+     "type": "bool",
+     "optional": true,
+     "id": 8
+    },
+    {
+     "name": "custom_status",
+     "type": "string",
+     "optional": true,
+     "id": 9
+    }
+   ]
+  },
+  {
+   "name": "Authenticated",
+   "fields": [
+    {
+     "name": "user_id",
+     "type": "id"
+    },
+    {
+     "name": "device_id",
+     "type": "id"
+    },
+    {
+     "name": "capabilities",
+     "type": "bitmask64",
+     "doc": "Capability bitmask for this session"
+    },
+    {
+     "name": "profile",
+     "type": "UserProfile",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "Error",
+   "doc": "Carried with the ERROR flag on any opcode, or standalone.",
+   "fields": [
+    {
+     "name": "code",
+     "type": "u32"
+    },
+    {
+     "name": "symbol",
+     "type": "string",
+     "doc": "Stable machine-readable symbol; clients localise from this, never from message"
+    },
+    {
+     "name": "message",
+     "type": "string",
+     "optional": true,
+     "id": 1,
+     "doc": "Developer-facing detail. Never shown verbatim to users"
+    },
+    {
+     "name": "retry_after_ms",
+     "type": "u32",
+     "optional": true,
+     "id": 2
+    },
+    {
+     "name": "field",
+     "type": "string",
+     "optional": true,
+     "id": 3,
+     "doc": "Offending field for validation errors"
+    }
+   ]
+  },
+  {
+   "name": "Acknowledged",
+   "fields": [
+    {
+     "name": "ok",
+     "type": "bool"
+    }
+   ]
+  },
+  {
+   "name": "Ping",
+   "fields": [
+    {
+     "name": "client_time",
+     "type": "timestamp"
+    }
+   ]
+  },
+  {
+   "name": "Pong",
+   "fields": [
+    {
+     "name": "client_time",
+     "type": "timestamp",
+     "doc": "Echoed so the client can compute RTT without keeping state"
+    },
+    {
+     "name": "server_time",
+     "type": "timestamp"
+    }
+   ]
+  },
+  {
+   "name": "Ack",
+   "doc": "Cumulative watermark. One ACK retires every held frame at or below it.",
+   "fields": [
+    {
+     "name": "frame_seq",
+     "type": "u64"
+    }
+   ]
+  },
+  {
+   "name": "ReconnectHint",
+   "doc": "Planned drain. after_ms is randomised per session to avoid a thundering herd.",
+   "fields": [
+    {
+     "name": "reason",
+     "type": "CloseReason"
+    },
+    {
+     "name": "after_ms",
+     "type": "u32"
+    },
+    {
+     "name": "endpoint",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "Topic",
+   "fields": [
+    {
+     "name": "kind",
+     "type": "TopicKind"
+    },
+    {
+     "name": "id",
+     "type": "id"
+    }
+   ]
+  },
+  {
+   "name": "SubscribeRequest",
+   "fields": [
+    {
+     "name": "topics",
+     "type": "list<Topic>"
+    }
+   ]
+  },
+  {
+   "name": "SubscribeResponse",
+   "fields": [
+    {
+     "name": "accepted",
+     "type": "list<Topic>"
+    },
+    {
+     "name": "rejected",
+     "type": "list<Topic>",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "MessageSend",
+   "fields": [
+    {
+     "name": "message_id",
+     "type": "id",
+     "doc": "Client-generated ULID. Makes retry idempotent"
+    },
+    {
+     "name": "conversation_id",
+     "type": "id"
+    },
+    {
+     "name": "kind",
+     "type": "MessageKind"
+    },
+    {
+     "name": "envelope",
+     "type": "bytes",
+     "doc": "E2E ciphertext for private conversations; MSE room payload for rooms"
+    },
+    {
+     "name": "reply_to",
+     "type": "id",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "expires_in_ms",
+     "type": "u32",
+     "optional": true,
+     "id": 2,
+     "doc": "Disappearing messages"
+    },
+    {
+     "name": "sender_key_id",
+     "type": "u32",
+     "optional": true,
+     "id": 3
+    }
+   ]
+  },
+  {
+   "name": "MessageAccepted",
+   "fields": [
+    {
+     "name": "message_id",
+     "type": "id"
+    },
+    {
+     "name": "conversation_id",
+     "type": "id"
+    },
+    {
+     "name": "seq",
+     "type": "u64"
+    },
+    {
+     "name": "created_at",
+     "type": "timestamp"
+    },
+    {
+     "name": "duplicate",
+     "type": "bool",
+     "optional": true,
+     "id": 1,
+     "doc": "True when dedup matched an earlier send. Success, not an error"
+    }
+   ]
+  },
+  {
+   "name": "MessageEvent",
+   "fields": [
+    {
+     "name": "message_id",
+     "type": "id"
+    },
+    {
+     "name": "conversation_id",
+     "type": "id"
+    },
+    {
+     "name": "seq",
+     "type": "u64"
+    },
+    {
+     "name": "sender_id",
+     "type": "id"
+    },
+    {
+     "name": "sender_device",
+     "type": "id"
+    },
+    {
+     "name": "kind",
+     "type": "MessageKind"
+    },
+    {
+     "name": "envelope",
+     "type": "bytes"
+    },
+    {
+     "name": "created_at",
+     "type": "timestamp"
+    },
+    {
+     "name": "reply_to",
+     "type": "id",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "edited_at",
+     "type": "timestamp",
+     "optional": true,
+     "id": 2
+    },
+    {
+     "name": "deleted",
+     "type": "bool",
+     "optional": true,
+     "id": 3,
+     "doc": "Tombstone, so offline clients converge instead of keeping ghosts"
+    },
+    {
+     "name": "sender_key_id",
+     "type": "u32",
+     "optional": true,
+     "id": 4
+    }
+   ]
+  },
+  {
+   "name": "MessageDelete",
+   "fields": [
+    {
+     "name": "message_id",
+     "type": "id"
+    },
+    {
+     "name": "conversation_id",
+     "type": "id"
+    },
+    {
+     "name": "for_everyone",
+     "type": "bool"
+    }
+   ]
+  },
+  {
+   "name": "MessageReceipt",
+   "fields": [
+    {
+     "name": "conversation_id",
+     "type": "id"
+    },
+    {
+     "name": "kind",
+     "type": "ReceiptKind"
+    },
+    {
+     "name": "seq",
+     "type": "u64",
+     "doc": "Cumulative: everything up to seq is delivered/read"
+    },
+    {
+     "name": "user_id",
+     "type": "id",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "at",
+     "type": "timestamp",
+     "optional": true,
+     "id": 2
+    }
+   ]
+  },
+  {
+   "name": "SyncRequest",
+   "fields": [
+    {
+     "name": "conversation_id",
+     "type": "id"
+    },
+    {
+     "name": "have_seq",
+     "type": "u64",
+     "doc": "Highest contiguous seq the client holds"
+    },
+    {
+     "name": "limit",
+     "type": "u32"
+    },
+    {
+     "name": "to_seq",
+     "type": "u64",
+     "optional": true,
+     "id": 1,
+     "doc": "Ranged fetch for a detected gap"
+    },
+    {
+     "name": "backwards",
+     "type": "bool",
+     "optional": true,
+     "id": 2,
+     "doc": "Paging older history"
+    }
+   ]
+  },
+  {
+   "name": "SyncResponse",
+   "fields": [
+    {
+     "name": "conversation_id",
+     "type": "id"
+    },
+    {
+     "name": "status",
+     "type": "SyncStatus"
+    },
+    {
+     "name": "from_seq",
+     "type": "u64"
+    },
+    {
+     "name": "to_seq",
+     "type": "u64"
+    },
+    {
+     "name": "more",
+     "type": "bool"
+    },
+    {
+     "name": "messages",
+     "type": "list<MessageEvent>"
+    }
+   ]
+  },
+  {
+   "name": "ConversationSummary",
+   "fields": [
+    {
+     "name": "conversation_id",
+     "type": "id"
+    },
+    {
+     "name": "kind",
+     "type": "ConversationKind"
+    },
+    {
+     "name": "encryption",
+     "type": "EncryptionMode"
+    },
+    {
+     "name": "last_seq",
+     "type": "u64"
+    },
+    {
+     "name": "read_seq",
+     "type": "u64"
+    },
+    {
+     "name": "title",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "avatar_url",
+     "type": "string",
+     "optional": true,
+     "id": 2
+    },
+    {
+     "name": "members",
+     "type": "list<id>",
+     "optional": true,
+     "id": 3
+    },
+    {
+     "name": "last_message",
+     "type": "MessageEvent",
+     "optional": true,
+     "id": 4
+    },
+    {
+     "name": "muted_until",
+     "type": "timestamp",
+     "optional": true,
+     "id": 5
+    },
+    {
+     "name": "pinned",
+     "type": "bool",
+     "optional": true,
+     "id": 6
+    },
+    {
+     "name": "archived",
+     "type": "bool",
+     "optional": true,
+     "id": 7
+    }
+   ]
+  },
+  {
+   "name": "ConversationListRequest",
+   "fields": [
+    {
+     "name": "limit",
+     "type": "u32"
+    },
+    {
+     "name": "cursor",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "ConversationListResponse",
+   "fields": [
+    {
+     "name": "conversations",
+     "type": "list<ConversationSummary>"
+    },
+    {
+     "name": "next_cursor",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "ConversationCreateRequest",
+   "doc": "Direct conversations are deterministic in their member set, so creation is idempotent.",
+   "fields": [
+    {
+     "name": "kind",
+     "type": "ConversationKind"
+    },
+    {
+     "name": "members",
+     "type": "list<id>"
+    },
+    {
+     "name": "title",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "TypingEvent",
+   "fields": [
+    {
+     "name": "conversation_id",
+     "type": "id"
+    },
+    {
+     "name": "state",
+     "type": "TypingState"
+    },
+    {
+     "name": "user_id",
+     "type": "id",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "PresenceUpdate",
+   "fields": [
+    {
+     "name": "state",
+     "type": "PresenceState"
+    },
+    {
+     "name": "custom_status",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "PresenceEvent",
+   "fields": [
+    {
+     "name": "user_id",
+     "type": "id"
+    },
+    {
+     "name": "state",
+     "type": "PresenceState"
+    },
+    {
+     "name": "custom_status",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "last_seen",
+     "type": "timestamp",
+     "optional": true,
+     "id": 2
+    }
+   ]
+  },
+  {
+   "name": "PrekeyEntry",
+   "fields": [
+    {
+     "name": "key_id",
+     "type": "u32"
+    },
+    {
+     "name": "public_key",
+     "type": "bytes"
+    }
+   ]
+  },
+  {
+   "name": "KeyPublish",
+   "doc": "Public halves only. The server never receives private key material.",
+   "fields": [
+    {
+     "name": "identity_key",
+     "type": "bytes"
+    },
+    {
+     "name": "signed_prekey_id",
+     "type": "u32"
+    },
+    {
+     "name": "signed_prekey",
+     "type": "bytes"
+    },
+    {
+     "name": "signed_prekey_signature",
+     "type": "bytes"
+    },
+    {
+     "name": "one_time_prekeys",
+     "type": "list<PrekeyEntry>"
+    }
+   ]
+  },
+  {
+   "name": "KeyPublishResult",
+   "fields": [
+    {
+     "name": "accepted_prekeys",
+     "type": "u32"
+    },
+    {
+     "name": "identity_fingerprint",
+     "type": "string",
+     "doc": "Shown in the UI for out-of-band verification"
+    }
+   ]
+  },
+  {
+   "name": "KeyBundleRequest",
+   "fields": [
+    {
+     "name": "user_id",
+     "type": "id"
+    },
+    {
+     "name": "device_id",
+     "type": "id",
+     "optional": true,
+     "id": 1,
+     "doc": "Omit to fetch a bundle for every device of the user"
+    }
+   ]
+  },
+  {
+   "name": "KeyBundle",
+   "fields": [
+    {
+     "name": "user_id",
+     "type": "id"
+    },
+    {
+     "name": "device_id",
+     "type": "id"
+    },
+    {
+     "name": "identity_key",
+     "type": "bytes"
+    },
+    {
+     "name": "signed_prekey_id",
+     "type": "u32"
+    },
+    {
+     "name": "signed_prekey",
+     "type": "bytes"
+    },
+    {
+     "name": "signed_prekey_signature",
+     "type": "bytes"
+    },
+    {
+     "name": "one_time_prekey_id",
+     "type": "u32",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "one_time_prekey",
+     "type": "bytes",
+     "optional": true,
+     "id": 2
+    }
+   ]
+  },
+  {
+   "name": "KeyBundleResponse",
+   "fields": [
+    {
+     "name": "bundles",
+     "type": "list<KeyBundle>"
+    }
+   ]
+  },
+  {
+   "name": "ProfileRequest",
+   "fields": [
+    {
+     "name": "user_ids",
+     "type": "list<id>"
+    }
+   ]
+  },
+  {
+   "name": "ProfileResponse",
+   "fields": [
+    {
+     "name": "profiles",
+     "type": "list<UserProfile>"
+    }
+   ]
+  },
+  {
+   "name": "RoomSummary",
+   "fields": [
+    {
+     "name": "room_id",
+     "type": "id"
+    },
+    {
+     "name": "public_id",
+     "type": "string"
+    },
+    {
+     "name": "kind",
+     "type": "RoomKind"
+    },
+    {
+     "name": "name",
+     "type": "string"
+    },
+    {
+     "name": "member_count",
+     "type": "u32"
+    },
+    {
+     "name": "online_count",
+     "type": "u32"
+    },
+    {
+     "name": "topic",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "description",
+     "type": "string",
+     "optional": true,
+     "id": 2
+    },
+    {
+     "name": "avatar_url",
+     "type": "string",
+     "optional": true,
+     "id": 3
+    },
+    {
+     "name": "category",
+     "type": "string",
+     "optional": true,
+     "id": 4
+    },
+    {
+     "name": "language",
+     "type": "string",
+     "optional": true,
+     "id": 5
+    },
+    {
+     "name": "country",
+     "type": "string",
+     "optional": true,
+     "id": 6
+    },
+    {
+     "name": "verified",
+     "type": "bool",
+     "optional": true,
+     "id": 7
+    },
+    {
+     "name": "my_role",
+     "type": "RoomRole",
+     "optional": true,
+     "id": 8
+    },
+    {
+     "name": "slow_mode_ms",
+     "type": "u32",
+     "optional": true,
+     "id": 9
+    }
+   ]
+  },
+  {
+   "name": "RoomJoinRequest",
+   "fields": [
+    {
+     "name": "room_id",
+     "type": "id"
+    },
+    {
+     "name": "invite_code",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "RoomJoinResponse",
+   "fields": [
+    {
+     "name": "room",
+     "type": "RoomSummary"
+    },
+    {
+     "name": "conversation_id",
+     "type": "id"
+    },
+    {
+     "name": "encryption",
+     "type": "EncryptionMode"
+    },
+    {
+     "name": "last_seq",
+     "type": "u64"
+    }
+   ]
+  },
+  {
+   "name": "RoomLeaveRequest",
+   "fields": [
+    {
+     "name": "room_id",
+     "type": "id"
+    }
+   ]
+  },
+  {
+   "name": "RoomListRequest",
+   "fields": [
+    {
+     "name": "limit",
+     "type": "u32"
+    },
+    {
+     "name": "query",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "category",
+     "type": "string",
+     "optional": true,
+     "id": 2
+    },
+    {
+     "name": "language",
+     "type": "string",
+     "optional": true,
+     "id": 3
+    },
+    {
+     "name": "country",
+     "type": "string",
+     "optional": true,
+     "id": 4
+    },
+    {
+     "name": "cursor",
+     "type": "string",
+     "optional": true,
+     "id": 5
+    }
+   ]
+  },
+  {
+   "name": "RoomListResponse",
+   "fields": [
+    {
+     "name": "rooms",
+     "type": "list<RoomSummary>"
+    },
+    {
+     "name": "next_cursor",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "RoomMemberEvent",
+   "fields": [
+    {
+     "name": "room_id",
+     "type": "id"
+    },
+    {
+     "name": "user_id",
+     "type": "id"
+    },
+    {
+     "name": "joined",
+     "type": "bool"
+    },
+    {
+     "name": "role",
+     "type": "RoomRole",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "member_count",
+     "type": "u32",
+     "optional": true,
+     "id": 2
+    }
+   ]
+  },
+  {
+   "name": "RoomStateEvent",
+   "doc": "Coalesced room counters and metadata. Deltas only.",
+   "fields": [
+    {
+     "name": "room_id",
+     "type": "id"
+    },
+    {
+     "name": "online_count",
+     "type": "u32",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "member_count",
+     "type": "u32",
+     "optional": true,
+     "id": 2
+    },
+    {
+     "name": "topic",
+     "type": "string",
+     "optional": true,
+     "id": 3
+    },
+    {
+     "name": "slow_mode_ms",
+     "type": "u32",
+     "optional": true,
+     "id": 4
+    }
+   ]
+  },
+  {
+   "name": "NotificationEvent",
+   "doc": "Never carries private plaintext. Push payloads are generic (brief 77).",
+   "fields": [
+    {
+     "name": "kind",
+     "type": "NotificationKind"
+    },
+    {
+     "name": "at",
+     "type": "timestamp"
+    },
+    {
+     "name": "title",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "body",
+     "type": "string",
+     "optional": true,
+     "id": 2
+    },
+    {
+     "name": "conversation_id",
+     "type": "id",
+     "optional": true,
+     "id": 3
+    },
+    {
+     "name": "room_id",
+     "type": "id",
+     "optional": true,
+     "id": 4
+    },
+    {
+     "name": "actor_id",
+     "type": "id",
+     "optional": true,
+     "id": 5
+    }
+   ]
+  },
+  {
+   "name": "GameAction",
+   "doc": "An intent. The server decides the outcome (brief 89).",
+   "fields": [
+    {
+     "name": "game_id",
+     "type": "id"
+    },
+    {
+     "name": "room_id",
+     "type": "id"
+    },
+    {
+     "name": "action_id",
+     "type": "u64",
+     "doc": "Monotonic per game per player; replays are detected"
+    },
+    {
+     "name": "action",
+     "type": "string"
+    },
+    {
+     "name": "args",
+     "type": "list<string>",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "GameEvent",
+   "fields": [
+    {
+     "name": "game_id",
+     "type": "id"
+    },
+    {
+     "name": "room_id",
+     "type": "id"
+    },
+    {
+     "name": "state_version",
+     "type": "u64"
+    },
+    {
+     "name": "event",
+     "type": "string"
+    },
+    {
+     "name": "payload",
+     "type": "bytes",
+     "optional": true,
+     "id": 1,
+     "doc": "Delta, never a full state snapshot"
+    },
+    {
+     "name": "actor_id",
+     "type": "id",
+     "optional": true,
+     "id": 2
+    },
+    {
+     "name": "text",
+     "type": "string",
+     "optional": true,
+     "id": 3,
+     "doc": "Pre-rendered bot line for thin clients"
+    }
+   ]
+  },
+  {
+   "name": "FriendTarget",
+   "doc": "A single subject account for a social action.",
+   "fields": [
+    {
+     "name": "user_id",
+     "type": "id"
+    }
+   ]
+  },
+  {
+   "name": "SocialSuggestReq",
+   "doc": "Request for people the caller might know.",
+   "fields": [
+    {
+     "name": "limit",
+     "type": "u32"
+    }
+   ]
+  },
+  {
+   "name": "SocialSuggestions",
+   "doc": "Suggested account ids.",
+   "fields": [
+    {
+     "name": "users",
+     "type": "list<id>"
+    }
+   ]
+  },
+  {
+   "name": "MediaBegin",
+   "doc": "Open an upload ticket for a media object.",
+   "fields": [
+    {
+     "name": "kind",
+     "type": "u32",
+     "doc": "Content kind, from the media domain enum"
+    },
+    {
+     "name": "content_type",
+     "type": "string"
+    },
+    {
+     "name": "size",
+     "type": "u64",
+     "doc": "Declared total bytes"
+    },
+    {
+     "name": "conversation_id",
+     "type": "id",
+     "optional": true,
+     "id": 1,
+     "doc": "Present for conversation-scoped media; absent for profile media"
+    },
+    {
+     "name": "width",
+     "type": "u32",
+     "optional": true,
+     "id": 2
+    },
+    {
+     "name": "height",
+     "type": "u32",
+     "optional": true,
+     "id": 3
+    },
+    {
+     "name": "duration_ms",
+     "type": "u64",
+     "optional": true,
+     "id": 4
+    }
+   ]
+  },
+  {
+   "name": "MediaTicket",
+   "doc": "Signed upload URL and the ticket that claims the object later.",
+   "fields": [
+    {
+     "name": "upload_id",
+     "type": "id"
+    },
+    {
+     "name": "upload_url",
+     "type": "string"
+    },
+    {
+     "name": "headers",
+     "type": "list<string>",
+     "doc": "Headers the client must send with the PUT"
+    }
+   ]
+  },
+  {
+   "name": "MediaStatusReq",
+   "fields": [
+    {
+     "name": "upload_id",
+     "type": "id"
+    }
+   ]
+  },
+  {
+   "name": "MediaProgress",
+   "fields": [
+    {
+     "name": "received",
+     "type": "u64"
+    },
+    {
+     "name": "expected",
+     "type": "u64"
+    }
+   ]
+  },
+  {
+   "name": "MediaCommit",
+   "fields": [
+    {
+     "name": "upload_id",
+     "type": "id"
+    },
+    {
+     "name": "digest",
+     "type": "bytes",
+     "doc": "SHA-256 of the uploaded bytes"
+    }
+   ]
+  },
+  {
+   "name": "MediaAbort",
+   "fields": [
+    {
+     "name": "upload_id",
+     "type": "id"
+    }
+   ]
+  },
+  {
+   "name": "MediaFetch",
+   "fields": [
+    {
+     "name": "object_id",
+     "type": "id"
+    },
+    {
+     "name": "conversation_id",
+     "type": "id",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "MediaUrl",
+   "fields": [
+    {
+     "name": "url",
+     "type": "string"
+    },
+    {
+     "name": "expires_at",
+     "type": "timestamp"
+    }
+   ]
+  },
+  {
+   "name": "MediaDelete",
+   "fields": [
+    {
+     "name": "object_id",
+     "type": "id"
+    }
+   ]
+  },
+  {
+   "name": "PushRegister",
+   "fields": [
+    {
+     "name": "token",
+     "type": "string"
+    },
+    {
+     "name": "provider",
+     "type": "u32"
+    }
+   ]
+  },
+  {
+   "name": "InboxReq",
+   "fields": [
+    {
+     "name": "limit",
+     "type": "u32"
+    },
+    {
+     "name": "cursor",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "InboxItem",
+   "fields": [
+    {
+     "name": "id",
+     "type": "id"
+    },
+    {
+     "name": "kind",
+     "type": "string"
+    },
+    {
+     "name": "at",
+     "type": "timestamp"
+    },
+    {
+     "name": "title",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    },
+    {
+     "name": "body",
+     "type": "string",
+     "optional": true,
+     "id": 2
+    },
+    {
+     "name": "conversation_id",
+     "type": "id",
+     "optional": true,
+     "id": 3
+    },
+    {
+     "name": "room_id",
+     "type": "id",
+     "optional": true,
+     "id": 4
+    },
+    {
+     "name": "actor_id",
+     "type": "id",
+     "optional": true,
+     "id": 5
+    }
+   ]
+  },
+  {
+   "name": "InboxResponse",
+   "fields": [
+    {
+     "name": "items",
+     "type": "list<InboxItem>"
+    },
+    {
+     "name": "next_cursor",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "WalletReq",
+   "doc": "Empty request; the caller's own wallet is implied by the session.",
+   "fields": []
+  },
+  {
+   "name": "WalletView",
+   "fields": [
+    {
+     "name": "balance",
+     "type": "u64"
+    },
+    {
+     "name": "points",
+     "type": "u64"
+    }
+   ]
+  },
+  {
+   "name": "GiftSend",
+   "fields": [
+    {
+     "name": "gift",
+     "type": "string",
+     "doc": "SKU slug"
+    },
+    {
+     "name": "recipient",
+     "type": "id"
+    },
+    {
+     "name": "conversation_id",
+     "type": "id",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "GiftSendResult",
+   "fields": [
+    {
+     "name": "ok",
+     "type": "bool"
+    },
+    {
+     "name": "tx_id",
+     "type": "id",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "CatalogueReq",
+   "doc": "Empty request for the gift catalogue.",
+   "fields": []
+  },
+  {
+   "name": "GiftListing",
+   "fields": [
+    {
+     "name": "sku",
+     "type": "string"
+    },
+    {
+     "name": "name",
+     "type": "string"
+    },
+    {
+     "name": "price",
+     "type": "u64"
+    },
+    {
+     "name": "category",
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "name": "CatalogueView",
+   "fields": [
+    {
+     "name": "items",
+     "type": "list<GiftListing>"
+    }
+   ]
+  },
+  {
+   "name": "BotRegister",
+   "fields": [
+    {
+     "name": "username",
+     "type": "string"
+    },
+    {
+     "name": "display_name",
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "name": "BotView",
+   "fields": [
+    {
+     "name": "bot_id",
+     "type": "id"
+    },
+    {
+     "name": "username",
+     "type": "string"
+    },
+    {
+     "name": "token",
+     "type": "string",
+     "optional": true,
+     "id": 1,
+     "doc": "Present only on register/rotate; never logged"
+    }
+   ]
+  },
+  {
+   "name": "BotAuth",
+   "fields": [
+    {
+     "name": "token",
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "name": "BotRotate",
+   "fields": [
+    {
+     "name": "bot_id",
+     "type": "id"
+    }
+   ]
+  },
+  {
+   "name": "ReportFile",
+   "fields": [
+    {
+     "name": "subject_kind",
+     "type": "u32",
+     "doc": "0 user, 1 message, 2 room, 3 bot"
+    },
+    {
+     "name": "subject_id",
+     "type": "id"
+    },
+    {
+     "name": "reason",
+     "type": "u32"
+    },
+    {
+     "name": "note",
+     "type": "string",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "ModAction",
+   "fields": [
+    {
+     "name": "case_id",
+     "type": "id"
+    },
+    {
+     "name": "action",
+     "type": "u32"
+    }
+   ]
+  },
+  {
+   "name": "ModQueueReq",
+   "fields": [
+    {
+     "name": "limit",
+     "type": "u32"
+    }
+   ]
+  },
+  {
+   "name": "CaseView",
+   "fields": [
+    {
+     "name": "case_id",
+     "type": "id"
+    },
+    {
+     "name": "subject_kind",
+     "type": "u32"
+    },
+    {
+     "name": "subject_id",
+     "type": "id"
+    },
+    {
+     "name": "reason",
+     "type": "u32"
+    },
+    {
+     "name": "state",
+     "type": "string"
+    },
+    {
+     "name": "filed_at",
+     "type": "timestamp"
+    }
+   ]
+  },
+  {
+   "name": "ModQueue",
+   "fields": [
+    {
+     "name": "items",
+     "type": "list<CaseView>"
+    }
+   ]
+  },
+  {
+   "name": "FedPeerSpec",
+   "fields": [
+    {
+     "name": "node_id",
+     "type": "string"
+    },
+    {
+     "name": "region",
+     "type": "string"
+    },
+    {
+     "name": "country",
+     "type": "string"
+    },
+    {
+     "name": "public_key",
+     "type": "bytes"
+    }
+   ]
+  },
+  {
+   "name": "FedPeerView",
+   "fields": [
+    {
+     "name": "node_id",
+     "type": "string"
+    },
+    {
+     "name": "region",
+     "type": "string"
+    },
+    {
+     "name": "status",
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "name": "FedPeerId",
+   "fields": [
+    {
+     "name": "node_id",
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "name": "FedListReq",
+   "fields": []
+  },
+  {
+   "name": "FedPeerList",
+   "fields": [
+    {
+     "name": "peers",
+     "type": "list<FedPeerView>"
+    }
+   ]
+  },
+  {
+   "name": "FedHello",
+   "fields": [
+    {
+     "name": "node_id",
+     "type": "string"
+    },
+    {
+     "name": "region",
+     "type": "string"
+    },
+    {
+     "name": "epoch",
+     "type": "u64"
+    },
+    {
+     "name": "nonce",
+     "type": "bytes"
+    }
+   ]
+  },
+  {
+   "name": "FedProof",
+   "fields": [
+    {
+     "name": "node_id",
+     "type": "string"
+    },
+    {
+     "name": "signature",
+     "type": "bytes"
+    }
+   ]
+  },
+  {
+   "name": "FedForward",
+   "fields": [
+    {
+     "name": "from",
+     "type": "string"
+    },
+    {
+     "name": "to",
+     "type": "string"
+    },
+    {
+     "name": "payload",
+     "type": "bytes"
+    }
+   ]
+  },
+  {
+   "name": "FedPresenceDigest",
+   "fields": [
+    {
+     "name": "region",
+     "type": "string"
+    },
+    {
+     "name": "digest",
+     "type": "bytes"
+    }
+   ]
+  },
+  {
+   "name": "FedRouting",
+   "fields": [
+    {
+     "name": "epoch",
+     "type": "u64"
+    },
+    {
+     "name": "home_region",
+     "type": "string"
+    },
+    {
+     "name": "room_id",
+     "type": "id"
+    }
+   ]
+  },
+  {
+   "name": "FedEpoch",
+   "fields": [
+    {
+     "name": "epoch",
+     "type": "u64"
+    }
+   ]
+  },
+  {
+   "name": "FedLinkState",
+   "fields": [
+    {
+     "name": "node_id",
+     "type": "string"
+    },
+    {
+     "name": "sequence",
+     "type": "u64"
+    },
+    {
+     "name": "healthy",
+     "type": "bool"
+    }
+   ]
+  },
+  {
+   "name": "FedHealth",
+   "fields": [
+    {
+     "name": "node_id",
+     "type": "string"
+    },
+    {
+     "name": "status",
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "name": "FedEvent",
+   "fields": [
+    {
+     "name": "from",
+     "type": "string"
+    },
+    {
+     "name": "kind",
+     "type": "string"
+    },
+    {
+     "name": "payload",
+     "type": "bytes"
+    }
+   ]
+  },
+  {
+   "name": "FriendRespond",
+   "fields": [
+    {
+     "name": "user_id",
+     "type": "id"
+    },
+    {
+     "name": "accept",
+     "type": "bool"
+    }
+   ]
+  },
+  {
+   "name": "FriendEvent",
+   "fields": [
+    {
+     "name": "user_id",
+     "type": "id"
+    },
+    {
+     "name": "state",
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "name": "RelationshipListReq",
+   "fields": [
+    {
+     "name": "limit",
+     "type": "u32"
+    }
+   ]
+  },
+  {
+   "name": "RelationshipEntry",
+   "fields": [
+    {
+     "name": "user_id",
+     "type": "id"
+    },
+    {
+     "name": "kind",
+     "type": "u32"
+    }
+   ]
+  },
+  {
+   "name": "RelationshipList",
+   "fields": [
+    {
+     "name": "entries",
+     "type": "list<RelationshipEntry>"
+    }
+   ]
+  },
+  {
+   "name": "MediaStateEvent",
+   "fields": [
+    {
+     "name": "object_id",
+     "type": "id"
+    },
+    {
+     "name": "state",
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "name": "NotificationAck",
+   "fields": [
+    {
+     "name": "id",
+     "type": "id"
+    }
+   ]
+  },
+  {
+   "name": "EconomyEvent",
+   "fields": [
+    {
+     "name": "kind",
+     "type": "string"
+    },
+    {
+     "name": "amount",
+     "type": "u64"
+    },
+    {
+     "name": "currency",
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "name": "BotCommand",
+   "fields": [
+    {
+     "name": "bot_id",
+     "type": "id"
+    },
+    {
+     "name": "command",
+     "type": "string"
+    },
+    {
+     "name": "args",
+     "type": "list<string>",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "BotEvent",
+   "fields": [
+    {
+     "name": "bot_id",
+     "type": "id"
+    },
+    {
+     "name": "event",
+     "type": "string"
+    },
+    {
+     "name": "payload",
+     "type": "bytes",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "FedAuth",
+   "fields": [
+    {
+     "name": "node_id",
+     "type": "string"
+    },
+    {
+     "name": "signature",
+     "type": "bytes"
+    },
+    {
+     "name": "epoch",
+     "type": "u64"
+    }
+   ]
+  },
+  {
+   "name": "FedPing",
+   "fields": [
+    {
+     "name": "node_id",
+     "type": "string"
+    },
+    {
+     "name": "nonce",
+     "type": "bytes"
+    }
+   ]
+  },
+  {
+   "name": "FedPong",
+   "fields": [
+    {
+     "name": "nonce",
+     "type": "bytes"
+    }
+   ]
+  },
+  {
+   "name": "FedAck",
+   "fields": [
+    {
+     "name": "node_id",
+     "type": "string"
+    },
+    {
+     "name": "seq",
+     "type": "u64"
+    }
+   ]
+  },
+  {
+   "name": "FedRoomEvent",
+   "fields": [
+    {
+     "name": "room_id",
+     "type": "id"
+    },
+    {
+     "name": "payload",
+     "type": "bytes"
+    }
+   ]
+  },
+  {
+   "name": "FedKeyRotate",
+   "fields": [
+    {
+     "name": "node_id",
+     "type": "string"
+    },
+    {
+     "name": "new_public_key",
+     "type": "bytes"
+    }
+   ]
+  },
+  {
+   "name": "FedShardMap",
+   "fields": [
+    {
+     "name": "region",
+     "type": "string"
+    },
+    {
+     "name": "nodes",
+     "type": "list<FedPeerView>"
+    }
+   ]
+  },
+  {
+   "name": "FedError",
+   "fields": [
+    {
+     "name": "node_id",
+     "type": "string"
+    },
+    {
+     "name": "code",
+     "type": "u32"
+    },
+    {
+     "name": "message",
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "name": "FedDirectoryReq",
+   "fields": [
+    {
+     "name": "query",
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "name": "FedDirectory",
+   "fields": [
+    {
+     "name": "peers",
+     "type": "list<FedPeerView>"
+    }
+   ]
+  },
+  {
+   "name": "ModerationEvent",
+   "fields": [
+    {
+     "name": "case_id",
+     "type": "id"
+    },
+    {
+     "name": "action",
+     "type": "u32"
+    },
+    {
+     "name": "state",
+     "type": "string"
+    }
+   ]
+  },
+  {
+   "name": "ProfileUpdate",
+   "doc": "A profile patch: every field optional, absent means leave alone.",
+   "fields": [
+    {
+     "name": "display_name",
+     "type": "string",
+     "optional": true,
+     "id": 1,
+     "doc": "New display name, or absent to leave it."
+    },
+    {
+     "name": "bio",
+     "type": "string",
+     "optional": true,
+     "id": 2,
+     "doc": "New bio, or absent to leave it."
+    },
+    {
+     "name": "avatar_media_id",
+     "type": "id",
+     "optional": true,
+     "id": 3,
+     "doc": "New avatar object, or absent to leave it."
+    },
+    {
+     "name": "birth_year",
+     "type": "u32",
+     "optional": true,
+     "id": 4,
+     "doc": "New birth year, or absent."
+    },
+    {
+     "name": "show_last_seen",
+     "type": "u32",
+     "optional": true,
+     "id": 5,
+     "doc": "New last-seen visibility."
+    },
+    {
+     "name": "who_can_message",
+     "type": "u32",
+     "optional": true,
+     "id": 6,
+     "doc": "New messaging visibility."
+    },
+    {
+     "name": "who_can_add",
+     "type": "u32",
+     "optional": true,
+     "id": 7,
+     "doc": "New friend-request visibility."
+    },
+    {
+     "name": "searchable",
+     "type": "bool",
+     "optional": true,
+     "id": 8,
+     "doc": "New search visibility."
+    }
+   ]
+  },
+  {
+   "name": "MessageEdit",
+   "doc": "Edits a message in place: the sealed replacement envelope, preserving its seq.",
+   "fields": [
+    {
+     "name": "message_id",
+     "type": "id"
+    },
+    {
+     "name": "conversation_id",
+     "type": "id"
+    },
+    {
+     "name": "envelope",
+     "type": "bytes",
+     "doc": "The sealed replacement content, opaque to the server."
+    }
+   ]
+  },
+  {
+   "name": "ReactionSet",
+   "doc": "Sets or removes the caller's reaction to a message.",
+   "fields": [
+    {
+     "name": "target_message_id",
+     "type": "id"
+    },
+    {
+     "name": "conversation_id",
+     "type": "id"
+    },
+    {
+     "name": "envelope",
+     "type": "bytes",
+     "doc": "The sealed reaction content, opaque to the server."
+    }
+   ]
+  },
+  {
+   "name": "SuggestReq",
+   "doc": "Asks for friend suggestions.",
+   "fields": [
+    {
+     "name": "limit",
+     "type": "u32",
+     "optional": true,
+     "id": 1,
+     "doc": "Maximum suggestions; server clamps."
+    }
+   ]
+  },
+  {
+   "name": "SuggestedUser",
+   "doc": "One suggested account.",
+   "fields": [
+    {
+     "name": "account_id",
+     "type": "id"
+    },
+    {
+     "name": "username",
+     "type": "string"
+    },
+    {
+     "name": "display_name",
+     "type": "string"
+    },
+    {
+     "name": "mutual_friends",
+     "type": "u32"
+    }
+   ]
+  },
+  {
+   "name": "SearchReq",
+   "doc": "Searches public profiles by username or display name.",
+   "fields": [
+    {
+     "name": "query",
+     "type": "string"
+    },
+    {
+     "name": "limit",
+     "type": "u32",
+     "optional": true,
+     "id": 1
+    }
+   ]
+  },
+  {
+   "name": "SearchResponse",
+   "doc": "Search results.",
+   "fields": [
+    {
+     "name": "results",
+     "type": "list<SuggestedUser>"
+    }
+   ]
+  },
+  {
+   "name": "ReactionEvent",
+   "doc": "A reaction was added or removed on a message.",
+   "fields": [
+    {
+     "name": "conversation_id",
+     "type": "id"
+    },
+    {
+     "name": "target_message_id",
+     "type": "id"
+    },
+    {
+     "name": "actor_id",
+     "type": "id"
+    },
+    {
+     "name": "emoji",
+     "type": "string"
+    },
+    {
+     "name": "remove",
+     "type": "bool",
+     "optional": true,
+     "id": 1,
+     "doc": "True when the reaction was removed."
+    }
+   ]
+  }
+ ]
 }

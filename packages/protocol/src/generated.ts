@@ -4196,6 +4196,294 @@ export function decodeModerationEvent(r: Reader): ModerationEvent {
   return out;
 }
 
+/** A profile patch: every field optional, absent means leave alone. */
+export interface ProfileUpdate {
+  /** New display name, or absent to leave it. */
+  displayName?: string;
+  /** New bio, or absent to leave it. */
+  bio?: string;
+  /** New avatar object, or absent to leave it. */
+  avatarMediaId?: Id;
+  /** New birth year, or absent. */
+  birthYear?: number;
+  /** New last-seen visibility. */
+  showLastSeen?: number;
+  /** New messaging visibility. */
+  whoCanMessage?: number;
+  /** New friend-request visibility. */
+  whoCanAdd?: number;
+  /** New search visibility. */
+  searchable?: boolean;
+}
+
+export function encodeProfileUpdate(w: Writer, v: ProfileUpdate): void {
+  w.enter();
+  let present = 0;
+  if (v.displayName !== undefined) present++;
+  if (v.bio !== undefined) present++;
+  if (v.avatarMediaId !== undefined) present++;
+  if (v.birthYear !== undefined) present++;
+  if (v.showLastSeen !== undefined) present++;
+  if (v.whoCanMessage !== undefined) present++;
+  if (v.whoCanAdd !== undefined) present++;
+  if (v.searchable !== undefined) present++;
+  w.u32(present);
+  if (v.displayName !== undefined) { const value = v.displayName; w.optional(1, (w) => { w.str(value); }); }
+  if (v.bio !== undefined) { const value = v.bio; w.optional(2, (w) => { w.str(value); }); }
+  if (v.avatarMediaId !== undefined) { const value = v.avatarMediaId; w.optional(3, (w) => { w.id(value); }); }
+  if (v.birthYear !== undefined) { const value = v.birthYear; w.optional(4, (w) => { w.u32(value); }); }
+  if (v.showLastSeen !== undefined) { const value = v.showLastSeen; w.optional(5, (w) => { w.u32(value); }); }
+  if (v.whoCanMessage !== undefined) { const value = v.whoCanMessage; w.optional(6, (w) => { w.u32(value); }); }
+  if (v.whoCanAdd !== undefined) { const value = v.whoCanAdd; w.optional(7, (w) => { w.u32(value); }); }
+  if (v.searchable !== undefined) { const value = v.searchable; w.optional(8, (w) => { w.bool(value); }); }
+  w.leave();
+}
+
+export function decodeProfileUpdate(r: Reader): ProfileUpdate {
+  r.enter();
+  const out: ProfileUpdate = {  } as ProfileUpdate;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.displayName = sub.str(); break;
+      case 2: out.bio = sub.str(); break;
+      case 3: out.avatarMediaId = sub.id(); break;
+      case 4: out.birthYear = sub.u32(); break;
+      case 5: out.showLastSeen = sub.u32(); break;
+      case 6: out.whoCanMessage = sub.u32(); break;
+      case 7: out.whoCanAdd = sub.u32(); break;
+      case 8: out.searchable = sub.bool(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** Edits a message in place: the sealed replacement envelope, preserving its seq. */
+export interface MessageEdit {
+  messageId: Id;
+  conversationId: Id;
+  /** The sealed replacement content, opaque to the server. */
+  envelope: Uint8Array;
+}
+
+export function encodeMessageEdit(w: Writer, v: MessageEdit): void {
+  w.enter();
+  w.id(v.messageId);
+  w.id(v.conversationId);
+  w.bytes(v.envelope);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeMessageEdit(r: Reader): MessageEdit {
+  r.enter();
+  const messageId = r.id();
+  const conversationId = r.id();
+  const envelope = r.bytes();
+  const out: MessageEdit = { messageId, conversationId, envelope } as MessageEdit;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Sets or removes the caller's reaction to a message. */
+export interface ReactionSet {
+  targetMessageId: Id;
+  conversationId: Id;
+  /** The sealed reaction content, opaque to the server. */
+  envelope: Uint8Array;
+}
+
+export function encodeReactionSet(w: Writer, v: ReactionSet): void {
+  w.enter();
+  w.id(v.targetMessageId);
+  w.id(v.conversationId);
+  w.bytes(v.envelope);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeReactionSet(r: Reader): ReactionSet {
+  r.enter();
+  const targetMessageId = r.id();
+  const conversationId = r.id();
+  const envelope = r.bytes();
+  const out: ReactionSet = { targetMessageId, conversationId, envelope } as ReactionSet;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Asks for friend suggestions. */
+export interface SuggestReq {
+  /** Maximum suggestions; server clamps. */
+  limit?: number;
+}
+
+export function encodeSuggestReq(w: Writer, v: SuggestReq): void {
+  w.enter();
+  let present = 0;
+  if (v.limit !== undefined) present++;
+  w.u32(present);
+  if (v.limit !== undefined) { const value = v.limit; w.optional(1, (w) => { w.u32(value); }); }
+  w.leave();
+}
+
+export function decodeSuggestReq(r: Reader): SuggestReq {
+  r.enter();
+  const out: SuggestReq = {  } as SuggestReq;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.limit = sub.u32(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** One suggested account. */
+export interface SuggestedUser {
+  accountId: Id;
+  username: string;
+  displayName: string;
+  mutualFriends: number;
+}
+
+export function encodeSuggestedUser(w: Writer, v: SuggestedUser): void {
+  w.enter();
+  w.id(v.accountId);
+  w.str(v.username);
+  w.str(v.displayName);
+  w.u32(v.mutualFriends);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeSuggestedUser(r: Reader): SuggestedUser {
+  r.enter();
+  const accountId = r.id();
+  const username = r.str();
+  const displayName = r.str();
+  const mutualFriends = r.u32();
+  const out: SuggestedUser = { accountId, username, displayName, mutualFriends } as SuggestedUser;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Searches public profiles by username or display name. */
+export interface SearchReq {
+  query: string;
+  limit?: number;
+}
+
+export function encodeSearchReq(w: Writer, v: SearchReq): void {
+  w.enter();
+  w.str(v.query);
+  let present = 0;
+  if (v.limit !== undefined) present++;
+  w.u32(present);
+  if (v.limit !== undefined) { const value = v.limit; w.optional(1, (w) => { w.u32(value); }); }
+  w.leave();
+}
+
+export function decodeSearchReq(r: Reader): SearchReq {
+  r.enter();
+  const query = r.str();
+  const out: SearchReq = { query } as SearchReq;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.limit = sub.u32(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** Search results. */
+export interface SearchResponse {
+  results: SuggestedUser[];
+}
+
+export function encodeSearchResponse(w: Writer, v: SearchResponse): void {
+  w.enter();
+  { w.listLen(v.results.length); for (const item of v.results) { encodeSuggestedUser(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeSearchResponse(r: Reader): SearchResponse {
+  r.enter();
+  const results = ((): SuggestedUser[] => { const n = r.listLen(); const v: SuggestedUser[] = []; for (let i = 0; i < n; i++) v.push(decodeSuggestedUser(r)); return v; })();
+  const out: SearchResponse = { results } as SearchResponse;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** A reaction was added or removed on a message. */
+export interface ReactionEvent {
+  conversationId: Id;
+  targetMessageId: Id;
+  actorId: Id;
+  emoji: string;
+  /** True when the reaction was removed. */
+  remove?: boolean;
+}
+
+export function encodeReactionEvent(w: Writer, v: ReactionEvent): void {
+  w.enter();
+  w.id(v.conversationId);
+  w.id(v.targetMessageId);
+  w.id(v.actorId);
+  w.str(v.emoji);
+  let present = 0;
+  if (v.remove !== undefined) present++;
+  w.u32(present);
+  if (v.remove !== undefined) { const value = v.remove; w.optional(1, (w) => { w.bool(value); }); }
+  w.leave();
+}
+
+export function decodeReactionEvent(r: Reader): ReactionEvent {
+  r.enter();
+  const conversationId = r.id();
+  const targetMessageId = r.id();
+  const actorId = r.id();
+  const emoji = r.str();
+  const out: ReactionEvent = { conversationId, targetMessageId, actorId, emoji } as ReactionEvent;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.remove = sub.bool(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
 export type DeliveryClass = 'Critical' | 'Coalescable' | 'Droppable';
 export type AuthLevel = 'None' | 'User' | 'Bot' | 'Server';
 export type Direction = 'client_to_server' | 'server_to_client' | 'both';
@@ -4223,6 +4511,12 @@ export const OP = {
   CONVERSATION_LIST: 37,
   CONVERSATION_CREATE: 38,
   TYPING: 39,
+  /** Edits a message's text in place. */
+  MESSAGE_EDIT: 40,
+  /** Sets or removes the caller's reaction to a message. */
+  REACTION_SET: 41,
+  /** A reaction was added or removed. */
+  REACTION_EVENT: 42,
   PRESENCE_SET: 64,
   PRESENCE_EVENT: 65,
   ROOM_JOIN: 80,
@@ -4230,26 +4524,32 @@ export const OP = {
   ROOM_LIST: 82,
   ROOM_MEMBER_EVENT: 83,
   ROOM_STATE_EVENT: 84,
+  /** Updates the caller's own profile and privacy settings. */
+  PROFILE_UPDATE: 111,
   PROFILE_FETCH: 112,
-  NOTIFICATION_EVENT: 144,
-  GAME_ACTION: 176,
-  GAME_EVENT: 177,
   FRIEND_REQUEST: 113,
   FRIEND_RESPOND: 114,
   FRIEND_EVENT: 115,
   BLOCK_SET: 116,
   RELATIONSHIP_LIST: 117,
+  /** Friend suggestions from the social graph. */
+  SUGGESTIONS: 118,
+  /** Searches public profiles. */
+  SEARCH: 119,
   MEDIA_UPLOAD_BEGIN: 128,
   MEDIA_UPLOAD_STATUS: 129,
   MEDIA_UPLOAD_COMMIT: 130,
   MEDIA_UPLOAD_ABORT: 131,
   MEDIA_FETCH_URL: 132,
   MEDIA_STATE_EVENT: 133,
+  NOTIFICATION_EVENT: 144,
   NOTIFICATION_ACK: 145,
   NOTIFICATION_LIST: 146,
   GIFT_SEND: 160,
   BALANCE_FETCH: 161,
   ECONOMY_EVENT: 162,
+  GAME_ACTION: 176,
+  GAME_EVENT: 177,
   BOT_COMMAND: 178,
   BOT_EVENT: 179,
   BOT_REGISTER: 180,
@@ -4305,6 +4605,9 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   37: { code: 37, name: 'CONVERSATION_LIST', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationListRequest', response: 'ConversationListResponse' },
   38: { code: 38, name: 'CONVERSATION_CREATE', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationCreateRequest', response: 'ConversationSummary' },
   39: { code: 39, name: 'TYPING', cost: 1, cls: 'Coalescable', auth: 'User', direction: 'both', ackRequired: false, payload: 'TypingEvent', coalesceKey: 'conversation_id' },
+  40: { code: 40, name: 'MESSAGE_EDIT', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MessageEdit', response: 'Acknowledged' },
+  41: { code: 41, name: 'REACTION_SET', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ReactionSet', response: 'Acknowledged' },
+  42: { code: 42, name: 'REACTION_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ReactionEvent' },
   64: { code: 64, name: 'PRESENCE_SET', cost: 1, cls: 'Coalescable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'PresenceUpdate', response: 'Acknowledged' },
   65: { code: 65, name: 'PRESENCE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'PresenceEvent', coalesceKey: 'user_id' },
   80: { code: 80, name: 'ROOM_JOIN', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomJoinRequest', response: 'RoomJoinResponse' },
@@ -4312,26 +4615,29 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   82: { code: 82, name: 'ROOM_LIST', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomListRequest', response: 'RoomListResponse' },
   83: { code: 83, name: 'ROOM_MEMBER_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'RoomMemberEvent', coalesceKey: 'room_id' },
   84: { code: 84, name: 'ROOM_STATE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'RoomStateEvent', coalesceKey: 'room_id' },
+  111: { code: 111, name: 'PROFILE_UPDATE', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ProfileUpdate', response: 'UserProfile' },
   112: { code: 112, name: 'PROFILE_FETCH', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ProfileRequest', response: 'ProfileResponse' },
-  144: { code: 144, name: 'NOTIFICATION_EVENT', cost: 0, cls: 'Droppable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'NotificationEvent' },
-  176: { code: 176, name: 'GAME_ACTION', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GameAction', response: 'Acknowledged' },
-  177: { code: 177, name: 'GAME_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'GameEvent' },
   113: { code: 113, name: 'FRIEND_REQUEST', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'FriendTarget', response: 'Acknowledged' },
   114: { code: 114, name: 'FRIEND_RESPOND', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'FriendRespond', response: 'Acknowledged' },
   115: { code: 115, name: 'FRIEND_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'FriendEvent' },
   116: { code: 116, name: 'BLOCK_SET', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'FriendTarget', response: 'Acknowledged' },
   117: { code: 117, name: 'RELATIONSHIP_LIST', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RelationshipListReq', response: 'RelationshipList' },
+  118: { code: 118, name: 'SUGGESTIONS', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'SuggestReq', response: 'SearchResponse' },
+  119: { code: 119, name: 'SEARCH', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'SearchReq', response: 'SearchResponse' },
   128: { code: 128, name: 'MEDIA_UPLOAD_BEGIN', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaBegin', response: 'MediaTicket' },
   129: { code: 129, name: 'MEDIA_UPLOAD_STATUS', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaStatusReq', response: 'MediaProgress' },
   130: { code: 130, name: 'MEDIA_UPLOAD_COMMIT', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaCommit', response: 'Acknowledged' },
   131: { code: 131, name: 'MEDIA_UPLOAD_ABORT', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaAbort', response: 'Acknowledged' },
   132: { code: 132, name: 'MEDIA_FETCH_URL', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaFetch', response: 'MediaUrl' },
   133: { code: 133, name: 'MEDIA_STATE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'MediaStateEvent', coalesceKey: 'object_id' },
+  144: { code: 144, name: 'NOTIFICATION_EVENT', cost: 0, cls: 'Droppable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'NotificationEvent' },
   145: { code: 145, name: 'NOTIFICATION_ACK', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'NotificationAck', response: 'Acknowledged' },
   146: { code: 146, name: 'NOTIFICATION_LIST', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'InboxReq', response: 'InboxResponse' },
   160: { code: 160, name: 'GIFT_SEND', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GiftSend', response: 'GiftSendResult' },
   161: { code: 161, name: 'BALANCE_FETCH', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'WalletReq', response: 'WalletView' },
   162: { code: 162, name: 'ECONOMY_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'EconomyEvent' },
+  176: { code: 176, name: 'GAME_ACTION', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GameAction', response: 'Acknowledged' },
+  177: { code: 177, name: 'GAME_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'GameEvent' },
   178: { code: 178, name: 'BOT_COMMAND', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'BotCommand', response: 'Acknowledged' },
   179: { code: 179, name: 'BOT_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'BotEvent' },
   180: { code: 180, name: 'BOT_REGISTER', cost: 20, cls: 'Critical', auth: 'Bot', direction: 'client_to_server', ackRequired: false, payload: 'BotRegister', response: 'BotView' },

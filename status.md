@@ -529,3 +529,29 @@ Ditunda dengan sadar ke fase berikutnya: permukaan wire baru (PROFILE_UPDATE, ed
 reaksi, room admin, games start, economy baca, discovery), voice note perekaman/pemutaran,
 dan calls penuh (§165/§166/§180). §177 migo.md disinkronkan dengan kenyataan: blok SCHEMA
 dan SPEC kini membedakan yang sudah menyentuh kabel dari yang benar-benar masih dokumen.
+
+## 16. Fase 2 batch pertama: delapan opcode baru menyentuh kabel (v0.3.1)
+
+Delapan opcode baru masuk registri beserta handler-nya, masing-masing mengikuti aturan
+alokasi §146 (dalam range domainnya) dan tabel §145 (barisnya ditambahkan):
+
+- **111 PROFILE_UPDATE**: caller mengubah profil dan pengaturan privasinya sendiri.
+  Patch semantics: absent = biarkan. Avatar bio, nama tampilan, tahun lahir, dan empat
+  pengaturan visibilitas kini bisa diubah lewat wire — sebelumnya semua akun terkunci
+  di default selamanya.
+- **118 SUGGESTIONS** dan **119 SEARCH**: discovery orang dari graph sosial. Suggestions
+  di-resolve ke kartu profil (sehingga blokir diam-diam menghapus saran alih-alih membocorkan
+  nama), search adalah prefix-match pada username/nama tampilan dengan opt-in searchable.
+- **40 MESSAGE_EDIT**: mengedit envelope terenkripsi di tempat dengan seq yang sama.
+  Hanya pengirim; `edited_at` terekam di store. Envelope adalah bytes — teks tidak pernah
+  kelihatan di server.
+- **41 REACTION_SET** dan **42 REACTION_EVENT**: reaksi sebagai pesan kind Text dengan
+  discriminator Reaction di dalam ciphertext (mengikuti kindForContent SDK), plus event
+  s2c Coalescable untuk pembaruan real-time.
+
+Semua handler baru berada di dispatch (profile.rs untuk 111/118/119; inline di dispatch.rs
+untuk 40/41). AppDispatcher kini memegang handle store (layer 2) untuk jalur update profil.
+Messaging crate mendapat method `edit` + meter `migo_messaging_edits_total`.
+
+Opcode yang masih SPEC (rooms admin, games start/view, economy baca, calls) menyusul di
+batch berikutnya — schema dan service-nya sudah siap menampung.

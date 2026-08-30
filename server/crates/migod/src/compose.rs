@@ -426,6 +426,7 @@ impl App {
         // opcodes this node speaks into messaging, presence, rooms, key material, the social graph,
         // and games.
         let dispatcher: Arc<dyn Dispatcher> = Arc::new(AppDispatcher::new(
+            store.clone(),
             messaging.clone(),
             presence.clone(),
             rooms.clone(),

@@ -517,6 +517,67 @@ where
         )))
     }
 
+    async fn edit(
+        &self,
+        caller: &Caller,
+        conversation_id: Id,
+        message_id: Id,
+        envelope: Vec<u8>,
+    ) -> Result<(MessageAccepted, Option<Fanout>)> {
+        if message_id.is_nil() {
+            return Err(fault::field_required("message_id"));
+        }
+        if conversation_id.is_nil() {
+            return Err(fault::field_required("conversation_id"));
+        }
+        if envelope.is_empty() {
+            return Err(fault::field_required("envelope"));
+        }
+        self.charge(caller, Opcode::MessageEdit).await?;
+        // Same posture as delete: membership is required, and the conversation is then
+        // discarded — an archived conversation still lets the sender fix what they said.
+        self.conversation_for(caller, conversation_id).await?;
+
+        let existing = self
+            .store
+            .message(conversation_id, message_id)
+            .await?
+            .ok_or_else(|| fault::not_found("message"))?;
+        if existing.sender_id != caller.account_id {
+            return Err(fault::permission_denied(
+                "only the sender may edit a message",
+            ));
+        }
+        if existing.deleted_at.is_some() {
+            // A tombstone cannot be edited back into existence; the sender's recourse
+            // is a new message, which is exactly what every other participant sees.
+            return Err(fault::not_found("message"));
+        }
+
+        let edited = self
+            .store
+            .edit_message(conversation_id, message_id, envelope, caller.now)
+            .await?
+            .ok_or_else(|| fault::not_found("message"))?;
+        self.meters.edited();
+
+        let accepted = MessageAccepted {
+            message_id: edited.message_id,
+            conversation_id: edited.conversation_id,
+            seq: edited.seq.max(0) as u64,
+            created_at: edited.created_at,
+            duplicate: Some(false),
+        };
+        Ok((
+            accepted,
+            Some(Fanout::to_conversation(
+                conversation_id,
+                caller.device_id,
+                Broadcast::Message(event_of(&edited)),
+            )),
+        ))
+    }
+
     async fn delete(
         &self,
         caller: &Caller,

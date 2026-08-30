@@ -1463,6 +1463,7 @@ fn the_wire_is_push_only_and_has_no_request_or_response_opcode() {
         Opcode::EconomyEvent,
         Opcode::BotEvent,
         Opcode::ModerationEvent,
+        Opcode::ReactionEvent,
     ];
     for opcode in server_only {
         assert!(
