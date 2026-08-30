@@ -133,6 +133,18 @@ test('calls: two invites never share a call id', async () => {
   );
 });
 
+test('calls: invite carries an app-supplied call id verbatim when given one', async () => {
+  // A caller that fetches TURN relays before placing the call must address the fetch with the
+  // call's own id, so the app mints the id first and hands it to the invite: the idempotency key
+  // the server sees is the one the TURN credentials were minted under.
+  const mine = idOf(42);
+  const { transport, calls } = rig(new Map([[OP.CALL_INVITE, inviteEchoReply]]));
+  const result = await calls.invite(CONVERSATION, CALLEE, CallMediaKind.Audio, SEALED, mine);
+  const invite = decodeBody(decodeCallInvite, sentAt(transport, 0).body);
+  assert.equal(invite.callId, mine, 'the app-minted id is the id the server must dedupe on');
+  assert.equal(result.callId, mine, 'the reply echoes the id the caller already tracks');
+});
+
 test('calls: answer stamps the callee device and carries the sealed answer verbatim', async () => {
   const { transport, calls } = rig(
     new Map([[OP.CALL_ANSWER, () => encodeBody(encodeAcknowledged, { ok: true })]]),

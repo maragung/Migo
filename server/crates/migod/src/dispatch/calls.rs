@@ -61,10 +61,11 @@
 use migo_calls::{Caller as CallCaller, SharedCallkeeper};
 use migo_core::Error;
 use migo_gateway::ClientContext;
+use migo_notify::{Event as NotificationEvent, SharedNotifier};
 use migo_protocol::{
     fault, from_frame, Acknowledged, CallAnswer, CallCancel, CallDecline, CallEnd, CallIce,
     CallInvite, CallInviteResult, CallKeyUpdate, CallRenegotiate, CallSdp, CallStats,
-    CallTurnFetch, CallTurnResponse, Frame, Opcode, Topic, TopicKind,
+    CallTurnFetch, CallTurnResponse, Frame, NotificationKind, Opcode, Topic, TopicKind,
 };
 
 /// Invites a callee and rings them.
@@ -75,10 +76,16 @@ use migo_protocol::{
 /// callee, so no call row is needed to route it. Not coalesced; a ring is
 /// Critical, and the callee's client dedupes by `call_id` if a retry ever
 /// did produce two.
+///
+/// A ring the gate accepted is also handed to the notifier as an
+/// `IncomingCall` event: the realtime topic only reaches devices that are
+/// connected, and the inbox row (and the push, once a sender is wired) is
+/// what wakes a callee whose every device is offline.
 pub(crate) async fn handle_invite(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedCallkeeper,
+    notify: &SharedNotifier,
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallInvite = from_frame(frame).map_err(fault::from_wire)?;
@@ -99,6 +106,22 @@ pub(crate) async fn handle_invite(
             ctx.publish_excluding_self(&topic, Opcode::CallInviteEvent, &event, None)
         {
             tracing::warn!(%error, "call invite event publication failed");
+        }
+        // The wake-up half of the ring. The notification is a courtesy, not a
+        // requirement — the call is already recorded and the realtime event
+        // is already out, and failing the request over a bell that did not
+        // ring would have the caller retry an invite the service would then
+        // have to answer as a duplicate.
+        let notification = NotificationEvent {
+            account_id: callee_id,
+            kind: NotificationKind::IncomingCall,
+            actor_id: Some(caller.account_id),
+            room_id: None,
+            subject_id: Some(call_id),
+            at: caller.now,
+        };
+        if let Err(error) = notify.notify(notification).await {
+            tracing::warn!(code = error.code(), "incoming-call notification dropped");
         }
     }
     Ok(())

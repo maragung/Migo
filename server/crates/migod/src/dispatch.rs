@@ -624,7 +624,9 @@ impl Dispatcher for AppDispatcher {
             // Each handler replies to the sender and publishes the returned
             // event to the other party's user topic; the service owns every
             // rule and never sends a frame itself.
-            Opcode::CallInvite => calls::handle_invite(context, frame, &self.calls).await,
+            Opcode::CallInvite => {
+                calls::handle_invite(context, frame, &self.calls, &self.notify).await
+            }
             Opcode::CallAnswer => calls::handle_answer(context, frame, &self.calls).await,
             Opcode::CallDecline => calls::handle_decline(context, frame, &self.calls).await,
             Opcode::CallCancel => calls::handle_cancel(context, frame, &self.calls).await,
@@ -805,14 +807,14 @@ fn wire_bundle(bundle: Bundle) -> WireBundle {
 
 /// Projects a [`ProfileCard`] onto the wire struct.
 ///
-/// Six of the thirteen wire fields are left absent, and absent is not the same as false. `level`
+/// Six of the fourteen wire fields are left absent, and absent is not the same as false. `level`
 /// belongs to progression, `presence` to presence, `badges` and `verified` to moderation, and
 /// `custom_status` to a column the data model does not have; a defaulted `verified: false` on a
 /// verified account would be a wrong answer wearing the shape of an answer. `avatar_url` is absent
-/// for a different reason: section 168 forbids the server from proxying media bytes, so the URL is a
-/// signed one the media service mints on request, and minting it here would put an expiring
-/// credential inside a response a client may cache. The same absence is already the rule in
-/// `migo_messaging` and `migo_rooms`.
+/// while `avatar_media_id` is carried: section 168 forbids the server from proxying media bytes, so
+/// the URL is a signed one the media service mints on request, and minting it here would put an
+/// expiring credential inside a response a client may cache — the id is the durable fact the client
+/// resolves at render time.
 ///
 /// `public_id` is derived rather than stored: it is a lossy display projection of the account id
 /// (`MGO-XXXXXXXX`), which is why nothing persists it.
@@ -823,6 +825,7 @@ fn wire_profile(card: ProfileCard) -> UserProfile {
         username: card.username,
         display_name: card.display_name,
         avatar_url: None,
+        avatar_media_id: card.avatar_media_id,
         bio: card.bio,
         country: card.country,
         language: Some(card.locale),

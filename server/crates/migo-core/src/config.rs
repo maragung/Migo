@@ -561,6 +561,41 @@ impl Default for RateLimitConfig {
     }
 }
 
+/// The call signaling subsystem's knobs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CallsConfig {
+    /// How long a ring lives before expiring unanswered, in milliseconds.
+    pub ring_ttl_ms: i64,
+    /// TURN relay servers. Each entry has url, username, credential, ttl_seconds, region.
+    pub turn_servers: Vec<TurnServerConfig>,
+}
+
+/// One configured TURN relay, handed to clients verbatim by the call service.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnServerConfig {
+    /// The relay's STUN/TURN URL, as a client's ICE agent expects it.
+    pub url: String,
+    /// The shared username the credential authenticates.
+    pub username: String,
+    /// The secret material the relay validates; treated as a credential, never logged.
+    pub credential: String,
+    /// How long the credential stays valid, in seconds.
+    pub ttl_seconds: u32,
+    /// Where this relay sits, so a client can pick the nearest one.
+    pub region: String,
+}
+
+impl Default for CallsConfig {
+    fn default() -> Self {
+        Self {
+            ring_ttl_ms: 30_000,
+            turn_servers: Vec::new(),
+        }
+    }
+}
+
 /// The whole configuration.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -589,6 +624,8 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     /// The image captcha.
     pub captcha: CaptchaConfig,
+    /// Call signaling.
+    pub calls: CallsConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -869,6 +906,14 @@ impl Config {
             problems.push(
                 "rate_limit user burst and refill must both be greater than zero".to_string(),
             );
+        }
+
+        // --- calls ---
+        if !(5_000..=120_000).contains(&self.calls.ring_ttl_ms) {
+            problems.push(format!(
+                "calls.ring_ttl_ms must be within 5000..=120000, got {}",
+                self.calls.ring_ttl_ms
+            ));
         }
 
         // --- telemetry ---
@@ -1434,6 +1479,29 @@ mod tests {
         .expect("builds");
         let rendered = config.validate().expect_err("must refuse").to_string();
         assert!(rendered.contains("refresh_ttl_seconds"), "{rendered}");
+    }
+
+    #[test]
+    fn out_of_range_ring_ttls_are_rejected() {
+        let config = Config::from_sources(&[], &env(&[("MIGO_CALLS__RING_TTL_MS", "1000")]))
+            .expect("builds");
+        let rendered = config.validate().expect_err("must refuse").to_string();
+        assert!(rendered.contains("calls.ring_ttl_ms"), "{rendered}");
+    }
+
+    #[test]
+    fn a_configured_turn_server_round_trips() {
+        let config = Config::from_toml_str(
+            "[[calls.turn_servers]]\nurl = \"turn:relay.example:3478\"\nusername = \"migo\"\n\
+             credential = \"s3cret\"\nttl_seconds = 3600\nregion = \"ap-southeast-1\"\n",
+            &[],
+        )
+        .expect("builds");
+        config.validate().expect("a configured relay is valid");
+        assert_eq!(config.calls.ring_ttl_ms, 30_000);
+        assert_eq!(config.calls.turn_servers.len(), 1);
+        assert_eq!(config.calls.turn_servers[0].url, "turn:relay.example:3478");
+        assert_eq!(config.calls.turn_servers[0].ttl_seconds, 3600);
     }
 
     #[test]

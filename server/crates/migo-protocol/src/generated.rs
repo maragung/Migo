@@ -1509,6 +1509,8 @@ pub struct UserProfile {
     pub badges: Option<Vec<String>>,
     pub verified: Option<bool>,
     pub custom_status: Option<String>,
+    /// The avatar media object; clients fetch a short-lived URL for it.
+    pub avatar_media_id: Option<Id>,
 }
 
 impl Encode for UserProfile {
@@ -1526,7 +1528,8 @@ impl Encode for UserProfile {
             + usize::from(self.presence.is_some())
             + usize::from(self.badges.is_some())
             + usize::from(self.verified.is_some())
-            + usize::from(self.custom_status.is_some());
+            + usize::from(self.custom_status.is_some())
+            + usize::from(self.avatar_media_id.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.avatar_url {
             w.optional(1, |w| {
@@ -1587,6 +1590,12 @@ impl Encode for UserProfile {
                 Ok(())
             })?;
         }
+        if let Some(v) = &self.avatar_media_id {
+            w.optional(10, |w| {
+                w.write_id(v);
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -1623,6 +1632,7 @@ impl Decode for UserProfile {
                 }
                 8 => out.verified = Some(sub.read_bool()?),
                 9 => out.custom_status = Some(sub.read_string()?),
+                10 => out.avatar_media_id = Some(sub.read_id()?),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }

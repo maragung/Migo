@@ -1095,6 +1095,8 @@ data class UserProfile(
     val badges: List<String>? = null,
     val verified: Boolean? = null,
     val customStatus: String? = null,
+    /** The avatar media object; clients fetch a short-lived URL for it. */
+    val avatarMediaId: Id? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -1112,6 +1114,7 @@ data class UserProfile(
         if (badges != null) present++
         if (verified != null) present++
         if (customStatus != null) present++
+        if (avatarMediaId != null) present++
         w.u32(present)
         if (avatarUrl != null) {
             val value = avatarUrl
@@ -1168,6 +1171,12 @@ data class UserProfile(
                 w.str(value)
             }
         }
+        if (avatarMediaId != null) {
+            val value = avatarMediaId
+            w.optional(10) { w ->
+                w.id(value)
+            }
+        }
         w.leave()
     }
 
@@ -1187,6 +1196,7 @@ data class UserProfile(
             var badges: List<String>? = null
             var verified: Boolean? = null
             var customStatus: String? = null
+            var avatarMediaId: Id? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
@@ -1200,11 +1210,12 @@ data class UserProfile(
                     7L -> badges = run { val n = sub.listLen(); val acc = ArrayList<String>(n); for (i in 0 until n) acc.add(sub.str()); acc }
                     8L -> verified = sub.bool()
                     9L -> customStatus = sub.str()
+                    10L -> avatarMediaId = sub.id()
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return UserProfile(userId, publicId, username, displayName, avatarUrl, bio, country, language, level, presence, badges, verified, customStatus)
+            return UserProfile(userId, publicId, username, displayName, avatarUrl, bio, country, language, level, presence, badges, verified, customStatus, avatarMediaId)
         }
     }
 }

@@ -686,3 +686,39 @@ onIce) yang memfilter relay untuk perangkat ini. 12 test.
 Placeholder sealing (32-byte nol + 12-byte nol) untuk SDP/ICE — pola yang sama dengan
 lampiran gambar; enkripsi media E2E penuh adalah tugas tersendiri yang membutuhkan
 integrasi dengan session-crypto SDK.
+
+## 21. Audit pasca-v0.5.0: perbaikan gate, push, TURN, avatar, dan sembilan bug call (v0.5.1)
+
+Audit menyeluruh menemukan mesin signaling kokoh tetapi lingkungannya bolong. Semua P0
+dan P1 diperbaiki:
+
+**Server:**
+
+- **Gate izin panggilan**: `StoreCallGate` kini memegang `SharedSocial` dan memanggil
+  `may_interact(Interaction::Call)` — callee yang mengatur "nobody can call" tidak lagi
+  dibunyikan. Gagal ke arah menolak ( Blocked, tanpa baris tersimpan).
+- **Push incoming call**: handler invite mengirim notifikasi `IncomingCall` (actor=caller,
+  subject=call_id) ke callee via notifier — offline callee mendapat wake-up dan baris inbox.
+- **CallsConfig**: `ring_ttl_ms` (5-120 detik, divalidasi) + `turn_servers` kini
+  operator-configurable via `MIGO_CALLS__*`. `turn_servers()` mengembalikan dari config.
+- **Feature bit CALLS**: `FEATURES` kini `migo_protocol::features::CALLS` (bit 17) —
+  klien spec-conforming melihat tombol call.
+- **avatar_media_id di wire**: `UserProfile` menambah field optional `avatar_media_id`;
+  kedua proyeksi profile mengisinya dari `ProfileCard` yang sudah membawanya.
+
+**Web (9 bug call diperbaiki):**
+
+- **Phantom ring**: `handleStateEvent` kini menangani Ended untuk ring yang belum diterima —
+  batal/kedaluwarsa menghentikan ring dengan kartu "Missed call".
+- **Timeout caller**: timer lokal dari `expiresAt` auto-cancel dengan NoAnswer.
+- **Dedup invite**: redelivered invite diabaikan (bukan auto-decline Busy).
+- **Double-click**: `startingRef` synchronous menutup race; tidak ada mic/pc leak.
+- **Network death**: `endCall(Network)` dikirim ke server; `beforeunload` fire-and-forget.
+- **STUN/TURN**: `iceServersForCall` selalu menyertakan STUN fallback + TURN dari config.
+- **Blocked ≠ Declined**: status 3 menampilkan "Unavailable" (bukan "Declined").
+- **Avatar display**: `use-profiles` me-resolve `avatarMediaId` via media URL cache;
+  avatar tampil di sidebar, header chat, overlay call, daftar percakapan, friends panel,
+  dan update langsung setelah unggah.
+
+Verifikasi: 83 suite server, 132 test SDK, 187 test web, 14 gate, doc-link bersih,
+e2e dua-akun lulus.

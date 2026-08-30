@@ -703,6 +703,8 @@ export interface UserProfile {
   badges?: string[];
   verified?: boolean;
   customStatus?: string;
+  /** The avatar media object; clients fetch a short-lived URL for it. */
+  avatarMediaId?: Id;
 }
 
 export function encodeUserProfile(w: Writer, v: UserProfile): void {
@@ -721,6 +723,7 @@ export function encodeUserProfile(w: Writer, v: UserProfile): void {
   if (v.badges !== undefined) present++;
   if (v.verified !== undefined) present++;
   if (v.customStatus !== undefined) present++;
+  if (v.avatarMediaId !== undefined) present++;
   w.u32(present);
   if (v.avatarUrl !== undefined) { const value = v.avatarUrl; w.optional(1, (w) => { w.str(value); }); }
   if (v.bio !== undefined) { const value = v.bio; w.optional(2, (w) => { w.str(value); }); }
@@ -731,6 +734,7 @@ export function encodeUserProfile(w: Writer, v: UserProfile): void {
   if (v.badges !== undefined) { const value = v.badges; w.optional(7, (w) => { { w.listLen(value.length); for (const item of value) { w.str(item); } } }); }
   if (v.verified !== undefined) { const value = v.verified; w.optional(8, (w) => { w.bool(value); }); }
   if (v.customStatus !== undefined) { const value = v.customStatus; w.optional(9, (w) => { w.str(value); }); }
+  if (v.avatarMediaId !== undefined) { const value = v.avatarMediaId; w.optional(10, (w) => { w.id(value); }); }
   w.leave();
 }
 
@@ -754,6 +758,7 @@ export function decodeUserProfile(r: Reader): UserProfile {
       case 7: out.badges = ((): string[] => { const n = sub.listLen(); const v: string[] = []; for (let i = 0; i < n; i++) v.push(sub.str()); return v; })(); break;
       case 8: out.verified = sub.bool(); break;
       case 9: out.customStatus = sub.str(); break;
+      case 10: out.avatarMediaId = sub.id(); break;
       default: break; // unknown optional field: skipped by length
     }
   }

@@ -129,6 +129,14 @@ export interface ActiveCall {
   state: CallState;
   /** Present once {@link CallState.Ended}; the reason the call ended. */
   endReason?: CallEndReason;
+  /**
+   * The wire's `CallInviteResult.status` when the invite never rang (declined, expired, or the
+   * callee blocked the caller), kept as the raw number so the ended screen can state the
+   * distinction the wire drew — the reason enum has no Blocked member, and a blocked refusal is
+   * a different fact on the caller's screen than a declined one. Absent for every call that
+   * rang, and never sent back to the server: `endReason` is the wire-facing half of the fact.
+   */
+  inviteStatus?: number;
   /** Whether this device placed the call — decides whose "Decline"/"Cancel" button shows. */
   isCaller: boolean;
   /** When media first connected, in epoch milliseconds; absent until then. */
@@ -243,18 +251,24 @@ export class CallsDomain {
    *
    * The `callId` is minted here — client-minted ids are the protocol's idempotency key, so a
    * retried invite re-rings the same call rather than placing a second one — and is echoed in the
-   * {@link CallInviteResult}; track the call under that id. The result's `status` says whether the
-   * callee is being rung (`0`), or why not (declined, expired, blocked); `expiresAt` is the moment
-   * an unanswered invite ends itself with {@link CallEndReason.NoAnswer}.
+   * {@link CallInviteResult}; track the call under that id. A caller that needs the id *before*
+   * the invite lands (to fetch TURN relays for the peer connection that will produce the offer —
+   * `CALL_TURN_FETCH` must be addressed before the call exists server-side, and its handler
+   * charges nothing and reads no call state, so the id of the call about to be placed is the
+   * honest key) passes its own minted `callId`; the reply echoes whichever id was sent. The
+   * result's `status` says whether the callee is being rung (`0`), or why not (declined,
+   * expired, blocked); `expiresAt` is the moment an unanswered invite ends itself with
+   * {@link CallEndReason.NoAnswer}.
    */
   async invite(
     conversationId: Id,
     calleeId: Id,
     mediaKind: CallMediaKind,
     sealedOffer: Uint8Array,
+    callId?: Id,
   ): Promise<CallInviteResult> {
     const request = {
-      callId: newId(),
+      callId: callId ?? newId(),
       conversationId,
       calleeId,
       mediaKind,

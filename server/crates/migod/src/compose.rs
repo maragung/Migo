@@ -4,7 +4,7 @@
 //! domain service is handed its store, its cache, its rate limiter, and its ports; it never reaches
 //! out and constructs them. That discipline is what keeps the layering honest and the crates
 //! testable in isolation — and it has to be paid back somewhere. This module is where. [`App::build`]
-//! is the single place in the system that holds all twenty-one crates at once and connects them.
+//! is the single place in the system that holds all twenty-five crates at once and connects them.
 //!
 //! # Dependency order
 //!
@@ -63,9 +63,10 @@ use crate::dispatch::AppDispatcher;
 use crate::ports::{EconomyRewards, FsStorage, StaffRoster, StoreCallGate};
 
 /// The feature bits this node advertises to clients in the handshake and the `/v1/config`
-/// document. Zero for now: no optional protocol feature is gated behind a bit yet, so the node
-/// advertises the base protocol and nothing more.
-const FEATURES: u64 = 0;
+/// document. The CALLS bit: this build signals 1:1 calls end to end — the ring lifecycle
+/// and the sealed SDP/ICE relay — so a client that asks for calls in its `HELLO` negotiates
+/// them instead of timing out against a feature mask that never said they were there.
+const FEATURES: u64 = migo_protocol::features::CALLS;
 
 /// Bytes of ephemeral secret to mint when no node signing key is configured (development only).
 const EPHEMERAL_SECRET_LEN: usize = 32;
@@ -200,7 +201,7 @@ impl App {
     /// Builds the whole system from a validated [`Config`].
     ///
     /// Runs bottom-up: the registry and shutdown signal, the platform layer (the data store is
-    /// opened asynchronously; the cache and rate limiter are not), the eleven domain services with
+    /// opened asynchronously; the cache and rate limiter are not), the fourteen domain services with
     /// their ports and default tuning, then the gateway and the REST API over them. The only
     /// fallible steps are the ones that touch the outside world at startup — opening the store, the
     /// cache, the rate limiter, authentication, and bots — plus configuration validation and the
@@ -308,16 +309,34 @@ impl App {
         );
 
         // Calls: the ring state machine over its own store, asking the gate (backed by the
-        // conversation and block tables above) before one account may ring another. The store is
-        // the in-memory one — a call row's useful life is one ring, and the production backend
-        // plugs in behind the same trait. Expired invites are swept inside each invite rather
-        // than by a background task, so v1 needs no timer to keep the store free of dead rings.
+        // conversation, block, and social-graph tables above) before one account may ring
+        // another. The store is the in-memory one — a call row's useful life is one ring,
+        // and the production backend plugs in behind the same trait. Expired invites are
+        // swept inside each invite rather than by a background task, so v1 needs no timer
+        // to keep the store free of dead rings. The ring timeout and the TURN relays come
+        // from the core `[calls]` section, mapped onto the wire's TURN shape, so an
+        // operator tunes a ring without a recompile and a relayless deployment gets the
+        // honest empty list.
         let calls = migo_calls::open(
             Arc::new(MemoryCallStore::new()),
             limiter.clone(),
-            Arc::new(StoreCallGate::new(store.clone())),
+            Arc::new(StoreCallGate::new(store.clone(), social.clone())),
             &registry,
-            CallsConfig::default(),
+            CallsConfig {
+                ring_ttl_ms: config.calls.ring_ttl_ms,
+                turn_servers: config
+                    .calls
+                    .turn_servers
+                    .iter()
+                    .map(|server| migo_protocol::TurnServer {
+                        url: server.url.clone(),
+                        username: server.username.clone(),
+                        credential: server.credential.clone(),
+                        ttl_seconds: server.ttl_seconds,
+                        region: server.region.clone(),
+                    })
+                    .collect(),
+            },
         );
 
         // The default policy serves a bundle without a one-time prekey rather than refusing it: a

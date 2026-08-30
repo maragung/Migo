@@ -16,9 +16,10 @@
 //!   the seam that lets a finished game credit experience and a win confer a badge. It is the one
 //!   place two sibling domains (games and economy) meet, and by layering rule they meet only here,
 //!   in the composition root, never by depending on each other.
-//! - [`StoreCallGate`] implements [`migo_calls::CallGate`]: the membership and block questions the
-//!   call service must ask before it lets one account ring another. Calls cannot read those tables
-//!   themselves — same layering rule, same answer: the composition root decides, the domain asks.
+//! - [`StoreCallGate`] implements [`migo_calls::CallGate`]: the membership, block, and
+//!   social-graph questions the call service must ask before it lets one account ring
+//!   another. Calls cannot read those tables themselves — same layering rule, same answer:
+//!   the composition root decides, the domain asks.
 
 use std::collections::HashMap;
 use std::io::ErrorKind as IoErrorKind;
@@ -301,24 +302,36 @@ impl migo_api::MediaFiles for FsStorage {
 // `migo-calls` refuses to read the membership and block tables itself: by the
 // layering rule it cannot depend on the crates that own them, and a call is
 // the one request whose every rule is about *somebody else*. It asks through
-// the `CallGate` port instead, and this adapter answers from the store.
+// the `CallGate` port instead, and this adapter answers from the store and
+// the social graph.
 
-/// Answers the call service's gate questions from the process's own store.
+/// Answers the call service's gate questions from the process's own store and
+/// social graph.
 ///
-/// Both questions fail closed, in the direction that refuses contact: a
+/// Membership and blocks come from the store. The third question — whether
+/// the callee's own policy admits the caller — belongs to the social graph,
+/// which `migo-calls` cannot reach by the same layering rule that keeps it
+/// off the store, so the graph is held here and asked through
+/// [`Graph::may_interact`](migo_social::Graph::may_interact) with the caller
+/// the call service already proved.
+///
+/// Every question fails closed, in the direction that refuses contact: a
 /// store that cannot answer a membership question is a store that has not
-/// said "member", and one that cannot answer a block question is a store
-/// that has not said "not blocked". An outage then costs a call invitation,
-/// never a ring through a block.
+/// said "member", one that cannot answer a block question is a store that has
+/// not said "not blocked", and a graph that cannot answer the policy question
+/// is a graph that has not said "allowed". An outage then costs a call
+/// invitation, never a ring through a policy.
 pub struct StoreCallGate {
     store: migo_store::SharedStore,
+    social: migo_social::SharedSocial,
 }
 
 impl StoreCallGate {
-    /// Wraps the store the composition root already opened.
+    /// Wraps the store and the social graph the composition root already
+    /// opened.
     #[must_use]
-    pub fn new(store: migo_store::SharedStore) -> Self {
-        Self { store }
+    pub fn new(store: migo_store::SharedStore, social: migo_social::SharedSocial) -> Self {
+        Self { store, social }
     }
 }
 
@@ -333,6 +346,21 @@ impl CallGate for StoreCallGate {
 
     async fn blocked_either_way(&self, a: Id, b: Id) -> bool {
         self.store.is_blocked_either_way(a, b).await.unwrap_or(true)
+    }
+
+    async fn can_call(&self, caller: &migo_calls::Caller, callee_id: Id) -> bool {
+        // The social graph asks its questions of its own `Caller`, built here
+        // from the one the call service already proved: the same account, the
+        // same device, the same tier, and the same sampled `now`, so the
+        // graph answers for exactly this request rather than a reconstruction
+        // of it. `request_id` is the correlation a social opcode would carry;
+        // the gate has no frame of its own to correlate.
+        let who =
+            migo_social::Caller::new(caller.account_id, caller.device_id, caller.tier, caller.now);
+        self.social
+            .may_interact(&who, callee_id, migo_social::Interaction::Call)
+            .await
+            .is_ok()
     }
 }
 

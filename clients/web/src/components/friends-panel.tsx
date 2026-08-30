@@ -172,6 +172,7 @@ export function FriendsPanel(): ReactNode {
                     id={entry.userId}
                     name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
                     username={profiles.get(entry.userId)?.username}
+                    avatarUrl={profiles.get(entry.userId)?.avatarUrl}
                     note="wants to be friends"
                     actions={
                       <>
@@ -201,6 +202,7 @@ export function FriendsPanel(): ReactNode {
                     id={entry.userId}
                     name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
                     username={profiles.get(entry.userId)?.username}
+                    avatarUrl={profiles.get(entry.userId)?.avatarUrl}
                     note="request sent"
                   />
                 ))}
@@ -219,6 +221,7 @@ export function FriendsPanel(): ReactNode {
                   id={entry.userId}
                   name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
                   username={profiles.get(entry.userId)?.username}
+                  avatarUrl={profiles.get(entry.userId)?.avatarUrl}
                 />
               ))
             )}
@@ -295,14 +298,20 @@ interface PersonRowProps {
   name: string;
   username?: string;
   note?: string;
+  /**
+   * The person's avatar URL, when a resolved profile is available. Only the relationship rows
+   * have one — the wire's suggestions and search results carry no avatar, so those rows keep
+   * their initials.
+   */
+  avatarUrl?: string;
   actions?: ReactNode;
 }
 
 /** One person in a list: avatar, name, @username, an optional note, and optional actions. */
-function PersonRow({ id, name, username, note, actions }: PersonRowProps): ReactNode {
+function PersonRow({ id, name, username, note, avatarUrl, actions }: PersonRowProps): ReactNode {
   return (
     <div className="person-row">
-      <Avatar name={name} id={id} size={36} />
+      <Avatar name={name} id={id} size={36} avatarUrl={avatarUrl} />
       <div className="person-main">
         <span className="person-name">{name}</span>
         {username ? <span className="person-sub">@{username}</span> : null}

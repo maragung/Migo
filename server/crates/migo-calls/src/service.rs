@@ -368,7 +368,9 @@ where
 
         // The gate, asked in the order the refusals compound: membership
         // first (the caller's own standing, which they can fix), the block
-        // second (somebody else's decision, which they cannot).
+        // second (somebody else's decision, which they cannot), and the
+        // callee's call policy third — the same visibility choice they
+        // already make about messages, applied to the ring.
         if !self
             .gate
             .may_invite(invite.conversation_id, caller.account_id)
@@ -387,6 +389,22 @@ where
             // "blocked" renders as, and nothing is stored — a block that is
             // lifted tomorrow must not have left a call row behind that
             // answers a re-invite with a stale status today.
+            return Ok((
+                WireOutcome {
+                    status: crate::model::invite_status::BLOCKED,
+                    expires_at: caller.now,
+                },
+                None,
+            ));
+        }
+        if !self.gate.can_call(caller, invite.callee_id).await {
+            self.meters.invite(InviteOutcome::Blocked);
+            // The same outcome, deliberately, and for the same reason the
+            // block returns one: a callee whose policy excludes the caller
+            // and a callee who blocked them are the same answer on the
+            // caller's screen (brief section 180), and a policy widened
+            // tomorrow must not find a stored row answering a re-invite with
+            // today's refusal.
             return Ok((
                 WireOutcome {
                     status: crate::model::invite_status::BLOCKED,

@@ -7,6 +7,8 @@ import type { ProfileUpdate, UserProfile } from '@migo/sdk';
 
 import { friendlyError } from '@/lib/migo/errors.js';
 import { uploadAvatarMedia } from '@/lib/migo/media.js';
+import { cacheProfile, refreshProfile } from '@/lib/migo/use-profiles.js';
+import type { ResolvedProfile } from '@/lib/migo/use-profiles.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 
 import { Avatar } from './avatar.js';
@@ -64,7 +66,7 @@ const PRIVACY_FIELDS: ReadonlyArray<PrivacyField> = [
 export function ProfilePanel(): ReactNode {
   const { client, accountId } = useMigo();
 
-  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [profile, setProfile] = useState<ResolvedProfile | null>(null);
   const [displayName, setDisplayName] = useState('');
   const [bio, setBio] = useState('');
   const [privacy, setPrivacy] = useState<Record<PrivacyField['key'], string>>({
@@ -84,11 +86,12 @@ export function ProfilePanel(): ReactNode {
       return;
     }
     let cancelled = false;
-    client.profile
-      .fetchOne(accountId)
-      .then((fetched) => {
-        if (!cancelled && fetched !== null) {
-          setProfile(fetched);
+    // The load goes through the shared profile cache, so the panel's copy and every other
+    // surface (the sidebar's self avatar) are one fact, and the avatar arrives resolved.
+    refreshProfile(client, accountId)
+      .then((resolved) => {
+        if (!cancelled && resolved !== null) {
+          setProfile(resolved);
         }
       })
       .catch(() => {
@@ -125,11 +128,13 @@ export function ProfilePanel(): ReactNode {
     setSaved(false);
     try {
       const updated = await client.profile.updateProfile(patch);
-      // The reply is the authoritative profile; adopt it wholesale so the view never disagrees
-      // with the server about what was saved.
-      setProfile(updated);
-      setDisplayName(updated.displayName);
-      setBio(updated.bio ?? '');
+      // The reply is the authoritative profile; adopt it through the shared cache so the avatar
+      // URL is resolved and every other surface (the sidebar) moves with this save, not after a
+      // refetch it has no reason to make.
+      const resolved = await cacheProfile(client, updated);
+      setProfile(resolved);
+      setDisplayName(resolved.displayName);
+      setBio(resolved.bio ?? '');
       setPrivacy({
         showLastSeen: UNCHANGED,
         whoCanMessage: UNCHANGED,
@@ -147,8 +152,10 @@ export function ProfilePanel(): ReactNode {
    * Uploads a picked image as the new avatar, then patches the profile to point at it.
    *
    * The two steps are one action to the user, so the busy state covers both and a failure anywhere
-   * surfaces beside the picker that started it. The reply is the authoritative profile, adopted
-   * wholesale exactly like {@link save} does.
+   * surfaces beside the picker that started it. The reply is adopted through the shared cache
+   * exactly like {@link save} does — with the new avatar's URL resolved before the panel shows
+   * it, so the picture that appears is the one just uploaded, and the sidebar's self avatar
+   * follows the same write instead of showing the old picture until some later refetch.
    */
   const changeAvatar = useCallback(
     async (file: File): Promise<void> => {
@@ -161,9 +168,10 @@ export function ProfilePanel(): ReactNode {
       try {
         const mediaId = await uploadAvatarMedia(client, file);
         const updated = await client.profile.updateProfile({ avatarMediaId: mediaId });
-        setProfile(updated);
-        setDisplayName(updated.displayName);
-        setBio(updated.bio ?? '');
+        const resolved = await cacheProfile(client, updated);
+        setProfile(resolved);
+        setDisplayName(resolved.displayName);
+        setBio(resolved.bio ?? '');
         setSaved(true);
       } catch (cause) {
         setError(friendlyError(cause));

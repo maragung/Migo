@@ -90,11 +90,12 @@ fn invite(call_id: u128, callee: u128) -> CallInviteWire {
     }
 }
 
-/// The gate as a test needs it: a membership list and a block list, both
-/// answerable without a store.
+/// The gate as a test needs it: a membership list, a block list, and a list
+/// of callees the social graph refuses, all answerable without a store.
 struct TestGate {
     members: HashMap<Id, Vec<Id>>,
     blocked: Vec<(Id, Id)>,
+    unreachable: Vec<Id>,
 }
 
 impl TestGate {
@@ -103,6 +104,7 @@ impl TestGate {
         Self {
             members: HashMap::from([(id(CONVERSATION), vec![id(ALICE), id(BOB), id(CAROL)])]),
             blocked: Vec::new(),
+            unreachable: Vec::new(),
         }
     }
 
@@ -114,11 +116,21 @@ impl TestGate {
         }
     }
 
+    /// The same, with the graph refusing Bob as a callee: Bob's call policy
+    /// excludes Alice, exactly as `may_interact(Interaction::Call)` would.
+    fn refused() -> Self {
+        Self {
+            unreachable: vec![id(BOB)],
+            ..Self::open()
+        }
+    }
+
     /// Nobody may call: the conversation is closed to the caller.
     fn closed() -> Self {
         Self {
             members: HashMap::new(),
             blocked: Vec::new(),
+            unreachable: Vec::new(),
         }
     }
 }
@@ -133,6 +145,10 @@ impl CallGate for TestGate {
 
     async fn blocked_either_way(&self, a: Id, b: Id) -> bool {
         self.blocked.contains(&(a, b)) || self.blocked.contains(&(b, a))
+    }
+
+    async fn can_call(&self, _caller: &migo_calls::Caller, callee_id: Id) -> bool {
+        !self.unreachable.contains(&callee_id)
     }
 }
 
@@ -150,6 +166,10 @@ impl Harness {
 
     fn blocked() -> Self {
         Self::gated(TestGate::with_block())
+    }
+
+    fn refused() -> Self {
+        Self::gated(TestGate::refused())
     }
 
     fn closed() -> Self {
@@ -273,6 +293,24 @@ async fn a_blocked_invite_never_rings_and_stores_nothing() {
     assert!(event.is_none());
     // Nothing stored. A block lifted tomorrow must not leave a call row that
     // answers a re-invite with a stale status today.
+    assert!(harness.store.get(id(CALL)).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_graph_refusal_never_rings_and_stores_nothing() {
+    let harness = Harness::refused();
+    let (outcome, event) = harness
+        .calls
+        .invite(&alice(NOW), invite(CALL, BOB))
+        .await
+        .unwrap();
+    // The callee's policy excludes the caller, and the answer is the same
+    // one a block produces: a refused call is indistinguishable from a
+    // missing one (brief section 180), on the caller's screen and in the
+    // store alike.
+    assert_eq!(outcome.status, invite_status::BLOCKED);
+    assert_eq!(outcome.expires_at, ts(NOW));
+    assert!(event.is_none());
     assert!(harness.store.get(id(CALL)).await.unwrap().is_none());
 }
 

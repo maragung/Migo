@@ -10,7 +10,6 @@ import type {
   IncomingMessage,
   MessageContent,
   MessageEvent,
-  UserProfile,
 } from '@migo/sdk';
 
 import { formatRelative } from '@/lib/format.js';
@@ -20,6 +19,7 @@ import { useMigo } from '@/lib/migo/use-migo.js';
 import { useRooms } from '@/lib/migo/rooms-provider.js';
 import type { RoomInfo } from '@/lib/migo/rooms-provider.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
+import type { ResolvedProfile } from '@/lib/migo/use-profiles.js';
 import { conversationHref, useOpenConversation } from '@/lib/migo/use-open-conversation.js';
 
 import { Avatar } from './avatar.js';
@@ -214,7 +214,7 @@ function Row({ summary, peerName, peerAvatarUrl, subtitle, active, unread }: Row
 function subtitleFor(
   summary: ConversationSummary,
   selfId: Id | null,
-  profiles: ReadonlyMap<Id, UserProfile>,
+  profiles: ReadonlyMap<Id, ResolvedProfile>,
   lastPreviews: ReadonlyMap<Id, IncomingMessage>,
   room: RoomInfo | null = null,
 ): string {
@@ -239,7 +239,7 @@ function subtitleFor(
 function peerNameFor(
   summary: ConversationSummary,
   selfId: Id | null,
-  profiles: Map<Id, UserProfile>,
+  profiles: ReadonlyMap<Id, ResolvedProfile>,
   room: RoomInfo | null = null,
 ): string {
   if (summary.kind === ConversationKind.Direct) {
@@ -255,10 +255,15 @@ function peerNameFor(
   return 'Group';
 }
 
+/**
+ * The row's avatar image: a 1:1's peer through their resolved profile, any other conversation
+ * through the summary's own avatar field (a room picture the server holds; that field is the
+ * conversation's, not the profile's, and is unaffected by the profile avatar migration).
+ */
 function peerAvatarFor(
   summary: ConversationSummary,
   selfId: Id | null,
-  profiles: Map<Id, UserProfile>,
+  profiles: ReadonlyMap<Id, ResolvedProfile>,
 ): string | undefined {
   if (summary.kind === ConversationKind.Direct) {
     const other = summary.members?.find((member) => member !== selfId);

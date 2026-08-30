@@ -23,7 +23,7 @@
  */
 
 import { CallEndReason, CallMediaKind, CallState } from '@migo/sdk';
-import type { ActiveCall } from '@migo/sdk';
+import type { ActiveCall, CallInviteEvent, CallStateEvent, Id } from '@migo/sdk';
 
 /** The envelope version this build writes; an unknown version refuses to open rather than guessing. */
 const SEAL_VERSION = 1;
@@ -203,6 +203,115 @@ export function endReasonLabel(reason: CallEndReason | undefined): string {
     default:
       return 'Call ended';
   }
+}
+
+// --- the invite's verdict, before any call exists ---
+
+/** The wire's `CallInviteResult.status`: the invite is out and the callee is being rung. */
+export const INVITE_RINGING = 0;
+/** The wire's `CallInviteResult.status`: a callee (or their settings) refused the invite. */
+export const INVITE_DECLINED = 1;
+/** The wire's `CallInviteResult.status`: the invite expired before anyone answered. */
+export const INVITE_EXPIRED = 2;
+/** The wire's `CallInviteResult.status`: a block or call policy excludes the caller. */
+export const INVITE_BLOCKED = 3;
+
+/**
+ * The ended reason for an invite that never rang.
+ *
+ * Expired is {@link CallEndReason.NoAnswer}; every other refusal is {@link
+ * CallEndReason.Declined}, because the wire's reason enum has no Blocked member. The distinction
+ * the wire did draw — blocked — rides on the tracked call as its raw `inviteStatus` for the
+ * screen to read through {@link endedReasonLine}.
+ */
+export function inviteEndReason(status: number): CallEndReason {
+  return status === INVITE_EXPIRED ? CallEndReason.NoAnswer : CallEndReason.Declined;
+}
+
+/**
+ * The reason line an ended call shows, including the one distinction the reason enum cannot
+ * carry: a blocked refusal.
+ *
+ * The server answers a block and a call policy that excludes the caller with the same status,
+ * deliberately, so the word must not say which it was — but it must still differ from a human's
+ * "Declined", which is a different fact before the caller decides what to do next.
+ */
+export function endedReasonLine(call: ActiveCall): string {
+  if (call.inviteStatus === INVITE_BLOCKED) {
+    return 'Unavailable';
+  }
+  return endReasonLabel(call.endReason);
+}
+
+// --- the ring's lifecycle ---
+
+/**
+ * How long the caller's own ring screen waits before ending the call locally, measured from the
+ * invite reply's `expiresAt`.
+ *
+ * The server sweeps its own expiry, but its `Ended` event can be late or lost; this mirror is
+ * what guarantees a "Calling…" screen never outlives the invite. Clamped at zero so a reply that
+ * arrived late (or a clock that disagrees with the server) fires the mirror at once rather than
+ * scheduling a negative delay.
+ */
+export function ringTimeoutMs(expiresAt: number, now: number): number {
+  return Math.max(0, expiresAt - now);
+}
+
+/**
+ * Whether a state event retires the inbound ring it names: an `Ended` for the call this device
+ * is being rung for and has not answered.
+ *
+ * The caller canceled (or the invite expired on the server); without this check the callee's
+ * ring outlives the call it belongs to, because a ringing inbound call is tracked only as the
+ * incoming invite — there is no active call for a state event to land on.
+ */
+export function endsRingingCall(event: CallStateEvent, ringingCallId: Id | null): boolean {
+  return (
+    ringingCallId !== null &&
+    event.callId === ringingCallId &&
+    callStateOf(event.state) === CallState.Ended
+  );
+}
+
+/** What the call manager does with an inbound invite. */
+export type IncomingInviteDisposition = 'ring' | 'ignore' | 'decline-busy';
+
+/** What the manager needs to know about this device's calls to place a new invite. */
+export interface IncomingCallOccupancy {
+  /** The call currently ringing inbound, when one is showing. */
+  ringingCallId: Id | null;
+  /** The tracked call, live or just ended and still on screen. */
+  activeCallId: Id | null;
+  /** Whether the tracked call still occupies this device — an ended screen does not. */
+  busy: boolean;
+}
+
+/**
+ * Places an inbound invite against this device's occupancy.
+ *
+ * At-least-once delivery of Critical frames makes a redelivered invite expected, not news: one
+ * naming the ring already showing — or the call already answered, or already over — is ignored,
+ * because declining it would hang up the very call the user is being rung for or is in. A
+ * *different* call while this device is occupied is answered `Busy`, which stops the new caller's
+ * ring without implying a human refusal. An invite that expired in flight (a push that woke this
+ * device too late) rings nobody at all.
+ */
+export function incomingInviteDisposition(
+  event: CallInviteEvent,
+  occupancy: IncomingCallOccupancy,
+  now: number,
+): IncomingInviteDisposition {
+  if (event.expiresAt <= now) {
+    return 'ignore';
+  }
+  if (event.callId === occupancy.ringingCallId || event.callId === occupancy.activeCallId) {
+    return 'ignore';
+  }
+  if (occupancy.busy || occupancy.ringingCallId !== null) {
+    return 'decline-busy';
+  }
+  return 'ring';
 }
 
 /** "voice call" or "video call", for the incoming screen's second line and the accept button's label. */

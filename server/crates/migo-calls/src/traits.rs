@@ -13,13 +13,14 @@
 //! # The gate
 //!
 //! Brief section 180 makes a refused call indistinguishable from a missing
-//! one, and the facts that decide a refusal — membership, a block — belong to
-//! other domains. [`CallGate`] is the two questions this crate needs answered,
-//! asked as questions, so that the answers arrive pre-checked: the composition
-//! root wires them to the store and the social graph, and a test wires them to
-//! a closure. This crate deliberately cannot read either table itself, which
-//! is what keeps the layering rule (no layer-3 crate depends on another)
-//! intact around the one domain whose every request is about *somebody else*.
+//! one, and the facts that decide a refusal — membership, a block, the
+//! callee's own call policy — belong to other domains. [`CallGate`] is the
+//! questions this crate needs answered, asked as questions, so that the
+//! answers arrive pre-checked: the composition root wires them to the store
+//! and the social graph, and a test wires them to a closure. This crate
+//! deliberately cannot read either table itself, which is what keeps the
+//! layering rule (no layer-3 crate depends on another) intact around the one
+//! domain whose every request is about *somebody else*.
 //!
 //! # What [`Callkeeper::call`] is for
 //!
@@ -40,11 +41,11 @@ use crate::model::{Call, CallIceWire, CallInviteWire, CallSdpWire, Caller, TurnS
 /// The questions the call service must ask another domain, answered by the
 /// composition root.
 ///
-/// Both methods answer with a `bool` rather than a `Result` on purpose: an
+/// Every method answers with a `bool` rather than a `Result` on purpose: an
 /// authority that cannot answer is an authority whose failure is a policy
 /// decision, and the *caller of the gate* is the one who has to live with
-/// that decision. Fail closed — "not a member", "blocked" — is the only
-/// posture either question supports.
+/// that decision. Fail closed — "not a member", "blocked", "not allowed" —
+/// is the only posture any question here supports.
 #[async_trait]
 pub trait CallGate: Send + Sync {
     /// Whether `caller_id` may place a call inside `conversation_id`.
@@ -59,6 +60,18 @@ pub trait CallGate: Send + Sync {
     /// The block is symmetric and either direction stops the call — the same
     /// rule `migo-social` enforces for messages, applied to the ring.
     async fn blocked_either_way(&self, a: Id, b: Id) -> bool;
+
+    /// Whether the social graph lets `caller` ring `callee_id` at all.
+    ///
+    /// The callee's own call policy and friendship standing, which
+    /// `migo-social` already answers for every other kind of contact; a ring
+    /// must not be the one path that skips it. Asked with the whole
+    /// [`Caller`] — account, device, tier, and the request's `now` — because
+    /// the graph's answer is about a person making a request, not about two
+    /// bare ids. `false` fails closed: the invite is refused exactly as a
+    /// block refuses it, so the caller cannot tell a policy from a block
+    /// (brief section 180).
+    async fn can_call(&self, caller: &Caller, callee_id: Id) -> bool;
 }
 
 /// A shared, fully erased gate.
@@ -83,6 +96,10 @@ impl CallGate for OpenGate {
 
     async fn blocked_either_way(&self, _a: Id, _b: Id) -> bool {
         false
+    }
+
+    async fn can_call(&self, _caller: &Caller, _callee_id: Id) -> bool {
+        true
     }
 }
 

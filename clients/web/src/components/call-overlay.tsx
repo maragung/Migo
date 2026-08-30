@@ -35,11 +35,12 @@ import {
   callMediaKindOf,
   callStateLabel,
   displayStateOf,
-  endReasonLabel,
+  endedReasonLine,
   formatCallDuration,
   mediaKindLabel,
 } from '@/lib/migo/call-signal.js';
 import { useCall } from '@/lib/migo/call-manager.js';
+import { MISSED_CALL_MESSAGE } from '@/lib/migo/call-manager.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
 
 import { Avatar } from './avatar.js';
@@ -185,7 +186,7 @@ export function CallScreen({
         <div className="call-name">{peerName}</div>
         {display === 'ended' ? (
           <div className="call-reason" aria-live="polite">
-            {endReasonLabel(call.endReason)}
+            {endedReasonLine(call)}
           </div>
         ) : (
           <div className="call-status" aria-live="polite">
@@ -263,21 +264,24 @@ export function CallScreen({
   );
 }
 
-/** The small card for a call that could not even be placed: the fact, and a way past it. */
+/**
+ * The small card for a call that could not even be placed: the fact, and a way past it. The
+ * label distinguishes the one message that is a notice rather than a failure — the missed-call
+ * note the manager leaves when an inbound ring retires — so a screen reader names the dialog
+ * for what it is.
+ */
 export function CallErrorCard({
   message,
   onDismiss,
+  label = 'Call failed',
 }: {
   message: string;
   onDismiss: () => void;
+  /** The dialog's accessible name; defaults to the placement-failure reading. */
+  label?: string;
 }): ReactNode {
   return (
-    <div
-      className="call-overlay error"
-      role="alertdialog"
-      aria-modal="true"
-      aria-label="Call failed"
-    >
+    <div className="call-overlay error" role="alertdialog" aria-modal="true" aria-label={label}>
       <div className="call-identity">
         <div className="emoji" aria-hidden="true">
           ⚠️
@@ -363,7 +367,15 @@ export function CallOverlay(): ReactNode {
   }
 
   if (callError !== null) {
-    return <CallErrorCard message={callError} onDismiss={dismissCall} />;
+    // The missed-call note is a notice about a call that ended elsewhere, not a placement
+    // failure; the label keeps the two facts apart for a screen reader.
+    return (
+      <CallErrorCard
+        message={callError}
+        onDismiss={dismissCall}
+        label={callError === MISSED_CALL_MESSAGE ? MISSED_CALL_MESSAGE : undefined}
+      />
+    );
   }
   return null;
 }

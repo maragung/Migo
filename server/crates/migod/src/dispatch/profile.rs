@@ -181,6 +181,7 @@ fn wire_profile(card: migo_social::model::ProfileCard) -> UserProfile {
         username: card.username,
         display_name: card.display_name,
         avatar_url: None,
+        avatar_media_id: card.avatar_media_id,
         bio: card.bio,
         country: card.country,
         language: Some(card.locale),

@@ -256,6 +256,13 @@
      "type": "string",
      "optional": true,
      "id": 9
+    },
+    {
+     "name": "avatar_media_id",
+     "type": "id",
+     "optional": true,
+     "id": 10,
+     "doc": "The avatar media object; clients fetch a short-lived URL for it."
     }
    ]
   },

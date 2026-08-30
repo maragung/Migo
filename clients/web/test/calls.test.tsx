@@ -36,21 +36,32 @@ import { CallErrorCard, CallScreen } from '../src/components/call-overlay.js';
 import type { CallScreenProps } from '../src/components/call-overlay.js';
 import { CallButtons } from '../src/components/call-buttons.js';
 import { callPeerFor } from '../src/components/chat-window.js';
-import { CallManagerProvider, useCall } from '../src/lib/migo/call-manager.js';
+import { CallManagerProvider, iceServersForCall, useCall } from '../src/lib/migo/call-manager.js';
+import type { TurnClient } from '../src/lib/migo/call-manager.js';
 import {
   CallSignalFormatError,
+  INVITE_BLOCKED,
+  INVITE_DECLINED,
+  INVITE_EXPIRED,
+  INVITE_RINGING,
   decodeIceBatch,
   decodeSdpDescription,
   displayStateOf,
   encodeIceBatch,
   encodeSdpDescription,
+  endedReasonLine,
+  endsRingingCall,
   endReasonLabel,
   formatCallDuration,
+  incomingInviteDisposition,
+  inviteEndReason,
   mediaKindLabel,
   openCallSignal,
+  ringTimeoutMs,
   sealCallSignal,
 } from '../src/lib/migo/call-signal.js';
 import { MigoContext } from '../src/lib/migo/provider.js';
+import type { TurnServer } from '@migo/sdk';
 
 const ME = 'me' as Id;
 const ADA = 'ada' as Id;
@@ -422,4 +433,182 @@ test('the call manager context starts with no call, no invite, and its actions b
   assert.ok(markup.includes('data-muted="false"'));
   assert.ok(markup.includes('data-ended="true"'));
   assert.ok(markup.includes('bound'), 'the manager must expose every action the UI calls');
+});
+
+// --- the ring's lifecycle: redelivery, expiry, and the phantom ring ---
+
+test('the invite status vocabulary is the wire\u2019s: 0 ringing, 1 declined, 2 expired, 3 blocked', () => {
+  assert.equal(INVITE_RINGING, 0);
+  assert.equal(INVITE_DECLINED, 1);
+  assert.equal(INVITE_EXPIRED, 2);
+  assert.equal(INVITE_BLOCKED, 3);
+});
+
+/** The occupancy facts the manager reads when an invite lands, for the disposition tests below. */
+function occupancy(
+  ringingCallId: Id | null,
+  activeCallId: Id | null = null,
+  busy = activeCallId !== null,
+): { ringingCallId: Id | null; activeCallId: Id | null; busy: boolean } {
+  return { ringingCallId, activeCallId, busy };
+}
+
+test('a redelivered invite for the ring already showing is ignored, never declined', () => {
+  // Critical frames are delivered at least once: the second copy of the invite that is ringing
+  // right now is the expected one, and declining it would hang up the call the user is being
+  // rung for.
+  assert.equal(incomingInviteDisposition(incomingCall(), occupancy(CALL), NOW), 'ignore');
+  // A genuinely different call while a ring shows is the busy case, and it must be declined.
+  assert.equal(
+    incomingInviteDisposition(
+      { ...incomingCall(), callId: 'call_busy' as Id },
+      occupancy(CALL),
+      NOW,
+    ),
+    'decline-busy',
+  );
+});
+
+test('a redelivered invite for the call already answered is ignored, and an ended call blocks nothing', () => {
+  assert.equal(
+    incomingInviteDisposition(incomingCall(), occupancy(null, CALL, true), NOW),
+    'ignore',
+  );
+  // A call that just ended and is still on screen does not occupy the device: a new call rings.
+  assert.equal(
+    incomingInviteDisposition(
+      { ...incomingCall(), callId: 'call_next' as Id },
+      occupancy(null, CALL, false),
+      NOW,
+    ),
+    'ring',
+  );
+  // But a different call while a live one runs is busy, as ever.
+  assert.equal(
+    incomingInviteDisposition(
+      { ...incomingCall(), callId: 'call_other' as Id },
+      occupancy(null, CALL, true),
+      NOW,
+    ),
+    'decline-busy',
+  );
+});
+
+test('an invite that expired in flight rings nobody; a fresh one with the device free rings', () => {
+  const stale = { ...incomingCall(), expiresAt: NOW - 1 };
+  assert.equal(incomingInviteDisposition(stale, occupancy(null), NOW), 'ignore');
+  assert.equal(incomingInviteDisposition(incomingCall(), occupancy(null), NOW), 'ring');
+});
+
+test('an Ended for the ringing call retires the ring; any other state event does not', () => {
+  const ended = { callId: CALL, state: 4, reason: 0 };
+  assert.ok(endsRingingCall(ended, CALL), 'the caller canceling must stop the callee\u2019s ring');
+  assert.ok(!endsRingingCall({ ...ended, callId: 'call_other' as Id }, CALL));
+  assert.ok(!endsRingingCall(ended, null), 'with no ring showing there is nothing to retire');
+  assert.ok(
+    !endsRingingCall({ ...ended, state: 1 }, CALL),
+    'a Connecting event for the ring is not an end',
+  );
+});
+
+test('the caller\u2019s local ring timeout mirrors the invite expiry, floored at zero', () => {
+  assert.equal(ringTimeoutMs(NOW + 45_000, NOW), 45_000);
+  assert.equal(
+    ringTimeoutMs(NOW - 10_000, NOW),
+    0,
+    'a reply that arrived late must fire the mirror at once, never a negative delay',
+  );
+});
+
+test('a blocked invite refusal is a distinct fact on the caller\u2019s ended screen', () => {
+  // The reason enum has no Blocked member: every non-expired refusal is Declined on the wire
+  // side, and the raw status rides along for the screen.
+  assert.equal(inviteEndReason(INVITE_DECLINED), CallEndReason.Declined);
+  assert.equal(inviteEndReason(INVITE_EXPIRED), CallEndReason.NoAnswer);
+  assert.equal(inviteEndReason(INVITE_BLOCKED), CallEndReason.Declined);
+
+  const blocked = activeCall({
+    state: CallState.Ended,
+    endReason: CallEndReason.Declined,
+    inviteStatus: INVITE_BLOCKED,
+  });
+  assert.equal(endedReasonLine(blocked), 'Unavailable');
+  assert.equal(
+    endedReasonLine(
+      activeCall({
+        state: CallState.Ended,
+        endReason: CallEndReason.Declined,
+        inviteStatus: INVITE_DECLINED,
+      }),
+    ),
+    'Declined',
+  );
+  assert.equal(
+    endedReasonLine(activeCall({ state: CallState.Ended, endReason: CallEndReason.Network })),
+    'Connection lost',
+  );
+
+  // The screen itself: the caller who was blocked sees the distinct word, never "Declined".
+  const markup = screen({ call: blocked });
+  assert.ok(markup.includes('Unavailable'));
+  assert.ok(!markup.includes('Declined'), 'a blocked refusal must not read as a human decline');
+});
+
+test('the missed-call note is a notice, labelled as one, not a placement failure', () => {
+  const markup = renderToStaticMarkup(
+    <CallErrorCard message="Missed call" onDismiss={() => {}} label="Missed call" />,
+  );
+  assert.ok(markup.includes('Missed call'));
+  assert.ok(markup.includes('aria-label="Missed call"'));
+});
+
+// --- the peer connection's ICE servers ---
+
+test('ICE servers map the TURN relays and always keep the public STUN fallback', async () => {
+  const requested: Id[] = [];
+  const client: TurnClient = {
+    calls: {
+      getTurnServers: (callId: Id) => {
+        requested.push(callId);
+        const servers: TurnServer[] = [
+          {
+            url: 'turn:relay.example.test:3478',
+            username: 'caller',
+            credential: 'secret',
+            ttlSeconds: 300,
+            region: 'eu',
+          },
+          {
+            url: 'turn:anon.example.test:3478',
+            username: '',
+            credential: '',
+            ttlSeconds: 300,
+            region: 'us',
+          },
+        ];
+        return Promise.resolve(servers);
+      },
+    },
+  };
+  assert.deepEqual(await iceServersForCall(client, CALL), [
+    { urls: 'turn:relay.example.test:3478', username: 'caller', credential: 'secret' },
+    { urls: 'turn:anon.example.test:3478' },
+    { urls: 'stun:stun.l.google.com:19302' },
+  ]);
+  assert.deepEqual(requested, [CALL], 'the relays must be fetched for the call they serve');
+});
+
+test('a TURN list that fails or comes back empty still leaves the STUN fallback', async () => {
+  const failing: TurnClient = {
+    calls: { getTurnServers: () => Promise.reject(new Error('relay config unreachable')) },
+  };
+  assert.deepEqual(await iceServersForCall(failing, CALL), [
+    { urls: 'stun:stun.l.google.com:19302' },
+  ]);
+  const empty: TurnClient = {
+    calls: { getTurnServers: () => Promise.resolve([]) },
+  };
+  assert.deepEqual(await iceServersForCall(empty, CALL), [
+    { urls: 'stun:stun.l.google.com:19302' },
+  ]);
 });
