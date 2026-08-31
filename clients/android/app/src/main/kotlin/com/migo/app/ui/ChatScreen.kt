@@ -56,6 +56,8 @@ fun ChatScreen(
     onBack: () -> Unit,
     onDraft: (String) -> Unit,
     onSend: () -> Unit,
+    /** Leaves the room behind this chat, offered only when the chat is a room this shell knows. */
+    onLeave: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -71,7 +73,7 @@ fun ChatScreen(
     }
 
     Column(modifier = modifier.fillMaxSize()) {
-        ChatHeader(chat = chat, onBack = onBack)
+        ChatHeader(chat = chat, onBack = onBack, onLeave = onLeave)
 
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             when {
@@ -116,7 +118,7 @@ fun ChatScreen(
 }
 
 @Composable
-private fun ChatHeader(chat: ChatState, onBack: () -> Unit) {
+private fun ChatHeader(chat: ChatState, onBack: () -> Unit, onLeave: (() -> Unit)?) {
     Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(end = 16.dp, top = 8.dp, bottom = 8.dp),
@@ -137,10 +139,15 @@ private fun ChatHeader(chat: ChatState, onBack: () -> Unit) {
                     maxLines = 1,
                 )
                 Text(
-                    text = "Encrypted end to end",
+                    text = if (chat.roomId != null) "Room" else "Encrypted end to end",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+            if (chat.roomId != null && onLeave != null) {
+                TextButton(onClick = onLeave) {
+                    Text("Leave", color = MaterialTheme.colorScheme.error)
+                }
             }
         }
     }

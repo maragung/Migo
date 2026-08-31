@@ -77,7 +77,8 @@ sealed interface AppState {
         /** A transient failure banner: a send that did not go, a page that did not load. */
         val failure: String? = null,
         /** The destination on screen; Home is where a session starts. */
-        val section: Section = Section.HOME,
+        /** Chats is where a session starts: the messenger's own first screen, not a dashboard. */
+        val section: Section = Section.CHATS,
         val home: HomeState = HomeState(),
         val rooms: RoomsState = RoomsState(),
         val space: SpaceState = SpaceState(),
@@ -208,6 +209,12 @@ data class ConversationRow(
      */
     val title: String,
     val kind: ConversationKind,
+    /**
+     * The room behind a Room-kind conversation, when this shell knows one (a join or a create
+     * named it). The leave affordance needs it: leaving is a room-service call, not a
+     * conversation one.
+     */
+    val roomId: Id? = null,
     /** The last message, as a short line. Null when the conversation has no readable message yet. */
     val preview: String? = null,
     /** `lastSeq - readSeq`, floored at zero. */
@@ -220,6 +227,8 @@ data class ConversationRow(
 data class ChatState(
     val conversationId: Id,
     val title: String,
+    /** The room behind a Room-kind chat, when the shell knows one; the Leave control needs it. */
+    val roomId: Id? = null,
     /** Oldest first: the order they are drawn in, and the order history must be replayed in. */
     val messages: List<ChatMessage> = emptyList(),
     /** True while history is being fetched and decrypted. */

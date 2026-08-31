@@ -1,475 +1,347 @@
-# MIGO — COMPLETE CROSS-PLATFORM UI/UX REDESIGN
+# MIGO — COMPLETE CROSS-PLATFORM MESSENGER UI/UX REDESIGN
 
-## Unified Web + Desktop + Tablet + Android + iOS Experience
+Redesign the entire Migo client UI/UX.
 
-Redesign and implement the complete Migo frontend into a single, cohesive, production-quality cross-platform experience.
+IMPORTANT:
+The current implementation looks like a generic modern SaaS dashboard with a large permanent sidebar and excessive empty space.
 
-The goal is to create ONE Migo product experience that works consistently across:
+THIS IS WRONG.
 
-- Mobile Web
-- Android
-- iOS
-- Tablet
-- Desktop Web
-- Desktop applications if applicable
+The target experience must be a:
 
-Do NOT create separate visual identities for each platform.
+- Messenger
+- Contact/social client
+- Private chat application
+- Public chat-room application
+- Realtime community application
 
-Use one unified Migo Design System, one component architecture, one information architecture, and one UX language.
+It must NOT look like:
 
-The interface should intelligently adapt to screen size while maintaining the same identity and interaction principles.
+- SaaS dashboard
+- Admin panel
+- Productivity application
+- Generic AI-generated dashboard
+- Generic Discord clone
+- Generic Telegram clone
+- Generic WhatsApp clone
 
----
+The primary visual and UX identity must be based on a compact, information-dense, classic mobile-messenger interaction model, but redesigned as an original modern Migo product.
 
-# IMPORTANT — VISUAL REFERENCE MATERIAL
+Do not mention or copy any existing product branding, logo, artwork, proprietary assets, or exact copyrighted UI.
 
-Before implementing the UI, inspect and study these visual/reference sources.
+Use the following historical screenshots/references ONLY to understand:
 
-These are REFERENCE MATERIAL ONLY.
+- information density
+- contact-list architecture
+- presence indicators
+- chat interaction
+- room interaction
+- tabs
+- compact menus
+- profile presentation
+- mobile navigation
+- efficient use of screen space
 
-Do NOT copy branding, logos, copyrighted assets, names, proprietary artwork, or exact visual assets.
-
-Use them to understand:
-
-- Information density
-- Compact mobile layouts
-- Navigation hierarchy
-- Contact-list design
-- Chat-room organization
-- Messaging UX
-- Presence indicators
-- Menus
-- Tabs
-- Profile presentation
-- Social interaction patterns
-- Small-screen information architecture
-- Efficient use of limited screen space
-
-## PRIMARY VISUAL REFERENCES
-
-### Reference 1 — Historical mobile client / version archive
+REFERENCE MATERIAL:
 
 https://mymig33pc2.blogspot.com/p/mig33-official-versions-13.html
 
-Study the sections describing the mobile and touch versions.
-
-The archive specifically documents:
-
-- Java MIDP client
-- Version 4.6
-- Touch Phones version
-- Full mobile feature set
-- Mobile-first usage
-
----
-
-### Reference 2 — Mobile UI / feature documentation
-
 https://mig33indonesian.blogspot.com/2013/06/mig33-original.html
-
-Study this for the historical mobile interaction philosophy.
-
-Pay particular attention to:
-
-- Lightweight client
-- Mobile chat
-- Tabbed navigation
-- Fast access to features
-- Mobile gaming
-- Low data usage
-- Compact navigation
-
----
-
-### Reference 3 — 240×320 Java mobile UI archive
 
 https://mobile.phoneky.com/java-software/?q=Editor+Mod+MIG&v=3
 
-Use this as a visual reference for the constraints of classic small-screen mobile applications.
-
-Important:
-
-The catalog contains entries such as:
-
-- Mig33 v4.6
-- Mig33v4.6
-- Mig 33 v46
-- Mig 33 v46 Touch
-
-and identifies these applications around the 240×320 form factor.
-
-Study the screenshots/previews available from these listings.
-
----
-
-### Reference 4 — Historical UI feature documentation
-
 https://mymig33pc2.blogspot.com/2012/01/feature-user-friendly-interface-color.html
-
-Study the documented interaction model, especially:
-
-- Contact list
-- Presence sorting
-- User status
-- View profile
-- Private chat
-- Room chat
-- Room tabs
-- Settings tabs
-- Popup notifications
-- User activity
-- Room interaction
-- Compact menus
-- Touch interactions
-
-This source is especially useful for understanding the original information architecture.
-
----
-
-### Reference 5 — Additional historical mobile screenshots
 
 https://mig33-malinau.blogspot.com/2010/06/mig33-v430-officially-unreleased-mobile.html
 
-Use the available screenshots as additional reference material for:
-
-- Mobile navigation
-- Chat interface
-- Avatar placement
-- Menus
-- Status
-- Theme
-- Small-screen composition
-
-Do NOT reproduce the original branding.
-
----
-
-### Reference 6 — Additional room/chat screenshots
-
 https://mig33-malinau.blogspot.com/2010/06/begini-begitu-kicking-flooding-gift-and-mix.html
 
-Study the screenshots for:
+OPEN AND STUDY THESE REFERENCES BEFORE IMPLEMENTING THE DESIGN.
 
-- Room chat
-- User lists
-- Chat controls
-- Emoticons
-- Room tools
-- Status
-- Gift interactions
-- Compact controls
+Do not blindly copy screenshots.
 
-Again, these are UX references only.
+Extract the underlying UX principles and create an ORIGINAL Migo interface.
 
 ---
 
-# REFERENCE ANALYSIS REQUIREMENT
+# 1. CRITICAL DESIGN DIRECTION
 
-Before writing new UI code:
+The application must immediately feel like a communication client.
 
-1. Open the reference pages.
-2. Inspect all available screenshots/images.
-3. Identify recurring UI patterns.
-4. Identify information hierarchy.
-5. Identify compact-layout techniques.
-6. Identify navigation patterns.
-7. Identify chat-room patterns.
-8. Identify contact-list patterns.
-9. Identify profile patterns.
-10. Identify menu patterns.
-11. Identify status/presence patterns.
-12. Identify how limited screen space was utilized.
+When the user opens Migo, the first impression should be:
 
-Then translate those principles into an ORIGINAL Migo Design System.
+PEOPLE
+↓
+PRESENCE
+↓
+CONVERSATIONS
+↓
+ROOMS
+↓
+SOCIAL ACTIVITY
 
-Do not blindly copy any single screenshot.
+NOT:
 
-Synthesize the useful interaction principles into a modern design.
+SIDEBAR
+↓
+EMPTY DASHBOARD
+↓
+LARGE CARDS
 
----
+The current design with:
 
-# DESIGN TARGET
+"Home
+Chats
+Rooms
+Space
+Friends
+Alerts
+Search
+Wallet
+Profile
+Settings"
 
-The final result should feel like:
+inside a large permanent sidebar with a mostly empty content area is NOT acceptable.
 
-**A modern, realtime, lightweight social communication platform with a highly efficient classic mobile information architecture.**
-
-It should NOT feel like:
-
-- Generic SaaS dashboard
-- Generic modern social media
-- Generic WhatsApp clone
-- Generic Discord clone
-- Generic Telegram clone
-- Oversized card-based application
-- Excessive glassmorphism
-- AI-generated template UI
-
-The interface must have its own Migo identity.
+Remove this SaaS-dashboard visual approach.
 
 ---
 
-# CORE DESIGN CHARACTERISTICS
+# 2. MESSENGER-FIRST INFORMATION ARCHITECTURE
 
-Prioritize:
+Migo's primary experience should revolve around:
 
-- Compact
-- Fast
-- Dense
-- Clear
-- Social
-- Realtime
-- Lightweight
-- Responsive
-- Easy to navigate
-- Easy to scan
-- Low bandwidth
-- One-handed mobile interaction
+1. Friends / Contacts
+2. Conversations
+3. Rooms
+4. Space / Social
+5. Notifications
+6. Search
+7. Profile
+8. Wallet
+9. Settings
 
-Avoid:
+Friends, Chats, and Rooms must be visually prominent.
 
-- Huge headers
-- Huge cards
-- Excessive whitespace
-- Excessive rounded containers
-- Excessive gradients
-- Excessive shadows
-- Excessive animations
-- Decorative UI without function
+They should NOT feel like secondary navigation items hidden behind a dashboard.
 
 ---
 
-# ONE UNIFIED DESIGN SYSTEM
+# 3. ONE UNIFIED EXPERIENCE
 
-Create ONE Migo design system.
+Migo must work across:
 
-The same design tokens must drive:
-
-- Mobile
-- Tablet
-- Desktop
 - Android
 - iOS
-- Web
+- Mobile Web
+- Tablet
+- Desktop Web
 
-Responsive layouts may change structure, but the design language must remain recognizable.
+Use ONE design system.
+
+Do not create completely different interfaces for each platform.
+
+The composition may adapt.
+
+The UX principles must remain identical.
 
 Example:
 
-Mobile:
+MOBILE:
+full-screen contact/chat/room
 
-┌────────────────────────────┐
-│ ← Chat ⋮ │
-├────────────────────────────┤
-│ messages │
-│ │
-│ │
-├────────────────────────────┤
-│ + Message... ➤ │
-└────────────────────────────┘
+TABLET:
+navigation + main content
 
-Tablet:
+DESKTOP:
+navigation/context + conversations + details
 
-┌──────────┬─────────────────────────┐
-│ Nav │ Chat │
-│ │ │
-│ Home │ messages │
-│ Friends │ │
+All must still clearly feel like the same Migo application.
+
+---
+
+# 4. DO NOT USE A LARGE PERMANENT SAAS SIDEBAR
+
+A large 240–300px sidebar must NOT dominate the application.
+
+Do not create:
+
+┌───────────────┬─────────────────────────────┐
+│ Home │ │
+│ Chats │ │
 │ Rooms │ │
-│ Space │ │
-└──────────┴─────────────────────────┘
+│ Space │ HUGE EMPTY AREA │
+│ Friends │ │
+│ Alerts │ │
+│ Search │ │
+│ Wallet │ │
+│ │ │
+│ Profile │ │
+│ Settings │ │
+└───────────────┴─────────────────────────────┘
 
-Desktop:
+This pattern is specifically prohibited.
 
-┌──────────┬──────────────────────┬───────────────┐
-│ Nav │ Main │ Context │
-│ │ │ │
-│ Home │ Conversation │ Members │
-│ Friends │ Room │ Profile │
-│ Messages │ Space │ Details │
-│ Rooms │ │ Media │
-│ Space │ │ │
-└──────────┴──────────────────────┴───────────────┘
-
-These are different compositions of the SAME product.
+Instead, use an adaptive messenger-oriented layout.
 
 ---
 
-# RESPONSIVE BREAKPOINTS
+# 5. MOBILE PRIMARY EXPERIENCE
 
-Support at minimum:
+Mobile should be the strongest representation of Migo.
 
-320px
-360px
-375px
-390px
-412px
-430px
-480px
-600px
-768px
-820px
-1024px
-1280px
-1440px
-1920px+
+Example:
 
-Do not assume only one mobile size.
+┌──────────────────────────────────┐
+│ Migo ⋮ │
+├──────────────────────────────────┤
+│ FRIENDS CHATS ROOMS │
+├──────────────────────────────────┤
+│ │
+│ 🟢 Alex │
+│ Hey, are you online? │
+│ │
+│ 🟢 Sarah │
+│ Let's join the room │
+│ │
+│ 🟡 Mike │
+│ Away │
+│ │
+│ ⚪ John │
+│ Offline │
+│ │
+├──────────────────────────────────┤
+│ Home Friends Chat Rooms More │
+└──────────────────────────────────┘
 
----
+The actual implementation should be visually polished and modern, but preserve this information hierarchy.
 
-# MOBILE
-
-Mobile must be designed as a first-class experience.
-
-Use:
-
-- Bottom navigation
-- Compact header
-- Full-screen conversations
-- Bottom sheets
-- Contextual menus
-- Swipe navigation
-- Touch-friendly controls
-- Safe-area handling
-
-Do NOT simply shrink desktop.
+The user should see people and activity immediately.
 
 ---
 
-# TABLET
+# 6. CONTACT / FRIENDS EXPERIENCE
 
-Tablet should transition naturally between mobile and desktop.
+Friends are a core part of Migo.
 
-Use:
+Create a compact contact list.
 
-Navigation + Content
+Every user row can contain:
 
-or:
+- Avatar
+- Online/offline indicator
+- Username
+- Status message
+- Last activity
+- Unread indicator where relevant
+- Optional favorite indicator
 
-Navigation + Content + Context
+Example:
 
-depending on available width.
+┌──────────────────────────────────┐
+│ 🟢 Alex │
+│ Available │
+├──────────────────────────────────┤
+│ 🟢 Sarah │
+│ Hey everyone 👋 │
+├──────────────────────────────────┤
+│ 🟡 Mike │
+│ Busy │
+└──────────────────────────────────┘
 
----
+Do NOT turn every contact into a large card.
 
-# DESKTOP
+Use compact rows.
 
-Desktop should use available space intelligently.
-
-Preferred structure:
-
-Navigation | Main | Context
-
-The main area must remain visually focused.
-
-Do not stretch content across the entire monitor.
-
-Use reasonable maximum widths.
-
----
-
-# PRIMARY NAVIGATION
-
-Primary destinations:
-
-- Home
-- Explore
-- Search
-- Friends
-- Messages
-- Rooms
-- Space
-- Notifications
-- Profile
-
-Secondary:
-
-- Wallet
-- Settings
-- Help
-- About
-
-Do not overcrowd mobile navigation.
-
-Adapt navigation according to screen size while preserving the same information architecture.
+The contact list should be fast to scan.
 
 ---
 
-# HOME
+# 7. PRESENCE SYSTEM
 
-Home should be a compact realtime dashboard.
-
-Include:
-
-- Current profile
-- Presence
-- Recent messages
-- Online friends
-- Recent rooms
-- Notifications
-- Community activity
-- Space activity
-- Recommended users
-- Recommended rooms
-- Relevant token activity
-
-Use compact sections.
-
----
-
-# FRIENDS
-
-Friend list should be extremely efficient.
-
-Each row:
-
-Avatar
-Presence
-Username
-Status
-Last activity
-Unread indicator
+Presence must be highly visible.
 
 Support:
 
-- Search
 - Online
+- Away
+- Busy
+- Invisible
 - Offline
-- Favorites
-- Recent
-- Requests
+- Do Not Disturb
+- Custom status
 
-Interactions:
+Use small visual indicators.
 
-Tap → Profile
+Presence should appear consistently:
 
-Long press → Context menu
-
-Right click → Context menu on desktop
+- Friends
+- Chat list
+- Chat header
+- Profile
+- Room members
+- Search results
 
 ---
 
-# PRIVATE MESSAGES
+# 8. CHAT LIST
 
-Conversation list:
+Chats should look like a real messenger conversation list.
 
-Avatar
-Username
-Last message
-Timestamp
-Unread count
-Presence
-Pinned
-Muted
+Example:
 
-Chat:
+┌──────────────────────────────────┐
+│ Chats 🔍 │
+├──────────────────────────────────┤
+│ 🟢 Alex 2m │
+│ See you later! 2 │
+├──────────────────────────────────┤
+│ 🟢 Sarah 10m │
+│ Hello 👋 │
+├──────────────────────────────────┤
+│ 🟡 Mike 1h │
+│ Are you coming? │
+└──────────────────────────────────┘
 
-Header
-Messages
-Composer
+Each row:
 
-Messages support:
+- Avatar
+- Presence
+- Username
+- Last message
+- Timestamp
+- Unread count
+- Muted/pinned state
+
+Keep it compact.
+
+---
+
+# 9. PRIVATE CHAT
+
+Private chat must be one of the most polished parts of the application.
+
+Header:
+
+┌──────────────────────────────────┐
+│ ← 🟢 Alex ⋮ │
+│ Online │
+├──────────────────────────────────┤
+
+Messages:
+
+│ Alex  
+│ Hello!  
+│  
+│ Hi Alex!  
+│  
+│ How are you?  
+│  
+├──────────────────────────────────┤
+│ + Message... 😊 ➤ │
+└──────────────────────────────────┘
+
+Support:
 
 - Text
 - Emoji
@@ -485,61 +357,82 @@ Messages support:
 - Deletion
 - Forwarding
 - Pinning
-- Search
+- Copy
+- Message search
+
+The message area must use available screen space efficiently.
+
+Avoid excessive whitespace.
 
 ---
 
-# CHAT COMPOSER
+# 10. MESSAGE COMPOSER
 
-Keep it extremely compact.
+The composer must feel like a real messenger input.
 
 Mobile:
 
-┌────────────────────────────┐
-│ + Message... 😊 ➤ │
-└────────────────────────────┘
+- | Message... | Emoji | Send
 
-Support:
+Desktop:
 
-- Attachments
-- Emoji
-- Voice
-- Reply
-- Drafts
+Attachment | Message... | Emoji | Voice | Send
+
+Requirements:
+
 - Multiline
-- Mentions
+- Auto-growing
+- Draft persistence
+- Reply mode
+- Attachment menu
+- Emoji picker
+- Voice recording if supported
+- Mention autocomplete
+- Keyboard-safe
+- Safe-area aware
 
-Keyboard must never cover the composer.
+The composer must never be hidden behind the mobile keyboard.
 
 ---
 
-# PUBLIC ROOMS
+# 11. PUBLIC CHAT ROOMS
 
-Rooms are a major Migo feature.
+Rooms are a primary Migo feature.
 
-Room header:
+Room experience should be optimized for fast realtime conversation.
 
-- Back
+Example:
+
+┌──────────────────────────────────┐
+│ ← # Indonesia ⋮ │
+│ 1,284 members │
+├──────────────────────────────────┤
+│ 🟢 alex: hello everyone │
+│ 🟢 sarah: hi 👋 │
+│ 🟡 mike: what's happening? │
+│ 🟢 john: welcome! │
+│ │
+│ [system] user joined the room │
+│ │
+├──────────────────────────────────┤
+│ + Message... ➤ │
+└──────────────────────────────────┘
+
+Room header should contain:
+
 - Room name
+- Room icon
 - Member count
 - Online count
 - Search
-- Menu
-
-Room messages:
-
-Username
-Timestamp
-Message
-Reactions
-Mentions
-System messages
-
-Support large rooms with virtualized rendering.
+- Room actions
+- More menu
 
 ---
 
-# ROOM DIRECTORY
+# 12. ROOM DIRECTORY
+
+Create a compact room browser.
 
 Categories:
 
@@ -555,42 +448,129 @@ Categories:
 - Entertainment
 - Communities
 
-Each row:
+Example:
 
-Icon
-Room name
-Description
-Members
-Online count
-Category
+# Popular Rooms
 
-Keep it compact.
+🌐 Indonesia 12.4K
+🎮 Gaming 8.2K
+₿ Crypto 3.4K
+🎵 Music 2.1K
+
+Use compact list rows.
+
+Do not create huge cards.
 
 ---
 
-# SPACE
+# 13. ROOM MEMBERS
 
-Space is Migo's social feed.
+Room member list should support:
+
+- Avatar
+- Presence
+- Username
+- Role
+- Moderator indicator
+- Status
 
 Support:
 
-- Posts
-- Replies
-- Likes
-- Reposts
-- Quotes
-- Shares
-- Mentions
-- Hashtags
-- Media
+- Search members
+- Online members
+- Moderators
+- Context menu
 
-Keep posts information-dense.
+Long press on mobile.
 
-Avoid giant social-media cards.
+Right click on desktop.
 
 ---
 
-# TOKEN REFERENCES
+# 14. TABS
+
+Use tabs where they improve information density.
+
+Examples:
+
+Friends | Chats | Rooms
+
+or:
+
+Messages | Media | Files
+
+or:
+
+Posts | Replies | Media
+
+Tabs should be compact and easy to switch.
+
+Do not overuse tabs.
+
+---
+
+# 15. HOME
+
+Home should NOT be a giant dashboard.
+
+Home should act as a compact activity hub.
+
+Possible sections:
+
+Recent chats
+Online friends
+Joined rooms
+Recent activity
+Notifications
+Space activity
+
+The user should immediately see active people and conversations.
+
+Avoid:
+
+Large hero sections
+Large empty areas
+Huge analytics cards
+Dashboard widgets
+
+---
+
+# 16. SPACE
+
+Space is Migo's social layer.
+
+Space should still feel like part of the messenger ecosystem.
+
+Users can:
+
+- Post
+- Reply
+- Like
+- Repost
+- Quote
+- Share
+- Mention
+- Follow
+- Hashtag
+- Attach media
+
+Posts should be compact.
+
+Example:
+
+🟢 Alex · 2m
+
+Had a great conversation today.
+
+$MIGO $BTC
+
+♡ 24 💬 8 ↻ 4
+
+Do not make every post a giant card.
+
+---
+
+# 17. TOKEN REFERENCES
 
 Support:
 
@@ -598,35 +578,41 @@ $TICKER
 
 and token contract addresses.
 
-When a valid token is detected, show:
+When detected:
 
-Token name
-Ticker
+Show a compact token reference:
+
+Token Name
+$TICKER
 Price
 24h change
 Mini chart
 
-Click → Token page.
+Clicking it opens the token page.
 
-Use autocomplete when appropriate.
+This feature must integrate naturally into Space and messaging.
 
 ---
 
-# PROFILE
+# 18. PROFILE
 
-Profile:
+Profile should remain compact.
 
-Avatar
-Username
-Presence
-Bio
-Friends
-Followers
-Following
-Posts
-Rooms
-Media
-Tokens
+Example:
+
+┌──────────────────────────────────┐
+│ ← Profile ⋮ │
+├──────────────────────────────────┤
+│ [Avatar] │
+│ username │
+│ 🟢 Online │
+│ │
+│ Short bio... │
+│ │
+│ 128 Friends 2.4K Followers │
+├──────────────────────────────────┤
+│ Posts | Media | Rooms │
+└──────────────────────────────────┘
 
 Actions:
 
@@ -637,71 +623,72 @@ Mute
 Block
 Report
 
-Keep profile information compact.
+---
+
+# 19. NOTIFICATIONS / ALERTS
+
+Notifications should be compact.
+
+Examples:
+
+🟢 Alex sent you a message
+👤 Sarah accepted your friend request
+💬 John mentioned you
+❤️ Someone reacted to your post
+🌐 New activity in Indonesia room
+
+Use unread indicators.
+
+Do not make notifications into giant cards.
 
 ---
 
-# SEARCH
+# 20. SEARCH
 
-Unified search:
+Unified search must find:
 
-Users
-Friends
-Messages
-Rooms
-Space
-Tokens
-Contracts
-
-Support:
-
-- Instant search
-- Suggestions
-- Filters
-- Recent searches
-- Debouncing
-
----
-
-# NOTIFICATIONS
-
-Support:
-
+- Users
+- Friends
+- Chats
 - Messages
-- Friend requests
-- Mentions
-- Replies
-- Reactions
-- Room activity
-- Community activity
-- System events
+- Rooms
+- Space posts
+- Tokens
+- Contract addresses
 
-Use compact notification rows.
-
----
-
-# WALLET
-
-Wallet must use the SAME Migo design language.
+Search should feel like a core messenger feature.
 
 Support:
 
-- Balance
-- Assets
-- Tokens
-- Transactions
-- Send
-- Receive
-- Address
-- QR
-- Network
-- Token detail
-
-Do not make wallet look like an unrelated application.
+- Instant suggestions
+- Recent searches
+- Filters
+- Debounced realtime search
 
 ---
 
-# SETTINGS
+# 21. WALLET
+
+Wallet is secondary to communication but must use the same Migo design language.
+
+Do NOT make the wallet look like a separate DeFi dashboard.
+
+Use compact:
+
+Balance
+Assets
+Transactions
+Send
+Receive
+Network
+Address
+QR
+
+---
+
+# 22. SETTINGS
+
+Settings should be accessible but not dominate the primary experience.
 
 Categories:
 
@@ -719,70 +706,239 @@ Storage
 Accessibility
 About
 
-Use compact list navigation.
+Use compact list rows.
 
 ---
 
-# CONTEXT MENUS
+# 23. DESKTOP LAYOUT
 
-Mobile:
+Desktop must become a messenger workspace.
 
-- Long press
-- 3-dot
-- Bottom sheet
+Recommended:
 
-Desktop:
+┌──────────────┬────────────────────────┬────────────────────┐
+│ Navigation │ Conversations / Chat │ Context │
+│ │ │ │
+│ Migo │ │ User Profile │
+│ │ │ │
+│ Friends │ Chat / Room / Space │ Members │
+│ Chats │ │ Media │
+│ Rooms │ │ Room information │
+│ Space │ │ │
+│ Alerts │ │ │
+│ Search │ │ │
+└──────────────┴────────────────────────┴────────────────────┘
 
-- 3-dot
-- Right click
-- Context menu
+IMPORTANT:
 
-Menus should be short and contextual.
+The desktop layout must remain compact.
 
----
+Do not allow enormous empty content areas.
 
-# DESIGN TOKENS
-
-Create centralized tokens for:
-
-Colors
-Typography
-Spacing
-Radius
-Borders
-Shadows
-Elevation
-Icon sizes
-Touch targets
-Animation
-Z-index
-
-No random hardcoded values.
+Main content should have sensible maximum widths.
 
 ---
 
-# TYPOGRAPHY
+# 24. DESKTOP FRIENDS + CHAT
 
-Use readable system fonts.
+Desktop should support a classic communication workspace.
+
+Example:
+
+┌──────────────┬──────────────────────┬───────────────────┐
+│ Friends │ Alex │ Alex │
+│ │ 🟢 Online │ 🟢 Online │
+│ 🟢 Alex ├──────────────────────┤ │
+│ 🟢 Sarah │ │ Profile │
+│ 🟡 Mike │ Hello! │ Friends │
+│ 🟢 John │ │ Media │
+│ │ Hi 👋 │ │
+│ ROOMS │ │ │
+│ #Indonesia │ │ │
+│ #Gaming ├──────────────────────┤ │
+│ #Crypto │ Message... ➤ │ │
+└──────────────┴──────────────────────┴───────────────────┘
+
+This is much closer to the desired product architecture.
+
+---
+
+# 25. TABLET
+
+Tablet should intelligently switch between:
+
+Navigation + Main
+
+and:
+
+Navigation + Main + Context
+
+depending on width and orientation.
+
+Do not simply stretch the mobile layout.
+
+Do not simply shrink desktop.
+
+---
+
+# 26. MOBILE NAVIGATION
+
+Use a compact bottom navigation for the most important destinations.
+
+Possible:
+
+Home
+Chats
+Rooms
+Space
+More
+
+Friends can be directly accessible from Home/Chats or via a compact top tab/navigation structure.
+
+Do not put 10+ destinations into a mobile bottom navigation.
+
+---
+
+# 27. MORE MENU
+
+Secondary features:
+
+Friends
+Alerts
+Search
+Wallet
+Profile
+Settings
+Help
+
+can be accessible through a compact More menu or contextual navigation.
+
+The exact navigation should be optimized after inspecting the existing application.
+
+---
+
+# 28. VISUAL LANGUAGE
+
+Create an original Migo visual identity.
+
+The visual language should be:
+
+- Compact
+- Clean
+- Friendly
+- Slightly nostalgic in simplicity
+- Modern
+- Lightweight
+- Information-dense
+- Social
+- Realtime
+
+Avoid excessive:
+
+- Glassmorphism
+- Gradients
+- Huge rounded cards
+- Huge shadows
+- Decorative illustrations
+- Empty whitespace
+- Oversized typography
+
+Use subtle:
+
+- Borders
+- Dividers
+- Surface elevation
+- Rounded corners
+- Status colors
+- Selected states
+
+---
+
+# 29. INFORMATION DENSITY
+
+This is extremely important.
+
+The interface should allow many useful items to fit on screen.
+
+Prefer:
+
+COMPACT LIST
+
+over:
+
+LARGE CARD
+
+Prefer:
+
+USERNAME
+status
+last message
+
+over:
+
+Huge avatar
+Huge username
+Large card
+Large empty area
+
+The UI should be dense without becoming visually chaotic.
+
+---
+
+# 30. DESIGN TOKENS
+
+Create centralized design tokens.
+
+Define:
+
+- Colors
+- Typography
+- Font sizes
+- Font weights
+- Line heights
+- Spacing
+- Border radius
+- Borders
+- Shadows
+- Icon sizes
+- Touch targets
+- Animation durations
+- Z-index
+
+Do not scatter arbitrary CSS values throughout the project.
+
+---
+
+# 31. TYPOGRAPHY
+
+Use system-friendly typography.
 
 Prioritize:
 
-- Username
-- Message
-- Timestamp
-- Metadata
+Username
+Message
+Status
+Timestamp
+Metadata
 
-Avoid oversized typography.
+Avoid giant headings.
+
+Page titles should be compact.
 
 ---
 
-# ICONOGRAPHY
+# 32. ICONS
 
-Use one consistent icon family.
+Use ONE consistent icon family.
 
-Do not mix icon styles.
+Icons should be:
 
-Primary icons:
+- Simple
+- Lightweight
+- Consistent
+- Recognizable
+
+Typical icon visual size:
 
 20–24px
 
@@ -792,13 +948,13 @@ minimum 44×44 logical pixels.
 
 ---
 
-# THEMES
+# 33. LIGHT + DARK MODE
 
 Support:
 
-Light
-Dark
-System
+- Light
+- Dark
+- System
 
 Dark mode must be intentionally designed.
 
@@ -806,254 +962,285 @@ Do not simply invert colors.
 
 ---
 
-# ANIMATION
+# 34. TOUCH UX
 
-Animations must be:
+Support:
 
-- Short
-- Functional
-- Subtle
+- Tap
+- Long press
+- Swipe
+- Pull to refresh
+- Swipe back
+- Context menus
+- Bottom sheets
 
-Support reduced motion.
+Long press:
 
-Avoid decorative animations.
+User → user actions
+
+Message → message actions
+
+Room → room actions
 
 ---
 
-# ACCESSIBILITY
+# 35. DESKTOP UX
+
+Support:
+
+- Mouse
+- Hover
+- Right click
+- Keyboard shortcuts
+- Drag where appropriate
+- Resizable panels where useful
+
+But retain the same Migo visual identity.
+
+---
+
+# 36. REALTIME UX
+
+Realtime events:
+
+- Online status
+- Typing
+- New messages
+- Read status
+- Reactions
+- Room messages
+- Notifications
+
+must update immediately.
+
+Avoid full-page rerenders.
+
+---
+
+# 37. PERFORMANCE
+
+Migo should remain lightweight.
 
 Implement:
 
-- Semantic HTML
-- ARIA
-- Keyboard navigation
-- Screen readers
-- Focus states
-- High contrast
-- Reduced motion
-- Accessible dialogs
-- Accessible menus
-- Accessible forms
-
----
-
-# REALTIME
-
-Realtime UI should support:
-
-- Presence
-- Messages
-- Typing
-- Read state
-- Reactions
-- Room activity
-- Notifications
-
-Optimize rendering so realtime events do not cause unnecessary full-page rerenders.
-
----
-
-# OFFLINE / RECONNECT
-
-Display subtle connection states:
-
-Connected
-Connecting
-Reconnecting
-Offline
-
-Do not interrupt users with unnecessary dialogs.
-
----
-
-# PERFORMANCE
-
-Prioritize:
-
-- Fast startup
-- Small bundle
 - Lazy loading
-- Virtualized lists
-- Image optimization
-- Efficient WebSocket usage
+- Virtualized message lists
+- Virtualized room lists
 - Pagination
-- Caching
+- Image optimization
+- Thumbnail loading
+- Efficient WebSocket updates
 - Minimal rerenders
-- Low memory usage
-
-The application must work well on low-end mobile hardware.
-
----
-
-# LOW BANDWIDTH
-
-Prioritize text and essential UI.
-
-Load media progressively.
-
-Use:
-
-- Thumbnail-first loading
-- Lazy loading
-- Compression
 - Caching
+- Code splitting
 
-Do not automatically download large media.
+Large rooms must remain performant.
+
+Large chat histories must remain performant.
 
 ---
 
-# PWA / MOBILE WEB
+# 38. OFFLINE / RECONNECT
 
-Mobile Web must behave like an application.
+Show subtle states:
+
+● Connected
+○ Connecting
+⚠ Reconnecting
+× Offline
+
+Do not use disruptive modal dialogs for temporary network problems.
+
+---
+
+# 39. MOBILE WEB
+
+Mobile Web must feel like an actual application.
 
 Support:
 
 - PWA
-- Manifest
-- Service worker
-- Offline shell
-- Installability
-- Push notifications where supported
 - Safe areas
-- Keyboard handling
+- Sticky headers
+- Sticky composer
+- Bottom navigation
+- Keyboard-aware layouts
+- Scroll restoration
+- Offline shell
+
+Never make it look like a desktop website squeezed into a phone.
 
 ---
 
-# COMPONENT ARCHITECTURE
+# 40. ANDROID + IOS
+
+Respect platform conventions:
+
+Android:
+
+- Back gesture
+- Edge-to-edge
+- Keyboard behavior
+- Notifications
+- Deep links
+
+iOS:
+
+- Safe areas
+- Swipe back
+- Keyboard avoidance
+- Dynamic Island/notch
+- Home indicator
+- Deep links
+
+But maintain the same Migo design system.
+
+---
+
+# 41. RESPONSIVE BREAKPOINTS
+
+Test:
+
+320
+360
+375
+390
+412
+430
+480
+600
+768
+820
+1024
+1280
+1440
+1920+
+
+The interface must never:
+
+- Overflow horizontally
+- Clip text
+- Overlap elements
+- Hide important controls
+- Break the composer
+- Break navigation
+
+---
+
+# 42. COMPONENT ARCHITECTURE
 
 Create reusable components:
 
 AppShell
+MessengerShell
 Header
-Sidebar
+Navigation
 BottomNavigation
-Avatar
+Sidebar
+ContactList
+ContactRow
 PresenceIndicator
-Badge
-Button
-IconButton
-Input
-SearchInput
-UserRow
-FriendRow
+ConversationList
 ConversationRow
+ChatView
+ChatHeader
+MessageList
 MessageBubble
 MessageComposer
+RoomList
 RoomRow
-RoomMessage
+RoomView
 RoomHeader
-MemberList
+RoomMemberList
+SpaceFeed
 SpacePost
 TokenReference
-ProfileHeader
+ProfileView
+NotificationList
 NotificationRow
-SettingsRow
+SearchView
+WalletView
+SettingsView
 ContextMenu
 BottomSheet
 Dialog
 Toast
-Tooltip
 Skeleton
 EmptyState
 ErrorState
 
-Every component must be responsive.
+All components must be responsive.
 
 ---
 
-# DESIGN SYSTEM DOCUMENTATION
+# 43. EXISTING APPLICATION
 
-Create a Design System page containing:
+Before modifying anything:
 
-- Color tokens
-- Typography
-- Spacing
-- Buttons
-- Inputs
-- Lists
-- Headers
-- Navigation
-- Messages
-- Rooms
-- Profiles
-- Notifications
-- Dialogs
-- Bottom sheets
-- Loading states
-- Empty states
-- Error states
+INSPECT THE EXISTING APPLICATION FIRST.
 
-This becomes the source of truth for future Migo development.
+Inspect:
 
----
+- Framework
+- Routing
+- Components
+- State management
+- Authentication
+- API
+- WebSocket/realtime architecture
+- Chat implementation
+- Room implementation
+- Space
+- Wallet
+- Responsive behavior
+- Existing design tokens
 
-# IMPLEMENTATION PROCESS
+Reuse working functionality.
 
-Before changing the code:
+Do NOT unnecessarily rebuild backend functionality.
 
-1. Inspect existing frontend.
-2. Inspect routing.
-3. Inspect state management.
-4. Inspect API.
-5. Inspect WebSocket/realtime system.
-6. Inspect authentication.
-7. Inspect current components.
-8. Inspect existing responsive behavior.
-9. Inspect chat.
-10. Inspect rooms.
-11. Inspect Space.
-12. Inspect wallet.
-13. Identify reusable code.
-14. Identify UI that should be refactored.
-15. Preserve existing working backend functionality.
+Do NOT replace working infrastructure merely to change the UI.
 
-DO NOT rebuild the backend just for the redesign.
-
-DO NOT unnecessarily replace working infrastructure.
+Refactor only when necessary.
 
 ---
 
-# IMPLEMENTATION ORDER
+# 44. IMPLEMENTATION ORDER
 
 Phase 1:
-
-Design tokens
-↓
-Typography
-↓
-Icons
-↓
-Base components
-↓
-Layout system
+Inspect existing architecture.
 
 Phase 2:
-
-AppShell
-↓
-Navigation
-↓
-Responsive layout
+Create Migo Design System.
 
 Phase 3:
+Create MessengerShell/AppShell.
 
-Home
+Phase 4:
+Create responsive navigation.
+
+Phase 5:
+Implement:
+
 Friends
-Messages
-Chat
+Chats
+Private Chat
 Rooms
+Room Chat
+
+Phase 6:
+
 Space
 Profile
 Notifications
-
-Phase 4:
-
 Search
+
+Phase 7:
+
 Wallet
 Settings
-Secondary features
 
-Phase 5:
+Phase 8:
 
 Dark mode
 Accessibility
@@ -1061,15 +1248,15 @@ PWA
 Performance
 Offline/reconnect
 
-Phase 6:
+Phase 9:
 
 Full responsive QA.
 
 ---
 
-# VISUAL QA
+# 45. VISUAL QA REQUIREMENT
 
-For every major screen test:
+After implementation, inspect screenshots of the actual application at:
 
 320×568
 360×640
@@ -1083,61 +1270,122 @@ For every major screen test:
 1440×900
 1920×1080
 
-Verify:
+Compare the result against the reference material.
 
-- No horizontal overflow
-- No clipped text
-- No overlapping controls
-- No keyboard overlap
-- Correct safe areas
-- Correct scrolling
-- Correct focus
-- Correct touch targets
-- Correct desktop behavior
-- Correct tablet behavior
-- Correct mobile behavior
-- Correct dark mode
+Ask:
+
+"Does this look like a messenger?"
+
+If the answer is no, redesign it.
+
+Ask:
+
+"Is the first thing users see people, conversations, presence, rooms and activity?"
+
+If no, redesign it.
+
+Ask:
+
+"Does this look like a SaaS dashboard?"
+
+If yes, redesign it.
+
+Ask:
+
+"Is there excessive empty space?"
+
+If yes, redesign it.
+
+Ask:
+
+"Are Friends, Chats and Rooms visually important?"
+
+If no, redesign it.
 
 ---
 
-# CRITICAL RULE
+# 46. HARD PROHIBITIONS
 
-Do not make the interface look like a collection of modern UI templates.
+DO NOT:
 
-The entire application must feel intentionally designed as ONE product.
+- Build a generic SaaS sidebar
+- Build a dashboard-first interface
+- Put huge empty areas on the main screen
+- Use oversized cards
+- Use huge page headers
+- Make navigation dominate the screen
+- Hide friends and conversations behind secondary menus
+- Make rooms feel like an afterthought
+- Make chat look like a dashboard widget
+- Use random UI patterns per page
+- Create separate design languages per platform
+- Copy another product's branding
 
-Every screen must share:
+---
 
-- Same spacing language
-- Same typography
-- Same iconography
-- Same interaction patterns
-- Same navigation logic
-- Same component behavior
-- Same visual hierarchy
+# 47. FINAL DESIGN TEST
 
-The result should feel:
+When the application is opened for the first time, a user should immediately understand:
 
-**compact + social + realtime + lightweight + modern + highly usable.**
+"This is a social messenger."
+
+They should immediately be able to see:
+
+- Who is online
+- Recent conversations
+- Friends
+- Rooms
+- Social activity
+
+The application should feel alive.
+
+It should not feel like an empty enterprise dashboard.
 
 ---
 
 # FINAL OBJECTIVE
 
-Build Migo as a unified cross-platform communication and social platform.
+Create a modern Migo that combines:
 
-It should feel like:
+REALTIME MESSENGER +
+CONTACT / FRIEND SYSTEM +
+PUBLIC CHAT ROOMS +
+SOCIAL SPACE +
+PROFILE +
+DISCOVERY +
+WALLET
 
-**one application that intelligently adapts itself to every screen size.**
+with one unified cross-platform experience.
 
-Not:
+The design must preserve:
 
-"mobile version + desktop version + tablet version."
+- compact information density
+- fast navigation
+- contact-first interaction
+- visible presence
+- conversation-first UX
+- room-centric communication
+- contextual menus
+- efficient small-screen layouts
 
-Instead:
+while providing:
 
-**Migo everywhere, with one consistent experience.**
+- modern typography
+- modern accessibility
+- responsive layouts
+- dark mode
+- touch interaction
+- desktop support
+- tablet support
+- Android support
+- iOS support
+- mobile web support
+- high performance
 
-Use the historical references above only as UX inspiration for compact information architecture and efficient interaction design.
+The final product must feel like:
 
-Create a completely original Migo visual identity.
+"A modern, original, highly polished messenger that happens to work beautifully everywhere."
+
+NOT:
+
+"A SaaS dashboard that happens to contain chat."

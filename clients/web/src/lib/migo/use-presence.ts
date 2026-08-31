@@ -8,7 +8,7 @@
  * a conversation's members are watched when their profiles are shown). This hook only listens.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { PresenceState } from '@migo/sdk';
 import type { Id } from '@migo/sdk';
@@ -50,4 +50,54 @@ export function presenceLabel(state: PresenceState | undefined): string {
     default:
       return '';
   }
+}
+
+/**
+ * The presence of a known set of accounts: seeded, subscribed, and live.
+ *
+ * Presence is the messenger's ambient information — the spec asks for it everywhere people
+ * appear — and this hook is the one honest way to get it for a list: each account's user topic
+ * is subscribed (the live stream), the profiles' own presence field seeds the map before any
+ * event arrives (the server's last statement), and the live stream overrides the seed from then
+ * on. Profiles are optional: a caller that has none gets the live half alone.
+ */
+export function usePresenceOf(
+  ids: readonly Id[],
+  profiles?: ReadonlyMap<Id, { presence?: PresenceState }>,
+): Map<Id, PresenceState> {
+  const { client } = useMigo();
+  const live = usePresence();
+  // One stable key so the subscription effect runs only when the actual set changes.
+  const key = useMemo(() => [...ids].sort().join(','), [ids]);
+
+  // Subscribe each account's user topic once; the SDK re-subscribes across a session reset.
+  useEffect(() => {
+    if (!client) {
+      return;
+    }
+    for (const id of ids) {
+      void client.watchUser(id).catch(() => {
+        // A refusal (privacy, an unfriended account) leaves the seed standing.
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, key]);
+
+  return useMemo(() => {
+    const merged = new Map<Id, PresenceState>();
+    if (profiles !== undefined) {
+      for (const id of ids) {
+        const seed = profiles.get(id)?.presence;
+        if (seed !== undefined) {
+          merged.set(id, seed);
+        }
+      }
+    }
+    for (const [id, state] of live) {
+      merged.set(id, state);
+    }
+    return merged;
+    // `live` carries every update; `ids`/`profiles` re-derive on their own changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live, key, profiles]);
 }

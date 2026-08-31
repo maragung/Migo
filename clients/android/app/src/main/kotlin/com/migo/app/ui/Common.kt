@@ -1,5 +1,6 @@
 package com.migo.app.ui
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,7 +18,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -209,5 +215,86 @@ fun clockTime(millis: Long): String {
         // A timestamp from a future protocol version, or one outside the supported range. A blank
         // label is better than a crash in a message list.
         ""
+    }
+}
+
+/** The five bottom-bar glyphs, in bar order. */
+enum class BarGlyph { HOME, CHATS, ROOMS, SPACE, MORE }
+
+/**
+ * A bottom-bar glyph, drawn with the Canvas rather than typed or imported.
+ *
+ * The design system draws its icons as strokes — one weight, round caps — and this app declares
+ * no icon font (the Material icon artefacts are transitive, and depending on a version nobody
+ * chose is how builds break). Each glyph is a 20dp box of geometric strokes, the same shapes the
+ * web client's SVG family and the desktop client's painted icons carry, because it is one
+ * product.
+ */
+@Composable
+fun BarGlyph(kind: BarGlyph, active: Boolean, modifier: Modifier = Modifier) {
+    val color = if (active) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val stroke = with(LocalDensity.current) { 1.75.dp.toPx() }
+    Canvas(modifier = modifier.size(20.dp)) {
+        drawGlyph(kind, color, stroke)
+    }
+}
+
+/** The glyph shapes, on a unit box scaled to the drawing size. */
+private fun DrawScope.drawGlyph(kind: BarGlyph, color: Color, stroke: Float) {
+    fun p(x: Float, y: Float) = Offset(x * size.width, y * size.height)
+    val cap = StrokeCap.Round
+    when (kind) {
+        BarGlyph.HOME -> {
+            // A roof over a box with a door.
+            drawLine(color, p(0.1f, 0.5f), p(0.5f, 0.12f), stroke, cap)
+            drawLine(color, p(0.5f, 0.12f), p(0.9f, 0.5f), stroke, cap)
+            drawLine(color, p(0.2f, 0.42f), p(0.2f, 0.9f), stroke, cap)
+            drawLine(color, p(0.8f, 0.42f), p(0.8f, 0.9f), stroke, cap)
+            drawLine(color, p(0.2f, 0.9f), p(0.8f, 0.9f), stroke, cap)
+            drawLine(color, p(0.42f, 0.9f), p(0.42f, 0.62f), stroke, cap)
+            drawLine(color, p(0.42f, 0.62f), p(0.58f, 0.62f), stroke, cap)
+            drawLine(color, p(0.58f, 0.62f), p(0.58f, 0.9f), stroke, cap)
+        }
+
+        BarGlyph.CHATS -> {
+            // A speech bubble with a tail.
+            drawRoundRect(
+                color = color,
+                topLeft = p(0.08f, 0.15f),
+                size = androidx.compose.ui.geometry.Size(size.width * 0.84f, size.height * 0.57f),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx()),
+                style = Stroke(stroke, cap),
+            )
+            drawLine(color, p(0.3f, 0.72f), p(0.22f, 0.9f), stroke, cap)
+            drawLine(color, p(0.22f, 0.9f), p(0.48f, 0.72f), stroke, cap)
+        }
+
+        BarGlyph.ROOMS -> {
+            // A hash: the glyph the whole product marks rooms with.
+            drawLine(color, p(0.32f, 0.08f), p(0.32f, 0.92f), stroke, cap)
+            drawLine(color, p(0.68f, 0.08f), p(0.68f, 0.92f), stroke, cap)
+            drawLine(color, p(0.08f, 0.32f), p(0.92f, 0.32f), stroke, cap)
+            drawLine(color, p(0.08f, 0.68f), p(0.92f, 0.68f), stroke, cap)
+        }
+
+        BarGlyph.SPACE -> {
+            // A pulse: activity as a heartbeat line.
+            drawLine(color, p(0.05f, 0.55f), p(0.3f, 0.55f), stroke, cap)
+            drawLine(color, p(0.3f, 0.55f), p(0.4f, 0.2f), stroke, cap)
+            drawLine(color, p(0.4f, 0.2f), p(0.55f, 0.85f), stroke, cap)
+            drawLine(color, p(0.55f, 0.85f), p(0.65f, 0.55f), stroke, cap)
+            drawLine(color, p(0.65f, 0.55f), p(0.95f, 0.55f), stroke, cap)
+        }
+
+        BarGlyph.MORE -> {
+            // A hamburger: three even lines.
+            drawLine(color, p(0.15f, 0.3f), p(0.85f, 0.3f), stroke, cap)
+            drawLine(color, p(0.15f, 0.5f), p(0.85f, 0.5f), stroke, cap)
+            drawLine(color, p(0.15f, 0.7f), p(0.85f, 0.7f), stroke, cap)
+        }
     }
 }

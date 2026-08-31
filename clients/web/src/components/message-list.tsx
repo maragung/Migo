@@ -246,6 +246,16 @@ export interface MessageListProps {
   onOpenWallet?: () => void;
 }
 
+/** How many messages render at once — the render window a large room needs.
+ *
+ * The spec's "virtualized rendering" for large rooms: the transcript can hold a thousand
+ * messages after a few catch-up pages, and rendering every bubble is what makes a busy room
+ * stutter on a low-end phone. The window keeps the last {@link RENDER_WINDOW} bubbles in the
+ * DOM; "Load earlier" both fetches history and widens the window by one window's worth, so
+ * scrolling up is seamless and the DOM stays bounded.
+ */
+const RENDER_WINDOW = 150;
+
 export function MessageList({
   messages,
   selfId,
@@ -266,7 +276,18 @@ export function MessageList({
   onOpenWallet,
 }: MessageListProps): ReactNode {
   const bottomRef = useRef<HTMLDivElement | null>(null);
-  const visible = useMemo(() => messages.filter(isVisible), [messages]);
+  // How far back the render window reaches, in messages; grows by one window per Load earlier.
+  const [windowSize, setWindowSize] = useState(RENDER_WINDOW);
+  const visible = useMemo(() => {
+    const drawn = messages.filter(isVisible);
+    return drawn.length > windowSize ? drawn.slice(drawn.length - windowSize) : drawn;
+  }, [messages, windowSize]);
+  // Whether the window is clipping anything — the honest "there is more above" that the
+  // Load-earlier control below states even when the server has no more pages to fetch.
+  const clipped = useMemo(
+    () => messages.filter(isVisible).length > visible.length,
+    [messages, visible],
+  );
   // The scroll follows both surfaces that can grow: a new message and a new live row are each a
   // reason to bring the bottom into view.
   const liveCount = liveRowCount ?? 0;
@@ -297,11 +318,18 @@ export function MessageList({
 
   return (
     <div className="message-list">
-      {hasEarlier ? (
+      {hasEarlier || clipped ? (
         <button
           type="button"
           className="btn btn-ghost load-earlier"
-          onClick={onLoadEarlier}
+          onClick={() => {
+            if (hasEarlier) {
+              onLoadEarlier();
+            }
+            // Either way, reveal one more window: a server with no more history can still be
+            // holding more than the window shows.
+            setWindowSize((size) => size + RENDER_WINDOW);
+          }}
           disabled={loadingEarlier}
           aria-live="polite"
         >

@@ -29,6 +29,7 @@ import { useMigo } from '@/lib/migo/use-migo.js';
 import { useJoinRoom } from '@/lib/migo/use-join-room.js';
 
 import { Avatar } from './avatar.js';
+import { CreateRoomDialog } from './create-room-dialog.js';
 import { Icon } from './icons.js';
 import { EmptyState } from './states.js';
 import { Skeleton } from './states.js';
@@ -71,6 +72,8 @@ export function RoomsPanel({
   const [sort, setSort] = useState<Sort>('default');
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
+  // The Create Room dialog, opened from the header's + control.
+  const [creating, setCreating] = useState(false);
   // The debounced query is what the wire sees; the input's live text is what the user sees.
   const [liveQuery, setLiveQuery] = useState('');
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -168,15 +171,25 @@ export function RoomsPanel({
     <div className="panel panel-wide">
       <header className="panel-head">
         <h1 className="panel-title">Rooms</h1>
-        <button
-          type="button"
-          className="icon-btn"
-          aria-label="Refresh rooms"
-          title="Refresh rooms"
-          onClick={() => setReloadNonce((nonce) => nonce + 1)}
-        >
-          <Icon name="refresh" size={20} />
-        </button>
+        <div className="panel-head-actions">
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={() => setCreating(true)}
+          >
+            <Icon name="plus" size={16} />
+            New room
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            aria-label="Refresh rooms"
+            title="Refresh rooms"
+            onClick={() => setReloadNonce((nonce) => nonce + 1)}
+          >
+            <Icon name="refresh" size={20} />
+          </button>
+        </div>
       </header>
 
       <form className="panel-search" role="search" onSubmit={onSubmit}>
@@ -273,6 +286,16 @@ export function RoomsPanel({
           })}
         </ul>
       )}
+
+      {creating ? (
+        <CreateRoomDialog
+          onOpenConversation={(conversationId) => {
+            setCreating(false);
+            onOpenConversation(conversationId);
+          }}
+          onClose={() => setCreating(false)}
+        />
+      ) : null}
     </div>
   );
 }

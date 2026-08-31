@@ -70,27 +70,172 @@ pub fn brand_mark(ui: &mut Ui, theme: Theme) {
     ));
 }
 
-/// One tab of the top navigation bar: a text button that stays marked while its pane is open.
+/// A navigation icon, painted with the painter rather than typed.
 ///
-/// `badge` is the count drawn at the tab's corner — the unread total on Chat, zero elsewhere.
-/// Returns whether it was clicked. The open tab is marked two ways on purpose: an accent-tinted
-/// surface, and a two-pixel accent underline — the one marker that survives colour-blind
-/// viewing of a neon palette. A solid accent fill is deliberately avoided: a bar of neon cyan
-/// across the top of the window would out-shout the pane it points at.
-pub fn tab_button(ui: &mut Ui, theme: Theme, label: &str, selected: bool, badge: u32) -> bool {
+/// The design system draws its icons as strokes, and this client declares no icon font — so the
+/// rail's nine glyphs are painted the way the brand mark is: geometric shapes sized to a 20px
+/// box, one stroke weight, `currentColor` semantics via the palette. Each icon sits in a
+/// 20×20 box centred on the allocation it is given.
+pub fn place_icon(ui: &mut Ui, theme: Theme, place: crate::ui::Place, active: bool) {
     let colors = palette(theme);
-    let galley = ui.painter().layout_no_wrap(
-        label.to_owned(),
-        FontId::proportional(font::BODY),
-        if selected {
+    let stroke = egui::Stroke::new(
+        1.75,
+        if active {
             colors.accent
         } else {
             colors.text_muted
         },
     );
-    let padding = Vec2::new(space::LG, space::SM);
-    let size = galley.size() + padding * 2.0;
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let side = 20.0;
+    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(side), Sense::hover());
+    let painter = ui.painter().clone();
+    let min = rect.min;
+    // A unit box: (0,0) top-left to (1,1) bottom-right, scaled to the allocation.
+    let p = |x: f32, y: f32| egui::pos2(min.x + x * side, min.y + y * side);
+    match place {
+        crate::ui::Place::Chat => {
+            // A speech bubble: a rounded box with a tail.
+            painter.rect_stroke(
+                egui::Rect::from_min_max(p(0.08, 0.15), p(0.92, 0.72)),
+                4.0,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment([p(0.3, 0.72), p(0.22, 0.9)], stroke);
+            painter.line_segment([p(0.22, 0.9), p(0.48, 0.72)], stroke);
+        }
+        crate::ui::Place::Rooms => {
+            // A hash: the glyph the whole product marks rooms with.
+            for x in [0.32, 0.68] {
+                painter.line_segment([p(x, 0.08), p(x, 0.92)], stroke);
+            }
+            for y in [0.32, 0.68] {
+                painter.line_segment([p(0.08, y), p(0.92, y)], stroke);
+            }
+        }
+        crate::ui::Place::Space => {
+            // A pulse: activity as a heartbeat line.
+            painter.line_segment([p(0.05, 0.55), p(0.3, 0.55)], stroke);
+            painter.line_segment([p(0.3, 0.55), p(0.4, 0.2)], stroke);
+            painter.line_segment([p(0.4, 0.2), p(0.55, 0.85)], stroke);
+            painter.line_segment([p(0.55, 0.85), p(0.65, 0.55)], stroke);
+            painter.line_segment([p(0.65, 0.55), p(0.95, 0.55)], stroke);
+        }
+        crate::ui::Place::Friends => {
+            // Two people: a taller figure and a shorter one behind it.
+            painter.add(egui::Shape::circle_stroke(
+                p(0.35, 0.28),
+                side * 0.13,
+                stroke,
+            ));
+            painter.add(egui::Shape::circle_stroke(
+                p(0.72, 0.33),
+                side * 0.1,
+                stroke,
+            ));
+            painter.add(egui::Shape::line(
+                vec![
+                    p(0.1, 0.9),
+                    p(0.13, 0.62),
+                    p(0.35, 0.5),
+                    p(0.57, 0.62),
+                    p(0.6, 0.9),
+                ],
+                stroke,
+            ));
+            painter.add(egui::Shape::line(
+                vec![p(0.6, 0.9), p(0.63, 0.68), p(0.86, 0.6), p(0.95, 0.9)],
+                stroke,
+            ));
+        }
+        crate::ui::Place::Alerts => {
+            // A bell: a dome, a lip, and a clapper.
+            painter.add(egui::Shape::line(
+                vec![
+                    p(0.2, 0.75),
+                    p(0.2, 0.5),
+                    p(0.3, 0.25),
+                    p(0.5, 0.15),
+                    p(0.7, 0.25),
+                    p(0.8, 0.5),
+                    p(0.8, 0.75),
+                ],
+                stroke,
+            ));
+            painter.line_segment([p(0.12, 0.75), p(0.88, 0.75)], stroke);
+            painter.add(egui::Shape::circle_stroke(
+                p(0.5, 0.88),
+                side * 0.07,
+                stroke,
+            ));
+        }
+        crate::ui::Place::Search => {
+            // A magnifier: a lens and a handle.
+            painter.add(egui::Shape::circle_stroke(
+                p(0.42, 0.42),
+                side * 0.28,
+                stroke,
+            ));
+            painter.line_segment([p(0.62, 0.62), p(0.9, 0.9)], stroke);
+        }
+        crate::ui::Place::Wallet => {
+            // A wallet: a box with a clasp.
+            painter.rect_stroke(
+                egui::Rect::from_min_max(p(0.08, 0.22), p(0.92, 0.82)),
+                4.0,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment([p(0.62, 0.48), p(0.92, 0.48)], stroke);
+            painter.line_segment([p(0.62, 0.38), p(0.62, 0.62)], stroke);
+        }
+        crate::ui::Place::Settings => {
+            // A dial: a circle with spokes, the honest settings mark.
+            painter.add(egui::Shape::circle_stroke(p(0.5, 0.5), side * 0.22, stroke));
+            for (dx, dy) in [
+                (0.0f32, -1.0f32),
+                (0.0f32, 1.0f32),
+                (-1.0f32, 0.0f32),
+                (1.0f32, 0.0f32),
+                (0.71f32, -0.71f32),
+                (0.71f32, 0.71f32),
+                (-0.71f32, -0.71f32),
+                (-0.71f32, 0.71f32),
+            ] {
+                painter.line_segment(
+                    [
+                        egui::pos2(
+                            p(0.5, 0.5).x + dx * side * 0.32,
+                            p(0.5, 0.5).y + dy * side * 0.32,
+                        ),
+                        egui::pos2(
+                            p(0.5, 0.5).x + dx * side * 0.46,
+                            p(0.5, 0.5).y + dy * side * 0.46,
+                        ),
+                    ],
+                    stroke,
+                );
+            }
+        }
+    }
+}
+
+/// One rail button: a painted icon, a tooltip, and the two-marker selected treatment.
+///
+/// Icon-only because the rail is an icon rail at every width — the spec's messenger identity,
+/// not a SaaS sidebar — with the label travelling as the tooltip. Returns whether it was clicked.
+pub fn rail_button(
+    ui: &mut Ui,
+    theme: Theme,
+    place: crate::ui::Place,
+    label: &str,
+    selected: bool,
+    badge: u32,
+) -> Response {
+    let colors = palette(theme);
+    let width = ui.available_width();
+    let height = 40.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
     let background = if selected {
         colors.surface_selected
     } else if response.hovered() {
@@ -103,39 +248,43 @@ pub fn tab_button(ui: &mut Ui, theme: Theme, label: &str, selected: bool, badge:
             .rect_filled(rect, CornerRadius::same(radius::SM), background);
     }
     if selected {
-        let underline = egui::Rect::from_min_max(
-            egui::pos2(rect.left() + space::SM, rect.bottom() - 2.0),
-            egui::pos2(rect.right() - space::SM, rect.bottom()),
+        let bar = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.top() + space::SM),
+            egui::pos2(rect.left() + 3.0, rect.bottom() - space::SM),
         );
         ui.painter()
-            .rect_filled(underline, CornerRadius::ZERO, colors.accent);
+            .rect_filled(bar, CornerRadius::ZERO, colors.accent);
     }
-    let at = rect.center() - galley.size() / 2.0;
-    ui.painter().galley(at, galley, colors.text);
+    let mut inner = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    let indent = (width - 20.0) / 2.0;
+    inner.add_space(indent);
+    place_icon(&mut inner, theme, place, selected);
     if badge > 0 {
-        // Overlaid on the tab's corner rather than given its own slot: a badge that changes
-        // the bar's layout as the count appears and disappears would make every tab shift,
-        // and a moving target is the one thing a navigation bar must not be.
         let text = if badge > 99 {
-            "99+".to_owned()
+            "99+"
         } else {
-            badge.to_string()
+            &badge.to_string()
         };
         let mini = ui.painter().layout_no_wrap(
-            text,
+            text.to_owned(),
             FontId::proportional(font::TINY),
             colors.text_on_accent,
         );
         let padding = Vec2::new(space::XS, space::XS * 0.5);
         let size = mini.size() + padding * 2.0;
-        let top_right = rect.right_top() + Vec2::new(space::XS, -space::XS);
-        let badge_rect = egui::Rect::from_min_size(top_right - egui::vec2(size.x, 0.0), size);
+        let top_right = rect.right_top() + Vec2::new(-space::XS, space::XS);
+        let badge_rect =
+            egui::Rect::from_min_size(egui::pos2(top_right.x - size.x, top_right.y), size);
         ui.painter()
             .rect_filled(badge_rect, CornerRadius::same(radius::FULL), colors.accent);
         ui.painter()
             .galley(badge_rect.min + padding, mini, colors.text_on_accent);
     }
-    response.clicked()
+    response.on_hover_text(label)
 }
 
 /// A hairline separator that respects the palette instead of egui's default grey.

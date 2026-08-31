@@ -18,7 +18,6 @@ pub mod auth;
 pub mod captcha;
 pub mod chat;
 pub mod friends;
-pub mod home;
 pub mod rooms;
 pub mod search;
 pub mod server_form;
@@ -62,9 +61,7 @@ pub enum Screen {
 /// Android client's bottom bar carry, in the same order, because it is one product.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Place {
-    /// The realtime dashboard: a glance at everything, doors into all of it.
-    Home,
-    /// Conversations and threads.
+    /// Conversations and threads — where a session starts, per the messenger-first spec.
     Chat,
     /// The public room directory and the way in.
     Rooms,
@@ -87,7 +84,6 @@ impl Place {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::Home => "Home",
             Self::Chat => "Chats",
             Self::Rooms => "Rooms",
             Self::Space => "Space",
@@ -98,20 +94,6 @@ impl Place {
             Self::Settings => "Settings",
         }
     }
-
-    /// Every place, in information-architecture order — the bar is drawn from this list so the
-    /// offer and the order can never drift apart.
-    pub const ALL: [Place; 9] = [
-        Place::Home,
-        Place::Chat,
-        Place::Rooms,
-        Place::Space,
-        Place::Friends,
-        Place::Alerts,
-        Place::Search,
-        Place::Wallet,
-        Place::Settings,
-    ];
 }
 
 /// Everything a screen may read, and the things it may write.

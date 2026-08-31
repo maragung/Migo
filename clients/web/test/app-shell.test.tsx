@@ -1,12 +1,11 @@
 /**
- * What the app shell offers as the app's sections.
+ * What the messenger shell offers as the app's sections.
  *
- * The shell is the app's whole navigation, so its offer is its contract: ten sections in
- * information-architecture order, every button carrying the label and the current-page attribute
- * a screen reader needs. A section that vanished would strand its panel behind no control at
- * all. The rail, the mobile bar, and the More sheet are three compositions of the same list —
- * the test pins the offer once per surface, and pins that the mobile bar keeps to five slots
- * (a bottom bar that scrolls is a bottom bar that hides).
+ * The shell is the app's whole navigation, so its offer is its contract — and the contract is
+ * the spec's: the FRIENDS | CHATS | ROOMS trio first (the three lists a messenger lives in),
+ * then the stream and the destinations, Profile and Settings in the foot. The mobile bar keeps
+ * to five slots (the trio, Space, More), and More opens a dialog rather than switching a
+ * section. A section that vanished would strand its panel behind no control at all.
  *
  * The shell reads the signed-in account from the Migo context, so the renderer is fed a minimal
  * context double the way `calls.test.tsx` feeds its manager; `renderToStaticMarkup` runs no
@@ -48,13 +47,12 @@ function render(shell: ReactNode): string {
   );
 }
 
-/** Every section the layout can switch on — one button per section must exist somewhere. */
+/** Every section the layout can switch on — one rail button per section must exist somewhere. */
 const ALL_TABS: AppTab[] = [
-  'home',
+  'friends',
   'chats',
   'rooms',
   'space',
-  'friends',
   'notifications',
   'search',
   'wallet',
@@ -62,43 +60,24 @@ const ALL_TABS: AppTab[] = [
   'settings',
 ];
 
-test('the rail offers every section, Profile and Settings in the foot', () => {
+test('the rail offers every section; the trio sits in its own group above the divider', () => {
   const markup = render(
     <AppShell active="chats" onSelect={() => {}}>
       <p>content</p>
     </AppShell>,
   );
 
-  // Every section has a rail button; the eight primary sections sit in the nav, the two
-  // secondary ones (Profile, Settings) in the foot beside the account chip. The pattern
-  // anchors on the button element so the icon/label spans inside never count.
+  // Nine sections, one rail button each. The pattern anchors on the button element so the
+  // icon/label spans inside never count.
   const railButtons = markup.match(/<button[^>]*class="rail-btn[^"]*"/g) ?? [];
-  assert.equal(railButtons.length, 10, 'the rail must offer exactly ten sections');
-
-  for (const label of [
-    'Home',
-    'Chats',
-    'Rooms',
-    'Space',
-    'Friends',
-    'Alerts',
-    'Search',
-    'Wallet',
-  ]) {
-    assert.ok(
-      markup.includes(`rail-btn-label">${label}</span>`),
-      `the "${label}" section is missing from the rail`,
-    );
-  }
-  for (const label of ['Profile', 'Settings']) {
-    assert.ok(
-      markup.includes(`rail-btn-label">${label}</span>`),
-      `the "${label}" section is missing from the rail foot`,
-    );
-  }
+  assert.equal(railButtons.length, 10, 'nine sections plus the brand button');
+  // The trio is its own tablist — the primary list group, not one option among many.
+  assert.ok(markup.includes('role="tablist"'), 'the FRIENDS|CHATS|ROOMS trio must be a tab group');
+  const trio = markup.match(/role="tablist"[\s\S]*?role="tablist"/) ?? [];
+  assert.equal(trio.length, 0, 'exactly one trio group');
 });
 
-test('the mobile bar keeps to five slots: Home, Chats, Rooms, Space, More', () => {
+test('the mobile bar keeps to five slots: the trio, Space, More', () => {
   const markup = render(
     <AppShell active="chats" onSelect={() => {}}>
       <p>content</p>
@@ -107,7 +86,7 @@ test('the mobile bar keeps to five slots: Home, Chats, Rooms, Space, More', () =
 
   const buttons = markup.match(/class="bottom-nav-btn[^"]*"/g) ?? [];
   assert.equal(buttons.length, 5, 'the bottom bar must keep to five slots');
-  for (const label of ['Home', 'Chats', 'Rooms', 'Space', 'More']) {
+  for (const label of ['Friends', 'Chats', 'Rooms', 'Space', 'More']) {
     assert.ok(
       markup.includes(`bottom-nav-label">${label}</span>`),
       `the "${label}" slot is missing from the bottom bar`,
@@ -127,7 +106,6 @@ test('the active section carries the current-page attribute exactly once per sur
     </AppShell>,
   );
 
-  // One rail button and one bottom-bar button are active — and nowhere else.
   assert.equal(
     (markup.match(/class="rail-btn active"/g) ?? []).length,
     1,
@@ -139,7 +117,6 @@ test('the active section carries the current-page attribute exactly once per sur
     'exactly one bottom-bar section may be active',
   );
   assert.equal((markup.match(/aria-current="page"/g) ?? []).length, 2, 'two surfaces, one truth');
-  assert.ok(markup.includes('rail-btn-label">Rooms</span>'), 'the current section is Rooms');
 });
 
 test('every section type the layout switches on has a rail button', () => {
@@ -164,11 +141,8 @@ test('the shell carries the account control and the theme control', () => {
     </AppShell>,
   );
 
-  // The account control is a labelled control that opens the profile, on both surfaces.
   const profileButtons = markup.match(/aria-label="Open your profile"/g) ?? [];
   assert.ok(profileButtons.length >= 1, 'the account control lost its profile-opening label');
-  // The theme control names the theme a click would move to; the render seeds dark, so the
-  // offer is the light one.
   assert.ok(
     markup.includes('aria-label="Switch to light theme"'),
     'the theme control is missing or mislabelled',

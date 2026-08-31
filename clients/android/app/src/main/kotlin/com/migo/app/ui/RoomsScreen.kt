@@ -12,8 +12,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -45,10 +47,12 @@ fun RoomsScreen(
     state: AppState.SignedIn,
     onQuery: (String) -> Unit,
     onJoin: (RoomSummary) -> Unit,
+    onCreate: (slug: String, name: String, kind: com.migo.core.protocol.RoomKind, topic: String?) -> Unit,
     onRefresh: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var field by rememberSaveable { mutableStateOf(state.rooms.query) }
+    var creating by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
 
     // The debounce lives here rather than in the view model so the field's own text is the single
     // source of what is typed; the view model's query is what the wire sees.
@@ -59,6 +63,7 @@ fun RoomsScreen(
 
     Column(modifier = modifier.fillMaxSize().imePadding()) {
         ScreenTitle(title = "Rooms") {
+            TextButton(onClick = { creating = true }) { Text("New room") }
             TextButton(onClick = onRefresh, enabled = !state.rooms.loading) { Text("Refresh") }
         }
         OutlinedTextField(
@@ -92,6 +97,104 @@ fun RoomsScreen(
             }
         }
     }
+
+    if (creating) {
+        CreateRoomDialog(
+            onCreate = { slug, name, kind, topic ->
+                creating = false
+                onCreate(slug, name, kind, topic)
+            },
+            onDismiss = { creating = false },
+        )
+    }
+}
+
+/**
+ * The Create Room dialog: a room is named, addressed, and opened in one flow.
+ *
+ * The slug is the room's permanent address, so it is suggested from the name but stays editable —
+ * the name can change and the slug cannot. The suggestion is lowercase, spaces to hyphens,
+ * everything else stripped.
+ */
+@Composable
+private fun CreateRoomDialog(
+    onCreate: (String, String, com.migo.core.protocol.RoomKind, String?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var name by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf("") }
+    var slug by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf("") }
+    var slugTouched by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    var managed by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    var topic by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf("") }
+
+    // The slug follows the name until the user edits it.
+    androidx.compose.runtime.LaunchedEffect(name) {
+        if (!slugTouched) {
+            slug = name.lowercase().trim().replace(Regex("[^a-z0-9\\s-]"), "").replace(Regex("[\\s-]+"), "-")
+        }
+    }
+
+    val slugValid = slug.matches(Regex("[a-z0-9][a-z0-9-]*"))
+    val kind = if (managed) {
+        com.migo.core.protocol.RoomKind.Managed
+    } else {
+        com.migo.core.protocol.RoomKind.Public
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Create a room") },
+        text = {
+            Column {
+                Row(horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp)) {
+                    FilterChip(
+                        selected = !managed,
+                        onClick = { managed = false },
+                        label = { Text("Public") },
+                    )
+                    FilterChip(
+                        selected = managed,
+                        onClick = { managed = true },
+                        label = { Text("Managed") },
+                    )
+                }
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                )
+                OutlinedTextField(
+                    value = slug,
+                    onValueChange = {
+                        slugTouched = true
+                        slug = it.lowercase()
+                    },
+                    label = { Text("Address (permanent)") },
+                    singleLine = true,
+                    isError = slug.isNotEmpty() && !slugValid,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                )
+                OutlinedTextField(
+                    value = topic,
+                    onValueChange = { topic = it },
+                    label = { Text("Topic (optional)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onCreate(slug, name.trim(), kind, topic.trim().ifEmpty { null }) },
+                enabled = name.isNotBlank() && slugValid,
+            ) { Text("Create") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 /** One directory row: the facts of a join decision, and the way in. */

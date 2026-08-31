@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { ConversationKind, EncryptionMode } from '@migo/sdk';
+import { ConversationKind, ContentType, EncryptionMode } from '@migo/sdk';
 import type { ConversationSummary, GiftListing, Id } from '@migo/sdk';
 
 import { messagePreview } from '@/lib/message-preview.js';
@@ -108,6 +108,11 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   // the composer's gift picker. Each is plain open/closed state over the same conversation.
   const [profileOpen, setProfileOpen] = useState(false);
   const [roomInfoOpen, setRoomInfoOpen] = useState(false);
+  // The in-thread search: a filter over the transcript this session already holds. The spec's
+  // room header carries a search control; a client-side filter over loaded messages is the
+  // honest version of it, and it labels itself when it is only searching what is loaded.
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
   const [giftOpen, setGiftOpen] = useState(false);
   const [giftCatalogue, setGiftCatalogue] = useState<GiftListing[] | null>(null);
   const [giftRecipient, setGiftRecipient] = useState<Id | null>(null);
@@ -345,6 +350,19 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
             {encryptionLabel}
           </span>
         ) : null}
+        <button
+          type="button"
+          className={`icon-btn ${searchOpen ? 'active' : ''}`}
+          onClick={() => {
+            setSearchOpen((open) => !open);
+            setSearchQuery('');
+          }}
+          aria-label={searchOpen ? 'Close search' : 'Search this conversation'}
+          aria-expanded={searchOpen}
+          title="Search this conversation"
+        >
+          <Icon name="search" size={20} />
+        </button>
         {isRoom && roomInfo !== null ? (
           <button
             type="button"
@@ -362,6 +380,20 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
         <CallButtons conversationId={conversationId} peerId={peerId} onStartCall={startCall} />
         {supportsGames ? <GameLauncher onStart={game.startGame} /> : null}
       </header>
+
+      {searchOpen ? (
+        <div className="thread-search">
+          <input
+            type="search"
+            className="input"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Filter loaded messages"
+            aria-label="Filter loaded messages"
+            autoFocus
+          />
+        </div>
+      ) : null}
 
       {isRoom && roomInfoOpen && roomInfo !== null ? (
         <RoomInfoPanel roomId={roomInfo.roomId} conversationId={conversationId} />
@@ -382,7 +414,17 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
         </div>
       ) : accountId ? (
         <MessageList
-          messages={messages}
+          messages={
+            searchQuery.trim().length > 0
+              ? messages.filter((message) => {
+                  const content = message.content;
+                  return (
+                    content.type === ContentType.Text &&
+                    content.text.toLowerCase().includes(searchQuery.trim().toLowerCase())
+                  );
+                })
+              : messages
+          }
           selfId={accountId}
           showSenders={showSenders}
           profiles={profiles}

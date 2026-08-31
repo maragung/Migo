@@ -251,8 +251,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun open(conversationId: Id, title: String) {
         val live = session ?: return
         signedIn { current ->
+            val row = current.conversations.find { it.conversationId == conversationId }
             current.copy(
-                open = ChatState(conversationId = conversationId, title = title, loading = true),
+                open = ChatState(
+                    conversationId = conversationId,
+                    title = title,
+                    roomId = row?.roomId,
+                    loading = true,
+                ),
                 conversations = current.conversations.map {
                     if (it.conversationId == conversationId) it.copy(unread = 0) else it
                 },
@@ -461,19 +467,71 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Projects a join reply into the conversation list, the same shape a started chat notes. */
+    /** Projects a join (or create) reply into the conversation list, keeping the room id for leave. */
     private fun noteRoom(joined: RoomJoinResponse) {
         val fresh = ConversationRow(
             conversationId = joined.conversationId,
             title = joined.room.name,
             kind = ConversationKind.Room,
+            roomId = joined.room.roomId,
             preview = null,
             unread = 0,
             updatedAt = 0,
         )
         signedIn { current ->
             val absent = current.conversations.none { it.conversationId == fresh.conversationId }
-            current.copy(conversations = if (absent) listOf(fresh) + current.conversations else current.conversations)
+            current.copy(
+                conversations = if (absent) {
+                    listOf(fresh) + current.conversations
+                } else {
+                    current.conversations.map {
+                        if (it.conversationId == fresh.conversationId) it.copy(roomId = fresh.roomId) else it
+                    }
+                },
+            )
+        }
+    }
+
+    /**
+     * Creates a room and opens its conversation — creation is entry, so the reply is a join
+     * handle and the flow is the join flow's, projected the same way.
+     */
+    fun createRoom(slug: String, name: String, kind: com.migo.core.protocol.RoomKind, topic: String?) {
+        val live = session ?: return
+        viewModelScope.launch {
+            try {
+                val joined: RoomJoinResponse = live.client.rooms.create(slug, name, kind, topic)
+                noteRoom(joined)
+                signedIn { it.copy(section = AppState.Section.CHATS) }
+                open(joined.conversationId, joined.room.name)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Leaves a room: the server closes the conversation for this account, and the list stops
+     * offering it. The open chat (if it is this room's) closes with it.
+     */
+    fun leaveRoom(conversationId: Id, roomId: Id) {
+        val live = session ?: return
+        viewModelScope.launch {
+            try {
+                live.client.rooms.leave(roomId)
+                signedIn { current ->
+                    current.copy(
+                        conversations = current.conversations.filterNot { it.conversationId == conversationId },
+                        open = if (current.open?.conversationId == conversationId) null else current.open,
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(failure = readable(failure)) }
+            }
         }
     }
 

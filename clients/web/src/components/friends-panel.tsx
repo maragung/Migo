@@ -4,10 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent, ReactNode } from 'react';
 
 import { ConversationKind, RelationshipKind } from '@migo/sdk';
-import type { Id, RelationshipEntry, SuggestedUser } from '@migo/sdk';
+import type { Id, PresenceState, RelationshipEntry, SuggestedUser } from '@migo/sdk';
 
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { friendlyError } from '@/lib/migo/errors.js';
+import { presenceLabel, usePresenceOf } from '@/lib/migo/use-presence.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
 
@@ -176,6 +177,15 @@ export function FriendsPanel({
   );
   const profiles = useProfiles(relatedIds);
 
+  // Presence everywhere the spec asks for it: seeded from the fetched profiles, live through
+  // each friend's user topic. Only the friends are watched — a pending request has no presence
+  // worth showing, and a block is exactly the account whose whereabouts this client must stop
+  // asking about.
+  const presence = usePresenceOf(
+    useMemo(() => friends.map((entry) => entry.userId), [friends]),
+    profiles,
+  );
+
   // A block from the open modal is the panel's graph moving: run it as a busy action, then close.
   const blockFromModal = useCallback(
     async (userId: Id): Promise<void> => {
@@ -216,6 +226,31 @@ export function FriendsPanel({
         </div>
       ) : (
         <>
+          {/* The contact list leads: friends, presence-first, before anything administrative. */}
+          <section className="panel-section" aria-label="Your friends">
+            <h2 className="panel-heading">Friends</h2>
+            {friends.length === 0 ? (
+              <p className="muted">No friends yet. Add someone from the suggestions below.</p>
+            ) : (
+              friends.map((entry) => (
+                <PersonRow
+                  key={entry.userId}
+                  id={entry.userId}
+                  name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
+                  username={profiles.get(entry.userId)?.username}
+                  avatarUrl={profiles.get(entry.userId)?.avatarUrl}
+                  note={
+                    profiles.get(entry.userId)?.customStatus ??
+                    presenceLabel(presence.get(entry.userId))
+                  }
+                  presence={presence.get(entry.userId)}
+                  onSelect={() => setSelected(entry.userId)}
+                  onMessage={() => void startDirect(entry.userId)}
+                />
+              ))
+            )}
+          </section>
+
           <section className="panel-section" aria-label="Friend requests">
             <h2 className="panel-heading">Requests</h2>
             {incoming.length === 0 && outgoing.length === 0 ? (
@@ -263,25 +298,6 @@ export function FriendsPanel({
                   />
                 ))}
               </>
-            )}
-          </section>
-
-          <section className="panel-section" aria-label="Your friends">
-            <h2 className="panel-heading">Friends</h2>
-            {friends.length === 0 ? (
-              <p className="muted">No friends yet. Add someone from the suggestions below.</p>
-            ) : (
-              friends.map((entry) => (
-                <PersonRow
-                  key={entry.userId}
-                  id={entry.userId}
-                  name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
-                  username={profiles.get(entry.userId)?.username}
-                  avatarUrl={profiles.get(entry.userId)?.avatarUrl}
-                  onSelect={() => setSelected(entry.userId)}
-                  onMessage={() => void startDirect(entry.userId)}
-                />
-              ))
             )}
           </section>
 
@@ -425,6 +441,8 @@ interface PersonRowProps {
   onSelect?: () => void;
   /** Starts (or opens) a direct conversation with the person; offered where a DM makes sense. */
   onMessage?: () => void;
+  /** The person's presence, drawn on the avatar — the messenger's ambient information. */
+  presence?: PresenceState;
 }
 
 /**
@@ -443,6 +461,7 @@ function PersonRow({
   actions,
   onSelect,
   onMessage,
+  presence,
 }: PersonRowProps): ReactNode {
   const [menu, setMenu] = useState<{ x: number; y: number; touch: boolean } | null>(null);
   const suppressClick = useRef(false);
@@ -492,7 +511,7 @@ function PersonRow({
           }
         : {})}
     >
-      <Avatar name={name} id={id} size={36} avatarUrl={avatarUrl} />
+      <Avatar name={name} id={id} size={36} avatarUrl={avatarUrl} presence={presence} />
       <div className="person-main">
         <span className="person-name">{name}</span>
         {username ? <span className="person-sub">@{username}</span> : null}

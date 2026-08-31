@@ -130,8 +130,10 @@
   /* layout: content never stretches edge-to-edge on a monitor */
   --content-max: 1280px;
   --panel-max: 640px;
-  --rail-w: 232px;
-  --rail-w-compact: 64px;
+  /* The rail is an icon rail at every width: 56px of navigation, never a 240px column — the
+   * conversations are the product, and they keep the screen. */
+  --rail-w: 56px;
+  --rail-w-compact: 56px;
 }
 
 [data-theme='dark'] {
@@ -492,12 +494,13 @@ main {
   overflow: hidden;
 }
 
-/* --- the app shell: rail on wide screens, header + bottom bar on phones --- */
+/* --- the app shell: an icon rail, a mobile header, a bottom bar --- */
 
 /*
- * One grid, three compositions. Desktop is a two-column grid (rail + body). Mobile is a
- * three-row grid (header, body, bottom bar) — the rail hides. The body hosts either the chats
- * two-pane shell or a section panel; both scroll within it.
+ * One grid, two compositions. Wide screens are a two-column grid (icon rail + body); phones are
+ * a three-row grid (header, body, bottom bar) with the rail hidden. The rail is an *icon* rail
+ * everywhere — the spec's messenger identity, not a SaaS sidebar — with labels revealed on hover
+ * and tooltips always.
  */
 .app {
   display: grid;
@@ -506,7 +509,11 @@ main {
   overflow: hidden;
 }
 
-/* The rail: brand, the primary sections, the account foot. Icon + label on desktop. */
+/*
+ * The rail: brand, the FRIENDS|CHATS|ROOMS trio, then the rest below a divider, then the foot.
+ * Fixed at 56px; a hovered button slides its label out over the body as an overlay pill rather
+ * than pushing the rail wider, so nothing in the content ever reflows while a pointer browses.
+ */
 .rail {
   grid-column: 1;
   grid-row: 1;
@@ -515,52 +522,56 @@ main {
   min-height: 0;
   border-right: 1px solid var(--border);
   background: var(--panel);
+  z-index: var(--z-sticky);
 }
-.rail-brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 14px 10px;
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--accent);
-}
-.rail-brand .brand-mark {
-  display: inline-flex;
-}
-.rail-brand-name {
-  letter-spacing: 0.2px;
-}
-.rail-nav {
+.rail-trio,
+.rail-nav,
+.rail-foot {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 4px 8px;
+  padding: 4px;
+}
+.rail-trio {
+  padding-top: 2px;
+}
+.rail-nav {
   overflow-y: auto;
   min-height: 0;
+  flex: 1;
 }
-.rail-btn {
+.rail-divider {
+  height: 1px;
+  margin: 6px 10px;
+  background: var(--border);
+}
+.rail-btn,
+.rail-btn-brand {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: 36px;
-  padding: 7px 10px;
+  justify-content: center;
+  width: 44px;
+  height: 40px;
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-dim);
-  font-size: 13px;
-  font-weight: 600;
-  text-align: left;
   transition:
     color var(--motion-fast) var(--ease-standard),
     background var(--motion-fast) var(--ease-standard);
 }
-.rail-btn:hover {
+.rail-btn-brand {
+  color: var(--accent);
+  margin: 4px auto 2px;
+}
+.rail-btn:hover,
+.rail-btn-brand:hover {
   color: var(--text);
   background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
-.rail-btn:focus-visible {
+.rail-btn:focus-visible,
+.rail-btn-brand:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
@@ -572,36 +583,47 @@ main {
   display: inline-flex;
   flex-shrink: 0;
 }
+/* The hover label: an overlay pill to the button's right, over the body, never pushing layout. */
 .rail-btn-label {
+  display: none;
+}
+.rail-btn:hover .rail-btn-label,
+.rail-btn-brand:hover .rail-btn-label {
+  display: block;
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-overlay);
+  color: var(--text);
+  font-size: var(--fs-body-sm);
+  font-weight: 600;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  box-shadow: var(--shadow);
+  z-index: var(--z-dropdown);
 }
 .rail-foot {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px;
   border-top: 1px solid var(--border);
+  padding-bottom: 6px;
 }
 .rail-user {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 6px 8px;
+  justify-content: center;
+  width: 44px;
+  height: 40px;
+  margin: 0 auto;
+  padding: 0;
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
-  text-align: left;
-  transition:
-    color var(--motion-fast) var(--ease-standard),
-    background var(--motion-fast) var(--ease-standard);
+  transition: background var(--motion-fast) var(--ease-standard);
 }
 .rail-user:hover {
-  color: var(--accent);
   background: var(--accent-soft);
 }
 .rail-user:focus-visible {
@@ -609,17 +631,33 @@ main {
   outline-offset: -1px;
 }
 .rail-user.active {
-  color: var(--accent);
   background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 .rail-user-name {
-  max-width: 120px;
+  display: none;
+}
+.rail-user:hover .rail-user-name {
+  display: block;
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-overlay);
+  color: var(--text);
+  font-size: var(--fs-body-sm);
+  font-weight: 600;
   white-space: nowrap;
+  max-width: 160px;
   overflow: hidden;
   text-overflow: ellipsis;
+  box-shadow: var(--shadow);
+  z-index: var(--z-dropdown);
 }
 
-/* The mobile header and bottom bar exist only under 768px (rules near the end of the sheet). */
+/* The mobile header and bottom bar exist only under 768px (rules near the end of the sheet). */ /* The mobile header and bottom bar exist only under 768px (rules near the end of the sheet). */
 .mobile-header,
 .bottom-nav {
   display: none;
@@ -667,6 +705,12 @@ main {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+/* The header's right-hand controls, grouped so a second button never crowds the first. */
+.panel-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .panel-search {
   display: flex;
@@ -875,6 +919,11 @@ main {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+/* A header control whose pane is open: the accent states it without a second marker. */
+.icon-btn.active {
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 .icon-btn {
   width: 32px;
@@ -1203,6 +1252,16 @@ main {
   box-shadow: var(--glow);
 }
 
+/* The in-thread search bar, dropped between the header and the transcript. */
+.thread-search {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.thread-search .input {
+  width: 100%;
+}
+
 /* --- media attachments --- */
 
 /*
@@ -1244,7 +1303,7 @@ main {
   background: var(--lightbox-bg);
   display: grid;
   place-items: center;
-  z-index: 60;
+  z-index: var(--z-overlay);
   cursor: zoom-out;
 }
 .lightbox-image {
@@ -1675,7 +1734,7 @@ main {
   display: grid;
   place-items: center;
   padding: 16px;
-  z-index: 50;
+  z-index: var(--z-modal);
 }
 .modal {
   width: 100%;
@@ -2077,7 +2136,7 @@ main {
 .menu-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 20;
+  z-index: var(--z-dropdown);
   padding: 0;
   border: none;
   background: transparent;
@@ -2086,7 +2145,7 @@ main {
   position: absolute;
   top: calc(100% + 6px);
   right: 0;
-  z-index: 21;
+  z-index: calc(var(--z-dropdown) + 1);
   min-width: 230px;
   display: flex;
   flex-direction: column;
@@ -2227,7 +2286,12 @@ main {
 @media (max-width: 768px) {
   .app {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: 44px minmax(0, 1fr) calc(52px + env(safe-area-inset-bottom, 0px));
+    /* The bottom row sizes itself: a slot is an icon, a label, and the 44px touch target,
+     * which together stand taller than any fixed 52px row could hold without clipping. */
+    grid-template-rows:
+      calc(44px + env(safe-area-inset-top, 0px))
+      minmax(0, 1fr)
+      auto;
   }
   .rail {
     display: none;
@@ -2239,19 +2303,26 @@ main {
     align-items: center;
     gap: 8px;
     padding: 0 12px;
+    padding-top: env(safe-area-inset-top, 0px);
     border-bottom: 1px solid var(--border);
     background: var(--nav-bg, var(--panel));
     backdrop-filter: blur(8px);
     -webkit-backdrop-filter: blur(8px);
   }
+  /* With a thread open the header folds away; the two remaining rows are the body and the bar,
+   * and the bar must land in the SECOND row — its ordinary third-row assignment would fall off
+   * the two-row grid into an implicit row and out of the viewport. */
   .app.app-thread-open .mobile-header {
     display: none;
   }
   .app.app-thread-open {
-    grid-template-rows: minmax(0, 1fr) calc(52px + env(safe-area-inset-bottom, 0px));
+    grid-template-rows: minmax(0, 1fr) auto;
   }
   .app.app-thread-open .app-body {
     grid-row: 1;
+  }
+  .app.app-thread-open .bottom-nav {
+    grid-row: 2;
   }
   .mobile-header .brand-mark {
     display: inline-flex;
@@ -2289,6 +2360,8 @@ main {
     background: var(--panel);
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
+  /* The whole button is the touch target — 44px minimum — and the icon + label ride inside it,
+   * so the bar's height follows its content rather than clipping to a fixed row. */
   .bottom-nav-btn {
     flex: 1;
     min-height: var(--touch);
@@ -2296,8 +2369,8 @@ main {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 2px;
-    padding: 4px 8px;
+    gap: 3px;
+    padding: 6px 8px;
     border: none;
     background: transparent;
     color: var(--text-dim);
@@ -2350,28 +2423,10 @@ main {
 }
 
 /*
- * Tablet (768–1023px): the rail collapses to icons, so the content keeps the room. Labels come
- * back at the desktop width below.
+ * Tablet (768–1023px): the rail is already the icon rail at every width, so nothing changes
+ * here — the tablet and the desktop differ only in how much room the body gets, which the grid
+ * gives them without help.
  */
-@media (min-width: 768px) and (max-width: 1023px) {
-  .app {
-    grid-template-columns: var(--rail-w-compact) minmax(0, 1fr);
-  }
-  .rail-btn-label,
-  .rail-user-name,
-  .rail-brand-name {
-    display: none;
-  }
-  .rail-btn,
-  .rail-user {
-    justify-content: center;
-    padding: 9px 0;
-  }
-  .rail-brand {
-    justify-content: center;
-    padding: 12px 0 10px;
-  }
-}
 
 /* Desktop (≥1024px): the full rail. Wide monitors keep the content out of the margins. */
 @media (min-width: 1440px) {
@@ -2419,7 +2474,9 @@ main {
 .call-overlay {
   position: fixed;
   inset: 0;
-  z-index: 60;
+  /* The overlay tier: a ringing call must appear over any dialog, sheet, or menu that happens
+   * to be open — the caller cannot wait for the user to close things. */
+  z-index: var(--z-overlay);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -3362,75 +3419,6 @@ button.activity-row-btn:focus-visible {
 .token-ref:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: 1px;
-}
-
-/* --- the Home dashboard --- */
-
-.home-panel {
-  gap: 14px;
-}
-.home-hero {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--panel);
-}
-.home-hero-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-.home-hero-name {
-  margin: 0;
-  font-size: var(--fs-title-sm);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.home-actions {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-}
-.home-action {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  min-height: 64px;
-  justify-content: center;
-  padding: 10px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--panel);
-  color: var(--text-dim);
-  font-size: var(--fs-body-sm);
-  font-weight: 600;
-  transition:
-    color var(--motion-fast) var(--ease-standard),
-    border-color var(--motion-fast) var(--ease-standard);
-}
-.home-action:hover {
-  color: var(--accent);
-  border-color: var(--accent-border-soft);
-}
-.home-action:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: 1px;
-}
-.home-action-icon {
-  display: inline-flex;
-  color: var(--accent);
-}
-.home-section-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
 }
 
 /* --- the search box --- */

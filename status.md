@@ -873,3 +873,63 @@ Verifikasi lokal (ringan): tsc bersih, 141+235 test TS, 33 test desktop, clippy 
 warning, fmt bersih, 7 gate statis (brief/infra/pydeps/protocol/entity/vector/
 kotlin) hijau, build statis web sukses (8 route, /chat 184kB First Load). Compile
 Android diverifikasi android.yml di CI.
+
+## 25. Messenger-first redesign + Create Room, Leave Room, full room fitur (v0.8.1)
+
+**ui-design.md diganti spec baru** — melarang pola yang v0.8.0 buat: sidebar SaaS besar
+permanen, dashboard-first, area kosong. Diterapkan:
+
+**Web — messenger shell:**
+
+- **AppShell baru**: rail ikon 56px di SEMUA lebar (bukan 232px berlabel) dengan trio
+  FRIENDS|CHATS|ROOMS sebagai tablist tersendiri di atas divider, label muncul sebagai pill
+  overlay saat hover. Bottom bar mobile: Friends Chats Rooms Space More (trio langsung
+  tersedia, sesuai §26). Sesi dibuka di **Chats**, bukan dashboard. Panel Home dihapus.
+- **Friends = contact list**: seksi Friends paling atas dengan presence dot di avatar
+  (usePresenceOf: seed dari profile + subscribe topic user + event live) + custom status
+  sebagai baris kedua. Baris kompak, bukan kartu.
+- **Create Room**: dialog (Name, Slug auto-suggest dari nama, Public/Managed segmented,
+  Topic) → rooms.create → noteRoom + noteConversation → thread terbuka. Tombol "New room"
+  di header panel Rooms. Validasi slug [a-z0-9-].
+- **Leave Room (Android)**: ConversationRow + ChatState membawa roomId; tombol Leave di
+  header chat room → rooms.leave + hapus percakapan.
+- **Search dalam percakapan**: ikon search di thread header → filter pesan ter-load
+  client-side.
+- **Virtualized rendering**: MessageList merender window 150 pesan terakhir; "Load earlier"
+  sekaligus melebar-kan window satu langkah.
+- **Perbaikan bug UI v0.8.0**: grid mobile rusak saat thread terbuka (bottom-nav
+  grid-row salah → keluar viewport); baris bottom bar 52px memotong konten ~60px (kini
+  auto); ikon menu/coins/wallet salah gambar (menu = hamburger, coins tanpa clipPath
+  hantu, wallet clasp stroke); call-overlay z-60 kalah dari modal (kini --z-overlay 300,
+  modal --z-modal 400, lightbox --z-overlay, game-menu --z-dropdown); safe-area-inset-top
+  di mobile header (notch/PWA standalone).
+
+**Desktop — messenger workspace:**
+
+- **Rail ikon 56px** (bukan 210px berlabel): brand, trio Friends|Chats|Rooms di grup
+  tersendiri, divider, lalu Space/Alerts/Search/Wallet/Settings, foot: connection dot +
+  theme + avatar akun (tooltip). Place::Home dihapus — sesi dibuka di Chat. Top bar hanya
+  untuk layar auth. Ikon place digambar painter (bukan icon font): 9 glyph stroke 1.75.
+- **Create Room**: Command::CreateRoom + RoomCreate wire (opcode 85, reply
+  RoomJoinResponse) → join path yang sama. Form window di rooms.rs dengan slug-suggest.
+- **Leave Room**: Command::LeaveRoom + pending_leave (ack tak membawa room id) →
+  Event::RoomLeft → rooms.joined map dihapus + conversation list re-read. Baris room
+  joined: Open + Leave (bukan Join).
+- **Search dalam percakapan** & virtualized window ikut diterapkan di sisi chat web;
+  desktop chat sudah page-bounded.
+
+**Android:**
+
+- Sesi dibuka di **Chats** (bukan Home; Home tetap compact hub per §15). Bottom bar
+  bertambah glyph Canvas-drawn (BarGlyph: home/chats/rooms/space/more, stroke 1.75 —
+  tanpa icon font). More sheet berjudul.
+- **Create Room**: RoomsDomain.create (mirror join) + dialog di RoomsScreen (slug
+  auto-suggest, FilterChip Public/Managed) → noteRoom → chat terbuka.
+- **Leave Room**: tombol Leave di ChatScreen header (roomId via ChatState).
+
+**CI/CD**: semua build berat tetap di GitHub Actions (build-web di ci.yml sejak v0.8.0);
+rilis v0.8.1 = tag → release.yml (APK, migod binary, image GHCR, tarball web/desktop).
+
+Verifikasi lokal (ringan, VPS): tsc bersih, 235 test web, 33 test desktop, clippy 0
+warning, fmt bersih, 7 gate statis hijau, build statis web sukses (185 kB First Load
+/chat).

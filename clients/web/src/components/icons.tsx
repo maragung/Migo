@@ -101,8 +101,8 @@ const GLYPHS: Readonly<Record<IconName, ReactNode>> = {
   wallet: (
     <>
       <path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5v-9Z" />
-      <path d="M15 12h5" />
-      <circle cx="15.5" cy="12" r="0.5" />
+      <path d="M13.5 12H20" />
+      <path d="M13.5 9.5v5" />
     </>
   ),
   user: (
@@ -184,9 +184,7 @@ const GLYPHS: Readonly<Record<IconName, ReactNode>> = {
   ),
   menu: (
     <>
-      <circle cx="5.5" cy="12" r="0.5" />
-      <circle cx="12" cy="12" r="0.5" />
-      <circle cx="18.5" cy="12" r="0.5" />
+      <path d="M4.5 7h15M4.5 12h15M4.5 17h15" />
     </>
   ),
   close: (
@@ -213,10 +211,9 @@ const GLYPHS: Readonly<Record<IconName, ReactNode>> = {
   ),
   coins: (
     <>
-      <circle cx="9" cy="9" r="5" />
-      <path d="M14.2 6.6a5 5 0 1 1-7.6 6.3" />
-      <path d="M12.8 18.9a5 5 0 1 0 6.1-6.1" />
-      <circle cx="15.5" cy="15.5" r="5" clipPath="url(#coins-clip)" />
+      <circle cx="9" cy="9" r="5.5" />
+      <path d="M16.2 6.3a5.5 5.5 0 1 1-9.9 4.9" />
+      <path d="M12.5 20a5.5 5.5 0 1 0 8-7.6" />
     </>
   ),
   refresh: (

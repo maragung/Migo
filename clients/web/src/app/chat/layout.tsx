@@ -28,7 +28,6 @@ import type { ReactNode } from 'react';
 import { AppShell } from '@/components/app-shell.js';
 import type { AppTab } from '@/components/app-shell.js';
 import { FriendsPanel } from '@/components/friends-panel.js';
-import { HomePanel } from '@/components/home-panel.js';
 import { NotificationsPanel } from '@/components/notifications-panel.js';
 import { ProfilePanel } from '@/components/profile-panel.js';
 import { RequireReady } from '@/components/require-ready.js';
@@ -47,7 +46,8 @@ import { SectionNavProvider } from '@/lib/migo/section-nav.js';
 
 export default function ChatLayout({ children }: { children: ReactNode }): ReactNode {
   const hasThread = useOpenConversation() !== null;
-  const [tab, setTab] = useState<AppTab>('home');
+  // A session opens on its conversations: the messenger's own first screen, not a dashboard.
+  const [tab, setTab] = useState<AppTab>('chats');
 
   // The cross-section flow every "open this conversation" surface shares: switch first so the
   // chats shell is mounted when the fragment lands, then let the thread's own hook subscribe
@@ -69,8 +69,6 @@ export default function ChatLayout({ children }: { children: ReactNode }): React
             <main className="thread-area">{children}</main>
           </div>
         );
-      case 'home':
-        return <HomePanel onOpenSection={setTab} onOpenConversation={openInChats} />;
       case 'rooms':
         return <RoomsPanel onOpenConversation={openInChats} />;
       case 'space':

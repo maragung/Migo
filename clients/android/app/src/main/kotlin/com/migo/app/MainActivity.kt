@@ -10,8 +10,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -118,6 +120,9 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
                         onBack = model::closeChat,
                         onDraft = model::setDraft,
                         onSend = model::send,
+                        onLeave = open.roomId?.let { roomId ->
+                            { model.leaveRoom(open.conversationId, roomId) }
+                        },
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -161,6 +166,7 @@ private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel) {
                 state = state,
                 onQuery = model::setRoomsQuery,
                 onJoin = model::joinRoom,
+                onCreate = model::createRoom,
                 onRefresh = model::loadRooms,
                 modifier = Modifier.weight(1f),
             )
@@ -257,26 +263,31 @@ private fun BottomBar(
             ) {
                 BarSlot(
                     label = "Home",
+                    glyph = com.migo.app.ui.BarGlyph.HOME,
                     active = state.section == AppState.Section.HOME,
                     onClick = { onSelect(AppState.Section.HOME) },
                 )
                 BarSlot(
                     label = "Chats",
+                    glyph = com.migo.app.ui.BarGlyph.CHATS,
                     active = state.section == AppState.Section.CHATS,
                     onClick = { onSelect(AppState.Section.CHATS) },
                 )
                 BarSlot(
                     label = "Rooms",
+                    glyph = com.migo.app.ui.BarGlyph.ROOMS,
                     active = state.section == AppState.Section.ROOMS,
                     onClick = { onSelect(AppState.Section.ROOMS) },
                 )
                 BarSlot(
                     label = "Space",
+                    glyph = com.migo.app.ui.BarGlyph.SPACE,
                     active = state.section == AppState.Section.SPACE,
                     onClick = { onSelect(AppState.Section.SPACE) },
                 )
                 BarSlot(
                     label = "More",
+                    glyph = com.migo.app.ui.BarGlyph.MORE,
                     active = moreOpen,
                     onClick = onMore,
                 )
@@ -285,15 +296,17 @@ private fun BottomBar(
     }
 }
 
-/** One slot: a labelled, thumb-sized door, stated in the accent colour when it is the current one. */
+/** One slot: a glyph and its label, thumb-sized, in the accent colour when it is the current one. */
 @Composable
-private fun BarSlot(label: String, active: Boolean, onClick: () -> Unit) {
-    Box(
+private fun BarSlot(label: String, glyph: com.migo.app.ui.BarGlyph, active: Boolean, onClick: () -> Unit) {
+    Column(
         modifier = Modifier
             .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        contentAlignment = Alignment.Center,
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        com.migo.app.ui.BarGlyph(kind = glyph, active = active)
+        Spacer(modifier = Modifier.height(2.dp))
         Text(
             text = label,
             style = MaterialTheme.typography.labelMedium,
@@ -321,6 +334,14 @@ private fun MoreSheet(
         shadowElevation = 8.dp,
     ) {
         Column(modifier = Modifier.fillMaxWidth().navigationBarsPadding()) {
+            // The sheet is titled like any other surface: a person should know what they opened.
+            Text(
+                text = "More",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp),
+            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             for ((section, label) in listOf(
                 AppState.Section.FRIENDS to "Friends",
                 AppState.Section.ALERTS to "Alerts",

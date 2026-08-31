@@ -1,22 +1,19 @@
 'use client';
 
 /**
- * The app shell: one product, three compositions.
+ * The messenger shell: Migo's primary navigation, re-composed per size.
  *
- * The sections are the app's whole information architecture — Home, Chats, Rooms, Space, then
- * the rest — and the shell presents exactly that list at every size, only re-composed:
+ * The spec is explicit about what Migo is NOT: a SaaS dashboard with a large permanent sidebar
+ * and an empty content area. It is a messenger, so the shell leads with people — FRIENDS |
+ * CHATS | ROOMS as a trio of tabs (mobile: under the header; tablet/desktop: an icon rail with
+ * the trio prominent above the secondary destinations) — and every other destination is one
+ * compact control away. The rail stays an *icon* rail at every width: 56px of navigation, never
+ * a 240px column, so the conversations — the thing the product is — keep the screen.
  *
- *   - Desktop (≥1024px): a full rail (icons + labels) beside the content.
- *   - Tablet (768–1023px): the same rail collapsed to icons, so the content keeps the room.
- *   - Mobile (<768px): a compact 44px header, the content, and a five-slot bottom bar — Home,
- *     Chats, Rooms, Space, and More — with More opening a bottom sheet that carries the
- *     remaining sections. Five is the ceiling: a bottom bar that scrolls is a bottom bar that
- *     hides.
- *
- * Section state stays plain client state (the bundle is a static export; the open conversation
- * lives in the URL fragment; a section switch must never unload the session or the socket).
- * While a chat thread is open on mobile the header folds away — the thread's own header, with
- * its back button, is the only chrome that pane needs.
+ * The trio is one tab group for a reason: Friends, Chats, and Rooms are the three lists a
+ * messenger lives in, and switching between them should feel like paging through one surface,
+ * not navigating between sections. Everything else (Space, Alerts, Search, Wallet, Profile,
+ * Settings) is a destination, not a list, and lives below the fold of the rail.
  */
 
 import { useState } from 'react';
@@ -33,18 +30,16 @@ import type { IconName } from './icons.js';
 import { ThemeToggle } from './theme-toggle.js';
 
 /**
- * The app's top-level sections, switched by the shell's navigation.
+ * The app's top-level sections.
  *
- * The order is the information architecture: the realtime surfaces first (Home summarises them,
- * Chats and Rooms are where talking happens, Space is the activity stream), people next, tools
- * last. `AppTab` is exported for the layout that owns the state and any test that pins the offer.
+ * The order is the messenger's own: the three lists first (friends, chats, rooms), then the
+ * stream, then the destinations. `trio` marks the three that form the primary tab group.
  */
 export type AppTab =
-  | 'home'
+  | 'friends'
   | 'chats'
   | 'rooms'
   | 'space'
-  | 'friends'
   | 'notifications'
   | 'search'
   | 'wallet'
@@ -58,31 +53,31 @@ interface Section {
   icon: IconName;
 }
 
-/** The rail's full list, in information-architecture order. */
-const SECTIONS: ReadonlyArray<Section> = [
-  { id: 'home', label: 'Home', icon: 'home' },
+/** The primary trio: the three lists a messenger lives in. */
+const TRIO: ReadonlyArray<Section> = [
+  { id: 'friends', label: 'Friends', icon: 'friends' },
   { id: 'chats', label: 'Chats', icon: 'chats' },
   { id: 'rooms', label: 'Rooms', icon: 'rooms' },
+];
+
+/** The rest: the stream and the destinations, below the fold of the rail. */
+const REST: ReadonlyArray<Section> = [
   { id: 'space', label: 'Space', icon: 'space' },
-  { id: 'friends', label: 'Friends', icon: 'friends' },
   { id: 'notifications', label: 'Alerts', icon: 'bell' },
   { id: 'search', label: 'Search', icon: 'search' },
   { id: 'wallet', label: 'Wallet', icon: 'wallet' },
 ];
 
-/** The secondary row at the rail's foot: about the account, not destinations. */
+/** The rail's foot: about the account, not destinations. */
 const SECONDARY: ReadonlyArray<Section> = [
   { id: 'profile', label: 'Profile', icon: 'user' },
   { id: 'settings', label: 'Settings', icon: 'settings' },
 ];
 
-/** The five-slot mobile bar; `more` is not a section but the sheet that carries the rest. */
-const MOBILE_BAR: ReadonlyArray<Section | { id: 'more'; label: string; icon: IconName }> = [
-  { id: 'home', label: 'Home', icon: 'home' },
-  { id: 'chats', label: 'Chats', icon: 'chats' },
-  { id: 'rooms', label: 'Rooms', icon: 'rooms' },
+/** The mobile bar: the trio plus More — five slots, the spec's ceiling. */
+const MOBILE_BAR: ReadonlyArray<Section> = [
+  ...TRIO,
   { id: 'space', label: 'Space', icon: 'space' },
-  { id: 'more', label: 'More', icon: 'menu' },
 ];
 
 /**
@@ -90,7 +85,7 @@ const MOBILE_BAR: ReadonlyArray<Section | { id: 'more'; label: string; icon: Ico
  *
  * @param active The section currently shown; its control carries the current-page attribute.
  * @param onSelect Called with the section a control asks for.
- * @param hasThread True while a chat thread is open — the mobile header folds away for it.
+ * @param hasThread True while a chat thread is open — the mobile chrome folds away for it.
  * @param children The section's content, already chosen by the owner.
  */
 export function AppShell({
@@ -121,16 +116,33 @@ export function AppShell({
 
   return (
     <div className={`app app-${active}${hasThread ? ' app-thread-open' : ''}`}>
-      {/* The tablet/desktop rail: brand, the sections, the account. */}
+      {/* The tablet/desktop icon rail: the trio prominent, the rest below the fold. */}
       <aside className="rail" aria-label="Sections">
-        <div className="rail-brand">
-          <span className="brand-mark" aria-hidden="true">
+        <button
+          type="button"
+          className="rail-btn rail-btn-brand"
+          onClick={() => select('chats')}
+          title="Migo"
+          aria-label="Migo — Chats"
+        >
+          <span className="rail-btn-icon" aria-hidden="true">
             <Icon name="sparkle" size={20} />
           </span>
-          <span className="brand-name rail-brand-name">Migo</span>
+          <span className="rail-btn-label">Migo</span>
+        </button>
+        <div className="rail-trio" role="tablist" aria-label="Lists">
+          {TRIO.map((section) => (
+            <RailButton
+              key={section.id}
+              section={section}
+              active={active === section.id}
+              onSelect={select}
+            />
+          ))}
         </div>
+        <div className="rail-divider" aria-hidden="true" />
         <nav className="rail-nav">
-          {SECTIONS.map((section) => (
+          {REST.map((section) => (
             <RailButton
               key={section.id}
               section={section}
@@ -196,45 +208,41 @@ export function AppShell({
       {/* The section content. */}
       <div className="app-body">{children}</div>
 
-      {/* The mobile bar: five slots, thumb reach, no scrolling. */}
+      {/* The mobile bar: the trio plus Space — the messenger's five slots. */}
       <nav className="bottom-nav" aria-label="Sections">
-        {MOBILE_BAR.map((item) =>
-          item.id === 'more' ? (
-            <button
-              key="more"
-              type="button"
-              className={`bottom-nav-btn ${moreOpen ? 'active' : ''}`}
-              aria-haspopup="dialog"
-              aria-expanded={moreOpen}
-              onClick={() => setMoreOpen(true)}
-            >
-              <span className="bottom-nav-icon" aria-hidden="true">
-                <Icon name="menu" size={20} />
-              </span>
-              <span className="bottom-nav-label">More</span>
-            </button>
-          ) : (
-            <button
-              key={item.id}
-              type="button"
-              className={`bottom-nav-btn ${active === item.id ? 'active' : ''}`}
-              aria-current={active === item.id ? 'page' : undefined}
-              onClick={() => select(item.id)}
-            >
-              <span className="bottom-nav-icon" aria-hidden="true">
-                <Icon name={item.icon} size={20} />
-              </span>
-              <span className="bottom-nav-label">{item.label}</span>
-            </button>
-          ),
-        )}
+        {MOBILE_BAR.map((section) => (
+          <button
+            key={section.id}
+            type="button"
+            className={`bottom-nav-btn ${active === section.id ? 'active' : ''}`}
+            aria-current={active === section.id ? 'page' : undefined}
+            onClick={() => select(section.id)}
+          >
+            <span className="bottom-nav-icon" aria-hidden="true">
+              <Icon name={section.icon} size={20} />
+            </span>
+            <span className="bottom-nav-label">{section.label}</span>
+          </button>
+        ))}
+        <button
+          type="button"
+          className={`bottom-nav-btn ${moreOpen ? 'active' : ''}`}
+          aria-haspopup="dialog"
+          aria-expanded={moreOpen}
+          onClick={() => setMoreOpen(true)}
+        >
+          <span className="bottom-nav-icon" aria-hidden="true">
+            <Icon name="menu" size={20} />
+          </span>
+          <span className="bottom-nav-label">More</span>
+        </button>
       </nav>
 
       {/* The More sheet: every section the five-slot bar could not carry. */}
       {moreOpen ? (
         <BottomSheet title="More" onClose={() => setMoreOpen(false)}>
           <div className="sheet-menu">
-            {[...SECTIONS.slice(4), ...SECONDARY].map((section) => (
+            {[...REST.slice(1), ...SECONDARY].map((section) => (
               <button
                 key={section.id}
                 type="button"
@@ -259,7 +267,7 @@ export function AppShell({
   );
 }
 
-/** One rail entry: icon always, label beside it where the rail has room. */
+/** One rail entry: icon always, label on hover for the finding, tooltip always. */
 function RailButton({
   section,
   active,
@@ -275,6 +283,7 @@ function RailButton({
       className={`rail-btn ${active ? 'active' : ''}`}
       aria-current={active ? 'page' : undefined}
       title={section.label}
+      aria-label={section.label}
       onClick={() => onSelect(section.id)}
     >
       <span className="rail-btn-icon" aria-hidden="true">

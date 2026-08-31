@@ -37,8 +37,8 @@ use migo_core::{Id, OsRandom, Random, Timestamp};
 use migo_protocol::{
     features, BadgesReq, ClientInfo, ConversationKind, EncryptionMode, FriendRespond, FriendTarget,
     GiftCatalogueReq, GiftSend, InboxReq, LeaderboardReq, LedgerReq, MessageKind, NotificationAck,
-    Opcode, ProgressionReq, RelationshipListReq, RoomJoinRequest, RoomListRequest, SearchReq,
-    SubscribeRequest, SuggestReq, Topic, TopicKind, WalletReq,
+    Opcode, ProgressionReq, RelationshipListReq, RoomCreate, RoomJoinRequest, RoomLeaveRequest,
+    RoomListRequest, SearchReq, SubscribeRequest, SuggestReq, Topic, TopicKind, WalletReq,
 };
 use tokio::sync::mpsc;
 
@@ -168,6 +168,16 @@ pub enum Command {
     Rooms { query: String },
     /// Join a room, whose conversation opens like any other when the join is accepted.
     JoinRoom { room_id: Id },
+    /// Create a room and enter it. Creation is entry: the reply is a join handle.
+    CreateRoom {
+        slug: String,
+        name: String,
+        /// True for a managed room (server-moderated); false for a public community room.
+        managed: bool,
+        topic: Option<String>,
+    },
+    /// Leave a room; the server closes its conversation for this account.
+    LeaveRoom { room_id: Id },
     /// Read the durable notification inbox.
     Notifications,
     /// Mark every notification at or before one instant read.
@@ -268,8 +278,14 @@ pub enum Event {
     Sessions(Result<Vec<SessionRow>, String>),
     /// The public room directory, reduced to rows.
     Rooms(Vec<RoomRow>),
-    /// A join was accepted and its conversation is ready to open.
-    RoomJoined { conversation_id: Id, title: String },
+    /// A join (or create) was accepted and its conversation is ready to open.
+    RoomJoined {
+        conversation_id: Id,
+        room_id: Id,
+        title: String,
+    },
+    /// A leave was accepted; the rooms pane drops the room from its joined set.
+    RoomLeft { room_id: Id },
     /// The durable notification inbox, newest first.
     Alerts(Vec<AlertRow>),
     /// A notification was pushed: the cue to re-read whatever inbox-shaped surface is showing.
@@ -478,6 +494,9 @@ struct Worker {
     gateway: Option<Gateway>,
     /// Armed while the gateway is down and a reconnect is still worth trying.
     retry: Option<Retry>,
+    /// The room a leave is in flight for. The wire's acknowledgement names no room, so the
+    /// request's own id is the only thing that can say which room the ack answers.
+    pending_leave: Option<Id>,
 }
 
 impl Worker {
@@ -488,6 +507,7 @@ impl Worker {
             signed: None,
             gateway: None,
             retry: None,
+            pending_leave: None,
         }
     }
 
@@ -614,6 +634,15 @@ impl Worker {
             }
             Command::Rooms { query } => self.request_rooms(query).await,
             Command::JoinRoom { room_id } => self.join_room(room_id).await,
+            Command::CreateRoom {
+                slug,
+                name,
+                managed,
+                topic,
+            } => {
+                self.create_room(slug, name, managed, topic).await;
+            }
+            Command::LeaveRoom { room_id } => self.leave_room(room_id).await,
             Command::Notifications => self.request_notifications().await,
             Command::AcknowledgeAlerts { through_unix_ms } => {
                 self.acknowledge_alerts(through_unix_ms).await;
@@ -1316,6 +1345,34 @@ impl Worker {
         self.request(Opcode::RoomList, &message).await;
     }
 
+    /// Creates a room and enters it. The wire's create call resolves with a join handle —
+    /// creation is entry, the creator is the first member and its Owner — so the reply is
+    /// handled by the join path and nothing here has a second flow to keep in step.
+    async fn create_room(
+        &mut self,
+        slug: String,
+        name: String,
+        managed: bool,
+        topic: Option<String>,
+    ) {
+        let message = RoomCreate {
+            slug,
+            name,
+            kind: if managed { 2 } else { 1 },
+            topic,
+            max_members: None,
+        };
+        self.request(Opcode::RoomCreate, &message).await;
+    }
+
+    /// Leaves a room. The server closes the conversation for this account; the conversation list
+    /// re-reads behind the acknowledgement, and the rooms pane drops the room from its joined set.
+    async fn leave_room(&mut self, room_id: Id) {
+        self.pending_leave = Some(room_id);
+        let message = RoomLeaveRequest { room_id };
+        self.request(Opcode::RoomLeave, &message).await;
+    }
+
     /// Joins a room. The reply names both halves — the room and the conversation — and the
     /// conversation list re-reads behind it, exactly as a started direct chat does.
     async fn join_room(&mut self, room_id: Id) {
@@ -1437,8 +1494,25 @@ impl Worker {
         }
         self.sink.send(Event::RoomJoined {
             conversation_id: joined.conversation_id,
+            room_id: joined.room.room_id,
             title: joined.room.name,
         });
+        self.request_conversations().await;
+    }
+
+    /// A leave was accepted: the rooms pane drops the room, and the conversation list re-reads so
+    /// the closed conversation stops being offered.
+    async fn on_room_left(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(acknowledged) = gateway::decode::<migo_protocol::Acknowledged>(frame) else {
+            return;
+        };
+        let Some(room_id) = self.pending_leave.take() else {
+            return;
+        };
+        if !acknowledged.ok {
+            return;
+        }
+        self.sink.send(Event::RoomLeft { room_id });
         self.request_conversations().await;
     }
 
@@ -1655,7 +1729,8 @@ impl Worker {
             Opcode::FriendEvent => self.on_friend_event(&frame),
             Opcode::PresenceEvent => self.on_presence(&frame),
             Opcode::RoomList => self.on_rooms(&frame),
-            Opcode::RoomJoin => self.on_room_joined(&frame).await,
+            Opcode::RoomJoin | Opcode::RoomCreate => self.on_room_joined(&frame).await,
+            Opcode::RoomLeave => self.on_room_left(&frame).await,
             Opcode::NotificationList => self.on_alerts(&frame),
             Opcode::NotificationEvent => self.on_alert_pushed(&frame),
             Opcode::BalanceFetch => self.on_balance(&frame),

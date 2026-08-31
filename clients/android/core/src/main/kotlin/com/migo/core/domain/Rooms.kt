@@ -2,6 +2,7 @@ package com.migo.core.domain
 
 import com.migo.core.protocol.Acknowledged
 import com.migo.core.protocol.Op
+import com.migo.core.protocol.RoomCreate
 import com.migo.core.protocol.RoomJoinRequest
 import com.migo.core.protocol.RoomJoinResponse
 import com.migo.core.protocol.RoomLeaveRequest
@@ -97,6 +98,30 @@ class RoomsDomain(
      * busy room comes to show as empty.
      */
     fun onState(listener: Listener<RoomStateEvent>): Subscription = stateListeners.add(listener)
+
+    /**
+     * Creates a room and enters it, resolving with the same join handle [join] returns.
+     *
+     * The caller becomes the room's Owner ([com.migo.core.protocol.RoomRole.Owner]): the one role
+     * that can appoint managers and the one a room cannot lose. `slug` is the room's permanent
+     * address and must be unique server-side; `kind` picks the governance line —
+     * [com.migo.core.protocol.RoomKind.Public] for a community room,
+     * [com.migo.core.protocol.RoomKind.Managed] for one under server moderation. The reply is a
+     * join response because creation is entry: the creator is the first member.
+     */
+    suspend fun create(
+        slug: String,
+        name: String,
+        kind: com.migo.core.protocol.RoomKind,
+        topic: String? = null,
+    ): RoomJoinResponse {
+        val request = RoomCreate(slug, name, kind.wire.toLong(), topic)
+        return rpc.call(
+            Op.ROOM_CREATE,
+            { w -> request.encode(w) },
+            { r -> RoomJoinResponse.decode(r) },
+        )
+    }
 
     /**
      * Joins a room.
