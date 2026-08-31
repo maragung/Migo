@@ -468,6 +468,21 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     await this.subscribe([{ kind: TopicKind.User, id: userId }]);
   }
 
+  /**
+   * Subscribes many user topics in ONE SUBSCRIBE frame.
+   *
+   * A contact list wants presence for every friend it shows, and one frame per friend is exactly
+   * the burst the rate limiter prices worst. The wire carries a topic *list* on purpose: one
+   * round trip subscribes them all. Per-topic refusals (a privacy limit, a capped subscription
+   * set) are silently tolerated here the way {@link watchUser} tolerates its single refusal.
+   */
+  async watchUsers(userIds: readonly Id[]): Promise<void> {
+    if (userIds.length === 0) {
+      return;
+    }
+    await this.subscribe(userIds.map((id) => ({ kind: TopicKind.User, id })));
+  }
+
   // --- orchestration helpers (wire subscription and membership to the domains) ---
 
   /**

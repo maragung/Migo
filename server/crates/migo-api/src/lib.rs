@@ -164,6 +164,9 @@ struct Policy {
     /// Whether the accessible alternative captcha mode may be requested. Copied from
     /// `captcha.accessible_mode` so the route decides it without borrowing the whole tree.
     captcha_accessible_mode: bool,
+    /// Whether the captcha service is on at all. Reported through `/v1/config` so a client can
+    /// hide its captcha UI entirely instead of learning it from a refusal.
+    captcha_enabled: bool,
     /// The largest object one PUT may carry, from `media.max_upload_bytes`.
     media_max_upload_bytes: u64,
 }
@@ -178,6 +181,7 @@ impl ApiState {
             max_body_bytes: config.http.max_body_bytes,
             public_url: config.http.public_url.clone(),
             captcha_accessible_mode: config.captcha.accessible_mode,
+            captcha_enabled: config.captcha.enabled,
             media_max_upload_bytes: config.media.max_upload_bytes,
         };
         Self {
@@ -192,6 +196,11 @@ impl ApiState {
                 media_files: services.media_files,
             }),
         }
+    }
+
+    /// Whether the captcha service is on, for the config document.
+    pub(crate) fn captcha_enabled(&self) -> bool {
+        self.inner.policy.captcha_enabled
     }
 
     /// The authenticator, for the auth handlers and the [`Authenticated`] extractor.

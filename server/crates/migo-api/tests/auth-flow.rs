@@ -605,6 +605,83 @@ async fn the_full_flow_captcha_register_login_and_recovery() {
     );
 }
 
+/// Sign-in is never captcha-gated, whatever the gate's state.
+///
+/// The product decision: a returning member is the person the product exists for, and standing
+/// between them and their account because a stranger from their network mistyped passwords is
+/// punishing the wrong party. So the same wrong-password failure that engages the gate for
+/// `register` leaves `sign-in` open — a correct-password login from the same IP, with no
+/// captcha proof attached, succeeds.
+#[tokio::test]
+async fn a_sign_in_never_requires_a_captcha_even_once_the_gate_is_engaged() {
+    let h = Harness::new();
+    let ip = "198.51.100.30";
+
+    // Register the account (the gate starts clean, but the register carries a proof anyway —
+    // the threshold is one and this test's earlier traffic on this IP is none).
+    let setup_captcha = h.issue_captcha().await;
+    let setup_body = json!({
+        "username": "gale",
+        "password": GOOD_PASSWORD,
+        "device": { "display_name": "Setup Device" },
+        "captcha": {
+            "challenge_id": setup_captcha.challenge_id,
+            "answer": setup_captcha.answer,
+        },
+    });
+    let setup_resp = h
+        .send(post_json("/v1/auth/register", Some(ip), &setup_body))
+        .await;
+    assert_eq!(
+        setup_resp.status,
+        StatusCode::CREATED,
+        "setup register should succeed; body={}",
+        setup_resp.text()
+    );
+
+    // Trip the gate with a wrong-password sign-in.
+    let trip_captcha = h.issue_captcha().await;
+    let trip_body = json!({
+        "identifier": "gale",
+        "password": "deliberately-wrong",
+        "device": { "display_name": "Trip Device" },
+        "captcha": {
+            "challenge_id": trip_captcha.challenge_id,
+            "answer": trip_captcha.answer,
+        },
+    });
+    let trip_resp = h
+        .send(post_json("/v1/auth/login", Some(ip), &trip_body))
+        .await;
+    assert_eq!(
+        trip_resp.status,
+        StatusCode::UNAUTHORIZED,
+        "a wrong-password sign-in fails; body={}",
+        trip_resp.text()
+    );
+
+    // The gate is engaged for this network (a register without a proof would be refused —
+    // the test above pins that). Sign-in, though, carries no captcha and succeeds anyway.
+    let login_body = json!({
+        "identifier": "gale",
+        "password": GOOD_PASSWORD,
+        "device": { "display_name": "No Captcha Login" },
+    });
+    let login_resp = h
+        .send(post_json("/v1/auth/login", Some(ip), &login_body))
+        .await;
+    assert_eq!(
+        login_resp.status,
+        StatusCode::OK,
+        "sign-in must not be captcha-gated; body={}",
+        login_resp.text()
+    );
+    assert!(
+        login_resp.json()["access_token"].as_str().is_some(),
+        "the ungated login mints a grant"
+    );
+}
+
 /// A register without a captcha is refused once the gate is engaged.
 ///
 /// The captcha gate is tripped by a sign-in failure: a wrong password on

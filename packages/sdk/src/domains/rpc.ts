@@ -16,11 +16,41 @@
  * is routed to an optional error sink and dropped, and the connection keeps delivering.
  */
 
+import { OP, CODE } from '@migo/protocol';
 import type { Frame } from '@migo/wire';
 
 import { decodeBody, encodeBody } from '../codec.js';
 import type { BodyDecoder, BodyEncoder } from '../codec.js';
+import { RemoteError } from '../errors.js';
 import type { GatewayTransport } from '../transport.js';
+
+/**
+ * The read opcodes a RATE_LIMITED reply retries once against. These are the listing/reporting
+ * surfaces a UI fires in bursts as sections open — exactly the traffic the server's advice
+ * (`retry_after_ms`) can absorb — and they are all safe to re-issue: none of them mutates
+ * anything. Everything else (a message send, a gift, a friend action) surfaces its error, because
+ * an automatic second send is how a message arrives twice.
+ */
+const RETRYABLE_READS: ReadonlySet<number> = new Set([
+  OP.CONVERSATION_LIST,
+  OP.SYNC,
+  OP.ROOM_LIST,
+  OP.ROOM_ROSTER,
+  OP.RELATIONSHIP_LIST,
+  OP.PROFILE_FETCH,
+  OP.NOTIFICATION_LIST,
+  OP.SEARCH,
+  OP.SUGGESTIONS,
+  OP.BALANCE_FETCH,
+  OP.GIFT_CATALOGUE,
+  OP.LEDGER_HISTORY,
+  OP.PROGRESSION,
+  OP.BADGES,
+  OP.LEADERBOARD,
+]);
+
+/** The largest backoff a server's advice can command; anything larger is a policy worth surfacing. */
+const MAX_RETRY_DELAY_MS = 10_000;
 
 /** Notified when an inbound event fails to decode, or its handler throws. Never fatal. */
 export type EventErrorHandler = (opcode: number, cause: unknown) => void;
@@ -56,8 +86,26 @@ export class Rpc {
     decode: BodyDecoder<Response>,
     request: Request,
   ): Promise<Response> {
-    const frame = await this.#transport.request(opcode, encodeBody(encode, request));
-    return decodeBody(decode, frame.payload);
+    try {
+      const frame = await this.#transport.request(opcode, encodeBody(encode, request));
+      return decodeBody(decode, frame.payload);
+    } catch (cause) {
+      // The server answered a read with "too many, wait N ms" and the client obeys — once. This
+      // is the official client's half of the rate-limit contract: it never retries a mutation,
+      // and it caps the wait so a hostile or misconfigured node cannot stall a UI for minutes.
+      if (
+        RETRYABLE_READS.has(opcode) &&
+        cause instanceof RemoteError &&
+        cause.code === CODE.RATE_LIMITED &&
+        cause.retryAfterMs !== undefined
+      ) {
+        const wait = Math.min(Math.max(0, cause.retryAfterMs), MAX_RETRY_DELAY_MS);
+        await new Promise((resolve) => setTimeout(resolve, wait));
+        const frame = await this.#transport.request(opcode, encodeBody(encode, request));
+        return decodeBody(decode, frame.payload);
+      }
+      throw cause;
+    }
   }
 
   /** Sends a fire-and-forget frame the protocol gives no reply to (TYPING, MESSAGE_RECEIPT). */

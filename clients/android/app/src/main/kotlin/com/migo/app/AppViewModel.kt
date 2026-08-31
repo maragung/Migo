@@ -1083,8 +1083,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * which is the only string it puts on the wire (section 161). What is refused is a bare exception
      * class name, which tells somebody nothing and is how a stack detail ends up on a screen.
      */
-    private fun readable(failure: Throwable): String =
-        failure.message?.takeIf { it.isNotBlank() } ?: "Something went wrong. Try again."
+    /**
+     * A failure as the user reads it.
+     *
+     * The two auth-side refusals a person can actually act on get plain words instead of the
+     * server's wire vocabulary, which the message either carries bare (`RATE_LIMITED`) or not
+     * at all (`CAPTCHA_REQUIRED`): a wait is a wait, and "the server asked for a human check"
+     * means "wait a moment and try again" on a build with no captcha UI yet.
+     */
+    private fun readable(failure: Throwable): String {
+        if (failure is com.migo.core.net.RestError.Server) {
+            if (failure.symbol == "RATE_LIMITED") {
+                val seconds = failure.retryAfterMs?.div(1000)
+                return if (seconds != null && seconds > 0) {
+                    "Too many requests. Wait $seconds seconds and try again."
+                } else {
+                    "Too many requests. Wait a moment and try again."
+                }
+            }
+            if (failure.symbol == "CAPTCHA_REQUIRED") {
+                return "Too many failed attempts from this network. Wait a moment and try again."
+            }
+            if (failure.symbol == "INVALID_CAPTCHA" || failure.symbol == "CAPTCHA_EXPIRED") {
+                return "The human check was wrong or expired. Start the sign-up again."
+            }
+            failure.publicMessage.takeIf { it.isNotBlank() }?.let { return it }
+        }
+        return failure.message?.takeIf { it.isNotBlank() } ?: "Something went wrong. Try again."
+    }
 
     private inline fun signedOut(transform: (AppState.SignedOut) -> AppState.SignedOut) {
         _state.update { current ->

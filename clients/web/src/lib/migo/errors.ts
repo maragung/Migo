@@ -17,11 +17,14 @@ import { RemoteError, SdkError, TimeoutError, TransportError } from '@migo/sdk';
 
 export function friendlyError(error: unknown): string {
   if (error instanceof RemoteError) {
-    // `message === symbol` is the SDK's signal that the server disclosed no human message; never
-    // surface the bare symbol, or a withheld error becomes readable and distinguishable.
-    return error.message && error.message !== error.symbol
-      ? error.message
-      : 'The server rejected the request.';
+    // The SDK's JS message composes `symbol: human text`, so the symbol is stripped here rather
+    // than compared: "RATE_LIMITED: Too many requests. Retry in 5 s" reaches a person as "Too
+    // many requests. Retry in 5 s". When the server disclosed no human text at all, the bare
+    // symbol is never surfaced — a withheld error stays unreadable and indistinguishable.
+    const human = error.message.startsWith(`${error.symbol}: `)
+      ? error.message.slice(error.symbol.length + 2)
+      : error.message;
+    return human && human !== error.symbol ? human : 'The server rejected the request.';
   }
   if (error instanceof TimeoutError) {
     return 'The server took too long to respond. Check your connection and try again.';

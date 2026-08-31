@@ -41,12 +41,21 @@ struct Limits {
     max_page_size: u32,
 }
 
+/// The auth-challenge posture, so a client can shape its forms before it submits them.
+#[derive(Serialize)]
+struct Captcha {
+    /// Whether the node's captcha service is on. `false` means every captcha-free path stays
+    /// captcha-free and the client hides its captcha UI.
+    enabled: bool,
+}
+
 /// The whole document: who this node is, what it can do, and what it will accept.
 #[derive(Serialize)]
 struct Document {
     node: Node,
     features: u64,
     limits: Limits,
+    captcha: Captcha,
 }
 
 /// Builds the config document from node identity and the surface's policy.
@@ -68,6 +77,9 @@ async fn config(State(state): State<ApiState>) -> Json<Document> {
             max_devices_per_user: policy.max_devices_per_user,
             max_body_bytes: policy.max_body_bytes,
             max_page_size: MAX_PAGE_SIZE,
+        },
+        captcha: Captcha {
+            enabled: state.captcha_enabled(),
         },
     })
 }

@@ -70,16 +70,15 @@ export function usePresenceOf(
   // One stable key so the subscription effect runs only when the actual set changes.
   const key = useMemo(() => [...ids].sort().join(','), [ids]);
 
-  // Subscribe each account's user topic once; the SDK re-subscribes across a session reset.
+  // Subscribe the whole set in ONE SUBSCRIBE frame — one frame per friend is exactly the burst
+  // the rate limiter prices worst. The SDK re-subscribes across a session reset.
   useEffect(() => {
-    if (!client) {
+    if (!client || ids.length === 0) {
       return;
     }
-    for (const id of ids) {
-      void client.watchUser(id).catch(() => {
-        // A refusal (privacy, an unfriended account) leaves the seed standing.
-      });
-    }
+    void client.watchUsers(ids).catch(() => {
+      // A refusal (privacy, a capped subscription set) leaves the seed standing.
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, key]);
 

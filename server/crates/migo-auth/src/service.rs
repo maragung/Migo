@@ -984,13 +984,13 @@ where
     }
 
     async fn sign_in(&self, request: SignIn, context: &RequestContext) -> Result<Grant> {
-        // Captcha is checked first for the same reason as `register`:
-        // a flood of captcha-less attempts is priced at the captcha
-        // check rather than the rate-limit bucket. The captcha check
-        // has no opinion on whether the credentials are valid; that
-        // is the password's job, which runs after this gate.
-        self.enforce_captcha(request.captcha.as_ref(), context)
-            .await?;
+        // Sign-in deliberately runs WITHOUT the captcha gate, whatever the config says: a
+        // returning member is the person the product exists for, and standing between them and
+        // their account because a stranger from their network mistyped passwords is punishing
+        // the wrong party. The flood-side pricing still applies — this call charges the
+        // anonymous rate-limit bucket for the attempt — and `register` (plus recovery) keeps
+        // its captcha gate. The gate's own failure counter is still recorded below on a failed
+        // attempt, so a hostile IP hardens `register` against itself too.
 
         if let Err(error) = self
             .charge_stranger(context, Opcode::Authenticate, self.prices.attempt)

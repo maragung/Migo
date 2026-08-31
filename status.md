@@ -970,3 +970,50 @@ membawa accent `#4c6ef5` tanpa sisa cyan. Build berat tetap di GitHub Actions.
 
 Verifikasi lokal: tsc bersih, 235 test web, 33 test desktop, clippy 0 warning, fmt bersih,
 gate statis hijau, build statis sukses.
+
+## 27. Login tanpa captcha + integrasi rate limit (v0.8.3)
+
+**Captcha** — keputusan produk: sign-in tidak pernah di-gate captcha; register tetap
+threshold-gated (3 kegagalan per IP), recovery tetap wajib proof:
+
+- `migo-auth/service.rs`: `sign_in` tidak lagi memanggil `enforce_captcha`; counter
+  kegagalan tetap dicatat (`note_captcha_failure`) sehingga register mengeras terhadap
+  IP yang salah password berulang. Test baru
+  `a_sign_in_never_requires_a_captcha_even_once_the_gate_is_engaged` memfinalisasi
+  kontrak (login benar tanpa proof = 200 + grant, saat register tanpa proof pada gate
+  yang sama = `CAPTCHA_REQUIRED`).
+- `/v1/config` kini membawa `captcha.enabled` (Policy.captcha_enabled), sehingga client
+  dapat menyembunyikan UI captcha tanpa menebak dari penolakan.
+- **Web**: halaman login tanpa widget captcha sama sekali (widget hanya di register).
+- **Desktop**: seksi captcha dilepas dari form sign-in; hanya form register yang
+  mem-fetch challenge.
+- **Android**: `RATE_LIMITED`/`CAPTCHA_REQUIRED`/`INVALID_CAPTCHA` kini diterjemahkan
+  `readable()` menjadi kalimat yang bisa ditindaklanjuti ("Too many requests. Wait N
+  seconds…"), bukan gagal diam-diam.
+
+**RATE_LIMITED** — sisi client dari kontrak 429, yang sebelumnya tidak pernah
+dieksekusi:
+
+- SDK `Rpc.call`: bila server menjawab read dengan `RATE_LIMITED` + `retry_after_ms`,
+  client menunggu (dibatasi 10 detik) lalu mengulang **sekali**. Hanya opcode baca
+  (conversation list, sync, room list/roster, relationship, profile, inbox, search,
+  suggestions, seluruh economy) yang di-retry; mutation (send/gift/friend) tidak —
+  retry otomatis atas mutasi adalah cara sebuah pesan terkirim dua kali.
+- `friendlyError` (web): prefix `SYMBOL: ` dari pesan SDK kini di-strip — "RATE_LIMITED:
+  Too many requests. Retry in 5 s" sampai ke pengguna sebagai "Too many requests. Retry
+  in 5 s".
+- **Batch presence**: `MigoClient.watchUsers(ids)` — SATU frame SUBSCRIBE untuk N topik
+  user (server sudah menerima daftar; desktop sudah memakai pola ini). `usePresenceOf`
+  web memakainya, memangkas burst terbesar sesi baru dari satu frame per teman menjadi
+  satu frame per daftar.
+- **Deployment VPS**: `migod` di-build ulang dan direstart dengan bucket dinaikkan 2x
+  (`MIGO_RATE_LIMIT__USER_BURST=400`, `USER_REFILL_PER_SECOND=100`,
+  `ANONYMOUS_BURST=40`, `ANONYMOUS_REFILL_PER_SECOND=10`).
+
+**Verifikasi live di VPS**: 4x login salah menyalakan gate → login benar TANPA captcha
+= `200` + token; register tanpa proof saat gate panas = `400 CAPTCHA_REQUIRED`;
+`/v1/config` membawa `captcha.enabled: true`. Web client di-build ulang dan serve.mjs
+direstart (semua rute 200; halaman login tanpa referensi captcha).
+
+Lokal: 1600+ test Rust hijau (termasuk auth-flow 6/6), fmt/clippy bersih, 235 test
+web, fmt-check-js hijau.

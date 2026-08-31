@@ -60,9 +60,10 @@ test('a timeout is rephrased, hiding the internal deadline detail it carried', (
 test('a server refusal shows the curated public message the server chose', () => {
   const err = new RemoteError(429, 'RATE_LIMITED', 'Too many attempts. Try again later.', 5_000);
   const shown = friendlyError(err);
-  // The web client trusts the server's public message; it must be exactly what came back, nothing more.
-  assert.equal(shown, err.message);
-  assert.ok(shown.includes('Too many attempts. Try again later.'));
+  // The web client trusts the server's public message — but the symbol prefix the SDK's JS
+  // message carries is stripped: "RATE_LIMITED: Too many…" reaches a person as "Too many…".
+  assert.equal(shown, 'Too many attempts. Try again later.');
+  assert.ok(!shown.includes('RATE_LIMITED'), 'the machine symbol never reaches the person');
   // Even carrying a retry hint, nothing internal (a stack) is appended.
   assert.ok(!shown.includes('at '));
 });

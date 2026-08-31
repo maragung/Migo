@@ -265,7 +265,6 @@ fn sign_in(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
         context,
         "The vault passphrase encrypts your keys on this computer. It is not sent anywhere and cannot be reset.",
     );
-    captcha::show(ui, context, &mut state.captcha, &state.server);
     ui.add_space(space::LG);
 
     let ready = state.sign_in_ready() && !state.busy;
