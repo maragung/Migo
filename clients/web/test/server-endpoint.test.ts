@@ -24,10 +24,15 @@ import type { ServerEndpoint } from '@migo/sdk';
 import { buildFromForm } from '../src/components/server-form.js';
 import {
   clearServerEndpoint,
+  healStaleEndpoint,
   loadServerEndpoint,
   saveServerEndpoint,
 } from '../src/lib/storage/server-endpoint-store.js';
-import { installFakeIndexedDb, installRecordingWebStorage } from './support/dom-stubs.js';
+import {
+  installFakeIndexedDb,
+  installFakeWindow,
+  installRecordingWebStorage,
+} from './support/dom-stubs.js';
 
 let idb: ReturnType<typeof installFakeIndexedDb>;
 
@@ -201,4 +206,91 @@ test('the server endpoint never lands in localStorage, sessionStorage, or a cook
   } finally {
     web.restore();
   }
+});
+
+// The deployment this build belongs to, for the healing tests below: the single-port plain-HTTP
+// posture the production server answers on.
+const deployment: ServerEndpoint = {
+  host: '152.53.102.150',
+  port: 8080,
+  gatewayPort: 8080,
+  transport: 'WebSocket',
+  scheme: 'Ws',
+  restScheme: 'Http',
+};
+
+test('an http: page corrects a stale TLS/split-port snapshot in memory', () => {
+  const win = installFakeWindow('/login/', '', 'http:');
+  try {
+    // The SDK's non-loopback default and the pre-single-port layout, in one snapshot.
+    const healed = healStaleEndpoint(
+      {
+        host: '152.53.102.150',
+        port: 8080,
+        gatewayPort: 8081,
+        transport: 'WebSocket',
+        scheme: 'Wss',
+        restScheme: 'Http',
+      },
+      undefined,
+    );
+    assert.equal(healed.scheme, 'Ws');
+    assert.equal(healed.restScheme, 'Http');
+    assert.equal(healed.gatewayPort, healed.port);
+  } finally {
+    win.restore();
+  }
+});
+
+test('an https: page leaves a TLS snapshot alone', () => {
+  const win = installFakeWindow('/login/', '', 'https:');
+  try {
+    const stored: ServerEndpoint = {
+      host: 'migo.example.com',
+      port: 8443,
+      gatewayPort: 8443,
+      transport: 'WebSocket',
+      scheme: 'Wss',
+      restScheme: 'Https',
+    };
+    assert.deepEqual(healStaleEndpoint(stored, undefined), stored);
+  } finally {
+    win.restore();
+  }
+});
+
+test('a snapshot naming the deployment host adopts the deployment port and schemes', () => {
+  // Saved against the deployment's older layout: right host, wrong ports, TLS guesses.
+  const healed = healStaleEndpoint(
+    {
+      host: '152.53.102.150',
+      port: 18080,
+      gatewayPort: 18081,
+      transport: 'WebSocket',
+      scheme: 'Wss',
+      restScheme: 'Https',
+    },
+    deployment,
+  );
+  assert.equal(healed.host, '152.53.102.150');
+  assert.equal(healed.port, 8080);
+  assert.equal(healed.gatewayPort, 8080);
+  assert.equal(healed.scheme, 'Ws');
+  assert.equal(healed.restScheme, 'Http');
+});
+
+test('a snapshot naming another host is a self-hoster record and stays as typed', () => {
+  const stored: ServerEndpoint = {
+    host: 'home.example.org',
+    port: 18080,
+    gatewayPort: 18081,
+    transport: 'WebSocket',
+    scheme: 'Ws',
+    restScheme: 'Http',
+  };
+  assert.deepEqual(healStaleEndpoint(stored, deployment), stored);
+});
+
+test('a snapshot already on the deployment endpoint is returned unchanged', () => {
+  assert.deepEqual(healStaleEndpoint({ ...deployment }, deployment), deployment);
 });

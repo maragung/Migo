@@ -1095,6 +1095,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             if (failure.symbol == "INVALID_CAPTCHA" || failure.symbol == "CAPTCHA_EXPIRED") {
                 return "The human check was wrong or expired. Start the sign-up again."
             }
+            // An answer without the envelope -- a proxy's error page, or a framework-level
+            // rejection this server never wrote -- has no symbol and no public message. The
+            // HTTP status is the one fact it does carry, and it is all a person can act on;
+            // hiding it behind "something went wrong" would make two different failures
+            // indistinguishable.
+            if (failure.symbol.isBlank() && failure.publicMessage.isBlank()) {
+                return "The server answered with an error (HTTP ${failure.code}). Try again."
+            }
             failure.publicMessage.takeIf { it.isNotBlank() }?.let { return it }
         }
         return failure.message?.takeIf { it.isNotBlank() } ?: "Something went wrong. Try again."

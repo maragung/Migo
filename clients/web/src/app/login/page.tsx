@@ -9,6 +9,7 @@ import { ServerForm } from '@/components/server-form.js';
 import { Spinner } from '@/components/spinner.js';
 import { ThemeToggle } from '@/components/theme-toggle.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
+import { defaultServerEndpoint } from '@/lib/config.js';
 import { loadServerEndpoint, saveServerEndpoint } from '@/lib/storage/server-endpoint-store.js';
 
 import type { ServerEndpoint } from '@migo/sdk';
@@ -31,14 +32,14 @@ export default function LoginPage(): ReactNode {
     }
   }, [status, router]);
 
-  // Pre-fill the server field from the persisted endpoint. Without this snapshot a fresh visit
-  // sees the build's default, which is the env-supplied URL on production builds and a loopback on
-  // dev builds.
+  // Pre-fill the server field from the persisted endpoint, falling back to the build's default
+  // the register screen uses — a first visit has no snapshot, and without the fallback the form
+  // would render no server disclosure and a Sign-in button that can never be pressed.
   useEffect(() => {
     let cancelled = false;
     void loadServerEndpoint().then((stored) => {
       if (cancelled) return;
-      setEndpoint(stored ?? null);
+      setEndpoint(stored ?? defaultServerEndpoint());
       setEndpointReady(true);
     });
     return () => {

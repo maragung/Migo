@@ -1104,3 +1104,32 @@ My Credits & TopUp, Alerts, Search, Exit/Logout; pill saldo $MIG nyata); `Sectio
 **Verifikasi**: 235+ test web hijau, cargo fmt/clippy `-D warnings`/test desktop (34) hijau,
 `make kotlin-check` hijau, gates statis hijau; build APK + release penuh via GitHub Actions
 (`ci.yml`, `android.yml`, `release.yml` tag v0.9.0).
+
+## 31. Login "something went wrong": server sekarang durable (Postgres), endpoint basi di-heal (v0.9.1)
+
+**Diagnosis**: REST login di `:8080` sehat (register/login/WS round-trip lewat SDK OK);
+masalahnya dua. (1) `migod` jalan dengan `MIGO_STORE__BACKEND=memory` dan tanpa
+`node.signing_key`, jadi restart pukul 11:21 menghapus semua akun — log menunjukkan lima
+sign-in gagal + lockout dua menit kemudian. (2) Klien menyimpan `ServerEndpoint` lama
+(port/scheme pra-v0.8.5); REST ke port yang sudah tidak dilayani gagal sebagai `TypeError`
+bukan-SDK → web menampilkan fallback generik "Something went wrong. Please try again."
+(Android: envelope kosong → "Something went wrong. Try again.").
+
+**Server**: container `migo-postgres` (postgres:17-alpine, volume named, `127.0.0.1:15433`)
+sekarang backend store — akun bertahan restart (diverifikasi: register → restart migod →
+login sukses); `MIGO_NODE__SIGNING_KEY` (32 byte) dipasang sehingga token juga bertahan
+restart. `.migod.env` diperbarui (tetap gitignored, `chmod 600`).
+
+**Web**: `loadServerEndpoint` sekarang juga meng-heal port REST basi saat snapshot
+menyebut host yang sama dengan alamat deployment yang di-bake build (host lain = milik
+self-hoster, tidak disentuh); halaman login jatuh ke `defaultServerEndpoint()` saat belum
+ada snapshot (dulu tombol Sign-in mentah selamanya).
+
+**Android + desktop**: record tersimpan yang menyebut host deployment dengan port/scheme
+lama dinormalisasi ke `publicDeploymentDefault()` / `default_production_server_endpoint()`
+(web juga melewati migrasi legacy `server_url`); pesan error tanpa envelope kini menyebut
+status HTTP ("The server answered with an error (HTTP …)") alih-alih kalimat generik.
+
+**Verifikasi**: 240 test web hijau, cargo fmt/clippy `-D warnings`/test desktop (36) hijau,
+`make kotlin-check` hijau; live: register/login/WS via SDK ke `152.53.102.150:8080` sukses,
+`out/` di-build ulang dan served di `:19992`.

@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{default_production_server_endpoint, ServerEndpoint};
+use crate::config::{default_production_server_endpoint, rest_base_url, ServerEndpoint};
 use crate::theme::Theme;
 
 const SETTINGS_FILE: &str = "settings.json";
@@ -84,7 +84,7 @@ pub enum SettingsError {
 /// Loads the settings record, or returns the default when no file exists yet.
 pub fn load_or_default(path: &Path) -> Settings {
     match load(path) {
-        Ok(settings) => settings,
+        Ok(settings) => heal_stale_server(settings),
         Err(SettingsError::NotFound) => Settings::default_for_dev(),
         Err(error) => {
             // A parse or version error is a real problem; the safest fallback is the default
@@ -122,9 +122,33 @@ pub fn save(path: &Path, settings: &Settings) -> Result<(), SettingsError> {
     Ok(())
 }
 
+/// Reconciles a saved server endpoint with the deployment this build belongs to.
+///
+/// A settings file written by an earlier build may name the deployment host with the ports or
+/// TLS posture of an older layout — the REST call then goes to a socket nothing answers and the
+/// sign-in form can only report a generic failure. The rule is deliberately narrow: only a
+/// record naming *this deployment's host* is rewritten, because that host is ours and its one
+/// true endpoint is known. A record naming any other host is a self-hoster's server and is kept
+/// exactly as they typed it.
+fn heal_stale_server(settings: Settings) -> Settings {
+    let deployment = default_production_server_endpoint();
+    if settings.server.host != deployment.host || settings.server == deployment {
+        return settings;
+    }
+    tracing::info!(
+        "migo-desktop: settings name this deployment's host with a stale endpoint; adopting {}",
+        rest_base_url(&deployment)
+    );
+    Settings {
+        server: deployment,
+        ..settings
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{RestScheme, Scheme, Transport, WsScheme};
 
     /// The theme round-trips through the file, because the whole point of storing it is that
     /// the window starts the way it was left. The wire form is pinned too: a settings file is
@@ -167,5 +191,47 @@ mod tests {
         assert_eq!(loaded.theme, None);
         assert_eq!(loaded.server.host, "localhost");
         let _ = fs::remove_file(&path);
+    }
+
+    /// A record naming this deployment's host with an older layout (the TLS guesses and split
+    /// ports an early build could persist) is healed to the deployment's single-port endpoint:
+    /// the host is ours, so its one true address is known. Anything else a user typed is theirs.
+    #[test]
+    fn stale_deployment_endpoint_is_healed() {
+        let stale = Settings {
+            version: SETTINGS_VERSION,
+            server: ServerEndpoint {
+                host: "152.53.102.150".to_owned(),
+                port: 18080,
+                gateway_port: 18081,
+                transport: Transport::WebSocket,
+                scheme: Scheme::Ws(WsScheme::Wss),
+                rest_scheme: RestScheme::Https,
+            },
+            theme: Some(Theme::Dark),
+        };
+        let healed = heal_stale_server(stale);
+        assert_eq!(healed.server, default_production_server_endpoint());
+        // The theme is untouched: the healing is about the address, not the record.
+        assert_eq!(healed.theme, Some(Theme::Dark));
+    }
+
+    /// A self-hoster's record keeps its hand-typed ports and TLS posture: only this
+    /// deployment's own host is ever rewritten.
+    #[test]
+    fn self_hosted_endpoint_is_kept() {
+        let mine = Settings {
+            version: SETTINGS_VERSION,
+            server: ServerEndpoint {
+                host: "home.example.org".to_owned(),
+                port: 18080,
+                gateway_port: 18081,
+                transport: Transport::WebSocket,
+                scheme: Scheme::Ws(WsScheme::Ws),
+                rest_scheme: RestScheme::Http,
+            },
+            theme: None,
+        };
+        assert_eq!(heal_stale_server(mine.clone()), mine);
     }
 }

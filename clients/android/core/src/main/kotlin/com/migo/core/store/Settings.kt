@@ -347,10 +347,12 @@ private fun readServerEndpoint(preferences: Preferences, fallback: ServerEndpoin
         gatewaySchemeName == null && restSchemeName == null
     ) {
         // No structured fields written. Fall through to the legacy single-string migration
-        // when it exists, otherwise use the supplied default.
+        // when it exists, otherwise use the supplied default. Both results pass through the
+        // deployment healing: the migration's own rule guesses TLS for any non-loopback host,
+        // which is wrong for this deployment's plain-HTTP server.
         val legacy = preferences[KEY_SERVER_URL] ?: return fallback
         if (legacy.isBlank()) return fallback
-        return migrateLegacyServerUrl(legacy, fallback)
+        return healDeploymentEndpoint(migrateLegacyServerUrl(legacy, fallback), fallback)
     }
     val resolvedHost = host ?: fallback.host
     val resolvedPort = port ?: fallback.port
@@ -370,13 +372,39 @@ private fun readServerEndpoint(preferences: Preferences, fallback: ServerEndpoin
     // to WebSocket here, because the wire does not yet speak QUIC and a record this build
     // cannot honour would be worse than one the user has to change.
     val transport = if (resolvedTransport == Transport.Quic) Transport.WebSocket else resolvedTransport
+    return healDeploymentEndpoint(
+        ServerEndpoint(
+            host = resolvedHost,
+            port = resolvedPort,
+            gatewayPort = resolvedGatewayPort,
+            transport = transport,
+            gatewayScheme = resolvedGatewayScheme,
+            restScheme = resolvedRestScheme,
+        ),
+        fallback,
+    )
+}
+
+/**
+ * Reconciles a stored endpoint with the deployment this build belongs to.
+ *
+ * A record an earlier build saved may name the deployment host with the ports or TLS posture of
+ * an older layout — the pre-form default was a loopback, and the form's own scheme rule guesses
+ * TLS for any non-loopback host — and the REST call then goes to a socket nothing answers, which
+ * the sign-in screen can only report as a generic failure. The rule is deliberately narrow: only
+ * a record naming *this deployment's host* is rewritten, because that host is ours and its one
+ * true endpoint is known. A record naming any other host is a self-hoster's server and is kept
+ * exactly as they typed it.
+ */
+internal fun healDeploymentEndpoint(stored: ServerEndpoint, deployment: ServerEndpoint): ServerEndpoint {
+    if (stored.host != deployment.host || stored == deployment) return stored
     return ServerEndpoint(
-        host = resolvedHost,
-        port = resolvedPort,
-        gatewayPort = resolvedGatewayPort,
-        transport = transport,
-        gatewayScheme = resolvedGatewayScheme,
-        restScheme = resolvedRestScheme,
+        host = deployment.host,
+        port = deployment.port,
+        gatewayPort = deployment.gatewayPort,
+        transport = deployment.transport,
+        gatewayScheme = deployment.gatewayScheme,
+        restScheme = deployment.restScheme,
     )
 }
 

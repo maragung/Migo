@@ -234,6 +234,8 @@ export function installRecordingWebStorage(): RecordingWebStorage {
 interface FakeLocation {
   hash: string;
   pathname: string;
+  /** The page's own scheme, e.g. `http:` — the ground truth for whether a deployment has TLS. */
+  protocol: string;
   search: string;
 }
 
@@ -242,7 +244,11 @@ export interface FakeWindow extends Restorable {
   location: FakeLocation;
 }
 
-export function installFakeWindow(pathname = '/chat/', search = ''): FakeWindow {
+export function installFakeWindow(
+  pathname = '/chat/',
+  search = '',
+  protocol = 'http:',
+): FakeWindow {
   let hashValue = '';
   const location: FakeLocation = {
     get hash(): string {
@@ -252,6 +258,7 @@ export function installFakeWindow(pathname = '/chat/', search = ''): FakeWindow 
       hashValue = value === '' ? '' : value.startsWith('#') ? value : `#${value}`;
     },
     pathname,
+    protocol,
     search,
   };
 

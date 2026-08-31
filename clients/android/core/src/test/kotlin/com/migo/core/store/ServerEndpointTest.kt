@@ -244,4 +244,38 @@ class ServerEndpointTest {
         val other = ServerEndpoint.internetDefault("migo.example.com", 443)
         assertNotEquals(plain, other)
     }
+
+    /**
+     * The deployment healing: a stored record naming this deployment's host with an older
+     * layout (the TLS pair the form's rule guesses for any non-loopback host, or the split
+     * ports an early default carried) is rewritten to the deployment's single-port endpoint,
+     * because that host is ours. Any other host is a self-hoster's record and stays as typed.
+     */
+    @Test
+    fun healDeploymentEndpoint_rewritesAStaleRecordForTheDeploymentHost() {
+        val stale = ServerEndpoint(
+            host = "152.53.102.150",
+            port = 18080,
+            gatewayPort = 18081,
+            transport = Transport.WebSocket,
+            gatewayScheme = GatewayScheme.Wss,
+            restScheme = RestScheme.Https,
+        )
+        val healed = healDeploymentEndpoint(stale, ServerEndpoint.publicDeploymentDefault())
+        assertEquals(ServerEndpoint.publicDeploymentDefault(), healed)
+        assertEquals("http://152.53.102.150:8080", healed.restBaseUrl())
+        assertEquals("ws://152.53.102.150:8080/ws", healed.gatewayUrl())
+    }
+
+    @Test
+    fun healDeploymentEndpoint_keepsASelfHostedRecord() {
+        val mine = ServerEndpoint.loopbackDefault("home.example.org", 18080)
+        assertEquals(mine, healDeploymentEndpoint(mine, ServerEndpoint.publicDeploymentDefault()))
+    }
+
+    @Test
+    fun healDeploymentEndpoint_keepsAnAlreadyCorrectRecord() {
+        val current = ServerEndpoint.publicDeploymentDefault()
+        assertEquals(current, healDeploymentEndpoint(current, current))
+    }
 }
