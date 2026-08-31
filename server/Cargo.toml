@@ -75,6 +75,13 @@ tower-http  = { version = "0.6", features = ["cors", "trace", "limit", "request-
 http        = "1"
 futures-util = "0.3"
 async-trait  = "0.1"
+# The optional second realtime transport: a QUIC listener, bound only when the operator
+# gives it an address (section 138). quinn is rustls-only, like every other TLS consumer
+# in this graph — no OpenSSL anywhere. rcgen mints the listener's self-signed leaf;
+# rustls is pinned here for the pki-types the certificate handoff needs.
+quinn       = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls", "log"] }
+rustls      = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen       = { version = "0.13", default-features = false, features = ["crypto", "ring", "pem"] }
 
 # --- serialization ---
 serde       = { version = "1", features = ["derive"] }

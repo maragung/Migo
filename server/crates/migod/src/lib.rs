@@ -19,6 +19,7 @@ pub mod ports;
 
 mod compose;
 pub mod mesh;
+pub mod quic;
 mod serve;
 mod transport;
 mod webhook;

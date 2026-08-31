@@ -60,6 +60,11 @@ anyhow       = { workspace = true }
 reqwest      = { workspace = true }
 parking_lot  = { workspace = true }
 tracing      = { workspace = true }
+# The optional second realtime transport: quinn binds the QUIC listener, rcgen mints its
+# self-signed leaf, and rustls supplies the pki-types the certificate handoff needs.
+quinn        = { workspace = true }
+rustls       = { workspace = true }
+rcgen        = { workspace = true }
 # The binary chooses how logs are formatted and filtered; the library stays subscriber-agnostic.
 tracing-subscriber = { workspace = true }
 
@@ -68,3 +73,7 @@ tokio = { workspace = true, features = ["test-util"] }
 # The suite generates a valid 32-byte token key (base64) to exercise the production startup
 # path, and needs no other test-only crates.
 base64 = { workspace = true }
+# The QUIC listener test connects as a real client: it drives the same quinn/rustls stack
+# the listener serves, against the self-signed certificate the listener mints at boot.
+quinn = { workspace = true }
+rustls = { workspace = true }

@@ -4,7 +4,9 @@
 //! mounted side by side on one axum [`Router`]: the REST API brings its own routes and middleware,
 //! and one WebSocket route at [`GATEWAY_PATH`] upgrades a connection and hands it to the gateway.
 //! They share a port and nothing else — neither knows the other exists, which is the whole point of
-//! keeping the transports siblings.
+//! keeping the transports siblings. The optional QUIC listener (see [`crate::quic`]) is the third
+//! sibling: it is not part of this socket at all, but bound separately in [`App::build`] when the
+//! operator sets `quic.bind`, and it feeds the same gateway the WebSocket route feeds.
 //!
 //! # One connection's life
 //!
