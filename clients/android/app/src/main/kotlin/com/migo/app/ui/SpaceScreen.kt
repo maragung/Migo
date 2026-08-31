@@ -22,7 +22,7 @@ import com.migo.app.model.ActivityCategory
 import com.migo.app.model.AppState
 
 /**
- * The Space section: the activity stream.
+ * The Feed tab: the activity stream.
  *
  * The stream is the account's own activity — the notification inbox (durable, server-ordered) and
  * the wallet's statement (gifts, stakes, payouts) merged newest first, with a category filter over
@@ -38,7 +38,7 @@ fun SpaceScreen(
     var filter by rememberSaveable { mutableStateOf("all") }
 
     Column(modifier = modifier.fillMaxSize()) {
-        ScreenTitle(title = "Space") {
+        ScreenTitle(title = "Feed") {
             TextButton(onClick = onRefresh, enabled = !state.space.loading) { Text("Refresh") }
         }
 

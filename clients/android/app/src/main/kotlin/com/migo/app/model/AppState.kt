@@ -60,10 +60,11 @@ sealed interface AppState {
     /**
      * Signed in. The conversation list is always present; [open] is the chat on top of it.
      *
-     * The [section] is which destination the shell is showing — the same information architecture
-     * the web client's rail carries, composed as a bottom bar here. Each section's data lives in its
-     * own holder below, loaded on first entry and reloaded on demand; a section never yet visited
-     * holds nulls, and its screen draws its skeleton.
+     * The [section] is which destination the shell is showing — the same tab model the web client's
+     * strip carries: Friends, Chats, Rooms, Games and Feed as the system tabs, with the panels
+     * (Alerts, Search, Wallet, Profile) opened from the banner's avatar menu. Each section's data
+     * lives in its own holder below, loaded on first entry and reloaded on demand; a section never
+     * yet visited holds nulls, and its screen draws its skeleton.
      */
     data class SignedIn(
         val username: String,
@@ -72,14 +73,12 @@ sealed interface AppState {
         val conversations: List<ConversationRow> = emptyList(),
         /** True while the first page of conversations is loading. */
         val loading: Boolean = false,
-        /** The conversation the user is reading, or null when the list is on top of it. */
+        /** The conversation the user is reading, or null when a section is on top. */
         val open: ChatState? = null,
         /** A transient failure banner: a send that did not go, a page that did not load. */
         val failure: String? = null,
-        /** The destination on screen; Home is where a session starts. */
-        /** Chats is where a session starts: the messenger's own first screen, not a dashboard. */
+        /** The destination on screen; Chats is where a session starts, as it does on every client. */
         val section: Section = Section.CHATS,
-        val home: HomeState = HomeState(),
         val rooms: RoomsState = RoomsState(),
         val space: SpaceState = SpaceState(),
         val friends: FriendsState = FriendsState(),
@@ -88,31 +87,12 @@ sealed interface AppState {
         val alerts: AlertsState = AlertsState(),
     ) : AppState
 
-    /** The shell's destinations, in information-architecture order. */
-    enum class Section { HOME, CHATS, ROOMS, SPACE, FRIENDS, ALERTS, SEARCH, WALLET, PROFILE }
+    /**
+     * The shell's destinations. The first five are the reference's system tabs, in strip order; the
+     * rest are the panels the banner's avatar menu opens.
+     */
+    enum class Section { FRIENDS, CHATS, ROOMS, GAMES, FEED, ALERTS, SEARCH, WALLET, PROFILE }
 }
-
-/**
- * The Home dashboard's facts: one read per block, refreshed together.
- *
- * Every field is null until its read lands — the screen draws a placeholder per block, not one
- * spinner over the whole dashboard, because the blocks arrive independently and a dashboard that
- * waits for all of them shows nothing when any one is slow.
- */
-data class HomeState(
-    /** The caller's wallet, for the $MIG chip on the hero. */
-    val balance: Long? = null,
-    /** The social graph's own suggestions, offered as doors. */
-    val suggestions: List<SuggestedUser> = emptyList(),
-    /** The inbox's first page, as the alerts digest. */
-    val notifications: List<InboxItem> = emptyList(),
-    /** The leaderboard's top three. */
-    val leaders: List<RankWire> = emptyList(),
-    /** The room catalogue's liveliest page, offered for a join. */
-    val trending: List<RoomSummary> = emptyList(),
-    /** True while the dashboard's one combined read is in flight. */
-    val loading: Boolean = false,
-)
 
 /** The Rooms directory: the server's catalogue plus the browsing state around it. */
 data class RoomsState(
@@ -127,7 +107,7 @@ data class RoomsState(
 )
 
 /**
- * The Space activity stream: the inbox and the wallet's statement merged, newest first.
+ * The Feed tab's activity stream: the inbox and the wallet's statement merged, newest first.
  *
  * Rows are plain display values — icon kind, headline, time — rather than wire types, because a
  * stream row is a synthesis (a ledger line and a notification can describe the same gift) and the

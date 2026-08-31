@@ -369,37 +369,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      *
      * A section never yet visited holds nulls; this is the moment they become a read. Re-entering a
      * section keeps what it holds (the conversations list refreshes through its own control), so a
-     * tour through the bottom bar costs one read per section, not one per visit.
+     * tour through the tab strip costs one read per section, not one per visit.
      */
     fun selectSection(section: AppState.Section) {
         signedIn { it.copy(section = section) }
         when (section) {
-            AppState.Section.HOME -> if (!homeLoaded()) loadHome()
             AppState.Section.ROOMS -> if (signedInState?.rooms?.rooms == null) loadRooms()
-            AppState.Section.SPACE -> if (!spaceLoaded()) loadSpace()
+            AppState.Section.FEED -> if (!spaceLoaded()) loadSpace()
             AppState.Section.FRIENDS -> if (!friendsLoaded()) loadFriends()
             AppState.Section.SEARCH -> Unit
             AppState.Section.WALLET -> if (!walletLoaded()) loadWallet()
             AppState.Section.ALERTS -> if (!alertsLoaded()) loadAlerts()
-            AppState.Section.CHATS, AppState.Section.PROFILE -> Unit
-        }
-    }
-
-    /** The Home dashboard's one combined read; a block that fails alone renders its empty. */
-    fun loadHome() {
-        val live = session ?: return
-        signedIn { it.copy(home = it.home.copy(loading = true)) }
-        viewModelScope.launch {
-            val wallet = runCatching { live.client.economy.getBalance().balance }.getOrNull()
-            val suggested = runCatching { live.client.social.suggestions(6) }.getOrDefault(emptyList())
-            val inbox = runCatching { live.client.notifications.listNotifications(5) }.getOrDefault(emptyList())
-            val leaders = runCatching { live.client.economy.getLeaderboard("xp", 3) }.getOrDefault(emptyList())
-            val trending = runCatching {
-                live.client.rooms.list(20).rooms.sortedByDescending { it.onlineCount }.take(5)
-            }.getOrDefault(emptyList())
-            signedIn {
-                it.copy(home = it.home.copy(loading = false, balance = wallet, suggestions = suggested, notifications = inbox, leaders = leaders, trending = trending))
-            }
+            AppState.Section.CHATS, AppState.Section.GAMES, AppState.Section.PROFILE -> Unit
         }
     }
 
@@ -735,8 +716,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val signedInState: AppState.SignedIn?
         get() = _state.value as? AppState.SignedIn
 
-    private fun homeLoaded(): Boolean = signedInState?.home?.loading == false && signedInState?.home?.notifications?.isNotEmpty() == true
-
     private fun spaceLoaded(): Boolean = signedInState?.space?.loading == false && signedInState?.space?.rows?.isNotEmpty() == true
 
     private fun friendsLoaded(): Boolean = signedInState?.friends?.loading == false && signedInState?.friends?.entries?.isNotEmpty() == true
@@ -809,16 +788,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             if ((_state.value as? AppState.SignedIn)?.section == AppState.Section.FRIENDS) loadFriends()
         })
         refreshConversations()
-        loadHome()
+        // The wallet's combined read also fills the banner's $MIG balance, so the session starts
+        // with it -- the desktop client issues its wallet command at sign-in for the same reason.
+        loadWallet()
     }
 
-    /** A pushed notification: the Space stream and the Alerts inbox re-read, the digest follows. */
+    /** A pushed notification: the Feed stream and the Alerts inbox re-read, the digest follows. */
     private fun pushed(event: NotificationEvent) {
         val current = _state.value as? AppState.SignedIn ?: return
         when (current.section) {
-            AppState.Section.SPACE -> loadSpace()
+            AppState.Section.FEED -> loadSpace()
             AppState.Section.ALERTS -> loadAlerts()
-            AppState.Section.HOME -> loadHome()
             else -> Unit
         }
     }

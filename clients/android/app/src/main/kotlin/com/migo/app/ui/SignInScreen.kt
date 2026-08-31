@@ -1,6 +1,8 @@
 package com.migo.app.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,9 +17,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -28,6 +32,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -46,6 +51,11 @@ import com.migo.core.store.Transport
  * Two forms would mean two copies of the server field, the account field and the password field, kept
  * consistent by hand, to express a difference the server treats as two endpoints and a person treats
  * as "I have an account" or "I do not".
+ *
+ * The front door is the reference's: the cyan gradient fills the screen in either theme — the sign-in
+ * surface is the one place that ignores the lights — with the brand on the gradient and the form on a
+ * nearly-opaque card, so the fields keep the palette ink they already had. The submit button is the
+ * banner orange, the one warm accent the identity carries.
  *
  * The server field is a disclosure: collapsed by default, with a summary line ("localhost:18080",
  * say) that shows the current value, and an expanded panel underneath that exposes the structured
@@ -72,109 +82,135 @@ fun SignInScreen(
     // Whether the person is registering does survive a rotation: it is a choice they made, and not a
     // credential.
     var creating by rememberSaveable { mutableStateOf(false) }
+    val extra = LocalMigoExtra.current
 
-    Column(modifier = modifier.fillMaxSize()) {
-        ErrorBanner(message = form.failure, onDismiss = onDismissFailure)
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .imePadding()
-                .padding(horizontal = 24.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text(
-                text = "Migo",
-                style = MaterialTheme.typography.displaySmall,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary,
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "End-to-end encrypted. Your keys stay on this device.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-            )
-            Spacer(modifier = Modifier.height(32.dp))
-
-            ServerDisclosure(
-                value = form.serverEndpoint,
-                enabled = !form.busy,
-                onCommit = onServerEndpoint,
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-
-            OutlinedTextField(
-                value = form.identifier,
-                onValueChange = onIdentifier,
-                label = { Text(if (creating) "Choose a username" else "Username or email") },
-                singleLine = true,
-                enabled = !form.busy,
-                keyboardOptions = KeyboardOptions(
-                    keyboardType = KeyboardType.Email,
-                    imeAction = ImeAction.Next,
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(
+                brush = Brush.verticalGradient(
+                    listOf(extra.loginA, extra.loginB, extra.loginC),
                 ),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-
-            OutlinedTextField(
-                value = password,
-                onValueChange = { password = it },
-                label = { Text("Password") },
-                singleLine = true,
-                enabled = !form.busy,
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(
-                    keyboardType = KeyboardType.Password,
-                    imeAction = ImeAction.Done,
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(modifier = Modifier.height(24.dp))
-
-            Button(
-                onClick = { onSubmit(password, creating) },
-                enabled = !form.busy,
-                modifier = Modifier.fillMaxWidth().height(52.dp),
+            ),
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            ErrorBanner(message = form.failure, onDismiss = onDismissFailure)
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .imePadding()
+                    .padding(horizontal = 24.dp, vertical = 24.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                if (form.busy) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onPrimary,
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(if (creating) "Creating account" else "Signing in")
-                    }
-                } else {
-                    Text(if (creating) "Create account" else "Sign in")
-                }
-            }
-            Spacer(modifier = Modifier.height(4.dp))
-
-            TextButton(onClick = { creating = !creating }, enabled = !form.busy) {
                 Text(
-                    text = if (creating) {
-                        "I already have an account"
-                    } else {
-                        "Create a new account"
-                    },
+                    text = "Migo",
+                    style = MaterialTheme.typography.displaySmall,
+                    fontWeight = FontWeight.Bold,
+                    color = extra.bannerInk,
                 )
-            }
-            Spacer(modifier = Modifier.height(16.dp))
-
-            if (creating) {
+                Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "Your identity key is generated here and never sent to the server. " +
-                        "Signing out destroys it.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    text = "End-to-end encrypted. Your keys stay on this device.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = extra.bannerInk.copy(alpha = 0.9f),
                     textAlign = TextAlign.Center,
                 )
+                Spacer(modifier = Modifier.height(32.dp))
+
+                // The form sits on a card rather than on the gradient: a translucent-enough card to
+                // read as the reference's glass, opaque enough that the fields keep the contrast
+                // their labels were measured against.
+                Surface(
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+                    shape = MaterialTheme.shapes.large,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(modifier = Modifier.padding(20.dp)) {
+                        ServerDisclosure(
+                            value = form.serverEndpoint,
+                            enabled = !form.busy,
+                            onCommit = onServerEndpoint,
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        OutlinedTextField(
+                            value = form.identifier,
+                            onValueChange = onIdentifier,
+                            label = { Text(if (creating) "Choose a username" else "Username or email") },
+                            singleLine = true,
+                            enabled = !form.busy,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Email,
+                                imeAction = ImeAction.Next,
+                            ),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        OutlinedTextField(
+                            value = password,
+                            onValueChange = { password = it },
+                            label = { Text("Password") },
+                            singleLine = true,
+                            enabled = !form.busy,
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Password,
+                                imeAction = ImeAction.Done,
+                            ),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Spacer(modifier = Modifier.height(24.dp))
+
+                        Button(
+                            onClick = { onSubmit(password, creating) },
+                            enabled = !form.busy,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = extra.bannerB,
+                                contentColor = extra.bannerInk,
+                            ),
+                            modifier = Modifier.fillMaxWidth().height(52.dp),
+                        ) {
+                            if (form.busy) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp,
+                                        color = extra.bannerInk,
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Text(if (creating) "Creating account" else "Signing in")
+                                }
+                            } else {
+                                Text(if (creating) "Create account" else "Sign in")
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        TextButton(onClick = { creating = !creating }, enabled = !form.busy) {
+                            Text(
+                                text = if (creating) {
+                                    "I already have an account"
+                                } else {
+                                    "Create a new account"
+                                },
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        if (creating) {
+                            Text(
+                                text = "Your identity key is generated here and never sent to the server. " +
+                                    "Signing out destroys it.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                    }
+                }
             }
         }
     }
