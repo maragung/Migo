@@ -44,40 +44,25 @@ export const config: WebConfig = {
  */
 export function defaultServerEndpoint(): ServerEndpoint {
   if (config.defaultApiUrl !== undefined) {
-    // The SDK's default URL helper pins non-loopback hosts to Wss/Https and the next port
-    // (the public-internet posture). This deployment serves /ws on its HTTP port, plain, so an
-    // env-supplied URL like http://152.53.102.150:8080 must pin the gateway to the SAME port with
-    // the schemes matching the REST URL — otherwise the gateway would try wss://:8081.
-    const parsed = serverEndpointFromUrl(config.defaultApiUrl);
-    const isSecure = parsed.restScheme === 'Https';
-    return {
-      ...parsed,
-      scheme: isSecure ? 'Wss' : 'Ws',
-      restScheme: isSecure ? 'Https' : 'Http',
-      gatewayPort: parsed.port,
-    };
+    // The URL's own scheme is the ground truth now (the SDK helper honours it the same way
+    // Android and desktop do): an env-supplied `http://152.53.102.150:8080` resolves to the
+    // plain single-port pair — gateway on the same port — with no re-derivation here.
+    return serverEndpointFromUrl(config.defaultApiUrl);
   }
   if (typeof window !== 'undefined' && window.location) {
     const { protocol, hostname } = window.location;
-    const isSecure = protocol === 'https:';
-    const scheme = isSecure ? 'https' : 'http';
-    const endpoint = serverEndpointFromUrl(`${scheme}://${hostname}:8080`);
-    // The gateway rides the same port as REST (migod serves /ws on its HTTP listener),
-    // not the REST port + 1 the URL helper assumes for split-port deployments.
-    // The schemes follow the page's own protocol: a server that served this page over
-    // plain HTTP has no TLS certificate, so the SDK's non-loopback default of
-    // Wss/Https would try to open a TLS connection to a plain-HTTP port and fail.
-    return {
-      ...endpoint,
-      scheme: isSecure ? 'Wss' : 'Ws',
-      restScheme: isSecure ? 'Https' : 'Http',
-      gatewayPort: endpoint.port,
-    };
+    const scheme = protocol === 'https:' ? 'https' : 'http';
+    // The gateway rides the same port as REST (migod serves /ws on its HTTP listener), and the
+    // schemes follow the page's own protocol: a server that served this page over plain HTTP
+    // has no TLS certificate, so the endpoint stays plain.
+    return serverEndpointFromUrl(`${scheme}://${hostname}:8080`);
   }
+  // The last-resort fallback is this repository's own dev shape: `make dev` runs migod on
+  // 127.0.0.1:8080 with /ws on that same HTTP listener. The SDK helper's loopback rule keeps
+  // the split-port dev policy (gateway on the next port), so the fallback pins the single-port
+  // shape explicitly rather than inheriting it.
   return {
     ...serverEndpointFromUrl('http://localhost:8080'),
-    scheme: 'Ws',
-    restScheme: 'Http',
     gatewayPort: 8080,
   };
 }

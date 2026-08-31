@@ -316,6 +316,16 @@ export function gatewayUrl(endpoint: ServerEndpoint): string {
  * or `http://migo.example`. The form gives the SDK structured fields today; the env gives it a
  * string from before the form existed. This is the bridge: take the string, derive the
  * endpoint, and let the rest of the SDK forget it was ever a string.
+ *
+ * The URL's own scheme is the ground truth for both postures — the same rule the Android and
+ * desktop clients apply:
+ *
+ *   - `https://…` is the production pair (`Wss`/`Https`) with the gateway on the same port;
+ *   - `http://…` on a loopback host is the dev pair (`Ws`/`Http`) with the gateway on the next
+ *     port (the split-port dev policy);
+ *   - `http://…` on any other host is a single-port plain deployment (this repository's own
+ *     VPS shape: `migod` serves `/ws` on its HTTP listener), so the gateway rides the same
+ *     port, plain.
  */
 export function serverEndpointFromUrl(url: string): ServerEndpoint {
   const trimmed = url.trim();
@@ -332,14 +342,18 @@ export function serverEndpointFromUrl(url: string): ServerEndpoint {
   const restPort =
     parsed.port === '' ? (scheme === 'Https' ? 443 : 80) : Number.parseInt(parsed.port, 10);
   const host = parsed.hostname.toLowerCase();
-  const schemes = defaultSchemesForHost(host);
+  // The URL's own scheme decides both postures (see the doc above). Only a plain origin on a
+  // loopback host keeps the dev split — gateway on the next port; everything else serves `/ws`
+  // on the port the URL names.
+  const gatewayScheme: WsScheme = scheme === 'Https' ? 'Wss' : 'Ws';
+  const gatewayPort =
+    scheme === 'Https' || !isLoopbackHost(host) ? restPort : restPort + DEFAULT_GATEWAY_PORT_OFFSET;
   return {
     host,
     port: restPort,
-    gatewayPort: restPort + DEFAULT_GATEWAY_PORT_OFFSET,
+    gatewayPort,
     transport: 'WebSocket',
-    // The env form only ever implies ws/wss; the form's "Wss" choice arrives through its own path.
-    scheme: schemes.scheme,
+    scheme: gatewayScheme,
     restScheme: scheme,
   };
 }

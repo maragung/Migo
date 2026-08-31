@@ -164,11 +164,24 @@ test('serverEndpointFromUrl parses a plain HTTP origin and picks the loopback sc
 test('serverEndpointFromUrl parses an HTTPS origin and picks the TLS pair on a real domain', () => {
   const endpoint = serverEndpointFromUrl('https://migo.example.com');
   assert.equal(endpoint.host, 'migo.example.com');
-  // HTTPS carries no explicit port; the URL parser makes it 443.
+  // HTTPS carries no explicit port; the URL parser makes it 443. A TLS deployment serves /ws
+  // on the port the URL names, so the gateway rides the same port.
   assert.equal(endpoint.port, 443);
-  assert.equal(endpoint.gatewayPort, 444);
+  assert.equal(endpoint.gatewayPort, 443);
   assert.equal(endpoint.scheme, 'Wss');
   assert.equal(endpoint.restScheme, 'Https');
+});
+
+test('serverEndpointFromUrl treats a plain HTTP origin on a public host as a single-port deployment', () => {
+  // This repository's own VPS shape: `migod` serves REST and /ws on one plain-HTTP port. The
+  // URL's own scheme is the ground truth (the same rule Android and desktop apply), so the
+  // gateway rides the same port plain — never `wss://` one port up, which nothing serves.
+  const endpoint = serverEndpointFromUrl('http://152.53.102.150:8080');
+  assert.equal(endpoint.host, '152.53.102.150');
+  assert.equal(endpoint.port, 8080);
+  assert.equal(endpoint.gatewayPort, 8080);
+  assert.equal(endpoint.scheme, 'Ws');
+  assert.equal(endpoint.restScheme, 'Http');
 });
 
 test('serverEndpointFromUrl throws on a non-URL string', () => {
@@ -211,14 +224,17 @@ test('the default-port rule: the gateway port defaults to rest+1 on a loopback a
 });
 
 test('serverEndpointFromUrl honours the same default-port rule', () => {
+  // A plain origin on a loopback keeps the dev split — gateway on the next port.
   const loopback = serverEndpointFromUrl('http://localhost:18080');
   assert.equal(loopback.gatewayPort - loopback.port, 1);
 
-  // The from-url parser always picks `rest + 1`; the constructors differ on non-loopback hosts
-  // because the user can express that choice in a form. The from-url form is for env or legacy
-  // settings, where the dev policy is the only safe default.
+  // Every other origin — TLS or plain — serves /ws on the port the URL names: the from-url
+  // form is for env or legacy settings, where the URL is the only evidence of the deployment's
+  // shape and a plain public origin names a single-port deployment.
   const real = serverEndpointFromUrl('https://migo.example.com:8443');
-  assert.equal(real.gatewayPort - real.port, 1);
+  assert.equal(real.gatewayPort, real.port);
+  const singlePortPlain = serverEndpointFromUrl('http://migo.example.com:8080');
+  assert.equal(singlePortPlain.gatewayPort, singlePortPlain.port);
 });
 
 test('validateServerEndpoint returns null for a well-formed endpoint', () => {
