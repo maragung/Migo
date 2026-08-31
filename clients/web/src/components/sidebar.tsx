@@ -7,12 +7,12 @@ import { PresenceState } from '@migo/sdk';
 
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { useProfile } from '@/lib/migo/use-profiles.js';
+import { useSectionNav } from '@/lib/migo/section-nav.js';
 
 import { Avatar } from './avatar.js';
 import { ConnectionBadge } from './connection-badge.js';
 import { ConversationList } from './conversation-list.js';
-import { CoinMark } from './icons.js';
-import { Icon } from './icons.js';
+import { CoinMark, Icon } from './icons.js';
 import { NewConversationDialog } from './new-conversation-dialog.js';
 import { PresencePicker } from './presence-picker.js';
 
@@ -44,6 +44,7 @@ function presenceLabel(state: PresenceState): string {
  */
 export function Sidebar(): ReactNode {
   const { client, accountId, logout } = useMigo();
+  const navigate = useSectionNav();
   const self = useProfile(accountId);
   const [dialogOpen, setDialogOpen] = useState(false);
 
@@ -93,15 +94,26 @@ export function Sidebar(): ReactNode {
             ◆ {coins.toLocaleString()}
           </span>
         ) : null}
-        <button
-          type="button"
-          className="icon-btn"
-          aria-label="New conversation"
-          title="New conversation"
-          onClick={() => setDialogOpen(true)}
-        >
-          <Icon name="plus" size={20} />
-        </button>
+        <div className="sidebar-header-actions">
+          <button
+            type="button"
+            className="icon-btn"
+            aria-label="Search"
+            title="Search"
+            onClick={() => navigate('search')}
+          >
+            <Icon name="search" size={20} />
+          </button>
+          <button
+            type="button"
+            className="icon-btn"
+            aria-label="New conversation"
+            title="New conversation"
+            onClick={() => setDialogOpen(true)}
+          >
+            <Icon name="plus" size={20} />
+          </button>
+        </div>
       </header>
 
       <ConnectionBadge />

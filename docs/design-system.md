@@ -53,7 +53,9 @@ System fonts, no webfont. Base size 14px; the scale is small and dense on purpos
 ## Spacing, radius, elevation
 
 - Spacing: a 4px base — 4, 8, 12, 16, 20, 24, 32, 40, 48 (`--sp-1` … `--sp-12`).
-- Radius: 4 (sm), 6 (md), 8 (lg), 999 (pill).
+- Radius: 4 (sm), 6 (md), 8 (lg), 999 (pill). Message bubbles sit at **16px with a small corner
+  tail** (top-left incoming, top-right outgoing); the composer's input is a **capsule**; the
+  rail's controls are **circles** whose active state is the accent fill.
 - Elevation: flat → raised (`0 2px 8px rgba(0,0,0,.08)`) → overlay; an accent glow for focus and
   the active state. Nothing floats without a reason.
 

@@ -933,3 +933,40 @@ rilis v0.8.1 = tag → release.yml (APK, migod binary, image GHCR, tarball web/d
 Verifikasi lokal (ringan, VPS): tsc bersih, 235 test web, 33 test desktop, clippy 0
 warning, fmt bersih, 7 gate statis hijau, build statis web sukses (185 kB First Load
 /chat).
+
+## 26. Gaya visual main-ui.jpg: biru-violet, rail bulat, bubble solid (v0.8.2)
+
+**Referensi baru** (`main-ui.jpg`) dipelajari dan diterapkan ke semua client — palet dan
+bentuk komponen, dengan arsitektur messenger shell v0.8.1 yang dipertahankan:
+
+**Tokens kanonik** (v2.0.0): accent **#4c6ef5** (dark) / **#3b5bdb** (light); permukaan dark
+charcoal ala referensi (`#141519` bg, `#1b1c24` panel, `#24252e` sunken); presence hijau
+`#2fce7e`/`#0ca678`; bubble-out **accent solid** (gradient dibuang); radius bahasa baru:
+bubble 16px dengan ekor sudut, composer kapsul, kontrol rail bulat.
+
+**Web**: rail 56px dengan tombol **bulat 44px** — aktif = **lingkaran accent terisi** berupa
+ikon putih; `.rail-user` bulat; ikon header `.icon-btn` ghost bulat; baris percakapan rounded
+12px tanpa divider, **presence dot peer** di avatar (usePresenceOf: seed profil + subscribe
+topik + event live); tombol search di header Chats (→ section Search); bubble masuk `panel-alt`
+radius `4px 16px 16px 16px` (ekor kiri-atas), bubble keluar accent solid radius
+`16px 4px 16px 16px` (ekor kanan-atas); composer textarea **kapsul 999px** bg sunken,
+attach ghost, **kirim bulat accent solid**; themeColor PWA `#141519`.
+
+**Desktop**: theme.rs palet referensi (DARK: surface `#141519`/`#1b1c24`/`#24252e`, accent
+`#4c6ef5`, on-accent putih; LIGHT: `#f1f2f6`/putih, accent `#3b5bdb`) + test tema di-update;
+`rail_button` aktif = **lingkaran accent terisi 40px** (bukan rect + bar); `place_icon` ikon
+aktif memakai contrast ink; `widgets::send_button` baru — lingkaran accent dengan paper plane
+Canvas; composer input kapsul (stroke radius 20).
+
+**Android**: Theme.kt skema referensi (AccentLight `#3b5bdb` / AccentDark `#4c6ef5`, surface
+charcoal, secondary presence hijau, outline/variant baru, MigoExtra faint/gold); monogram
+re-tint; glyph kirim composer diganti **paper plane Canvas** (dari teks ">").
+
+**iOS native dibatalkan** (keputusan pengguna) — iOS tetap dilayani web PWA yang dirilis ini.
+
+**Deployment**: web client di VPS di-build ulang (static export) dan `serve.mjs` di-restart
+pada port 19992 — verifikasi HTTP 200 untuk /, /chat/, /design/, /login/, healthz; CSS live
+membawa accent `#4c6ef5` tanpa sisa cyan. Build berat tetap di GitHub Actions.
+
+Verifikasi lokal: tsc bersih, 235 test web, 33 test desktop, clippy 0 warning, fmt bersih,
+gate statis hijau, build statis sukses.

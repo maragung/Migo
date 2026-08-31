@@ -32,71 +32,71 @@ import androidx.compose.ui.unit.sp
  * would not follow the theme.
  */
 
-// The accent. Light carries white text on the stronger blue (above 4.5:1); dark carries near-black
-// text on the cyan.
-private val AccentLight = Color(0xFF005CB8)
-private val AccentDark = Color(0xFF00D4FF)
+// The accent — the reference's blue-violet. Both schemes carry white text on the primary
+// (above 4.5:1 in each).
+private val AccentLight = Color(0xFF3B5BDB)
+private val AccentDark = Color(0xFF4C6EF5)
 
-// The Migo surfaces, straight from the token table.
+// The Migo surfaces, straight from the token table (the main-ui.jpg reference's charcoal).
 private val SurfaceLight = Color(0xFFFFFFFF)
-private val SurfaceDimLight = Color(0xFFF0F2F5)
-private val SurfaceSunkenLight = Color(0xFFF5F6F8)
-private val SurfaceDark = Color(0xFF111118)
-private val SurfaceDimDark = Color(0xFF0A0A12)
-private val SurfaceSunkenDark = Color(0xFF1A1A28)
+private val SurfaceDimLight = Color(0xFFF1F2F6)
+private val SurfaceSunkenLight = Color(0xFFEFF1F5)
+private val SurfaceDark = Color(0xFF1B1C24)
+private val SurfaceDimDark = Color(0xFF141519)
+private val SurfaceSunkenDark = Color(0xFF24252E)
 
 private val LightScheme = lightColorScheme(
     primary = AccentLight,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFDCEBFA),
-    onPrimaryContainer = Color(0xFF00284F),
-    secondary = Color(0xFF00A85A),
+    primaryContainer = Color(0xFFD6DCFF),
+    onPrimaryContainer = Color(0xFF1B2A6B),
+    secondary = Color(0xFF0CA678),
     onSecondary = Color.White,
-    secondaryContainer = Color(0xFFD3F5E4),
-    onSecondaryContainer = Color(0xFF00391D),
+    secondaryContainer = Color(0xFFC8F5E3),
+    onSecondaryContainer = Color(0xFF003926),
     tertiary = Color(0xFF9A6700),
     onTertiary = Color.White,
     tertiaryContainer = Color(0xFFF7E8C8),
     onTertiaryContainer = Color(0xFF2E2000),
     background = SurfaceDimLight,
-    onBackground = Color(0xFF1A1D24),
+    onBackground = Color(0xFF1B1C24),
     surface = SurfaceLight,
-    onSurface = Color(0xFF1A1D24),
+    onSurface = Color(0xFF1B1C24),
     surfaceVariant = SurfaceSunkenLight,
-    onSurfaceVariant = Color(0xFF5C6370),
-    outline = Color(0xFFC5CAD0),
-    outlineVariant = Color(0xFFE0E3E8),
-    error = Color(0xFFE04050),
+    onSurfaceVariant = Color(0xFF5C6170),
+    outline = Color(0xFFC9CDD8),
+    outlineVariant = Color(0xFFE3E5EC),
+    error = Color(0xFFE03131),
     onError = Color.White,
-    errorContainer = Color(0xFFFBE3E6),
-    onErrorContainer = Color(0xFFC22837),
+    errorContainer = Color(0xFFFFD9D9),
+    onErrorContainer = Color(0xFFC92A2A),
 )
 
 private val DarkScheme = darkColorScheme(
     primary = AccentDark,
-    onPrimary = Color(0xFF051018),
-    primaryContainer = Color(0xFF003B4D),
-    onPrimaryContainer = Color(0xFFC5F0FF),
-    secondary = Color(0xFF00FF88),
-    onSecondary = Color(0xFF002412),
-    secondaryContainer = Color(0xFF004D28),
-    onSecondaryContainer = Color(0xFFB8FFD9),
-    tertiary = Color(0xFFFFD166),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFF33418C),
+    onPrimaryContainer = Color(0xFFD6DCFF),
+    secondary = Color(0xFF2FCE7E),
+    onSecondary = Color(0xFF00240F),
+    secondaryContainer = Color(0xFF00502B),
+    onSecondaryContainer = Color(0xFFB8F5D9),
+    tertiary = Color(0xFFFCC419),
     onTertiary = Color(0xFF332800),
     tertiaryContainer = Color(0xFF55430F),
     onTertiaryContainer = Color(0xFFFFE2A6),
     background = SurfaceDimDark,
-    onBackground = Color(0xFFE8E8F0),
+    onBackground = Color(0xFFF2F3F7),
     surface = SurfaceDark,
-    onSurface = Color(0xFFE8E8F0),
+    onSurface = Color(0xFFF2F3F7),
     surfaceVariant = SurfaceSunkenDark,
-    onSurfaceVariant = Color(0xFF8888A0),
-    outline = Color(0xFF2E2E4A),
-    outlineVariant = Color(0xFF1A1A2E),
-    error = Color(0xFFFF4466),
+    onSurfaceVariant = Color(0xFFA0A3B1),
+    outline = Color(0xFF3A3C4A),
+    outlineVariant = Color(0xFF2A2B36),
+    error = Color(0xFFFF5C7A),
     onError = Color(0xFF2B060D),
     errorContainer = Color(0xFF5C1120),
-    onErrorContainer = Color(0xFFFFB3C1),
+    onErrorContainer = Color(0xFFFFC2CF),
 )
 
 /** The tokens Material's scheme has no slot for, themed light and dark like the rest. */
@@ -112,15 +112,15 @@ data class MigoExtra(
 )
 
 private val ExtraLight = MigoExtra(
-    faint = Color(0xFF9AA1AD),
+    faint = Color(0xFF9BA0AC),
     gold = Color(0xFF9A6700),
     bubbleIn = SurfaceSunkenLight,
     coin = AccentLight,
 )
 
 private val ExtraDark = MigoExtra(
-    faint = Color(0xFF555570),
-    gold = Color(0xFFFFD166),
+    faint = Color(0xFF6E7180),
+    gold = Color(0xFFFCC419),
     bubbleIn = SurfaceSunkenDark,
     coin = AccentDark,
 )

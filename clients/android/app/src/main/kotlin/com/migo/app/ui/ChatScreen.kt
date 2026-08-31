@@ -1,5 +1,6 @@
 package com.migo.app.ui
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -265,10 +266,29 @@ private fun Composer(
                         color = MaterialTheme.colorScheme.onPrimary,
                     )
                 } else {
-                    // A right-pointing triangle: the send glyph, without an icon dependency.
-                    Text(text = ">", style = MaterialTheme.typography.titleMedium)
+                    // A paper plane: the send mark the whole product draws, without an icon
+                    // dependency (Canvas strokes, like the bottom bar's glyphs).
+                    Canvas(modifier = Modifier.size(22.dp)) {
+                        drawGlyphSend(color)
+                    }
                 }
             }
         }
     }
+}
+
+/** The composer's paper-plane glyph, drawn on the unit canvas in the given ink. */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGlyphSend(
+    color: androidx.compose.ui.graphics.Color,
+) {
+    val stroke = androidx.compose.ui.graphics.drawscope.Stroke(
+        width = 1.75.dp.toPx(),
+        cap = androidx.compose.ui.graphics.StrokeCap.Round,
+    )
+    fun p(x: Float, y: Float) = androidx.compose.ui.geometry.Offset(x * size.width, y * size.height)
+    drawLine(color, p(0.26f, 0.52f), p(0.76f, 0.28f), strokeWidth = stroke.width, cap = stroke.cap)
+    drawLine(color, p(0.26f, 0.52f), p(0.52f, 0.76f), strokeWidth = stroke.width, cap = stroke.cap)
+    drawLine(color, p(0.52f, 0.76f), p(0.44f, 0.56f), strokeWidth = stroke.width, cap = stroke.cap)
+    drawLine(color, p(0.44f, 0.56f), p(0.26f, 0.52f), strokeWidth = stroke.width, cap = stroke.cap)
+    drawLine(color, p(0.76f, 0.28f), p(0.44f, 0.56f), strokeWidth = stroke.width, cap = stroke.cap)
 }

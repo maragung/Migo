@@ -14,6 +14,7 @@ import type {
 
 import { formatRelative } from '@/lib/format.js';
 import { messagePreview, truncate } from '@/lib/message-preview.js';
+import { usePresenceOf } from '@/lib/migo/use-presence.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { useRooms } from '@/lib/migo/rooms-provider.js';
@@ -124,6 +125,18 @@ export function ConversationList(): ReactNode {
   }, [items, lastPreviews, accountId]);
   const profiles = useProfiles(profileIds);
 
+  // Presence on the list rows — the messenger's ambient information. Only the 1:1 peers are
+  // watched: a room's presence is its online count, and watching every member of a large room
+  // would be a subscription per stranger.
+  const directPeers = useMemo(
+    () =>
+      profileIds.filter((id) =>
+        items.some((item) => item.kind === ConversationKind.Direct && item.members?.includes(id)),
+      ),
+    [profileIds, items],
+  );
+  const presence = usePresenceOf(directPeers, profiles);
+
   if (items.length === 0 && loading) {
     return (
       <div className="center-fill">
@@ -157,6 +170,10 @@ export function ConversationList(): ReactNode {
             summary={item}
             peerName={peerNameFor(item, accountId, profiles, room)}
             peerAvatarUrl={peerAvatarFor(item, accountId, profiles)}
+            peerPresence={(() => {
+              const peer = peerIdOf(item, accountId);
+              return peer !== undefined ? presence.get(peer) : undefined;
+            })()}
             subtitle={subtitleFor(item, accountId, profiles, lastPreviews, room)}
             active={active}
             unread={!active && (unread.has(item.conversationId) || item.lastSeq > item.readSeq)}
@@ -184,16 +201,31 @@ interface RowProps {
   subtitle: string;
   active: boolean;
   unread: boolean;
+  peerPresence?: number;
 }
 
-function Row({ summary, peerName, peerAvatarUrl, subtitle, active, unread }: RowProps): ReactNode {
+function Row({
+  summary,
+  peerName,
+  peerAvatarUrl,
+  peerPresence,
+  subtitle,
+  active,
+  unread,
+}: RowProps): ReactNode {
   const time = summary.lastMessage?.createdAt;
   return (
     <a
       href={conversationHref(summary.conversationId)}
       className={`conversation-row ${active ? 'active' : ''}`}
     >
-      <Avatar name={peerName} id={summary.conversationId} size={44} avatarUrl={peerAvatarUrl} />
+      <Avatar
+        name={peerName}
+        id={summary.conversationId}
+        size={44}
+        avatarUrl={peerAvatarUrl}
+        presence={peerPresence}
+      />
       <div className="conversation-main">
         <div className="conversation-name">{peerName}</div>
         <div className="conversation-sub">{subtitle}</div>
@@ -263,6 +295,14 @@ function peerNameFor(
  * through the summary's own avatar field (a room picture the server holds; that field is the
  * conversation's, not the profile's, and is unaffected by the profile avatar migration).
  */
+/** The 1:1 peer of a conversation, or undefined for anything else. */
+function peerIdOf(summary: ConversationSummary, selfId: Id | null): Id | undefined {
+  if (summary.kind === ConversationKind.Direct) {
+    return summary.members?.find((member) => member !== selfId);
+  }
+  return undefined;
+}
+
 function peerAvatarFor(
   summary: ConversationSummary,
   selfId: Id | null,

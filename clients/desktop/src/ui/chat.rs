@@ -739,7 +739,7 @@ fn composer(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conve
         .inner_margin(egui::Margin::symmetric(space::LG as i8, space::SM as i8))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let send_width = 76.0;
+                let send_width = 56.0;
                 let response = ui.add_enabled(
                     online,
                     egui::TextEdit::multiline(&mut state.draft)
@@ -750,13 +750,22 @@ fn composer(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conve
                         })
                         .desired_rows(1)
                         .desired_width(ui.available_width() - send_width - space::SM)
-                        .margin(egui::Margin::symmetric(space::MD as i8, space::SM as i8)),
+                        .margin(egui::Margin::symmetric(space::LG as i8, space::MD as i8)),
+                );
+                // The pill: the input's own frame is rounded to the composer's capsule shape.
+                let pill =
+                    egui::Rect::from_min_size(response.rect.shrink(0.0).min, response.rect.size());
+                let _ = pill;
+                ui.painter().rect_stroke(
+                    response.rect,
+                    20.0,
+                    egui::Stroke::new(1.0, colors.border),
+                    egui::StrokeKind::Inside,
                 );
 
                 let enter = ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift);
                 let send_by_key = response.has_focus() && enter;
-                let send_by_click =
-                    widgets::primary_button(ui, context.theme, "Send", online).clicked();
+                let send_by_click = widgets::send_button(ui, context.theme, online).clicked();
 
                 if (send_by_key || send_by_click) && !state.draft.trim().is_empty() && online {
                     let text = state.draft.trim().to_owned();

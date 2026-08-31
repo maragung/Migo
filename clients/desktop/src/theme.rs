@@ -121,25 +121,25 @@ pub struct Palette {
 /// presence and success, red for failure; neither ever marks a selection or a primary action,
 /// because a user must not have to learn which "bright colour" means what.
 const DARK: Palette = Palette {
-    surface: Color32::from_rgb(0x0a, 0x0a, 0x12),
-    surface_raised: Color32::from_rgb(0x11, 0x11, 0x18),
-    surface_overlay: Color32::from_rgb(0x17, 0x17, 0x21),
-    surface_hover: Color32::from_rgb(0x1c, 0x1c, 0x29),
-    surface_selected: Color32::from_rgb(0x0f, 0x2b, 0x36),
-    border: Color32::from_rgb(0x22, 0x22, 0x30),
-    border_strong: Color32::from_rgb(0x38, 0x38, 0x50),
-    text: Color32::from_rgb(0xe8, 0xe8, 0xf0),
-    text_muted: Color32::from_rgb(0x88, 0x88, 0xa0),
-    // Near-black with a cyan cast rather than pure black: on `#00d4ff` the difference between
-    // `#000000` and this is what keeps the label from looking like a hole in the button.
-    text_on_accent: Color32::from_rgb(0x05, 0x14, 0x1c),
-    accent: Color32::from_rgb(0x00, 0xd4, 0xff),
-    accent_hover: Color32::from_rgb(0x33, 0xdd, 0xff),
-    accent_active: Color32::from_rgb(0x00, 0xaa, 0xcc),
-    positive: Color32::from_rgb(0x00, 0xff, 0x88),
-    warning: Color32::from_rgb(0xe3, 0xb3, 0x41),
-    danger: Color32::from_rgb(0xff, 0x44, 0x66),
-    verified: Color32::from_rgb(0x77, 0xb6, 0xf0),
+    // The main-ui.jpg reference: charcoal surfaces with a blue-violet accent.
+    surface: Color32::from_rgb(0x14, 0x15, 0x19),
+    surface_raised: Color32::from_rgb(0x1b, 0x1c, 0x24),
+    surface_overlay: Color32::from_rgb(0x24, 0x25, 0x2e),
+    surface_hover: Color32::from_rgb(0x26, 0x28, 0x33),
+    surface_selected: Color32::from_rgb(0x2a, 0x31, 0x50),
+    border: Color32::from_rgb(0x2a, 0x2b, 0x36),
+    border_strong: Color32::from_rgb(0x3a, 0x3c, 0x4a),
+    text: Color32::from_rgb(0xf2, 0xf3, 0xf7),
+    text_muted: Color32::from_rgb(0xa0, 0xa3, 0xb1),
+    // White on the indigo: the reference's filled send button and active rail mark.
+    text_on_accent: Color32::from_rgb(0xff, 0xff, 0xff),
+    accent: Color32::from_rgb(0x4c, 0x6e, 0xf5),
+    accent_hover: Color32::from_rgb(0x65, 0x7f, 0xff),
+    accent_active: Color32::from_rgb(0x3b, 0x5b, 0xdb),
+    positive: Color32::from_rgb(0x2f, 0xce, 0x7e),
+    warning: Color32::from_rgb(0xf5, 0x9f, 0x00),
+    danger: Color32::from_rgb(0xff, 0x5c, 0x7a),
+    verified: Color32::from_rgb(0x74, 0xc0, 0xfc),
 };
 
 /// Light — the canonical Migo light palette, from `shared/design/tokens.json`.
@@ -148,22 +148,22 @@ const DARK: Palette = Palette {
 /// interface cannot lean on fill contrast the way a dark one can. The accent is the blue the web
 /// client's light theme carries, strong enough to hold white text above the 4.5:1 contrast bar.
 const LIGHT: Palette = Palette {
-    surface: Color32::from_rgb(0xf0, 0xf2, 0xf5),
+    surface: Color32::from_rgb(0xf1, 0xf2, 0xf6),
     surface_raised: Color32::from_rgb(0xff, 0xff, 0xff),
     surface_overlay: Color32::from_rgb(0xff, 0xff, 0xff),
-    surface_hover: Color32::from_rgb(0xe9, 0xed, 0xf3),
-    surface_selected: Color32::from_rgb(0xdc, 0xeb, 0xfa),
-    border: Color32::from_rgb(0xe0, 0xe3, 0xe8),
-    border_strong: Color32::from_rgb(0xc5, 0xca, 0xd0),
-    text: Color32::from_rgb(0x1a, 0x1d, 0x24),
-    text_muted: Color32::from_rgb(0x5c, 0x63, 0x70),
+    surface_hover: Color32::from_rgb(0xec, 0xee, 0xf4),
+    surface_selected: Color32::from_rgb(0xe3, 0xe8, 0xfb),
+    border: Color32::from_rgb(0xe3, 0xe5, 0xec),
+    border_strong: Color32::from_rgb(0xc9, 0xcd, 0xd8),
+    text: Color32::from_rgb(0x1b, 0x1c, 0x24),
+    text_muted: Color32::from_rgb(0x5c, 0x61, 0x70),
     text_on_accent: Color32::from_rgb(0xff, 0xff, 0xff),
-    accent: Color32::from_rgb(0x00, 0x77, 0xe6),
-    accent_hover: Color32::from_rgb(0x1a, 0x86, 0xee),
-    accent_active: Color32::from_rgb(0x00, 0x5c, 0xb8),
-    positive: Color32::from_rgb(0x00, 0xa8, 0x5a),
-    warning: Color32::from_rgb(0xe6, 0xa1, 0x00),
-    danger: Color32::from_rgb(0xe0, 0x40, 0x50),
+    accent: Color32::from_rgb(0x3b, 0x5b, 0xdb),
+    accent_hover: Color32::from_rgb(0x4c, 0x6e, 0xf5),
+    accent_active: Color32::from_rgb(0x2f, 0x4c, 0xb8),
+    positive: Color32::from_rgb(0x0c, 0xa6, 0x78),
+    warning: Color32::from_rgb(0xe6, 0x77, 0x00),
+    danger: Color32::from_rgb(0xe0, 0x31, 0x31),
     verified: Color32::from_rgb(0x1f, 0x6f, 0xd0),
 };
 
@@ -381,15 +381,15 @@ mod tests {
     /// surfaces (overlay, hover, selected, borders) are free to move as the theme is tuned, and
     /// pinning them here would turn every polish into a test failure.
     #[test]
-    fn dark_is_the_neon_palette() {
+    fn dark_is_the_reference_palette() {
         let p = palette(Theme::Dark);
-        assert_eq!(p.surface, Color32::from_rgb(0x0a, 0x0a, 0x12));
-        assert_eq!(p.surface_raised, Color32::from_rgb(0x11, 0x11, 0x18));
-        assert_eq!(p.accent, Color32::from_rgb(0x00, 0xd4, 0xff));
-        assert_eq!(p.positive, Color32::from_rgb(0x00, 0xff, 0x88));
-        assert_eq!(p.danger, Color32::from_rgb(0xff, 0x44, 0x66));
-        assert_eq!(p.text, Color32::from_rgb(0xe8, 0xe8, 0xf0));
-        assert_eq!(p.text_muted, Color32::from_rgb(0x88, 0x88, 0xa0));
+        assert_eq!(p.surface, Color32::from_rgb(0x14, 0x15, 0x19));
+        assert_eq!(p.surface_raised, Color32::from_rgb(0x1b, 0x1c, 0x24));
+        assert_eq!(p.accent, Color32::from_rgb(0x4c, 0x6e, 0xf5));
+        assert_eq!(p.positive, Color32::from_rgb(0x2f, 0xce, 0x7e));
+        assert_eq!(p.danger, Color32::from_rgb(0xff, 0x5c, 0x7a));
+        assert_eq!(p.text, Color32::from_rgb(0xf2, 0xf3, 0xf7));
+        assert_eq!(p.text_muted, Color32::from_rgb(0xa0, 0xa3, 0xb1));
     }
 
     /// The light theme is the canonical Migo light palette: the same token table the web client
@@ -397,11 +397,11 @@ mod tests {
     #[test]
     fn light_is_the_canonical_migo_palette() {
         let p = palette(Theme::Light);
-        assert_eq!(p.surface, Color32::from_rgb(0xf0, 0xf2, 0xf5));
+        assert_eq!(p.surface, Color32::from_rgb(0xf1, 0xf2, 0xf6));
         assert_eq!(p.surface_raised, Color32::from_rgb(0xff, 0xff, 0xff));
-        assert_eq!(p.accent, Color32::from_rgb(0x00, 0x77, 0xe6));
-        assert_eq!(p.text, Color32::from_rgb(0x1a, 0x1d, 0x24));
-        assert_eq!(p.danger, Color32::from_rgb(0xe0, 0x40, 0x50));
+        assert_eq!(p.accent, Color32::from_rgb(0x3b, 0x5b, 0xdb));
+        assert_eq!(p.text, Color32::from_rgb(0x1b, 0x1c, 0x24));
+        assert_eq!(p.danger, Color32::from_rgb(0xe0, 0x31, 0x31));
     }
 
     /// The toggle must remain an involution: flipping twice lands where flipping once did, and

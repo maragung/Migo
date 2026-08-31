@@ -469,6 +469,44 @@ pub fn primary_button(ui: &mut Ui, theme: Theme, text: &str, enabled: bool) -> R
     .inner
 }
 
+/// The composer's send control: a filled accent circle with a paper plane drawn on it — the
+/// reference composer's send mark. Disabled reads as the muted surface, never as a grey text
+/// button.
+pub fn send_button(ui: &mut Ui, theme: Theme, enabled: bool) -> Response {
+    let colors = palette(theme);
+    let side = 40.0;
+    let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(side), Sense::click());
+    let fill = if enabled {
+        colors.accent
+    } else {
+        colors.surface_hover
+    };
+    ui.painter().circle_filled(rect.center(), side / 2.0, fill);
+
+    // A paper plane: two strokes forming the classic shape, in the fill's contrast ink.
+    let ink = if enabled {
+        colors.text_on_accent
+    } else {
+        colors.text_muted
+    };
+    let stroke = egui::Stroke::new(1.75, ink);
+    let min = rect.min;
+    let p = |x: f32, y: f32| egui::pos2(min.x + x * side, min.y + y * side);
+    ui.painter().add(egui::Shape::line(
+        vec![
+            p(0.26, 0.52),
+            p(0.76, 0.28),
+            p(0.52, 0.76),
+            p(0.44, 0.56),
+            p(0.26, 0.52),
+        ],
+        stroke,
+    ));
+    ui.painter()
+        .line_segment([p(0.76, 0.28), p(0.44, 0.56)], stroke);
+    response
+}
+
 /// A quieter action beside the primary one.
 pub fn ghost_button(ui: &mut Ui, theme: Theme, text: &str) -> Response {
     let colors = palette(theme);
