@@ -1133,3 +1133,12 @@ status HTTP ("The server answered with an error (HTTP …)") alih-alih kalimat g
 **Verifikasi**: 240 test web hijau, cargo fmt/clippy `-D warnings`/test desktop (36) hijau,
 `make kotlin-check` hijau; live: register/login/WS via SDK ke `152.53.102.150:8080` sukses,
 `out/` di-build ulang dan served di `:19992`.
+
+**Follow-up (masih v0.9.1)**: `ServerEndpoint.fromRestUrl` — jembatan resume sesi di
+Android — membuang scheme URL aslinya dan menebak TLS untuk host non-loopback, jadi
+resume sesi yang tersimpan dari `http://152.53.102.150:8080` mencoba `https://…:8080`,
+gagal di socket, dan pengguna dilempar kembali ke layar sign-in setiap restart app.
+Sekarang scheme URL adalah ground truth: `https://` → pasangan TLS (gateway = port),
+`http://` → pasangan plain (gateway = port+1 hanya untuk loopback/dev; host publik =
+single-port seperti deployment ini). Dua test baru + satu round-trip test untuk origin
+deployment; `make kotlin-check` hijau.

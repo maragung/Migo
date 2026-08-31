@@ -152,8 +152,10 @@ data class ServerEndpoint(
          *
          * The bridge the resume path uses: the [SavedSession] still carries a single URL
          * string from before the form was structured, and the bootstrap needs the
-         * structured record to build a [MigoClient]. The default scheme pair is the
-         * loopback rule, so a `localhost` URL keeps the dev defaults.
+         * structured record to build a [MigoClient]. The URL's own scheme is the ground
+         * truth for TLS — a session saved against `http://152.53.102.150:8080` must not
+         * come back as a TLS endpoint, or the resume handshake dies at the socket and
+         * the user is dumped back on the sign-in screen.
          */
         fun fromRestUrl(url: String): ServerEndpoint {
             val trimmed = url.trim()
@@ -170,7 +172,27 @@ data class ServerEndpoint(
                 else -> hostAndPort.substring(0, colon).lowercase() to
                     (hostAndPort.substring(colon + 1).toIntOrNull() ?: (if (restScheme == RestScheme.Https) 443 else 80))
             }
-            return defaultFor(host, port)
+            // The origin's own scheme decides the posture. A `https://` origin keeps the
+            // TLS pair with the gateway on the same port; an `http://` origin keeps the
+            // plain pair, with the gateway on the next port only under the dev policy
+            // (loopback) — a plain origin on a public host is a single-port deployment
+            // like this build's, which serves `/ws` on its HTTP listener.
+            return when (restScheme) {
+                RestScheme.Https -> internetDefault(host, port)
+                RestScheme.Http ->
+                    if (isLoopbackHost(host)) {
+                        loopbackDefault(host, port)
+                    } else {
+                        ServerEndpoint(
+                            host = host,
+                            port = port,
+                            gatewayPort = port,
+                            transport = Transport.WebSocket,
+                            gatewayScheme = GatewayScheme.Ws,
+                            restScheme = RestScheme.Http,
+                        )
+                    }
+            }
         }
 
         /**

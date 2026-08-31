@@ -137,6 +137,24 @@ class ServerEndpointTest {
     }
 
     @Test
+    fun fromRestUrl_honoursAPlainHttpOriginOnAPublicHost() {
+        // The resume path bridges through here with the origin the session was saved
+        // against. This deployment's origin is plain HTTP, so the record must come back
+        // plain too — guessing TLS for a non-loopback host would break the resume
+        // handshake at the socket.
+        val reparsed = ServerEndpoint.fromRestUrl("http://152.53.102.150:8080")
+        assertEquals(ServerEndpoint.publicDeploymentDefault(), reparsed)
+        assertEquals("http://152.53.102.150:8080", reparsed.restBaseUrl())
+        assertEquals("ws://152.53.102.150:8080/ws", reparsed.gatewayUrl())
+    }
+
+    @Test
+    fun roundTrip_thePublicDeploymentOriginSurvives() {
+        val original = ServerEndpoint.publicDeploymentDefault()
+        assertEquals(original, ServerEndpoint.fromRestUrl(original.restBaseUrl()))
+    }
+
+    @Test
     fun fromRestUrl_toleratesTrailingPathAndQuery() {
         val reparsed = ServerEndpoint.fromRestUrl("https://migo.example.com:8443/some/path?q=1")
         assertEquals("migo.example.com", reparsed.host)
