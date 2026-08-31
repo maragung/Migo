@@ -21,6 +21,12 @@ surface where humans and curl matter more than bytes.
 
 ## 2. Transport bindings
 
+TCP is the default realtime transport: every deployment serves the WebSocket
+route on its HTTP listener. QUIC is the second option — `migod` binds a QUIC
+listener when `MIGO_QUIC__BIND` is set and advertises the `QUIC` feature bit only
+while that listener is serving, so a client never negotiates a transport the node
+is not carrying.
+
 | Transport  | Binding                                                                                    |
 | ---------- | ------------------------------------------------------------------------------------------ |
 | WebSocket  | One MWP frame per **binary** WS message. WS supplies the length, so the frame carries none |

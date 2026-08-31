@@ -15,7 +15,7 @@ friends, avatars, virtual gifts, game bots — on a modern foundation:
 | Pillar         | Choice                                                                                |
 | -------------- | ------------------------------------------------------------------------------------- |
 | Backend        | Rust, modular monolith with role composition (`MIGO_ROLES`)                           |
-| Realtime       | WebSocket now, QUIC-ready; custom **binary** frame protocol (varint, opcode registry) |
+| Realtime       | TCP (WebSocket) by default, optional QUIC listener (`MIGO_QUIC__BIND`); custom **binary** frame protocol (varint, opcode registry) |
 | Privacy        | X3DH + Double Ratchet for 1:1, sender-key for groups, **on by default**               |
 | Storage        | PostgreSQL (source of truth) · Redis (ephemeral/presence) · S3 (media)                |
 | Web            | Next.js App Router, TypeScript, PWA, offline-first (IndexedDB)                        |

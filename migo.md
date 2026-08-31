@@ -147,10 +147,10 @@ Async runtime tokio
 
 Protocol:
 Binary-first. Wire protocol realtime adalah MWP/1, sebuah binary framing dengan payload MSE. Lihat section 136 sampai 145.
-WebSocket sebagai transport realtime utama. Satu MWP frame per satu binary WebSocket message. Text frame TIDAK BOLEH digunakan. permessage-deflate WAJIB dimatikan karena kompresi diputuskan per frame oleh MWP sendiri.
-QUIC sebagai transport realtime kedua untuk client yang mendukungnya, dinegosiasikan lewat feature bit QUIC. Framing di atas QUIC dan TCP memakai length prefix u32 big-endian.
+WebSocket di atas TCP sebagai transport realtime default. Satu MWP frame per satu binary WebSocket message. Text frame TIDAK BOLEH digunakan. permessage-deflate WAJIB dimatikan karena kompresi diputuskan per frame oleh MWP sendiri.
+QUIC sebagai transport realtime kedua (opsi) untuk client yang mendukungnya, dinegosiasikan lewat feature bit QUIC. Server hanya mengiklankan bit QUIC bila listener QUIC diaktifkan. Framing di atas QUIC dan TCP memakai length prefix u32 big-endian.
 HTTPS di atas HTTP/1.1, HTTP/2, atau HTTP/3 hanya untuk REST dan public API, upload media, admin, dan health endpoint. Bukan untuk chat.
-Server-to-server federation memakai QUIC/TLS 1.3, atau TLS 1.3 di atas TCP bila QUIC tidak tersedia, dengan binary federation packet. Lihat section 169.
+Server-to-server federation memakai TLS 1.3 di atas TCP sebagai transport default, dengan QUIC/TLS 1.3 sebagai opsi kedua bila tersedia, membawa binary federation packet. Lihat section 169.
 Transport tanpa enkripsi TIDAK BOLEH ada, termasuk di environment development.
 
 Database:
@@ -307,8 +307,8 @@ Semua komunikasi antar-server WAJIB encrypted dan authenticated. Tidak ada penge
 
 Transport:
 
-QUIC/TLS 1.3 sebagai pilihan utama
-TLS 1.3 di atas TCP sebagai fallback bila jaringan memblokir UDP
+TLS 1.3 di atas TCP sebagai transport default
+QUIC/TLS 1.3 sebagai opsi kedua untuk deployment yang mendukung UDP
 Cipher suite modern saja, tanpa downgrade path
 
 Payload:
@@ -3792,7 +3792,7 @@ Alasan angkanya. Sebuah pesan chat dengan empat id, satu timestamp, dan tiga enu
 
 138. TRANSPORT BINDINGS
 
-STATUS: BUILT untuk WebSocket dan length-prefixed stream. STATUS: SPEC untuk QUIC.
+STATUS: BUILT untuk WebSocket, length-prefixed stream, dan listener QUIC opsional (diaktifkan lewat MIGO_QUIC__BIND; bit QUIC hanya diiklankan saat listener aktif). STATUS: SPEC untuk QUIC datagram dan jalur data QUIC pada client.
 
 WebSocket:
 
@@ -3801,11 +3801,11 @@ Text frame TIDAK BOLEH dipakai. Menerima text frame adalah protocol violation da
 WebSocket message boundary yang menyediakan panjang frame, sehingga frame tidak membawa length field sendiri
 permessage-deflate WAJIB dimatikan, karena keputusan kompresi diambil per frame oleh MWP pada section 155
 
-QUIC:
+QUIC (opsi kedua):
 
 Satu MWP frame per QUIC datagram bila datagram tersedia, dengan batas ukuran sesuai path MTU
 Untuk QUIC stream, framing memakai length prefix u32 big-endian diikuti frame
-Dinegosiasikan melalui feature bit QUIC
+Dinegosiasikan melalui feature bit QUIC. Server mengiklankan bit QUIC hanya bila listener QUIC diaktifkan lewat konfigurasi; TCP/WebSocket tetap menjadi transport default
 Keuntungan utamanya adalah tidak ada head-of-line blocking dan reconnect yang lebih cepat saat berpindah jaringan
 
 TCP:
@@ -5030,7 +5030,7 @@ STATUS: SPEC. Keputusan desain ada di ADR-0005 dan section 7.
 
 Transport:
 
-QUIC/TLS 1.3 sebagai pilihan utama, TLS 1.3 di atas TCP sebagai fallback
+TLS 1.3 di atas TCP sebagai transport default, QUIC/TLS 1.3 sebagai opsi kedua bila tersedia
 Framing pada stream memakai length prefix u32 big-endian
 Semua packet adalah binary MWP/1 dengan opcode range federation, 208 sampai 223
 Listener mesh berada di network segment terpisah dan TIDAK BOLEH terekspos ke public Internet

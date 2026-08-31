@@ -56,7 +56,8 @@ system with scheduling and rewards, on-demand translation, advanced discovery.
 
 Full mesh handshake and routing gossip, room home regions and edge shards, automatic
 failover and ownership transfer, cross-region replication, regional relays, capacity
-autoscaling, QUIC transport, per-region feature flags.
+autoscaling, QUIC client data paths and federation-over-QUIC (the optional QUIC
+listener on the server is already built), per-region feature flags.
 
 ## Post-MVP (brief §129)
 

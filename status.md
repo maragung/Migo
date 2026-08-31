@@ -1142,3 +1142,42 @@ Sekarang scheme URL adalah ground truth: `https://` → pasangan TLS (gateway = 
 `http://` → pasangan plain (gateway = port+1 hanya untuk loopback/dev; host publik =
 single-port seperti deployment ini). Dua test baru + satu round-trip test untuk origin
 deployment; `make kotlin-check` hijau.
+
+## 32. TCP/WebSocket default, QUIC opsi kedua yang sungguhan (v0.10.0)
+
+**Spec (migo.md)**: arah transport dibalik dan dinyatakan eksplisit — WebSocket di atas
+TCP adalah transport realtime **default**; QUIC adalah **opsi kedua**, dan server hanya
+mengiklankan bit fitur `QUIC` bila listener QUIC diaktifkan lewat konfigurasi. Federation
+juga diluruskan: TLS 1.3 di atas TCP (mesh yang sudah BUILT) sebagai default, QUIC/TLS 1.3
+sebagai opsi kedua — teks lama yang menulis QUIC sebagai jalur utama federation
+bertentangan dengan mesh raw-TCP + FED_HELLO Ed25519 yang sesungguhnya ada.
+
+**Server**: `migod::quic` — listener QUIC opsional (quinn 0.11 + rustls TLS 1.3,
+self-signed leaf via rcgen, identitas tetap dibuktikan di lapisan aplikasi lewat
+AUTHENTICATE, postur yang sama dengan mesh). Satu stream dua-arah = satu sesi realtime;
+framing stream section 138 (prefix panjang u32 big-endian + frame) diimplementasikan
+sebagai `QuicStreamTransport` di atas `Transport` trait, cancel-safe persis tuntutan
+trait (byte parsial mendarat di buffer milik transport, bukan di future yang di-drop).
+Prefix musuh (> `MAX_FRAME_BYTES`) ditolak sebelum byte kedua dialokasikan. Aktifasi:
+`MIGO_QUIC__BIND` kosong (default) = tidak ada listener, bit QUIC tidak diiklankan; diisi
+= listener di-bind **dan** bit QUIC di-OR-kan ke set fitur node pada saat yang sama di
+composition root — kegagalan bind membatalkan startup, jadi set yang diiklankan tidak
+pernah bohong tentang set yang dilayani.
+
+**Client**: di ketiga client (web/desktop/Android) QUIC sekarang pilihan kedua yang bisa
+dipilih dan dipersistenkan apa adanya — bukan lagi radio disabled / "coming soon" /
+downgrade diam-diam. Copy jujur: build ini belum punya runtime QUIC di JS/Kotlin, jadi
+jalur kabelnya masih WebSocket (Android memutuskan di `MigoSession.wireGatewayUrl` pada
+saat connect; record tersimpan tidak diubah). Desktop combo: "QUIC (second option)".
+Pairing transport/scheme divalidasi simetris di ketiga platform (WS↔WS/WSS,
+QUIC↔QUIC/QUIC-TLS); pembaca Settings Android men-snap scheme ke family transportnya
+supaya record parsial tidak bisa crash read path.
+
+**Verifikasi**: workspace server penuh — fmt, `cargo clippy --workspace --all-targets
+-- -D warnings`, `cargo test --workspace` (termasuk 5 unit test framing + 3 test
+integrasi `tests/quic_listener.rs` yang mengikat listener sungguhan dan menggerakkan
+klien quinn/rustls nyata) semua hijau; desktop fmt/clippy/test (36); TS build + eslint +
+test web (240) + test SDK (141); `make kotlin-check` (14 selftest / 0 masalah);
+`make brief-check` (41 pemeriksaan, bersih). Rilis lewat GitHub Actions seperti biasa:
+tag `v0.10.0` → release.yml (binary migod, tarball web, binary desktop, APK debug,
+2 image GHCR).
