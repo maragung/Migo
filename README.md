@@ -12,15 +12,15 @@
 Migo rebuilds the best ideas of the mig33 era — Public Rooms, Managed Rooms, global chat,
 friends, avatars, virtual gifts, game bots — on a modern foundation:
 
-| Pillar         | Choice                                                                                |
-| -------------- | ------------------------------------------------------------------------------------- |
-| Backend        | Rust, modular monolith with role composition (`MIGO_ROLES`)                           |
-| Realtime       | TCP (WebSocket) by default, optional QUIC listener (`MIGO_QUIC__BIND`); custom **binary** frame protocol (varint, opcode registry) |
-| Privacy        | X3DH + Double Ratchet for 1:1, sender-key for groups, **on by default**               |
-| Storage        | PostgreSQL (source of truth) · Redis (ephemeral/presence) · S3 (media)                |
-| Web            | Next.js App Router, TypeScript, PWA, offline-first (IndexedDB)                        |
-| Mobile         | Native Android (Kotlin / Jetpack Compose) — see `clients/android`                     |
-| Protocol truth | One IDL in `shared/protocol/schema`, code-generated for Rust **and** TypeScript       |
+| Pillar         | Choice                                                                                                             |
+| -------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Backend        | Rust, modular monolith with role composition (`MIGO_ROLES`)                                                        |
+| Realtime       | TCP (WebSocket) by default, QUIC optional (`MIGO_QUIC__BIND`); **binary** frame protocol (varint, opcode registry) |
+| Privacy        | X3DH + Double Ratchet for 1:1, sender-key for groups, **on by default**                                            |
+| Storage        | PostgreSQL (source of truth) · Redis (ephemeral/presence) · S3 (media)                                             |
+| Web            | Next.js App Router, TypeScript, PWA, offline-first (IndexedDB)                                                     |
+| Mobile         | Native Android (Kotlin / Jetpack Compose) — see `clients/android`                                                  |
+| Protocol truth | One IDL in `shared/protocol/schema`, code-generated for Rust **and** TypeScript                                    |
 
 Design north star: **do more with fewer bytes.** Every feature is measured against a
 [bandwidth budget](docs/05-bandwidth-budget.md).
