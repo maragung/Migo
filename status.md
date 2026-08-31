@@ -1045,3 +1045,31 @@ sukses; ladder reset); **live di VPS**: 5 salah → percobaan ke-6 dengan passwo
 `429 AUTH_LOCKED, Retry in 34 s`; setelah lockout lewat login benar = 200 + token; ladder
 ter-reset (4 salah berikutnya = plain 401). 1600+ test Rust, 236 test web, clippy/fmt
 bersih, gate statis hijau.
+
+## 29. Port stabil di IP publik 152.53.102.150:8080 (v0.8.5)
+
+**Masalah**: port server & default client sering berganti — desktop `localhost:18080`
+(split gateway `18081`), Android loopback `18080`, web fresh visit menebak dari origin
+dan SDK menormalkan non-loopback ke `Wss/Https` + `+1` port. Hasil: first-run selalu
+salah dan user harus mengetik manual.
+
+**Web**: `NEXT_PUBLIC_MIGO_API_URL=http://152.53.102.150:8080` di-bake ke `out/` lewat
+`.env.production.local` (gitignored). Fresh visit, snapshot, dan derive gateway semua
+stabil: `serverEndpointFromUrl` kini dinormalisasi ke **WS/Http, same-port** untuk URL
+env (gateway tidak lagi `+1`, skema mengikuti REST), matching `migod` single-listener
+`0.0.0.0:8080`.
+
+**Desktop**: `Settings::default_for_dev()` → `default_production_server_endpoint()`
+baru: `152.53.102.150:8080`, plain `Http/Ws`, `gateway_port = 8080`, `Transport::WebSocket`.
+
+**Android**: `ServerEndpoint.publicDeploymentDefault():152.53.102.150:8080` (plain,
+same-port) dan `AppSettings.serverEndpoint` default-nya. Fresh install langsung ke
+live server; edit di form tetap persist dan menang di resume path.
+
+**VPS stabil**: `migod` tetap `0.0.0.0:8080`, CORS `http://152.53.102.150:19992` +
+`localhost`; `.migod.env` (gitignored, `chmod 600`) menyimpan fixed env + template
+`server/migod.env.example.vps`; build tidak lagi menebak port.
+
+**Verifikasi live**: `curl /health → {"status":"ok"}` via `127.0.0.1` & `152.53.102.150`;
+`GET /` `GET /chat/` `GET /login/` semua `200`; JS chunk di `out/` mengandung
+`152.53.102.150:8080`.

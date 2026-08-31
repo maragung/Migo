@@ -64,3 +64,5 @@ Thumbs.db
 # rather than left to be noticed in a diff.
 .pgdata/
 var/
+# VPS deployment — stable env written by the deployment; never committed
+.migod.env

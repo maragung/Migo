@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{default_loopback_server_endpoint, ServerEndpoint};
+use crate::config::{default_production_server_endpoint, ServerEndpoint};
 use crate::theme::Theme;
 
 const SETTINGS_FILE: &str = "settings.json";
@@ -43,14 +43,14 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// The default: the loopback dev policy on `localhost:18080`, with the gateway on the next
-    /// port. A user who has never opened the server field gets exactly the same defaults the
-    /// web client offers on its first visit.
+    /// The default: the public deployment at `152.53.102.150:8080` (plain HTTP, single port).
+    /// A first-run install talks to the live server immediately, and a user who edits the field
+    /// later is overriding one stable default, not chasing one that moves each build.
     #[must_use]
     pub fn default_for_dev() -> Self {
         Self {
             version: SETTINGS_VERSION,
-            server: default_loopback_server_endpoint("localhost", 18080),
+            server: default_production_server_endpoint(),
             theme: None,
         }
     }

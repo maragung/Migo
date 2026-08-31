@@ -176,7 +176,12 @@ data class AppSettings(
      * nonsense URL. The same record is persisted into [SavedSession] for a signed-in device,
      * and that copy is the authoritative one on the resume path.
      */
-    val serverEndpoint: ServerEndpoint = ServerEndpoint.loopbackDefault(),
+    /**
+     * This deployment's endpoint. A fresh install talks to the live server immediately;
+     * a later edit in the sign-in form persists under this same field and wins on
+     * every future launch.
+     */
+    val serverEndpoint: ServerEndpoint = ServerEndpoint.publicDeploymentDefault(),
 
     /**
      * The same server as a single string, kept in lockstep with [serverEndpoint].

@@ -44,7 +44,18 @@ export const config: WebConfig = {
  */
 export function defaultServerEndpoint(): ServerEndpoint {
   if (config.defaultApiUrl !== undefined) {
-    return serverEndpointFromUrl(config.defaultApiUrl);
+    // The SDK's default URL helper pins non-loopback hosts to Wss/Https and the next port
+    // (the public-internet posture). This deployment serves /ws on its HTTP port, plain, so an
+    // env-supplied URL like http://152.53.102.150:8080 must pin the gateway to the SAME port with
+    // the schemes matching the REST URL — otherwise the gateway would try wss://:8081.
+    const parsed = serverEndpointFromUrl(config.defaultApiUrl);
+    const isSecure = parsed.restScheme === 'Https';
+    return {
+      ...parsed,
+      scheme: isSecure ? 'Wss' : 'Ws',
+      restScheme: isSecure ? 'Https' : 'Http',
+      gatewayPort: parsed.port,
+    };
   }
   if (typeof window !== 'undefined' && window.location) {
     const { protocol, hostname } = window.location;

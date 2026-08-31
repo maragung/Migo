@@ -126,6 +126,16 @@ data class ServerEndpoint(
          * REST. `https://migo.example.com:443` for REST, `wss://migo.example.com:443/ws`
          * for the gateway.
          */
+        /** The VPS deployment's single-host endpoint, matching the running migod. */
+        fun publicDeploymentDefault(): ServerEndpoint = ServerEndpoint(
+            host = "152.53.102.150",
+            port = 8080,
+            gatewayPort = 8080,
+            transport = Transport.WebSocket,
+            gatewayScheme = GatewayScheme.Ws,
+            restScheme = RestScheme.Http,
+        )
+
         fun internetDefault(host: String, port: Int = 443): ServerEndpoint =
             ServerEndpoint(
                 host = host.lowercase(),
