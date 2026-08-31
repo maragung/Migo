@@ -1017,3 +1017,31 @@ direstart (semua rute 200; halaman login tanpa referensi captcha).
 
 Lokal: 1600+ test Rust hijau (termasuk auth-flow 6/6), fmt/clippy bersih, 235 test
 web, fmt-check-js hijau.
+
+## 28. Lockout bertingkat untuk kegagalan login (v0.8.4)
+
+**Ladder** — lima password salah untuk satu identifier mengunci percobaan berikutnya
+selama satu menit; setiap tiga kegagalan berikutnya menaikkan dua menit (1, 3, 5, 7, …)
+sampai cap 24 jam. Percobaan selama lockout ditolak cepat tanpa cek password dan tanpa
+menghitung; login sukses mereset seluruh catatan.
+
+- **Protokol**: error baru `1406 AUTH_LOCKED` (HTTP 429) di `errors.json` — codegen
+  memancarkan Rust/TS/Kotlin; table http_status menghasilkan 429 untuk REST.
+- **Server**: `migo-auth/src/lockout.rs` — `LockoutGate`, gate murni state+Timestamp
+  (waktu dari `context.now`, tanpa clock dependency), kunci = identifier terlipat
+  (keputusan produk: username global, lintas IP; trade-off DoS akun diterima dan
+  didokumentasikan). Kabel ke `sign_in`: cek di awal (sebelum percobaan dibebankan),
+  `record_failure` di kedua jalur gagal (unknown-user & bad-password), `record_success`
+  saat sukses. Config `auth.lockout`: `MIGO_AUTH__LOCKOUT__{ENABLED, INITIAL_FAILURES,
+STEP_FAILURES, BASE_SECONDS, STEP_SECONDS, MAX_SECONDS}`.
+- **Client**: Android `readable()` menambah cabang AUTH_LOCKED ("Account temporarily
+  locked. Try again in N seconds."); web login menampilkan kalimat server verbatim
+  (friendlyError sudah strip symbol) + test baru; desktop menampilkan server message.
+
+**Verifikasi**: unit lockout (tangga 5→60s, +3→180s→300s, ceiling, reset, refuse cepat,
+kunci independen); integrasi auth-flow `repeated_sign_in_failures_lock_the_account_on_a_
+climbing_ladder` (5 salah → ke-6 = 429 AUTH_LOCKED + retry_after_ms; clock maju → login
+sukses; ladder reset); **live di VPS**: 5 salah → percobaan ke-6 dengan password BENAR =
+`429 AUTH_LOCKED, Retry in 34 s`; setelah lockout lewat login benar = 200 + token; ladder
+ter-reset (4 salah berikutnya = plain 401). 1600+ test Rust, 236 test web, clippy/fmt
+bersih, gate statis hijau.

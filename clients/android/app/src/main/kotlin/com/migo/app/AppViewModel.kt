@@ -1093,6 +1093,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun readable(failure: Throwable): String {
         if (failure is com.migo.core.net.RestError.Server) {
+            if (failure.symbol == "AUTH_LOCKED") {
+                val seconds = failure.retryAfterMs?.div(1000)
+                return if (seconds != null && seconds > 0) {
+                    "Account temporarily locked. Try again in $seconds seconds."
+                } else {
+                    "Account temporarily locked. Try again later."
+                }
+            }
             if (failure.symbol == "RATE_LIMITED") {
                 val seconds = failure.retryAfterMs?.div(1000)
                 return if (seconds != null && seconds > 0) {

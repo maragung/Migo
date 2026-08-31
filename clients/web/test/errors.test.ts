@@ -68,6 +68,18 @@ test('a server refusal shows the curated public message the server chose', () =>
   assert.ok(!shown.includes('at '));
 });
 
+test('an account lockout reaches the person as a wait, never as a symbol', () => {
+  const err = new RemoteError(
+    1406,
+    'AUTH_LOCKED',
+    'Account temporarily locked. Retry in 90 s',
+    90_000,
+  );
+  const shown = friendlyError(err);
+  assert.equal(shown, 'Account temporarily locked. Retry in 90 s');
+  assert.ok(!shown.includes('AUTH_LOCKED'), 'the machine symbol never reaches the person');
+});
+
 test('a wrong password and a missing account are indistinguishable to the user', () => {
   // The server collapses both to one public answer; the client must not re-introduce a difference,
   // e.g. by branching on the numeric code. Two different codes, one identical public message:

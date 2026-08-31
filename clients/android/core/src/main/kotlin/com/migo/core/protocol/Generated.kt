@@ -122,6 +122,8 @@ object Code {
     const val TOO_MANY_SUBSCRIPTIONS: Long = 1403L
     const val TOO_MANY_SESSIONS: Long = 1404L
     const val UPLOAD_LIMIT_EXCEEDED: Long = 1405L
+    /** Sign-in is temporarily locked for this account after repeated failures; retry after the given interval */
+    const val AUTH_LOCKED: Long = 1406L
     const val NOT_FOUND: Long = 1500L
     const val ALREADY_EXISTS: Long = 1501L
     const val CONFLICT: Long = 1502L
@@ -200,6 +202,7 @@ object Code {
         TOO_MANY_SUBSCRIPTIONS,
         TOO_MANY_SESSIONS,
         UPLOAD_LIMIT_EXCEEDED,
+        AUTH_LOCKED,
         NOT_FOUND,
         ALREADY_EXISTS,
         CONFLICT,
@@ -275,6 +278,7 @@ val ERROR_SYMBOLS: Map<Long, String> = mapOf(
     1403L to "TOO_MANY_SUBSCRIPTIONS",
     1404L to "TOO_MANY_SESSIONS",
     1405L to "UPLOAD_LIMIT_EXCEEDED",
+    1406L to "AUTH_LOCKED",
     1500L to "NOT_FOUND",
     1501L to "ALREADY_EXISTS",
     1502L to "CONFLICT",
@@ -349,6 +353,7 @@ val ERROR_HTTP_STATUS: Map<Long, Int> = mapOf(
     1403L to 429,
     1404L to 429,
     1405L to 413,
+    1406L to 429,
     1500L to 404,
     1501L to 409,
     1502L to 409,

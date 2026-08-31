@@ -682,6 +682,120 @@ async fn a_sign_in_never_requires_a_captcha_even_once_the_gate_is_engaged() {
     );
 }
 
+/// The progressive sign-in lockout: five wrong passwords lock the account for a
+/// minute, the next three for three, the next three for five — and a correct
+/// password clears the whole ladder. The lock follows the account across every
+/// identifier and network (v0.8.4).
+#[tokio::test]
+async fn repeated_sign_in_failures_lock_the_account_on_a_climbing_ladder() {
+    let h = Harness::new();
+    let ip = "198.51.100.40";
+
+    // Register the target account (the gate starts clean).
+    let setup_captcha = h.issue_captcha().await;
+    let setup_body = json!({
+        "username": "laddered",
+        "password": GOOD_PASSWORD,
+        "device": { "display_name": "Setup Device" },
+        "captcha": {
+            "challenge_id": setup_captcha.challenge_id,
+            "answer": setup_captcha.answer,
+        },
+    });
+    let setup_resp = h
+        .send(post_json("/v1/auth/register", Some(ip), &setup_body))
+        .await;
+    assert_eq!(
+        setup_resp.status,
+        StatusCode::CREATED,
+        "setup register should succeed; body={}",
+        setup_resp.text()
+    );
+
+    // Five wrong passwords. None of them is captcha-gated (sign-in never is) and
+    // none of them trips the lockout yet. The clock advances between attempts so the
+    // anonymous rate-limit bucket refills — the ladder under test is the lockout, not
+    // the bucket.
+    for attempt in 1..=5 {
+        h.advance(2_000);
+        let body = json!({
+            "identifier": "laddered",
+            "password": "deliberately-wrong",
+            "device": { "display_name": "Ladder Device" },
+        });
+        let resp = h.send(post_json("/v1/auth/login", Some(ip), &body)).await;
+        assert_eq!(
+            resp.status,
+            StatusCode::UNAUTHORIZED,
+            "wrong password {attempt} is a plain refusal; body={}",
+            resp.text()
+        );
+    }
+
+    // The sixth attempt is locked: 429 AUTH_LOCKED, with the server's advice on
+    // how long to wait.
+    let body = json!({
+        "identifier": "laddered",
+        "password": GOOD_PASSWORD,
+        "device": { "display_name": "Locked Device" },
+    });
+    let locked = h.send(post_json("/v1/auth/login", Some(ip), &body)).await;
+    assert_eq!(
+        locked.status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the fifth failure must have engaged the lockout; body={}",
+        locked.text()
+    );
+    assert_eq!(locked.error_code(), u64::from(codes::AUTH_LOCKED));
+    let locked_json = locked.json();
+    let retry_ms = locked_json["error"]["retry_after_ms"]
+        .as_u64()
+        .expect("the lockout names its remaining wait");
+    assert!(
+        retry_ms > 0 && retry_ms <= 60_000,
+        "the first rung is a minute: retry_after_ms={retry_ms}"
+    );
+
+    // Waiting it out (the clock advances past the minute) and signing in with the
+    // right password succeeds — and clears the ladder.
+    h.advance(retry_ms as i64 + 1_000);
+    let clear_body = json!({
+        "identifier": "laddered",
+        "password": GOOD_PASSWORD,
+        "device": { "display_name": "After Lockout Device" },
+    });
+    let clear_resp = h
+        .send(post_json("/v1/auth/login", Some(ip), &clear_body))
+        .await;
+    assert_eq!(
+        clear_resp.status,
+        StatusCode::OK,
+        "an expired lockout frees the account; body={}",
+        clear_resp.text()
+    );
+
+    // A fresh wrong-password run starts the ladder from its first rung again —
+    // the success reset it, so four more failures are plain refusals.
+    for attempt in 1..=4 {
+        h.advance(2_000);
+        let body = json!({
+            "identifier": "laddered",
+            "password": "deliberately-wrong",
+            "device": { "display_name": "Ladder Device" },
+        });
+        let resp = h.send(post_json("/v1/auth/login", Some(ip), &body)).await;
+        assert_eq!(
+            resp.status,
+            StatusCode::UNAUTHORIZED,
+            "post-reset failure {attempt} is a plain refusal; body={}",
+            resp.text()
+        );
+    }
+}
+
+/// A register without a captcha is refused once the gate is engaged.
+///
+
 /// A register without a captcha is refused once the gate is engaged.
 ///
 /// The captcha gate is tripped by a sign-in failure: a wrong password on

@@ -67,6 +67,7 @@ use parking_lot::Mutex;
 use crate::capability::Capabilities;
 use crate::captcha::CaptchaGate;
 use crate::credential;
+use crate::lockout::{error_locked, LockoutConfig, LockoutGate};
 use crate::metrics::{Meters, RefreshOutcome, SignInOutcome};
 use crate::model::{
     truncate_chars, DeviceClaim, Grant, Refresh, Registration, RequestContext, SessionSummary,
@@ -161,6 +162,9 @@ pub struct Auth<S: ?Sized = dyn Store, L: ?Sized = dyn RateLimiter> {
     /// has to carry a proof. `None` means the captcha is off for the
     /// whole process and the auth path skips the checks entirely.
     captcha: Option<Arc<CaptchaGate>>,
+    /// The sign-in lockout, when the deployment has it turned on (the default).
+    /// Keyed by account id and holding the whole ladder — see [`LockoutGate`].
+    lockout: Option<Arc<LockoutGate>>,
     /// The recovery MAC key, when the deployment has password-recovery
     /// turned on. `None` means the recovery endpoints are not mounted
     /// and `request_recovery` / `confirm_recovery` are short-circuited
@@ -226,6 +230,16 @@ where
             .map_err(|error| {
                 fault::internal(format!("could not build the placeholder hash: {error}"))
             })?;
+        let lockout = (config.auth.lockout.enabled).then(|| {
+            Arc::new(LockoutGate::new(LockoutConfig {
+                enabled: true,
+                initial_failures: config.auth.lockout.initial_failures,
+                step_failures: config.auth.lockout.step_failures,
+                base_seconds: config.auth.lockout.base_seconds,
+                step_seconds: config.auth.lockout.step_seconds,
+                max_seconds: config.auth.lockout.max_seconds,
+            }))
+        });
         Ok(Self {
             store,
             limiter,
@@ -233,6 +247,7 @@ where
             config: config.auth.clone(),
             prices,
             absent_hash,
+            lockout,
             random: Mutex::new(random),
             meters: Meters::new(registry),
             // The captcha is opt-in via [`Self::with_captcha`]; the
@@ -984,6 +999,23 @@ where
     }
 
     async fn sign_in(&self, request: SignIn, context: &RequestContext) -> Result<Grant> {
+        // The progressive lockout leads: five wrong passwords for one identifier buy a
+        // minute, every further three buy two more, capped. The key is the identifier the
+        // attempt named (folded), so the lock follows the account's username across every
+        // network — the product decision, with its trade accepted. The check runs before
+        // the attempt is priced, so a locked-out guesser spends nothing and learns nothing.
+        if let Some(gate) = self.lockout.as_ref() {
+            let key = request
+                .identifier
+                .trim()
+                .trim_start_matches('@')
+                .to_ascii_lowercase();
+            if let Err(remaining_ms) = gate.check(context.now, &key) {
+                self.meters.signin(SignInOutcome::RateLimited);
+                return Err(error_locked(remaining_ms));
+            }
+        }
+
         // Sign-in deliberately runs WITHOUT the captcha gate, whatever the config says: a
         // returning member is the person the product exists for, and standing between them and
         // their account because a stranger from their network mistyped passwords is punishing
@@ -1030,6 +1062,16 @@ where
                 .await;
             self.charge_penalty(context, Opcode::Authenticate).await;
             self.note_captcha_failure(context);
+            // The lockout counts this failure for the identifier the attempt named. A
+            // nonexistent account locks nothing real, but the count is what keeps an
+            // enumeration attempt from riding the ladder for free.
+            if let Some(gate) = self.lockout.as_ref() {
+                let now = context.now;
+                let key = identifier.trim_start_matches('@').to_ascii_lowercase();
+                if let Some(seconds) = gate.record_failure(now, &key) {
+                    tracing::warn!(seconds, "sign-in lockout engaged for an identifier");
+                }
+            }
             self.meters.signin(SignInOutcome::UnknownUser);
             return Err(fault::invalid_credentials());
         };
@@ -1044,6 +1086,13 @@ where
         let Some(verification) = verification else {
             self.charge_penalty(context, Opcode::Authenticate).await;
             self.note_captcha_failure(context);
+            if let Some(gate) = self.lockout.as_ref() {
+                let now = context.now;
+                let key = identifier.trim_start_matches('@').to_ascii_lowercase();
+                if let Some(seconds) = gate.record_failure(now, &key) {
+                    tracing::warn!(seconds, "sign-in lockout engaged for an identifier");
+                }
+            }
             self.meters.signin(SignInOutcome::BadPassword);
             return Err(fault::invalid_credentials());
         };
@@ -1098,6 +1147,12 @@ where
         // gate suspects a network, not a person; the person just
         // proved they own the account, so the suspicion is over.
         self.note_captcha_success(context);
+        // …and the lockout ladder with it: the owner proved themselves, so the guessing
+        // attack the ladder was pricing is over.
+        if let Some(gate) = self.lockout.as_ref() {
+            let key = identifier.trim_start_matches('@').to_ascii_lowercase();
+            gate.record_success(&key);
+        }
         self.meters.signin(SignInOutcome::Success);
         // The effective server the request reached. Recorded for
         // parity with the registration path so the operator can

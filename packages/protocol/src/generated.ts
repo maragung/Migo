@@ -155,6 +155,8 @@ export const CODE = {
   TOO_MANY_SUBSCRIPTIONS: 1403,
   TOO_MANY_SESSIONS: 1404,
   UPLOAD_LIMIT_EXCEEDED: 1405,
+  /** Sign-in is temporarily locked for this account after repeated failures; retry after the given interval */
+  AUTH_LOCKED: 1406,
   NOT_FOUND: 1500,
   ALREADY_EXISTS: 1501,
   CONFLICT: 1502,
@@ -234,6 +236,7 @@ export const ERROR_SYMBOLS: Record<number, string> = {
   1403: 'TOO_MANY_SUBSCRIPTIONS',
   1404: 'TOO_MANY_SESSIONS',
   1405: 'UPLOAD_LIMIT_EXCEEDED',
+  1406: 'AUTH_LOCKED',
   1500: 'NOT_FOUND',
   1501: 'ALREADY_EXISTS',
   1502: 'CONFLICT',

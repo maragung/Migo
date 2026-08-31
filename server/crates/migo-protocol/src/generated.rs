@@ -164,6 +164,8 @@ pub mod codes {
     pub const TOO_MANY_SUBSCRIPTIONS: u32 = 1403;
     pub const TOO_MANY_SESSIONS: u32 = 1404;
     pub const UPLOAD_LIMIT_EXCEEDED: u32 = 1405;
+    /// Sign-in is temporarily locked for this account after repeated failures; retry after the given interval
+    pub const AUTH_LOCKED: u32 = 1406;
     pub const NOT_FOUND: u32 = 1500;
     pub const ALREADY_EXISTS: u32 = 1501;
     pub const CONFLICT: u32 = 1502;
@@ -246,6 +248,7 @@ pub mod codes {
         TOO_MANY_SUBSCRIPTIONS,
         TOO_MANY_SESSIONS,
         UPLOAD_LIMIT_EXCEEDED,
+        AUTH_LOCKED,
         NOT_FOUND,
         ALREADY_EXISTS,
         CONFLICT,
@@ -370,6 +373,7 @@ pub fn error_symbol(code: u32) -> Option<&'static str> {
         codes::TOO_MANY_SUBSCRIPTIONS => "TOO_MANY_SUBSCRIPTIONS",
         codes::TOO_MANY_SESSIONS => "TOO_MANY_SESSIONS",
         codes::UPLOAD_LIMIT_EXCEEDED => "UPLOAD_LIMIT_EXCEEDED",
+        codes::AUTH_LOCKED => "AUTH_LOCKED",
         codes::NOT_FOUND => "NOT_FOUND",
         codes::ALREADY_EXISTS => "ALREADY_EXISTS",
         codes::CONFLICT => "CONFLICT",
@@ -448,6 +452,7 @@ pub fn error_http_status(code: u32) -> u16 {
         codes::TOO_MANY_SUBSCRIPTIONS => 429,
         codes::TOO_MANY_SESSIONS => 429,
         codes::UPLOAD_LIMIT_EXCEEDED => 413,
+        codes::AUTH_LOCKED => 429,
         codes::NOT_FOUND => 404,
         codes::ALREADY_EXISTS => 409,
         codes::CONFLICT => 409,

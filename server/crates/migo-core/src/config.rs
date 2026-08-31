@@ -354,11 +354,14 @@ pub struct AuthConfig {
     /// the value is in the round trip, not the rate ceiling.
     pub registration_cost: Option<u32>,
     /// Number of consecutive sign-in failures from the same network at which a
-    /// captcha proof becomes mandatory for the next attempt. `None` disables the
-    /// captcha gate entirely; the `/v1/auth/captcha` route still issues challenges
-    /// but the authenticator never asks for one. Defaults to a small value so the
-    /// gate is on by default and the deployment has to opt out by setting `None`.
+    /// captcha proof becomes mandatory for the next *registration*. Sign-in itself
+    /// is never captcha-gated (see the auth service's `sign_in`); recovery always
+    /// requires a proof. Defaults to a small value so the gate is on by default and
+    /// the deployment has to opt out by setting `None`.
     pub captcha_threshold: Option<u32>,
+    /// The progressive sign-in lockout: repeated wrong passwords for one account
+    /// (across every identifier and network) buy increasingly long time-outs.
+    pub lockout: LockoutConfig,
 }
 
 impl Default for AuthConfig {
@@ -372,6 +375,40 @@ impl Default for AuthConfig {
             password_min_length: 10,
             registration_cost: None,
             captcha_threshold: Some(3),
+            lockout: LockoutConfig::default(),
+        }
+    }
+}
+
+/// The progressive sign-in lockout's knobs (`auth.lockout`). The ladder: the first
+/// `initial_failures` wrong passwords buy `base_seconds` of lockout, and every further
+/// `step_failures` buy `step_seconds` more, up to `max_seconds`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LockoutConfig {
+    /// Whether the gate runs at all.
+    pub enabled: bool,
+    /// Consecutive failures at which the first lockout lands.
+    pub initial_failures: u32,
+    /// Further failures between one lockout level and the next.
+    pub step_failures: u32,
+    /// The first lockout's length.
+    pub base_seconds: u64,
+    /// How much longer each level above the first is.
+    pub step_seconds: u64,
+    /// The ceiling; the ladder climbs to here and stays.
+    pub max_seconds: u64,
+}
+
+impl Default for LockoutConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            initial_failures: 5,
+            step_failures: 3,
+            base_seconds: 60,
+            step_seconds: 120,
+            max_seconds: 86_400,
         }
     }
 }

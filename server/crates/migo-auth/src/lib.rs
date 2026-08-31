@@ -82,6 +82,7 @@ pub mod capability;
 pub mod captcha;
 pub mod credential;
 pub mod endpoint;
+pub mod lockout;
 pub mod metrics;
 pub mod model;
 pub mod service;
