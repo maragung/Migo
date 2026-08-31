@@ -1073,3 +1073,34 @@ live server; edit di form tetap persist dan menang di resume path.
 **Verifikasi live**: `curl /health → {"status":"ok"}` via `127.0.0.1` & `152.53.102.150`;
 `GET /` `GET /chat/` `GET /login/` semua `200`; JS chunk di `out/` mengandung
 `152.53.102.150:8080`.
+
+## 30. Redesign seluruh client ke new-client-ui.tsx: tab strip, banner oranye, teal-and-orange (v0.9.0)
+
+**Referensi**: `docs/design/new-client-ui.tsx` — identitas teal/oranye, tab strip di atas
+(Friends/Chats/Rooms/Games/Feed + tab chat dinamis yang bisa ditutup), banner profil oranye
+dengan avatar dropdown, login gradient cyan. Model tab yang sama untuk PC dan mobile.
+
+**Token v3.0.0** (`shared/design/tokens.json`): light = cream `#fdfbf7` + teal `#00838f`;
+dark = deep-teal `#0c1517` + cyan `#00bcd4`; gradient banner `#ea580c→#f97316→#f59e0b` dan
+login `#0093af→#00acc1→#00838f` theme-independent; `shape.tabChip = 12`. Dicerminkan ke CSS
+variable web, `theme.rs` desktop, dan `Theme.kt`/`MigoExtra` Android (plus token nav/banner/login).
+
+**Web**: `TabStrip` + `ProfileBanner` + `AvatarMenu` + `GamesPanel` menggantikan rail ikon dan
+bottom-nav; tab chat dinamis (`#c=<id>` tetap sumber kebenaran, tombol X per tab); login/register
+restyle gradient cyan + kartu glass + tombol oranye (logika captcha/lockout tidak diubah).
+
+**Desktop (egui)**: `Place` baru (Friends/Chats/Rooms/Games/Feed + panel), tab strip 46px +
+banner gradient 58px via `Mesh` colored-vertex, menu avatar (Profile/Credits & TopUp/Alerts/
+Search/Logout), tab chat MDI (`open_chats`/`active_chat`), `games.rs` katalog statis jujur,
+auth full-viewport gradient cyan.
+
+**Android (Compose)**: bottom bar + More sheet diganti `TabStrip` (chip aktif accent-bright +
+underline oranye, chip chat dengan ✕, badge unread) + `ProfileBanner` (dropdown: My Profile,
+My Credits & TopUp, Alerts, Search, Exit/Logout; pill saldo $MIG nyata); `Section` baru
+(HOME dihapus — wallet read saat sign-in mengisi saldo banner); `GamesScreen` baru;
+`SignInScreen` gradient cyan + kartu glass + tombol oranye; `BarGlyph` → `TabGlyph`
+(FRIENDS/CHATS/ROOMS/GAMES/FEED).
+
+**Verifikasi**: 235+ test web hijau, cargo fmt/clippy `-D warnings`/test desktop (34) hijau,
+`make kotlin-check` hijau, gates statis hijau; build APK + release penuh via GitHub Actions
+(`ci.yml`, `android.yml`, `release.yml` tag v0.9.0).
