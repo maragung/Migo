@@ -1,6 +1,5 @@
 package com.migo.app.ui
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -144,7 +143,9 @@ fun ProfileBanner(
 /**
  * The banner's avatar: a translucent disc with a white ring and the initial, as the reference
  * draws it. Not [Monogram] — the monogram derives a solid tint from the name, which is right on a
- * list row and wrong on a surface that already has its own strong colour.
+ * list row and wrong on a surface that already has its own strong colour. The ring is a larger
+ * white disc behind the translucent one, drawn that way rather than with a stroke so the avatar is
+ * two backgrounds and nothing else.
  */
 @Composable
 private fun BannerAvatar(name: String, modifier: Modifier = Modifier) {
@@ -152,20 +153,23 @@ private fun BannerAvatar(name: String, modifier: Modifier = Modifier) {
     val letter = name.trim().firstOrNull()?.uppercase() ?: "?"
     Box(
         modifier = modifier
-            .size(40.dp)
-            .background(Color.White.copy(alpha = 0.35f), CircleShape)
-            .border(
-                border = BorderStroke(1.5.dp, Color.White),
-                shape = CircleShape,
-            ),
+            .size(43.dp)
+            .background(Color.White, CircleShape),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = letter,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            color = extra.bannerInk,
-            textAlign = TextAlign.Center,
-        )
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .background(Color.White.copy(alpha = 0.35f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = letter,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = extra.bannerInk,
+                textAlign = TextAlign.Center,
+            )
+        }
     }
 }

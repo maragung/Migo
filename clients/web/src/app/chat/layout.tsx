@@ -162,7 +162,13 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
   // secondary panels arrive as tabs of their own.
   const navigate = useCallback(
     (tab: 'friends' | 'chats' | 'rooms' | 'games' | 'feed' | PanelTab): void => {
-      if (tab === 'friends' || tab === 'chats' || tab === 'rooms' || tab === 'games' || tab === 'feed') {
+      if (
+        tab === 'friends' ||
+        tab === 'chats' ||
+        tab === 'rooms' ||
+        tab === 'games' ||
+        tab === 'feed'
+      ) {
         setActive(tab);
         return;
       }

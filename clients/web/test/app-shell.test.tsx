@@ -104,10 +104,7 @@ test('an open panel is a closable chip on the strip', () => {
   );
 
   assert.ok(markup.includes('tab-chip-label">Wallet</span>'), 'the panel chip is missing');
-  assert.ok(
-    markup.includes('aria-label="Close Wallet"'),
-    'the panel chip must be closable',
-  );
+  assert.ok(markup.includes('aria-label="Close Wallet"'), 'the panel chip must be closable');
 });
 
 test('the active tab carries the current-page attribute exactly once', () => {

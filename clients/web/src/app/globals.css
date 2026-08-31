@@ -50,11 +50,21 @@
   --banner-b: #f97316;
   --banner-c: #f59e0b;
   --banner-ink: #ffffff;
-  --banner-gradient: linear-gradient(90deg, var(--banner-a) 0%, var(--banner-b) 52%, var(--banner-c) 100%);
+  --banner-gradient: linear-gradient(
+    90deg,
+    var(--banner-a) 0%,
+    var(--banner-b) 52%,
+    var(--banner-c) 100%
+  );
   --login-a: #0093af;
   --login-b: #00acc1;
   --login-c: #00838f;
-  --login-gradient: linear-gradient(180deg, var(--login-a) 0%, var(--login-b) 55%, var(--login-c) 100%);
+  --login-gradient: linear-gradient(
+    180deg,
+    var(--login-a) 0%,
+    var(--login-b) 55%,
+    var(--login-c) 100%
+  );
 
   /* status colours */
   --positive: #059669;
@@ -867,7 +877,6 @@ main {
   color: var(--text-faint);
   font-size: var(--fs-meta);
 }
-
 
 /* --- section panels (home, rooms, space, friends, alerts, search, wallet, profile, settings) --- */
 

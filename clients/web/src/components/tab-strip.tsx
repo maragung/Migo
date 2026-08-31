@@ -113,7 +113,11 @@ export function TabStrip({
         <button
           key={`chat:${tab.conversationId}`}
           type="button"
-          className={chipClass('tab-chip', 'tab-chat', active === `chat:${tab.conversationId}` && 'active')}
+          className={chipClass(
+            'tab-chip',
+            'tab-chat',
+            active === `chat:${tab.conversationId}` && 'active',
+          )}
           aria-current={active === `chat:${tab.conversationId}` ? 'page' : undefined}
           onClick={() => onSelectChat(tab.conversationId)}
           title={tab.title}

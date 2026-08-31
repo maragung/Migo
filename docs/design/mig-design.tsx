@@ -1,9 +1,33 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  User, Users, MessageSquare, Gift, Gamepad2, Bell, Mail, 
-  Settings, HelpCircle, LogOut, ChevronDown, ChevronRight, 
-  Search, RefreshCw, Volume2, VolumeX, Smartphone, Laptop, 
-  Send, Smile, Shield, Crown, Play, CheckSquare, Square, X, PlusCircle, Sparkles
+import {
+  User,
+  Users,
+  MessageSquare,
+  Gift,
+  Gamepad2,
+  Bell,
+  Mail,
+  Settings,
+  HelpCircle,
+  LogOut,
+  ChevronDown,
+  ChevronRight,
+  Search,
+  RefreshCw,
+  Volume2,
+  VolumeX,
+  Smartphone,
+  Laptop,
+  Send,
+  Smile,
+  Shield,
+  Crown,
+  Play,
+  CheckSquare,
+  Square,
+  X,
+  PlusCircle,
+  Sparkles,
 } from 'lucide-react';
 
 // --- Web Audio Retro Sound Effects ---
@@ -85,7 +109,7 @@ export default function App() {
     { id: 2, name: 'nrock', status: 'online', isVip: false, mood: 'Listening to Linkin Park' },
     { id: 3, name: 'neel_the_great', status: 'online', isVip: true, mood: 'Salam kawan' },
     { id: 4, name: 'ahok', status: 'online', isVip: false, mood: 'Ada yang mau barter egg?' },
-    { id: 5, name: 'sampit_gaul', status: 'offline', isVip: false, mood: 'tidur dulu zzz' }
+    { id: 5, name: 'sampit_gaul', status: 'offline', isVip: false, mood: 'tidur dulu zzz' },
   ]);
 
   const [chatRooms, setChatRooms] = useState([
@@ -93,7 +117,7 @@ export default function App() {
     { id: 'r2', name: 'indo terindah', users: 14, max: 40, category: 'Recent Rooms' },
     { id: 'r3', name: 'malang.jomblo2', users: 12, max: 40, category: 'Recent Rooms' },
     { id: 'r4', name: 'Jakarta_Gaul', users: 22, max: 50, category: 'Favorites' },
-    { id: 'r5', name: 'Cari_Jodoh_Nusantara', users: 35, max: 50, category: 'Favorites' }
+    { id: 'r5', name: 'Cari_Jodoh_Nusantara', users: 35, max: 50, category: 'Favorites' },
   ]);
 
   // Dice Game State
@@ -102,7 +126,7 @@ export default function App() {
     botRoll: null,
     result: null,
     bet: 100,
-    isPlaying: false
+    isPlaying: false,
   });
 
   // Emoticons
@@ -114,7 +138,7 @@ export default function App() {
     { code: '(gift)', symbol: '🎁' },
     { code: '(kiss)', symbol: '💋' },
     { code: '(devil)', symbol: '😈' },
-    { code: '(heart)', symbol: '❤️' }
+    { code: '(heart)', symbol: '❤️' },
   ];
 
   const chatBottomRef = useRef(null);
@@ -148,29 +172,44 @@ export default function App() {
   const handleOpenRoomTab = (room) => {
     playFx('keypress');
     const tabId = `room-${room.id}`;
-    
+
     // Check if tab is already open
-    const exists = openTabs.find(t => t.id === tabId);
+    const exists = openTabs.find((t) => t.id === tabId);
     if (!exists) {
       const newTab = {
         id: tabId,
         title: `#${room.name}`,
         type: 'chatroom',
         roomData: room,
-        closable: true
+        closable: true,
       };
-      setOpenTabs(prev => [...prev, newTab]);
+      setOpenTabs((prev) => [...prev, newTab]);
 
       // Initialize chat history if empty
       if (!chatHistories[tabId]) {
-        setChatHistories(prev => ({
+        setChatHistories((prev) => ({
           ...prev,
           [tabId]: [
-            { id: 1, sender: 'System', text: `*** Selamat datang di room ${room.name} ***`, isSystem: true },
-            { id: 2, sender: 'Bot', text: 'Halo gaes! Jaga kesopanan & patuhi rule room ya.', isBot: true },
-            { id: 3, sender: 'reason008', text: `Halo @${username}! Baru bergabung?`, time: '11:32' },
-            { id: 4, sender: 'sampit_gaul', text: 'ada yang jual ID cantik ga?', time: '11:33' }
-          ]
+            {
+              id: 1,
+              sender: 'System',
+              text: `*** Selamat datang di room ${room.name} ***`,
+              isSystem: true,
+            },
+            {
+              id: 2,
+              sender: 'Bot',
+              text: 'Halo gaes! Jaga kesopanan & patuhi rule room ya.',
+              isBot: true,
+            },
+            {
+              id: 3,
+              sender: 'reason008',
+              text: `Halo @${username}! Baru bergabung?`,
+              time: '11:32',
+            },
+            { id: 4, sender: 'sampit_gaul', text: 'ada yang jual ID cantik ga?', time: '11:33' },
+          ],
         }));
       }
     }
@@ -183,25 +222,30 @@ export default function App() {
     const tabId = `pm-${friendName}`;
 
     // Check if tab is already open
-    const exists = openTabs.find(t => t.id === tabId);
+    const exists = openTabs.find((t) => t.id === tabId);
     if (!exists) {
       const newTab = {
         id: tabId,
         title: `@${friendName}`,
         type: 'pm',
         targetName: friendName,
-        closable: true
+        closable: true,
       };
-      setOpenTabs(prev => [...prev, newTab]);
+      setOpenTabs((prev) => [...prev, newTab]);
 
       // Initialize PM history
       if (!chatHistories[tabId]) {
-        setChatHistories(prev => ({
+        setChatHistories((prev) => ({
           ...prev,
           [tabId]: [
-            { id: 1, sender: 'System', text: `Sesi obrolan pribadi dengan ${friendName}`, isSystem: true },
-            { id: 2, sender: friendName, text: 'Oi bro, lagi di mana?', time: '11:30' }
-          ]
+            {
+              id: 1,
+              sender: 'System',
+              text: `Sesi obrolan pribadi dengan ${friendName}`,
+              isSystem: true,
+            },
+            { id: 2, sender: friendName, text: 'Oi bro, lagi di mana?', time: '11:30' },
+          ],
         }));
       }
     }
@@ -213,7 +257,7 @@ export default function App() {
     e.stopPropagation();
     playFx('keypress');
 
-    const nextTabs = openTabs.filter(t => t.id !== tabIdToClose);
+    const nextTabs = openTabs.filter((t) => t.id !== tabIdToClose);
     setOpenTabs(nextTabs);
 
     if (activeTabId === tabIdToClose) {
@@ -227,19 +271,19 @@ export default function App() {
     if (!chatInput.trim()) return;
     playFx('keypress');
 
-    const activeTab = openTabs.find(t => t.id === activeTabId);
+    const activeTab = openTabs.find((t) => t.id === activeTabId);
     if (!activeTab) return;
 
     const newMsg = {
       id: Date.now(),
       sender: username,
       text: chatInput,
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
 
-    setChatHistories(prev => ({
+    setChatHistories((prev) => ({
       ...prev,
-      [activeTabId]: [...(prev[activeTabId] || []), newMsg]
+      [activeTabId]: [...(prev[activeTabId] || []), newMsg],
     }));
     setChatInput('');
     setShowEmoticonPicker(false);
@@ -253,20 +297,20 @@ export default function App() {
           id: Date.now() + 1,
           sender: 'reason008',
           text: `Mantap Bro! 🥚 ${chatInput.includes(':D') ? '😀' : ''}`,
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
       } else if (activeTab.type === 'pm') {
         replyMsg = {
           id: Date.now() + 1,
           sender: activeTab.targetName,
           text: 'Sip mas, nanti aku kirim gift telur ya!',
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
       }
       if (replyMsg) {
-        setChatHistories(prev => ({
+        setChatHistories((prev) => ({
           ...prev,
-          [activeTabId]: [...(prev[activeTabId] || []), replyMsg]
+          [activeTabId]: [...(prev[activeTabId] || []), replyMsg],
         }));
       }
     }, 1200);
@@ -276,12 +320,12 @@ export default function App() {
   const handleSendEgg = () => {
     if (eggCount <= 0) return;
     playFx('msg');
-    setEggCount(prev => prev - 1);
+    setEggCount((prev) => prev - 1);
 
-    const activeTab = openTabs.find(t => t.id === activeTabId);
+    const activeTab = openTabs.find((t) => t.id === activeTabId);
     const targetText = activeTab?.title || 'Room';
 
-    setChatHistories(prev => ({
+    setChatHistories((prev) => ({
       ...prev,
       [activeTabId]: [
         ...(prev[activeTabId] || []),
@@ -289,9 +333,9 @@ export default function App() {
           id: Date.now(),
           sender: 'System',
           text: `🥚 ${username} melempar TELUR KELUARGA ke ${targetText}! (+10 Exp)`,
-          isSystem: true
-        }
-      ]
+          isSystem: true,
+        },
+      ],
     }));
   };
 
@@ -302,7 +346,7 @@ export default function App() {
       return;
     }
     playFx('dice');
-    setDiceState(prev => ({ ...prev, isPlaying: true }));
+    setDiceState((prev) => ({ ...prev, isPlaying: true }));
 
     setTimeout(() => {
       const pRoll = Math.floor(Math.random() * 6) + 1;
@@ -318,23 +362,22 @@ export default function App() {
         change = -diceState.bet;
       }
 
-      setCredits(prev => prev + change);
+      setCredits((prev) => prev + change);
       setDiceState({
         playerRoll: pRoll,
         botRoll: bRoll,
         result: res,
         bet: diceState.bet,
-        isPlaying: false
+        isPlaying: false,
       });
       playFx('msg');
     }, 800);
   };
 
-  const activeTabObject = openTabs.find(t => t.id === activeTabId) || openTabs[0];
+  const activeTabObject = openTabs.find((t) => t.id === activeTabId) || openTabs[0];
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center justify-start p-2 sm:p-6 font-sans select-none">
-      
       {/* Header Bar Switcher */}
       <header className="w-full max-w-4xl bg-slate-800 border border-slate-700 rounded-xl p-3 mb-4 flex flex-wrap items-center justify-between gap-3 shadow-lg">
         <div className="flex items-center gap-2">
@@ -355,38 +398,53 @@ export default function App() {
         {/* Mode & Sound Controls */}
         <div className="flex items-center gap-2 bg-slate-900/80 p-1.5 rounded-lg border border-slate-700">
           <button
-            onClick={() => { playFx('keypress'); setDeviceMode('mobile'); }}
+            onClick={() => {
+              playFx('keypress');
+              setDeviceMode('mobile');
+            }}
             className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md font-medium transition ${
-              deviceMode === 'mobile' ? 'bg-cyan-600 text-white shadow' : 'text-slate-400 hover:text-white'
+              deviceMode === 'mobile'
+                ? 'bg-cyan-600 text-white shadow'
+                : 'text-slate-400 hover:text-white'
             }`}
           >
             <Smartphone className="w-4 h-4" /> Mode Mobile
           </button>
           <button
-            onClick={() => { playFx('keypress'); setDeviceMode('desktop'); }}
+            onClick={() => {
+              playFx('keypress');
+              setDeviceMode('desktop');
+            }}
             className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md font-medium transition ${
-              deviceMode === 'desktop' ? 'bg-cyan-600 text-white shadow' : 'text-slate-400 hover:text-white'
+              deviceMode === 'desktop'
+                ? 'bg-cyan-600 text-white shadow'
+                : 'text-slate-400 hover:text-white'
             }`}
           >
             <Laptop className="w-4 h-4" /> Mode Desktop
           </button>
           <button
-            onClick={() => { playFx('keypress'); setSoundEnabled(!soundEnabled); }}
+            onClick={() => {
+              playFx('keypress');
+              setSoundEnabled(!soundEnabled);
+            }}
             className="p-1.5 text-slate-400 hover:text-cyan-400 rounded-md"
             title="Toggle Retro Sound Effects"
           >
-            {soundEnabled ? <Volume2 className="w-4 h-4 text-emerald-400" /> : <VolumeX className="w-4 h-4 text-slate-500" />}
+            {soundEnabled ? (
+              <Volume2 className="w-4 h-4 text-emerald-400" />
+            ) : (
+              <VolumeX className="w-4 h-4 text-slate-500" />
+            )}
           </button>
         </div>
       </header>
 
       {/* MAIN APPLICATION CONTAINER (Tanpa Bingkai HP) */}
       <div className="w-full max-w-xl bg-[#fdfbf7] text-slate-900 rounded-2xl border-2 border-slate-700 shadow-2xl flex flex-col min-h-[620px] max-h-[720px] overflow-hidden relative font-sans text-xs">
-        
         {!isLoggedIn ? (
           /* LOGIN SCREEN */
           <div className="flex-1 bg-gradient-to-b from-[#0093AF] via-[#00ACC1] to-[#00838F] flex flex-col items-center justify-between p-6 text-white relative overflow-hidden">
-            
             <div className="w-full flex justify-between items-center text-[10px] text-cyan-100 font-mono mb-2 z-10">
               <span className="flex items-center gap-1">📶 TELKOMSEL 3G</span>
               <span>11:33 🔋</span>
@@ -401,9 +459,15 @@ export default function App() {
               </div>
 
               <div className="flex items-end justify-center gap-1 mb-4">
-                <div className="w-7 h-7 bg-emerald-400 border border-white rounded-t-full flex items-center justify-center text-xs">🤖</div>
-                <div className="w-9 h-9 bg-slate-100 border border-slate-300 rounded-t-full flex items-center justify-center text-sm shadow">🤖</div>
-                <div className="w-7 h-7 bg-pink-400 border border-white rounded-t-full flex items-center justify-center text-xs">🌸</div>
+                <div className="w-7 h-7 bg-emerald-400 border border-white rounded-t-full flex items-center justify-center text-xs">
+                  🤖
+                </div>
+                <div className="w-9 h-9 bg-slate-100 border border-slate-300 rounded-t-full flex items-center justify-center text-sm shadow">
+                  🤖
+                </div>
+                <div className="w-7 h-7 bg-pink-400 border border-white rounded-t-full flex items-center justify-center text-xs">
+                  🌸
+                </div>
               </div>
 
               <p className="text-xs font-medium text-cyan-100 mb-4 tracking-wide">Join the Fun!</p>
@@ -428,7 +492,12 @@ export default function App() {
                     className="w-full px-3 py-2 text-slate-800 bg-white border border-cyan-200 rounded shadow-inner focus:outline-none text-xs"
                     required
                   />
-                  <button type="button" className="absolute right-2 top-2 text-cyan-600 font-bold text-xs">?</button>
+                  <button
+                    type="button"
+                    className="absolute right-2 top-2 text-cyan-600 font-bold text-xs"
+                  >
+                    ?
+                  </button>
                 </div>
 
                 <button
@@ -446,22 +515,25 @@ export default function App() {
                     onChange={(e) => setLoginInvisible(e.target.checked)}
                     className="rounded border-cyan-300 accent-orange-500"
                   />
-                  <label htmlFor="invisibleCheck" className="cursor-pointer">Login as Invisible</label>
+                  <label htmlFor="invisibleCheck" className="cursor-pointer">
+                    Login as Invisible
+                  </label>
                 </div>
               </form>
             </div>
 
             <div className="z-10 pb-2">
-              <button onClick={() => alert('Fitur Registrasi')} className="text-cyan-100 text-xs underline font-semibold hover:text-white">
+              <button
+                onClick={() => alert('Fitur Registrasi')}
+                className="text-cyan-100 text-xs underline font-semibold hover:text-white"
+              >
                 Create Account
               </button>
             </div>
-
           </div>
         ) : (
           /* MAIN APPLICATION VIEW WITH DYNAMIC TABS */
           <div className="flex-1 flex flex-col bg-[#fdfbf7] text-slate-900 overflow-hidden">
-            
             {/* DYNAMIC SCROLLABLE TAB BAR */}
             <div className="bg-[#00838F] text-white flex items-center text-[11px] font-semibold border-b border-cyan-900 shadow-sm overflow-x-auto no-scrollbar scroll-smooth">
               {openTabs.map((tab) => {
@@ -469,17 +541,32 @@ export default function App() {
                 return (
                   <div
                     key={tab.id}
-                    onClick={() => { playFx('keypress'); setActiveTabId(tab.id); }}
+                    onClick={() => {
+                      playFx('keypress');
+                      setActiveTabId(tab.id);
+                    }}
                     className={`py-1.5 px-3 flex items-center gap-1.5 border-r border-cyan-700/60 cursor-pointer whitespace-nowrap transition shrink-0 ${
-                      isActive ? 'bg-[#00ACC1] text-white font-bold border-b-2 border-orange-400' : 'hover:bg-cyan-800 text-cyan-100'
+                      isActive
+                        ? 'bg-[#00ACC1] text-white font-bold border-b-2 border-orange-400'
+                        : 'hover:bg-cyan-800 text-cyan-100'
                     }`}
                   >
-                    {tab.type === 'system' && tab.id === 'friends' && <Users className="w-3.5 h-3.5 text-cyan-200" />}
-                    {tab.type === 'system' && tab.id === 'rooms' && <MessageSquare className="w-3.5 h-3.5 text-cyan-200" />}
-                    {tab.type === 'system' && tab.id === 'games' && <Gamepad2 className="w-3.5 h-3.5 text-cyan-200" />}
-                    {tab.type === 'system' && tab.id === 'updates' && <Sparkles className="w-3.5 h-3.5 text-cyan-200" />}
-                    
-                    {tab.type === 'chatroom' && <span className="text-amber-300 font-bold">💬</span>}
+                    {tab.type === 'system' && tab.id === 'friends' && (
+                      <Users className="w-3.5 h-3.5 text-cyan-200" />
+                    )}
+                    {tab.type === 'system' && tab.id === 'rooms' && (
+                      <MessageSquare className="w-3.5 h-3.5 text-cyan-200" />
+                    )}
+                    {tab.type === 'system' && tab.id === 'games' && (
+                      <Gamepad2 className="w-3.5 h-3.5 text-cyan-200" />
+                    )}
+                    {tab.type === 'system' && tab.id === 'updates' && (
+                      <Sparkles className="w-3.5 h-3.5 text-cyan-200" />
+                    )}
+
+                    {tab.type === 'chatroom' && (
+                      <span className="text-amber-300 font-bold">💬</span>
+                    )}
                     {tab.type === 'pm' && <span className="text-emerald-300 font-bold">👤</span>}
 
                     <span>{tab.title}</span>
@@ -528,7 +615,6 @@ export default function App() {
 
             {/* TAB CONTENT AREA */}
             <div className="flex-1 overflow-y-auto bg-white flex flex-col">
-
               {/* 1. FRIENDS TAB */}
               {activeTabId === 'friends' && (
                 <div className="divide-y divide-slate-100">
@@ -547,37 +633,55 @@ export default function App() {
                   </div>
 
                   <div className="bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-500 uppercase tracking-wider flex justify-between items-center">
-                    <span>Online Friends ({friends.filter(f=>f.status==='online').length})</span>
-                    <button onClick={() => playFx('keypress')} className="text-cyan-700 hover:underline">Refresh</button>
+                    <span>
+                      Online Friends ({friends.filter((f) => f.status === 'online').length})
+                    </span>
+                    <button
+                      onClick={() => playFx('keypress')}
+                      className="text-cyan-700 hover:underline"
+                    >
+                      Refresh
+                    </button>
                   </div>
 
-                  {friends.filter(f=>f.status==='online').map((friend) => (
-                    <div
-                      key={friend.id}
-                      onClick={() => handleOpenPMTab(friend.name)}
-                      className="p-2.5 flex items-center gap-2 hover:bg-cyan-50/70 cursor-pointer border-b border-slate-100 transition"
-                    >
-                      <span className="w-2.5 h-2.5 bg-emerald-500 rounded-full border border-emerald-200 shrink-0"></span>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-1">
-                          <span className="font-semibold text-xs text-slate-800">{friend.name}</span>
-                          {friend.isVip && <Crown className="w-3 h-3 text-amber-500 fill-amber-400" />}
+                  {friends
+                    .filter((f) => f.status === 'online')
+                    .map((friend) => (
+                      <div
+                        key={friend.id}
+                        onClick={() => handleOpenPMTab(friend.name)}
+                        className="p-2.5 flex items-center gap-2 hover:bg-cyan-50/70 cursor-pointer border-b border-slate-100 transition"
+                      >
+                        <span className="w-2.5 h-2.5 bg-emerald-500 rounded-full border border-emerald-200 shrink-0"></span>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1">
+                            <span className="font-semibold text-xs text-slate-800">
+                              {friend.name}
+                            </span>
+                            {friend.isVip && (
+                              <Crown className="w-3 h-3 text-amber-500 fill-amber-400" />
+                            )}
+                          </div>
+                          <p className="text-[10px] text-slate-500 truncate">{friend.mood}</p>
                         </div>
-                        <p className="text-[10px] text-slate-500 truncate">{friend.mood}</p>
-                      </div>
-                      <button className="text-[10px] bg-cyan-600 text-white px-2 py-0.5 rounded font-medium shadow-sm hover:bg-cyan-700">
-                        Buka Tab PM
-                      </button>
-                    </div>
-                  ))}
-
-                  <div className="mt-2 space-y-0.5">
-                    {['Facebook (0/0)', 'MSN (0/0)', 'Yahoo! (0/0)', 'GTalk (0/0)'].map((im, idx) => (
-                      <div key={idx} className="bg-[#E0F7FA] border-y border-cyan-100 px-2 py-1.5 text-xs text-cyan-900 font-medium flex items-center gap-2 hover:bg-cyan-100 cursor-pointer">
-                        <span className="font-bold text-cyan-700">–</span>
-                        <span>{im}</span>
+                        <button className="text-[10px] bg-cyan-600 text-white px-2 py-0.5 rounded font-medium shadow-sm hover:bg-cyan-700">
+                          Buka Tab PM
+                        </button>
                       </div>
                     ))}
+
+                  <div className="mt-2 space-y-0.5">
+                    {['Facebook (0/0)', 'MSN (0/0)', 'Yahoo! (0/0)', 'GTalk (0/0)'].map(
+                      (im, idx) => (
+                        <div
+                          key={idx}
+                          className="bg-[#E0F7FA] border-y border-cyan-100 px-2 py-1.5 text-xs text-cyan-900 font-medium flex items-center gap-2 hover:bg-cyan-100 cursor-pointer"
+                        >
+                          <span className="font-bold text-cyan-700">–</span>
+                          <span>{im}</span>
+                        </div>
+                      ),
+                    )}
                   </div>
                 </div>
               )}
@@ -596,48 +700,67 @@ export default function App() {
 
                   <div className="bg-cyan-50/80 px-2 py-1 text-[10px] font-bold text-cyan-800 border-b border-cyan-100 flex items-center gap-1">
                     <ChevronDown className="w-3 h-3" />
-                    <span>Favorites ({chatRooms.filter(r=>r.category==='Favorites').length})</span>
+                    <span>
+                      Favorites ({chatRooms.filter((r) => r.category === 'Favorites').length})
+                    </span>
                   </div>
-                  {chatRooms.filter(r=>r.category==='Favorites').map((room) => (
-                    <div
-                      key={room.id}
-                      onClick={() => handleOpenRoomTab(room)}
-                      className="p-2.5 flex items-center justify-between hover:bg-cyan-50 cursor-pointer border-b border-slate-100"
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="text-cyan-700">💬</span>
-                        <span className="font-semibold text-xs text-slate-800">{room.name}</span>
+                  {chatRooms
+                    .filter((r) => r.category === 'Favorites')
+                    .map((room) => (
+                      <div
+                        key={room.id}
+                        onClick={() => handleOpenRoomTab(room)}
+                        className="p-2.5 flex items-center justify-between hover:bg-cyan-50 cursor-pointer border-b border-slate-100"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="text-cyan-700">💬</span>
+                          <span className="font-semibold text-xs text-slate-800">{room.name}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-slate-500 font-mono">
+                            ({room.users} / {room.max})
+                          </span>
+                          <span className="text-[10px] bg-amber-500 text-white px-2 py-0.5 rounded font-bold shadow-sm">
+                            Masuk Tab Room
+                          </span>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-slate-500 font-mono">({room.users} / {room.max})</span>
-                        <span className="text-[10px] bg-amber-500 text-white px-2 py-0.5 rounded font-bold shadow-sm">Masuk Tab Room</span>
-                      </div>
-                    </div>
-                  ))}
+                    ))}
 
                   <div className="bg-cyan-50/80 px-2 py-1 text-[10px] font-bold text-cyan-800 border-b border-cyan-100 flex items-center gap-1">
                     <ChevronDown className="w-3 h-3" />
-                    <span>Recent Rooms ({chatRooms.filter(r=>r.category==='Recent Rooms').length})</span>
+                    <span>
+                      Recent Rooms ({chatRooms.filter((r) => r.category === 'Recent Rooms').length})
+                    </span>
                   </div>
-                  {chatRooms.filter(r=>r.category==='Recent Rooms').map((room) => (
-                    <div
-                      key={room.id}
-                      onClick={() => handleOpenRoomTab(room)}
-                      className="p-2.5 flex items-center justify-between hover:bg-cyan-50 cursor-pointer border-b border-slate-100"
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="text-cyan-700">💬</span>
-                        <span className="font-semibold text-xs text-slate-800">{room.name}</span>
+                  {chatRooms
+                    .filter((r) => r.category === 'Recent Rooms')
+                    .map((room) => (
+                      <div
+                        key={room.id}
+                        onClick={() => handleOpenRoomTab(room)}
+                        className="p-2.5 flex items-center justify-between hover:bg-cyan-50 cursor-pointer border-b border-slate-100"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="text-cyan-700">💬</span>
+                          <span className="font-semibold text-xs text-slate-800">{room.name}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-slate-500 font-mono">
+                            ({room.users} / {room.max})
+                          </span>
+                          <span className="text-[10px] bg-amber-500 text-white px-2 py-0.5 rounded font-bold shadow-sm">
+                            Masuk Tab Room
+                          </span>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-slate-500 font-mono">({room.users} / {room.max})</span>
-                        <span className="text-[10px] bg-amber-500 text-white px-2 py-0.5 rounded font-bold shadow-sm">Masuk Tab Room</span>
-                      </div>
-                    </div>
-                  ))}
+                    ))}
 
                   <div className="p-2 text-center">
-                    <button onClick={() => alert('Fitur Buat Room')} className="text-xs text-cyan-700 font-bold hover:underline flex items-center justify-center gap-1 w-full py-1.5 bg-cyan-50 border border-cyan-200 rounded">
+                    <button
+                      onClick={() => alert('Fitur Buat Room')}
+                      className="text-xs text-cyan-700 font-bold hover:underline flex items-center justify-center gap-1 w-full py-1.5 bg-cyan-50 border border-cyan-200 rounded"
+                    >
                       <PlusCircle className="w-3.5 h-3.5" /> Create New Room
                     </button>
                   </div>
@@ -677,10 +800,15 @@ export default function App() {
                     </div>
 
                     {diceState.result && (
-                      <div className={`p-2 rounded font-extrabold text-xs ${
-                        diceState.result === 'MENANG' ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' :
-                        diceState.result === 'KALAH' ? 'bg-rose-100 text-rose-800 border border-rose-300' : 'bg-slate-100 text-slate-800'
-                      }`}>
+                      <div
+                        className={`p-2 rounded font-extrabold text-xs ${
+                          diceState.result === 'MENANG'
+                            ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                            : diceState.result === 'KALAH'
+                              ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                              : 'bg-slate-100 text-slate-800'
+                        }`}
+                      >
                         {diceState.result === 'MENANG' && `🎉 Menang +Rp ${diceState.bet}!`}
                         {diceState.result === 'KALAH' && `😭 Kalah -Rp ${diceState.bet}`}
                         {diceState.result === 'SERI' && '🤝 Seri!'}
@@ -693,9 +821,11 @@ export default function App() {
                         {[100, 500, 1000].map((amt) => (
                           <button
                             key={amt}
-                            onClick={() => setDiceState(p => ({ ...p, bet: amt }))}
+                            onClick={() => setDiceState((p) => ({ ...p, bet: amt }))}
                             className={`px-2 py-0.5 rounded text-xs font-bold ${
-                              diceState.bet === amt ? 'bg-orange-500 text-white' : 'bg-slate-200 text-slate-700'
+                              diceState.bet === amt
+                                ? 'bg-orange-500 text-white'
+                                : 'bg-slate-200 text-slate-700'
                             }`}
                           >
                             {amt}
@@ -727,7 +857,10 @@ export default function App() {
                         onChange={(e) => setStatusText(e.target.value)}
                         className="flex-1 text-xs border border-cyan-300 rounded px-2 py-1 bg-white"
                       />
-                      <button onClick={() => playFx('msg')} className="bg-cyan-700 text-white px-2.5 py-1 rounded font-bold text-[10px]">
+                      <button
+                        onClick={() => playFx('msg')}
+                        className="bg-cyan-700 text-white px-2.5 py-1 rounded font-bold text-[10px]"
+                      >
                         Post
                       </button>
                     </div>
@@ -739,7 +872,9 @@ export default function App() {
                         <span className="text-cyan-700">@reason008</span>
                         <span className="text-[9px] text-slate-400">10m ago</span>
                       </div>
-                      <p className="text-slate-600 mt-1">Lagi seru nih di chatroom sampit_terindah, gabung yuk! 🥚🎁</p>
+                      <p className="text-slate-600 mt-1">
+                        Lagi seru nih di chatroom sampit_terindah, gabung yuk! 🥚🎁
+                      </p>
                     </div>
                     <div className="p-2.5 text-xs">
                       <div className="flex justify-between items-center font-bold text-slate-800">
@@ -755,7 +890,6 @@ export default function App() {
               {/* 5. ACTIVE CHATROOM OR PM TAB CONTENT */}
               {(activeTabObject.type === 'chatroom' || activeTabObject.type === 'pm') && (
                 <div className="flex-1 flex flex-col bg-white">
-                  
                   {/* Chat Sub-Header */}
                   <div className="bg-slate-100 px-3 py-1.5 border-b border-slate-200 flex items-center justify-between text-xs">
                     <div className="flex items-center gap-1.5 min-w-0 font-bold text-slate-800">
@@ -781,16 +915,24 @@ export default function App() {
                           </p>
                         ) : msg.isBot ? (
                           <div className="bg-emerald-50 border border-emerald-200 rounded p-2">
-                            <span className="font-bold text-emerald-700 text-[11px]">🤖 {msg.sender}: </span>
+                            <span className="font-bold text-emerald-700 text-[11px]">
+                              🤖 {msg.sender}:{' '}
+                            </span>
                             <span className="text-slate-800">{msg.text}</span>
                           </div>
                         ) : (
                           <div className="flex flex-col">
                             <div className="flex items-baseline justify-between">
-                              <span className={`font-bold text-[11px] ${msg.sender === username ? 'text-orange-600' : 'text-cyan-800'}`}>
+                              <span
+                                className={`font-bold text-[11px] ${msg.sender === username ? 'text-orange-600' : 'text-cyan-800'}`}
+                              >
                                 {msg.sender}:
                               </span>
-                              {msg.time && <span className="text-[9px] text-slate-400 font-mono">{msg.time}</span>}
+                              {msg.time && (
+                                <span className="text-[9px] text-slate-400 font-mono">
+                                  {msg.time}
+                                </span>
+                              )}
                             </div>
                             <p className="text-slate-800 bg-slate-100/90 p-2 rounded border border-slate-200/80 mt-0.5">
                               {msg.text}
@@ -810,7 +952,7 @@ export default function App() {
                           key={i}
                           type="button"
                           onClick={() => {
-                            setChatInput(prev => prev + ' ' + emo.code);
+                            setChatInput((prev) => prev + ' ' + emo.code);
                             setShowEmoticonPicker(false);
                           }}
                           className="bg-white p-1 rounded border border-slate-300 hover:bg-cyan-50 flex items-center justify-center gap-1 text-xs"
@@ -823,7 +965,10 @@ export default function App() {
                   )}
 
                   {/* Chat Input Form */}
-                  <form onSubmit={handleSendMessage} className="p-2 bg-slate-200 border-t border-slate-300 flex items-center gap-1.5">
+                  <form
+                    onSubmit={handleSendMessage}
+                    className="p-2 bg-slate-200 border-t border-slate-300 flex items-center gap-1.5"
+                  >
                     <button
                       type="button"
                       onClick={() => setShowEmoticonPicker(!showEmoticonPicker)}
@@ -847,16 +992,17 @@ export default function App() {
                       Kirim
                     </button>
                   </form>
-
                 </div>
               )}
-
             </div>
 
             {/* BOTTOM MENU FOOTER BUTTONS */}
             <div className="bg-[#006064] text-white border-t border-cyan-800 p-1.5 flex justify-between items-center text-[11px] font-bold">
               <button
-                onClick={() => { playFx('keypress'); alert('Menu Options'); }}
+                onClick={() => {
+                  playFx('keypress');
+                  alert('Menu Options');
+                }}
                 className="px-3 py-1 bg-cyan-800/80 hover:bg-cyan-700 rounded border border-cyan-600"
               >
                 Options
@@ -869,16 +1015,13 @@ export default function App() {
                 Exit / Logout
               </button>
             </div>
-
           </div>
         )}
-
       </div>
 
       <footer className="mt-4 text-center text-xs text-slate-500">
         <p>Nostalgia Simulator - Multi-tab chatroom & PM secara bersamaan.</p>
       </footer>
-
     </div>
   );
 }

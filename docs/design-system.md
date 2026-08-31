@@ -51,15 +51,15 @@ Tints (hovers, soft fills, soft borders) are mixed from the accent at paint time
 
 System fonts, no webfont. Base size 14px; the scale is small and dense on purpose.
 
-| Step     | Size                         | Use                                 |
-| -------- | ---------------------------- | ----------------------------------- |
-| micro    | 11px, 600, uppercase, +0.4px | section headings, tab labels        |
-| meta     | 12px                         | timestamps, metadata                |
-| body-sm  | 13px                         | secondary body, chips               |
-| body     | 14px                         | messages, controls                  |
-| title-sm | 16px, 600                    | subtitles, banner name              |
-| title    | 18px, 700                    | panel titles                        |
-| display  | 22px, 700                    | the greeting                        |
+| Step     | Size                         | Use                          |
+| -------- | ---------------------------- | ---------------------------- |
+| micro    | 11px, 600, uppercase, +0.4px | section headings, tab labels |
+| meta     | 12px                         | timestamps, metadata         |
+| body-sm  | 13px                         | secondary body, chips        |
+| body     | 14px                         | messages, controls           |
+| title-sm | 16px, 600                    | subtitles, banner name       |
+| title    | 18px, 700                    | panel titles                 |
+| display  | 22px, 700                    | the greeting                 |
 
 ## Spacing, radius, elevation
 

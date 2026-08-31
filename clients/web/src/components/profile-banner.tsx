@@ -24,7 +24,11 @@ import { ThemeToggle } from './theme-toggle.js';
 import type { PanelTab } from './tab-strip.js';
 
 /** The banner's menu: where the account's own surfaces open from. */
-const MENU: ReadonlyArray<{ panel: PanelTab; label: string; icon: 'user' | 'wallet' | 'settings' }> = [
+const MENU: ReadonlyArray<{
+  panel: PanelTab;
+  label: string;
+  icon: 'user' | 'wallet' | 'settings';
+}> = [
   { panel: 'profile', label: 'My Profile', icon: 'user' },
   { panel: 'wallet', label: 'My Credits & TopUp', icon: 'wallet' },
   { panel: 'settings', label: 'Settings', icon: 'settings' },

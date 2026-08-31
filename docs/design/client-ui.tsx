@@ -1,12 +1,55 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  User, Users, MessageSquare, Gift, Gamepad2, Bell, Mail, 
-  Settings, HelpCircle, LogOut, ChevronDown, ChevronRight, 
-  Search, RefreshCw, Volume2, VolumeX, Smartphone, Laptop, 
-  Send, Smile, Shield, Crown, Play, CheckSquare, Square, X, PlusCircle, Sparkles,
-  Dices, Hash, AtSign, Eye, EyeOff, CheckCheck, Zap, Award, Flame, Heart,
-  Sparkle, Trophy, RotateCcw, HelpCircle as QuizIcon, Layers, Star, UserPlus,
-  Edit3, Key, Info, CreditCard, Lock
+import {
+  User,
+  Users,
+  MessageSquare,
+  Gift,
+  Gamepad2,
+  Bell,
+  Mail,
+  Settings,
+  HelpCircle,
+  LogOut,
+  ChevronDown,
+  ChevronRight,
+  Search,
+  RefreshCw,
+  Volume2,
+  VolumeX,
+  Smartphone,
+  Laptop,
+  Send,
+  Smile,
+  Shield,
+  Crown,
+  Play,
+  CheckSquare,
+  Square,
+  X,
+  PlusCircle,
+  Sparkles,
+  Dices,
+  Hash,
+  AtSign,
+  Eye,
+  EyeOff,
+  CheckCheck,
+  Zap,
+  Award,
+  Flame,
+  Heart,
+  Sparkle,
+  Trophy,
+  RotateCcw,
+  HelpCircle as QuizIcon,
+  Layers,
+  Star,
+  UserPlus,
+  Edit3,
+  Key,
+  Info,
+  CreditCard,
+  Lock,
 } from 'lucide-react';
 
 // --- Web Audio Sound Effects System ---
@@ -70,7 +113,7 @@ export default function App() {
   // Status Auth & Form View Mode: 'login' | 'register'
   const [authView, setAuthView] = useState('login');
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  
+
   // Login State
   const [username, setUsername] = useState('reason007007');
   const [password, setPassword] = useState('••••••••');
@@ -121,20 +164,88 @@ export default function App() {
 
   // Data Teman
   const [friends, setFriends] = useState([
-    { id: 1, name: 'reason008', status: 'online', isVip: true, mood: 'Main dice yuk!', avatarBg: 'bg-emerald-500', avatarIcon: '🤖' },
-    { id: 2, name: 'nrock', status: 'online', isVip: false, mood: 'Listening to Linkin Park', avatarBg: 'bg-[#00BCD4]', avatarIcon: '🎧' },
-    { id: 3, name: 'neel_the_great', status: 'online', isVip: true, mood: 'Salam kawan semua ✌️', avatarBg: 'bg-indigo-500', avatarIcon: '👑' },
-    { id: 4, name: 'ahok', status: 'online', isVip: false, mood: 'Ada yang mau barter egg?', avatarBg: 'bg-amber-500', avatarIcon: '🥚' },
-    { id: 5, name: 'sampit_gaul', status: 'offline', isVip: false, mood: 'Tidur dulu zzz...', avatarBg: 'bg-slate-400', avatarIcon: '😴' }
+    {
+      id: 1,
+      name: 'reason008',
+      status: 'online',
+      isVip: true,
+      mood: 'Main dice yuk!',
+      avatarBg: 'bg-emerald-500',
+      avatarIcon: '🤖',
+    },
+    {
+      id: 2,
+      name: 'nrock',
+      status: 'online',
+      isVip: false,
+      mood: 'Listening to Linkin Park',
+      avatarBg: 'bg-[#00BCD4]',
+      avatarIcon: '🎧',
+    },
+    {
+      id: 3,
+      name: 'neel_the_great',
+      status: 'online',
+      isVip: true,
+      mood: 'Salam kawan semua ✌️',
+      avatarBg: 'bg-indigo-500',
+      avatarIcon: '👑',
+    },
+    {
+      id: 4,
+      name: 'ahok',
+      status: 'online',
+      isVip: false,
+      mood: 'Ada yang mau barter egg?',
+      avatarBg: 'bg-amber-500',
+      avatarIcon: '🥚',
+    },
+    {
+      id: 5,
+      name: 'sampit_gaul',
+      status: 'offline',
+      isVip: false,
+      mood: 'Tidur dulu zzz...',
+      avatarBg: 'bg-slate-400',
+      avatarIcon: '😴',
+    },
   ]);
 
   // Data Room Obrolan
   const [chatRooms, setChatRooms] = useState([
-    { id: 'r1', name: 'sampit_terindah', users: 18, max: 30, category: 'Recent Rooms', badge: 'Popular' },
-    { id: 'r2', name: 'indo_terindah', users: 24, max: 40, category: 'Recent Rooms', badge: 'Active' },
-    { id: 'r3', name: 'malang_jomblo2', users: 12, max: 40, category: 'Recent Rooms', badge: 'Fun' },
+    {
+      id: 'r1',
+      name: 'sampit_terindah',
+      users: 18,
+      max: 30,
+      category: 'Recent Rooms',
+      badge: 'Popular',
+    },
+    {
+      id: 'r2',
+      name: 'indo_terindah',
+      users: 24,
+      max: 40,
+      category: 'Recent Rooms',
+      badge: 'Active',
+    },
+    {
+      id: 'r3',
+      name: 'malang_jomblo2',
+      users: 12,
+      max: 40,
+      category: 'Recent Rooms',
+      badge: 'Fun',
+    },
     { id: 'r4', name: 'Jakarta_Gaul', users: 42, max: 50, category: 'Favorites', badge: 'Hot' },
-    { id: 'r5', name: 'Cari_Jodoh_Nusantara', users: 38, max: 50, category: 'Favorites', badge: 'Top' }
+    {
+      id: 'r5',
+      name: 'Cari_Jodoh_Nusantara',
+      users: 38,
+      max: 50,
+      category: 'Favorites',
+      badge: 'Top',
+    },
   ]);
 
   // --- GAME CENTER STATES ---
@@ -148,7 +259,7 @@ export default function App() {
     bet: 500,
     isPlaying: false,
     wins: 3,
-    losses: 1
+    losses: 1,
   });
 
   // Game 2: Low Card 7
@@ -157,7 +268,7 @@ export default function App() {
     botCard: null,
     result: null,
     bet: 500,
-    isPlaying: false
+    isPlaying: false,
   });
 
   // Game 3: Questions 5 Quiz
@@ -166,41 +277,41 @@ export default function App() {
     score: 0,
     selectedOption: null,
     isFinished: false,
-    rewardClaimed: false
+    rewardClaimed: false,
   });
 
   const quizQuestions = [
     {
       q: 'Apa sebutan untuk melempar item spesial di room obrolan?',
       options: ['Lempar Telur', 'Lempar Batu', 'Kirim Bintang', 'Boom Chat'],
-      answer: 0
+      answer: 0,
     },
     {
       q: 'Fitur apa yang memungkinkan Anda mengobrol tanpa terlihat online?',
       options: ['Ghost Mode', 'Invisible Login', 'Incognito Chat', 'Offline Status'],
-      answer: 1
+      answer: 1,
     },
     {
       q: 'Di game Low Card 7, pemenang ditentukan berdasarkan?',
       options: ['Kartu Tertinggi', 'Kartu Terendah', 'Warna Kartu', 'Kartu Kembar'],
-      answer: 1
+      answer: 1,
     },
     {
       q: 'Apa mata uang yang digunakan di simulator ini?',
       options: ['Gold Coin', 'migCredit', 'Rupiah / Credits', 'Diamonds'],
-      answer: 2
+      answer: 2,
     },
     {
       q: 'Berapa angka maksimal pemain di room favorit "Jakarta_Gaul"?',
       options: ['30', '40', '50', '100'],
-      answer: 2
-    }
+      answer: 2,
+    },
   ];
 
   // Game 4: Lucky Wheel
   const [wheelState, setWheelState] = useState({
     isSpinning: false,
-    lastReward: null
+    lastReward: null,
   });
 
   // Emotikon & Stiker
@@ -213,7 +324,7 @@ export default function App() {
     { code: '(bot)', symbol: '🤖', category: 'sticker' },
     { code: '(crown)', symbol: '👑', category: 'sticker' },
     { code: '(egg)', symbol: '🥚', category: 'gift' },
-    { code: '(gift)', symbol: '🎁', category: 'gift' }
+    { code: '(gift)', symbol: '🎁', category: 'gift' },
   ];
 
   const chatBottomRef = useRef(null);
@@ -263,27 +374,47 @@ export default function App() {
   const handleOpenRoomTab = (room) => {
     triggerFx('click');
     const tabId = `room-${room.id}`;
-    
-    const exists = openTabs.find(t => t.id === tabId);
+
+    const exists = openTabs.find((t) => t.id === tabId);
     if (!exists) {
       const newTab = {
         id: tabId,
         title: `#${room.name}`,
         type: 'chatroom',
         roomData: room,
-        closable: true
+        closable: true,
       };
-      setOpenTabs(prev => [...prev, newTab]);
+      setOpenTabs((prev) => [...prev, newTab]);
 
       if (!chatHistories[tabId]) {
-        setChatHistories(prev => ({
+        setChatHistories((prev) => ({
           ...prev,
           [tabId]: [
-            { id: 1, sender: 'System', text: `*** Selamat datang di room #${room.name} ***`, isSystem: true },
-            { id: 2, sender: 'Bot', text: 'Halo gaes! Jaga kesopanan & patuhi rule room ya.', isBot: true },
-            { id: 3, sender: 'reason008', text: `Halo @${username}! Selamat bergabung bro 🎉`, time: '11:32' },
-            { id: 4, sender: 'sampit_gaul', text: 'Ada yang mau mabar game dadu hari ini?', time: '11:33' }
-          ]
+            {
+              id: 1,
+              sender: 'System',
+              text: `*** Selamat datang di room #${room.name} ***`,
+              isSystem: true,
+            },
+            {
+              id: 2,
+              sender: 'Bot',
+              text: 'Halo gaes! Jaga kesopanan & patuhi rule room ya.',
+              isBot: true,
+            },
+            {
+              id: 3,
+              sender: 'reason008',
+              text: `Halo @${username}! Selamat bergabung bro 🎉`,
+              time: '11:32',
+            },
+            {
+              id: 4,
+              sender: 'sampit_gaul',
+              text: 'Ada yang mau mabar game dadu hari ini?',
+              time: '11:33',
+            },
+          ],
         }));
       }
     }
@@ -295,24 +426,29 @@ export default function App() {
     triggerFx('click');
     const tabId = `pm-${friendName}`;
 
-    const exists = openTabs.find(t => t.id === tabId);
+    const exists = openTabs.find((t) => t.id === tabId);
     if (!exists) {
       const newTab = {
         id: tabId,
         title: `@${friendName}`,
         type: 'pm',
         targetName: friendName,
-        closable: true
+        closable: true,
       };
-      setOpenTabs(prev => [...prev, newTab]);
+      setOpenTabs((prev) => [...prev, newTab]);
 
       if (!chatHistories[tabId]) {
-        setChatHistories(prev => ({
+        setChatHistories((prev) => ({
           ...prev,
           [tabId]: [
-            { id: 1, sender: 'System', text: `Sesi obrolan pribadi bersama ${friendName}`, isSystem: true },
-            { id: 2, sender: friendName, text: 'Oi bro, lagi di mana?', time: '11:30' }
-          ]
+            {
+              id: 1,
+              sender: 'System',
+              text: `Sesi obrolan pribadi bersama ${friendName}`,
+              isSystem: true,
+            },
+            { id: 2, sender: friendName, text: 'Oi bro, lagi di mana?', time: '11:30' },
+          ],
         }));
       }
     }
@@ -324,7 +460,7 @@ export default function App() {
     e.stopPropagation();
     triggerFx('click');
 
-    const nextTabs = openTabs.filter(t => t.id !== tabIdToClose);
+    const nextTabs = openTabs.filter((t) => t.id !== tabIdToClose);
     setOpenTabs(nextTabs);
 
     if (activeTabId === tabIdToClose) {
@@ -338,19 +474,19 @@ export default function App() {
     if (!chatInput.trim()) return;
     triggerFx('click');
 
-    const activeTab = openTabs.find(t => t.id === activeTabId);
+    const activeTab = openTabs.find((t) => t.id === activeTabId);
     if (!activeTab) return;
 
     const newMsg = {
       id: Date.now(),
       sender: username,
       text: chatInput,
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
 
-    setChatHistories(prev => ({
+    setChatHistories((prev) => ({
       ...prev,
-      [activeTabId]: [...(prev[activeTabId] || []), newMsg]
+      [activeTabId]: [...(prev[activeTabId] || []), newMsg],
     }));
     setChatInput('');
     setShowPicker(false);
@@ -364,20 +500,20 @@ export default function App() {
           id: Date.now() + 1,
           sender: 'reason008',
           text: `Mantap Bro! 🥚 ${chatInput.includes(':D') ? '😀' : ''}`,
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
       } else if (activeTab.type === 'pm') {
         replyMsg = {
           id: Date.now() + 1,
           sender: activeTab.targetName,
           text: 'Sip mas, nanti aku kirim gift telur ya!',
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
       }
       if (replyMsg) {
-        setChatHistories(prev => ({
+        setChatHistories((prev) => ({
           ...prev,
-          [activeTabId]: [...(prev[activeTabId] || []), replyMsg]
+          [activeTabId]: [...(prev[activeTabId] || []), replyMsg],
         }));
       }
     }, 1200);
@@ -387,16 +523,16 @@ export default function App() {
   const handleSendEgg = () => {
     if (eggCount <= 0) return;
     triggerFx('egg');
-    setEggCount(prev => prev - 1);
-    setUserXp(prev => Math.min(100, prev + 10));
+    setEggCount((prev) => prev - 1);
+    setUserXp((prev) => Math.min(100, prev + 10));
 
-    const activeTab = openTabs.find(t => t.id === activeTabId);
+    const activeTab = openTabs.find((t) => t.id === activeTabId);
     const targetText = activeTab?.title || 'Room';
 
     setEggAnimation(`🥚 Melempar Telur ke ${targetText}! (+10 EXP)`);
     setTimeout(() => setEggAnimation(null), 2000);
 
-    setChatHistories(prev => ({
+    setChatHistories((prev) => ({
       ...prev,
       [activeTabId]: [
         ...(prev[activeTabId] || []),
@@ -404,9 +540,9 @@ export default function App() {
           id: Date.now(),
           sender: 'System',
           text: `🥚 ${username} melempar TELUR KELUARGA ke ${targetText}! (+10 Exp)`,
-          isSystem: true
-        }
-      ]
+          isSystem: true,
+        },
+      ],
     }));
   };
 
@@ -417,7 +553,7 @@ export default function App() {
       return;
     }
     triggerFx('dice');
-    setDiceState(prev => ({ ...prev, isPlaying: true }));
+    setDiceState((prev) => ({ ...prev, isPlaying: true }));
 
     setTimeout(() => {
       const pRoll = Math.floor(Math.random() * 6) + 1;
@@ -439,7 +575,7 @@ export default function App() {
         triggerFx('msg');
       }
 
-      setCredits(prev => prev + change);
+      setCredits((prev) => prev + change);
       setDiceState({
         playerRoll: pRoll,
         botRoll: bRoll,
@@ -447,7 +583,7 @@ export default function App() {
         bet: diceState.bet,
         isPlaying: false,
         wins: newWins,
-        losses: newLosses
+        losses: newLosses,
       });
     }, 700);
   };
@@ -459,7 +595,7 @@ export default function App() {
       return;
     }
     triggerFx('dice');
-    setLowCardState(prev => ({ ...prev, isPlaying: true }));
+    setLowCardState((prev) => ({ ...prev, isPlaying: true }));
 
     setTimeout(() => {
       const pCard = Math.floor(Math.random() * 10) + 1;
@@ -477,13 +613,13 @@ export default function App() {
         triggerFx('msg');
       }
 
-      setCredits(prev => prev + change);
-      setLowCardState(prev => ({
+      setCredits((prev) => prev + change);
+      setLowCardState((prev) => ({
         ...prev,
         playerCard: pCard,
         botCard: bCard,
         result: res,
-        isPlaying: false
+        isPlaying: false,
       }));
     }, 600);
   };
@@ -491,7 +627,7 @@ export default function App() {
   // LOGIKA GAME 3: Questions 5 Quiz
   const handleAnswerQuiz = (optionIdx) => {
     triggerFx('click');
-    setQuizState(prev => ({ ...prev, selectedOption: optionIdx }));
+    setQuizState((prev) => ({ ...prev, selectedOption: optionIdx }));
 
     setTimeout(() => {
       const isCorrect = optionIdx === quizQuestions[quizState.currentQuestion].answer;
@@ -500,22 +636,22 @@ export default function App() {
       }
 
       if (quizState.currentQuestion + 1 < quizQuestions.length) {
-        setQuizState(prev => ({
+        setQuizState((prev) => ({
           ...prev,
           score: isCorrect ? prev.score + 20 : prev.score,
           currentQuestion: prev.currentQuestion + 1,
-          selectedOption: null
+          selectedOption: null,
         }));
       } else {
         const finalScore = isCorrect ? quizState.score + 20 : quizState.score;
         const reward = finalScore * 20;
-        setCredits(prev => prev + reward);
-        setQuizState(prev => ({
+        setCredits((prev) => prev + reward);
+        setQuizState((prev) => ({
           ...prev,
           score: finalScore,
           isFinished: true,
           selectedOption: null,
-          rewardClaimed: true
+          rewardClaimed: true,
         }));
       }
     }, 600);
@@ -528,7 +664,7 @@ export default function App() {
       score: 0,
       selectedOption: null,
       isFinished: false,
-      rewardClaimed: false
+      rewardClaimed: false,
     });
   };
 
@@ -544,38 +680,36 @@ export default function App() {
         { text: '+2 Telur 🥚', credits: 0, eggs: 2 },
         { text: '+1000 Credits 🎉', credits: 1000, eggs: 0 },
         { text: '+5 Telur 🥚✨', credits: 0, eggs: 5 },
-        { text: '+2500 Credits Jackpot! 💎', credits: 2500, eggs: 1 }
+        { text: '+2500 Credits Jackpot! 💎', credits: 2500, eggs: 1 },
       ];
 
       const won = rewards[Math.floor(Math.random() * rewards.length)];
-      setCredits(prev => prev + won.credits);
-      setEggCount(prev => prev + won.eggs);
+      setCredits((prev) => prev + won.credits);
+      setEggCount((prev) => prev + won.eggs);
       triggerFx('win');
 
       setWheelState({
         isSpinning: false,
-        lastReward: won.text
+        lastReward: won.text,
       });
     }, 1200);
   };
 
-  const activeTabObject = openTabs.find(t => t.id === activeTabId) || openTabs[0];
+  const activeTabObject = openTabs.find((t) => t.id === activeTabId) || openTabs[0];
 
-  const filteredFriends = friends.filter(f => 
-    f.name.toLowerCase().includes(searchFriendQuery.toLowerCase()) || 
-    f.mood.toLowerCase().includes(searchFriendQuery.toLowerCase())
+  const filteredFriends = friends.filter(
+    (f) =>
+      f.name.toLowerCase().includes(searchFriendQuery.toLowerCase()) ||
+      f.mood.toLowerCase().includes(searchFriendQuery.toLowerCase()),
   );
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-3 sm:p-6 font-sans select-none antialiased">
-      
       {/* CONTAINER UTAMA APLIKASI (FOKUS UI UTAMA TANPA HEADER/FOOTER LUAR) */}
       <div className="w-full max-w-2xl bg-[#fdfbf7] text-slate-900 rounded-3xl border-2 border-slate-700 shadow-2xl flex flex-col min-h-[660px] max-h-[800px] overflow-hidden relative font-sans text-xs">
-        
         {!isLoggedIn ? (
           /* HOMEPAGE AUTH (LOGIN / REGISTER FORM) */
           <div className="flex-1 bg-gradient-to-b from-[#0093AF] via-[#00ACC1] to-[#00838F] flex flex-col items-center justify-between p-6 sm:p-8 text-white relative overflow-hidden">
-            
             <div className="w-full flex justify-between items-center text-[11px] text-cyan-100 font-mono mb-2 z-10">
               <span className="flex items-center gap-1.5">
                 <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping"></span>
@@ -591,9 +725,15 @@ export default function App() {
               </div>
 
               <div className="flex items-end justify-center gap-2">
-                <div className="w-8 h-8 bg-emerald-400 border-2 border-white rounded-t-full flex items-center justify-center text-sm shadow-md">🤖</div>
-                <div className="w-10 h-10 bg-slate-100 border-2 border-slate-300 rounded-t-full flex items-center justify-center text-base shadow-lg">🤖</div>
-                <div className="w-8 h-8 bg-pink-400 border-2 border-white rounded-t-full flex items-center justify-center text-sm shadow-md">🌸</div>
+                <div className="w-8 h-8 bg-emerald-400 border-2 border-white rounded-t-full flex items-center justify-center text-sm shadow-md">
+                  🤖
+                </div>
+                <div className="w-10 h-10 bg-slate-100 border-2 border-slate-300 rounded-t-full flex items-center justify-center text-base shadow-lg">
+                  🤖
+                </div>
+                <div className="w-8 h-8 bg-pink-400 border-2 border-white rounded-t-full flex items-center justify-center text-sm shadow-md">
+                  🌸
+                </div>
               </div>
 
               <p className="text-xs font-semibold text-cyan-100 tracking-wide">
@@ -602,7 +742,10 @@ export default function App() {
 
               {/* FORM LOGIN */}
               {authView === 'login' ? (
-                <form onSubmit={handleLogin} className="w-full space-y-3 bg-white/15 p-5 rounded-2xl border border-white/30 backdrop-blur-md shadow-2xl">
+                <form
+                  onSubmit={handleLogin}
+                  className="w-full space-y-3 bg-white/15 p-5 rounded-2xl border border-white/30 backdrop-blur-md shadow-2xl"
+                >
                   <div>
                     <input
                       type="text"
@@ -646,12 +789,17 @@ export default function App() {
                       onChange={(e) => setLoginInvisible(e.target.checked)}
                       className="rounded border-cyan-300 accent-orange-500 cursor-pointer"
                     />
-                    <label htmlFor="invisibleCheck" className="cursor-pointer">Login as Invisible</label>
+                    <label htmlFor="invisibleCheck" className="cursor-pointer">
+                      Login as Invisible
+                    </label>
                   </div>
                 </form>
               ) : (
                 /* FORM CREATE ACCOUNT (FUNGSIONAL) */
-                <form onSubmit={handleRegister} className="w-full space-y-2.5 bg-white/15 p-5 rounded-2xl border border-white/30 backdrop-blur-md shadow-2xl">
+                <form
+                  onSubmit={handleRegister}
+                  className="w-full space-y-2.5 bg-white/15 p-5 rounded-2xl border border-white/30 backdrop-blur-md shadow-2xl"
+                >
                   <div>
                     <input
                       type="text"
@@ -707,26 +855,30 @@ export default function App() {
             <div className="z-10 pb-2 text-center">
               {authView === 'login' ? (
                 <button
-                  onClick={() => { triggerFx('click'); setAuthView('register'); }}
+                  onClick={() => {
+                    triggerFx('click');
+                    setAuthView('register');
+                  }}
                   className="text-cyan-100 text-xs underline font-semibold hover:text-white"
                 >
                   Create Account
                 </button>
               ) : (
                 <button
-                  onClick={() => { triggerFx('click'); setAuthView('login'); }}
+                  onClick={() => {
+                    triggerFx('click');
+                    setAuthView('login');
+                  }}
                   className="text-cyan-100 text-xs underline font-semibold hover:text-white"
                 >
                   Sudah Memiliki Akun? Login
                 </button>
               )}
             </div>
-
           </div>
         ) : (
           /* WORKSPACE UTAMA SETELAH LOGIN */
           <div className="flex-1 flex flex-col bg-[#fdfbf7] text-slate-900 overflow-hidden relative">
-            
             {/* Animasi Lempar Telur Popup Toast */}
             {eggAnimation && (
               <div className="absolute top-16 left-1/2 -translate-x-1/2 z-50 bg-amber-500 text-white px-4 py-2 rounded-2xl shadow-2xl font-bold text-xs flex items-center gap-2 border-2 border-white animate-bounce">
@@ -742,15 +894,20 @@ export default function App() {
                 return (
                   <div
                     key={tab.id}
-                    onClick={() => { triggerFx('click'); setActiveTabId(tab.id); }}
+                    onClick={() => {
+                      triggerFx('click');
+                      setActiveTabId(tab.id);
+                    }}
                     className={`py-1.5 px-3 rounded-xl flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-all duration-150 shrink-0 ${
-                      isActive 
-                        ? 'bg-[#00ACC1] text-white font-bold shadow-md border-b-2 border-orange-400' 
+                      isActive
+                        ? 'bg-[#00ACC1] text-white font-bold shadow-md border-b-2 border-orange-400'
                         : 'bg-cyan-900/40 text-cyan-100 hover:bg-cyan-800/80'
                     }`}
                   >
                     {IconComponent && <IconComponent className="w-3.5 h-3.5 text-cyan-200" />}
-                    {tab.type === 'chatroom' && <span className="text-amber-300 font-bold">💬</span>}
+                    {tab.type === 'chatroom' && (
+                      <span className="text-amber-300 font-bold">💬</span>
+                    )}
                     {tab.type === 'pm' && <span className="text-emerald-300 font-bold">👤</span>}
 
                     <span>{tab.title}</span>
@@ -772,11 +929,13 @@ export default function App() {
 
             {/* BANNER PROFIL ORANGE IKONIK - AVATAR BISA DIKLIK BUKA POPOVER MENU LENGKAP */}
             <div className="bg-gradient-to-r from-orange-600 via-orange-500 to-amber-500 text-white p-2.5 px-3.5 flex items-center gap-3 border-b border-orange-600 shadow-inner relative">
-              
               {/* AVATAR INTERAKSI DENGAN POPOVER MENU */}
               <div className="relative">
                 <button
-                  onClick={() => { triggerFx('click'); setShowAvatarMenu(!showAvatarMenu); }}
+                  onClick={() => {
+                    triggerFx('click');
+                    setShowAvatarMenu(!showAvatarMenu);
+                  }}
                   className="w-10 h-10 bg-white rounded-xl border-2 border-orange-200 p-0.5 flex items-center justify-center shadow hover:scale-105 active:scale-95 transition cursor-pointer"
                   title="Klik untuk Menu Profil & Pengaturan"
                 >
@@ -794,7 +953,11 @@ export default function App() {
                     </div>
 
                     <button
-                      onClick={() => { triggerFx('click'); setActiveModal('profile'); setShowAvatarMenu(false); }}
+                      onClick={() => {
+                        triggerFx('click');
+                        setActiveModal('profile');
+                        setShowAvatarMenu(false);
+                      }}
                       className="w-full text-left px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-cyan-50 hover:text-cyan-800 rounded-xl flex items-center gap-2 transition"
                     >
                       <User className="w-4 h-4 text-cyan-600" />
@@ -802,7 +965,11 @@ export default function App() {
                     </button>
 
                     <button
-                      onClick={() => { triggerFx('click'); setActiveModal('topup'); setShowAvatarMenu(false); }}
+                      onClick={() => {
+                        triggerFx('click');
+                        setActiveModal('topup');
+                        setShowAvatarMenu(false);
+                      }}
                       className="w-full text-left px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-cyan-50 hover:text-cyan-800 rounded-xl flex items-center gap-2 transition"
                     >
                       <CreditCard className="w-4 h-4 text-amber-600" />
@@ -810,7 +977,11 @@ export default function App() {
                     </button>
 
                     <button
-                      onClick={() => { triggerFx('click'); setActiveModal('settings'); setShowAvatarMenu(false); }}
+                      onClick={() => {
+                        triggerFx('click');
+                        setActiveModal('settings');
+                        setShowAvatarMenu(false);
+                      }}
                       className="w-full text-left px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-cyan-50 hover:text-cyan-800 rounded-xl flex items-center gap-2 transition"
                     >
                       <Settings className="w-4 h-4 text-slate-600" />
@@ -818,7 +989,11 @@ export default function App() {
                     </button>
 
                     <button
-                      onClick={() => { triggerFx('click'); setActiveModal('help'); setShowAvatarMenu(false); }}
+                      onClick={() => {
+                        triggerFx('click');
+                        setActiveModal('help');
+                        setShowAvatarMenu(false);
+                      }}
                       className="w-full text-left px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-cyan-50 hover:text-cyan-800 rounded-xl flex items-center gap-2 transition"
                     >
                       <HelpCircle className="w-4 h-4 text-blue-600" />
@@ -846,11 +1021,14 @@ export default function App() {
                     Lvl {userLevel}
                   </span>
                 </div>
-                
+
                 {/* Status & Progress Bar */}
                 <p className="text-[10px] text-orange-100 truncate italic mt-0.5">{statusText}</p>
                 <div className="w-full bg-orange-800/40 h-1 rounded-full mt-1 overflow-hidden">
-                  <div className="bg-amber-300 h-full rounded-full transition-all duration-300" style={{ width: `${userXp}%` }}></div>
+                  <div
+                    className="bg-amber-300 h-full rounded-full transition-all duration-300"
+                    style={{ width: `${userXp}%` }}
+                  ></div>
                 </div>
               </div>
 
@@ -877,7 +1055,10 @@ export default function App() {
                       {activeModal === 'settings' && '⚙️ Settings'}
                       {activeModal === 'help' && '❓ Help & Support'}
                     </span>
-                    <button onClick={() => setActiveModal(null)} className="p-1 hover:bg-slate-200 rounded-full">
+                    <button
+                      onClick={() => setActiveModal(null)}
+                      className="p-1 hover:bg-slate-200 rounded-full"
+                    >
                       <X className="w-4 h-4 text-slate-600" />
                     </button>
                   </div>
@@ -891,12 +1072,16 @@ export default function App() {
                           </div>
                           <div>
                             <p className="font-bold text-sm text-slate-800">{username}</p>
-                            <p className="text-[10px] text-slate-500">Level {userLevel} Exp ({userXp}/100)</p>
+                            <p className="text-[10px] text-slate-500">
+                              Level {userLevel} Exp ({userXp}/100)
+                            </p>
                           </div>
                         </div>
 
                         <div>
-                          <label className="block text-[10px] font-bold text-slate-600 mb-1">Update Status Mood:</label>
+                          <label className="block text-[10px] font-bold text-slate-600 mb-1">
+                            Update Status Mood:
+                          </label>
                           <input
                             type="text"
                             value={statusText}
@@ -906,7 +1091,9 @@ export default function App() {
                         </div>
 
                         <div>
-                          <label className="block text-[10px] font-bold text-slate-600 mb-1">Status Kehadiran:</label>
+                          <label className="block text-[10px] font-bold text-slate-600 mb-1">
+                            Status Kehadiran:
+                          </label>
                           <select
                             value={userStatus}
                             onChange={(e) => setUserStatus(e.target.value)}
@@ -925,7 +1112,9 @@ export default function App() {
                       <div className="space-y-3">
                         <div className="bg-amber-50 p-3 rounded-xl border border-amber-200 text-amber-900">
                           <p className="font-bold text-xs">Saldo Kredit Anda:</p>
-                          <p className="text-lg font-black text-amber-700 mt-1">Rp {credits.toLocaleString()}</p>
+                          <p className="text-lg font-black text-amber-700 mt-1">
+                            Rp {credits.toLocaleString()}
+                          </p>
                         </div>
 
                         <p className="font-bold text-slate-800">Isi Saldo Instant Gratis:</p>
@@ -934,7 +1123,7 @@ export default function App() {
                             <button
                               key={amt}
                               onClick={() => {
-                                setCredits(prev => prev + amt);
+                                setCredits((prev) => prev + amt);
                                 triggerFx('win');
                                 alert(`Top up Rp ${amt.toLocaleString()} berhasil!`);
                               }}
@@ -994,11 +1183,9 @@ export default function App() {
 
             {/* AREA KONTEN UTAMA */}
             <div className="flex-1 overflow-y-auto bg-white flex flex-col">
-
               {/* 1. FRIENDS TAB */}
               {activeTabId === 'friends' && (
                 <div className="divide-y divide-slate-100">
-                  
                   {/* Search Bar Teman */}
                   <div className="p-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2">
                     <Search className="w-4 h-4 text-slate-400" />
@@ -1028,46 +1215,66 @@ export default function App() {
                   </div>
 
                   <div className="bg-slate-100 px-3 py-1.5 text-[10px] font-bold text-slate-500 uppercase tracking-wider flex justify-between items-center">
-                    <span>Teman Online ({filteredFriends.filter(f=>f.status==='online').length})</span>
-                    <button onClick={() => triggerFx('click')} className="text-cyan-700 hover:underline">Refresh</button>
+                    <span>
+                      Teman Online ({filteredFriends.filter((f) => f.status === 'online').length})
+                    </span>
+                    <button
+                      onClick={() => triggerFx('click')}
+                      className="text-cyan-700 hover:underline"
+                    >
+                      Refresh
+                    </button>
                   </div>
 
                   {/* Daftar Teman Online - KLIK BARIS ATAU AVATAR LANGSUNG BUKA PM */}
-                  {filteredFriends.filter(f=>f.status==='online').map((friend) => (
-                    <div
-                      key={friend.id}
-                      onClick={() => handleOpenPMTab(friend.name)}
-                      className="p-2.5 px-3 flex items-center gap-3 hover:bg-cyan-50/70 cursor-pointer border-b border-slate-100 transition group"
-                    >
-                      {/* Avatar Logo Badge */}
-                      <div className={`w-8 h-8 rounded-full ${friend.avatarBg} text-white flex items-center justify-center font-bold shadow-md border-2 border-white text-xs shrink-0 group-hover:scale-105 transition`}>
-                        {friend.avatarIcon}
-                      </div>
-
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-semibold text-xs text-slate-800 group-hover:text-cyan-800">{friend.name}</span>
-                          {friend.isVip && <Crown className="w-3.5 h-3.5 text-amber-500 fill-amber-400" />}
+                  {filteredFriends
+                    .filter((f) => f.status === 'online')
+                    .map((friend) => (
+                      <div
+                        key={friend.id}
+                        onClick={() => handleOpenPMTab(friend.name)}
+                        className="p-2.5 px-3 flex items-center gap-3 hover:bg-cyan-50/70 cursor-pointer border-b border-slate-100 transition group"
+                      >
+                        {/* Avatar Logo Badge */}
+                        <div
+                          className={`w-8 h-8 rounded-full ${friend.avatarBg} text-white flex items-center justify-center font-bold shadow-md border-2 border-white text-xs shrink-0 group-hover:scale-105 transition`}
+                        >
+                          {friend.avatarIcon}
                         </div>
-                        <p className="text-[10px] text-slate-500 truncate">{friend.mood}</p>
-                      </div>
 
-                      {/* Indikator Online Dot */}
-                      <span className="w-2.5 h-2.5 bg-emerald-500 rounded-full border border-emerald-200 shrink-0"></span>
-                    </div>
-                  ))}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-semibold text-xs text-slate-800 group-hover:text-cyan-800">
+                              {friend.name}
+                            </span>
+                            {friend.isVip && (
+                              <Crown className="w-3.5 h-3.5 text-amber-500 fill-amber-400" />
+                            )}
+                          </div>
+                          <p className="text-[10px] text-slate-500 truncate">{friend.mood}</p>
+                        </div>
+
+                        {/* Indikator Online Dot */}
+                        <span className="w-2.5 h-2.5 bg-emerald-500 rounded-full border border-emerald-200 shrink-0"></span>
+                      </div>
+                    ))}
 
                   {/* SUB-BAR LAYANAN INSTANT MESSENGER (#E0F7FA KLASIK) */}
                   <div className="mt-2 space-y-0.5">
-                    {['Facebook (0/0)', 'MSN (0/0)', 'Yahoo! (0/0)', 'GTalk (0/0)'].map((im, idx) => (
-                      <div key={idx} className="bg-[#E0F7FA] border-y border-cyan-100 px-3 py-2 text-xs text-cyan-900 font-medium flex items-center justify-between hover:bg-cyan-100 cursor-pointer transition">
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-cyan-700">–</span>
-                          <span>{im}</span>
+                    {['Facebook (0/0)', 'MSN (0/0)', 'Yahoo! (0/0)', 'GTalk (0/0)'].map(
+                      (im, idx) => (
+                        <div
+                          key={idx}
+                          className="bg-[#E0F7FA] border-y border-cyan-100 px-3 py-2 text-xs text-cyan-900 font-medium flex items-center justify-between hover:bg-cyan-100 cursor-pointer transition"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-cyan-700">–</span>
+                            <span>{im}</span>
+                          </div>
+                          <ChevronRight className="w-3.5 h-3.5 text-cyan-600" />
                         </div>
-                        <ChevronRight className="w-3.5 h-3.5 text-cyan-600" />
-                      </div>
-                    ))}
+                      ),
+                    )}
                   </div>
                 </div>
               )}
@@ -1088,58 +1295,89 @@ export default function App() {
 
                   <div className="bg-cyan-50/80 px-3 py-1.5 text-[10px] font-bold text-cyan-800 border-b border-cyan-100 flex items-center gap-1">
                     <ChevronDown className="w-3.5 h-3.5" />
-                    <span>Favorit ({chatRooms.filter(r=>r.category==='Favorites').length})</span>
+                    <span>
+                      Favorit ({chatRooms.filter((r) => r.category === 'Favorites').length})
+                    </span>
                   </div>
-                  {chatRooms.filter(r => r.category==='Favorites' && r.name.toLowerCase().includes(searchRoomQuery.toLowerCase())).map((room) => (
-                    <div
-                      key={room.id}
-                      onClick={() => handleOpenRoomTab(room)}
-                      className="p-2.5 px-3 flex items-center justify-between hover:bg-cyan-50 cursor-pointer border-b border-slate-100 transition group"
-                    >
-                      <div className="flex items-center gap-2.5">
-                        <div className="w-7 h-7 bg-amber-100 text-amber-700 rounded-lg flex items-center justify-center font-bold text-xs group-hover:bg-amber-500 group-hover:text-white transition">
-                          💬
+                  {chatRooms
+                    .filter(
+                      (r) =>
+                        r.category === 'Favorites' &&
+                        r.name.toLowerCase().includes(searchRoomQuery.toLowerCase()),
+                    )
+                    .map((room) => (
+                      <div
+                        key={room.id}
+                        onClick={() => handleOpenRoomTab(room)}
+                        className="p-2.5 px-3 flex items-center justify-between hover:bg-cyan-50 cursor-pointer border-b border-slate-100 transition group"
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-7 h-7 bg-amber-100 text-amber-700 rounded-lg flex items-center justify-center font-bold text-xs group-hover:bg-amber-500 group-hover:text-white transition">
+                            💬
+                          </div>
+                          <div>
+                            <span className="font-semibold text-xs text-slate-800 group-hover:text-cyan-800">
+                              #{room.name}
+                            </span>
+                            <span className="ml-2 text-[9px] bg-amber-100 text-amber-800 px-1.5 py-0.2 rounded font-semibold">
+                              {room.badge}
+                            </span>
+                          </div>
                         </div>
-                        <div>
-                          <span className="font-semibold text-xs text-slate-800 group-hover:text-cyan-800">#{room.name}</span>
-                          <span className="ml-2 text-[9px] bg-amber-100 text-amber-800 px-1.5 py-0.2 rounded font-semibold">{room.badge}</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-slate-500 font-mono font-semibold">
+                            ({room.users} / {room.max})
+                          </span>
+                          <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-600 transition" />
                         </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-slate-500 font-mono font-semibold">({room.users} / {room.max})</span>
-                        <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-600 transition" />
-                      </div>
-                    </div>
-                  ))}
+                    ))}
 
                   <div className="bg-cyan-50/80 px-3 py-1.5 text-[10px] font-bold text-cyan-800 border-b border-cyan-100 flex items-center gap-1">
                     <ChevronDown className="w-3.5 h-3.5" />
-                    <span>Recent Rooms ({chatRooms.filter(r=>r.category==='Recent Rooms').length})</span>
+                    <span>
+                      Recent Rooms ({chatRooms.filter((r) => r.category === 'Recent Rooms').length})
+                    </span>
                   </div>
-                  {chatRooms.filter(r => r.category==='Recent Rooms' && r.name.toLowerCase().includes(searchRoomQuery.toLowerCase())).map((room) => (
-                    <div
-                      key={room.id}
-                      onClick={() => handleOpenRoomTab(room)}
-                      className="p-2.5 px-3 flex items-center justify-between hover:bg-cyan-50 cursor-pointer border-b border-slate-100 transition group"
-                    >
-                      <div className="flex items-center gap-2.5">
-                        <div className="w-7 h-7 bg-cyan-100 text-cyan-700 rounded-lg flex items-center justify-center font-bold text-xs group-hover:bg-cyan-600 group-hover:text-white transition">
-                          💬
+                  {chatRooms
+                    .filter(
+                      (r) =>
+                        r.category === 'Recent Rooms' &&
+                        r.name.toLowerCase().includes(searchRoomQuery.toLowerCase()),
+                    )
+                    .map((room) => (
+                      <div
+                        key={room.id}
+                        onClick={() => handleOpenRoomTab(room)}
+                        className="p-2.5 px-3 flex items-center justify-between hover:bg-cyan-50 cursor-pointer border-b border-slate-100 transition group"
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-7 h-7 bg-cyan-100 text-cyan-700 rounded-lg flex items-center justify-center font-bold text-xs group-hover:bg-cyan-600 group-hover:text-white transition">
+                            💬
+                          </div>
+                          <div>
+                            <span className="font-semibold text-xs text-slate-800 group-hover:text-cyan-800">
+                              #{room.name}
+                            </span>
+                            <span className="ml-2 text-[9px] bg-slate-100 text-slate-600 px-1.5 py-0.2 rounded font-semibold">
+                              {room.badge}
+                            </span>
+                          </div>
                         </div>
-                        <div>
-                          <span className="font-semibold text-xs text-slate-800 group-hover:text-cyan-800">#{room.name}</span>
-                          <span className="ml-2 text-[9px] bg-slate-100 text-slate-600 px-1.5 py-0.2 rounded font-semibold">{room.badge}</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-slate-500 font-mono font-semibold">
+                            ({room.users} / {room.max})
+                          </span>
+                          <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-600 transition" />
                         </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-slate-500 font-mono font-semibold">({room.users} / {room.max})</span>
-                        <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-cyan-600 transition" />
-                      </div>
-                    </div>
-                  ))}
+                    ))}
 
                   <div className="p-3 text-center">
-                    <button onClick={() => alert('Fitur Buat Room Baru')} className="text-xs text-cyan-700 font-bold hover:underline flex items-center justify-center gap-1 w-full py-2 bg-cyan-50 border border-cyan-200 rounded-xl transition">
+                    <button
+                      onClick={() => alert('Fitur Buat Room Baru')}
+                      className="text-xs text-cyan-700 font-bold hover:underline flex items-center justify-center gap-1 w-full py-2 bg-cyan-50 border border-cyan-200 rounded-xl transition"
+                    >
                       <PlusCircle className="w-4 h-4" /> Create New Room
                     </button>
                   </div>
@@ -1149,16 +1387,20 @@ export default function App() {
               {/* 3. GAMES TAB - WEB BROWSER GAME PORTAL DASHBOARD + MINI GAMES */}
               {activeTabId === 'games' && (
                 <div className="p-3 space-y-3">
-                  
                   {/* Dashboard Header Bar */}
                   <div className="bg-gradient-to-r from-amber-500 to-orange-500 text-white p-3 rounded-2xl shadow-sm text-xs flex justify-between items-center">
                     <div>
                       <p className="font-bold flex items-center gap-1">🎮 Browser Web Games Zone</p>
-                      <p className="text-[10px] opacity-90">Pilih & mainkan mini game langsung di browser!</p>
+                      <p className="text-[10px] opacity-90">
+                        Pilih & mainkan mini game langsung di browser!
+                      </p>
                     </div>
                     {activeGame && (
                       <button
-                        onClick={() => { triggerFx('click'); setActiveGame(null); }}
+                        onClick={() => {
+                          triggerFx('click');
+                          setActiveGame(null);
+                        }}
                         className="bg-white/20 hover:bg-white/30 text-white px-2.5 py-1 rounded-xl text-[10px] font-bold flex items-center gap-1 transition"
                       >
                         ‹ Back to Portal
@@ -1169,10 +1411,12 @@ export default function App() {
                   {/* PORTAL DASHBOARD VIEW (GRID GAMES) */}
                   {!activeGame ? (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      
                       {/* Game Card 1: Dice 10 */}
                       <div
-                        onClick={() => { triggerFx('click'); setActiveGame('dice'); }}
+                        onClick={() => {
+                          triggerFx('click');
+                          setActiveGame('dice');
+                        }}
                         className="bg-white border border-slate-200 p-3.5 rounded-2xl shadow-sm hover:border-orange-400 hover:shadow-md cursor-pointer transition flex flex-col justify-between space-y-3 group"
                       >
                         <div className="flex items-start justify-between">
@@ -1185,17 +1429,24 @@ export default function App() {
                         </div>
                         <div>
                           <h4 className="font-bold text-xs text-slate-800">Dice 10 Challenge</h4>
-                          <p className="text-[10px] text-slate-500 mt-0.5">Kocok dadu melawan bot, kumpulkan kredit taruhan!</p>
+                          <p className="text-[10px] text-slate-500 mt-0.5">
+                            Kocok dadu melawan bot, kumpulkan kredit taruhan!
+                          </p>
                         </div>
                         <div className="flex justify-between items-center text-[10px] text-slate-400 border-t border-slate-100 pt-2 font-mono">
                           <span>👥 1,240 Online</span>
-                          <span className="text-orange-600 font-bold group-hover:underline">Play Now →</span>
+                          <span className="text-orange-600 font-bold group-hover:underline">
+                            Play Now →
+                          </span>
                         </div>
                       </div>
 
                       {/* Game Card 2: Low Card 7 */}
                       <div
-                        onClick={() => { triggerFx('click'); setActiveGame('lowcard'); }}
+                        onClick={() => {
+                          triggerFx('click');
+                          setActiveGame('lowcard');
+                        }}
                         className="bg-white border border-slate-200 p-3.5 rounded-2xl shadow-sm hover:border-cyan-400 hover:shadow-md cursor-pointer transition flex flex-col justify-between space-y-3 group"
                       >
                         <div className="flex items-start justify-between">
@@ -1208,17 +1459,24 @@ export default function App() {
                         </div>
                         <div>
                           <h4 className="font-bold text-xs text-slate-800">Low Card 7</h4>
-                          <p className="text-[10px] text-slate-500 mt-0.5">Adu keberuntungan kartu terendah melawan Bot.</p>
+                          <p className="text-[10px] text-slate-500 mt-0.5">
+                            Adu keberuntungan kartu terendah melawan Bot.
+                          </p>
                         </div>
                         <div className="flex justify-between items-center text-[10px] text-slate-400 border-t border-slate-100 pt-2 font-mono">
                           <span>👥 850 Online</span>
-                          <span className="text-cyan-600 font-bold group-hover:underline">Play Now →</span>
+                          <span className="text-cyan-600 font-bold group-hover:underline">
+                            Play Now →
+                          </span>
                         </div>
                       </div>
 
                       {/* Game Card 3: Questions 5 Trivia */}
                       <div
-                        onClick={() => { triggerFx('click'); setActiveGame('quiz'); }}
+                        onClick={() => {
+                          triggerFx('click');
+                          setActiveGame('quiz');
+                        }}
                         className="bg-white border border-slate-200 p-3.5 rounded-2xl shadow-sm hover:border-emerald-400 hover:shadow-md cursor-pointer transition flex flex-col justify-between space-y-3 group"
                       >
                         <div className="flex items-start justify-between">
@@ -1231,17 +1489,24 @@ export default function App() {
                         </div>
                         <div>
                           <h4 className="font-bold text-xs text-slate-800">Questions 5 Quiz</h4>
-                          <p className="text-[10px] text-slate-500 mt-0.5">Jawab 5 kuis pengetahuan umum & klaim bonus kredit!</p>
+                          <p className="text-[10px] text-slate-500 mt-0.5">
+                            Jawab 5 kuis pengetahuan umum & klaim bonus kredit!
+                          </p>
                         </div>
                         <div className="flex justify-between items-center text-[10px] text-slate-400 border-t border-slate-100 pt-2 font-mono">
                           <span>👥 2,110 Online</span>
-                          <span className="text-emerald-600 font-bold group-hover:underline">Play Now →</span>
+                          <span className="text-emerald-600 font-bold group-hover:underline">
+                            Play Now →
+                          </span>
                         </div>
                       </div>
 
                       {/* Game Card 4: Lucky Spin Wheel */}
                       <div
-                        onClick={() => { triggerFx('click'); setActiveGame('spin'); }}
+                        onClick={() => {
+                          triggerFx('click');
+                          setActiveGame('spin');
+                        }}
                         className="bg-white border border-slate-200 p-3.5 rounded-2xl shadow-sm hover:border-purple-400 hover:shadow-md cursor-pointer transition flex flex-col justify-between space-y-3 group"
                       >
                         <div className="flex items-start justify-between">
@@ -1254,19 +1519,21 @@ export default function App() {
                         </div>
                         <div>
                           <h4 className="font-bold text-xs text-slate-800">Lucky Spin Wheel</h4>
-                          <p className="text-[10px] text-slate-500 mt-0.5">Putar Roda Keberuntungan Harian dapatkan Telur & Kredit!</p>
+                          <p className="text-[10px] text-slate-500 mt-0.5">
+                            Putar Roda Keberuntungan Harian dapatkan Telur & Kredit!
+                          </p>
                         </div>
                         <div className="flex justify-between items-center text-[10px] text-slate-400 border-t border-slate-100 pt-2 font-mono">
                           <span>👥 3,450 Online</span>
-                          <span className="text-purple-600 font-bold group-hover:underline">Play Now →</span>
+                          <span className="text-purple-600 font-bold group-hover:underline">
+                            Play Now →
+                          </span>
                         </div>
                       </div>
-
                     </div>
                   ) : (
                     /* PLAYABLE ACTIVE GAME VIEW */
                     <div>
-                      
                       {/* 1. DICE 10 GAME VIEW */}
                       {activeGame === 'dice' && (
                         <div className="bg-white p-4 rounded-2xl border border-slate-200 text-center shadow-sm space-y-3">
@@ -1276,7 +1543,9 @@ export default function App() {
 
                           <div className="flex justify-around items-center py-3 bg-slate-50 rounded-xl border border-slate-200">
                             <div className="flex flex-col items-center">
-                              <span className="text-xs font-bold text-slate-600 mb-1">{username}</span>
+                              <span className="text-xs font-bold text-slate-600 mb-1">
+                                {username}
+                              </span>
                               <div className="w-13 h-13 bg-gradient-to-br from-amber-400 to-orange-500 rounded-xl flex items-center justify-center text-2xl text-white font-black shadow border-2 border-white">
                                 {diceState.playerRoll !== null ? diceState.playerRoll : '?'}
                               </div>
@@ -1293,12 +1562,19 @@ export default function App() {
                           </div>
 
                           {diceState.result && (
-                            <div className={`p-2 rounded-xl font-extrabold text-xs ${
-                              diceState.result === 'MENANG' ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' :
-                              diceState.result === 'KALAH' ? 'bg-rose-100 text-rose-800 border border-rose-300' : 'bg-slate-100 text-slate-800'
-                            }`}>
-                              {diceState.result === 'MENANG' && `🎉 Menang +Rp ${diceState.bet.toLocaleString()}!`}
-                              {diceState.result === 'KALAH' && `😭 Kalah -Rp ${diceState.bet.toLocaleString()}`}
+                            <div
+                              className={`p-2 rounded-xl font-extrabold text-xs ${
+                                diceState.result === 'MENANG'
+                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                                  : diceState.result === 'KALAH'
+                                    ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                                    : 'bg-slate-100 text-slate-800'
+                              }`}
+                            >
+                              {diceState.result === 'MENANG' &&
+                                `🎉 Menang +Rp ${diceState.bet.toLocaleString()}!`}
+                              {diceState.result === 'KALAH' &&
+                                `😭 Kalah -Rp ${diceState.bet.toLocaleString()}`}
                               {diceState.result === 'SERI' && '🤝 Seri!'}
                             </div>
                           )}
@@ -1309,12 +1585,14 @@ export default function App() {
                               {[100, 500, 1000, 5000].map((amt) => (
                                 <button
                                   key={amt}
-                                  onClick={() => setDiceState(p => ({ ...p, bet: amt }))}
+                                  onClick={() => setDiceState((p) => ({ ...p, bet: amt }))}
                                   className={`px-2.5 py-1 rounded-lg text-xs font-bold transition ${
-                                    diceState.bet === amt ? 'bg-orange-500 text-white shadow' : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
+                                    diceState.bet === amt
+                                      ? 'bg-orange-500 text-white shadow'
+                                      : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
                                   }`}
                                 >
-                                  {amt >= 1000 ? `${amt/1000}k` : amt}
+                                  {amt >= 1000 ? `${amt / 1000}k` : amt}
                                 </button>
                               ))}
                             </div>
@@ -1339,9 +1617,13 @@ export default function App() {
 
                           <div className="flex justify-around items-center py-4 bg-cyan-50/50 rounded-xl border border-cyan-100">
                             <div className="flex flex-col items-center">
-                              <span className="text-xs font-bold text-slate-600 mb-1">{username}</span>
+                              <span className="text-xs font-bold text-slate-600 mb-1">
+                                {username}
+                              </span>
                               <div className="w-14 h-20 bg-gradient-to-br from-cyan-600 to-teal-700 rounded-xl flex flex-col items-center justify-center text-white font-black shadow-md border-2 border-white">
-                                <span className="text-xl">{lowCardState.playerCard !== null ? lowCardState.playerCard : '?'}</span>
+                                <span className="text-xl">
+                                  {lowCardState.playerCard !== null ? lowCardState.playerCard : '?'}
+                                </span>
                                 <span className="text-[10px]">♠</span>
                               </div>
                             </div>
@@ -1351,19 +1633,28 @@ export default function App() {
                             <div className="flex flex-col items-center">
                               <span className="text-xs font-bold text-slate-600 mb-1">Bot</span>
                               <div className="w-14 h-20 bg-gradient-to-br from-slate-700 to-slate-900 rounded-xl flex flex-col items-center justify-center text-white font-black shadow-md border-2 border-white">
-                                <span className="text-xl">{lowCardState.botCard !== null ? lowCardState.botCard : '?'}</span>
+                                <span className="text-xl">
+                                  {lowCardState.botCard !== null ? lowCardState.botCard : '?'}
+                                </span>
                                 <span className="text-[10px]">♦</span>
                               </div>
                             </div>
                           </div>
 
                           {lowCardState.result && (
-                            <div className={`p-2 rounded-xl font-extrabold text-xs ${
-                              lowCardState.result === 'MENANG' ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' :
-                              lowCardState.result === 'KALAH' ? 'bg-rose-100 text-rose-800 border border-rose-300' : 'bg-slate-100 text-slate-800'
-                            }`}>
-                              {lowCardState.result === 'MENANG' && `🎉 Kartumu Lebih Rendah! Menang +Rp ${lowCardState.bet.toLocaleString()}!`}
-                              {lowCardState.result === 'KALAH' && `😭 Kartumu Lebih Tinggi/Sama! Kalah -Rp ${lowCardState.bet.toLocaleString()}`}
+                            <div
+                              className={`p-2 rounded-xl font-extrabold text-xs ${
+                                lowCardState.result === 'MENANG'
+                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                                  : lowCardState.result === 'KALAH'
+                                    ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                                    : 'bg-slate-100 text-slate-800'
+                              }`}
+                            >
+                              {lowCardState.result === 'MENANG' &&
+                                `🎉 Kartumu Lebih Rendah! Menang +Rp ${lowCardState.bet.toLocaleString()}!`}
+                              {lowCardState.result === 'KALAH' &&
+                                `😭 Kartumu Lebih Tinggi/Sama! Kalah -Rp ${lowCardState.bet.toLocaleString()}`}
                               {lowCardState.result === 'SERI' && '🤝 Nilai Kartu Sama (Seri)!'}
                             </div>
                           )}
@@ -1397,26 +1688,34 @@ export default function App() {
                               </p>
 
                               <div className="space-y-2">
-                                {quizQuestions[quizState.currentQuestion].options.map((opt, oIdx) => (
-                                  <button
-                                    key={oIdx}
-                                    onClick={() => handleAnswerQuiz(oIdx)}
-                                    className="w-full text-left px-3.5 py-2.5 bg-white hover:bg-cyan-50 border border-slate-200 hover:border-cyan-400 rounded-xl font-medium text-xs text-slate-700 transition"
-                                  >
-                                    {String.fromCharCode(65 + oIdx)}. {opt}
-                                  </button>
-                                ))}
+                                {quizQuestions[quizState.currentQuestion].options.map(
+                                  (opt, oIdx) => (
+                                    <button
+                                      key={oIdx}
+                                      onClick={() => handleAnswerQuiz(oIdx)}
+                                      className="w-full text-left px-3.5 py-2.5 bg-white hover:bg-cyan-50 border border-slate-200 hover:border-cyan-400 rounded-xl font-medium text-xs text-slate-700 transition"
+                                    >
+                                      {String.fromCharCode(65 + oIdx)}. {opt}
+                                    </button>
+                                  ),
+                                )}
                               </div>
                             </div>
                           ) : (
                             <div className="text-center py-4 space-y-3">
                               <Trophy className="w-10 h-10 text-amber-500 mx-auto" />
-                              <h4 className="font-extrabold text-sm text-slate-800">Kuis Selesai!</h4>
+                              <h4 className="font-extrabold text-sm text-slate-800">
+                                Kuis Selesai!
+                              </h4>
                               <p className="text-xs text-slate-600">
-                                Total Skor Kamu: <span className="font-bold text-emerald-600">{quizState.score} / 100</span>
+                                Total Skor Kamu:{' '}
+                                <span className="font-bold text-emerald-600">
+                                  {quizState.score} / 100
+                                </span>
                               </p>
                               <p className="text-[11px] bg-emerald-50 text-emerald-800 p-2 rounded-xl border border-emerald-200 font-semibold">
-                                Hadiah Rp {(quizState.score * 20).toLocaleString()} telah ditambahkan ke saldo kreditmu!
+                                Hadiah Rp {(quizState.score * 20).toLocaleString()} telah
+                                ditambahkan ke saldo kreditmu!
                               </p>
                               <button
                                 onClick={handleResetQuiz}
@@ -1451,14 +1750,14 @@ export default function App() {
                             disabled={wheelState.isSpinning}
                             className="w-full py-2.5 bg-gradient-to-r from-purple-600 to-pink-600 text-white font-extrabold rounded-xl shadow active:scale-95 disabled:opacity-50 text-xs tracking-wider transition"
                           >
-                            {wheelState.isSpinning ? 'Menumputar Roda...' : 'PUTAR SEKARANG (GRATIS)'}
+                            {wheelState.isSpinning
+                              ? 'Menumputar Roda...'
+                              : 'PUTAR SEKARANG (GRATIS)'}
                           </button>
                         </div>
                       )}
-
                     </div>
                   )}
-
                 </div>
               )}
 
@@ -1474,7 +1773,10 @@ export default function App() {
                         onChange={(e) => setStatusText(e.target.value)}
                         className="flex-1 text-xs border border-cyan-300 rounded-lg px-2.5 py-1.5 bg-white focus:outline-none"
                       />
-                      <button onClick={() => triggerFx('msg')} className="bg-cyan-700 hover:bg-cyan-800 text-white px-3.5 py-1.5 rounded-lg font-bold text-[10px] transition">
+                      <button
+                        onClick={() => triggerFx('msg')}
+                        className="bg-cyan-700 hover:bg-cyan-800 text-white px-3.5 py-1.5 rounded-lg font-bold text-[10px] transition"
+                      >
                         Post
                       </button>
                     </div>
@@ -1486,7 +1788,9 @@ export default function App() {
                         <span className="text-cyan-700">@reason008</span>
                         <span className="text-[9px] text-slate-400">10m ago</span>
                       </div>
-                      <p className="text-slate-600 mt-1">Lagi seru nih di room #sampit_terindah, gabung yuk! 🥚🎁</p>
+                      <p className="text-slate-600 mt-1">
+                        Lagi seru nih di room #sampit_terindah, gabung yuk! 🥚🎁
+                      </p>
                     </div>
                     <div className="p-3 text-xs">
                       <div className="flex justify-between items-center font-bold text-slate-800">
@@ -1502,7 +1806,6 @@ export default function App() {
               {/* 5. TAB OBROLAN DUAL CHATROOM & PM */}
               {(activeTabObject.type === 'chatroom' || activeTabObject.type === 'pm') && (
                 <div className="flex-1 flex flex-col bg-white">
-                  
                   {/* Sub-Header Chat */}
                   <div className="bg-slate-100 px-3 py-2 border-b border-slate-200 flex items-center justify-between text-xs">
                     <div className="flex items-center gap-1.5 min-w-0 font-bold text-slate-800">
@@ -1531,19 +1834,25 @@ export default function App() {
                           </p>
                         ) : msg.isBot ? (
                           <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5">
-                            <span className="font-bold text-emerald-700 text-[11px]">🤖 {msg.sender}: </span>
+                            <span className="font-bold text-emerald-700 text-[11px]">
+                              🤖 {msg.sender}:{' '}
+                            </span>
                             <span className="text-slate-800">{msg.text}</span>
                           </div>
                         ) : (
                           <div className="flex flex-col">
                             <div className="flex items-baseline justify-between">
-                              <span className={`font-bold text-[11px] ${msg.sender === username ? 'text-orange-600' : 'text-cyan-800'}`}>
+                              <span
+                                className={`font-bold text-[11px] ${msg.sender === username ? 'text-orange-600' : 'text-cyan-800'}`}
+                              >
                                 {msg.sender}:
                               </span>
                               {msg.time && (
                                 <span className="text-[9px] text-slate-400 font-mono flex items-center gap-1">
                                   {msg.time}
-                                  {msg.sender === username && <CheckCheck className="w-3 h-3 text-cyan-600" />}
+                                  {msg.sender === username && (
+                                    <CheckCheck className="w-3 h-3 text-cyan-600" />
+                                  )}
                                 </span>
                               )}
                             </div>
@@ -1585,26 +1894,33 @@ export default function App() {
                       </div>
 
                       <div className="grid grid-cols-4 gap-1.5">
-                        {emoticons.filter(e => e.category === pickerTab).map((emo, i) => (
-                          <button
-                            key={i}
-                            type="button"
-                            onClick={() => {
-                              setChatInput(prev => prev + ' ' + emo.code);
-                              setShowPicker(false);
-                            }}
-                            className="bg-white p-1.5 rounded-lg border border-slate-300 hover:bg-cyan-50 flex items-center justify-center gap-1 text-xs shadow-sm transition"
-                          >
-                            <span>{emo.symbol}</span>
-                            <span className="text-[9px] text-slate-500 font-mono">{emo.code}</span>
-                          </button>
-                        ))}
+                        {emoticons
+                          .filter((e) => e.category === pickerTab)
+                          .map((emo, i) => (
+                            <button
+                              key={i}
+                              type="button"
+                              onClick={() => {
+                                setChatInput((prev) => prev + ' ' + emo.code);
+                                setShowPicker(false);
+                              }}
+                              className="bg-white p-1.5 rounded-lg border border-slate-300 hover:bg-cyan-50 flex items-center justify-center gap-1 text-xs shadow-sm transition"
+                            >
+                              <span>{emo.symbol}</span>
+                              <span className="text-[9px] text-slate-500 font-mono">
+                                {emo.code}
+                              </span>
+                            </button>
+                          ))}
                       </div>
                     </div>
                   )}
 
                   {/* Form Pesan */}
-                  <form onSubmit={handleSendMessage} className="p-2 bg-slate-200 border-t border-slate-300 flex items-center gap-1.5">
+                  <form
+                    onSubmit={handleSendMessage}
+                    className="p-2 bg-slate-200 border-t border-slate-300 flex items-center gap-1.5"
+                  >
                     <button
                       type="button"
                       onClick={() => setShowPicker(!showPicker)}
@@ -1628,17 +1944,12 @@ export default function App() {
                       Kirim
                     </button>
                   </form>
-
                 </div>
               )}
-
             </div>
-
           </div>
         )}
-
       </div>
-
     </div>
   );
 }
