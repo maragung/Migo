@@ -144,10 +144,6 @@
   /* layout: content never stretches edge-to-edge on a monitor */
   --content-max: 1280px;
   --panel-max: 640px;
-  /* The rail is an icon rail at every width: 56px of navigation, never a 240px column — the
-   * conversations are the product, and they keep the screen. */
-  --rail-w: 56px;
-  --rail-w-compact: 56px;
 }
 
 [data-theme='dark'] {
@@ -535,12 +531,6 @@ main {
 
 /* --- app shell --- */
 
-.shell {
-  display: grid;
-  grid-template-columns: 340px 1fr;
-  height: 100%;
-  overflow: hidden;
-}
 .sidebar {
   border-right: 1px solid var(--border);
   background: var(--panel);
@@ -563,195 +553,321 @@ main {
   overflow: hidden;
 }
 
-/* --- the app shell: an icon rail, a mobile header, a bottom bar --- */
+/* --- the app shell: a tab strip, a profile banner, the body --- */
 
 /*
- * One grid, two compositions. Wide screens are a two-column grid (icon rail + body); phones are
- * a three-row grid (header, body, bottom bar) with the rail hidden. The rail is an *icon* rail
- * everywhere — the spec's messenger identity, not a SaaS sidebar — with labels revealed on hover
- * and tooltips always.
+ * The v0.9.0 shell (docs/design/new-client-ui.tsx) is a column: the teal tab strip, the orange
+ * profile banner, the body — worn identically at every width, because the reference's mobile
+ * view and PC view are the same model at different widths. The strip scrolls horizontally when
+ * the open chats outgrow it; nothing hides at any size.
  */
 .app {
-  display: grid;
-  grid-template-columns: var(--rail-w) minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   height: 100%;
   overflow: hidden;
 }
 
-/*
- * The rail: brand, the FRIENDS|CHATS|ROOMS trio, then the rest below a divider, then the foot.
- * Fixed at 56px; a hovered button slides its label out over the body as an overlay pill rather
- * than pushing the rail wider, so nothing in the content ever reflows while a pointer browses.
- */
-.rail {
-  grid-column: 1;
-  grid-row: 1;
+/* The strip: the reference's teal #00838F bar, chips rounded and scrollable. */
+.tab-strip {
   display: flex;
-  flex-direction: column;
-  min-height: 0;
-  border-right: 1px solid var(--border);
-  background: var(--panel);
-  z-index: var(--z-sticky);
+  align-items: stretch;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--nav-bg);
+  border-bottom: 1px solid color-mix(in srgb, var(--bg) 35%, var(--nav-bg));
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex-shrink: 0;
 }
-.rail-trio,
-.rail-nav,
-.rail-foot {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 4px;
+.tab-strip::-webkit-scrollbar {
+  display: none;
 }
-.rail-trio {
-  padding-top: 2px;
-}
-.rail-nav {
-  overflow-y: auto;
-  min-height: 0;
-  flex: 1;
-}
-.rail-divider {
-  height: 1px;
-  margin: 6px 10px;
-  background: var(--border);
-}
-.rail-btn,
-.rail-btn-brand {
-  position: relative;
-  display: flex;
+.tab-chip {
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 44px;
-  height: 44px;
+  gap: 6px;
+  padding: 6px 10px;
   border: none;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--text-dim);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg) 20%, transparent);
+  color: color-mix(in srgb, #ffffff 82%, transparent);
+  font-size: var(--fs-body-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
   transition:
-    color var(--motion-fast) var(--ease-standard),
-    background var(--motion-fast) var(--ease-standard);
+    background var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
 }
-.rail-btn-brand {
-  color: var(--accent);
-  margin: 4px auto 2px;
+.tab-chip:hover {
+  background: color-mix(in srgb, var(--bg) 32%, transparent);
+  color: #ffffff;
 }
-.rail-btn:hover,
-.rail-btn-brand:hover {
-  color: var(--text);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+.tab-chip:focus-visible {
+  outline: 1px solid var(--accent-bright);
+  outline-offset: 1px;
 }
-.rail-btn:focus-visible,
-.rail-btn-brand:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: -1px;
+/* The current tab: the brighter #00ACC1 teal over the orange underline — the reference's
+ * pairing, carried by an inset shadow so it rides the rounded corners. */
+.tab-chip.active {
+  background: var(--accent-bright);
+  color: #ffffff;
+  font-weight: 700;
+  box-shadow: inset 0 -2px 0 var(--banner-b);
 }
-/* The current place: a filled accent circle — the reference rail's active mark, with the icon
- * riding on the fill in the contrast ink. */
-.rail-btn.active {
-  color: var(--accent-contrast);
-  background: var(--accent);
-  box-shadow: var(--glow);
-}
-.rail-btn-icon {
+.tab-chip-icon {
   display: inline-flex;
   flex-shrink: 0;
 }
-/* The hover label: an overlay pill to the button's right, over the body, never pushing layout. */
-.rail-btn-label {
-  display: none;
-}
-.rail-btn:hover .rail-btn-label,
-.rail-btn-brand:hover .rail-btn-label {
-  display: block;
-  position: absolute;
-  left: calc(100% + 8px);
-  top: 50%;
-  transform: translateY(-50%);
-  padding: 3px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--panel-overlay);
-  color: var(--text);
-  font-size: var(--fs-body-sm);
-  font-weight: 600;
-  white-space: nowrap;
-  box-shadow: var(--shadow);
-  z-index: var(--z-dropdown);
-}
-.rail-foot {
-  border-top: 1px solid var(--border);
-  padding-bottom: 6px;
-}
-.rail-user {
-  position: relative;
-  display: flex;
+/* The chip's close control: a quiet glyph inside the chip's own hit area. */
+.tab-close {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
-  margin: 0 auto;
-  padding: 0;
-  border: none;
+  width: 18px;
+  height: 18px;
+  margin-right: -4px;
   border-radius: 999px;
-  background: transparent;
-  transition: background var(--motion-fast) var(--ease-standard);
+  color: inherit;
+  opacity: 0.7;
 }
-.rail-user:hover {
-  background: var(--accent-soft);
+.tab-close:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.22);
 }
-.rail-user:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: -1px;
+
+/*
+ * The banner: the orange-to-amber gradient that owns the account — avatar with its menu, the
+ * name with a presence dot, the status line, the coin chip, the theme control.
+ */
+.profile-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  background: var(--banner-gradient);
+  color: var(--banner-ink);
+  border-bottom: 1px solid var(--banner-a);
+  flex-shrink: 0;
 }
-.rail-user.active {
-  background: var(--accent);
-  box-shadow: var(--glow);
+.banner-menu-anchor {
+  position: relative;
 }
-.rail-user-name {
-  display: none;
+.banner-avatar {
+  display: inline-flex;
+  padding: 2px;
+  border: 2px solid rgba(255, 255, 255, 0.65);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-standard);
 }
-.rail-user:hover .rail-user-name {
-  display: block;
+.banner-avatar:hover {
+  border-color: #ffffff;
+}
+.banner-avatar:focus-visible {
+  outline: 1px solid #ffffff;
+  outline-offset: 2px;
+}
+.banner-menu {
   position: absolute;
-  left: calc(100% + 8px);
-  top: 50%;
-  transform: translateY(-50%);
-  padding: 3px 10px;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 220px;
+  padding: 6px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: 12px;
   background: var(--panel-overlay);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  z-index: var(--z-dropdown);
+}
+.banner-menu-head {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.banner-menu-name {
+  margin: 0;
+  font-size: var(--fs-body-sm);
+  font-weight: 700;
+  color: var(--text);
+}
+.banner-menu-sub {
+  margin: 0;
+  font-size: var(--fs-meta);
+  color: var(--text-faint);
+}
+.banner-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
   color: var(--text);
   font-size: var(--fs-body-sm);
   font-weight: 600;
+  text-align: left;
+}
+.banner-menu-item:hover {
+  background: var(--accent-soft);
+}
+.banner-menu-item svg {
+  color: var(--accent);
+}
+.banner-menu-item.banner-menu-signout {
+  color: var(--danger);
+  font-weight: 700;
+}
+.banner-menu-item.banner-menu-signout svg {
+  color: var(--danger);
+}
+.banner-menu-item.banner-menu-signout:hover {
+  background: var(--danger-soft);
+}
+.banner-menu-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+.banner-id {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.banner-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-body-sm);
+  font-weight: 700;
   white-space: nowrap;
-  max-width: 160px;
   overflow: hidden;
   text-overflow: ellipsis;
-  box-shadow: var(--shadow);
-  z-index: var(--z-dropdown);
+}
+.banner-presence {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--positive);
+  flex-shrink: 0;
+}
+.banner-status {
+  font-size: var(--fs-meta);
+  color: color-mix(in srgb, #ffffff 78%, var(--banner-a));
+  font-style: italic;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.banner-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.18);
+  color: #ffe3bd;
+  font-size: var(--fs-meta);
+  font-weight: 700;
+}
+.banner-actions .theme-toggle {
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.4);
+  color: #ffffff;
 }
 
-/* The mobile header and bottom bar exist only under 768px (rules near the end of the sheet). */ /* The mobile header and bottom bar exist only under 768px (rules near the end of the sheet). */
-.mobile-header,
-.bottom-nav {
-  display: none;
-}
-
-/* The body hosts the current section. */
+/* The body hosts the active tab. */
 .app-body {
-  grid-column: 2;
-  grid-row: 1;
   min-width: 0;
   min-height: 0;
-  height: 100%;
+  flex: 1;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
-.app-body > .shell,
-.app-body > .panel {
+.app-body > .panel,
+.app-body > .chats-pane,
+.app-body > .thread-area {
   flex: 1;
   min-height: 0;
 }
+
+/* The chats list as a tab: the sidebar pane, centred and edged like any panel. */
+.chats-pane {
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+.chats-pane .sidebar {
+  flex: 1;
+  min-height: 0;
+  border-right: none;
+}
+
+/* --- the Games tab: the catalogue as cards --- */
+
+.games-lede {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-body-sm);
+}
+.games-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.game-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+}
+.game-card:hover {
+  border-color: var(--accent-border);
+}
+.game-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  font-size: 18px;
+}
+.game-card-name {
+  font-weight: 700;
+  font-size: var(--fs-body);
+}
+.game-card-range {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: var(--fs-meta);
+}
+
 
 /* --- section panels (home, rooms, space, friends, alerts, search, wallet, profile, settings) --- */
 
@@ -2358,131 +2474,23 @@ main {
  * needs.
  */
 @media (max-width: 768px) {
-  .app {
-    grid-template-columns: minmax(0, 1fr);
-    /* The bottom row sizes itself: a slot is an icon, a label, and the 44px touch target,
-     * which together stand taller than any fixed 52px row could hold without clipping. */
-    grid-template-rows:
-      calc(44px + env(safe-area-inset-top, 0px))
-      minmax(0, 1fr)
-      auto;
-  }
-  .rail {
-    display: none;
-  }
-  .mobile-header {
-    display: flex;
-    grid-column: 1;
-    grid-row: 1;
-    align-items: center;
-    gap: 8px;
-    padding: 0 12px;
-    padding-top: env(safe-area-inset-top, 0px);
-    border-bottom: 1px solid var(--border);
-    background: var(--nav-bg, var(--panel));
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
-  }
-  /* With a thread open the header folds away; the two remaining rows are the body and the bar,
-   * and the bar must land in the SECOND row — its ordinary third-row assignment would fall off
-   * the two-row grid into an implicit row and out of the viewport. */
-  .app.app-thread-open .mobile-header {
-    display: none;
-  }
-  .app.app-thread-open {
-    grid-template-rows: minmax(0, 1fr) auto;
-  }
-  .app.app-thread-open .app-body {
-    grid-row: 1;
-  }
-  .app.app-thread-open .bottom-nav {
-    grid-row: 2;
-  }
-  .mobile-header .brand-mark {
-    display: inline-flex;
-    color: var(--accent);
-  }
-  .mobile-brand-name {
-    font-size: 15px;
-    font-weight: 700;
-    letter-spacing: 0.2px;
-  }
-  .mobile-header-actions {
-    display: flex;
-    align-items: center;
+  /* The shell is one model at every width; on a phone the strip only tightens its padding so
+   * the chips that matter stay visible, and the banner's status line is the first thing to go
+   * when the width runs out. */
+  .tab-strip {
     gap: 4px;
-    margin-left: auto;
+    padding: 5px 6px;
   }
-  .mobile-header-avatar {
-    display: inline-flex;
-    align-items: center;
-    border: none;
-    padding: 2px;
-    border-radius: 999px;
-    background: transparent;
+  .tab-chip {
+    padding: 5px 8px;
   }
-  .mobile-header-avatar:focus-visible {
-    outline: 1px solid var(--accent);
-  }
-  .bottom-nav {
-    display: flex;
-    grid-column: 1;
-    grid-row: 3;
-    align-items: stretch;
-    justify-content: space-around;
-    border-top: 1px solid var(--border);
-    background: var(--panel);
-    padding-bottom: env(safe-area-inset-bottom, 0px);
-  }
-  /* The whole button is the touch target — 44px minimum — and the icon + label ride inside it,
-   * so the bar's height follows its content rather than clipping to a fixed row. */
-  .bottom-nav-btn {
-    flex: 1;
-    min-height: var(--touch);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 3px;
-    padding: 6px 8px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-micro);
-    font-weight: 600;
-  }
-  .bottom-nav-btn:hover {
-    color: var(--text);
-  }
-  .bottom-nav-btn:focus-visible {
-    outline: 1px solid var(--accent);
-    outline-offset: -2px;
-  }
-  .bottom-nav-btn.active {
-    color: var(--accent);
-  }
-  .bottom-nav-icon {
-    display: inline-flex;
-    line-height: 1;
-  }
-  .app-body {
-    grid-column: 1;
-    grid-row: 2;
-  }
-  .shell {
-    grid-template-columns: 1fr;
-  }
-  .shell .sidebar {
-    display: flex;
-  }
-  .shell .thread-area {
+  .banner-status {
     display: none;
   }
-  .shell.has-thread .sidebar {
-    display: none;
-  }
-  .shell.has-thread .thread-area {
-    display: flex;
+  .chats-pane {
+    max-width: none;
+    border-left: none;
+    border-right: none;
   }
   .thread-header .back {
     display: inline-grid;
@@ -3333,47 +3341,6 @@ button.activity-row-btn:focus-visible {
   padding: 0 14px calc(14px + env(safe-area-inset-bottom, 0px));
   overflow-y: auto;
   min-height: 0;
-}
-.sheet-menu {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.sheet-menu-btn {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 48px;
-  padding: 10px 12px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text);
-  font-size: var(--fs-body);
-  font-weight: 600;
-  text-align: left;
-}
-.sheet-menu-btn:hover {
-  background: var(--accent-soft);
-}
-.sheet-menu-btn:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: -1px;
-}
-.sheet-menu-btn.active {
-  color: var(--accent);
-}
-.sheet-menu-icon {
-  display: inline-flex;
-  color: var(--text-dim);
-}
-.sheet-menu-btn.active .sheet-menu-icon {
-  color: var(--accent);
-}
-.sheet-menu-current {
-  display: inline-flex;
-  margin-left: auto;
-  color: var(--accent);
 }
 
 /* On tablet/desktop widths the sheet is a small centred dialog instead. */
