@@ -266,10 +266,12 @@ private fun Composer(
                         color = MaterialTheme.colorScheme.onPrimary,
                     )
                 } else {
-                    // A paper plane: the send mark the whole product draws, without an icon
-                    // dependency (Canvas strokes, like the bottom bar's glyphs).
+                    // A paper plane in the button's own content ink: the send mark the whole
+                    // product draws, without an icon dependency (Canvas strokes, like the bottom
+                    // bar's glyphs).
+                    val sendInk = MaterialTheme.colorScheme.onPrimary
                     Canvas(modifier = Modifier.size(22.dp)) {
-                        drawGlyphSend(color)
+                        drawGlyphSend(sendInk)
                     }
                 }
             }
