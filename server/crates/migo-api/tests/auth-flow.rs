@@ -795,9 +795,6 @@ async fn repeated_sign_in_failures_lock_the_account_on_a_climbing_ladder() {
 
 /// A register without a captcha is refused once the gate is engaged.
 ///
-
-/// A register without a captcha is refused once the gate is engaged.
-///
 /// The captcha gate is tripped by a sign-in failure: a wrong password on
 /// a known identifier from a network records one failure past the
 /// threshold of one, and the next attempt from the same network has to
