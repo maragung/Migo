@@ -45,7 +45,8 @@ data class ServerEndpoint(
     val port: Int,
     /** The realtime gateway port. Defaults to [port] + 1. */
     val gatewayPort: Int,
-    /** The realtime transport. WebSocket is the wired one; QUIC is shown but not yet carried. */
+    /** The realtime transport. WebSocket is the default; QUIC is a real second option whose wire
+     *  path this build still carries over WebSocket. */
     val transport: Transport,
     /** The TLS posture of the realtime transport. */
     val gatewayScheme: GatewayScheme,
@@ -56,8 +57,16 @@ data class ServerEndpoint(
         require(host.isNotBlank()) { "host is required" }
         require(port in 1..65535) { "rest port is out of range (1..65535): $port" }
         require(gatewayPort in 1..65535) { "gateway port is out of range (1..65535): $gatewayPort" }
-        require(transport == Transport.WebSocket) {
-            "only WebSocket is wired; QUIC support is coming soon"
+        // The transport and its scheme must agree: a WebSocket carries WS/WSS, QUIC carries
+        // QUIC/QUIC-TLS. This is the same pairing the web and desktop forms enforce, so a record
+        // that validates here is one every client would accept.
+        when (transport) {
+            Transport.WebSocket -> require(
+                gatewayScheme == GatewayScheme.Ws || gatewayScheme == GatewayScheme.Wss,
+            ) { "WebSocket transport requires WS or WSS scheme" }
+            Transport.Quic -> require(
+                gatewayScheme == GatewayScheme.Quic || gatewayScheme == GatewayScheme.QuicTls,
+            ) { "QUIC transport requires QUIC or QUIC-TLS scheme" }
         }
     }
 
@@ -216,13 +225,14 @@ data class ServerEndpoint(
 
 /** The realtime transport the user picked. */
 enum class Transport {
-    /** WebSocket, the only transport this build actually carries on the wire. */
+    /** WebSocket, the default transport and the one this build carries on the wire. */
     WebSocket,
 
     /**
-     * QUIC. Shown in the form so the user can see the choice; selecting it is blocked
-     * because the path is not yet built. A future commit that wires QUIC changes this
-     * enum, not the form.
+     * QUIC, the realtime transport's second option ("opsi kedua"): negotiated via the QUIC feature
+     * bit and served by the optional server-side QUIC listener when a deployment enables it. A user
+     * can select it and the choice persists as typed. This build has no Kotlin QUIC runtime, so its
+     * wire path still connects over WebSocket; a QUIC-capable client honours the persisted endpoint.
      */
     Quic,
 }
@@ -234,12 +244,25 @@ enum class GatewayScheme {
 
     /** WebSocket over TLS. The production form. */
     Wss,
+
+    /**
+     * Plain QUIC. The realtime transport's second option, served by the optional server-side QUIC
+     * listener when a deployment enables it. Both QUIC postures share the `quic` URL prefix -- the
+     * TLS posture rides in ALPN, not the URL.
+     */
+    Quic,
+
+    /** QUIC over TLS. The second option's production posture; shares the `quic` URL prefix with [Quic]. */
+    QuicTls,
     ;
 
     /** The URL scheme prefix, taking the value's own posture only. */
     fun prefix(): String = when (this) {
         Ws -> "ws"
         Wss -> "wss"
+        // Both QUIC variants are spelled `quic` at the URL level; the TLS posture is expressed via
+        // ALPN, not the URL. Mirrors web/desktop.
+        Quic, QuicTls -> "quic"
     }
 }
 

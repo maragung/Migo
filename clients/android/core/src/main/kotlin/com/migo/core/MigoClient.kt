@@ -184,8 +184,10 @@ val DEFAULT_REPLENISH_POLICY = PrekeyReplenishPolicy(low = 16, batch = 64)
  * behaviour on the strength of it. [Feature.MEDIA_UPLOAD] and [Feature.VOICE_MESSAGE] are absent because
  * their upload path is still specification (migo.md sections 167 and 168) -- this client can decode a
  * media or voice-note reference in a message, which is a different thing from being able to produce one.
- * [Feature.BOTS], [Feature.TRANSLATION], [Feature.ECONOMY] and [Feature.QUIC] are absent for the same
- * reason, and [Feature.TRACING] because a mobile client has no trace sink to send to.
+ * [Feature.BOTS], [Feature.TRANSLATION] and [Feature.ECONOMY] are absent for the same reason;
+ * [Feature.QUIC] because this build has no Kotlin QUIC runtime and connects over WebSocket even when a
+ * QUIC endpoint is chosen, so announcing the bit would be a promise the wire cannot keep; and
+ * [Feature.TRACING] because a mobile client has no trace sink to send to.
  *
  * The negotiated set is [com.migo.core.protocol.Welcome.features], which is the *intersection*. Nothing
  * should read this constant to decide what a live session can do.

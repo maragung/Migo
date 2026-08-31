@@ -324,7 +324,25 @@ private fun ServerDisclosure(
                 TransportChoice(
                     value = transport,
                     enabled = enabled,
-                    onChange = { transport = it },
+                    onChange = { chosen ->
+                        transport = chosen
+                        // Pair the scheme with the new transport, the same rule the web form's
+                        // updateTransport uses: QUIC defaults to plain/TLS by the loopback rule,
+                        // WebSocket restores the WS/WSS pair for the host.
+                        val loopback = ServerEndpoint.isLoopbackHost(host.trim())
+                        when (chosen) {
+                            Transport.Quic -> {
+                                gatewayScheme =
+                                    if (loopback) GatewayScheme.Quic else GatewayScheme.QuicTls
+                                restScheme = if (loopback) RestScheme.Http else RestScheme.Https
+                            }
+                            Transport.WebSocket -> {
+                                val (gateway, rest) = ServerEndpoint.defaultSchemesForHost(host.trim())
+                                gatewayScheme = gateway
+                                restScheme = rest
+                            }
+                        }
+                    },
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
@@ -343,7 +361,8 @@ private fun ServerDisclosure(
                 if (transport == Transport.Quic) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "QUIC support is coming soon. Pick WebSocket to sign in today.",
+                        text = "QUIC is a second option; it needs a server with the QUIC listener " +
+                            "enabled. This build still connects over WebSocket.",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -398,9 +417,10 @@ private fun serverSummary(host: String, port: String, gatewayPort: String): Stri
 }
 
 /**
- * The transport picker: WebSocket wired, QUIC visible but disabled. Mirrors the web form's
- * behaviour exactly, so a user who picked "QUIC (coming soon)" on the web and picks it on
- * Android sees the same label.
+ * The transport picker: WebSocket (the default) and QUIC (the second option). Mirrors the web
+ * form, so a user who picked "QUIC" on the web and picks it on Android sees the same choice. Both
+ * are selectable and the choice persists; the inline note in [ServerDisclosure] is honest that
+ * this build's wire path still connects over WebSocket.
  */
 @Composable
 private fun TransportChoice(
@@ -416,17 +436,13 @@ private fun TransportChoice(
             ) {
                 androidx.compose.material3.RadioButton(
                     selected = value == option,
-                    onClick = { if (enabled && option != Transport.Quic) onChange(option) },
-                    enabled = enabled && option != Transport.Quic,
+                    onClick = { if (enabled) onChange(option) },
+                    enabled = enabled,
                 )
                 Text(
-                    text = if (option == Transport.Quic) "QUIC (coming soon)" else "WebSocket",
+                    text = if (option == Transport.Quic) "QUIC (second option)" else "WebSocket",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = if (option == Transport.Quic) {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    } else {
-                        MaterialTheme.colorScheme.onSurface
-                    },
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
             }
         }
@@ -434,11 +450,12 @@ private fun TransportChoice(
 }
 
 /**
- * The scheme picker: HTTP for loopback, HTTPS otherwise. The gateway scheme is paired
- * with the REST one: plain HTTP for the REST plane implies plain WS for the gateway,
- * HTTPS implies WSS. The picker lets a user override either side when the deployment
- * is split (TLS terminator in front of plain migod, say), at the cost of seeing a
- * result that the dev policy would have rejected as a default.
+ * The scheme picker: HTTP for loopback, HTTPS otherwise. The gateway scheme is paired with the
+ * REST one within the chosen transport's family -- plain HTTP implies plain WS (or plain QUIC),
+ * HTTPS implies WSS (or QUIC-TLS) -- and the gateway radios show WS/WSS under WebSocket and
+ * QUIC/QUIC-TLS under QUIC. The picker lets a user override either side when the deployment is
+ * split (TLS terminator in front of plain migod, say), at the cost of seeing a result that the
+ * dev policy would have rejected as a default.
  */
 @Composable
 private fun SchemeChoice(
@@ -462,12 +479,15 @@ private fun SchemeChoice(
                         onClick = {
                             if (!enabled) return@RadioButton
                             onRest(option)
-                            // Keep the gateway scheme paired: HTTP -> WS, HTTPS -> WSS.
+                            // Keep the gateway scheme paired with the REST posture, within the
+                            // chosen transport's family: HTTPS -> the TLS side, HTTP -> the plain
+                            // side (WS/WSS for WebSocket, QUIC/QUIC-TLS for QUIC).
                             onGateway(
-                                if (option == RestScheme.Https) {
-                                    GatewayScheme.Wss
-                                } else {
-                                    GatewayScheme.Ws
+                                when (transport) {
+                                    Transport.WebSocket ->
+                                        if (option == RestScheme.Https) GatewayScheme.Wss else GatewayScheme.Ws
+                                    Transport.Quic ->
+                                        if (option == RestScheme.Https) GatewayScheme.QuicTls else GatewayScheme.Quic
                                 },
                             )
                         },
@@ -484,28 +504,40 @@ private fun SchemeChoice(
                 }
             }
         }
-        // Gateway scheme, kept paired but exposed for the reverse-proxy case.
-        if (transport == Transport.WebSocket) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                GatewayScheme.values().forEach { option ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(end = 16.dp),
-                    ) {
-                        androidx.compose.material3.RadioButton(
-                            selected = gatewayScheme == option,
-                            onClick = { if (enabled) onGateway(option) },
-                            enabled = enabled,
-                        )
-                        Text(
-                            text = if (option == GatewayScheme.Wss) "WSS" else "WS",
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    }
+        // Gateway scheme, kept paired but exposed for the reverse-proxy case. The options follow
+        // the transport: WS/WSS under WebSocket, QUIC/QUIC-TLS under QUIC (both spelled `quic` in
+        // the URL; the TLS posture rides in ALPN).
+        val gatewayOptions = when (transport) {
+            Transport.WebSocket -> listOf(GatewayScheme.Ws, GatewayScheme.Wss)
+            Transport.Quic -> listOf(GatewayScheme.Quic, GatewayScheme.QuicTls)
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            gatewayOptions.forEach { option ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(end = 16.dp),
+                ) {
+                    androidx.compose.material3.RadioButton(
+                        selected = gatewayScheme == option,
+                        onClick = { if (enabled) onGateway(option) },
+                        enabled = enabled,
+                    )
+                    Text(
+                        text = gatewaySchemeLabel(option),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
                 }
             }
         }
     }
+}
+
+/** The gateway-scheme radio label, matching the web/desktop wording. */
+private fun gatewaySchemeLabel(scheme: GatewayScheme): String = when (scheme) {
+    GatewayScheme.Ws -> "WS"
+    GatewayScheme.Wss -> "WSS"
+    GatewayScheme.Quic -> "QUIC (plain)"
+    GatewayScheme.QuicTls -> "QUIC-TLS"
 }
 
 /**
@@ -535,12 +567,9 @@ private fun buildFromDraft(
     } else {
         parsePort(gatewayPort, "gateway port")
     }
-    if (transport == Transport.Quic) {
-        // The form already disables the QUIC option, but a user who found a way to
-        // pick it (custom input, a future build that unblocks it) gets the same
-        // message the form shows.
-        throw IllegalArgumentException("QUIC support is coming soon. Pick WebSocket to sign in today.")
-    }
+    // The transport/scheme pairing is carried by the draft (the picker keeps QUIC on a QUIC
+    // scheme and WebSocket on a WS scheme); the constructor validates it and throws a message
+    // the disclosure shows verbatim if a pair somehow slipped through inconsistent.
     return ServerEndpoint(
         host = trimmedHost.lowercase(),
         port = parsedPort,

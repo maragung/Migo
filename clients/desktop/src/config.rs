@@ -2,9 +2,9 @@
 //!
 //! The shape is the same as the TypeScript SDK's `ServerEndpoint`: host, REST port, gateway port,
 //! transport (`WebSocket` or `Quic`), the realtime scheme (`Ws`, `Wss`, `Quic`, `QuicTls`), and the
-//! REST scheme (`Http`, `Https`). The transport enum has only one wired value today (WebSocket);
-//! the QUIC variants exist so the UI can show the choice and mark it "coming soon" without
-//! blocking sign-in, exactly as the web form does.
+//! REST scheme (`Http`, `Https`). The transport enum's values are `WebSocket` (the default) and
+//! `Quic` (a real second option); QUIC needs a server with its optional QUIC listener enabled, and
+//! this client still connects over WebSocket on the wire, exactly as the web form does.
 //!
 //! A self-hoster types a host and a port and picks a TLS posture. The form then derives the REST
 //! origin and the gateway WebSocket URL from the same fields, so the two endpoints can never
@@ -15,8 +15,9 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// The realtime transport the user picked. `Quic` is exposed today only so the menu can show the
-/// choice; the desktop still speaks WebSocket on the wire because the QUIC path is not yet built.
+/// The realtime transport the user picked. `Quic` is a real second option: a server advertises it
+/// via the `QUIC` feature bit only when its optional QUIC listener is enabled. The desktop persists
+/// and validates the choice, and still speaks WebSocket on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Transport {
     WebSocket,

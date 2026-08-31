@@ -10,9 +10,10 @@
  * second way to express the same thing.
  *
  * The transport and scheme enums are deliberately split: a WebSocket on `WS` is the plain-TCP dev
- * affordance, a WebSocket on `WSS` is the production form, and the QUIC pair is exposed today only so
- * the form can show the choice and mark it "coming soon". A future commit that actually carries
- * QUIC will add a real path; the form need not change because it already speaks the future pair.
+ * affordance, a WebSocket on `WSS` is the production form, and QUIC is the second realtime transport
+ * option. A server advertises QUIC via the `QUIC` feature bit only when its optional QUIC listener
+ * is enabled (a QUIC-capable host offers `FEATURE.QUIC` itself through `hello.features`). This SDK
+ * validates and persists the choice; the data path it opens is still WebSocket.
  */
 
 /** The transport the realtime socket speaks. */
@@ -275,7 +276,9 @@ export function assertValidServerEndpoint(endpoint: ServerEndpoint): void {
  */
 export function gatewaySchemePrefix(endpoint: ServerEndpoint): string {
   if (endpoint.transport === 'Quic') {
-    return endpoint.scheme === 'QuicTls' ? 'quic' : 'quic';
+    // Both QUIC schemes map to the single "quic" URL prefix: the TLS posture rides in the REST
+    // scheme, not the gateway scheme. This matches the Rust and Kotlin clients.
+    return 'quic';
   }
   return endpoint.scheme === 'Wss' ? 'wss' : 'ws';
 }

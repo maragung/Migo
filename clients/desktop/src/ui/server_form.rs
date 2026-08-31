@@ -4,10 +4,10 @@
 //! and password. A user who has opened it picks the host, port, transport and scheme, and on
 //! "Use this server" the disclosure closes and the choice becomes the new form input.
 //!
-//! The QUIC choice is a menu item that does not yet have a wired path; selecting it shows
-//! "coming soon" inline and never blocks submit. The form still accepts the choice, and the rest
-//! of the surface (REST, captcha) proceeds, so the user can finish setting up a server and try
-//! QUIC the day it actually lands.
+//! QUIC is a real second option, not a placeholder: the choice persists and is validated the same
+//! as WebSocket. Connecting over it requires a server with the QUIC listener enabled, and this
+//! client's wire path is still WebSocket. The form accepts the choice and never blocks submit, so
+//! the user can save a QUIC-capable server and the rest of the surface (REST, captcha) proceeds.
 //!
 //! The widget writes its accepted endpoint through a callback rather than mutating the caller's
 //! state directly. The caller decides whether the new value is accepted into the form state and
@@ -116,7 +116,7 @@ pub fn show(
                 if state.transport == Transport::Quic {
                     ui.label(
                         RichText::new(
-                            "QUIC support is coming soon. The form will not block; pick WebSocket to sign in today.",
+                            "QUIC is a second option; it needs a server with the QUIC listener enabled. This client still connects over WebSocket.",
                         )
                         .font(egui::FontId::proportional(font::TINY))
                         .color(colors.text_muted),
@@ -228,7 +228,7 @@ fn draw_fields(ui: &mut Ui, theme: crate::theme::Theme, state: &mut ServerFormSt
                     state.rest_scheme = pair.rest_scheme;
                 }
                 if ui
-                    .selectable_label(state.transport == Transport::Quic, "QUIC (coming soon)")
+                    .selectable_label(state.transport == Transport::Quic, "QUIC (second option)")
                     .clicked()
                 {
                     state.transport = Transport::Quic;

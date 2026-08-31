@@ -7,10 +7,10 @@
  * and password. A user who has opened it picks the host, port, transport and scheme, and on
  * "Use this server" the disclosure closes and the choice becomes the new form input.
  *
- * The QUIC choice is a menu item that does not yet have a wired path; selecting it shows
- * "coming soon" inline and never blocks submit. The form still accepts the choice, and the rest
- * of the surface (REST, captcha) proceeds, so the user can finish setting up a server and try
- * QUIC the day it actually lands.
+ * QUIC is a real second option, not a placeholder: the choice persists and is validated the same
+ * as WebSocket. Connecting over it requires a server with the QUIC listener enabled, and this
+ * client's wire path is still WebSocket. The form accepts the choice and never blocks submit, so
+ * the user can save a QUIC-capable server and the rest of the surface (REST, captcha) proceeds.
  */
 
 import { useId, useState } from 'react';
@@ -197,7 +197,8 @@ export function ServerForm({ value, onCommit }: ServerFormProps): ReactNode {
           </div>
           {draft.transport === 'Quic' ? (
             <p className="server-disclosure-note" role="status">
-              QUIC support is coming soon. The form will not block; pick WebSocket to sign in today.
+              QUIC is a second option; it needs a server with the QUIC listener enabled. This client
+              still connects over WebSocket.
             </p>
           ) : null}
           {error ? <p className="form-error">{error}</p> : null}

@@ -6,8 +6,10 @@ import com.migo.core.ConnectionState
 import com.migo.core.MigoClient
 import com.migo.core.MigoClientOptions
 import com.migo.core.domain.KeyStore
+import com.migo.core.store.GatewayScheme
 import com.migo.core.store.ServerEndpoint
 import com.migo.core.store.SessionStore
+import com.migo.core.store.Transport
 import com.migo.core.store.Vault
 import com.migo.core.store.VaultError
 import com.migo.core.wire.Id
@@ -267,7 +269,7 @@ class MigoSession private constructor(
         ): MigoClient = MigoClient.create(
             MigoClientOptions(
                 baseUrl = endpoint.restBaseUrl(),
-                gatewayUrl = endpoint.gatewayUrl(),
+                gatewayUrl = wireGatewayUrl(endpoint),
                 appVersion = appVersion,
                 osVersion = "Android ${Build.VERSION.RELEASE}",
                 deviceModel = Build.MODEL,
@@ -279,5 +281,25 @@ class MigoSession private constructor(
                 onStateChange = hooks.onState,
             ),
         )
+
+        /**
+         * The gateway URL this build actually dials.
+         *
+         * [ServerEndpoint.gatewayUrl] is the canonical address the record derives, and for a QUIC
+         * endpoint that is a `quic://` URL -- the realtime transport's second option, honoured by a
+         * QUIC-capable client. This build has no Kotlin QUIC runtime, so its wire path always
+         * connects over WebSocket: a QUIC endpoint keeps its TLS posture (QUIC-TLS -> wss, plain
+         * QUIC -> ws) but dials the WebSocket listener. The persisted record is untouched; only the
+         * socket this process opens is decided here, which is where the wire path is free to differ
+         * from the record the user typed.
+         */
+        private fun wireGatewayUrl(endpoint: ServerEndpoint): String =
+            when (endpoint.transport) {
+                Transport.WebSocket -> endpoint.gatewayUrl()
+                Transport.Quic -> {
+                    val scheme = if (endpoint.gatewayScheme == GatewayScheme.QuicTls) "wss" else "ws"
+                    "$scheme://${endpoint.host}:${endpoint.gatewayPort}/ws"
+                }
+            }
     }
 }

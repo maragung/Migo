@@ -368,22 +368,48 @@ private fun readServerEndpoint(preferences: Preferences, fallback: ServerEndpoin
         RestScheme.entries,
         ServerEndpoint.defaultSchemesForHost(resolvedHost).second,
     )
-    // A record with a Quic transport (e.g. one chosen in a newer build) silently downgrades
-    // to WebSocket here, because the wire does not yet speak QUIC and a record this build
-    // cannot honour would be worse than one the user has to change.
-    val transport = if (resolvedTransport == Transport.Quic) Transport.WebSocket else resolvedTransport
+    // QUIC is a real second option now, so a persisted QUIC transport is kept as the user typed it
+    // rather than downgraded: the record is their choice, not a promise about this socket. The wire
+    // path decides at connect time -- this build has no Kotlin QUIC runtime, so it dials WebSocket --
+    // and the stored record survives a reload unchanged. The scheme is snapped onto its transport's
+    // posture family so a partial or newer-build write can never assemble a pair the constructor
+    // rejects, the same forward-compatibility rule the enum readers follow.
+    val gatewayScheme = pairGatewaySchemeWithTransport(resolvedTransport, resolvedGatewayScheme)
     return healDeploymentEndpoint(
         ServerEndpoint(
             host = resolvedHost,
             port = resolvedPort,
             gatewayPort = resolvedGatewayPort,
-            transport = transport,
-            gatewayScheme = resolvedGatewayScheme,
+            transport = resolvedTransport,
+            gatewayScheme = gatewayScheme,
             restScheme = resolvedRestScheme,
         ),
         fallback,
     )
 }
+
+/**
+ * Snaps a gateway scheme onto the posture family its transport requires, so a read never yields a
+ * `(transport, scheme)` pair the [ServerEndpoint] constructor would reject.
+ *
+ * The scheme's own TLS posture is preserved across the swap: a plain WebSocket maps to plain QUIC,
+ * a WSS maps to QUIC-TLS, and back. A pair that already matches is returned untouched, so a record
+ * this build wrote passes through unchanged; only a partial write or a newer build's mismatched
+ * scheme is reconciled, the same forward-compatibility rule [readEnum] follows.
+ */
+private fun pairGatewaySchemeWithTransport(transport: Transport, scheme: GatewayScheme): GatewayScheme =
+    when (transport) {
+        Transport.WebSocket -> when (scheme) {
+            GatewayScheme.Ws, GatewayScheme.Wss -> scheme
+            GatewayScheme.Quic -> GatewayScheme.Ws
+            GatewayScheme.QuicTls -> GatewayScheme.Wss
+        }
+        Transport.Quic -> when (scheme) {
+            GatewayScheme.Quic, GatewayScheme.QuicTls -> scheme
+            GatewayScheme.Ws -> GatewayScheme.Quic
+            GatewayScheme.Wss -> GatewayScheme.QuicTls
+        }
+    }
 
 /**
  * Reconciles a stored endpoint with the deployment this build belongs to.

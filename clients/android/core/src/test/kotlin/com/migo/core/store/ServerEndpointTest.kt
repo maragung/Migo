@@ -229,9 +229,33 @@ class ServerEndpointTest {
     }
 
     @Test
-    fun quicTransportIsRejected() {
-        // The form hides QUIC behind a disabled radio; this test pins the data
-        // class's stance so a future refactor cannot quietly start honouring it.
+    fun quicEndpointDerivesQuicGatewayUrl() {
+        // QUIC is a real second option now: a valid QUIC endpoint constructs, and its gateway URL is
+        // spelled `quic://` -- both QUIC postures share the prefix, the TLS posture rides in ALPN.
+        val tls = ServerEndpoint(
+            host = "migo.example.com",
+            port = 8443,
+            gatewayPort = 8443,
+            transport = Transport.Quic,
+            gatewayScheme = GatewayScheme.QuicTls,
+            restScheme = RestScheme.Https,
+        )
+        assertEquals("quic://migo.example.com:8443/ws", tls.gatewayUrl())
+
+        val plain = ServerEndpoint(
+            host = "localhost",
+            port = 18080,
+            gatewayPort = 18081,
+            transport = Transport.Quic,
+            gatewayScheme = GatewayScheme.Quic,
+            restScheme = RestScheme.Http,
+        )
+        assertEquals("quic://localhost:18081/ws", plain.gatewayUrl())
+    }
+
+    @Test
+    fun quicTransportRequiresAQuicScheme() {
+        // Pairing validation, mirroring web/desktop: a QUIC transport rejects a WS scheme.
         val error = assertThrows(IllegalArgumentException::class.java) {
             ServerEndpoint(
                 host = "localhost",
@@ -243,9 +267,38 @@ class ServerEndpointTest {
             )
         }
         assertTrue(
-            "error mentions QUIC or WebSocket: ${error.message}",
-            error.message!!.contains("QUIC") || error.message!!.contains("WebSocket"),
+            "error names the QUIC schemes: ${error.message}",
+            error.message!!.contains("QUIC or QUIC-TLS"),
         )
+    }
+
+    @Test
+    fun webSocketTransportRequiresAWsScheme() {
+        // The mirror: a WebSocket transport rejects a QUIC scheme.
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            ServerEndpoint(
+                host = "localhost",
+                port = 18080,
+                gatewayPort = 18081,
+                transport = Transport.WebSocket,
+                gatewayScheme = GatewayScheme.Quic,
+                restScheme = RestScheme.Http,
+            )
+        }
+        assertTrue(
+            "error names the WS schemes: ${error.message}",
+            error.message!!.contains("WS or WSS"),
+        )
+    }
+
+    @Test
+    fun defaultsPinWebSocketAsTheTransport() {
+        // WebSocket stays the default everywhere; QUIC is opt-in only.
+        assertEquals(Transport.WebSocket, ServerEndpoint.defaultFor("localhost").transport)
+        assertEquals(Transport.WebSocket, ServerEndpoint.defaultFor("migo.example.com").transport)
+        assertEquals(Transport.WebSocket, ServerEndpoint.loopbackDefault().transport)
+        assertEquals(Transport.WebSocket, ServerEndpoint.publicDeploymentDefault().transport)
+        assertEquals(Transport.WebSocket, ServerEndpoint.internetDefault("migo.example.com").transport)
     }
 
     @Test
