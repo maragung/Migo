@@ -39,8 +39,14 @@ pub struct App {
     theme: Theme,
     net: Net,
     screen: Screen,
-    /// Which signed-in pane the top navigation bar has selected.
+    /// Which pane the tab strip has selected, when no conversation tab is active.
     place: Place,
+    /// The open conversation tabs, in open order — the strip's closable chat chips.
+    open_chats: Vec<migo_core::Id>,
+    /// The conversation whose thread is showing, when a chat tab is the active tab.
+    active_chat: Option<migo_core::Id>,
+    /// The open secondary panels, in open order — the strip's closable panel chips.
+    open_panels: Vec<Place>,
     connection: Connection,
     account: Option<Account>,
     auth: AuthState,
@@ -106,6 +112,9 @@ impl App {
             net,
             screen: Screen::Opening,
             place: Place::Chat,
+            open_chats: Vec::new(),
+            active_chat: None,
+            open_panels: Vec::new(),
             connection: Connection::Offline,
             account: None,
             auth,
@@ -170,6 +179,9 @@ impl App {
                     // graph or device list: those describe an account, and this may be a
                     // different one signing in over the same window.
                     self.place = Place::Chat;
+                    self.open_chats.clear();
+                    self.active_chat = None;
+                    self.open_panels.clear();
                     self.friends = FriendsState::default();
                     self.settings_panel = SettingsState::default();
                     self.rooms = RoomsState::default();
@@ -179,6 +191,9 @@ impl App {
                     self.wallet = WalletState::default();
                     self.activity.clear();
                     self.screen = Screen::Chat;
+                    // The banner carries the balance, so the session's first reads include the
+                    // wallet the same way they include the conversation list.
+                    self.commands.push(Command::Wallet);
                 }
                 Event::SignedOut => {
                     self.account = None;
@@ -201,6 +216,9 @@ impl App {
                     self.wallet = WalletState::default();
                     self.activity.clear();
                     self.place = Place::Chat;
+                    self.open_chats.clear();
+                    self.active_chat = None;
+                    self.open_panels.clear();
                     self.screen = Screen::Unlock;
                 }
                 Event::CaptchaChallenge(challenge) => self.auth.captcha.hold(challenge),
@@ -374,184 +392,339 @@ impl App {
         !self.toasts.is_empty()
     }
 
-    /// The auth top bar: brand on the left, nothing else — the signed-in shell navigates from
-    /// its own left rail, which carries the connection and the theme where a signed-in person
-    /// looks for them.
-    fn top_bar(&mut self, ui: &mut egui::Ui, theme_choice: &mut Option<Theme>) {
+    /// The navigation strip: five system tabs, then a closable chip per open conversation and per
+    /// open panel — the reference's MDI tab model, worn the same at every width.
+    ///
+    /// The strip scrolls horizontally rather than hiding anything, because a tab that is
+    /// off-screen is still a tab: hiding it would strand the surface it names behind no control
+    /// at all.
+    fn tab_strip(&mut self, ui: &mut egui::Ui) {
         let colors = palette(self.theme);
-        ui.horizontal(|ui| {
-            ui.add_space(space::MD);
-            widgets::brand_mark(ui, self.theme);
-            ui.label(
-                egui::RichText::new("Migo")
-                    .text_style(crate::theme::named(crate::theme::text_style::TITLE))
-                    .color(colors.text)
-                    .strong(),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(space::MD);
-                // Sun while dark, moon while light: the glyph names the theme one click would
-                // arrive at. 🌙 (`U+1F319`) rather than ☾ (`U+263D`) because only the emoji
-                // crescent is carried by any face in the font stack.
-                if ui
-                    .button(if self.theme.is_dark() {
-                        "\u{2600}"
-                    } else {
-                        "\u{1F319}"
+        // Resolved before the panel closure so the chip loop never borrows the chat state it
+        // mutates through the click handlers.
+        let unread: u32 = self.chat.conversations.iter().map(|c| c.unread).sum();
+        let account_id = self.account.as_ref().map(|a| a.account_id);
+        let chat_tabs: Vec<(migo_core::Id, String)> = self
+            .open_chats
+            .iter()
+            .map(|id| {
+                let title = self
+                    .chat
+                    .conversations
+                    .iter()
+                    .find(|c| c.conversation_id == *id)
+                    .map(|c| {
+                        account_id
+                            .map(|me| c.display_title(me, &self.chat.names))
+                            .unwrap_or_else(|| crate::model::short_id(*id))
                     })
-                    .on_hover_text(format!("Switch to {}", self.theme.flipped().label()))
-                    .clicked()
-                {
-                    *theme_choice = Some(self.theme.flipped());
-                }
+                    .unwrap_or_else(|| crate::model::short_id(*id));
+                (*id, title)
+            })
+            .collect();
+        let panels: Vec<Place> = self.open_panels.clone();
+        let active_chat = self.active_chat;
+        let place = self.place;
+
+        let mut selected: Option<Place> = None;
+        let mut chat_pick: Option<migo_core::Id> = None;
+        let mut chat_close: Option<migo_core::Id> = None;
+        let mut panel_pick: Option<Place> = None;
+        let mut panel_close: Option<Place> = None;
+
+        egui::Panel::top("tab-strip")
+            .exact_size(46.0)
+            .frame(egui::Frame::new().fill(colors.nav))
+            .show(ui, |ui| {
+                ui.add_space(space::XS);
+                egui::ScrollArea::horizontal()
+                    .id_salt("tabs")
+                    .auto_shrink([false, false])
+                    .show_viewport(ui, |ui, _viewport| {
+                        ui.horizontal_centered(|ui| {
+                            for candidate in Place::SYSTEM_TABS {
+                                let label = if candidate == Place::Chat && unread > 0 {
+                                    format!("Chats ({unread})")
+                                } else {
+                                    candidate.label().to_owned()
+                                };
+                                let outcome = widgets::tab_chip(
+                                    ui,
+                                    self.theme,
+                                    &label,
+                                    Some(candidate),
+                                    active_chat.is_none() && place == candidate,
+                                    false,
+                                );
+                                if outcome.clicked {
+                                    selected = Some(candidate);
+                                }
+                            }
+                            for (conversation_id, title) in &chat_tabs {
+                                let outcome = widgets::tab_chip(
+                                    ui,
+                                    self.theme,
+                                    title,
+                                    None,
+                                    active_chat == Some(*conversation_id),
+                                    true,
+                                );
+                                if outcome.clicked {
+                                    chat_pick = Some(*conversation_id);
+                                }
+                                if outcome.closed {
+                                    chat_close = Some(*conversation_id);
+                                }
+                            }
+                            for panel in &panels {
+                                let outcome = widgets::tab_chip(
+                                    ui,
+                                    self.theme,
+                                    panel.label(),
+                                    Some(*panel),
+                                    active_chat.is_none() && place == *panel,
+                                    true,
+                                );
+                                if outcome.clicked {
+                                    panel_pick = Some(*panel);
+                                }
+                                if outcome.closed {
+                                    panel_close = Some(*panel);
+                                }
+                            }
+                        });
+                    });
             });
-        });
+
+        if let Some(target) = selected {
+            self.select_place(target);
+        }
+        if let Some(conversation_id) = chat_pick {
+            self.select_chat(conversation_id);
+        }
+        if let Some(conversation_id) = chat_close {
+            self.close_chat(conversation_id);
+        }
+        if let Some(panel) = panel_pick {
+            self.select_place(panel);
+        }
+        if let Some(panel) = panel_close {
+            self.close_panel(panel);
+        }
     }
 
-    /// The signed-in rail: an icon rail — brand, the FRIENDS|CHATS|ROOMS trio, the rest, the foot.
+    /// The profile banner: the orange gradient that owns the account.
     ///
-    /// The spec prohibits the large permanent sidebar: navigation must not dominate, and the
-    /// conversations keep the screen. So the rail is 56px of icons at every width, the trio in
-    /// its own group above a divider (the three lists a messenger lives in), and the labels
-    /// travel as tooltips.
-    fn rail(&mut self, ui: &mut egui::Ui, theme_choice: &mut Option<Theme>) {
+    /// The reference puts the avatar, the name, the balance and the way out here, and the account
+    /// menu is the honest mapping of what this client carries: profile facts live in settings,
+    /// credits live in the wallet, and the exit is the sign-out.
+    fn banner(&mut self, ui: &mut egui::Ui, theme_choice: &mut Option<Theme>) {
         let colors = palette(self.theme);
-        egui::Panel::left("rail")
-            .exact_size(56.0)
-            .frame(egui::Frame::new().fill(colors.surface_raised))
+        let username = self
+            .account
+            .as_ref()
+            .map(|account| account.username.clone())
+            .unwrap_or_default();
+        let coins = self.wallet.coins;
+        // The state word for the banner's dot, resolved here so the panel closure never borrows
+        // the connection it is drawn beside.
+        let (dot_color, dot_label) = {
+            let colors_local = colors;
+            match &self.connection {
+                Connection::Online => (colors_local.positive, "Connected"),
+                Connection::Connecting => (colors_local.warning, "Connecting"),
+                Connection::Offline => (colors_local.banner_ink, "Offline"),
+                Connection::Failed(_) => (colors_local.danger, "Disconnected"),
+            }
+        };
+        let connection_detail = self.connection.label().to_owned();
+
+        let mut menu: Option<Place> = None;
+        let mut sign_out = false;
+        let mut flip_theme = false;
+
+        egui::Panel::top("banner")
+            .exact_size(58.0)
+            .frame(egui::Frame::new())
             .show(ui, |ui| {
-                let width = ui.available_width();
-                let indent = (width - 20.0) / 2.0;
+                let rect = ui.max_rect();
+                widgets::gradient_rect(ui, rect, colors.banner_a, colors.banner_b, colors.banner_c);
+                ui.horizontal_centered(|ui| {
+                    ui.add_space(space::MD);
+                    widgets::banner_avatar(ui, self.theme, &username, 32.0);
+                    ui.add_space(space::SM);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new(widgets::elide(&username, 20))
+                                .font(egui::FontId::proportional(crate::theme::font::SUBTITLE))
+                                .color(colors.banner_ink)
+                                .strong(),
+                        );
+                        // The connection dot travels with the name: the one live fact about the
+                        // session, stated where the account is.
+                        ui.horizontal(|ui| {
+                            let (dot, _) =
+                                ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                            ui.painter().circle_filled(dot.center(), 3.5, dot_color);
+                            ui.label(
+                                egui::RichText::new(dot_label)
+                                    .font(egui::FontId::proportional(crate::theme::font::TINY))
+                                    .color(colors.banner_ink),
+                            )
+                            .on_hover_text(&connection_detail);
+                        });
+                    });
 
-                // Brand.
-                ui.add_space(space::MD);
-                ui.horizontal(|ui| {
-                    ui.add_space(indent);
-                    widgets::brand_mark(ui, self.theme);
-                });
-                ui.add_space(space::SM);
-                widgets::divider(ui, self.theme);
-                ui.add_space(space::XS);
-
-                // The trio: friends, chats, rooms — one group, above the fold.
-                let unread: u32 = self.chat.conversations.iter().map(|c| c.unread).sum();
-                let mut place = self.place;
-                let mut entered: Option<Place> = None;
-                ui.vertical(|ui| {
-                    for (candidate, label, badge) in [
-                        (Place::Friends, "Friends", 0),
-                        (Place::Chat, "Chats", unread),
-                        (Place::Rooms, "Rooms", 0),
-                    ] {
-                        if widgets::rail_button(
-                            ui,
-                            self.theme,
-                            candidate,
-                            label,
-                            place == candidate,
-                            badge,
-                        )
-                        .clicked()
-                        {
-                            place = candidate;
-                            entered = Some(candidate);
-                        }
-                    }
-                });
-                widgets::divider(ui, self.theme);
-                ui.add_space(space::XS);
-
-                // The rest, below the fold.
-                ui.vertical(|ui| {
-                    for candidate in [
-                        Place::Space,
-                        Place::Alerts,
-                        Place::Search,
-                        Place::Wallet,
-                        Place::Settings,
-                    ] {
-                        if widgets::rail_button(
-                            ui,
-                            self.theme,
-                            candidate,
-                            candidate.label(),
-                            place == candidate,
-                            0,
-                        )
-                        .clicked()
-                        {
-                            place = candidate;
-                            entered = Some(candidate);
-                        }
-                    }
-                });
-                self.place = place;
-
-                // The foot: connection, theme, account.
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                    widgets::divider(ui, self.theme);
-                    ui.add_space(space::XS);
-                    let color = match &self.connection {
-                        Connection::Online => colors.positive,
-                        Connection::Connecting => colors.warning,
-                        Connection::Offline => colors.text_muted,
-                        Connection::Failed(_) => colors.danger,
-                    };
-                    ui.horizontal(|ui| {
-                        ui.add_space(indent);
-                        let (dot, _) =
-                            ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                        ui.painter().circle_filled(dot.center(), 4.0, color);
-                    })
-                    .response
-                    .on_hover_text(self.connection.label());
-                    ui.add_space(space::XS);
-                    ui.horizontal(|ui| {
-                        ui.add_space((width - 40.0).max(0.0) / 2.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(space::MD);
+                        // Sun while dark, moon while light: the glyph names the theme one click
+                        // would arrive at, drawn as ink on the banner.
                         if ui
-                            .button(if self.theme.is_dark() {
-                                "\u{2600}"
-                            } else {
-                                "\u{1F319}"
-                            })
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(if self.theme.is_dark() {
+                                        "\u{2600}"
+                                    } else {
+                                        "\u{1F319}"
+                                    })
+                                    .color(colors.banner_ink),
+                                )
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::NONE),
+                            )
                             .on_hover_text(format!("Switch to {}", self.theme.flipped().label()))
                             .clicked()
                         {
-                            *theme_choice = Some(self.theme.flipped());
+                            flip_theme = true;
+                        }
+                        // The account menu, opened from the chevron beside the avatar — the
+                        // reference's dropdown, carrying the three things it offers.
+                        let mut opened = None;
+                        let mut out = false;
+                        ui.scope(|ui| {
+                            let w = &mut ui.style_mut().visuals.widgets;
+                            w.inactive.bg_fill = egui::Color32::TRANSPARENT;
+                            w.inactive.bg_stroke = egui::Stroke::NONE;
+                            w.hovered.bg_fill = egui::Color32::from_black_alpha(60);
+                            w.hovered.bg_stroke = egui::Stroke::NONE;
+                            w.active.bg_fill = egui::Color32::from_black_alpha(90);
+                            w.active.bg_stroke = egui::Stroke::NONE;
+                            ui.menu_button(
+                                egui::RichText::new("\u{25BE}")
+                                    .color(colors.banner_ink)
+                                    .strong(),
+                                |ui| {
+                                    if ui.button("My Profile").clicked() {
+                                        opened = Some(Place::Settings);
+                                        ui.close();
+                                    }
+                                    if ui.button("My Credits & TopUp").clicked() {
+                                        opened = Some(Place::Wallet);
+                                        ui.close();
+                                    }
+                                    // The two panes the reference keeps off the strip: they
+                                    // arrive here as tabs of their own, the same chips a
+                                    // conversation opens.
+                                    if ui.button("Alerts").clicked() {
+                                        opened = Some(Place::Alerts);
+                                        ui.close();
+                                    }
+                                    if ui.button("Search").clicked() {
+                                        opened = Some(Place::Search);
+                                        ui.close();
+                                    }
+                                    if ui.button("Exit / Logout").clicked() {
+                                        out = true;
+                                        ui.close();
+                                    }
+                                },
+                            );
+                        });
+                        menu = opened;
+                        sign_out = out;
+                        // The balance chip: the session's real $MIG, dark on the gradient.
+                        if let Some(coins) = coins {
+                            widgets::pill(
+                                ui,
+                                &format!("{coins} $MIG"),
+                                colors.banner_ink,
+                                egui::Color32::from_black_alpha(90),
+                            );
                         }
                     });
-                    if let Some(account) = self.account.as_ref() {
-                        ui.add_space(space::XS);
-                        let (rect, response) =
-                            ui.allocate_exact_size(egui::vec2(width, 32.0), egui::Sense::click());
-                        if response.clicked() {
-                            place = Place::Settings;
-                            entered = Some(Place::Settings);
-                        }
-                        let mut inner = ui.new_child(
-                            egui::UiBuilder::new()
-                                .max_rect(rect)
-                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-                        );
-                        let avatar_indent = (width - 24.0) / 2.0;
-                        inner.add_space(avatar_indent);
-                        widgets::avatar(&mut inner, self.theme, &account.username, 24.0);
-                        response.on_hover_text(format!(
-                            "{} — signed in",
-                            widgets::elide(&account.username, 16)
-                        ));
-                    }
-                    self.place = place;
-                    ui.add_space(space::SM);
                 });
-
-                if let Some(target) = entered {
-                    self.entered_place(target);
-                }
             });
+
+        if let Some(target) = menu {
+            self.select_place(target);
+        }
+        if sign_out {
+            self.commands.push(Command::SignOut);
+        }
+        if flip_theme {
+            *theme_choice = Some(self.theme.flipped());
+        }
     }
 
-    /// The per-place first reads when a place is entered from the rail.
+    /// Selects a place: the secondary panels arrive as tabs of their own.
+    fn select_place(&mut self, target: Place) {
+        self.active_chat = None;
+        if target.is_panel() && !self.open_panels.contains(&target) {
+            self.open_panels.push(target);
+        }
+        self.place = target;
+        self.entered_place(target);
+    }
+
+    /// Activates a conversation's tab, opening it if it is not open yet.
+    fn select_chat(&mut self, conversation_id: migo_core::Id) {
+        if self.chat.selected != Some(conversation_id) {
+            self.open_conversation(conversation_id);
+            return;
+        }
+        if !self.open_chats.contains(&conversation_id) {
+            self.open_chats.push(conversation_id);
+        }
+        self.active_chat = Some(conversation_id);
+    }
+
+    /// Registers an open conversation as a tab and makes it the active one.
+    fn activate_chat(&mut self, conversation_id: migo_core::Id) {
+        if !self.open_chats.contains(&conversation_id) {
+            self.open_chats.push(conversation_id);
+        }
+        self.active_chat = Some(conversation_id);
+    }
+
+    /// Closes a conversation's tab: the thread falls through to the most recently opened one, or
+    /// back to whatever place was showing beneath it.
+    fn close_chat(&mut self, conversation_id: migo_core::Id) {
+        self.open_chats.retain(|id| *id != conversation_id);
+        if self.active_chat == Some(conversation_id) {
+            match self.open_chats.last().copied() {
+                Some(next) => {
+                    self.active_chat = Some(next);
+                    self.open_conversation(next);
+                }
+                None => {
+                    self.active_chat = None;
+                    if self.chat.selected == Some(conversation_id) {
+                        self.chat.selected = None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Closes a panel's tab, falling back to the conversation list if it was the showing pane.
+    fn close_panel(&mut self, panel: Place) {
+        self.open_panels.retain(|p| *p != panel);
+        if self.active_chat.is_none() && self.place == panel {
+            self.place = Place::Chat;
+        }
+    }
+
+    /// The per-place first reads when a place is entered.
     ///
     /// A place whose facts are the server's re-reads on entry, for the same reason the friends
     /// graph does: the other devices of this account act on it too.
@@ -561,26 +734,28 @@ impl App {
             Place::Rooms => self.commands.push(Command::Rooms {
                 query: self.rooms.query.clone(),
             }),
-            Place::Alerts | Place::Space => self.commands.push(Command::Notifications),
+            Place::Alerts | Place::Feed => self.commands.push(Command::Notifications),
             Place::Wallet => self.commands.push(Command::Wallet),
             Place::Search => {
                 if self.search.suggestions.is_empty() {
                     self.commands.push(Command::Suggestions);
                 }
             }
-            Place::Chat | Place::Settings => {}
+            Place::Chat | Place::Games | Place::Settings => {}
         }
     }
 
-    /// Opens a conversation from outside the chat pane — a Home row, a joined room, a search hit.
+    /// Opens a conversation from outside the chat pane — a list row, a joined room, a search hit.
     ///
-    /// The same [`crate::ui::chat::open`] the sidebar uses, driven with a scratch command buffer
-    /// because the event that calls this arrives outside the frame that owns the real one.
+    /// The same [`crate::ui::chat::open`] the conversation list uses, driven with a scratch
+    /// command buffer because the event that calls this arrives outside the frame that owns the
+    /// real one. Opening a conversation is opening a tab: the chip lands on the strip and the
+    /// thread becomes the active surface.
     fn open_conversation(&mut self, conversation_id: migo_core::Id) {
         let mut commands = std::mem::take(&mut self.commands);
         let mut navigate = None;
         let mut theme_choice = None;
-        let mut open_place = Some(Place::Chat);
+        let mut open_place = None;
         let server = self.auth.server.clone();
         let mut context = Context {
             theme: self.theme,
@@ -594,7 +769,7 @@ impl App {
         };
         crate::ui::chat::open(&mut context, &mut self.chat, conversation_id);
         self.commands = commands;
-        self.place = Place::Chat;
+        self.activate_chat(conversation_id);
     }
 
     /// Rebuilds the merged activity stream from its durable halves.
@@ -608,9 +783,9 @@ impl eframe::App for App {
     ///
     /// eframe 0.36 hands the application a [`egui::Ui`] covering the whole viewport rather than a
     /// bare context, so panels are shown *inside* that ui. The consequence worth knowing is that the
-    /// order of the calls below is the layout: the top bar claims the top of the viewport first,
-    /// and the central panel then fills whatever is left. Reversing them would leave the bar
-    /// floating over the screen it is supposed to sit above.
+    /// order of the calls below is the layout: the tab strip claims the top of the viewport first,
+    /// the banner sits beneath it, and the central panel then fills whatever is left. Reversing
+    /// them would leave the strip floating over the screen it is supposed to sit above.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain();
 
@@ -632,28 +807,25 @@ impl eframe::App for App {
         // Screens are handed a context and a command buffer; nothing below this point can reach the
         // worker directly.
         let mut navigate: Option<Screen> = None;
-        // A theme change requested by the top bar's toggle or by a screen, applied after the frame.
+        // A theme change requested by the banner's toggle or by a screen, applied after the frame.
         let mut theme_choice: Option<Theme> = None;
         let screen = self.screen;
         let signed_in = screen == Screen::Chat && self.account.is_some();
+        // A conversation opened anywhere inside this frame — a list row, a search hit, a joined
+        // room — lands as a chat tab; the value is compared after the panes have drawn.
+        let selected_before = self.chat.selected;
         if signed_in {
-            // The signed-in shell is a rail plus the place: navigation down the left edge, the
-            // thing being navigated to in every pixel the window can spare. The old top-bar tabs
-            // could not carry nine places across a narrow window; a column can carry them at any
-            // width.
-            self.rail(ui, &mut theme_choice);
-        } else {
-            egui::Panel::top("nav")
-                .exact_size(44.0)
-                .frame(egui::Frame::new().fill(colors.surface_raised))
-                .show(ui, |ui| self.top_bar(ui, &mut theme_choice));
+            // The signed-in shell is the reference's: a tab strip, the orange banner, then the
+            // active tab's surface in every pixel the window can spare. The strip claims the top
+            // first, the banner sits beneath it, and the central panel fills the rest.
+            self.tab_strip(ui);
+            self.banner(ui, &mut theme_choice);
         }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(colors.surface))
             .show(ui, |ui| {
                 if signed_in {
-                    // The pane fills the whole central panel beside the rail.
                     let mut open_place = None;
                     let mut context = Context {
                         theme: self.theme,
@@ -665,40 +837,64 @@ impl eframe::App for App {
                         theme_choice: &mut theme_choice,
                         open_place: &mut open_place,
                     };
-                    match self.place {
-                        Place::Chat => crate::ui::chat::show(ui, &mut context, &mut self.chat),
-                        Place::Rooms => crate::ui::rooms::show(
-                            ui,
-                            &mut context,
-                            &mut self.rooms,
-                            &mut self.chat,
-                        ),
-                        Place::Space => {
-                            let activity = std::mem::take(&mut self.activity);
-                            crate::ui::space::show(ui, &mut context, &mut self.space, &activity);
-                            self.activity = activity;
-                        }
-                        Place::Friends => {
-                            crate::ui::friends::show(ui, &mut context, &mut self.friends)
-                        }
-                        Place::Alerts => {
-                            crate::ui::alerts::show(ui, &mut context, &mut self.alerts)
-                        }
-                        Place::Search => crate::ui::search::show(
-                            ui,
-                            &mut context,
-                            &mut self.search,
-                            &mut self.chat,
-                        ),
-                        Place::Wallet => {
-                            crate::ui::wallet::show(ui, &mut context, &mut self.wallet)
-                        }
-                        Place::Settings => {
-                            crate::ui::settings::show(ui, &mut context, &mut self.settings_panel)
+                    if self.active_chat.is_some() {
+                        // A chat tab: the thread is the whole pane, with nothing beside it.
+                        crate::ui::chat::thread(ui, &mut context, &mut self.chat);
+                    } else {
+                        match self.place {
+                            Place::Chat => crate::ui::chat::list(ui, &mut context, &mut self.chat),
+                            Place::Rooms => crate::ui::rooms::show(
+                                ui,
+                                &mut context,
+                                &mut self.rooms,
+                                &mut self.chat,
+                            ),
+                            Place::Feed => {
+                                let activity = std::mem::take(&mut self.activity);
+                                crate::ui::space::show(
+                                    ui,
+                                    &mut context,
+                                    &mut self.space,
+                                    &activity,
+                                );
+                                self.activity = activity;
+                            }
+                            Place::Games => crate::ui::games::show(ui, &context),
+                            Place::Friends => {
+                                crate::ui::friends::show(ui, &mut context, &mut self.friends)
+                            }
+                            Place::Alerts => {
+                                crate::ui::alerts::show(ui, &mut context, &mut self.alerts)
+                            }
+                            Place::Search => crate::ui::search::show(
+                                ui,
+                                &mut context,
+                                &mut self.search,
+                                &mut self.chat,
+                            ),
+                            Place::Wallet => {
+                                crate::ui::wallet::show(ui, &mut context, &mut self.wallet)
+                            }
+                            Place::Settings => crate::ui::settings::show(
+                                ui,
+                                &mut context,
+                                &mut self.settings_panel,
+                            ),
                         }
                     }
                     if let Some(place) = open_place {
                         self.place = place;
+                        if place.is_panel() && !self.open_panels.contains(&place) {
+                            self.open_panels.push(place);
+                        }
+                        self.entered_place(place);
+                    }
+                    // Whatever opened a conversation this frame opened a tab: the chip lands on
+                    // the strip and the thread becomes the active surface.
+                    if self.chat.selected != selected_before {
+                        if let Some(conversation_id) = self.chat.selected {
+                            self.activate_chat(conversation_id);
+                        }
                     }
                 } else {
                     // The server is cloned for the context because the auth screen holds the

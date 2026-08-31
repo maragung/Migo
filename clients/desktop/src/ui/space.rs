@@ -1,4 +1,4 @@
-//! The Space place: the activity stream.
+//! The Feed place: the activity stream.
 //!
 //! The stream is the account's own activity — the notification inbox (durable, server-ordered)
 //! and the wallet's statement (gifts, stakes, payouts) merged newest first, with a category filter
@@ -19,7 +19,8 @@ pub struct SpaceState {
     pub filter: Option<ActivityCategory>,
 }
 
-/// Draws the Space place.
+/// Draws the Feed place — the reference's Feed tab, carrying the activity stream this client
+/// has always called Space.
 pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SpaceState, rows: &[ActivityRow]) {
     ui.add_space(space::MD);
     ui.horizontal(|ui| {
@@ -27,7 +28,7 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SpaceState, rows
         widgets::header(
             ui,
             context.theme,
-            "Space",
+            "Feed",
             Some("Your activity, newest first"),
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

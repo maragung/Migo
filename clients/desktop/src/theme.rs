@@ -18,13 +18,15 @@
 //! theme override and no accent picker: a messenger is read for hours at a time, and the useful
 //! knob is the one the operating system already provides.
 //!
-//! # The dark theme is the neon theme
+//! # The v3 identity: teal and orange
 //!
-//! Dark is not a neutral grey scale but the neon palette: near-black surfaces with a faint
-//! violet cast, one neon cyan accent, neon green for "online" and success, and a red kept well
-//! away from the accent so a failure can never be mistaken for a highlight. The light theme
-//! stays the quiet one it always was, because a neon palette on white is unreadable, not
-//! striking.
+//! Both themes speak the reference's language (docs/design/new-client-ui.tsx): cyan-teal
+//! surfaces and accents, an orange banner that owns the account, and the same login gradient in
+//! either theme — the sign-in screen is the one place that is allowed to look identical in dark
+//! and light, because it is the front door and the front door does not change with the lights.
+//! Dark is a deep teal (`#0c1517` window, `#00BCD4` accent) rather than a neutral grey scale, so
+//! the accent stays the brightest saturated thing on screen; light is the reference's cream
+//! (`#fdfbf7`) with the teal `#00838F` doing the same job.
 
 use egui::{Color32, CornerRadius, FontFamily, FontId, Margin, Stroke, TextStyle, Vec2};
 use serde::{Deserialize, Serialize};
@@ -96,12 +98,26 @@ pub struct Palette {
     pub text_muted: Color32,
     /// Text on top of [`Palette::accent`].
     pub text_on_accent: Color32,
-    /// The one brand colour. Primary buttons, the caret, the outgoing bubble.
+    /// The one brand colour. Primary actions that are not the banner's, the caret, the outgoing bubble.
     pub accent: Color32,
     /// A hovered accent surface.
     pub accent_hover: Color32,
     /// A pressed accent surface.
     pub accent_active: Color32,
+    /// The brighter accent the active tab chip wears on the nav strip.
+    pub accent_bright: Color32,
+    /// The navigation strip's own teal — what the tab chips sit on.
+    pub nav: Color32,
+    /// The profile banner's gradient, left to right: deep orange, orange, amber.
+    pub banner_a: Color32,
+    pub banner_b: Color32,
+    pub banner_c: Color32,
+    /// Ink on the banner and on the orange primaries: white in both themes.
+    pub banner_ink: Color32,
+    /// The login screen's vertical gradient: cyan, bright cyan, teal. Theme-independent.
+    pub login_a: Color32,
+    pub login_b: Color32,
+    pub login_c: Color32,
     /// Success, and "connected".
     pub positive: Color32,
     /// A warning, and "connecting".
@@ -112,56 +128,70 @@ pub struct Palette {
     pub verified: Color32,
 }
 
-/// The neon dark theme, and the default — the canonical Migo dark palette, from
-/// `shared/design/tokens.json`.
+/// Dark — the canonical Migo dark palette, from `shared/design/tokens.json` v3.
 ///
-/// The surfaces sit almost at black with a violet cast (`#0a0a12` window, `#111118` panel) so the
-/// cyan accent is the brightest saturated thing on screen by a wide margin — the neon effect the
-/// palette is named for comes from that contrast, not from any glow. Green is reserved for
-/// presence and success, red for failure; neither ever marks a selection or a primary action,
-/// because a user must not have to learn which "bright colour" means what.
+/// Deep-teal surfaces with a cyan accent (`#00BCD4`), so the accent is the brightest saturated
+/// thing on screen by a wide margin. Green is reserved for presence and success, red for failure;
+/// neither ever marks a selection or a primary action, because a user must not have to learn
+/// which "bright colour" means what.
 const DARK: Palette = Palette {
-    // The main-ui.jpg reference: charcoal surfaces with a blue-violet accent.
-    surface: Color32::from_rgb(0x14, 0x15, 0x19),
-    surface_raised: Color32::from_rgb(0x1b, 0x1c, 0x24),
-    surface_overlay: Color32::from_rgb(0x24, 0x25, 0x2e),
-    surface_hover: Color32::from_rgb(0x26, 0x28, 0x33),
-    surface_selected: Color32::from_rgb(0x2a, 0x31, 0x50),
-    border: Color32::from_rgb(0x2a, 0x2b, 0x36),
-    border_strong: Color32::from_rgb(0x3a, 0x3c, 0x4a),
-    text: Color32::from_rgb(0xf2, 0xf3, 0xf7),
-    text_muted: Color32::from_rgb(0xa0, 0xa3, 0xb1),
-    // White on the indigo: the reference's filled send button and active rail mark.
+    surface: Color32::from_rgb(0x0c, 0x15, 0x17),
+    surface_raised: Color32::from_rgb(0x12, 0x20, 0x23),
+    surface_overlay: Color32::from_rgb(0x1a, 0x2c, 0x30),
+    surface_hover: Color32::from_rgb(0x15, 0x28, 0x2c),
+    surface_selected: Color32::from_rgb(0x0e, 0x30, 0x38),
+    border: Color32::from_rgb(0x24, 0x39, 0x3e),
+    border_strong: Color32::from_rgb(0x35, 0x51, 0x58),
+    text: Color32::from_rgb(0xe9, 0xf4, 0xf5),
+    text_muted: Color32::from_rgb(0x9d, 0xb4, 0xb8),
     text_on_accent: Color32::from_rgb(0xff, 0xff, 0xff),
-    accent: Color32::from_rgb(0x4c, 0x6e, 0xf5),
-    accent_hover: Color32::from_rgb(0x65, 0x7f, 0xff),
-    accent_active: Color32::from_rgb(0x3b, 0x5b, 0xdb),
+    accent: Color32::from_rgb(0x00, 0xbc, 0xd4),
+    accent_hover: Color32::from_rgb(0x26, 0xc6, 0xda),
+    accent_active: Color32::from_rgb(0x00, 0x93, 0xaf),
+    accent_bright: Color32::from_rgb(0x26, 0xc6, 0xda),
+    nav: Color32::from_rgb(0x0f, 0x3a, 0x40),
+    banner_a: Color32::from_rgb(0xea, 0x58, 0x0c),
+    banner_b: Color32::from_rgb(0xf9, 0x73, 0x16),
+    banner_c: Color32::from_rgb(0xf5, 0x9e, 0x0b),
+    banner_ink: Color32::from_rgb(0xff, 0xff, 0xff),
+    login_a: Color32::from_rgb(0x00, 0x93, 0xaf),
+    login_b: Color32::from_rgb(0x00, 0xac, 0xc1),
+    login_c: Color32::from_rgb(0x00, 0x83, 0x8f),
     positive: Color32::from_rgb(0x2f, 0xce, 0x7e),
     warning: Color32::from_rgb(0xf5, 0x9f, 0x00),
     danger: Color32::from_rgb(0xff, 0x5c, 0x7a),
     verified: Color32::from_rgb(0x74, 0xc0, 0xfc),
 };
 
-/// Light — the canonical Migo light palette, from `shared/design/tokens.json`.
+/// Light — the canonical Migo light palette, from `shared/design/tokens.json` v3.
 ///
-/// Not an inversion of [`DARK`]: the borders carry more of the structure here, because a light
-/// interface cannot lean on fill contrast the way a dark one can. The accent is the blue the web
-/// client's light theme carries, strong enough to hold white text above the 4.5:1 contrast bar.
+/// The reference's cream (`#fdfbf7`) with the teal `#00838F` as the accent, strong enough to
+/// hold white text above the 4.5:1 contrast bar. The borders carry more of the structure here,
+/// because a light interface cannot lean on fill contrast the way a dark one can.
 const LIGHT: Palette = Palette {
-    surface: Color32::from_rgb(0xf1, 0xf2, 0xf6),
+    surface: Color32::from_rgb(0xfd, 0xfb, 0xf7),
     surface_raised: Color32::from_rgb(0xff, 0xff, 0xff),
-    surface_overlay: Color32::from_rgb(0xff, 0xff, 0xff),
-    surface_hover: Color32::from_rgb(0xec, 0xee, 0xf4),
-    surface_selected: Color32::from_rgb(0xe3, 0xe8, 0xfb),
-    border: Color32::from_rgb(0xe3, 0xe5, 0xec),
-    border_strong: Color32::from_rgb(0xc9, 0xcd, 0xd8),
-    text: Color32::from_rgb(0x1b, 0x1c, 0x24),
-    text_muted: Color32::from_rgb(0x5c, 0x61, 0x70),
+    surface_overlay: Color32::from_rgb(0xf5, 0xf1, 0xe8),
+    surface_hover: Color32::from_rgb(0xef, 0xe9, 0xdb),
+    surface_selected: Color32::from_rgb(0xdc, 0xee, 0xf1),
+    border: Color32::from_rgb(0xe8, 0xe2, 0xd4),
+    border_strong: Color32::from_rgb(0xd3, 0xca, 0xb4),
+    text: Color32::from_rgb(0x1e, 0x2b, 0x2e),
+    text_muted: Color32::from_rgb(0x5c, 0x6a, 0x6d),
     text_on_accent: Color32::from_rgb(0xff, 0xff, 0xff),
-    accent: Color32::from_rgb(0x3b, 0x5b, 0xdb),
-    accent_hover: Color32::from_rgb(0x4c, 0x6e, 0xf5),
-    accent_active: Color32::from_rgb(0x2f, 0x4c, 0xb8),
-    positive: Color32::from_rgb(0x0c, 0xa6, 0x78),
+    accent: Color32::from_rgb(0x00, 0x83, 0x8f),
+    accent_hover: Color32::from_rgb(0x00, 0xac, 0xc1),
+    accent_active: Color32::from_rgb(0x00, 0x60, 0x6b),
+    accent_bright: Color32::from_rgb(0x00, 0xac, 0xc1),
+    nav: Color32::from_rgb(0x00, 0x83, 0x8f),
+    banner_a: Color32::from_rgb(0xea, 0x58, 0x0c),
+    banner_b: Color32::from_rgb(0xf9, 0x73, 0x16),
+    banner_c: Color32::from_rgb(0xf5, 0x9e, 0x0b),
+    banner_ink: Color32::from_rgb(0xff, 0xff, 0xff),
+    login_a: Color32::from_rgb(0x00, 0x93, 0xaf),
+    login_b: Color32::from_rgb(0x00, 0xac, 0xc1),
+    login_c: Color32::from_rgb(0x00, 0x83, 0x8f),
+    positive: Color32::from_rgb(0x05, 0x96, 0x69),
     warning: Color32::from_rgb(0xe6, 0x77, 0x00),
     danger: Color32::from_rgb(0xe0, 0x31, 0x31),
     verified: Color32::from_rgb(0x1f, 0x6f, 0xd0),
@@ -192,6 +222,8 @@ pub mod radius {
     pub const SM: u8 = 6;
     pub const MD: u8 = 10;
     pub const LG: u8 = 14;
+    /// A tab chip on the navigation strip — the reference's `tabChip` token.
+    pub const TAB: u8 = 12;
     /// A circle, for avatars and icon buttons.
     pub const FULL: u8 = 255;
 }
@@ -376,20 +408,21 @@ pub fn install(ctx: &egui::Context, theme: Theme) {
 mod tests {
     use super::*;
 
-    /// The neon palette as specified, spelled out once so a regression is a diff against the
-    /// spec rather than against itself. Only the roles the spec names are asserted; the derived
-    /// surfaces (overlay, hover, selected, borders) are free to move as the theme is tuned, and
-    /// pinning them here would turn every polish into a test failure.
+    /// The v3 palette as specified (shared/design/tokens.json), spelled out once so a regression
+    /// is a diff against the spec rather than against itself. Only the roles the spec names are
+    /// asserted; the derived surfaces (hover, selected, borders) are free to move as the theme is
+    /// tuned, and pinning them here would turn every polish into a test failure.
     #[test]
     fn dark_is_the_reference_palette() {
         let p = palette(Theme::Dark);
-        assert_eq!(p.surface, Color32::from_rgb(0x14, 0x15, 0x19));
-        assert_eq!(p.surface_raised, Color32::from_rgb(0x1b, 0x1c, 0x24));
-        assert_eq!(p.accent, Color32::from_rgb(0x4c, 0x6e, 0xf5));
+        assert_eq!(p.surface, Color32::from_rgb(0x0c, 0x15, 0x17));
+        assert_eq!(p.surface_raised, Color32::from_rgb(0x12, 0x20, 0x23));
+        assert_eq!(p.accent, Color32::from_rgb(0x00, 0xbc, 0xd4));
+        assert_eq!(p.nav, Color32::from_rgb(0x0f, 0x3a, 0x40));
         assert_eq!(p.positive, Color32::from_rgb(0x2f, 0xce, 0x7e));
         assert_eq!(p.danger, Color32::from_rgb(0xff, 0x5c, 0x7a));
-        assert_eq!(p.text, Color32::from_rgb(0xf2, 0xf3, 0xf7));
-        assert_eq!(p.text_muted, Color32::from_rgb(0xa0, 0xa3, 0xb1));
+        assert_eq!(p.text, Color32::from_rgb(0xe9, 0xf4, 0xf5));
+        assert_eq!(p.text_muted, Color32::from_rgb(0x9d, 0xb4, 0xb8));
     }
 
     /// The light theme is the canonical Migo light palette: the same token table the web client
@@ -397,11 +430,27 @@ mod tests {
     #[test]
     fn light_is_the_canonical_migo_palette() {
         let p = palette(Theme::Light);
-        assert_eq!(p.surface, Color32::from_rgb(0xf1, 0xf2, 0xf6));
+        assert_eq!(p.surface, Color32::from_rgb(0xfd, 0xfb, 0xf7));
         assert_eq!(p.surface_raised, Color32::from_rgb(0xff, 0xff, 0xff));
-        assert_eq!(p.accent, Color32::from_rgb(0x3b, 0x5b, 0xdb));
-        assert_eq!(p.text, Color32::from_rgb(0x1b, 0x1c, 0x24));
+        assert_eq!(p.accent, Color32::from_rgb(0x00, 0x83, 0x8f));
+        assert_eq!(p.text, Color32::from_rgb(0x1e, 0x2b, 0x2e));
         assert_eq!(p.danger, Color32::from_rgb(0xe0, 0x31, 0x31));
+    }
+
+    /// The banner and the login gradient are the reference's own colours, and they are
+    /// deliberately theme-independent: the front door does not change with the lights.
+    #[test]
+    fn the_banner_and_login_gradients_ignore_the_theme() {
+        for theme in [Theme::Dark, Theme::Light] {
+            let p = palette(theme);
+            assert_eq!(p.banner_a, Color32::from_rgb(0xea, 0x58, 0x0c));
+            assert_eq!(p.banner_b, Color32::from_rgb(0xf9, 0x73, 0x16));
+            assert_eq!(p.banner_c, Color32::from_rgb(0xf5, 0x9e, 0x0b));
+            assert_eq!(p.banner_ink, Color32::from_rgb(0xff, 0xff, 0xff));
+            assert_eq!(p.login_a, Color32::from_rgb(0x00, 0x93, 0xaf));
+            assert_eq!(p.login_b, Color32::from_rgb(0x00, 0xac, 0xc1));
+            assert_eq!(p.login_c, Color32::from_rgb(0x00, 0x83, 0x8f));
+        }
     }
 
     /// The toggle must remain an involution: flipping twice lands where flipping once did, and

@@ -73,7 +73,7 @@ pub fn brand_mark(ui: &mut Ui, theme: Theme) {
 /// A navigation icon, painted with the painter rather than typed.
 ///
 /// The design system draws its icons as strokes, and this client declares no icon font — so the
-/// rail's nine glyphs are painted the way the brand mark is: geometric shapes sized to a 20px
+/// strip's glyphs are painted the way the brand mark is: geometric shapes sized to a 20px
 /// box, one stroke weight, `currentColor` semantics via the palette. Each icon sits in a
 /// 20×20 box centred on the allocation it is given.
 pub fn place_icon(ui: &mut Ui, theme: Theme, place: crate::ui::Place, active: bool) {
@@ -113,13 +113,28 @@ pub fn place_icon(ui: &mut Ui, theme: Theme, place: crate::ui::Place, active: bo
                 painter.line_segment([p(0.08, y), p(0.92, y)], stroke);
             }
         }
-        crate::ui::Place::Space => {
+        crate::ui::Place::Feed => {
             // A pulse: activity as a heartbeat line.
             painter.line_segment([p(0.05, 0.55), p(0.3, 0.55)], stroke);
             painter.line_segment([p(0.3, 0.55), p(0.4, 0.2)], stroke);
             painter.line_segment([p(0.4, 0.2), p(0.55, 0.85)], stroke);
             painter.line_segment([p(0.55, 0.85), p(0.65, 0.55)], stroke);
             painter.line_segment([p(0.65, 0.55), p(0.95, 0.55)], stroke);
+        }
+        crate::ui::Place::Games => {
+            // A game pad: a D-pad cross and the two action dots.
+            painter.line_segment([p(0.4, 0.2), p(0.4, 0.62)], stroke);
+            painter.line_segment([p(0.19, 0.41), p(0.61, 0.41)], stroke);
+            painter.add(egui::Shape::circle_stroke(
+                p(0.78, 0.34),
+                side * 0.07,
+                stroke,
+            ));
+            painter.add(egui::Shape::circle_stroke(
+                p(0.88, 0.5),
+                side * 0.07,
+                stroke,
+            ));
         }
         crate::ui::Place::Friends => {
             // Two people: a taller figure and a shorter one behind it.
@@ -220,71 +235,179 @@ pub fn place_icon(ui: &mut Ui, theme: Theme, place: crate::ui::Place, active: bo
     }
 }
 
-/// One rail button: a painted icon, a tooltip, and the two-marker selected treatment.
+/// What happened to one chip on the tab strip.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ChipOutcome {
+    /// The chip's body was clicked: select whatever it names.
+    pub clicked: bool,
+    /// The chip's close mark was clicked: close whatever it names.
+    pub closed: bool,
+}
+
+/// One chip on the navigation strip.
 ///
-/// Icon-only because the rail is an icon rail at every width — the spec's messenger identity,
-/// not a SaaS sidebar — with the label travelling as the tooltip. Returns whether it was clicked.
-pub fn rail_button(
+/// The strip is the teal `nav` fill and a chip is a rounded label on it: the active chip takes
+/// the brighter accent and the orange underline, exactly the pairing the reference draws. A
+/// closable chip (an open conversation, an open panel) carries an × that must not also select —
+/// the two responses are reported separately so a close never opens what it is closing.
+pub fn tab_chip(
     ui: &mut Ui,
     theme: Theme,
-    place: crate::ui::Place,
     label: &str,
-    selected: bool,
-    badge: u32,
-) -> Response {
+    icon: Option<crate::ui::Place>,
+    active: bool,
+    closable: bool,
+) -> ChipOutcome {
     let colors = palette(theme);
-    let width = ui.available_width();
-    let height = 40.0;
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), Sense::click());
-    let background = if selected {
-        colors.surface_selected
-    } else if response.hovered() {
-        colors.surface_hover
-    } else {
-        Color32::TRANSPARENT
-    };
-    if background != Color32::TRANSPARENT {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(radius::SM), background);
-    }
-    if selected {
-        let bar = egui::Rect::from_min_max(
-            egui::pos2(rect.left(), rect.top() + space::SM),
-            egui::pos2(rect.left() + 3.0, rect.bottom() - space::SM),
-        );
-        ui.painter()
-            .rect_filled(bar, CornerRadius::ZERO, colors.accent);
-    }
-    let mut inner = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(Layout::left_to_right(Align::Center)),
+    let font = FontId::proportional(font::SMALL);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font.clone(), colors.banner_ink);
+    let icon_room = if icon.is_some() { 26.0 } else { 0.0 };
+    let close_room = if closable { 24.0 } else { 0.0 };
+    let padding = Vec2::new(space::MD, 0.0);
+    let size = egui::vec2(
+        galley.size().x + icon_room + close_room + padding.x * 2.0,
+        32.0,
     );
-    let indent = (width - 20.0) / 2.0;
-    inner.add_space(indent);
-    place_icon(&mut inner, theme, place, selected);
-    if badge > 0 {
-        let text = if badge > 99 {
-            "99+"
-        } else {
-            &badge.to_string()
-        };
-        let mini = ui.painter().layout_no_wrap(
-            text.to_owned(),
-            FontId::proportional(font::TINY),
-            colors.text_on_accent,
-        );
-        let padding = Vec2::new(space::XS, space::XS * 0.5);
-        let size = mini.size() + padding * 2.0;
-        let top_right = rect.right_top() + Vec2::new(-space::XS, space::XS);
-        let badge_rect =
-            egui::Rect::from_min_size(egui::pos2(top_right.x - size.x, top_right.y), size);
-        ui.painter()
-            .rect_filled(badge_rect, CornerRadius::same(radius::FULL), colors.accent);
-        ui.painter()
-            .galley(badge_rect.min + padding, mini, colors.text_on_accent);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let mut outcome = ChipOutcome::default();
+    if response.clicked() {
+        outcome.clicked = true;
     }
-    response.on_hover_text(label)
+
+    let fill = if active {
+        colors.accent_bright
+    } else {
+        // A translucent dark over the teal strip reads as the reference's idle chip in either
+        // theme: the strip is the same family of colour in both, so one overlay serves both.
+        Color32::from_black_alpha(70)
+    };
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(radius::TAB), fill);
+    if active {
+        // The orange underline: 3px of banner orange inset at the chip's foot.
+        let bar = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + space::SM, rect.bottom() - 3.0),
+            egui::pos2(rect.right() - space::SM, rect.bottom()),
+        );
+        ui.painter()
+            .rect_filled(bar, CornerRadius::same(radius::SM), colors.banner_b);
+    }
+
+    let mut at = rect.left() + padding.x;
+    if let Some(place) = icon {
+        let icon_rect = egui::Rect::from_min_size(
+            egui::pos2(at, rect.center().y - 10.0),
+            egui::vec2(20.0, 20.0),
+        );
+        let mut inner = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(icon_rect)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        // White on the strip whatever the theme: the chip's ink is the banner's ink.
+        inner.set_visuals(egui::Visuals {
+            override_text_color: Some(colors.banner_ink),
+            ..egui::Visuals::dark()
+        });
+        place_icon(&mut inner, theme, place, active);
+        at += icon_room;
+    }
+    ui.painter().galley(
+        egui::pos2(at, rect.center().y - galley.size().y / 2.0),
+        galley,
+        colors.banner_ink,
+    );
+    if active {
+        // Stronger ink for the selected chip, so the strip's "you are here" is readable at a
+        // glance even among many open chats.
+    }
+
+    if closable {
+        let mark = egui::Rect::from_center_size(
+            egui::pos2(rect.right() - 12.0, rect.center().y),
+            egui::vec2(16.0, 16.0),
+        );
+        let close = ui.interact(mark, ui.id().with(label).with("close"), Sense::click());
+        if close.clicked() {
+            outcome.closed = true;
+        }
+        let hover = if close.hovered() {
+            Color32::from_white_alpha(70)
+        } else {
+            Color32::TRANSPARENT
+        };
+        if hover != Color32::TRANSPARENT {
+            ui.painter()
+                .rect_filled(mark, CornerRadius::same(radius::FULL), hover);
+        }
+        let stroke = egui::Stroke::new(1.5, colors.banner_ink);
+        ui.painter().line_segment(
+            [
+                egui::pos2(mark.left() + 5.0, mark.top() + 5.0),
+                egui::pos2(mark.right() - 5.0, mark.bottom() - 5.0),
+            ],
+            stroke,
+        );
+        ui.painter().line_segment(
+            [
+                egui::pos2(mark.right() - 5.0, mark.top() + 5.0),
+                egui::pos2(mark.left() + 5.0, mark.bottom() - 5.0),
+            ],
+            stroke,
+        );
+    }
+
+    outcome
+}
+
+/// Paints a horizontal three-stop gradient across a rect.
+///
+/// egui has no gradient primitive, so this is the two-triangle mesh it decomposes to: `a` at the
+/// left edge, `b` at the middle, `c` at the right. Used by the profile banner, which is the one
+/// surface in the client that is a gradient rather than a fill.
+pub fn gradient_rect(ui: &mut Ui, rect: egui::Rect, a: Color32, b: Color32, c: Color32) {
+    let mut mesh = egui::Mesh::default();
+    let (l, m, r) = (rect.left_top(), rect.center_top(), rect.right_top());
+    let (lb, mb, rb) = (
+        rect.left_bottom(),
+        rect.center_bottom(),
+        rect.right_bottom(),
+    );
+    let base = mesh.vertices.len() as u32;
+    for (pos, color) in [(l, a), (lb, a), (m, b), (mb, b)] {
+        mesh.colored_vertex(pos, color);
+    }
+    mesh.indices
+        .extend([base, base + 1, base + 2, base + 2, base + 1, base + 3]);
+    let base = mesh.vertices.len() as u32;
+    for (pos, color) in [(m, b), (mb, b), (r, c), (rb, c)] {
+        mesh.colored_vertex(pos, color);
+    }
+    mesh.indices
+        .extend([base, base + 1, base + 2, base + 2, base + 1, base + 3]);
+    ui.painter().add(egui::Shape::mesh(mesh));
+}
+
+/// Paints a vertical three-stop gradient across a rect, for the login screen.
+pub fn gradient_rect_vertical(ui: &mut Ui, rect: egui::Rect, a: Color32, b: Color32, c: Color32) {
+    let mut mesh = egui::Mesh::default();
+    let (t, m, bo) = (rect.left_top(), rect.left_center(), rect.left_bottom());
+    let (tr, mr, br) = (rect.right_top(), rect.right_center(), rect.right_bottom());
+    let base = mesh.vertices.len() as u32;
+    for (pos, color) in [(t, a), (tr, a), (m, b), (mr, b)] {
+        mesh.colored_vertex(pos, color);
+    }
+    mesh.indices
+        .extend([base, base + 1, base + 2, base + 2, base + 1, base + 3]);
+    let base = mesh.vertices.len() as u32;
+    for (pos, color) in [(m, b), (mr, b), (bo, c), (br, c)] {
+        mesh.colored_vertex(pos, color);
+    }
+    mesh.indices
+        .extend([base, base + 1, base + 2, base + 2, base + 1, base + 3]);
+    ui.painter().add(egui::Shape::mesh(mesh));
 }
 
 /// A hairline separator that respects the palette instead of egui's default grey.
@@ -369,6 +492,35 @@ pub fn avatar(ui: &mut Ui, theme: Theme, seed: &str, diameter: f32) {
     ui.painter().galley(at, galley, colors.text_on_accent);
 }
 
+/// The avatar as it sits on the orange banner: the same monogram logic, drawn as a translucent
+/// white disc ringed in white, because the tinted avatar's hue would argue with the gradient
+/// behind it.
+pub fn banner_avatar(ui: &mut Ui, theme: Theme, seed: &str, diameter: f32) -> Response {
+    let colors = palette(theme);
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(diameter), Sense::click());
+    let radius = diameter / 2.0;
+    ui.painter()
+        .circle_filled(rect.center(), radius, Color32::from_white_alpha(60));
+    ui.painter().circle_stroke(
+        rect.center(),
+        radius - 1.0,
+        egui::Stroke::new(1.5, colors.banner_ink),
+    );
+
+    let initial = seed
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| "?".to_owned());
+    let font = FontId::proportional(diameter * 0.42);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(initial, font, colors.banner_ink);
+    let at = rect.center() - galley.size() / 2.0;
+    ui.painter().galley(at, galley, colors.banner_ink);
+    response
+}
+
 /// A stable hue for a name.
 ///
 /// FNV-1a over the bytes, then a fixed palette of hues. A hash rather than an index because the seed
@@ -432,10 +584,11 @@ pub fn field(
     response
 }
 
-/// The one prominent action on a screen.
+/// The one prominent action on a screen: the reference's orange — the banner's own gradient
+/// family, so every "Go" in the product is the same orange.
 pub fn primary_button(ui: &mut Ui, theme: Theme, text: &str, enabled: bool) -> Response {
     let colors = palette(theme);
-    // Scoped so the three accent shades apply to this button and nothing after it.
+    // Scoped so the three banner shades apply to this button and nothing after it.
     //
     // `Button::fill` is one colour for every state, so a filled button gets no hover and no press
     // feedback — which reads as disabled, on the one control the user is most likely to aim at.
@@ -444,14 +597,14 @@ pub fn primary_button(ui: &mut Ui, theme: Theme, text: &str, enabled: bool) -> R
         {
             let w = &mut ui.style_mut().visuals.widgets;
             w.inactive.weak_bg_fill = if enabled {
-                colors.accent
+                colors.banner_b
             } else {
                 colors.surface_hover
             };
             w.inactive.bg_stroke = Stroke::NONE;
-            w.hovered.weak_bg_fill = colors.accent_hover;
+            w.hovered.weak_bg_fill = colors.banner_c;
             w.hovered.bg_stroke = Stroke::NONE;
-            w.active.weak_bg_fill = colors.accent_active;
+            w.active.weak_bg_fill = colors.banner_a;
             w.active.bg_stroke = Stroke::NONE;
         }
         let width = ui.available_width();
@@ -460,7 +613,7 @@ pub fn primary_button(ui: &mut Ui, theme: Theme, text: &str, enabled: bool) -> R
             egui::Button::new(
                 RichText::new(text)
                     .font(FontId::proportional(font::SUBTITLE))
-                    .color(colors.text_on_accent),
+                    .color(colors.banner_ink),
             )
             .corner_radius(CornerRadius::same(radius::MD))
             .min_size(Vec2::new(width, 40.0)),
@@ -476,10 +629,16 @@ pub fn send_button(ui: &mut Ui, theme: Theme, enabled: bool) -> Response {
     let colors = palette(theme);
     let side = 40.0;
     let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(side), Sense::click());
-    let fill = if enabled {
-        colors.accent
-    } else {
+    // The three accent states the palette names, chosen by the interaction egui already tracked
+    // for this response: idle, hovered, held.
+    let fill = if !enabled {
         colors.surface_hover
+    } else if response.is_pointer_button_down_on() {
+        colors.accent_active
+    } else if response.hovered() {
+        colors.accent_hover
+    } else {
+        colors.accent
     };
     ui.painter().circle_filled(rect.center(), side / 2.0, fill);
 

@@ -18,6 +18,7 @@ pub mod auth;
 pub mod captcha;
 pub mod chat;
 pub mod friends;
+pub mod games;
 pub mod rooms;
 pub mod search;
 pub mod server_form;
@@ -50,25 +51,29 @@ pub enum Screen {
     Chat,
 }
 
-/// Which pane a signed-in user is looking at, chosen from the top navigation bar.
+/// Which pane a signed-in user is looking at, chosen from the tab strip.
 ///
 /// Deliberately separate from [`Screen`]: the screens are the auth *pipeline* (which form, which
 /// gate), while a place is where a signed-in person already is. Folding friends into `Screen`
 /// would let the auth flow "navigate" to it, and a sign-out would have to remember to reset it
 /// rather than it simply being unreachable without an account.
 ///
-/// The order is the information architecture — the same list the web client's rail and the
-/// Android client's bottom bar carry, in the same order, because it is one product.
+/// The order is the information architecture — the reference's tab strip (Friends, Chats, Rooms,
+/// Games, Feed) first, then the secondary panels that arrive as closable chips of their own, the
+/// same list the web client's strip and the Android client's strip carry, because it is one
+/// product.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Place {
-    /// Conversations and threads — where a session starts, per the messenger-first spec.
+    /// The social graph: friends, requests, adding by id.
+    Friends,
+    /// The conversation list — where a session starts, per the messenger-first spec.
     Chat,
     /// The public room directory and the way in.
     Rooms,
+    /// The games the server referees, and where they are played.
+    Games,
     /// The activity stream.
-    Space,
-    /// The social graph: friends, requests, adding by id.
-    Friends,
+    Feed,
     /// The durable notification inbox.
     Alerts,
     /// One box, everything it can honestly find.
@@ -80,19 +85,42 @@ pub enum Place {
 }
 
 impl Place {
-    /// The tab's own word, in the bar and nowhere else.
+    /// The tab's own word, on the strip and nowhere else.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
+            Self::Friends => "Friends",
             Self::Chat => "Chats",
             Self::Rooms => "Rooms",
-            Self::Space => "Space",
-            Self::Friends => "Friends",
+            Self::Games => "Games",
+            Self::Feed => "Feed",
             Self::Alerts => "Alerts",
             Self::Search => "Search",
             Self::Wallet => "Wallet",
             Self::Settings => "Settings",
         }
+    }
+
+    /// The five places that are always on the strip, in the reference's order.
+    pub const SYSTEM_TABS: [Self; 5] = [
+        Self::Friends,
+        Self::Chat,
+        Self::Rooms,
+        Self::Games,
+        Self::Feed,
+    ];
+
+    /// Whether the place is one of the strip's permanent five.
+    #[must_use]
+    pub fn is_system_tab(self) -> bool {
+        Self::SYSTEM_TABS.contains(&self)
+    }
+
+    /// Whether the place is a secondary panel — one that arrives as a closable chip, opened from
+    /// the banner's account menu or a link, rather than living on the strip.
+    #[must_use]
+    pub fn is_panel(self) -> bool {
+        !self.is_system_tab()
     }
 }
 

@@ -109,16 +109,60 @@ impl AuthState {
 }
 
 /// Draws whichever auth screen is current.
+///
+/// The v3 front door is the reference's: the cyan gradient fills the viewport in either theme —
+/// the sign-in screen is the one surface that ignores the theme, because it is the front door and
+/// the front door does not change with the lights — and the form sits on a card rather than on
+/// the gradient, so every field, label and hint keeps the palette ink it already had.
 pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState, screen: Screen) {
-    // A fixed-width column centred in the window. A form stretched across a wide monitor puts the
+    let colors = palette(context.theme);
+    widgets::gradient_rect_vertical(
+        ui,
+        ui.max_rect(),
+        colors.login_a,
+        colors.login_b,
+        colors.login_c,
+    );
+
+    // The theme control, top-right on the gradient: the one setting available before a session
+    // exists. Sun while dark, moon while light — the glyph names the theme one click would arrive
+    // at, drawn as the gradient's own ink.
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        ui.add_space(space::MD);
+        let glyph = if context.theme.is_dark() {
+            "\u{2600}"
+        } else {
+            "\u{1F319}"
+        };
+        if ui
+            .add(
+                egui::Button::new(
+                    RichText::new(glyph)
+                        .font(egui::FontId::proportional(crate::theme::font::TITLE))
+                        .color(colors.banner_ink),
+                )
+                .fill(egui::Color32::TRANSPARENT)
+                .stroke(egui::Stroke::NONE),
+            )
+            .on_hover_text(format!("Switch to {}", context.theme.flipped().label()))
+            .clicked()
+        {
+            context.want_theme(context.theme.flipped());
+        }
+    });
+
+    // A fixed-width card centred in the window. A form stretched across a wide monitor puts the
     // label a hand's width from its field, and the eye loses the pairing.
     let column = 380.0_f32.min(ui.available_width() - space::XL * 2.0);
     ui.vertical_centered(|ui| {
-        ui.add_space((ui.available_height() * 0.10).min(72.0));
-        ui.allocate_ui_with_layout(
-            egui::vec2(column, ui.available_height()),
-            Layout::top_down(Align::Min),
-            |ui| {
+        ui.add_space((ui.available_height() * 0.08).min(64.0));
+        egui::Frame::new()
+            .fill(colors.surface_raised)
+            .stroke(egui::Stroke::new(1.0, colors.border))
+            .corner_radius(egui::CornerRadius::same(crate::theme::radius::LG))
+            .inner_margin(egui::Margin::same(space::XL as i8))
+            .show(ui, |ui| {
+                ui.set_width(column);
                 brand(ui, context);
                 ui.add_space(space::XL);
                 match screen {
@@ -134,8 +178,7 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState, scree
                 if let crate::model::Connection::Failed(reason) = context.connection {
                     problem(ui, context, reason);
                 }
-            },
-        );
+            });
     });
 }
 
@@ -143,12 +186,17 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState, scree
 fn brand(ui: &mut Ui, context: &Context<'_>) {
     let colors = palette(context.theme);
     ui.vertical_centered(|ui| {
-        ui.label(
-            RichText::new("Migo")
-                .font(egui::FontId::proportional(crate::theme::font::DISPLAY))
-                .color(colors.text)
-                .strong(),
-        );
+        ui.add_space(space::XS);
+        ui.horizontal_centered(|ui| {
+            widgets::brand_mark(ui, context.theme);
+            ui.add_space(space::SM);
+            ui.label(
+                RichText::new("Migo")
+                    .font(egui::FontId::proportional(crate::theme::font::DISPLAY))
+                    .color(colors.text)
+                    .strong(),
+            );
+        });
         ui.add_space(space::XS);
         ui.label(
             RichText::new("End-to-end encrypted messaging")

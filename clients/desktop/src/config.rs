@@ -94,15 +94,11 @@ pub fn default_loopback_server_endpoint(host: impl Into<String>, port: u16) -> S
     }
 }
 
-/// The production default: plain HTTP and plain WS on one port (this deployment).
-
-/**
- * This deployment's single-host endpoint. The public IP is baked here so a
- * first-run install talks to the live server immediately. The local-dev
- * policy (plain HTTP, gateway on the next port) now lives in the legacy
- * `default_loopback_server_endpoint` for tests and as the fallback when a
- * user's hand-typed `server_endpoint_from_url` parse fails.
- */
+/// This deployment's single-host endpoint. The public IP is baked here so a first-run install
+/// talks to the live server immediately: plain HTTP and plain WS on one port (this deployment).
+/// The local-dev policy (plain HTTP, gateway on the next port) now lives in the legacy
+/// `default_loopback_server_endpoint` for tests and as the fallback when a user's hand-typed
+/// `server_endpoint_from_url` parse fails.
 pub fn default_production_server_endpoint() -> ServerEndpoint {
     ServerEndpoint {
         host: "152.53.102.150".to_owned(),

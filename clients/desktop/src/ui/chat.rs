@@ -160,35 +160,44 @@ fn delivery_rank(state: Delivery) -> u8 {
     }
 }
 
-/// Draws the whole chat screen.
-pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState) {
+/// Draws the Chats tab: the conversation list as a pane of its own, centred, with the account
+/// footer beneath it.
+///
+/// In the v3 shell a conversation is no longer opened *beside* this list — opening one lands a
+/// closable tab on the strip and the thread takes the whole pane (see [`thread`]). The list is
+/// therefore the Chats tab's whole content, and it is centred the way the reference centres it,
+/// because a conversation list stretched across a maximised window is mostly empty margin.
+pub fn list(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState) {
     let colors = palette(context.theme);
-    // A fixed-width sidebar rather than a proportional one. A conversation list needs room for a name
-    // and a preview and nothing more; letting it grow with the window only shortens the messages.
-    let sidebar = 300.0_f32.min(ui.available_width() * 0.42);
-
-    ui.horizontal_top(|ui| {
+    let width = 560.0_f32.min(ui.available_width());
+    let margin = (ui.available_width() - width) / 2.0;
+    ui.horizontal(|ui| {
+        ui.add_space(margin);
         ui.allocate_ui_with_layout(
-            egui::vec2(sidebar, ui.available_height()),
+            egui::vec2(width, ui.available_height()),
             Layout::top_down(Align::Min),
-            |ui| sidebar_pane(ui, context, state),
-        );
-
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(1.0, ui.available_height()), egui::Sense::hover());
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::ZERO, colors.border);
-
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), ui.available_height()),
-            Layout::top_down(Align::Min),
-            |ui| thread_pane(ui, context, state),
+            |ui| list_pane(ui, context, state),
         );
     });
+    // Hairlines framing the centred column, so it reads as a pane rather than as a float.
+    let height = ui.min_rect().height();
+    let top = ui.min_rect().top();
+    for at in [margin - 1.0, margin + width] {
+        if at >= 0.0 {
+            let rect = egui::Rect::from_min_size(egui::pos2(at, top), egui::vec2(1.0, height));
+            ui.painter()
+                .rect_filled(rect, egui::CornerRadius::ZERO, colors.border);
+        }
+    }
+}
+
+/// The open conversation as its own tab: header, messages, composer, with nothing beside them.
+pub fn thread(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState) {
+    thread_pane(ui, context, state);
 }
 
 /// The conversation list, its header, and the new-conversation row.
-fn sidebar_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState) {
+fn list_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState) {
     let colors = palette(context.theme);
     let me = context.account.map(|a| a.account_id);
 
