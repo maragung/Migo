@@ -30,6 +30,10 @@ export default tseslint.config(
       // linted as source, so linting it again can only produce findings in generated
       // chunks nobody may edit.
       'clients/web/out/**',
+      // Design reference mockups (docs/design/*.tsx): standalone React+Tailwind demos that
+      // document the look, not code that ships. They sit outside every tsconfig, so the
+      // typed rules can only produce parser errors over them.
+      'docs/design/**',
     ],
   },
   js.configs.recommended,

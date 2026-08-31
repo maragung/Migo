@@ -13,66 +13,79 @@
   color-scheme: light;
 
   /* surfaces */
-  --bg: #f1f2f6;
-  --bg-body: radial-gradient(1200px 800px at 80% -10%, #eceef4 0%, var(--bg) 55%) fixed;
-  --bg-gradient: radial-gradient(500px 360px at 50% 8%, rgba(59, 91, 219, 0.05), transparent 70%);
+  --bg: #fdfbf7;
+  --bg-body: radial-gradient(1200px 800px at 80% -10%, #f7f2e6 0%, var(--bg) 55%) fixed;
+  --bg-gradient: radial-gradient(500px 360px at 50% 8%, rgba(0, 131, 143, 0.05), transparent 70%);
   --bg-elevated: #ffffff;
   --panel: #ffffff;
-  --panel-alt: #eff1f5;
+  --panel-alt: #f5f1e8;
   --panel-overlay: rgba(255, 255, 255, 0.96);
   --input: #ffffff;
-  --nav-bg: rgba(255, 255, 255, 0.96);
+  /* The tab strip is the teal of the new-client-ui reference: #00838F, solid, in both themes. */
+  --nav-bg: #00838f;
 
   /* lines */
-  --border: #e3e5ec;
-  --border-strong: #c9cdd8;
-  --border-soft: rgba(27, 28, 36, 0.08);
+  --border: #e8e2d4;
+  --border-strong: #d3cab4;
+  --border-soft: rgba(30, 43, 46, 0.08);
 
   /* ink */
-  --text: #1b1c24;
-  --text-dim: #5c6170;
-  --text-faint: #9ba0ac;
+  --text: #1e2b2e;
+  --text-dim: #5c6a6d;
+  --text-faint: #9aa5a7;
 
   /* accent */
-  --accent: #3b5bdb;
-  --accent-strong: #2f4cb8;
+  --accent: #00838f;
+  --accent-strong: #00606b;
+  --accent-bright: #00acc1;
   --accent-contrast: #ffffff;
-  --accent-glow: rgba(59, 91, 219, 0.25);
-  --accent-soft: rgba(59, 91, 219, 0.06);
-  --accent-soft-strong: rgba(59, 91, 219, 0.1);
-  --accent-border: rgba(59, 91, 219, 0.45);
-  --accent-border-soft: rgba(59, 91, 219, 0.3);
+  --accent-glow: rgba(0, 131, 143, 0.25);
+  --accent-soft: rgba(0, 131, 143, 0.06);
+  --accent-soft-strong: rgba(0, 131, 143, 0.1);
+  --accent-border: rgba(0, 131, 143, 0.45);
+  --accent-border-soft: rgba(0, 131, 143, 0.3);
+
+  /* the orange profile banner and the cyan login gradient — theme-independent */
+  --banner-a: #ea580c;
+  --banner-b: #f97316;
+  --banner-c: #f59e0b;
+  --banner-ink: #ffffff;
+  --banner-gradient: linear-gradient(90deg, var(--banner-a) 0%, var(--banner-b) 52%, var(--banner-c) 100%);
+  --login-a: #0093af;
+  --login-b: #00acc1;
+  --login-c: #00838f;
+  --login-gradient: linear-gradient(180deg, var(--login-a) 0%, var(--login-b) 55%, var(--login-c) 100%);
 
   /* status colours */
-  --positive: #0ca678;
+  --positive: #059669;
   --warning: #e67700;
   --danger: #e03131;
-  --offline: #9ba0ac;
-  --positive-glow: rgba(12, 166, 120, 0.45);
+  --offline: #9aa5a7;
+  --positive-glow: rgba(5, 150, 105, 0.45);
   --danger-glow: rgba(224, 49, 49, 0.3);
   --danger-soft: rgba(224, 49, 49, 0.08);
   --danger-border: rgba(224, 49, 49, 0.4);
   --danger-text: #c92a2a;
-  --gold: #9a6700;
+  --gold: #d97706;
 
   /* bubbles */
   --bubble-in: #ffffff;
-  --bubble-out: #3b5bdb;
+  --bubble-out: #00838f;
 
   /* effects and overlays */
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-  --glow: 0 0 12px rgba(59, 91, 219, 0.15);
-  --glow-strong: 0 0 16px rgba(59, 91, 219, 0.3);
-  --backdrop: rgba(15, 18, 30, 0.45);
-  --lightbox-bg: rgba(15, 18, 30, 0.9);
-  --overlay-bg: radial-gradient(900px 600px at 50% -10%, #e9ebf4 0%, rgba(241, 242, 246, 0.97) 60%);
-  --video-bg: #10141c;
+  --glow: 0 0 12px rgba(0, 131, 143, 0.15);
+  --glow-strong: 0 0 16px rgba(0, 131, 143, 0.3);
+  --backdrop: rgba(15, 30, 32, 0.45);
+  --lightbox-bg: rgba(15, 30, 32, 0.9);
+  --overlay-bg: radial-gradient(900px 600px at 50% -10%, #f7f2e6 0%, rgba(253, 251, 247, 0.97) 60%);
+  --video-bg: #10202a;
   --ink-on-fill: #ffffff;
 
   /* browser chrome */
   --scrollbar-thumb: rgba(0, 0, 0, 0.18);
-  --scrollbar-track: #eef0f3;
-  --selection-bg: rgba(59, 91, 219, 0.22);
+  --scrollbar-track: #f3efe4;
+  --selection-bg: rgba(0, 131, 143, 0.22);
 
   /* theme-independent tokens */
   --radius: 6px;
@@ -141,41 +154,42 @@
   color-scheme: dark;
 
   /* surfaces */
-  --bg: #141519;
-  --bg-body: radial-gradient(1200px 800px at 80% -10%, #17181d 0%, var(--bg) 55%) fixed;
-  --bg-gradient: radial-gradient(500px 360px at 50% 8%, rgba(76, 110, 245, 0.06), transparent 70%);
-  --bg-elevated: #1b1c24;
-  --panel: #1b1c24;
-  --panel-alt: #24252e;
-  --panel-overlay: rgba(27, 28, 36, 0.94);
-  --input: #1f2029;
-  --nav-bg: rgba(20, 21, 25, 0.96);
+  --bg: #0c1517;
+  --bg-body: radial-gradient(1200px 800px at 80% -10%, #0f1a1d 0%, var(--bg) 55%) fixed;
+  --bg-gradient: radial-gradient(500px 360px at 50% 8%, rgba(0, 188, 212, 0.06), transparent 70%);
+  --bg-elevated: #122023;
+  --panel: #122023;
+  --panel-alt: #1a2c30;
+  --panel-overlay: rgba(18, 32, 35, 0.94);
+  --input: #15262a;
+  --nav-bg: #0f3a40;
 
   /* lines */
-  --border: #2a2b36;
-  --border-strong: #3a3c4a;
-  --border-soft: rgba(42, 43, 54, 0.6);
+  --border: #24393e;
+  --border-strong: #355158;
+  --border-soft: rgba(36, 57, 62, 0.6);
 
   /* ink */
-  --text: #f2f3f7;
-  --text-dim: #a0a3b1;
-  --text-faint: #6e7180;
+  --text: #e9f4f5;
+  --text-dim: #9db4b8;
+  --text-faint: #64808a;
 
   /* accent */
-  --accent: #4c6ef5;
-  --accent-strong: #3b5bdb;
-  --accent-contrast: #ffffff;
-  --accent-glow: rgba(76, 110, 245, 0.28);
-  --accent-soft: rgba(76, 110, 245, 0.1);
-  --accent-soft-strong: rgba(76, 110, 245, 0.16);
-  --accent-border: rgba(76, 110, 245, 0.55);
-  --accent-border-soft: rgba(76, 110, 245, 0.35);
+  --accent: #00bcd4;
+  --accent-strong: #0093af;
+  --accent-bright: #26c6da;
+  --accent-contrast: #062a30;
+  --accent-glow: rgba(0, 188, 212, 0.28);
+  --accent-soft: rgba(0, 188, 212, 0.1);
+  --accent-soft-strong: rgba(0, 188, 212, 0.16);
+  --accent-border: rgba(0, 188, 212, 0.55);
+  --accent-border-soft: rgba(0, 188, 212, 0.35);
 
   /* status colours */
   --positive: #2fce7e;
   --warning: #f59f00;
   --danger: #ff5c7a;
-  --offline: #6e7180;
+  --offline: #64808a;
   --positive-glow: rgba(47, 206, 126, 0.4);
   --danger-glow: rgba(255, 92, 122, 0.3);
   --danger-soft: rgba(255, 92, 122, 0.1);
@@ -184,23 +198,23 @@
   --gold: #fcc419;
 
   /* bubbles */
-  --bubble-in: #24252e;
-  --bubble-out: #4c6ef5;
+  --bubble-in: #1a2c30;
+  --bubble-out: #007e8f;
 
   /* effects and overlays */
   --shadow: 0 0 14px rgba(0, 0, 0, 0.45);
-  --glow: 0 0 12px rgba(76, 110, 245, 0.18);
-  --glow-strong: 0 0 16px rgba(76, 110, 245, 0.35);
-  --backdrop: rgba(8, 9, 12, 0.72);
-  --lightbox-bg: rgba(8, 9, 12, 0.92);
-  --overlay-bg: radial-gradient(900px 600px at 50% -10%, #1b1c24 0%, rgba(14, 15, 19, 0.98) 60%);
-  --video-bg: #0e0f13;
+  --glow: 0 0 12px rgba(0, 188, 212, 0.18);
+  --glow-strong: 0 0 16px rgba(0, 188, 212, 0.35);
+  --backdrop: rgba(4, 10, 11, 0.72);
+  --lightbox-bg: rgba(4, 10, 11, 0.92);
+  --overlay-bg: radial-gradient(900px 600px at 50% -10%, #122023 0%, rgba(12, 21, 23, 0.98) 60%);
+  --video-bg: #0a1418;
   --ink-on-fill: #ffffff;
 
   /* browser chrome */
-  --scrollbar-thumb: rgba(160, 163, 177, 0.35);
-  --scrollbar-track: #141519;
-  --selection-bg: rgba(76, 110, 245, 0.35);
+  --scrollbar-thumb: rgba(157, 180, 184, 0.35);
+  --scrollbar-track: #0c1517;
+  --selection-bg: rgba(0, 188, 212, 0.35);
 }
 
 * {
@@ -298,12 +312,15 @@ main {
   cursor: not-allowed;
 }
 .btn-primary {
-  background: linear-gradient(135deg, var(--accent-strong), var(--accent));
-  color: var(--accent-contrast);
+  /* The reference's action colour: the orange of the profile banner, not the teal accent. */
+  background: linear-gradient(90deg, var(--banner-b), var(--banner-c));
+  border-color: transparent;
+  color: var(--banner-ink);
   box-shadow: var(--glow);
 }
 .btn-primary:hover {
   border-color: transparent;
+  background: linear-gradient(90deg, var(--banner-a), var(--banner-b));
   box-shadow: var(--glow-strong);
 }
 .btn-ghost {
@@ -399,12 +416,20 @@ main {
 
 /* --- centered auth screens --- */
 
+/*
+ * The auth screens wear the reference's cyan gradient in both themes: the gradient is the
+ * brand moment, not a surface, so it does not flip with the light/dark switch. The card on
+ * top is the mockup's glass — translucent white, blurred, hairline-bordered — and everything
+ * inside it (fields, the server disclosure, the captcha) is scoped below to stay readable
+ * on that glass regardless of theme.
+ */
 .auth-screen {
   min-height: 100%;
   display: grid;
   place-items: center;
   padding: 20px;
-  background: var(--bg-gradient);
+  background: var(--login-gradient);
+  color: #ffffff;
 }
 .auth-theme-toggle {
   position: fixed;
@@ -412,15 +437,21 @@ main {
   right: 16px;
   z-index: 10;
   box-shadow: var(--shadow);
+  background: rgba(255, 255, 255, 0.2);
+  border-color: rgba(255, 255, 255, 0.4);
+  color: #ffffff;
 }
 .auth-card {
   width: 100%;
   max-width: 420px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: var(--shadow);
+  background: rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 16px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
   padding: 32px 28px;
+  color: #ffffff;
 }
 .auth-brand {
   display: flex;
@@ -431,18 +462,19 @@ main {
 }
 .auth-brand .brand-mark {
   font-size: 48px;
-  color: var(--accent);
-  text-shadow: 0 0 20px var(--accent-glow);
+  color: #ffffff;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
 }
 .auth-brand h1 {
   font-size: 28px;
   font-weight: 800;
   margin: 0;
   letter-spacing: -0.5px;
+  color: #ffffff;
 }
 .auth-sub {
   text-align: center;
-  color: var(--text-dim);
+  color: rgba(255, 255, 255, 0.85);
   margin: 0 0 24px;
   font-size: 14px;
 }
@@ -450,19 +482,55 @@ main {
   margin-top: 14px;
   text-align: center;
   font-size: 13px;
-  color: var(--text-dim);
+  color: rgba(255, 255, 255, 0.85);
 }
 .auth-alt a {
-  color: var(--accent);
+  color: #ffffff;
   font-weight: 600;
+  text-decoration: underline;
 }
-.auth-note {
-  margin-top: 14px;
-  font-size: 12px;
-  color: var(--text-faint);
-  display: flex;
-  gap: 6px;
-  align-items: flex-start;
+/* Fields on the glass: solid white inputs with dark ink, as in the mockup's login form. */
+.auth-screen .field-label {
+  color: rgba(255, 255, 255, 0.9);
+}
+.auth-screen .field-label input,
+.auth-screen .field-label textarea {
+  background: #ffffff;
+  border: 1px solid rgba(0, 172, 193, 0.35);
+  color: #1e2b2e;
+}
+.auth-screen .field-label input::placeholder,
+.auth-screen .field-label textarea::placeholder {
+  color: #9aa5a7;
+}
+.auth-screen .form-error {
+  color: #ffe3e3;
+}
+.auth-screen .muted {
+  color: rgba(255, 255, 255, 0.75);
+}
+/* The server disclosure and captcha sit on the glass too: white bodies, cyan hairlines. */
+.auth-screen .server-disclosure {
+  background: rgba(255, 255, 255, 0.85);
+  border-color: rgba(255, 255, 255, 0.5);
+}
+.auth-screen .server-disclosure-toggle {
+  color: #00606b;
+}
+.auth-screen .server-disclosure-summary,
+.auth-screen .server-disclosure-note {
+  color: #5c6a6d;
+}
+.auth-screen .server-disclosure-panel {
+  border-top-color: rgba(0, 131, 143, 0.25);
+}
+.auth-screen .server-disclosure-note {
+  background: rgba(255, 255, 255, 0.6);
+  border-color: rgba(0, 131, 143, 0.35);
+}
+.auth-screen .captcha-widget {
+  background: rgba(255, 255, 255, 0.85);
+  border-color: rgba(255, 255, 255, 0.5);
 }
 
 /* --- app shell --- */
