@@ -267,7 +267,7 @@ private fun DrawScope.drawGlyph(kind: BarGlyph, color: Color, stroke: Float) {
                 topLeft = p(0.08f, 0.15f),
                 size = androidx.compose.ui.geometry.Size(size.width * 0.84f, size.height * 0.57f),
                 cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx()),
-                style = Stroke(stroke, cap),
+                style = Stroke(width = stroke, cap = cap),
             )
             drawLine(color, p(0.3f, 0.72f), p(0.22f, 0.9f), stroke, cap)
             drawLine(color, p(0.22f, 0.9f), p(0.48f, 0.72f), stroke, cap)
