@@ -68,7 +68,9 @@ export function downloadAccountFile(bytes: Uint8Array, filename: string): void {
   if (typeof document === 'undefined') {
     return;
   }
-  const blob = new Blob([bytes], { type: 'application/octet-stream' });
+  // `slice()` re-backs the bytes on a fresh ArrayBuffer, which is what the DOM's BlobPart asks
+  // for under TS 5.7's typed-array generics; the copy is a few hundred bytes, once per download.
+  const blob = new Blob([bytes.slice()], { type: 'application/octet-stream' });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;

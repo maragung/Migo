@@ -40,9 +40,11 @@ test('a username becomes a findable account file name', () => {
 test('a recovery credential is judged locally, before any Argon2id work is spent on it', () => {
   assert.equal(credentialProblem('correct horse', 'correct horse'), null);
   assert.equal(credentialProblem('12345678', '12345678'), null);
-  assert.match(credentialProblem('short', 'short'), /at least 8 characters/);
-  assert.match(credentialProblem('one credential', 'another credential'), /do not match/);
-  assert.match(credentialProblem('x'.repeat(1025), 'x'.repeat(1025)), /too long/);
+  // `?? ''`: a null (sealable) would fail the match, which is exactly the point — these three
+  // lines each demand a refusal, and a credential the judge accepted cannot refuse anything.
+  assert.match(credentialProblem('short', 'short') ?? '', /at least 8 characters/);
+  assert.match(credentialProblem('one credential', 'another credential') ?? '', /do not match/);
+  assert.match(credentialProblem('x'.repeat(1025), 'x'.repeat(1025)) ?? '', /too long/);
 });
 
 test('the save offer shows the credential fields and the download, and says what it is for', () => {
