@@ -431,10 +431,17 @@ main {
  */
 .auth-screen {
   min-height: 100%;
+  /* The register card (username, password, email, captcha, submit, cross-link, server link)
+     is taller than a short viewport; the page must scroll under a background that stays put.
+     `100dvh` tracks the real viewport on mobile URL-bar collapse; the `100%` line above is the
+     fallback for engines without it. `fixed` pins the gradient to the viewport so scrolling the
+     card never scrolls the sky. */
+  min-height: 100dvh;
   display: grid;
   place-items: center;
   padding: 20px;
   background: var(--login-gradient);
+  background-attachment: fixed;
   color: #ffffff;
 }
 .auth-theme-toggle {
