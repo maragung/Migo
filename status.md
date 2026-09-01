@@ -1439,3 +1439,14 @@ credential, file berubah, dan file asing tidak dibedakan.
 akun ditulis pada register dan login sukses, dan sengaja tidak dihapus
 saat logout — logout mengakhiri sesi, bukan hubungan browser dengan
 akun.
+
+## 41. Register: captcha bersebelahan dengan field di layar PC (v0.13.4)
+
+Kartu register kini melebar (660px) di atas breakpoint sheet dan membagi
+diri menjadi dua kolom: username, email, dan password di kiri, captcha
+di kanan — seorang pengguna PC membaca form dan menyelesaikan challenge
+dalam satu lebar pandangan, bukan men-scroll kartu yang lebih tinggi.
+Kolom field sedikit lebih lebar (1.15fr) karena input adalah pekerjaan
+utama; gambar challenge tetap 200px. Di ponsel grid runtuh menjadi
+susunan biasa — field lalu captcha — persis seperti sebelumnya, dan
+kartu login tidak tersentuh (tetap 420px; form-nya tidak punya captcha).

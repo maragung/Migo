@@ -591,6 +591,28 @@ main {
   background: rgba(255, 255, 255, 0.85);
   border-color: rgba(255, 255, 255, 0.5);
 }
+/* The register card's two-column form. On a phone the grid is a plain block — the fields,
+   then the captcha under them, as it always was. From the sheet breakpoint up, the card
+   widens and the captcha moves to the right of the fields, so a PC user reads the form
+   and solves the challenge in one eye-width instead of scrolling the card taller.
+   The fields column is a hair wider than the captcha's: the inputs are the primary work,
+   the challenge image is fixed at 200px and does not need the extra room. */
+.auth-card-wide {
+  max-width: 660px;
+}
+@media (min-width: 768px) {
+  .register-grid {
+    display: grid;
+    grid-template-columns: 1.15fr 1fr;
+    column-gap: 18px;
+    align-items: start;
+  }
+  /* The widget's own bottom margin is rhythm for the stacked layout; in the grid the
+     column's last row is the answer field, whose margin closes the gap to the submit. */
+  .register-grid .captcha-widget {
+    margin-bottom: 0;
+  }
+}
 
 /* --- app shell --- */
 

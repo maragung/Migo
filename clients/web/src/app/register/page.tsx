@@ -95,7 +95,7 @@ export default function RegisterPage(): ReactNode {
   return (
     <main className="auth-screen">
       <ThemeToggle className="auth-theme-toggle" />
-      <form className="auth-card" onSubmit={(event) => void onSubmit(event)}>
+      <form className="auth-card auth-card-wide" onSubmit={(event) => void onSubmit(event)}>
         <div className="auth-brand">
           <span className="brand-mark" aria-hidden="true">
             ◆
@@ -104,45 +104,52 @@ export default function RegisterPage(): ReactNode {
         </div>
         <p className="auth-sub">Create an account — your keys are made here and never leave it.</p>
 
-        <label className="field-label">
-          Username
-          <input
-            type="text"
-            value={username}
-            onChange={(event) => setUsername(event.target.value)}
-            autoComplete="username"
-            placeholder="the name friends will find you by"
-            spellCheck={false}
-            autoFocus
-            required
-          />
-        </label>
+        {/* On a wide screen the fields take the left column and the captcha the right, so a PC
+            user reads the form and solves the challenge in one eye-width; on a phone the grid
+            collapses and the captcha follows the fields as before. */}
+        <div className="register-grid">
+          <div className="register-fields">
+            <label className="field-label">
+              Username
+              <input
+                type="text"
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                autoComplete="username"
+                placeholder="the name friends will find you by"
+                spellCheck={false}
+                autoFocus
+                required
+              />
+            </label>
 
-        <label className="field-label">
-          Email <span className="muted">(optional)</span>
-          <input
-            type="email"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            autoComplete="email"
-            placeholder="you@example.com"
-          />
-        </label>
+            <label className="field-label">
+              Email <span className="muted">(optional)</span>
+              <input
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                autoComplete="email"
+                placeholder="you@example.com"
+              />
+            </label>
 
-        <label className="field-label">
-          Password
-          <input
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            autoComplete="new-password"
-            minLength={10}
-            required
-          />
-          <span className="field-hint">At least 10 characters.</span>
-        </label>
+            <label className="field-label">
+              Password
+              <input
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                autoComplete="new-password"
+                minLength={10}
+                required
+              />
+              <span className="field-hint">At least 10 characters.</span>
+            </label>
+          </div>
 
-        {endpoint !== null ? <CaptchaWidget endpoint={endpoint} onChange={setCaptcha} /> : null}
+          {endpoint !== null ? <CaptchaWidget endpoint={endpoint} onChange={setCaptcha} /> : null}
+        </div>
 
         {validationError ? <p className="form-error">{validationError}</p> : null}
         {error ? <p className="form-error">{error}</p> : null}
