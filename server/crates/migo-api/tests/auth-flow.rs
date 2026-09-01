@@ -1285,8 +1285,10 @@ async fn revoking_one_session_and_then_its_device_over_the_routes() {
         device_revoke.text()
     );
 
-    // The laptop's fresh token is dead, and the device reads as revoked — the two
-    // facts a security screen shows after "this device is gone".
+    // The laptop's fresh token is dead and the device is gone from the list — the
+    // two facts a security screen shows after "this device is gone". (A revoked
+    // device is filtered out of the account's list: the store's contract keeps
+    // `devices_for_account` to devices that may still authenticate.)
     let dead = h
         .send(build_req(
             Method::GET,
@@ -1315,9 +1317,11 @@ async fn revoking_one_session_and_then_its_device_over_the_routes() {
         .as_array()
         .expect("devices array")
         .clone();
-    let laptop = devices
-        .iter()
-        .find(|device| device["device_id"].as_str() == Some(first_device.as_str()))
-        .expect("the revoked device is still listed");
-    assert_eq!(laptop["status"], "revoked");
+    assert!(
+        devices
+            .iter()
+            .all(|device| device["device_id"].as_str() != Some(first_device.as_str())),
+        "the revoked device is gone from the list; body={}",
+        after.text()
+    );
 }

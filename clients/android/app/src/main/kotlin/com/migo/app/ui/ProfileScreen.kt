@@ -23,6 +23,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.migo.app.model.AppState
+import com.migo.app.model.DevicesState
 import com.migo.core.net.DeviceSummary
 
 /**
@@ -130,7 +131,9 @@ fun ProfileScreen(
 }
 
 /**
- * The account's devices: one row per device, the current one marked, revoked ones still listed.
+ * The account's devices: one row per device, the current one marked. (A revoked
+ * device no longer appears — the server's list only holds devices that may still
+ * authenticate — so a row is always live.)
  *
  * A null list is the honest "not checked yet" state — a panel that showed an empty list before
  * the read landed would be saying "you have one device", which is the most reassuring answer a
@@ -138,7 +141,7 @@ fun ProfileScreen(
  */
 @Composable
 private fun DevicesSection(
-    devicesState: AppState.DevicesState,
+    devicesState: DevicesState,
     onRefresh: () -> Unit,
     onRemove: (String) -> Unit,
 ) {
