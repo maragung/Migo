@@ -1316,3 +1316,59 @@ menyinkronkan dompet 0..7 ke server; panel Settings menampilkan daftar device
 (brief section 183) agar token/kunci tidak pernah ter-commit. Pintu akhir:
 server 1750 test hijau, desktop 56 test hijau, web/TS 29 test vektor akun
 hijau, lint/fmt/clippy bersih di seluruh workspace.
+
+## 37. Dompet AVAX: tanda tangan EIP-1559 di device, Avalanche C-Chain sebagai chain pertama (v0.13.0)
+
+**Desain** (migo.md section 184, ADR-0014): dompet EVM pertama Migo adalah
+native AVAX di Avalanche C-Chain — transfer native saja, transaksi type 0x02
+(EIP-1559) saja, jaringan dipilih lewat nama (Mainnet / Fuji) dan tidak
+pernah lewat URL, RPC di-pin (43114/43113), AVAX 18 desimal dengan fee
+dikutip di nAVAX (9 desimal). Mainnet tampil default dengan acknowledgement
+"uang sungguhan, tidak bisa dibatalkan" sebelum tombol kirim terbuka. Kunci
+privat tidak pernah diekspor dalam plaintext. Aturan sesi (spec 44): RPC
+pertama adalah eth_chainId dan harus cocok; broadcast re-verifikasi — hash
+asing ditolak.
+
+**Signing** (migo-account, diikuti TypeScript dan Kotlin dengan vektor yang
+sama): EIP-1559 signing hash = Keccak-256(0x02 || RLP(sembilan field)),
+signature ECDSA-secp256k1 low-s, dan EIP-712 untuk typed-data. Tidak ada
+RPC ke blockchain di dalam crate crypto — yang keluar dari device hanya
+transaksi mentah yang sudah ditandatangani. Vektor konformansi
+`account-tx.json` memakai integer string desimal agar empat bahasa membaca
+angka yang sama tanpa presisi float.
+
+**ChainClient** (SDK TS + Kotlin :core): JSON-RPC publik ke network yang
+di-pin, bukan lewat server Migo — server tidak pernah jadi proxy blockchain.
+getBalance/getNonce/estimateGas/getFees untuk membangun transaksi,
+broadcast mengembalikan acceptance dan tidak lebih, dan `track` mengikuti
+hash sampai akhir yang jujur (spec 41): CONFIRMED hanya dari receipt
+status 1, REVERTED dari status 0, DROPPED bila hilang melewati toleransi,
+EXPIRED saat deadline; backoff ×1.5 dengan batas. Penerimaan bukan
+konfirmasi — UI menyebutnya BROADCAST.
+
+**Tiga klien, satu alur**: layar konfirmasi menampilkan SEMUA field yang
+akan ditandatangani (From/To/Amount/Max fee/Max priority fee/Gas
+limit/Nonce/Chain) sebelum tombol konfirmasi aktif; kegagalan parse
+ditolak sebelum RPC pertama keluar; `from` yang bukan wallet 0 device ini
+ditolak, bukan ditandatangani. Desktop (egui) menambahkan panel AVAX +
+alur kirim + toast settle; Android (Compose) menambahkan panel AVAX di
+WalletScreen dengan FilterChip dua jaringan, form kirim satu layar, dan
+baris aktivitas; web menambahkan seksi AVAX di WalletPanel dengan
+chip/network, form kirim, dan daftar aktivitas — semuanya membaca wallet 0
+dari root (device tanpa root mendapat satu kalimat jujur: buka dompet di
+device yang memegang backup akun).
+
+**SDK web — root di key store**: registrasi web sekarang device pendiri
+(mints root, identitas E2EE diturunkan dari domain E2EE root) dan snapshot
+key store membawa root + daftar transaksi terlacak; device tambahan tetap
+tanpa root. Enrolment material publik (kunci identitas ML-DSA + alamat
+wallet 0) berjalan idempotent di setiap register/resume — pintu upgrade
+legacy yang sama dengan klien native. Record transaksi ditulis saat
+broadcast (reload di tengah tracking kehilangan akhirannya, bukan fakta
+bahwa value sudah keluar) dan dimutasi di array hidup yang disegel pada
+persist berikutnya.
+
+**Pintu akhir**: vektor akun lulus di Rust/TS/Kotlin/Python, SDK 154 test
+hijau, web 248 test hijau (termasuk aritmetika AVAX/nAVAX dan penolakan
+parser), server dan desktop hijau di CI, Android hijau di Actions, lint/
+fmt/clippy bersih. Google Drive backup ditunda sesuai keputusan fase.
