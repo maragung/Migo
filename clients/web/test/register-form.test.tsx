@@ -128,14 +128,22 @@ test('the captcha widget renders the challenge image, the answer input, and the 
   assert.ok(markup.includes('Easier challenge'), 'the easier-challenge control must be labelled');
 });
 
-test('the server form renders the disclosure that lets the user pick host, port, transport, scheme', async () => {
+test('the server form renders the picker body: transport, host, port, scheme, and the commit control', async () => {
   const { ServerForm } = await import('../src/components/server-form.js');
   const markup = renderToStaticMarkup(<ServerForm value={ENDPOINT} onCommit={() => undefined} />);
+  assert.ok(markup.includes('class="server-form"'), 'the picker body must render its shell');
   assert.ok(
-    markup.includes('class="server-disclosure"'),
-    'server disclosure must render its shell',
+    markup.includes('aria-label="Realtime transport"'),
+    'the transport segmented control must be present',
   );
-  assert.ok(markup.includes('>Server<'), 'the disclosure is labelled "Server"');
+  assert.ok(markup.includes('WebSocket'), 'the WebSocket transport must be offered');
+  assert.ok(markup.includes('QUIC'), 'the QUIC transport must be offered');
+  assert.ok(markup.includes('placeholder="migo.example.com"'), 'the host field must be present');
+  assert.ok(markup.includes('placeholder="18080"'), 'the port field must be present');
+  assert.ok(
+    markup.includes('Use this server'),
+    'the commit control must name what it does with the choice',
+  );
 });
 
 test('requestCaptcha posts the chosen mode and parses the image challenge', async () => {

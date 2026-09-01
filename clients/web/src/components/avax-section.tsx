@@ -27,6 +27,8 @@ import { avaxOf, hexOf, navaxOf, parseAvaxAmount } from '@/lib/avax.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 
+import { BottomSheet } from './bottom-sheet.js';
+
 /** The two first-class networks, as the chips name them. */
 type NetworkChoice = 'mainnet' | 'fuji';
 
@@ -427,24 +429,35 @@ export function AvaxSection(): ReactNode {
       ) : null}
 
       {sending ? (
-        <AvaxSendForm
-          network={network}
-          prepared={prepared}
-          prepareError={prepareError}
-          sendError={sendError}
-          acknowledged={acknowledged}
-          busy={tracking !== null}
-          onPrepare={prepare}
-          onAcknowledged={setAcknowledged}
-          onCancel={() => {
+        <BottomSheet
+          title={prepared === null ? 'Send AVAX' : 'Confirm the transaction'}
+          onClose={() => {
             setSending(false);
             setPrepared(null);
             setPrepareError(null);
             setSendError(null);
             setAcknowledged(false);
           }}
-          onSend={confirmSend}
-        />
+        >
+          <AvaxSendForm
+            network={network}
+            prepared={prepared}
+            prepareError={prepareError}
+            sendError={sendError}
+            acknowledged={acknowledged}
+            busy={tracking !== null}
+            onPrepare={prepare}
+            onAcknowledged={setAcknowledged}
+            onCancel={() => {
+              setSending(false);
+              setPrepared(null);
+              setPrepareError(null);
+              setSendError(null);
+              setAcknowledged(false);
+            }}
+            onSend={confirmSend}
+          />
+        </BottomSheet>
       ) : (
         <button
           type="button"
@@ -514,13 +527,12 @@ function AvaxSendForm({
   const [amount, setAmount] = useState('');
 
   return (
-    <div className="recipient-picker avax-send" role="dialog" aria-label="Send AVAX">
+    <div className="avax-send" role="group" aria-label="Send AVAX">
       {prepared === null ? (
         <>
-          <div className="panel-head">
-            <h2 className="panel-heading">Send AVAX</h2>
+          <p className="avax-send-network">
             <span className="avax-network">{networkLabel(network)}</span>
-          </div>
+          </p>
           <form
             onSubmit={(event) => {
               event.preventDefault();
@@ -565,10 +577,9 @@ function AvaxSendForm({
         </>
       ) : (
         <>
-          <div className="panel-head">
-            <h2 className="panel-heading">Confirm the transaction</h2>
+          <p className="avax-send-network">
             <span className="avax-network">{networkLabel(prepared.network)}</span>
-          </div>
+          </p>
           <div className="avax-prepared">
             <PreparedLine label="From" value={prepared.from} />
             <PreparedLine label="To" value={prepared.to} />

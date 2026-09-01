@@ -5,8 +5,9 @@ import type { FormEvent, ReactNode } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
+import { BottomSheet } from '@/components/bottom-sheet.js';
 import { CaptchaWidget } from '@/components/captcha-widget.js';
-import { ServerForm } from '@/components/server-form.js';
+import { ServerForm, transportLabel } from '@/components/server-form.js';
 import { Spinner } from '@/components/spinner.js';
 import { ThemeToggle } from '@/components/theme-toggle.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
@@ -25,6 +26,7 @@ export default function RegisterPage(): ReactNode {
   const [email, setEmail] = useState('');
   const [endpoint, setEndpoint] = useState<ServerEndpoint | null>(null);
   const [endpointReady, setEndpointReady] = useState(false);
+  const [serverSheetOpen, setServerSheetOpen] = useState(false);
   const [captcha, setCaptcha] = useState<CaptchaProof | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const submitting = status === 'connecting';
@@ -40,11 +42,11 @@ export default function RegisterPage(): ReactNode {
     void loadServerEndpoint().then((stored) => {
       if (cancelled) return;
       // A fresh visitor (no stored endpoint) still gets a working form
-      // against the build's default host. The Server disclosure stays
-      // collapsed, the captcha widget mounts, and the submit button is
-      // enabled; the user can expand the disclosure to point at a
-      // self-hosted server without ever leaving the page in a disabled
-      // state.
+      // against the build's default host. The card stays sparse — just the
+      // fields, the captcha widget, and the bottom-corner server link — and
+      // the submit button is enabled; the user can open the server sheet to
+      // point at a self-hosted server without ever leaving the page in a
+      // disabled state.
       setEndpoint(stored ?? defaultServerEndpoint());
       setEndpointReady(true);
     });
@@ -71,9 +73,16 @@ export default function RegisterPage(): ReactNode {
     }
   }
 
-  function onServerDisclosureCommit(next: ServerEndpoint): void {
+  // Same shape as the sign-in card: the server choice lives in a sheet behind a bottom-corner
+  // link, and a commit from the sheet is the only thing that changes the endpoint here.
+  function onServerCommit(next: ServerEndpoint): void {
     setEndpoint(next);
     setValidationError(null);
+  }
+
+  function onServerConfirmed(next: ServerEndpoint): void {
+    onServerCommit(next);
+    setServerSheetOpen(false);
   }
 
   return (
@@ -89,10 +98,6 @@ export default function RegisterPage(): ReactNode {
         <p className="auth-sub">
           Create an account. Your encryption keys are generated on this device and never leave it.
         </p>
-
-        {endpointReady && endpoint !== null ? (
-          <ServerForm value={endpoint} onCommit={onServerDisclosureCommit} />
-        ) : null}
 
         <label className="field-label">
           Username
@@ -143,7 +148,29 @@ export default function RegisterPage(): ReactNode {
         <p className="auth-alt">
           Already have an account? <Link href="/login">Sign in</Link>
         </p>
+
+        {endpointReady && endpoint !== null ? (
+          <div className="auth-card-footer">
+            <button
+              type="button"
+              className="auth-server-link"
+              onClick={() => setServerSheetOpen(true)}
+            >
+              Server · {endpoint.host}:{endpoint.port} · {transportLabel(endpoint.transport)}
+            </button>
+          </div>
+        ) : null}
       </form>
+
+      {serverSheetOpen && endpoint !== null ? (
+        <BottomSheet title="Server" onClose={() => setServerSheetOpen(false)}>
+          <ServerForm
+            value={endpoint}
+            onCommit={onServerConfirmed}
+            onTransportPick={onServerCommit}
+          />
+        </BottomSheet>
+      ) : null}
     </main>
   );
 }

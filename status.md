@@ -1372,3 +1372,24 @@ persist berikutnya.
 hijau, web 248 test hijau (termasuk aritmetika AVAX/nAVAX dan penolakan
 parser), server dan desktop hijau di CI, Android hijau di Actions, lint/
 fmt/clippy bersih. Google Drive backup ditunda sesuai keputusan fase.
+
+## 38. Setiap keperluan di sheet-nya sendiri: kartu auth yang lega (v0.13.1)
+
+**Desain**: kartu login/registrasi kembali lega — hanya brand, sub-kalimat,
+field identitas/password, captcha, tombol, dan tautan silang. Pemilihan
+server pindah ke sheet tersendiri (BottomSheet: bottom sheet di ponsel,
+dialog kecil terpusat di ≥768px) yang dibuka dari satu tautan kecil di
+pojok kanan bawah dalam kartu (`Server · host:port · Transport`), sehingga
+keputusan server tidak lagi memakan ruang kartu. Prinsip yang sama
+diterapkan ke semua keperluan sekunder: pemilih penerima hadiah, form
+kirim AVAX (Build → Confirm dua langkah di satu sheet, judul sheet
+mengikuti langkah), dan ganti password di Settings — masing-masing
+keperluan hidup di sheetnya sendiri, bukan menumpuk di panel.
+
+**ServerForm sebagai body sheet**: transport tetap satu-satunya pilihan
+yang bukan draft — segmented WebSocket/QUIC commit seketika; host/port/
+scheme tetap draft sampai "Use this server", yang sekaligus menutup sheet.
+Commit dari sheet adalah satu-satunya jalan perubahan endpoint di halaman.
+CSS `.server-disclosure*` diganti `.server-form*`; body picker di dalam
+sheet melepas frame-nya sendiri (border/shadow/padding) supaya tidak
+kotak-di-dalam-kotak.

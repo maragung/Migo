@@ -47,6 +47,7 @@ import { useProfiles } from '@/lib/migo/use-profiles.js';
 
 import { Avatar } from './avatar.js';
 import { AvaxSection } from './avax-section.js';
+import { BottomSheet } from './bottom-sheet.js';
 import { CoinMark } from './icons.js';
 import { Spinner } from './spinner.js';
 
@@ -359,11 +360,10 @@ export function RecipientPicker({
 }): ReactNode {
   const [query, setQuery] = useState('');
   return (
-    <div className="recipient-picker" role="dialog" aria-label={`Send ${gift.name}`}>
-      <div className="panel-head">
-        <h2 className="panel-heading">Send {gift.name}</h2>
-        <span className="gift-price">{gift.price} coins</span>
-      </div>
+    <div className="recipient-picker" role="group" aria-label={`Send ${gift.name}`}>
+      <p className="gift-price-line">
+        {gift.name} · <span className="gift-price">{gift.price} coins</span>
+      </p>
       {error != null ? <p className="form-error">{error}</p> : null}
       <form
         className="panel-search"
@@ -639,21 +639,30 @@ export function WalletPanel(): ReactNode {
       )}
 
       {picking !== null ? (
-        <RecipientPicker
-          gift={picking}
-          friends={friends ?? []}
-          results={results}
-          profiles={profiles}
-          onSearch={onSearch}
-          onPick={sendTo}
-          onCancel={() => {
+        <BottomSheet
+          title={`Send ${picking.name}`}
+          onClose={() => {
             setPicking(null);
             setResults(null);
             setSendError(null);
           }}
-          busy={sending}
-          error={sendError}
-        />
+        >
+          <RecipientPicker
+            gift={picking}
+            friends={friends ?? []}
+            results={results}
+            profiles={profiles}
+            onSearch={onSearch}
+            onPick={sendTo}
+            onCancel={() => {
+              setPicking(null);
+              setResults(null);
+              setSendError(null);
+            }}
+            busy={sending}
+            error={sendError}
+          />
+        </BottomSheet>
       ) : null}
     </div>
   );

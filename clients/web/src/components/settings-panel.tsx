@@ -31,6 +31,7 @@ import { saveSession } from '@/lib/storage/session-store.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 
 import { Spinner } from './spinner.js';
+import { BottomSheet } from './bottom-sheet.js';
 
 /** The presentational row for one active session. */
 export function SessionRow({
@@ -195,6 +196,7 @@ export function SettingsPanel(): ReactNode {
   const [changing, setChanging] = useState(false);
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [passwordSaved, setPasswordSaved] = useState(false);
+  const [passwordSheetOpen, setPasswordSheetOpen] = useState(false);
 
   const currentSessionId = client?.grant.sessionId ?? null;
 
@@ -327,17 +329,36 @@ export function SettingsPanel(): ReactNode {
 
       <section className="panel-section" aria-label="Change password">
         <h2 className="panel-heading">Account</h2>
-        <PasswordFormView
-          current={current}
-          next={next}
-          confirm={confirm}
-          busy={changing}
-          error={passwordError}
-          saved={passwordSaved}
-          onChange={onFieldChange}
-          onSubmit={changePassword}
-        />
+        <p className="hint">Your password, changed in its own screen.</p>
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={() => setPasswordSheetOpen(true)}
+        >
+          Change password
+        </button>
       </section>
+
+      {passwordSheetOpen ? (
+        <BottomSheet
+          title="Change password"
+          onClose={() => {
+            setPasswordSheetOpen(false);
+            setPasswordSaved(false);
+          }}
+        >
+          <PasswordFormView
+            current={current}
+            next={next}
+            confirm={confirm}
+            busy={changing}
+            error={passwordError}
+            saved={passwordSaved}
+            onChange={onFieldChange}
+            onSubmit={changePassword}
+          />
+        </BottomSheet>
+      ) : null}
 
       <AppearanceSection />
       <AboutSection />

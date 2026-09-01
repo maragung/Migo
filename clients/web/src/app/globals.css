@@ -426,7 +426,7 @@ main {
  * The auth screens wear the reference's cyan gradient in both themes: the gradient is the
  * brand moment, not a surface, so it does not flip with the light/dark switch. The card on
  * top is the mockup's glass — translucent white, blurred, hairline-bordered — and everything
- * inside it (fields, the server disclosure, the captcha) is scoped below to stay readable
+ * inside it (fields, the captcha, the server link) is scoped below to stay readable
  * on that glass regardless of theme.
  */
 .auth-screen {
@@ -515,24 +515,26 @@ main {
 .auth-screen .muted {
   color: rgba(255, 255, 255, 0.75);
 }
-/* The server disclosure and captcha sit on the glass too: white bodies, cyan hairlines. */
-.auth-screen .server-disclosure {
-  background: rgba(255, 255, 255, 0.85);
-  border-color: rgba(255, 255, 255, 0.5);
+/* The card's bottom corner: the one link that opens the server sheet. */
+.auth-card-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
 }
-.auth-screen .server-disclosure-toggle {
-  color: #00606b;
+.auth-server-link {
+  background: transparent;
+  border: none;
+  padding: 4px 0;
+  color: #e0f7fa;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-decoration: underline dotted rgba(224, 247, 250, 0.6);
+  text-underline-offset: 3px;
+  cursor: pointer;
 }
-.auth-screen .server-disclosure-summary,
-.auth-screen .server-disclosure-note {
-  color: #5c6a6d;
-}
-.auth-screen .server-disclosure-panel {
-  border-top-color: rgba(0, 131, 143, 0.25);
-}
-.auth-screen .server-disclosure-note {
-  background: rgba(255, 255, 255, 0.6);
-  border-color: rgba(0, 131, 143, 0.35);
+.auth-server-link:hover {
+  color: #ffffff;
+  text-decoration-style: solid;
 }
 .auth-screen .captcha-widget {
   background: rgba(255, 255, 255, 0.85);
@@ -2006,95 +2008,41 @@ main {
   font-size: 13px;
 }
 
-/* --- the "Server" disclosure on the auth forms --- */
+/* --- the server picker's body, inside the sheet the auth cards open --- */
 
-.server-disclosure {
-  margin: 0 0 11px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--input);
-}
-.server-disclosure-toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 10px;
-  background: transparent;
-  border: none;
-  color: var(--text-dim);
-  font-weight: 600;
-  text-align: left;
-}
-.server-disclosure-toggle:hover {
-  color: var(--text);
-}
-.server-disclosure-icon {
-  display: inline-block;
-  width: 12px;
-  text-align: center;
-}
-.server-disclosure-summary {
-  margin-left: auto;
-  color: var(--text-faint);
-  font-weight: 400;
-  font-size: 13px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-.server-disclosure-panel {
-  padding: 4px 10px 10px;
+.server-form {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  border-top: 1px solid var(--border);
+  gap: 10px;
 }
-.server-disclosure-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-.server-disclosure-row .field-label {
-  margin: 0;
-}
-/* The always-visible transport switcher: the one server choice that is not behind the
-   disclosure. Kept compact so the collapsed form stays one toggle + one row. */
-.server-disclosure-transport {
+/* The transport switcher is the one choice that is never a draft; it sits at the top of the
+   sheet because one tap there commits immediately. */
+.server-form-transport {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 10px 8px;
+  gap: 10px;
 }
-.server-disclosure-transport-label {
+.server-form-label {
   color: var(--text-faint);
   font-size: 12px;
   font-weight: 600;
 }
-.server-disclosure-segmented {
+.server-form-transport .segmented {
   flex: 1;
   margin: 0;
   padding: 2px;
 }
-.server-disclosure-segmented button {
+.server-form-transport .segmented button {
   padding: 4px 8px;
   font-size: 12px;
 }
-/* The QUIC note sits beside the transport row, outside the panel, so it carries the
-   disclosure's own horizontal padding instead of the panel's. */
-.server-disclosure > .server-disclosure-note {
-  margin: 0 10px 8px;
+.server-form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
 }
-.server-disclosure-note {
+.server-form-row .field-label {
   margin: 0;
-  padding: 6px 8px;
-  background: var(--panel);
-  border: 1px dashed var(--border-strong);
-  border-radius: 4px;
-  color: var(--text-faint);
-  font-size: 12px;
-}
-.server-disclosure-actions {
-  display: flex;
-  justify-content: flex-end;
 }
 .btn-secondary {
   background: var(--panel);
@@ -3805,6 +3753,30 @@ button.activity-row-btn:focus-visible {
 .avax-network {
   font-size: 12px;
   color: var(--text-faint);
+}
+
+/* The send flow's body inside its sheet: the network name leads, the form follows. */
+.avax-send {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.avax-send-network {
+  margin: 0;
+}
+
+/* A picker's body inside its sheet: the sheet is the surface, so the picker's own frame
+   (border, shadow, padding) flattens instead of boxing a box. */
+.sheet-body .recipient-picker {
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+.gift-price-line {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 13px;
 }
 
 /* The confirm screen: every line the signature will cover, labelled and exact. */

@@ -145,7 +145,7 @@ export function CaptchaWidget({ endpoint, onChange }: CaptchaWidgetProps): React
   const answerId = useId();
 
   // One captcha per (endpoint, mount) pair. The endpoint is part of the key
-  // because a self-hosted user who flips the disclosure to a different host
+  // because a self-hosted user who picks a different host in the server sheet
   // needs a challenge the new server actually minted, not a stale one from
   // the previous host that the new server would refuse to verify. A new
   // server also means a fresh start from the default rendering: the alt-mode
