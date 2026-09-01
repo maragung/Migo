@@ -19,8 +19,6 @@ import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-/// The package runner the repository pins in package.json's `packageManager`.
-const PNPM = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
 const SCHEMA = join(ROOT, 'shared/protocol/schema');
 const CHECK = process.argv.includes('--check');
 
@@ -1041,39 +1039,6 @@ function rustfmt(source, label) {
   return result.stdout;
 }
 
-/**
- * Formats emitted TypeScript with the repository's prettier.
- *
- * The same reasoning as `rustfmt`, one toolchain over: `make fmt-check-js`
- * gates the committed file on prettier, and `make protocol-check` gates it on
- * the generator's output. Until the feature registry and the error table were
- * small enough, the generator's hand-wrapped lines stayed inside prettier's
- * width and the two gates agreed by accident; TCP_TRANSPORT and CHALLENGE_INVALID
- * pushed two constructs past it, and the gates now contradict. Running the
- * output through the same prettier the repository uses makes it canonical, so
- * the two can never disagree again.
- */
-function prettify(source) {
-  const result = spawnSync(
-    PNPM,
-    ['exec', 'prettier', '--stdin-filepath', 'packages/protocol/src/generated.ts'],
-    {
-      cwd: ROOT,
-      input: source,
-      encoding: 'utf8',
-      maxBuffer: 64 * 1024 * 1024,
-    },
-  );
-  if (result.error?.code === 'ENOENT' || result.status !== 0) {
-    console.error(
-      'prettier is unavailable (run `pnpm install`). Generated TypeScript must be\n' +
-        'formatted or the fmt-check-js and protocol-check gates disagree.',
-    );
-    process.exit(1);
-  }
-  return result.stdout;
-}
-
 const targets = [
   {
     path: join(ROOT, 'server/crates/migo-wire/src/limits.rs'),
@@ -1087,10 +1052,13 @@ const targets = [
     path: join(ROOT, 'server/crates/migo-protocol/src/generated.rs'),
     content: rustfmt(genRust(), 'generated.rs'),
   },
-  // TypeScript through the repository's prettier, for the same reason the Rust
-  // targets go through rustfmt: the fmt gate and the protocol gate must agree
-  // on one canonical form.
-  { path: join(ROOT, 'packages/protocol/src/generated.ts'), content: prettify(genTs()) },
+  // TypeScript, emitted as-is: .prettierignore excludes this file on purpose, so
+  // prettier never gates it and the generator's own wrapping is the one canonical
+  // form. That is a deliberate difference from the Rust targets above — rustfmt
+  // runs on the committed file, prettier does not — and piping the output through
+  // prettier here anyway would make `make protocol-check` demand a pnpm install,
+  // which the fast gates job (Node only, no node_modules) must never need.
+  { path: join(ROOT, 'packages/protocol/src/generated.ts'), content: genTs() },
   // Kotlin, likewise emitted as-is — the Android build has no in-tree formatter, and
   // the wire foundation it imports (com.migo.core.wire) is hand-written, not generated.
   {
