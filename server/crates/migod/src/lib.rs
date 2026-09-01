@@ -21,6 +21,7 @@ mod compose;
 pub mod mesh;
 pub mod quic;
 mod serve;
+pub mod tcp;
 mod transport;
 mod webhook;
 

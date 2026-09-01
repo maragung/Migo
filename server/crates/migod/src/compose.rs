@@ -69,18 +69,23 @@ use crate::ports::{EconomyRewards, FsStorage, StaffRoster, StoreCallGate};
 /// them instead of timing out against a feature mask that never said they were there.
 const FEATURES: u64 = migo_protocol::features::CALLS;
 
-/// The feature set the node advertises, given whether the optional QUIC listener is configured.
+/// The feature set the node advertises, given which optional realtime listeners are configured.
 ///
-/// The `QUIC` bit is a promise that the node actually carries the second realtime transport, so
-/// it is OR'd in only when `quic.bind` is set — and the composition root binds the listener (or
-/// refuses to start) on the same condition, which keeps the advertised set and the served set
-/// from ever disagreeing. TCP stays the default; a node without `quic.bind` advertises no QUIC.
-fn advertised_features(quic_enabled: bool) -> u64 {
+/// The `QUIC` and `TCP_TRANSPORT` bits are promises that the node actually carries those
+/// transports, so each is OR'd in only when its `bind` is set — and the composition root binds
+/// the listener (or refuses to start) on the same condition, which keeps the advertised set and
+/// the served set from ever disagreeing. The WebSocket route on the HTTP listener is always
+/// bound and always serves the web client; TCP is the native clients' default transport, QUIC
+/// the second option (section 138).
+fn advertised_features(quic_enabled: bool, tcp_enabled: bool) -> u64 {
+    let mut features = FEATURES;
     if quic_enabled {
-        FEATURES | migo_protocol::features::QUIC
-    } else {
-        FEATURES
+        features |= migo_protocol::features::QUIC;
     }
+    if tcp_enabled {
+        features |= migo_protocol::features::TCP_TRANSPORT;
+    }
+    features
 }
 
 /// Bytes of ephemeral secret to mint when no node signing key is configured (development only).
@@ -186,10 +191,14 @@ pub struct App {
     /// The socket address the server binds, taken from the HTTP configuration.
     pub bind: String,
     /// The address the optional QUIC listener bound, or `None` when QUIC is not configured.
-    /// TCP — the HTTP listener's WebSocket route — is always bound and always the default
-    /// transport; this is the second option (section 138), advertised through the `QUIC`
-    /// feature bit only while it is serving.
+    /// The WebSocket route on the HTTP listener — the web client's transport — is always bound
+    /// and always the web default; QUIC is the second option (section 138), advertised through
+    /// the `QUIC` feature bit only while it is serving.
     pub quic_bind: Option<SocketAddr>,
+    /// The address the optional raw TCP listener bound, or `None` when it is not configured.
+    /// TCP is the native clients' (Android, desktop) default transport (section 138), advertised
+    /// through the `TCP_TRANSPORT` feature bit only while it is serving.
+    pub tcp_bind: Option<SocketAddr>,
     /// Authentication: register, sign in, refresh, sign out, and access-token verification.
     pub auth: SharedAuth,
     /// Direct messaging: send, receipt, delete, sync, and conversation management.
@@ -501,10 +510,10 @@ impl App {
             calls.clone(),
         ));
 
-        // The advertised feature set must be settled before the gateway opens: the QUIC bit is
-        // only there when the second listener is configured, and the gateway masks every
-        // client's requested features against exactly this set.
-        let features = advertised_features(config.quic.bind.is_some());
+        // The advertised feature set must be settled before the gateway opens: the QUIC and
+        // TCP_TRANSPORT bits are only there when their listeners are configured, and the
+        // gateway masks every client's requested features against exactly this set.
+        let features = advertised_features(config.quic.bind.is_some(), config.tcp.bind.is_some());
 
         let gateway = Arc::new(Gateway::open(
             &registry,
@@ -521,11 +530,32 @@ impl App {
             },
         ));
 
-        // The optional second realtime transport: QUIC, bound only when the operator gave it an
-        // address (section 138). TCP — the HTTP listener's WebSocket route — remains the default
-        // with or without this. Binding here (rather than at serve time) is what keeps the
-        // advertised `QUIC` bit honest: a node that cannot bind the listener refuses to start
-        // rather than promising a transport it is not serving.
+        // The native clients' default transport: raw TCP, bound only when the operator gave it
+        // an address (section 138). One connection, one session, length-prefixed binary frames —
+        // the mig33v46 heritage. Binding here (rather than at serve time) is what keeps the
+        // advertised `TCP_TRANSPORT` bit honest: a node that cannot bind the listener refuses to
+        // start rather than promising a transport it is not serving.
+        let tcp_bind = match config.tcp.bind.as_deref() {
+            Some(bind) => {
+                let bound = crate::tcp::spawn_listener(
+                    Arc::clone(&gateway),
+                    Arc::clone(&clock),
+                    shutdown.clone(),
+                    bind,
+                )
+                .await
+                .context("cannot bind the TCP listener")?;
+                tracing::info!(%bound, "tcp listener bound");
+                Some(bound)
+            }
+            None => None,
+        };
+
+        // The optional second transport: QUIC, bound only when the operator gave it an address
+        // (section 138). The WebSocket route on the HTTP listener remains the web client's
+        // transport with or without this. Binding here (rather than at serve time) is what keeps
+        // the advertised `QUIC` bit honest: a node that cannot bind the listener refuses to
+        // start rather than promising a transport it is not serving.
         let quic_bind = match config.quic.bind.as_deref() {
             Some(bind) => {
                 let bound = crate::quic::spawn_listener(
@@ -596,6 +626,7 @@ impl App {
             features,
             bind: config.http.bind.clone(),
             quic_bind,
+            tcp_bind,
             auth,
             messaging,
             presence,

@@ -245,6 +245,18 @@ pub struct QuicConfig {
     pub bind: Option<String>,
 }
 
+/// Optional raw TCP listener for native clients. Empty `bind` disables it.
+///
+/// The HTTP listener's WebSocket route stays always-bound and serves the web client; this is the
+/// native client's default transport (section 138) — one socket, one session, length-prefixed
+/// binary frames, the mig33v46 heritage.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct TcpConfig {
+    /// Socket to bind, or `None` to disable the native-client TCP listener.
+    pub bind: Option<String>,
+}
+
 /// Durable storage.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -643,6 +655,8 @@ pub struct Config {
     pub http: HttpConfig,
     /// QUIC listener.
     pub quic: QuicConfig,
+    /// Raw TCP listener for native clients.
+    pub tcp: TcpConfig,
     /// Durable storage.
     pub store: StoreConfig,
     /// Ephemeral cache.
@@ -770,7 +784,8 @@ impl Config {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "node={} env={} region={} roles=[{}] store={:?} cache={:?} media={:?} http={} quic={} \
+            "node={} env={} region={} roles=[{}] store={:?} cache={:?} media={:?} http={} tcp={} \
+             quic={}
              metrics={} compression={}",
             self.node.id,
             self.node.environment.as_str(),
@@ -780,6 +795,7 @@ impl Config {
             self.cache.backend,
             self.media.backend,
             self.http.bind,
+            self.tcp.bind.as_deref().unwrap_or("disabled"),
             self.quic.bind.as_deref().unwrap_or("disabled"),
             self.telemetry.metrics_bind.as_deref().unwrap_or("disabled"),
             self.gateway.compression_enabled,
@@ -804,6 +820,9 @@ impl Config {
         check_socket_addr("http.bind", &self.http.bind, &mut problems);
         if let Some(bind) = &self.quic.bind {
             check_socket_addr("quic.bind", bind, &mut problems);
+        }
+        if let Some(bind) = &self.tcp.bind {
+            check_socket_addr("tcp.bind", bind, &mut problems);
         }
         if let Some(bind) = &self.telemetry.metrics_bind {
             check_socket_addr("telemetry.metrics_bind", bind, &mut problems);
