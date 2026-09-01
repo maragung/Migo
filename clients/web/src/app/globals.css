@@ -3768,3 +3768,124 @@ button.activity-row-btn:focus-visible {
 .context-menu-danger .context-menu-icon {
   color: var(--danger);
 }
+
+/* --- the AVAX chain surface (§184): wallet 0, named networks, tracked sends --- */
+
+/* The address row: the only form an address should ever be shown in is EIP-55, copied whole. */
+.avax-address {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+.avax-address code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* The balance is a pull, never a poll: a number and the button that asked for it. */
+.avax-balance {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0;
+}
+.avax-balance-amount {
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A network's name, wherever the chain surface names it. */
+.avax-network {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+/* The confirm screen: every line the signature will cover, labelled and exact. */
+.avax-prepared {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.avax-prepared-line {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+.avax-prepared-label {
+  width: 110px;
+  flex: none;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+.avax-prepared-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* The mainnet acknowledgement: what unlocks the button that spends. */
+.avax-ack {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.avax-ack input {
+  margin-top: 2px;
+  accent-color: var(--danger);
+}
+
+/* Spec #41's own word, in the tone the outcome earns. */
+.avax-outcome {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-faint);
+}
+.avax-outcome-confirmed {
+  color: var(--positive);
+}
+.avax-outcome-failed {
+  color: var(--danger);
+}
+.avax-outcome-expired {
+  color: var(--gold);
+}
+
+/* The hash is a button so a tap copies the whole thing; the row shows only its head. */
+.avax-hash {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  cursor: pointer;
+}
+.avax-hash:hover {
+  text-decoration: underline;
+}
+
+/* A tracked send in the activity list, on the ledger row's own rhythm. */
+.avax-row .ledger-reason {
+  font-variant-numeric: tabular-nums;
+}
+
+/* A row of a form's final buttons, right-aligned. */
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

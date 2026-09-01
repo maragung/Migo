@@ -417,6 +417,7 @@ test('the call manager context starts with no call, no invite, and its actions b
         deviceId: null,
         error: null,
         resetNonce: 0,
+        persistKeyStore: () => {},
         client: null,
         register: () => Promise.resolve(),
         login: () => Promise.resolve(),

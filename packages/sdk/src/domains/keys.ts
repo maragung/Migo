@@ -21,7 +21,14 @@
  */
 
 import type { Id } from '@migo/wire';
-import { IdentityPublic, IdentitySecret, KeyPair, PrekeyBundle, SignedPrekey } from '@migo/crypto';
+import {
+  account,
+  IdentityPublic,
+  IdentitySecret,
+  KeyPair,
+  PrekeyBundle,
+  SignedPrekey,
+} from '@migo/crypto';
 import {
   OP,
   encodeKeyBundleRequest,
@@ -62,6 +69,46 @@ export interface KeyStoreSnapshot {
   oneTimePrekeys: Array<{ keyId: number; seed: Uint8Array }>;
   nextSignedPrekeyId: number;
   nextOneTimePrekeyId: number;
+  /**
+   * The unified account root's 32 bytes, on the device that founded the account. Absent on every
+   * additional device: they generate a fresh identity and never inherit the root, which is what
+   * keeps the root the one secret a `.migo` container has to carry.
+   */
+  root?: Uint8Array;
+  /** The tracked AVAX transactions, newest first. Absent rather than empty when there are none. */
+  trackedTxs?: TrackedTx[];
+}
+
+/**
+ * One tracked AVAX transaction: what was sent, and how the tracker ended (§184, spec #59).
+ *
+ * The chain has no "list transactions by sender" without an indexer, so the Activity list is a
+ * client-side record. It rides the key-store snapshot because that is already the device's sealed
+ * local state — nothing here is transmitted anywhere. Wei magnitudes are `bigint` by construction;
+ * a `number` at a call site is a silent precision bug the type prevents.
+ */
+export interface TrackedTx {
+  /** The transaction hash, the handle the chain knows it by. */
+  txHash: Uint8Array;
+  /** The chain the transaction was signed for — EIP-155's replay protection, restated. */
+  chainId: number;
+  /** The recipient. */
+  to: Uint8Array;
+  /** The amount, wei. AVAX has 18 decimals. */
+  valueWei: bigint;
+  /** The fee ceiling the user confirmed: `maxFeePerGas * gasLimit`, wei. */
+  feeWei: bigint;
+  /** The gas limit that was signed. */
+  gasLimit: number;
+  /** When the transaction was broadcast, unix seconds. */
+  atUnix: number;
+  /** Spec #41's own word for where the transaction stands: `PENDING` at broadcast, one of the
+   *  tracker's endings once it settles. */
+  outcome: string;
+  /** The block that included the transaction, once one did. */
+  block?: number;
+  /** The gas the block actually spent on it, from the receipt — the ceiling's honest companion. */
+  gasUsed?: bigint;
 }
 
 /**
@@ -78,17 +125,23 @@ export class KeyStore implements LocalKeyStore, IdentityProvider {
   readonly #oneTimePrekeys = new Map<number, KeyPair>();
   #nextSignedPrekeyId: number;
   #nextOneTimePrekeyId: number;
+  readonly #root: account.MigoRoot | null;
+  readonly #trackedTxs: TrackedTx[];
 
   private constructor(
     identity: IdentitySecret,
     signedPrekey: SignedPrekeyEntry,
     nextSignedPrekeyId: number,
     nextOneTimePrekeyId: number,
+    root: account.MigoRoot | null,
+    trackedTxs: TrackedTx[],
   ) {
     this.#identity = identity;
     this.#signedPrekey = signedPrekey;
     this.#nextSignedPrekeyId = nextSignedPrekeyId;
     this.#nextOneTimePrekeyId = nextOneTimePrekeyId;
+    this.#root = root;
+    this.#trackedTxs = trackedTxs;
   }
 
   /**
@@ -99,7 +152,25 @@ export class KeyStore implements LocalKeyStore, IdentityProvider {
   static create(oneTimePrekeyCount: number = DEFAULT_ONE_TIME_PREKEYS): KeyStore {
     const identity = IdentitySecret.generate();
     const signedPrekey = buildSignedPrekey(identity, 1);
-    const store = new KeyStore(identity, signedPrekey, 2, 1);
+    const store = new KeyStore(identity, signedPrekey, 2, 1, null, []);
+    store.replenishOneTimePrekeys(oneTimePrekeyCount);
+    return store;
+  }
+
+  /**
+   * Mints the founding device of a brand-new account (§182): the E2EE identity is derived from the
+   * root's E2EE domain rather than generated, which is what makes the account's E2EE history
+   * recoverable from a `.migo` container. Additional devices never take this path — they call
+   * {@link KeyStore.create} and hold no root.
+   */
+  static founding(
+    root: account.MigoRoot,
+    oneTimePrekeyCount: number = DEFAULT_ONE_TIME_PREKEYS,
+  ): KeyStore {
+    const seeds = account.foundingDeviceE2eeSeeds(root);
+    const identity = IdentitySecret.fromSeeds(seeds.signing, seeds.exchange);
+    const signedPrekey = buildSignedPrekey(identity, 1);
+    const store = new KeyStore(identity, signedPrekey, 2, 1, root, []);
     store.replenishOneTimePrekeys(oneTimePrekeyCount);
     return store;
   }
@@ -108,7 +179,9 @@ export class KeyStore implements LocalKeyStore, IdentityProvider {
    * Rebuilds a store from a {@link KeyStoreSnapshot} produced by {@link KeyStore.snapshot}.
    *
    * Key pairs are reconstructed from their seeds, and the signed prekey's signature is recomputed
-   * over the restored pair, so a snapshot round-trips to a byte-identical published bundle.
+   * over the restored pair, so a snapshot round-trips to a byte-identical published bundle. The
+   * root and the tracked transactions ride along when the snapshot carries them, which is only on
+   * the device that founded the account.
    */
   static restore(snapshot: KeyStoreSnapshot): KeyStore {
     const identity = IdentitySecret.fromSeeds(
@@ -121,16 +194,39 @@ export class KeyStore implements LocalKeyStore, IdentityProvider {
       pair: signedPrekeyPair,
       signed: SignedPrekey.create(identity, snapshot.signedPrekeyId, signedPrekeyPair),
     };
+    const root = snapshot.root !== undefined ? account.MigoRoot.fromBytes(snapshot.root) : null;
     const store = new KeyStore(
       identity,
       signedPrekey,
       snapshot.nextSignedPrekeyId,
       snapshot.nextOneTimePrekeyId,
+      root,
+      snapshot.trackedTxs !== undefined ? [...snapshot.trackedTxs] : [],
     );
     for (const entry of snapshot.oneTimePrekeys) {
       store.#oneTimePrekeys.set(entry.keyId, KeyPair.fromSeed(entry.seed));
     }
     return store;
+  }
+
+  /**
+   * The unified account root, on the device that founded the account, or `null` on every additional
+   * device. This is the one secret the wallet and the `.migo` container both derive from — hand it
+   * to nothing but the `account` surface's own functions.
+   */
+  root(): account.MigoRoot | null {
+    return this.#root;
+  }
+
+  /**
+   * The tracked AVAX transactions, newest first — the wallet surface's live list.
+   *
+   * The array returned is the store's own: the wallet flow mutates it (a record inserted at
+   * broadcast, its ending written at settle) and the next {@link snapshot} seals the result, which
+   * is the same trade the one-time prekey pool makes.
+   */
+  trackedTxs(): TrackedTx[] {
+    return this.#trackedTxs;
   }
 
   /** This device's long-term identity secret. Backs both crypto layers. */
@@ -232,6 +328,11 @@ export class KeyStore implements LocalKeyStore, IdentityProvider {
       oneTimePrekeys,
       nextSignedPrekeyId: this.#nextSignedPrekeyId,
       nextOneTimePrekeyId: this.#nextOneTimePrekeyId,
+      // The root is present only on a device that holds it, and the tx list only when it has
+      // entries: a field that exists to say "nothing here" costs every reader a skip for no
+      // information.
+      ...(this.#root !== null ? { root: this.#root.asBytes() } : {}),
+      ...(this.#trackedTxs.length > 0 ? { trackedTxs: [...this.#trackedTxs] } : {}),
     };
   }
 }

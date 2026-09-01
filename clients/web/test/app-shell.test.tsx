@@ -37,6 +37,7 @@ function render(shell: ReactNode): string {
         deviceId: null,
         error: null,
         resetNonce: 0,
+        persistKeyStore: () => {},
         client: null,
         register: () => Promise.resolve(),
         login: () => Promise.resolve(),

@@ -106,7 +106,7 @@ export { ListenerSet } from './domains/listeners.js';
 export type { Listener } from './domains/listeners.js';
 
 export { KeyStore, KeysDomain } from './domains/keys.js';
-export type { KeyStoreSnapshot, DeviceBundle } from './domains/keys.js';
+export type { KeyStoreSnapshot, DeviceBundle, TrackedTx } from './domains/keys.js';
 
 export { MessagingDomain } from './domains/messaging.js';
 export type {
@@ -156,6 +156,11 @@ export type {
   TrackedOutcome,
   TxState,
 } from './domains/chain.js';
+
+// --- the account surface the wallet draws on: the root, wallet 0, and transaction signing ---
+// Re-exported so the app packages need no direct dependency on @migo/crypto; the module is the
+// cross-language mirror of `server/crates/migo-account`, and this is the one door into it.
+export { account } from '@migo/crypto';
 
 // --- the two end-to-end crypto policy layers ---
 export {

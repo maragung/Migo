@@ -46,6 +46,7 @@ import { useMigo } from '@/lib/migo/use-migo.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
 
 import { Avatar } from './avatar.js';
+import { AvaxSection } from './avax-section.js';
 import { CoinMark } from './icons.js';
 import { Spinner } from './spinner.js';
 
@@ -588,6 +589,10 @@ export function WalletPanel(): ReactNode {
             <h2 className="panel-heading">Balance</h2>
             <BalanceCard balance={balance} />
           </section>
+
+          {/* The chain side of the wallet (§184): a separate conversation with a separate
+              network, and its own record of tracked sends. */}
+          <AvaxSection />
 
           {progression !== null ? (
             <section className="panel-section" aria-label="Progression">

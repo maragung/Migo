@@ -21,7 +21,7 @@
 import { createContext, useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { BootstrapClient, KeyStore, MigoClient, PresenceState } from '@migo/sdk';
+import { BootstrapClient, KeyStore, MigoClient, PresenceState, account } from '@migo/sdk';
 import type {
   CaptchaProof,
   ConnectionState,
@@ -75,6 +75,12 @@ export interface MigoContextValue {
   resetNonce: number;
   /** The live client once {@link status} is `ready`, else `null`. */
   client: MigoClient | null;
+  /**
+   * Seals the key store's current snapshot (identity, prekeys, root, tracked transactions) to
+   * IndexedDB. The wallet flow calls this after mutating the tracked list, the same way the
+   * inbound path does after a prekey is consumed.
+   */
+  persistKeyStore: () => void;
   register: (
     form: RegisterForm,
     server: ServerEndpoint,
@@ -205,6 +211,42 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
     setStatus('ready');
   }, []);
 
+  // --- the account root's public material (§182) ---
+
+  /**
+   * Publishes the root's account material: the ML-DSA identity key, and the root's first wallet if
+   * the server does not know it yet.
+   *
+   * Best-effort by design — a failure here is not a failed sign-in, because the calls are
+   * idempotent and the next resume tries again. Only a device that holds the root enrols at all;
+   * every additional device signs in with a fresh identity and no root, and the address is a pure
+   * function of the root, so "which wallets exist" is server state, not a matter of opinion.
+   */
+  const enrolAccountMaterial = useCallback(
+    async (created: MigoClient, grant: Grant, server: ServerEndpoint): Promise<void> => {
+      const root = created.keyStore.root();
+      if (root === null) {
+        return;
+      }
+      try {
+        const rest = new BootstrapClient(server);
+        await rest.publishIdentityKey(grant.accessToken, {
+          identityPublicKey: account.IdentityKey.fromRoot(root).publicKey(),
+        });
+        const known = new Set(
+          (await rest.wallets(grant.accessToken)).map((wallet) => wallet.address),
+        );
+        const address = account.EvmWallet.fromRoot(root, 0).addressChecksummed();
+        if (!known.has(address)) {
+          await rest.registerWallet(grant.accessToken, { address, derivationIndex: 0 });
+        }
+      } catch {
+        // Deliberately quiet: the material publishes again on the next resume.
+      }
+    },
+    [],
+  );
+
   // --- register / login / logout ---
 
   const register = useCallback(
@@ -223,7 +265,11 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
         // Persistence is best-effort: a failed write will not block the in-flight attempt.
       }
       try {
-        const created = buildClient({ server });
+        // A registration is the founding device of a brand-new account (§182): the root is minted
+        // here, the E2EE identity is derived from the root's E2EE domain, and both seal into the
+        // snapshot below — which is what a `.migo` container can later be rebuilt from.
+        const root = account.MigoRoot.generate();
+        const created = buildClient({ server, keyStore: KeyStore.founding(root) });
         const params: Omit<RegisterParams, 'device'> = {
           username: form.username.trim(),
           password: form.password,
@@ -247,6 +293,7 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
         ]);
         wireInbound(created);
         void created.presence.setPresence(PresenceState.Online).catch(() => {});
+        void enrolAccountMaterial(created, grant, server);
         markReady(grant);
       } catch (cause) {
         await teardown();
@@ -255,7 +302,7 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
         throw cause;
       }
     },
-    [buildClient, markReady, teardown, wireInbound],
+    [buildClient, markReady, enrolAccountMaterial, teardown, wireInbound],
   );
 
   const login = useCallback(
@@ -351,6 +398,10 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
       await created.resume(grant);
       wireInbound(created);
       void created.presence.setPresence(PresenceState.Online).catch(() => {});
+      // The legacy upgrade door: a device that holds the root re-publishes its material on every
+      // resume, idempotently — it is what makes an account created before the root existed
+      // ML-DSA-loginable the day its founding device returns.
+      void enrolAccountMaterial(created, grant, server);
       if (!cancelled) {
         markReady(grant);
       }
@@ -399,6 +450,7 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
     error,
     resetNonce,
     client,
+    persistKeyStore: scheduleKeyStorePersist,
     register,
     login,
     logout,
