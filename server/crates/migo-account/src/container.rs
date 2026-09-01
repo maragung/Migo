@@ -492,7 +492,10 @@ mod tests {
         let named = file.for_account("01j8y0migo0migo0migo0migo0migo");
         let container = seal_fast("credential", &named);
         let opened = open_container("credential", &container).expect("opens");
-        assert_eq!(opened.account_id.as_deref(), Some("01j8y0migo0migo0migo0migo0migo"));
+        assert_eq!(
+            opened.account_id.as_deref(),
+            Some("01j8y0migo0migo0migo0migo0migo")
+        );
 
         // And a reader that does not know the field still opens the named
         // container, because serde ignores unknown keys by default — the
