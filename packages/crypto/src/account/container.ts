@@ -249,7 +249,12 @@ export class AccountFile {
     const object = parsed as Record<string, unknown>;
 
     const version = object.version;
-    if (typeof version !== 'number' || !Number.isInteger(version) || version < 0 || version > 0xffff) {
+    if (
+      typeof version !== 'number' ||
+      !Number.isInteger(version) ||
+      version < 0 ||
+      version > 0xffff
+    ) {
       throw AccountError.openFailed();
     }
     const createdAt = object.created_at;
