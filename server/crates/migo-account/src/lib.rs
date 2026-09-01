@@ -70,4 +70,7 @@ pub use identity::{
     DeviceCredential, IdentityKey, IDENTITY_ALGORITHM, KEY_VERSION_ONE, PUBLIC_KEY_LEN,
     SIGNATURE_LEN,
 };
-pub use root::{MigoRoot, DOMAIN_BACKUP, DOMAIN_DEVICE, DOMAIN_E2EE, DOMAIN_EVM, DOMAIN_IDENTITY};
+pub use root::{
+    founding_device_e2ee_seeds, MigoRoot, DOMAIN_BACKUP, DOMAIN_DEVICE, DOMAIN_E2EE,
+    DOMAIN_EVM, DOMAIN_IDENTITY,
+};

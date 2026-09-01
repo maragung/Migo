@@ -161,6 +161,21 @@ pub struct AccountFile {
     /// The root secret, hex-encoded: 64 characters. The only secret in the
     /// file, and the only one any account needs.
     pub root: String,
+    /// The account's server-side id, in its text form, when the sealing
+    /// device knew it.
+    ///
+    /// The restore ceremony (`POST /v1/auth/identity/challenge` with purpose
+    /// `add-device`) names the account being restored, and the container is
+    /// where that name belongs: the sealing device learned it from the grant
+    /// it signed in with, and a restoring device has nothing else to say it
+    /// with. It is deliberately the *last* field and deliberately optional —
+    /// containers sealed before the field existed, and the conformance
+    /// vectors that pin this file's bytes, serialise exactly the three
+    /// fields above, and `skip_serializing_if` keeps those bytes unchanged.
+    /// A restoring device that finds `None` here cannot run the ceremony and
+    /// says so, rather than guessing at an account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 impl AccountFile {
@@ -171,7 +186,16 @@ impl AccountFile {
             version: FORMAT_VERSION,
             created_at: now,
             root: hex(root.as_bytes()),
+            account_id: None,
         }
+    }
+
+    /// Names the account this container restores, from the grant the sealing
+    /// device signed in with.
+    #[must_use]
+    pub fn for_account(mut self, account_id: &str) -> Self {
+        self.account_id = Some(account_id.to_owned());
+        self
     }
 
     /// The root secret.
@@ -445,6 +469,37 @@ mod tests {
         assert_eq!(opened.root().expect("root"), root);
         assert_eq!(opened.version, file.version);
         assert_eq!(opened.created_at, file.created_at);
+        // The account name is optional metadata, and a container sealed
+        // without one must round-trip to `None` rather than to a guess.
+        assert_eq!(opened.account_id, None);
+    }
+
+    #[test]
+    fn the_account_name_rides_along_and_the_nameless_bytes_do_not_move() {
+        let (root, file) = sample();
+        // The three-field form is the byte contract the conformance vectors
+        // pin: adding an optional field must not move it by one byte.
+        let plain = serde_json::to_string(&file).expect("serialises");
+        assert_eq!(
+            plain,
+            format!(
+                "{{\"version\":1,\"created_at\":{},\"root\":\"{}\"}}",
+                file.created_at, file.root
+            )
+        );
+
+        // A named container round-trips the account id through the seal.
+        let named = file.for_account("01j8y0migo0migo0migo0migo0migo");
+        let container = seal_fast("credential", &named);
+        let opened = open_container("credential", &container).expect("opens");
+        assert_eq!(opened.account_id.as_deref(), Some("01j8y0migo0migo0migo0migo0migo"));
+
+        // And a reader that does not know the field still opens the named
+        // container, because serde ignores unknown keys by default — the
+        // forward-compatibility rule every port already follows.
+        let named_bytes = serde_json::to_vec(&named).expect("serialises");
+        let decoded: AccountFile = serde_json::from_slice(&named_bytes).expect("parses");
+        assert_eq!(decoded, named);
     }
 
     #[test]
