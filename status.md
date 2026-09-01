@@ -1181,3 +1181,13 @@ test web (240) + test SDK (141); `make kotlin-check` (14 selftest / 0 masalah);
 `make brief-check` (41 pemeriksaan, bersih). Rilis lewat GitHub Actions seperti biasa:
 tag `v0.10.0` → release.yml (binary migod, tarball web, binary desktop, APK debug,
 2 image GHCR).
+
+**Follow-up (masih v0.10.0)**: listener QUIC dinyalakan di deployment produksi
+(`MIGO_QUIC__BIND=0.0.0.0:18443` di `.migod.env`, restart bersih; TCP/WebSocket
+di `:8080` tetap default). Test live baru `a_live_listener_answers_hello_with_a_
+welcome_that_carries_the_quic_bit` (ignored, env-gated `MIGO_QUIC_LIVE_ADDR`)
+menjalankan handshake penuh ke node sungguhan: TLS 1.3 → satu stream dua-arah →
+HELLO dengan bit QUIC diminta → WELCOME dengan bit QUIC ter-negosiasi
+(features = irisan, jadi klien yang tidak meminta tetap tidak menerimanya —
+kontrak, bukan cacat). `cargo fmt`/`clippy -D warnings`/suite in-process hijau;
+test live hijau terhadap `152.53.102.150:18443`.

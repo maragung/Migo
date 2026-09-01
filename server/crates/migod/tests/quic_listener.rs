@@ -196,3 +196,85 @@ async fn the_listener_accepts_a_stream_and_ends_the_session_on_an_invalid_frame(
 
     let _ = send.finish();
 }
+
+/// A full handshake against a live deployment, not one built in this process.
+///
+/// The tests above prove the listener against an [`App`] assembled here; this one proves the node
+/// an operator actually started. Set `MIGO_QUIC_LIVE_ADDR=host:port` and run it with
+/// `cargo test -p migod --test quic_listener -- --ignored` — the same check an operator runs
+/// after flipping `MIGO_QUIC__BIND` on, answering the only question that matters at that moment:
+/// does a real client complete the TLS 1.3 handshake, open a stream, and hear a WELCOME whose
+/// negotiated features carry the QUIC bit the listener's existence promised?
+#[tokio::test]
+#[ignore = "points at a live deployment: set MIGO_QUIC_LIVE_ADDR=host:port to run it"]
+async fn a_live_listener_answers_hello_with_a_welcome_that_carries_the_quic_bit() {
+    let addr: SocketAddr = std::env::var("MIGO_QUIC_LIVE_ADDR")
+        .expect("MIGO_QUIC_LIVE_ADDR names the deployment under test, e.g. 152.53.102.150:18443")
+        .parse()
+        .expect("MIGO_QUIC_LIVE_ADDR must be a socket address");
+
+    let connection = connect(addr)
+        .await
+        .expect("the TLS 1.3 handshake completes against the live listener");
+
+    // One stream is one session. Open it and speak the stream framing.
+    let (mut send, mut recv) = tokio::time::timeout(STEP, connection.open_bi())
+        .await
+        .expect("opening a stream does not stall")
+        .expect("the stream opens");
+
+    // A real opening HELLO: the version this build speaks, no token, exactly the frame a fresh
+    // client puts on the wire first — and the QUIC bit requested, because the negotiated set is
+    // the intersection with what the client asks for. A client that does not ask gets a WELCOME
+    // without QUIC even from a node that serves it, which is the contract, not a fault.
+    let hello = migo_protocol::Hello {
+        protocol_version: migo_protocol::PROTOCOL_VERSION,
+        features: features::QUIC,
+        ..Default::default()
+    };
+    let frame = migo_protocol::to_frame(migo_protocol::Opcode::Hello.to_wire(), 7, &hello)
+        .expect("the HELLO encodes");
+    let wire = frame
+        .encode_length_prefixed()
+        .expect("the HELLO frames for the stream binding");
+    send.write_all(&wire).await.expect("the HELLO is written");
+
+    // The reply rides the same framing: a u32 big-endian length, then the frame.
+    let mut prefix = [0u8; 4];
+    tokio::time::timeout(STEP, recv.read_exact(&mut prefix))
+        .await
+        .expect("the WELCOME arrives within the step budget")
+        .expect("the length prefix reads");
+    let len = u32::from_be_bytes(prefix) as usize;
+    assert!(
+        len <= migo_wire::limits::MAX_FRAME_BYTES,
+        "the reply respects the frame ceiling: {len}"
+    );
+    let mut body = vec![0u8; len];
+    tokio::time::timeout(STEP, recv.read_exact(&mut body))
+        .await
+        .expect("the WELCOME body arrives within the step budget")
+        .expect("the body reads");
+
+    let reply = migo_wire::Frame::decode(bytes::Bytes::copy_from_slice(&body))
+        .expect("the reply decodes as an MWP frame");
+    assert_eq!(
+        reply.header.opcode,
+        migo_protocol::Opcode::Hello.to_wire(),
+        "the handshake is answered under the HELLO opcode"
+    );
+    assert!(
+        !reply.header.is_error(),
+        "a valid HELLO is answered with a WELCOME, not a fault: {:?}",
+        reply.header
+    );
+    let welcome =
+        migo_protocol::from_frame::<migo_protocol::Welcome>(&reply).expect("the WELCOME decodes");
+    assert_ne!(
+        welcome.features & features::QUIC,
+        0,
+        "a node serving the QUIC listener negotiates the QUIC feature bit"
+    );
+
+    let _ = send.finish();
+}
