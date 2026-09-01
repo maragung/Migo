@@ -50,13 +50,13 @@ import com.migo.core.protocol.PresenceEvent
 import com.migo.core.protocol.ResumeRequest
 import com.migo.core.protocol.RoomMemberEvent
 import com.migo.core.protocol.RoomStateEvent
-import com.migo.core.protocol.Welcome
 import com.migo.core.protocol.SubscribeRequest
 import com.migo.core.protocol.SubscribeResponse
 import com.migo.core.protocol.SyncResponse
 import com.migo.core.protocol.Topic
 import com.migo.core.protocol.TopicKind
 import com.migo.core.protocol.TypingEvent
+import com.migo.core.protocol.Welcome
 import com.migo.core.session.GroupCrypto
 import com.migo.core.session.GroupPersistence
 import com.migo.core.session.PeerBundleSource
