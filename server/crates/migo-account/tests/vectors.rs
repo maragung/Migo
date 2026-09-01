@@ -365,13 +365,13 @@ fn transaction_bodies_and_signing_hashes_match_the_independent_generator() {
         let wallet = EvmWallet::from_root(&root, index)
             .unwrap_or_else(|e| panic!("{path} {name}: derivation failed: {e:?}"));
         let tx = Eip1559Tx {
-            chain_id: case["chain_id"].as_u64().expect("chain id"),
-            nonce: case["nonce"].as_u64().expect("nonce"),
-            max_priority_fee_per_gas: u128_field(case, "max_priority_fee_per_gas", &path, name),
-            max_fee_per_gas: u128_field(case, "max_fee_per_gas", &path, name),
-            gas_limit: case["gas_limit"].as_u64().expect("gas limit"),
+            chain_id: u64_text(case, "chain_id", &path, name),
+            nonce: u64_text(case, "nonce", &path, name),
+            max_priority_fee_per_gas: u128_text(case, "max_priority_fee_per_gas", &path, name),
+            max_fee_per_gas: u128_text(case, "max_fee_per_gas", &path, name),
+            gas_limit: u64_text(case, "gas_limit", &path, name),
             to: address_field(case, "recipient", &path, name),
-            value: u128_field(case, "value_wei", &path, name),
+            value: u128_text(case, "value_wei", &path, name),
             data: unhex(case["data"].as_str().expect("data hex")),
         };
 
@@ -450,13 +450,13 @@ fn the_chain_sourced_transaction_recovers_to_its_observed_sender() {
     );
     let observed_body = Rlp::List(items[..9].to_vec()).encode();
     let tx = Eip1559Tx {
-        chain_id: case["chain_id"].as_u64().expect("chain id"),
-        nonce: case["nonce"].as_u64().expect("nonce"),
-        max_priority_fee_per_gas: u128_field(case, "max_priority_fee_per_gas", &path, name),
-        max_fee_per_gas: u128_field(case, "max_fee_per_gas", &path, name),
-        gas_limit: case["gas_limit"].as_u64().expect("gas limit"),
+        chain_id: u64_text(case, "chain_id", &path, name),
+        nonce: u64_text(case, "nonce", &path, name),
+        max_priority_fee_per_gas: u128_text(case, "max_priority_fee_per_gas", &path, name),
+        max_fee_per_gas: u128_text(case, "max_fee_per_gas", &path, name),
+        gas_limit: u64_text(case, "gas_limit", &path, name),
         to: address_field(case, "recipient", &path, name),
-        value: u128_field(case, "value_wei", &path, name),
+        value: u128_text(case, "value_wei", &path, name),
         data: unhex(case["data"].as_str().expect("data hex")),
     };
     assert_eq!(
@@ -639,11 +639,24 @@ fn address_field(case: &Value, key: &str, path: &str, name: &str) -> [u8; 20] {
     parse_address(text).unwrap_or_else(|e| panic!("{path} {name}: bad {key} {text}: {e:?}"))
 }
 
-/// A u128 field from a case. `serde_json::Value` has no `as_u128`, so fee and
-/// value fields — which exceed u64 in wei terms — go through `Number`.
-fn u128_field(case: &Value, key: &str, path: &str, name: &str) -> u128 {
-    case[key]
-        .as_number()
-        .and_then(serde_json::Number::as_u128)
-        .unwrap_or_else(|| panic!("{path} {name}: no u128 {key}"))
+/// A u128 field from a case, as a decimal string. `serde_json::Value` has no
+/// `as_u128`, and fee and value fields — which exceed u64 in wei terms — are
+/// decimal strings in the file precisely because they also exceed JavaScript's
+/// 2^53 exact-integer range, and a JSON number would arrive in the TypeScript
+/// port already rounded.
+fn u128_text(case: &Value, key: &str, path: &str, name: &str) -> u128 {
+    let text = case[key]
+        .as_str()
+        .unwrap_or_else(|| panic!("{path} {name}: no decimal-string {key}"));
+    text.parse()
+        .unwrap_or_else(|e| panic!("{path} {name}: bad u128 {key} {text}: {e}"))
+}
+
+/// A u64 field from a case, as a decimal string (see [`u128_text`]).
+fn u64_text(case: &Value, key: &str, path: &str, name: &str) -> u64 {
+    let text = case[key]
+        .as_str()
+        .unwrap_or_else(|| panic!("{path} {name}: no decimal-string {key}"));
+    text.parse()
+        .unwrap_or_else(|e| panic!("{path} {name}: bad u64 {key} {text}: {e}"))
 }

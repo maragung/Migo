@@ -1292,13 +1292,13 @@ def tx_file() -> dict:
                 "name": name,
                 "root": root.hex(),
                 "index": index,
-                "chain_id": chain_id,
-                "nonce": nonce,
-                "max_priority_fee_per_gas": priority,
-                "max_fee_per_gas": max_fee,
-                "gas_limit": gas,
+                "chain_id": str(chain_id),
+                "nonce": str(nonce),
+                "max_priority_fee_per_gas": str(priority),
+                "max_fee_per_gas": str(max_fee),
+                "gas_limit": str(gas),
                 "recipient": recipient.hex(),
-                "value_wei": value,
+                "value_wei": str(value),
                 "data": data.hex(),
                 "sender": sender.hex(),
                 "body_rlp": rlp_encode(body).hex(),
@@ -1325,13 +1325,13 @@ def tx_file() -> dict:
                 "self-consistent can still disagree with the chain; this case is "
                 "how that is caught."
             ),
-            "chain_id": int.from_bytes(body[0], "big"),
-            "nonce": int.from_bytes(body[1], "big"),
-            "max_priority_fee_per_gas": int.from_bytes(body[2], "big"),
-            "max_fee_per_gas": int.from_bytes(body[3], "big"),
-            "gas_limit": int.from_bytes(body[4], "big"),
+            "chain_id": str(int.from_bytes(body[0], "big")),
+            "nonce": str(int.from_bytes(body[1], "big")),
+            "max_priority_fee_per_gas": str(int.from_bytes(body[2], "big")),
+            "max_fee_per_gas": str(int.from_bytes(body[3], "big")),
+            "gas_limit": str(int.from_bytes(body[4], "big")),
             "recipient": body[5].hex(),
-            "value_wei": int.from_bytes(body[6], "big"),
+            "value_wei": str(int.from_bytes(body[6], "big")),
             "data": body[7].hex(),
             "sender": AVAX_TX_SENDER,
             "raw": AVAX_TX_RAW.hex(),
@@ -1354,9 +1354,12 @@ def tx_file() -> dict:
             "recovering the sender from its own raw transaction and getting "
             "`sender` back. The pinned bytes are the deterministic ones: `body_rlp` "
             "(which a port must produce before signing) and `signing_hash` (which "
-            "it must hash before signing). Integer fields are JSON numbers; "
-            "`value_wei` is wei, AVAX's 18 decimals. The last case is chain-sourced "
-            "and carries `raw`/`tx_hash` instead of a body to re-encode."
+            "it must hash before signing). Integer fields are DECIMAL STRINGS, "
+            "not JSON numbers: `value_wei` and the fee fields exceed JavaScript's "
+            "2^53 exact-integer range, and a JSON number would arrive in the "
+            "TypeScript port already rounded. `value_wei` is wei, AVAX's 18 "
+            "decimals. The last case is chain-sourced and carries `raw`/`tx_hash` "
+            "instead of a body to re-encode."
         ),
         "cases": cases,
     }
