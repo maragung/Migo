@@ -433,6 +433,14 @@ export enum CloseReason {
   ProtocolViolation = 8,
 }
 
+/** What an ML-DSA login challenge may be used for; mixed into the challenge payload so a challenge issued for one purpose cannot be answered for another */
+export enum MlDsaPurpose {
+  Unknown = 0,
+  Login = 1,
+  AddDevice = 2,
+  Rotate = 3,
+}
+
 /** Who is connecting. Used for feature gating and abuse triage, never for tracking. */
 export interface ClientInfo {
   platform: Platform;
@@ -5802,6 +5810,60 @@ export function decodeCallId(r: Reader): CallId {
   r.enter();
   const callId = r.id();
   const out: CallId = { callId } as CallId;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** The bytes an ML-DSA login ceremony signs: issued over REST, MSE-encoded by the server, signed by the client exactly as received so no port re-encodes it differently. Single use, short lived, bound to one account, device and purpose. */
+export interface MlDsaChallenge {
+  protocolVersion: number;
+  purpose: MlDsaPurpose;
+  /** The account the challenge authenticates */
+  accountId: Id;
+  /** The device the challenge is bound to; for add-device, the new device */
+  deviceId: Id;
+  /** Server-side handle; single use — the first answer consumes it */
+  challengeId: Id;
+  /** 32 bytes from the server CSPRNG; never derived from anything the client controls */
+  nonce: Uint8Array;
+  issuedAt: number;
+  /** Five minutes after issuance */
+  expiresAt: number;
+  /** Deployment identity, so a challenge from one deployment cannot be answered at another */
+  serverRegion: string;
+}
+
+export function encodeMlDsaChallenge(w: Writer, v: MlDsaChallenge): void {
+  w.enter();
+  w.u32(v.protocolVersion);
+  w.u32(v.purpose);
+  w.id(v.accountId);
+  w.id(v.deviceId);
+  w.id(v.challengeId);
+  w.bytes(v.nonce);
+  w.timestamp(v.issuedAt);
+  w.timestamp(v.expiresAt);
+  w.str(v.serverRegion);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeMlDsaChallenge(r: Reader): MlDsaChallenge {
+  r.enter();
+  const protocolVersion = r.u32();
+  const purpose = r.u32() as MlDsaPurpose;
+  const accountId = r.id();
+  const deviceId = r.id();
+  const challengeId = r.id();
+  const nonce = r.bytes();
+  const issuedAt = r.timestamp();
+  const expiresAt = r.timestamp();
+  const serverRegion = r.str();
+  const out: MlDsaChallenge = { protocolVersion, purpose, accountId, deviceId, challengeId, nonce, issuedAt, expiresAt, serverRegion } as MlDsaChallenge;
   const optionalCount = r.u32();
   // No optional fields in this version of the struct. Each entry is length-delimited,
   // so reading it is skipping it, and a newer peer may well have sent one.

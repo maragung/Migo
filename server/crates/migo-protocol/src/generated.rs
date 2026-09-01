@@ -1151,6 +1151,45 @@ impl CloseReason {
     }
 }
 
+/// What an ML-DSA login challenge may be used for; mixed into the challenge payload so a challenge issued for one purpose cannot be answered for another
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u32)]
+pub enum MlDsaPurpose {
+    #[default]
+    Unknown = 0,
+    Login = 1,
+    AddDevice = 2,
+    Rotate = 3,
+}
+
+impl MlDsaPurpose {
+    #[must_use]
+    pub const fn to_wire(self) -> u32 {
+        self as u32
+    }
+
+    /// Unknown discriminants decode to `Unknown` so a new variant never breaks an old peer.
+    #[must_use]
+    pub const fn from_wire(v: u32) -> Self {
+        match v {
+            1 => Self::Login,
+            2 => Self::AddDevice,
+            3 => Self::Rotate,
+            _ => Self::Unknown,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::Login => "Login",
+            Self::AddDevice => "AddDevice",
+            Self::Rotate => "Rotate",
+        }
+    }
+}
+
 /// Who is connecting. Used for feature gating and abuse triage, never for tracking.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ClientInfo {
@@ -8802,6 +8841,68 @@ impl Decode for CallId {
         r.enter()?;
         let mut out = Self::default();
         out.call_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// The bytes an ML-DSA login ceremony signs: issued over REST, MSE-encoded by the server, signed by the client exactly as received so no port re-encodes it differently. Single use, short lived, bound to one account, device and purpose.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MlDsaChallenge {
+    pub protocol_version: u32,
+    pub purpose: MlDsaPurpose,
+    /// The account the challenge authenticates
+    pub account_id: Id,
+    /// The device the challenge is bound to; for add-device, the new device
+    pub device_id: Id,
+    /// Server-side handle; single use — the first answer consumes it
+    pub challenge_id: Id,
+    /// 32 bytes from the server CSPRNG; never derived from anything the client controls
+    pub nonce: Vec<u8>,
+    pub issued_at: Timestamp,
+    /// Five minutes after issuance
+    pub expires_at: Timestamp,
+    /// Deployment identity, so a challenge from one deployment cannot be answered at another
+    pub server_region: String,
+}
+
+impl Encode for MlDsaChallenge {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u32(self.protocol_version);
+        w.write_u32(self.purpose.to_wire());
+        w.write_id(&self.account_id);
+        w.write_id(&self.device_id);
+        w.write_id(&self.challenge_id);
+        w.write_bytes(&self.nonce)?;
+        w.write_timestamp(self.issued_at);
+        w.write_timestamp(self.expires_at);
+        w.write_str(&self.server_region)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for MlDsaChallenge {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.protocol_version = r.read_u32()?;
+        out.purpose = MlDsaPurpose::from_wire(r.read_u32()?);
+        out.account_id = r.read_id()?;
+        out.device_id = r.read_id()?;
+        out.challenge_id = r.read_id()?;
+        out.nonce = r.read_bytes()?;
+        out.issued_at = r.read_timestamp()?;
+        out.expires_at = r.read_timestamp()?;
+        out.server_region = r.read_string()?;
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
             // No optional fields are defined for this struct in this

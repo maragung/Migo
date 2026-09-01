@@ -772,6 +772,29 @@ enum class CloseReason(val wire: Int) {
     }
 }
 
+/** What an ML-DSA login challenge may be used for; mixed into the challenge payload so a challenge issued for one purpose cannot be answered for another */
+enum class MlDsaPurpose(val wire: Int) {
+    Unknown(0),
+    /** Sign in as a registered device: identity + device signatures */
+    Login(1),
+    /** Register a new device under an existing identity */
+    AddDevice(2),
+    /** Approve an identity key rotation */
+    Rotate(3);
+
+    fun toWire(): Int = wire
+
+    companion object {
+        /** Unknown discriminants decode to [Unknown] so a new variant never breaks an old peer. */
+        fun fromWire(value: Long): MlDsaPurpose = when (value) {
+            1L -> Login
+            2L -> AddDevice
+            3L -> Rotate
+            else -> Unknown
+        }
+    }
+}
+
 /** Who is connecting. Used for feature gating and abuse triage, never for tracking. */
 data class ClientInfo(
     val platform: Platform,
@@ -7132,6 +7155,61 @@ data class CallId(
             }
             r.leave()
             return CallId(callId)
+        }
+    }
+}
+
+/** The bytes an ML-DSA login ceremony signs: issued over REST, MSE-encoded by the server, signed by the client exactly as received so no port re-encodes it differently. Single use, short lived, bound to one account, device and purpose. */
+data class MlDsaChallenge(
+    val protocolVersion: Long,
+    val purpose: MlDsaPurpose,
+    /** The account the challenge authenticates */
+    val accountId: Id,
+    /** The device the challenge is bound to; for add-device, the new device */
+    val deviceId: Id,
+    /** Server-side handle; single use — the first answer consumes it */
+    val challengeId: Id,
+    /** 32 bytes from the server CSPRNG; never derived from anything the client controls */
+    val nonce: ByteArray,
+    val issuedAt: Long,
+    /** Five minutes after issuance */
+    val expiresAt: Long,
+    /** Deployment identity, so a challenge from one deployment cannot be answered at another */
+    val serverRegion: String,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u32(protocolVersion)
+        w.u32(purpose.toWire())
+        w.id(accountId)
+        w.id(deviceId)
+        w.id(challengeId)
+        w.bytes(nonce)
+        w.timestamp(issuedAt)
+        w.timestamp(expiresAt)
+        w.str(serverRegion)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): MlDsaChallenge {
+            r.enter()
+            val protocolVersion = r.u32()
+            val purpose = MlDsaPurpose.fromWire(r.u32())
+            val accountId = r.id()
+            val deviceId = r.id()
+            val challengeId = r.id()
+            val nonce = r.bytes()
+            val issuedAt = r.timestamp()
+            val expiresAt = r.timestamp()
+            val serverRegion = r.str()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return MlDsaChallenge(protocolVersion, purpose, accountId, deviceId, challengeId, nonce, issuedAt, expiresAt, serverRegion)
         }
     }
 }

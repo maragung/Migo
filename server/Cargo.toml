@@ -7,6 +7,7 @@ members = [
     "crates/migo-wire",
     "crates/migo-protocol",
     "crates/migo-crypto",
+    "crates/migo-account",
     "crates/migo-store",
     "crates/migo-cache",
     "crates/migo-ratelimit",
@@ -44,6 +45,7 @@ migo-core       = { path = "crates/migo-core" }
 migo-wire       = { path = "crates/migo-wire" }
 migo-protocol   = { path = "crates/migo-protocol" }
 migo-crypto     = { path = "crates/migo-crypto" }
+migo-account    = { path = "crates/migo-account" }
 migo-store      = { path = "crates/migo-store" }
 migo-cache      = { path = "crates/migo-cache" }
 migo-ratelimit  = { path = "crates/migo-ratelimit" }

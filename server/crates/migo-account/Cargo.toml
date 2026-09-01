@@ -1,0 +1,42 @@
+[package]
+name = "migo-account"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The Migo account root: domain-separated derivation, the ML-DSA-65 identity, the EVM wallet domain, and the .migo container."
+
+[dependencies]
+migo-core.workspace = true
+migo-crypto.workspace = true
+
+# ML-DSA-65 (FIPS 204) for the account identity. `default-features = false`
+# drops `getrandom` — signing here is the deterministic variant, which needs no
+# RNG and, more importantly, produces the same signature bytes in the Rust,
+# TypeScript, and Kotlin ports, so the cross-language vectors can pin them.
+# `zeroize` makes the seed clear itself when the signing key drops.
+ml-dsa = { version = "0.1", default-features = false, features = [
+    "alloc",
+    "zeroize",
+] }
+# secp256k1 for the EVM wallet domain — the audited curve implementation, used
+# for exactly the operations BIP-32 needs (scalar arithmetic and point
+# tweaking); no key generation, because the wallet key always arrives as a
+# derived scalar rather than a random one.
+secp256k1 = { version = "0.33", default-features = false, features = ["alloc"] }
+# Keccak-256 for Ethereum addresses. Not SHA3-256: Ethereum kept the original
+# Keccak padding, and `sha3` would silently produce the wrong address — the
+# kind of mistake that looks exactly like a working wallet until funds move.
+tiny-keccak = { version = "2", features = ["keccak"] }
+
+hmac.workspace = true
+sha2.workspace = true
+argon2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+hex.workspace = true

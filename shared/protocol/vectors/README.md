@@ -31,8 +31,9 @@ agreement, not correctness.
 make vectors          # Rust runners (and TypeScript, once packages/wire exists)
 ```
 
-The Rust runners live in `server/crates/migo-wire/tests/vectors.rs` and
-`server/crates/migo-crypto/tests/vectors.rs`. They fail if a file is missing, if
+The Rust runners live in `server/crates/migo-wire/tests/vectors.rs`,
+`server/crates/migo-crypto/tests/vectors.rs` and
+`server/crates/migo-account/tests/vectors.rs`. They fail if a file is missing, if
 a file is empty, or if a case does not parse — a vector suite that silently runs
 zero cases is the most expensive kind of green build.
 
@@ -141,6 +142,30 @@ python3 tools/vectors/generate_crypto_vectors.py
 The generator is committed and reviewable. If it and the Rust code ever agree on
 something wrong, that is a design error, not a copied constant — and a reviewer
 can see both derivations side by side.
+
+### `crypto/account-*.json`
+
+The unified-account vectors, consumed by `migo-account`'s runner (the Rust half;
+TypeScript and Kotlin consumers land with their ports). Four files, two
+provenances, and the split is the point:
+
+* `account-domains.json`, `account-evm.json` — **independent-python**, from
+  `tools/vectors/generate_account_vectors.py`. The generator implements HKDF
+  from RFC 5869, BIP-32 from its specification and EIP-55 from the EIP, each
+  self-checked against that document's own published vectors before it emits
+  anything. Domain seeds, the founding device's E2EE sub-seeds, and
+  `m/44'/60'/0'/0/i` addresses are checked against it.
+* `account-mldsa.json`, `account-container.json` — **rust-reference**, written
+  by `server/crates/migo-account/examples/write_reference_vectors.rs`. ML-DSA-65
+  has no script-reproducible published vector set, and the container's bytes are
+  the house composition, so the Rust implementation is the reference and these
+  files test the *ports*, not the crate. The case-level `provenance` field says
+  so, and the Rust runner re-asserts it before trusting a case.
+
+Regenerate all four with `make vectors` (the two Python files also have a
+`--check` mode in `vector-check`; the two rust-reference files are instead
+re-derived byte for byte by `test-vectors-rust`, which is the same guarantee
+expressed as a test).
 
 ## Gaps, stated deliberately
 

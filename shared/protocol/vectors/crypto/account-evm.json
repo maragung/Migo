@@ -1,0 +1,62 @@
+{
+  "$comment": "EVM wallet derivation from the account root: HKDF EVM seed -> BIP-32 master -> m/44'/60'/0'/0/index -> secp256k1 uncompressed public key -> Keccak-256 address -> EIP-55 checksum.",
+  "provenance": "computed by tools/vectors/generate_account_vectors.py: BIP-32 CKDpriv, secp256k1 point arithmetic and Keccak-f[1600] implemented in pure Python from their specifications, self-checked against BIP-32 test vector 1, the secp256k1 generator, the published Keccak-256 digests, the EIP-55 examples and the EIP-155 example address before emission",
+  "note": "The path is m/44'/60'/0'/0/{index} (BIP-44 for coin type 60). `address` is the 20-byte address as lowercase hex WITHOUT a 0x prefix; `address_checksummed` is the same address in 0x-prefixed EIP-55 mixed case. `chain_code` is after the full path and `public_key_uncompressed` is 65 bytes (0x04 || X || Y); the consumer pins the address, and these intermediates are pinned for the ports and for debugging.",
+  "cases": [
+    {
+      "name": "root-a-index-0",
+      "root": "8f2a1c9d4e6b3a7f5d0c8e1b9a2f4d6c8e0a2b4d6f8c0e2a4b6d8f0a2c4e6d80",
+      "index": 0,
+      "private_key": "110302b39010dcc984cca1f448685b551788cb4695aaa75e5859ee0f5c64ba04",
+      "chain_code": "5d9613c3fba8f3b2b1c6bbf1ce407164c22450da76e92b1f8f8ecd4bb5756ef3",
+      "public_key_uncompressed": "041228782be70a130a64969cf418fbb6b64d1a7c1936401877661fc4c862d982e891eca717cb87d4ab83a7f7163c8562bfaf38db0a678c7ab820226ab32066305c",
+      "address": "701fa81de5c8a61bfa8c4f815bab3768d56f1865",
+      "address_checksummed": "0x701Fa81de5c8A61bfa8c4f815BAb3768d56F1865",
+      "provenance": "independent-python-bip32-keccak"
+    },
+    {
+      "name": "root-a-index-1",
+      "root": "8f2a1c9d4e6b3a7f5d0c8e1b9a2f4d6c8e0a2b4d6f8c0e2a4b6d8f0a2c4e6d80",
+      "index": 1,
+      "private_key": "809a8fe8d5ea706fad9f4aa59e6e8ed3f76c28af7bb129de6e7a02ba41de3a64",
+      "chain_code": "176d8276439e948f2c05f10e2be67bf972977e4c49015b7c744a86effd02af3b",
+      "public_key_uncompressed": "044aa9b792fca3f172ce7cae833ae09915566967dd7b515abf12c75ebe39d9a1538ef895f526646026b3e075253808a5cacc68780dbae653cd57837fd327788629",
+      "address": "8ef2773dfb478f3ca90734940424a45d443da1f9",
+      "address_checksummed": "0x8eF2773dfB478F3Ca90734940424a45d443Da1F9",
+      "provenance": "independent-python-bip32-keccak"
+    },
+    {
+      "name": "root-b-index-0",
+      "root": "1a3c5e7f9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7b9d1f3a",
+      "index": 0,
+      "private_key": "633725b94b985413d062e7dbbe08d2cb2fe701a5c4c48f55c3a596708e81b2f9",
+      "chain_code": "34458a47df3c67367a04c7a208b40179bea7aebeb11623c2ba82da9c9d79978d",
+      "public_key_uncompressed": "047870a33d2e699804a3e64ce52b8f1642fa2c7767be2017d335399cb2853ef911c9ada241a616bcf19fedf0ee45ca1c4fae04a2feacb8988d523658c3344493b7",
+      "address": "9a3821a39e0d95f016f3180daa11a3936ceea32f",
+      "address_checksummed": "0x9A3821A39e0D95F016F3180dAA11A3936ceea32f",
+      "provenance": "independent-python-bip32-keccak"
+    },
+    {
+      "name": "root-b-index-7",
+      "root": "1a3c5e7f9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7b9d1f3a",
+      "index": 7,
+      "private_key": "717f0f753040051bf5485068237bc761ef12a6ab63cae6f1864b254279f195f1",
+      "chain_code": "de175b43892ded819d57908516527e11b01707040f0ef31aa9dfa893cc15b240",
+      "public_key_uncompressed": "04f8e93ea0b603ffa2b9caa3c97ba2a3021b563423a8f0e3c2bed966cda7e58399f1135a32d150a59d74ddf120ba651bb26608c3681d1ec88587a5b0ae9a93386d",
+      "address": "1ad17baef34c0b8deeeed4c3b49d5ec8c9ec4fd2",
+      "address_checksummed": "0x1aD17BAef34C0B8Deeeed4c3B49d5eC8c9ec4fD2",
+      "provenance": "independent-python-bip32-keccak"
+    },
+    {
+      "name": "root-c-index-0",
+      "root": "0000000000000000000000000000000000000000000000000000000000000000",
+      "index": 0,
+      "private_key": "fed0b3a4763d9947793d01afd5bd54280770c83a6dc1fb5dbbcb529927188bca",
+      "chain_code": "99e59e25c08bcc911cf8fc61798e088ab5746496dcd74ef44d5f9b4ba92e0fa5",
+      "public_key_uncompressed": "049db52cc5f199f9550b7fcbbf6bb85f858660ee31e475f315e480b4d18ac86e30d93f3e03b2ddd7adf88b00845158407c8992062cb4ba10d2f31a33c69f775e68",
+      "address": "ade0380c563027e04480ed60952dbddc1e1612d8",
+      "address_checksummed": "0xAdE0380c563027e04480ED60952DBDdC1e1612D8",
+      "provenance": "independent-python-bip32-keccak"
+    }
+  ]
+}

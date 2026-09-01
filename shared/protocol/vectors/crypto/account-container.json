@@ -1,0 +1,33 @@
+{
+  "$comment": "The .migo container format: Argon2id (header parameters) → HKDF MIGO/BACKUP/V1 → XChaCha20-Poly1305, whole header as associated data. Each case is a complete container; a port recomputes it from the inputs and must match every byte.",
+  "cases": [
+    {
+      "container": "4d49474f414343543100010001010000200000000001000000010101010101010101010101010101010101000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000078dfea63afc0183122d15c519eb8a254a2df19b79a6d3a8e7330c7516a3969528cc0603e25556764377fc6847dae094d2564d6defdd524bac377235213e36d66c99132f1c4762c15f859eba52e81b5640b0c87a1ce9bf0273b185d3be54f9c272a5577569a2afdf0a159ada03c1fc4fe79963268ac1a1dc358a339643c4b44",
+      "created_at": 1700000000,
+      "credential": "recovery-credential-vector-1",
+      "lanes": 1,
+      "memory_kib": 8192,
+      "name": "container_root_a",
+      "nonce": "010000000000000000000000000000000000000000000000",
+      "provenance": "rust-reference",
+      "root": "8f2a1c9d4e6b3a7f5d0c8e1b9a2f4d6c8e0a2b4d6f8c0e2a4b6d8f0a2c4e6d80",
+      "salt": "01010101010101010101010101010101",
+      "time_cost": 1
+    },
+    {
+      "container": "4d49474f41434354310001000101000020000000000100000001020202020202020202020202020202020200000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000006c337584623b3dc2097f5cc967992080633ee7896ac8c2e4c606f8cecff3a2d6bb12177e99bcad78e87b4324162031a2150ca700c64c4768c9771383d77cd41c47414b1d1d4993ed056f257a13eb8e0ec5c5c743b42ab2f04b0a7f96c7f153bfa4981a1b37918264bc13ae14a1cdaa34e590769b497051d430723cf1a93a78",
+      "created_at": 1710000000,
+      "credential": "recovery-credential-vector-1",
+      "lanes": 1,
+      "memory_kib": 8192,
+      "name": "container_root_b",
+      "nonce": "020000000000000000000000000000000000000000000000",
+      "provenance": "rust-reference",
+      "root": "1a3c5e7f9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7b9d1f3a",
+      "salt": "02020202020202020202020202020202",
+      "time_cost": 1
+    }
+  ],
+  "note": "Argon2id parameters are the accepted floor so the ports can recompute quickly; production containers use 64 MiB / 3 passes, which rides in the header and is honored on open.",
+  "provenance": "rust-reference: computed by server/crates/migo-account/examples/write_reference_vectors.rs. The container's bytes are the composition of the house KDF, HKDF and AEAD exactly as the Rust stack builds it."
+}

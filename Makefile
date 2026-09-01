@@ -70,20 +70,27 @@ brief-check: ## Fail if migo.md contradicts the schema or docs (CI gate, see bri
 
 .PHONY: vectors
 vectors: ## Regenerate the cross-language conformance vectors in shared/protocol/vectors
-	# Both generators are independent implementations written from the
+	# The wire and crypto generators are independent implementations written from the
 	# specification and the RFCs; the crypto one refuses to emit anything until it
-	# reproduces the published test vectors it was written against.
+	# reproduces the published test vectors it was written against. The account
+	# generator follows the same policy for the HKDF domains and BIP-32/EIP-55;
+	# the two rust-reference files (ML-DSA, .migo container) come from the
+	# migo-account example binary, and that provenance is recorded in each file.
 	python3 tools/vectors/generate_wire_vectors.py
 	python3 tools/vectors/generate_crypto_vectors.py
+	python3 tools/vectors/generate_account_vectors.py
+	$(CARGO) run $(MANIFEST) -p migo-account --example write_reference_vectors
 
 .PHONY: vector-check
 vector-check: ## Fail if the committed vectors are stale (CI gate, no Rust toolchain needed)
 	# Separate from the runners on purpose. If a generator now produces different
 	# bytes, the interesting failure is "the vectors moved" — and this target
 	# answers that in two seconds, without a Rust toolchain, so it can live in the
-	# fast gate job alongside protocol-check.
+	# fast gate job alongside protocol-check. The two rust-reference account files
+	# are not checked here (they need cargo); test-vectors-rust covers them.
 	python3 tools/vectors/generate_wire_vectors.py --check
 	python3 tools/vectors/generate_crypto_vectors.py --check --quiet
+	python3 tools/vectors/generate_account_vectors.py --check --quiet
 
 .PHONY: kotlin-check
 kotlin-check: ## Static checks on the Android Kotlin, which nothing here can compile (CI gate)
@@ -294,7 +301,10 @@ test-vectors: test-vectors-rust test-vectors-ts ## Cross-language conformance: R
 
 .PHONY: test-vectors-rust
 test-vectors-rust: vector-check ## The Rust half of the conformance vectors (CI gate)
-	$(CARGO) test $(MANIFEST) -p migo-wire -p migo-crypto --test vectors
+	# migo-account's consumer also covers the two rust-reference files: it
+	# reseals and re-signs every case, which doubles as the staleness check
+	# those files cannot get from the Python-only vector-check.
+	$(CARGO) test $(MANIFEST) -p migo-wire -p migo-crypto -p migo-account --test vectors
 
 .PHONY: test-vectors-ts
 test-vectors-ts: vector-check ## The TypeScript half of the conformance vectors (CI gate)

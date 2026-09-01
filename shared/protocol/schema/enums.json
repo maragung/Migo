@@ -442,6 +442,31 @@
           "value": 8
         }
       ]
+    },
+    {
+      "name": "MlDsaPurpose",
+      "doc": "What an ML-DSA login challenge may be used for; mixed into the challenge payload so a challenge issued for one purpose cannot be answered for another",
+      "variants": [
+        {
+          "name": "Unknown",
+          "value": 0
+        },
+        {
+          "name": "Login",
+          "value": 1,
+          "doc": "Sign in as a registered device: identity + device signatures"
+        },
+        {
+          "name": "AddDevice",
+          "value": 2,
+          "doc": "Register a new device under an existing identity"
+        },
+        {
+          "name": "Rotate",
+          "value": 3,
+          "doc": "Approve an identity key rotation"
+        }
+      ]
     }
   ]
 }

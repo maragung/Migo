@@ -1,0 +1,118 @@
+{
+  "$comment": "Domain-separated account-root seeds: seed = HKDF-SHA256(ikm=root, salt=absent, info=label). Five domains over three roots; the E2EE case also carries the founding device's two sub-seeds.",
+  "provenance": "computed by tools/vectors/generate_account_vectors.py, an independent HKDF-SHA256 written from RFC 5869 (extract with an absent salt = 32 zero bytes, one 32-byte expand round), self-checked against the RFC 5869 test cases before emission",
+  "note": "`label` is the ASCII `info` of a single HKDF round and `seed` is its 32-byte output. On a MIGO/E2EE/V1 case, `e2ee_signing_seed` and `e2ee_exchange_seed` are a SECOND HKDF round over `seed` (ikm = the E2EE domain seed, info = migo-e2ee-signing-v1 / migo-e2ee-exchange-v1) — the founding device's Ed25519 and X25519 seeds, not the domain seed itself.",
+  "cases": [
+    {
+      "name": "root-a-identity",
+      "root": "8f2a1c9d4e6b3a7f5d0c8e1b9a2f4d6c8e0a2b4d6f8c0e2a4b6d8f0a2c4e6d80",
+      "label": "MIGO/IDENTITY/V1",
+      "seed": "ef88ad9f16046552ed0a1219ba1fcc6d1493c6a19c0f8608e867076d140fd97e",
+      "provenance": "independent-python-rfc5869"
+    },
+    {
+      "name": "root-a-evm",
+      "root": "8f2a1c9d4e6b3a7f5d0c8e1b9a2f4d6c8e0a2b4d6f8c0e2a4b6d8f0a2c4e6d80",
+      "label": "MIGO/EVM/V1",
+      "seed": "ebe5fbce6529bf1e4a77909ee3578f695c85a1e411e9e4ee0e81a74c3ccec323",
+      "provenance": "independent-python-rfc5869"
+    },
+    {
+      "name": "root-a-e2ee",
+      "root": "8f2a1c9d4e6b3a7f5d0c8e1b9a2f4d6c8e0a2b4d6f8c0e2a4b6d8f0a2c4e6d80",
+      "label": "MIGO/E2EE/V1",
+      "seed": "fd8317e5ac7be101fc9a502cff7176bd8bcd0b53b00cd42adef7d383a03c0dab",
+      "e2ee_signing_seed": "9f85ef9cad9fdb777bea3811e33d133ac70a7a53bdf9afa303dc17de5137e534",
+      "e2ee_exchange_seed": "7112795b780b4d28103400b342480ec408f7e490aec92f437a5fd93528b58d88",
+      "provenance": "independent-python-rfc5869"
+    },
+    {
+      "name": "root-a-backup",
+      "root": "8f2a1c9d4e6b3a7f5d0c8e1b9a2f4d6c8e0a2b4d6f8c0e2a4b6d8f0a2c4e6d80",
+      "label": "MIGO/BACKUP/V1",
+      "seed": "7df0e02fbc994842c883439e328cfc72ee60ffbd2043e248e34c9e065307f96e",
+      "provenance": "independent-python-rfc5869"
+    },
+    {
+      "name": "root-a-device",
+      "root": "8f2a1c9d4e6b3a7f5d0c8e1b9a2f4d6c8e0a2b4d6f8c0e2a4b6d8f0a2c4e6d80",
+      "label": "MIGO/DEVICE/V1",
+      "seed": "eb61023f946d50005c30fd40bc37cf755e0d57239cd525c159a73370c307762c",
+      "provenance": "independent-python-rfc5869"
+    },
+    {
+      "name": "root-b-identity",
+      "root": "1a3c5e7f9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7b9d1f3a",
+      "label": "MIGO/IDENTITY/V1",
+      "seed": "96668c31526d92df68dc25fd5f46e6b5e455665ec74507917ffdfd154cd2e8c9",
+      "provenance": "independent-python-rfc5869"
+    },
+    {
+      "name": "root-b-evm",
+      "root": "1a3c5e7f9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7b9d1f3a",
+      "label": "MIGO/EVM/V1",
+      "seed": "6fb025fe12a109b746df279e7d60e5a5a79d555d34c40028bd33f8328cd8fb2c",
+      "provenance": "independent-python-rfc5869"
+    },
+    {
+      "name": "root-b-e2ee",
+      "root": "1a3c5e7f9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7b9d1f3a",
+      "label": "MIGO/E2EE/V1",
+      "seed": "80941ebb80d0bef40924d1ebbf23bff5dd4e338b5aa97ab2009ebdfaffef4e26",
+      "e2ee_signing_seed": "b3b3091c2a170dac3f4ce796fafd6d304d7a5074e62af8b9e71d5965d776bda1",
+      "e2ee_exchange_seed": "b04ee581d4a174a905c6a9d06d162821919e7a9f850bba66808fe17577c41760",
+      "provenance": "independent-python-rfc5869"
+    },
+    {
+      "name": "root-b-backup",
+      "root": "1a3c5e7f9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7b9d1f3a",
+      "label": "MIGO/BACKUP/V1",
+      "seed": "d3bf94a5e88a8d2f821fdc8262b4ca67485f228b81a04d7a623f0769dc959c45",
+      "provenance": "independent-python-rfc5869"
+    },
+    {
+      "name": "root-b-device",
+      "root": "1a3c5e7f9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7b9d1f3a",
+      "label": "MIGO/DEVICE/V1",
+      "seed": "8087fcd5859d7f3cb20203b98264ccd47ee2a889470daf13351521973c6efc65",
+      "provenance": "independent-python-rfc5869"
+    },
+    {
+      "name": "root-c-identity",
+      "root": "0000000000000000000000000000000000000000000000000000000000000000",
+      "label": "MIGO/IDENTITY/V1",
+      "seed": "69783122b421c13522e2a775d715dc18be61ea139447383260f313d3a98941b1",
+      "provenance": "independent-python-rfc5869"
+    },
+    {
+      "name": "root-c-evm",
+      "root": "0000000000000000000000000000000000000000000000000000000000000000",
+      "label": "MIGO/EVM/V1",
+      "seed": "65dc0bf14df06fe31aa0008f72f7b8c4751e3136f668cb1362d47c108ee8d686",
+      "provenance": "independent-python-rfc5869"
+    },
+    {
+      "name": "root-c-e2ee",
+      "root": "0000000000000000000000000000000000000000000000000000000000000000",
+      "label": "MIGO/E2EE/V1",
+      "seed": "22fa760ada3091cd90ca12b560258e0092fca385e252a159310c72a256991052",
+      "e2ee_signing_seed": "84d5436c924c9fbc450716e4cd164c49020814557d63e3bad88e555ddb6770d5",
+      "e2ee_exchange_seed": "338c47e8bd7acd21de3988cbe162f4a78d5fe751be41a691bc2b4b7d7c2b1166",
+      "provenance": "independent-python-rfc5869"
+    },
+    {
+      "name": "root-c-backup",
+      "root": "0000000000000000000000000000000000000000000000000000000000000000",
+      "label": "MIGO/BACKUP/V1",
+      "seed": "a4a1b58711e8d4a658e487938f520edc9b59768fde1bf10162ed39f080c7e671",
+      "provenance": "independent-python-rfc5869"
+    },
+    {
+      "name": "root-c-device",
+      "root": "0000000000000000000000000000000000000000000000000000000000000000",
+      "label": "MIGO/DEVICE/V1",
+      "seed": "9d4487c2eae57d0179d1a0faa507eed24e551fc54734b7641ce735f639180769",
+      "provenance": "independent-python-rfc5869"
+    }
+  ]
+}
