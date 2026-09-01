@@ -114,6 +114,14 @@ jobs:
         # crypto vector gate broke once already. This compares the two directly.
         run: make pydeps-check
 
+      - name: No secret-shaped string is committed
+        # Brief section 183's committed half. A leaked credential is the one class of
+        # failure that gets worse with every minute it sits unnoticed, so it belongs
+        # in the one-minute job, before any build spends a runner on a commit that
+        # will be reverted anyway. The scanner self-tests its own rules on synthetic
+        # samples, so a regex that rotted into uselessness fails here too.
+        run: make secret-check
+
   # ------------------------------------------------------------------ rust
   # One job for formatting, lints and the whole test suite, because all three want the
   # same warm `target/` directory and splitting them means building the workspace three

@@ -139,6 +139,18 @@ pydeps-check: ## The CI gate installs exactly the Python modules tools/ imports
 	# imported is the reverse, an install line that outlived its reason. Both fail here.
 	python3 tools/scripts/pydeps-audit.py
 
+.PHONY: secret-check
+secret-check: ## Fail if a secret-shaped string is committed anywhere (CI gate, brief section 183)
+	# The committed half of brief section 183: no credential format -- token,
+	# key, private key block, signed JWT, literal password in a URL -- may
+	# land in a tracked file. The runtime half (redaction before anything
+	# leaves the process) is the loadgen redaction filter and the config
+	# summary/Debug tests, which this scanner's allowlist documents rather
+	# than duplicates. Well-known formats only: a generic hunt for
+	# high-entropy "passwords" cannot tell a secret from a test vector, and
+	# a gate that cries wolf is a gate everyone scrolls past.
+	python3 tools/scripts/secret-audit.py
+
 # ---------------------------------------------------------------- build
 
 .PHONY: build
@@ -337,7 +349,7 @@ audit: ## Dependency vulnerability + licence audit
 	$(PNPM) audit --audit-level high || true
 
 .PHONY: ci
-ci: protocol-check entity-check brief-check vector-check kotlin-check infra-check pydeps-check fmt-check build-ts lint doc-check test test-vectors ## Everything CI runs
+ci: protocol-check entity-check brief-check vector-check kotlin-check infra-check pydeps-check secret-check fmt-check build-ts lint doc-check test test-vectors ## Everything CI runs
 
 # ---------------------------------------------------------------- misc
 
