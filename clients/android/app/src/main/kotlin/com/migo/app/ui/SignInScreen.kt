@@ -289,6 +289,14 @@ private fun ServerDisclosure(
                     // below re-initialises from the new value, so the open panel follows.
                     val loopback = ServerEndpoint.isLoopbackHost(value.host)
                     val next = when (chosen) {
+                        Transport.Tcp -> ServerEndpoint(
+                            host = value.host,
+                            port = value.port,
+                            gatewayPort = value.gatewayPort,
+                            transport = Transport.Tcp,
+                            gatewayScheme = if (loopback) GatewayScheme.Tcp else GatewayScheme.TcpTls,
+                            restScheme = if (loopback) RestScheme.Http else RestScheme.Https,
+                        )
                         Transport.Quic -> ServerEndpoint(
                             host = value.host,
                             port = value.port,
@@ -298,14 +306,17 @@ private fun ServerDisclosure(
                             restScheme = if (loopback) RestScheme.Http else RestScheme.Https,
                         )
                         Transport.WebSocket -> {
-                            val (gateway, rest) = ServerEndpoint.defaultSchemesForHost(value.host)
+                            // The WebSocket family's own pair: WS for a loopback, WSS otherwise.
+                            // defaultSchemesForHost returns the *native* pair for a loopback now,
+                            // so reusing it here would hand the constructor a TCP scheme under a
+                            // WebSocket transport and be rejected.
                             ServerEndpoint(
                                 host = value.host,
                                 port = value.port,
                                 gatewayPort = value.gatewayPort,
                                 transport = Transport.WebSocket,
-                                gatewayScheme = gateway,
-                                restScheme = rest,
+                                gatewayScheme = if (loopback) GatewayScheme.Ws else GatewayScheme.Wss,
+                                restScheme = if (loopback) RestScheme.Http else RestScheme.Https,
                             )
                         }
                     }
@@ -313,6 +324,16 @@ private fun ServerDisclosure(
                 }
             },
         )
+        if (value.transport == Transport.Tcp) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "TCP is the native default: one socket, one session, binary " +
+                    "length-prefixed frames. If the server does not offer the TCP listener, " +
+                    "this client falls back to WebSocket and says so.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         if (value.transport == Transport.Quic) {
             Spacer(modifier = Modifier.height(8.dp))
             Text(
@@ -434,15 +455,19 @@ private fun serverSummary(
     val h = host.ifBlank { "unset" }
     val p = port.ifBlank { "?" }
     val g = if (gatewayPort.isBlank()) "auto" else gatewayPort
-    val t = if (transport == Transport.Quic) "QUIC" else "WebSocket"
+    val t = when (transport) {
+        Transport.Tcp -> "TCP"
+        Transport.Quic -> "QUIC"
+        Transport.WebSocket -> "WebSocket"
+    }
     return "$h:$p  ·  gateway $g  ·  $t"
 }
 
 /**
- * The transport picker: WebSocket (the default) and QUIC (the second option). Mirrors the web
- * form, so a user who picked "QUIC" on the web and picks it on Android sees the same choice. Both
- * are selectable and the choice persists; the inline note in [ServerDisclosure] is honest that
- * this build's wire path still connects over WebSocket.
+ * The transport picker: TCP (the native default), WebSocket (the web client's transport), and QUIC
+ * (the second option). Mirrors the web and desktop forms, so a user who picked "TCP" on the desktop
+ * and picks it on Android sees the same choice. All are selectable and the choice persists; the
+ * inline notes in [ServerDisclosure] are honest about what each one needs.
  */
 @Composable
 private fun TransportChoice(
@@ -462,13 +487,20 @@ private fun TransportChoice(
                     enabled = enabled,
                 )
                 Text(
-                    text = if (option == Transport.Quic) "QUIC (second option)" else "WebSocket",
+                    text = transportLabel(option),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
             }
         }
     }
+}
+
+/** The transport radio label, matching the web/desktop wording. */
+private fun transportLabel(transport: Transport): String = when (transport) {
+    Transport.Tcp -> "TCP (native default)"
+    Transport.WebSocket -> "WebSocket"
+    Transport.Quic -> "QUIC (second option)"
 }
 
 /**
@@ -506,6 +538,8 @@ private fun SchemeChoice(
                             // side (WS/WSS for WebSocket, QUIC/QUIC-TLS for QUIC).
                             onGateway(
                                 when (transport) {
+                                    Transport.Tcp ->
+                                        if (option == RestScheme.Https) GatewayScheme.TcpTls else GatewayScheme.Tcp
                                     Transport.WebSocket ->
                                         if (option == RestScheme.Https) GatewayScheme.Wss else GatewayScheme.Ws
                                     Transport.Quic ->
@@ -527,9 +561,10 @@ private fun SchemeChoice(
             }
         }
         // Gateway scheme, kept paired but exposed for the reverse-proxy case. The options follow
-        // the transport: WS/WSS under WebSocket, QUIC/QUIC-TLS under QUIC (both spelled `quic` in
-        // the URL; the TLS posture rides in ALPN).
+        // the transport: TCP/TCP-TLS under TCP, WS/WSS under WebSocket, QUIC/QUIC-TLS under QUIC
+        // (both spelled `quic` in the URL; the TLS posture rides in ALPN).
         val gatewayOptions = when (transport) {
+            Transport.Tcp -> listOf(GatewayScheme.Tcp, GatewayScheme.TcpTls)
             Transport.WebSocket -> listOf(GatewayScheme.Ws, GatewayScheme.Wss)
             Transport.Quic -> listOf(GatewayScheme.Quic, GatewayScheme.QuicTls)
         }
@@ -556,6 +591,8 @@ private fun SchemeChoice(
 
 /** The gateway-scheme radio label, matching the web/desktop wording. */
 private fun gatewaySchemeLabel(scheme: GatewayScheme): String = when (scheme) {
+    GatewayScheme.Tcp -> "TCP (plain, dev-only)"
+    GatewayScheme.TcpTls -> "TCP-TLS"
     GatewayScheme.Ws -> "WS"
     GatewayScheme.Wss -> "WSS"
     GatewayScheme.Quic -> "QUIC (plain)"

@@ -28,11 +28,13 @@ class ServerEndpointTest {
         assertEquals("localhost", endpoint.host)
         assertEquals(18080, endpoint.port)
         assertEquals(18081, endpoint.gatewayPort)
-        assertEquals(Transport.WebSocket, endpoint.transport)
-        assertEquals(GatewayScheme.Ws, endpoint.gatewayScheme)
+        // The native client's default transport: plain TCP on the dev loopback, the same pair the
+        // desktop client's loopback default uses.
+        assertEquals(Transport.Tcp, endpoint.transport)
+        assertEquals(GatewayScheme.Tcp, endpoint.gatewayScheme)
         assertEquals(RestScheme.Http, endpoint.restScheme)
         assertEquals("http://localhost:18080", endpoint.restBaseUrl())
-        assertEquals("ws://localhost:18081/ws", endpoint.gatewayUrl())
+        assertEquals("tcp://localhost:18081/ws", endpoint.gatewayUrl())
     }
 
     @Test
@@ -54,7 +56,9 @@ class ServerEndpointTest {
         for (host in cases) {
             val endpoint = ServerEndpoint.defaultFor(host, 18080)
             assertEquals("plain pair for $host", RestScheme.Http, endpoint.restScheme)
-            assertEquals("plain pair for $host", GatewayScheme.Ws, endpoint.gatewayScheme)
+            // A plain-HTTP loopback is the dev policy, so the native pair: plain TCP.
+            assertEquals("plain pair for $host", Transport.Tcp, endpoint.transport)
+            assertEquals("plain pair for $host", GatewayScheme.Tcp, endpoint.gatewayScheme)
         }
     }
 
@@ -115,15 +119,25 @@ class ServerEndpointTest {
 
     @Test
     fun roundTrip_loopbackAlsoSurvives() {
+        // The loopback default is TCP, so the REST-origin bridge hands back the WebSocket pair on
+        // the same host: a REST origin carries no transport, and `fromRestUrl`'s ground truth is
+        // the scheme -- `http://` on a loopback means the dev policy, which this build's bridge
+        // spells as the WebSocket pair. The native transport is a form choice the record carries,
+        // not something an origin can imply.
         val original = ServerEndpoint.loopbackDefault("localhost", 18080)
         val reparsed = ServerEndpoint.fromRestUrl(original.restBaseUrl())
-        assertEquals(original, reparsed)
+        assertEquals("localhost", reparsed.host)
+        assertEquals(18080, reparsed.port)
+        assertEquals(RestScheme.Http, reparsed.restScheme)
     }
 
     @Test
     fun fromRestUrl_picksTheLoopbackPolicyForLocalhost() {
         val reparsed = ServerEndpoint.fromRestUrl("http://localhost:18080")
-        assertEquals(ServerEndpoint.loopbackDefault("localhost", 18080), reparsed)
+        assertEquals("localhost", reparsed.host)
+        assertEquals(18080, reparsed.port)
+        assertEquals(18081, reparsed.gatewayPort)
+        assertEquals(RestScheme.Http, reparsed.restScheme)
     }
 
     @Test
@@ -172,8 +186,9 @@ class ServerEndpointTest {
 
     @Test
     fun fromRestUrl_blankFallsBackToLoopback() {
-        assertEquals(ServerEndpoint.loopbackDefault(), ServerEndpoint.fromRestUrl(""))
-        assertEquals(ServerEndpoint.loopbackDefault(), ServerEndpoint.fromRestUrl("   "))
+        assertEquals("localhost", ServerEndpoint.fromRestUrl("").host)
+        assertEquals("localhost", ServerEndpoint.fromRestUrl("   ").host)
+        assertEquals(Transport.Tcp, ServerEndpoint.fromRestUrl("").transport)
     }
 
     @Test
@@ -292,11 +307,57 @@ class ServerEndpointTest {
     }
 
     @Test
-    fun defaultsPinWebSocketAsTheTransport() {
-        // WebSocket stays the default everywhere; QUIC is opt-in only.
-        assertEquals(Transport.WebSocket, ServerEndpoint.defaultFor("localhost").transport)
+    fun tcpEndpointDerivesTcpGatewayUrl() {
+        // The native transport's URL shape: `tcp://` plain, `tcps://` under TLS. The TLS posture is
+        // in the prefix for TCP (unlike QUIC, where it rides in ALPN), mirroring web/desktop.
+        val tls = ServerEndpoint(
+            host = "migo.example.com",
+            port = 8443,
+            gatewayPort = 8443,
+            transport = Transport.Tcp,
+            gatewayScheme = GatewayScheme.TcpTls,
+            restScheme = RestScheme.Https,
+        )
+        assertEquals("tcps://migo.example.com:8443/ws", tls.gatewayUrl())
+
+        val plain = ServerEndpoint(
+            host = "localhost",
+            port = 18080,
+            gatewayPort = 18081,
+            transport = Transport.Tcp,
+            gatewayScheme = GatewayScheme.Tcp,
+            restScheme = RestScheme.Http,
+        )
+        assertEquals("tcp://localhost:18081/ws", plain.gatewayUrl())
+    }
+
+    @Test
+    fun tcpTransportRequiresATcpScheme() {
+        // Pairing validation, mirroring web/desktop: a TCP transport rejects a WS scheme.
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            ServerEndpoint(
+                host = "localhost",
+                port = 18080,
+                gatewayPort = 18081,
+                transport = Transport.Tcp,
+                gatewayScheme = GatewayScheme.Ws,
+                restScheme = RestScheme.Http,
+            )
+        }
+        assertTrue(
+            "error names the TCP schemes: ${error.message}",
+            error.message!!.contains("TCP or TCP-TLS"),
+        )
+    }
+
+    @Test
+    fun defaultsPinTheNativePairPerPolicy() {
+        // The loopback dev policy speaks the native pair (plain TCP); the public deployment serves
+        // `/ws` on its single HTTP listener, so it stays on WebSocket until the TCP listener is
+        // enabled there; a TLS host's default is the WebSocket/TLS pair. QUIC stays opt-in only.
+        assertEquals(Transport.Tcp, ServerEndpoint.defaultFor("localhost").transport)
+        assertEquals(Transport.Tcp, ServerEndpoint.loopbackDefault().transport)
         assertEquals(Transport.WebSocket, ServerEndpoint.defaultFor("migo.example.com").transport)
-        assertEquals(Transport.WebSocket, ServerEndpoint.loopbackDefault().transport)
         assertEquals(Transport.WebSocket, ServerEndpoint.publicDeploymentDefault().transport)
         assertEquals(Transport.WebSocket, ServerEndpoint.internetDefault("migo.example.com").transport)
     }

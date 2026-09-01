@@ -2,6 +2,7 @@ package com.migo.core.domain
 
 import com.migo.core.net.Gateway
 import com.migo.core.net.GatewayError
+import com.migo.core.net.RealtimeTransport
 import com.migo.core.wire.Frame
 import com.migo.core.wire.Reader
 import com.migo.core.wire.Writer
@@ -54,7 +55,7 @@ fun interface Subscription {
  * domain -- so it stays a mechanical adapter over the gateway.
  */
 class Rpc(
-    private val gateway: Gateway,
+    private val gateway: RealtimeTransport,
     private val onEventError: EventErrorHandler? = null,
 ) {
     /**

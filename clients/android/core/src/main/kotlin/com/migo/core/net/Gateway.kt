@@ -13,6 +13,7 @@ import com.migo.core.protocol.opcodeName
 import com.migo.core.wire.Compress
 import com.migo.core.wire.Flags
 import com.migo.core.wire.Frame
+import com.migo.core.wire.Id
 import com.migo.core.wire.Limits
 import com.migo.core.wire.NIL_ID
 import com.migo.core.wire.Reader
@@ -142,7 +143,7 @@ class Gateway private constructor(
     private val socket: WebSocket,
     private val scope: CoroutineScope,
     private val state: SocketState,
-) {
+) : RealtimeTransport {
     /** Correlation ids for request frames. Zero means "not a reply to anything", so ids start at 1. */
     private val nextCorrelation = AtomicInteger(1)
 
@@ -152,10 +153,10 @@ class Gateway private constructor(
     private var heartbeat: Job? = null
 
     /** Frames nobody correlated: broadcasts, and replies whose waiter has gone. */
-    val inbound: Channel<Inbound> get() = state.inbound
+    override val inbound: Channel<Inbound> get() = state.inbound
 
     /** The session id from WELCOME, which a resume attempt must name. */
-    val sessionId get() = state.sessionId
+    override val sessionId: Id get() = state.sessionId
 
     /**
      * The highest `frame_seq` this client has seen.
@@ -170,10 +171,10 @@ class Gateway private constructor(
      *
      * Only WELCOME and RECONNECT_HINT bypass the mailbox and carry no sequence.
      */
-    val lastFrameSeq get() = state.lastFrameSeq
+    override val lastFrameSeq get() = state.lastFrameSeq
 
     /** A fresh correlation id, for a request whose reply must be matched to it. */
-    fun correlate(): Long {
+    override fun correlate(): Long {
         // Wrapping is fine and deliberate: correlation ids only have to be unique among the requests
         // currently in flight, and four billion is far beyond that. Growing to a wider type, or
         // throwing on overflow, would both be worse answers to a problem that does not exist.
@@ -192,7 +193,7 @@ class Gateway private constructor(
      * won, which is what [maybeDeflate] decides; a compressed frame that grew is a frame that cost
      * CPU on both ends to waste bytes.
      */
-    suspend fun send(opcode: Long, correlation: Long, encode: (Writer) -> Unit) {
+    override suspend fun send(opcode: Long, correlation: Long, encode: (Writer) -> Unit) {
         val writer = Writer()
         encode(writer)
         val payload = writer.finish()
@@ -225,7 +226,7 @@ class Gateway private constructor(
      * frame, because every caller would otherwise have to remember to check the flag, and the one
      * that forgot would read an error body as a success struct.
      */
-    suspend fun request(opcode: Long, encode: (Writer) -> Unit): Frame {
+    override suspend fun request(opcode: Long, encode: (Writer) -> Unit): Frame {
         val correlation = correlate()
         val waiter = state.register(correlation)
         try {
@@ -246,7 +247,7 @@ class Gateway private constructor(
      * heartbeat, which means an idle client still tells the server what it has, and the server's ring
      * does not hold frames the client read minutes ago.
      */
-    suspend fun acknowledge() {
+    override suspend fun acknowledge() {
         val seq = state.lastFrameSeq
         if (seq == 0L || seq == state.lastAcked) return
         state.lastAcked = seq
@@ -283,7 +284,7 @@ class Gateway private constructor(
     }
 
     /** Closes the socket politely, so the server retires the session rather than timing it out. */
-    fun close() {
+    override fun close() {
         heartbeat?.cancel()
         socket.close(NORMAL_CLOSURE, null)
         state.fail(GatewayError.Closed)

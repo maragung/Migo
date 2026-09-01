@@ -270,6 +270,7 @@ class MigoSession private constructor(
             MigoClientOptions(
                 baseUrl = endpoint.restBaseUrl(),
                 gatewayUrl = wireGatewayUrl(endpoint),
+                tcpGatewayAddress = wireTcpAddress(endpoint),
                 appVersion = appVersion,
                 osVersion = "Android ${Build.VERSION.RELEASE}",
                 deviceModel = Build.MODEL,
@@ -283,18 +284,40 @@ class MigoSession private constructor(
         )
 
         /**
+         * The raw TCP address this build dials first, or null when the endpoint does not ask for it.
+         *
+         * A TCP endpoint dials the native transport: host + gateway port, one connection, one
+         * session, length-prefixed binary frames. A `TcpTls` posture is a production deployment's
+         * TLS-fronted listener -- this build dials the address and the TLS posture is the
+         * deployment's to terminate, the same trust story the desktop client tells. WebSocket and
+         * QUIC endpoints return null and ride the WebSocket path: WebSocket is the web client's
+         * transport and this build's fallback, and a QUIC endpoint has no Kotlin QUIC runtime to
+         * dial yet. The MIGO_TCP_LIVE_ADDR contract covers this seam: the client tries TCP first
+         * and falls back to WebSocket when the server does not negotiate the bit.
+         */
+        private fun wireTcpAddress(endpoint: ServerEndpoint): String? =
+            when (endpoint.transport) {
+                Transport.Tcp -> "${endpoint.host}:${endpoint.gatewayPort}"
+                Transport.WebSocket, Transport.Quic -> null
+            }
+
+        /**
          * The gateway URL this build actually dials.
          *
          * [ServerEndpoint.gatewayUrl] is the canonical address the record derives, and for a QUIC
          * endpoint that is a `quic://` URL -- the realtime transport's second option, honoured by a
          * QUIC-capable client. This build has no Kotlin QUIC runtime, so its wire path always
          * connects over WebSocket: a QUIC endpoint keeps its TLS posture (QUIC-TLS -> wss, plain
-         * QUIC -> ws) but dials the WebSocket listener. The persisted record is untouched; only the
-         * socket this process opens is decided here, which is where the wire path is free to differ
-         * from the record the user typed.
+         * QUIC -> ws) but dials the WebSocket listener. A TCP endpoint's fallback is the plain
+         * WebSocket pair on the same host, because a server that is up but not speaking the native
+         * transport still serves `/ws` on its HTTP listener. The persisted record is untouched;
+         * only the socket this process opens is decided here, which is where the wire path is free
+         * to differ from the record the user typed.
          */
         private fun wireGatewayUrl(endpoint: ServerEndpoint): String =
             when (endpoint.transport) {
+                Transport.Tcp ->
+                    "ws://${endpoint.host}:${endpoint.gatewayPort}/ws"
                 Transport.WebSocket -> endpoint.gatewayUrl()
                 Transport.Quic -> {
                     val scheme = if (endpoint.gatewayScheme == GatewayScheme.QuicTls) "wss" else "ws"

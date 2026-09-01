@@ -45,7 +45,7 @@ data class ServerEndpoint(
     val port: Int,
     /** The realtime gateway port. Defaults to [port] + 1. */
     val gatewayPort: Int,
-    /** The realtime transport. WebSocket is the default; QUIC is a real second option whose wire
+    /** The realtime transport. TCP is the native default; QUIC is a real second option whose wire
      *  path this build still carries over WebSocket. */
     val transport: Transport,
     /** The TLS posture of the realtime transport. */
@@ -57,10 +57,13 @@ data class ServerEndpoint(
         require(host.isNotBlank()) { "host is required" }
         require(port in 1..65535) { "rest port is out of range (1..65535): $port" }
         require(gatewayPort in 1..65535) { "gateway port is out of range (1..65535): $gatewayPort" }
-        // The transport and its scheme must agree: a WebSocket carries WS/WSS, QUIC carries
-        // QUIC/QUIC-TLS. This is the same pairing the web and desktop forms enforce, so a record
-        // that validates here is one every client would accept.
+        // The transport and its scheme must agree: TCP carries TCP/TCP-TLS, a WebSocket carries
+        // WS/WSS, QUIC carries QUIC/QUIC-TLS. This is the same pairing the web and desktop forms
+        // enforce, so a record that validates here is one every client would accept.
         when (transport) {
+            Transport.Tcp -> require(
+                gatewayScheme == GatewayScheme.Tcp || gatewayScheme == GatewayScheme.TcpTls,
+            ) { "TCP transport requires TCP or TCP-TLS scheme" }
             Transport.WebSocket -> require(
                 gatewayScheme == GatewayScheme.Ws || gatewayScheme == GatewayScheme.Wss,
             ) { "WebSocket transport requires WS or WSS scheme" }
@@ -92,12 +95,13 @@ data class ServerEndpoint(
         const val DEFAULT_REST_PORT: Int = 18080
 
         /**
-         * The default endpoint for a host. A loopback gets the dev pair (plain WS, plain
-         * HTTP, gateway on the next port), anything else gets the production pair (WSS,
-         * HTTPS, gateway on the same port).
+         * The default endpoint for a host. A loopback gets the dev pair (plain TCP, plain HTTP,
+         * gateway on the next port), anything else gets the production pair (WSS over WebSocket,
+         * HTTPS, gateway on the same port) — the public deployment serves `/ws` on its single HTTP
+         * listener, so WebSocket stays its default until the TCP listener is enabled there.
          *
-         * Splitting the rule from the constructor means a settings field that just lost
-         * focus can rebuild the pair without re-running the whole endpoint construction.
+         * Splitting the rule from the constructor means a settings field that just lost focus can
+         * rebuild the pair without re-running the whole endpoint construction.
          */
         fun defaultFor(host: String, port: Int = DEFAULT_REST_PORT): ServerEndpoint {
             // defaultSchemesForHost returns a Pair<GatewayScheme, RestScheme>; destructure
@@ -109,24 +113,24 @@ data class ServerEndpoint(
                 host = host.lowercase(),
                 port = port,
                 gatewayPort = if (restScheme == RestScheme.Https) port else port + 1,
-                transport = Transport.WebSocket,
+                transport = if (restScheme == RestScheme.Https) Transport.WebSocket else Transport.Tcp,
                 gatewayScheme = gatewayScheme,
                 restScheme = restScheme,
             )
         }
 
         /**
-         * The dev-policy default: plain WebSocket on plain HTTP, with the gateway on the
-         * next port. `ws://localhost:18080` for REST, `ws://localhost:18081/ws` for the
-         * gateway.
+         * The dev-policy default: plain TCP on plain HTTP, with the gateway on the next port —
+         * the native client's transport pair. `http://localhost:18080` for REST,
+         * `tcp://localhost:18081` for the gateway.
          */
         fun loopbackDefault(host: String = "localhost", port: Int = DEFAULT_REST_PORT): ServerEndpoint =
             ServerEndpoint(
                 host = host.lowercase(),
                 port = port,
                 gatewayPort = port + 1,
-                transport = Transport.WebSocket,
-                gatewayScheme = GatewayScheme.Ws,
+                transport = Transport.Tcp,
+                gatewayScheme = GatewayScheme.Tcp,
                 restScheme = RestScheme.Http,
             )
 
@@ -205,12 +209,14 @@ data class ServerEndpoint(
         }
 
         /**
-         * Picks a default scheme pair for a host. Loopback defaults to plain (dev),
-         * anything else to TLS.
+         * Picks a default scheme pair for a host. Loopback defaults to the native plain pair
+         * (plain TCP, plain HTTP), anything else to the TLS pair (WSS, HTTPS) — the public
+         * deployment serves `/ws` on its HTTP listener, so WebSocket stays the non-loopback
+         * default until the TCP listener is enabled there.
          */
         fun defaultSchemesForHost(host: String): Pair<GatewayScheme, RestScheme> =
             if (isLoopbackHost(host)) {
-                GatewayScheme.Ws to RestScheme.Http
+                GatewayScheme.Tcp to RestScheme.Http
             } else {
                 GatewayScheme.Wss to RestScheme.Https
             }
@@ -225,7 +231,18 @@ data class ServerEndpoint(
 
 /** The realtime transport the user picked. */
 enum class Transport {
-    /** WebSocket, the default transport and the one this build carries on the wire. */
+    /**
+     * TCP, the native client's default transport: one connection, one session, binary
+     * length-prefixed frames — the mig33v46 heritage. A server advertises it via the
+     * `TCP_TRANSPORT` feature bit only when its optional TCP listener is enabled; a node that does
+     * not offer the bit falls back to WebSocket, which stays the web client's transport.
+     */
+    Tcp,
+
+    /**
+     * WebSocket, the web client's transport, kept here for development and for the fallback a
+     * TCP-less deployment leaves the client on.
+     */
     WebSocket,
 
     /**
@@ -239,6 +256,15 @@ enum class Transport {
 
 /** The TLS posture of the realtime gateway. */
 enum class GatewayScheme {
+    /**
+     * Plain TCP. Allowed only for the dev-policy loopback (and a deployment's explicitly plain
+     * dev listener); a production TCP listener is fronted by TLS 1.3.
+     */
+    Tcp,
+
+    /** TCP over TLS 1.3. The native transport's production posture. */
+    TcpTls,
+
     /** Plain WebSocket. Allowed only for loopback hosts; see [ServerEndpoint.defaultFor]. */
     Ws,
 
@@ -258,6 +284,8 @@ enum class GatewayScheme {
 
     /** The URL scheme prefix, taking the value's own posture only. */
     fun prefix(): String = when (this) {
+        Tcp -> "tcp"
+        TcpTls -> "tcps"
         Ws -> "ws"
         Wss -> "wss"
         // Both QUIC variants are spelled `quic` at the URL level; the TLS posture is expressed via

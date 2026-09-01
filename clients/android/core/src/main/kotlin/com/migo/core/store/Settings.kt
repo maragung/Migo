@@ -399,15 +399,20 @@ private fun readServerEndpoint(preferences: Preferences, fallback: ServerEndpoin
  */
 private fun pairGatewaySchemeWithTransport(transport: Transport, scheme: GatewayScheme): GatewayScheme =
     when (transport) {
+        Transport.Tcp -> when (scheme) {
+            GatewayScheme.Tcp, GatewayScheme.TcpTls -> scheme
+            GatewayScheme.Ws, GatewayScheme.Quic -> GatewayScheme.Tcp
+            GatewayScheme.Wss, GatewayScheme.QuicTls -> GatewayScheme.TcpTls
+        }
         Transport.WebSocket -> when (scheme) {
             GatewayScheme.Ws, GatewayScheme.Wss -> scheme
-            GatewayScheme.Quic -> GatewayScheme.Ws
-            GatewayScheme.QuicTls -> GatewayScheme.Wss
+            GatewayScheme.Tcp, GatewayScheme.Quic -> GatewayScheme.Ws
+            GatewayScheme.TcpTls, GatewayScheme.QuicTls -> GatewayScheme.Wss
         }
         Transport.Quic -> when (scheme) {
             GatewayScheme.Quic, GatewayScheme.QuicTls -> scheme
-            GatewayScheme.Ws -> GatewayScheme.Quic
-            GatewayScheme.Wss -> GatewayScheme.QuicTls
+            GatewayScheme.Ws, GatewayScheme.Tcp -> GatewayScheme.Quic
+            GatewayScheme.Wss, GatewayScheme.TcpTls -> GatewayScheme.QuicTls
         }
     }
 

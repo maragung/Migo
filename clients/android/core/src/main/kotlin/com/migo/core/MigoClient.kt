@@ -26,8 +26,11 @@ import com.migo.core.domain.SyncDomain
 import com.migo.core.domain.TypingDomain
 import com.migo.core.net.DeviceRequest
 import com.migo.core.net.Gateway
+import com.migo.core.net.GatewayError
 import com.migo.core.net.Grant
+import com.migo.core.net.RealtimeTransport
 import com.migo.core.net.Rest
+import com.migo.core.net.TcpGateway
 import com.migo.core.protocol.Acknowledged
 import com.migo.core.protocol.BandwidthMode
 import com.migo.core.protocol.ClientInfo
@@ -47,6 +50,7 @@ import com.migo.core.protocol.PresenceEvent
 import com.migo.core.protocol.ResumeRequest
 import com.migo.core.protocol.RoomMemberEvent
 import com.migo.core.protocol.RoomStateEvent
+import com.migo.core.protocol.Welcome
 import com.migo.core.protocol.SubscribeRequest
 import com.migo.core.protocol.SubscribeResponse
 import com.migo.core.protocol.SyncResponse
@@ -213,6 +217,14 @@ class MigoClientOptions(
      * typed one address from ending up with an API and a gateway pointing at different deployments.
      */
     val gatewayUrl: String? = null,
+    /**
+     * The raw TCP gateway address, `host:port`. When set, the client dials the TCP transport first
+     * — the native client's default (one connection, one session, length-prefixed binary frames) —
+     * and falls back to [gatewayUrl] when the TCP dial fails or the server's WELCOME does not
+     * negotiate the `TCP_TRANSPORT` bit. Null means WebSocket only, which is the web client's
+     * posture.
+     */
+    val tcpGatewayAddress: String? = null,
     /** The Android release, e.g. `"14"`. Shown on the device list so a session can be recognised. */
     val osVersion: String? = null,
     /** The device model, for the same reason. Nothing finer: see [DeviceRequest.describe]. */
@@ -825,12 +837,77 @@ class MigoClient private constructor(
     }
 
     /**
+     * Dials the realtime transport the endpoint asks for.
+     *
+     * A TCP address means the native default is tried first: one connection, one session,
+     * length-prefixed binary frames. A TCP dial that fails, or a WELCOME whose negotiated features
+     * lack the `TCP_TRANSPORT` bit (the server did not enable its listener), falls back to the
+     * WebSocket path — the same honest-fallback contract the desktop client applies, and the
+     * answer to a server that is up but not speaking the native transport. The fallback is
+     * reported through [MigoClientOptions.onConnectionError], never thrown: a session that opened
+     * over WebSocket is a working session, not an error.
+     *
+     * A refusal from the server — bad token, locked account — is *not* a transport question and is
+     * raised on both paths, because a client that swallowed it to try the other transport would
+     * only be refused again with the same credentials.
+     */
+    private suspend fun connectGateway(hello: Hello): Pair<RealtimeTransport, Welcome> {
+        val tcpAddress = options.tcpGatewayAddress ?: return webSocket(hello)
+        val (host, port) = parseTcpAddress(tcpAddress)
+
+        val (gateway, welcome) = try {
+            TcpGateway.connect(host, port, scope, hello)
+        } catch (cause: GatewayError.Refused) {
+            throw cause
+        } catch (cause: Throwable) {
+            if (cause is CancellationException) throw cause
+            options.onConnectionError?.invoke(cause)
+            return webSocket(hello)
+        }
+        if ((welcome.features and Feature.TCP_TRANSPORT) == 0uL) {
+            // The server is up and answered, but it is not serving the native transport — its
+            // listener is off or it fronts the realtime path over HTTP only. Falling back is the
+            // contract, not a failure; the caller is told so it can say so.
+            gateway.close()
+            options.onConnectionError?.invoke(
+                GatewayError.Refused(
+                    code = 0L,
+                    symbol = "TCP_NOT_NEGOTIATED",
+                    detail = "the server did not negotiate the TCP transport; connected over WebSocket",
+                    retryAfterMs = null,
+                ),
+            )
+            return webSocket(hello)
+        }
+        return gateway to welcome
+    }
+
+    /** The WebSocket path: the web client's transport, and every native client's fallback. */
+    private suspend fun webSocket(hello: Hello): Pair<RealtimeTransport, Welcome> {
+        val (gateway, welcome) = Gateway.connect(gatewayUrl, socketClient, scope, hello)
+        return gateway to welcome
+    }
+
+    /**
+     * Splits a `host:port` TCP address. Port-less input is rejected rather than defaulted: a wrong
+     * guess here dials a stranger, and the address came from a structured endpoint that always
+     * knows its port.
+     */
+    private fun parseTcpAddress(address: String): Pair<String, Int> {
+        val host = address.substringBeforeLast(':')
+        val port = address.substringAfterLast(':').toIntOrNull()
+        require(!host.isEmpty() && port != null && port in 1..65535) {
+            "tcp gateway address must be host:port, got $address"
+        }
+        return host to port
+    }
+
+    /**
      * Opens one socket and builds the per-connection graph over it.
      *
      * Inbound handlers are registered before the pump can run, so nothing pushed to us in the first
      * milliseconds is dropped for want of a subscriber.
-     */
-    private suspend fun openSession(grant: Grant, resume: ResumeRequest?): Session {
+     */private suspend fun openSession(grant: Grant, resume: ResumeRequest?): Session {
         val accountId = parseId(grant.accountId)
         val deviceId = parseId(grant.deviceId)
         val hello = Hello(
@@ -848,7 +925,7 @@ class MigoClient private constructor(
             deviceId = deviceId,
             resume = resume,
         )
-        val (gateway, welcome) = Gateway.connect(gatewayUrl, socketClient, scope, hello)
+        val (gateway, welcome) = connectGateway(hello)
         val rpc = Rpc(gateway, options.onEventError)
         val session = Session(
             grant = grant,
@@ -1053,7 +1130,7 @@ private class Session(
     var grant: Grant,
     val accountId: Id,
     val deviceId: Id,
-    val gateway: Gateway,
+    val gateway: RealtimeTransport,
     val rpc: Rpc,
     /** Whether WELCOME said the previous session was resumed, so subscriptions are still in place. */
     val resumed: Boolean,
