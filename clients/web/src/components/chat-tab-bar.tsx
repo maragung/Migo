@@ -63,7 +63,7 @@ export function ChatTabBar({
   return (
     <nav className="chat-tab-bar" aria-label="Open conversations">
       <button type="button" className="chat-back" onClick={onBackToMenu}>
-        <Icon name="back" size={14} />
+        <Icon name="back" size={16} />
         <span>Menu Panel</span>
       </button>
       <button

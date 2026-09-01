@@ -64,7 +64,7 @@ export function PanelTabBar({
   return (
     <nav className="panel-tab-bar" aria-label="Panel">
       <button type="button" className="chat-back pane-back" onClick={onBackToMenu}>
-        <Icon name="back" size={14} />
+        <Icon name="back" size={16} />
         <span>Menu Panel</span>
       </button>
       <span className="panel-tab-title">
