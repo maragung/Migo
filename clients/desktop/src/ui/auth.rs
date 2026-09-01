@@ -265,10 +265,12 @@ fn unlock(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
 
 /// Renders the server disclosure into `ui`, applying the user's accepted endpoint back into
 /// [`AuthState`]. Split out so the sign-in and register screens share the same disclosure
-/// rendering rather than carrying the wiring twice.
+/// rendering rather than carrying the wiring twice. The widget returns a value on two paths —
+/// "Use this server" and the one-tap transport selector under the toggle — and both land here,
+/// where [`AuthState::apply_server`] persists the endpoint and re-seeds the form.
 fn draw_server_disclosure(ui: &mut Ui, context: &Context<'_>, state: &mut AuthState) {
     let theme = context.theme;
-    if let Some(endpoint) = server_form::show(ui, theme, &mut state.server_form) {
+    if let Some(endpoint) = server_form::show(ui, theme, &state.server, &mut state.server_form) {
         state.apply_server(endpoint);
     }
 }

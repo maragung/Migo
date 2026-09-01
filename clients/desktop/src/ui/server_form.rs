@@ -1,9 +1,12 @@
 //! The "Server" disclosure on the sign-in and registration forms.
 //!
 //! A user who has never opened this disclosure sees exactly the form they saw yesterday: identifier
-//! and password. A user who has opened it picks the host, port, transport and scheme, and on
+//! and password. A user who has opened it picks the host, port and scheme, and on
 //! "Use this server" the disclosure closes and the choice becomes the new form input.
 //!
+//! The transport is the one choice that is not behind the disclosure: a WebSocket/QUIC pair of
+//! selectable labels rides directly under the toggle and one click commits the swap immediately —
+//! a transport change never needs the host and port re-confirmed, so it never lives in the draft.
 //! QUIC is a real second option, not a placeholder: the choice persists and is validated the same
 //! as WebSocket. Connecting over it requires a server with the QUIC listener enabled, and this
 //! client's wire path is still WebSocket. The form accepts the choice and never blocks submit, so
@@ -21,7 +24,7 @@
 use egui::{Align, ComboBox, Layout, RichText, Ui};
 
 use crate::config::{
-    default_loopback_server_endpoint, is_loopback_host, parse_host, RestScheme, Scheme,
+    default_loopback_server_endpoint, is_loopback_host, parse_host, QuicScheme, RestScheme, Scheme,
     ServerEndpoint, Transport, WsScheme,
 };
 use crate::theme::{font, palette, space, text_style};
@@ -63,14 +66,20 @@ impl Default for ServerFormState {
 /// Renders the disclosure into `ui`. The widget is a self-contained piece of state: it holds the
 /// `ServerFormState` itself (because it owns the disclosure's `open` flag too).
 ///
-/// Returns the endpoint the user accepted with "Use this server", or `None` if the form was
-/// edited but not accepted (or if the disclosure is closed). The caller is responsible for
-/// applying the value to its own state and persisting it; the widget is intentionally ignorant
-/// of the persistence path so the same shape can be reused on any screen that wants to ask for
-/// a server.
+/// `value` is the caller's committed endpoint — the thing the one-tap transport selector swaps
+/// and the thing the summary line reports. The draft `state` only ever becomes an endpoint
+/// through "Use this server".
+///
+/// Returns an endpoint the caller must apply, or `None`. Two paths produce a value: the
+/// transport selector under the toggle (a one-tap swap of the committed endpoint's transport and
+/// its paired schemes — everything else rides along untouched), and "Use this server" inside the
+/// panel. The caller is responsible for applying the value to its own state and persisting it;
+/// the widget is intentionally ignorant of the persistence path so the same shape can be reused
+/// on any screen that wants to ask for a server.
 pub fn show(
     ui: &mut Ui,
     theme: crate::theme::Theme,
+    value: &ServerEndpoint,
     state: &mut ServerFormState,
 ) -> Option<ServerEndpoint> {
     let colors = palette(theme);
@@ -96,9 +105,14 @@ pub fn show(
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(
-                    RichText::new(format!("{}:{}", state.host, state.port_text))
-                        .font(egui::FontId::proportional(font::SMALL))
-                        .color(colors.text_muted),
+                    RichText::new(format!(
+                        "{}:{} · {}",
+                        state.host,
+                        state.port_text,
+                        transport_label(value.transport)
+                    ))
+                    .font(egui::FontId::proportional(font::SMALL))
+                    .color(colors.text_muted),
                 );
             });
         });
@@ -108,20 +122,44 @@ pub fn show(
             egui::Color32::TRANSPARENT,
         );
 
+        // The transport selector is always visible, whether or not the panel is open. One tap
+        // swaps the committed endpoint's transport immediately — the host, ports, and everything
+        // else ride along untouched, so the choice never waits on "Use this server".
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("Transport")
+                    .text_style(crate::theme::named(text_style::OVERLINE))
+                    .color(colors.text_muted),
+            );
+            if ui
+                .selectable_label(value.transport == Transport::WebSocket, "WebSocket")
+                .clicked()
+                && value.transport != Transport::WebSocket
+            {
+                accepted = Some(swap_transport(value, Transport::WebSocket));
+            }
+            if ui
+                .selectable_label(value.transport == Transport::Quic, "QUIC")
+                .clicked()
+                && value.transport != Transport::Quic
+            {
+                accepted = Some(swap_transport(value, Transport::Quic));
+            }
+        });
+        if value.transport == Transport::Quic {
+            ui.label(
+                RichText::new(
+                    "QUIC is a second option; it needs a server with the QUIC listener enabled. This client still connects over WebSocket.",
+                )
+                .font(egui::FontId::proportional(font::TINY))
+                .color(colors.text_muted),
+            );
+        }
+
         if open {
             ui.indent("migo-server-disclosure-panel", |ui| {
                 ui.add_space(space::SM);
                 draw_fields(ui, theme, state);
-                ui.add_space(space::SM);
-                if state.transport == Transport::Quic {
-                    ui.label(
-                        RichText::new(
-                            "QUIC is a second option; it needs a server with the QUIC listener enabled. This client still connects over WebSocket.",
-                        )
-                        .font(egui::FontId::proportional(font::TINY))
-                        .color(colors.text_muted),
-                    );
-                }
                 ui.add_space(space::SM);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ghost_button(ui, theme, "Use this server").clicked() {
@@ -149,7 +187,8 @@ pub fn show(
     accepted
 }
 
-/// Draws the four fields, plus the transport/scheme pair, on the current disclosure.
+/// Draws the fields plus the scheme picker on the current disclosure. The transport is not here:
+/// it lives in the always-visible selector under the toggle, where one tap commits it.
 fn draw_fields(ui: &mut Ui, theme: crate::theme::Theme, state: &mut ServerFormState) {
     let colors = palette(theme);
 
@@ -203,44 +242,6 @@ fn draw_fields(ui: &mut Ui, theme: crate::theme::Theme, state: &mut ServerFormSt
                 .desired_width(120.0)
                 .margin(egui::Margin::symmetric(space::MD as i8, space::SM as i8)),
         );
-    });
-
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new("Transport")
-                .text_style(crate::theme::named(text_style::OVERLINE))
-                .color(colors.text_muted),
-        );
-        let current_label = match state.transport {
-            Transport::WebSocket => "WebSocket",
-            Transport::Quic => "QUIC",
-        };
-        ComboBox::from_id_salt("migo-server-transport")
-            .selected_text(current_label)
-            .show_ui(ui, |ui| {
-                if ui
-                    .selectable_label(state.transport == Transport::WebSocket, "WebSocket")
-                    .clicked()
-                {
-                    state.transport = Transport::WebSocket;
-                    let pair = schemes_for_host(&state.host);
-                    state.scheme = pair.scheme;
-                    state.rest_scheme = pair.rest_scheme;
-                }
-                if ui
-                    .selectable_label(state.transport == Transport::Quic, "QUIC (second option)")
-                    .clicked()
-                {
-                    state.transport = Transport::Quic;
-                    if is_loopback_host(&state.host) {
-                        state.scheme = Scheme::Quic(crate::config::QuicScheme::Quic);
-                        state.rest_scheme = RestScheme::Http;
-                    } else {
-                        state.scheme = Scheme::Quic(crate::config::QuicScheme::QuicTls);
-                        state.rest_scheme = RestScheme::Https;
-                    }
-                }
-            });
     });
 
     ui.horizontal(|ui| {
@@ -321,6 +322,46 @@ fn schemes_for_host(host: &str) -> SchemeWithRest {
 struct SchemeWithRest {
     scheme: Scheme,
     rest_scheme: RestScheme,
+}
+
+/// The transport's display name, shared by the summary line and the always-visible selector.
+fn transport_label(transport: Transport) -> &'static str {
+    match transport {
+        Transport::WebSocket => "WebSocket",
+        Transport::Quic => "QUIC",
+    }
+}
+
+/// Builds the endpoint a one-tap transport swap produces: the committed endpoint with the
+/// transport and its paired schemes replaced. Host, ports, and everything else ride along
+/// untouched — a transport change never needs the rest re-confirmed, which is exactly why the
+/// selector commits immediately instead of living in the draft.
+fn swap_transport(endpoint: &ServerEndpoint, transport: Transport) -> ServerEndpoint {
+    let (scheme, rest_scheme) = schemes_for_transport(transport, &endpoint.host);
+    ServerEndpoint {
+        transport,
+        scheme,
+        rest_scheme,
+        ..endpoint.clone()
+    }
+}
+
+/// The default scheme pair for a transport on a given host — the same loopback rule the web and
+/// Android forms apply: loopback gets the plain dev pair, everything else the TLS pair.
+fn schemes_for_transport(transport: Transport, host: &str) -> (Scheme, RestScheme) {
+    match transport {
+        Transport::WebSocket => {
+            let pair = schemes_for_host(host);
+            (pair.scheme, pair.rest_scheme)
+        }
+        Transport::Quic => {
+            if is_loopback_host(host) {
+                (Scheme::Quic(QuicScheme::Quic), RestScheme::Http)
+            } else {
+                (Scheme::Quic(QuicScheme::QuicTls), RestScheme::Https)
+            }
+        }
+    }
 }
 
 /// Validates the state and turns it into an endpoint, or returns a form-level error message.
@@ -456,5 +497,56 @@ mod tests {
         let endpoint = build_endpoint(&state).expect("ok");
         assert_eq!(endpoint.host, "migo.example.com");
         assert_eq!(endpoint.port, 8443);
+    }
+
+    #[test]
+    fn a_transport_swap_to_quic_pairs_the_tls_schemes_on_a_public_host() {
+        let endpoint = ServerEndpoint {
+            host: "152.53.102.150".to_owned(),
+            port: 8080,
+            gateway_port: 8081,
+            transport: Transport::WebSocket,
+            scheme: Scheme::Ws(WsScheme::Ws),
+            rest_scheme: RestScheme::Http,
+        };
+        let swapped = swap_transport(&endpoint, Transport::Quic);
+        assert_eq!(swapped.transport, Transport::Quic);
+        assert_eq!(swapped.scheme, Scheme::Quic(QuicScheme::QuicTls));
+        assert_eq!(swapped.rest_scheme, RestScheme::Https);
+        // The swap touches only the transport and its schemes; the addressing rides along.
+        assert_eq!(swapped.host, endpoint.host);
+        assert_eq!(swapped.port, endpoint.port);
+        assert_eq!(swapped.gateway_port, endpoint.gateway_port);
+    }
+
+    #[test]
+    fn a_transport_swap_to_quic_keeps_the_plain_pair_on_loopback() {
+        let endpoint = ServerEndpoint {
+            host: "localhost".to_owned(),
+            port: 18080,
+            gateway_port: 18081,
+            transport: Transport::WebSocket,
+            scheme: Scheme::Ws(WsScheme::Ws),
+            rest_scheme: RestScheme::Http,
+        };
+        let swapped = swap_transport(&endpoint, Transport::Quic);
+        assert_eq!(swapped.scheme, Scheme::Quic(QuicScheme::Quic));
+        assert_eq!(swapped.rest_scheme, RestScheme::Http);
+    }
+
+    #[test]
+    fn a_transport_swap_back_to_websocket_restores_the_host_pair() {
+        let endpoint = ServerEndpoint {
+            host: "migo.example.com".to_owned(),
+            port: 8443,
+            gateway_port: 8444,
+            transport: Transport::Quic,
+            scheme: Scheme::Quic(QuicScheme::QuicTls),
+            rest_scheme: RestScheme::Https,
+        };
+        let swapped = swap_transport(&endpoint, Transport::WebSocket);
+        assert_eq!(swapped.transport, Transport::WebSocket);
+        assert_eq!(swapped.scheme, Scheme::Ws(WsScheme::Wss));
+        assert_eq!(swapped.rest_scheme, RestScheme::Https);
     }
 }

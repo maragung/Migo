@@ -1206,3 +1206,18 @@ tampil selama QUIC dipilih, dan ringkasan server kini menyebut transport
 aktif. Select transport duplikat di dalam panel web dihapus (satu sumber
 kebenaran); detail host/port/scheme tetap di dalam panel. `make kotlin-check`
 hijau; web build/test/lint/Prettier hijau; bundle baru di-deploy ke :19992.
+
+**Follow-up (v0.10.2)**: desktop kini sama dengan web dan Android. Disclosure
+"Server" di egui menampilkan pemilih transport WebSocket | QUIC yang selalu
+terlihat di bawah toggle (`server_form::show` kini menerima endpoint ter-commit
+sebagai `value`, cermin prop `value` di web); satu klik menukar transport pada
+endpoint tersimpan lewat `swap_transport` — transport dan pasangan schemenya
+saja yang berubah (QUIC→QUIC/QUIC-TLS, WebSocket→WS/WSS via aturan loopback),
+host/port/gateway port ikut apa adanya — lalu hasilnya dikembalikan sebagai
+`Some(endpoint)` sehingga `AuthState::apply_server` yang sudah ada yang
+mem-persist dan me-re-seed draft. ComboBox transport lama di dalam panel
+dihapus (satu sumber kebenaran); catatan jujur QUIC kini tampil di luar panel
+selama transport ter-commit adalah QUIC, dan baris ringkasan menyebut transport
+aktif. Tiga test baru untuk `swap_transport` (host publik → QUIC-TLS/HTTPS,
+loopback → QUIC/HTTP, balik ke WebSocket → pasangan host). Desktop
+fmt/clippy `-D warnings`/test (39) hijau.
