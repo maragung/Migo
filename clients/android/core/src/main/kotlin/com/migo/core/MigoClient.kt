@@ -25,6 +25,8 @@ import com.migo.core.domain.Subscription
 import com.migo.core.domain.SyncDomain
 import com.migo.core.domain.TypingDomain
 import com.migo.core.net.DeviceRequest
+import com.migo.core.net.DeviceRevoked
+import com.migo.core.net.DeviceSummary
 import com.migo.core.net.Gateway
 import com.migo.core.net.GatewayError
 import com.migo.core.net.Grant
@@ -592,6 +594,20 @@ class MigoClient private constructor(
     suspend fun publishIdentityKey(identityPublicKey: ByteArray) {
         rest.publishIdentityKey(requireConnected().grant.accessToken, identityPublicKey, null)
     }
+
+    /** The account's devices, as the server knows them — the owner's own security screen. */
+    suspend fun devices(): List<DeviceSummary> =
+        rest.devices(requireConnected().grant.accessToken)
+
+    /**
+     * Removes one of the account's devices.
+     *
+     * Its sessions end with it and its credential stops working (brief section 18), so a lost
+     * phone is gone from the account in one call. Returns how many sessions ended, which is the
+     * confirmation a security screen owes the person who pressed the button.
+     */
+    suspend fun revokeDevice(deviceId: Id): DeviceRevoked =
+        rest.revokeDevice(requireConnected().grant.accessToken, deviceId)
 
     /** The account's registered wallet addresses, as the server knows them. */
     suspend fun registeredWallets(): List<WalletSummary> =

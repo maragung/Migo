@@ -376,9 +376,14 @@ fn account_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsS
                         .color(colors.text_muted),
                 );
             }
+            let mut remove: Option<Id> = None;
             for row in rows {
-                device_row(ui, context, row);
+                device_row(ui, context, row, &mut remove);
                 ui.add_space(space::XS);
+            }
+            if let Some(device_id) = remove {
+                state.devices = Fetch::Loading;
+                context.issue(Command::RevokeDevice { device_id });
             }
         }
     }
@@ -449,8 +454,15 @@ fn account_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsS
 ///
 /// The credential mark is the security question a device list exists to answer: a device *with* a
 /// credential can take part in the passwordless ceremony, and one appearing that the user does not
-/// recognise is the moment to rotate.
-fn device_row(ui: &mut Ui, context: &Context<'_>, row: &crate::model::DeviceRow) {
+/// recognise is the moment to remove it — or rotate. The current device and already-revoked ones
+/// carry no button: removing the device the button is pressed on would sign its own user out
+/// mid-click, and a revoked device is gone.
+fn device_row(
+    ui: &mut Ui,
+    context: &Context<'_>,
+    row: &crate::model::DeviceRow,
+    remove: &mut Option<Id>,
+) {
     let colors = palette(context.theme);
     egui::Frame::new()
         .fill(colors.surface_raised)
@@ -484,15 +496,33 @@ fn device_row(ui: &mut Ui, context: &Context<'_>, row: &crate::model::DeviceRow)
                     );
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(if row.is_current {
-                            "current"
-                        } else {
-                            &row.status
-                        })
-                        .text_style(crate::theme::named(text_style::CAPTION))
-                        .color(colors.text_muted),
-                    );
+                    if row.is_current || row.status == "revoked" {
+                        ui.label(
+                            RichText::new(if row.is_current {
+                                "current"
+                            } else {
+                                &row.status
+                            })
+                            .text_style(crate::theme::named(text_style::CAPTION))
+                            .color(colors.text_muted),
+                        );
+                    } else {
+                        if widgets::ghost_button(ui, context.theme, "Remove")
+                            .on_hover_text(
+                                "Signs this device out of the account everywhere and ends its \
+                                 ability to sign in again. Its messages and keys stay on the \
+                                 device it was.",
+                            )
+                            .clicked()
+                        {
+                            *remove = Some(row.device_id);
+                        }
+                        ui.label(
+                            RichText::new(&row.status)
+                                .text_style(crate::theme::named(text_style::CAPTION))
+                                .color(colors.text_muted),
+                        );
+                    }
                 });
             });
         });

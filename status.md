@@ -1504,3 +1504,42 @@ menutupinya dengan tombol kembali di barnya masing-masing.
   `Place::RIGHT_TABS` + `right_label()` (Wallet→"TopUp") menggantikan
   chip panel yang bisa ditutup; `select_place` merutekan tab sistem ke
   kiri dan panel ke kanan.
+
+## 44. Fase 7 §16-§18: daftar device dan pencabutannya di semua client (v0.13.5)
+
+Manajemen device akun (migo-update-1.md §16-§18) turun ke semua
+permukaan. Server mendapat `POST /v1/devices/{device_id}/revoke` yang
+memanggil `revoke_device` service (menutup semua sesi device itu, lalu
+menandai baris device-nya `revoked`) dan menjawab `{ok, revoked}` —
+`revoked` adalah jumlah sesi yang diakhiri. Sebuah cacat produksi ikut
+tertutup: `POST /v1/auth/sessions/{session_id}/revoke` selama ini
+salah sambung — ia meneruskan _session id_ ke `revoke_device`
+(pencarian device, selalu 404), sehingga tombol revoke per-baris di web
+tidak pernah bisa bekerja; kini ia memanggil `sign_out` yang memang
+dimaksudkan untuk satu sesi. Test rute baru
+(`revoking_one_session_and_then_its_device_over_the_routes`) menjalankan
+kedua jalur: daftar sesi, cabut satu sesi (token-nya 401, yang lain
+tetap hidup), _login_ ulang yang mengklaim device pertama sehingga
+device itu punya sesi hidup lagi, lalu cabut device-nya dan buktikan
+token ketiga mati dan statusnya "revoked".
+
+- **SDK**: `devices()` dan `revokeDevice({device_id})` di MigoClient,
+  di atas `GET /v1/devices` dan route revoke baru di rest.ts.
+- **Web**: panel Settings terbagi dua — "Devices" (akar akun:
+  termasuk yang revoked, tanda "This device"/"Revoked"/"holds a
+  sign-in credential", tombol Remove dengan `window.confirm` yang
+  menyebut nama device, §70) dan "Sessions" seperti sebelumnya.
+- **Desktop**: baris device di settings dengan ghost button Remove
+  (tooltip menjelaskan konsekuensinya); hanya device yang bukan
+  current dan belum revoked yang menawarkannya.
+- **Android**: section "Devices" di ProfileScreen — `DevicesState` di
+  AppState, `loadDevices()`/`revokeDevice()` di AppViewModel (lazy-load
+  saat pertama masuk Profile), AlertDialog konfirmasi yang menyebut
+  nama device sebelum server bertindak.
+- **Alat**: `tools/chatbot` menambah `room-smoke.ts` — uji asap satu
+  node: register dua akun, _login_ ulang alice di client baru, buat
+  room publik, bob join, lalu chat round-trip yang diverifikasi tiba
+  dan terdekripsi di kedua sisi. Ia menemukan (dan dokumentasikan
+  lewat penggunaannya) bahwa origin loopback `http://` berarti kebijakan
+  split-port dev (gateway = port+1): server VPS satu-port harus
+  dituju lewat URL publiknya.

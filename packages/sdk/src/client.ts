@@ -65,6 +65,7 @@ import type {
   CaptchaMode,
   CaptchaProof,
   DeviceDescriptor,
+  DeviceSummary,
   FetchLike,
   Grant,
   LoginParams,
@@ -680,6 +681,25 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   async signOutOthers(): Promise<{ revoked: number }> {
     const ctx = this.#requireConnected();
     return this.#bootstrap.signOutOthers(ctx.grant.accessToken);
+  }
+
+  /**
+   * Lists the account's devices — the account-root view, not the session view: a device stays
+   * listed (as `revoked`) after it is removed, because "which phone was that" is a question
+   * about the past as much as the present.
+   */
+  async devices(): Promise<DeviceSummary[]> {
+    const ctx = this.#requireConnected();
+    return this.#bootstrap.devices(ctx.grant.accessToken);
+  }
+
+  /**
+   * Removes one of the account's devices: it can no longer authenticate, refresh, or open a
+   * WebSocket, and every session on it ends. Returns how many sessions died with it.
+   */
+  async revokeDevice(params: { device_id: Id }): Promise<{ revoked: number }> {
+    const ctx = this.#requireConnected();
+    return this.#bootstrap.revokeDevice(ctx.grant.accessToken, params.device_id);
   }
 
   /**

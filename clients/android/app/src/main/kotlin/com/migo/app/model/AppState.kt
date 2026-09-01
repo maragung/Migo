@@ -1,6 +1,7 @@
 package com.migo.app.model
 
 import com.migo.core.ConnectionState
+import com.migo.core.net.DeviceSummary
 import com.migo.core.protocol.BadgeWire
 import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.GiftListing
@@ -92,6 +93,7 @@ sealed interface AppState {
         val search: SearchState = SearchState(),
         val wallet: WalletState = WalletState(),
         val alerts: AlertsState = AlertsState(),
+        val devices: DevicesState = DevicesState(),
     ) : AppState
 
     /**
@@ -285,6 +287,26 @@ data class AlertsState(
     val loading: Boolean = false,
     /** True while a mark-all-read acknowledgement is in flight. */
     val acknowledging: Boolean = false,
+)
+
+/**
+ * The Profile section's device list: the account-root security view.
+ *
+ * A device stays listed (as `revoked`) after it is removed, because "which phone was that" is a
+ * question about the past as much as the present. [removing] holds device ids with a removal in
+ * flight, so only the pressed row shows its busy state.
+ */
+data class DevicesState(
+    /** The server's rows, or null before the first read lands. */
+    val devices: List<DeviceSummary>? = null,
+    /** True while the list is being read. */
+    val loading: Boolean = false,
+    /** Device ids with a removal in flight. */
+    val removing: Set<String> = emptySet(),
+    /** Why the last read or removal could not answer. */
+    val failure: String? = null,
+    /** The sentence the last removal answered with, shown once. */
+    val notice: String? = null,
 )
 
 /** One row of the conversation list. */

@@ -6,7 +6,8 @@
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
-    "migo-chatbot": "./dist/main.js"
+    "migo-chatbot": "./dist/main.js",
+    "migo-room-smoke": "./dist/room-smoke.js"
   },
   "files": [
     "dist"

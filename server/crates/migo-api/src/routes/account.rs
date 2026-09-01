@@ -10,8 +10,11 @@
 //!
 //! The device and wallet routes are the authenticated read/write surface of
 //! the account's own metadata. Nothing here moves a secret in either
-//! direction: the device list carries a public key's *presence*, and the
-//! wallet registry carries an address.
+//! direction: the device list carries a public key's *presence*, the wallet
+//! registry carries an address, and the one write the device surface offers
+//! takes a device away rather than handing anything out — a revoke ends the
+//! device's sessions server-side (brief section 18), which is the whole of
+//! what "this phone is gone" must mean.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -46,6 +49,7 @@ pub(crate) fn routes() -> Router<ApiState> {
     Router::new()
         .nest("/auth/identity", identity)
         .route("/devices", get(list_devices))
+        .route("/devices/{device_id}/revoke", post(revoke_device))
         .route("/wallets", get(list_wallets).put(register_wallet))
         .route("/wallets/{wallet_id}", post(archive_wallet))
 }
@@ -327,6 +331,33 @@ async fn list_devices(
         .devices(&auth.identity, &context)
         .await?;
     Ok(Json(DevicesResponse { devices }))
+}
+
+#[derive(Serialize)]
+struct RevokeDeviceResponse {
+    ok: bool,
+    /// How many sessions died with the device.
+    revoked: u64,
+}
+
+/// `POST /v1/devices/{device_id}/revoke` — remove one of the caller's devices.
+///
+/// Brief section 18: the device row is marked revoked and every session on it ends,
+/// so nothing on that device can authenticate, refresh, or open a WebSocket again. The
+/// count comes back because "your phone, with its two sessions, is gone" is a fact
+/// worth confirming rather than assuming.
+async fn revoke_device(
+    State(state): State<ApiState>,
+    auth: Authenticated,
+    Path(device_id): Path<Id>,
+) -> Result<Json<RevokeDeviceResponse>, crate::ApiError> {
+    let now = state.now();
+    let context = auth.facts.context(now);
+    let revoked = state
+        .authenticator()
+        .revoke_device(&auth.identity, device_id, &context)
+        .await?;
+    Ok(Json(RevokeDeviceResponse { ok: true, revoked }))
 }
 
 #[derive(Serialize)]

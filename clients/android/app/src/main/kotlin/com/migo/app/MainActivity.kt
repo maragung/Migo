@@ -241,6 +241,8 @@ private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifie
         AppState.Section.PROFILE -> ProfileScreen(
             state = state,
             onSignOut = model::signOut,
+            onRefreshDevices = model::loadDevices,
+            onRemoveDevice = model::revokeDevice,
             modifier = modifier,
         )
     }

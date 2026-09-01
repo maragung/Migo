@@ -53,6 +53,13 @@
 //!    unconfirmed id — answer with the same status and the same body
 //!    bytes, and neither response echoes the supplied tag or the
 //!    identifier back.
+//! 9. **The account security surface revokes what it names.**
+//!    `/auth/sessions/{id}/revoke` ends exactly the session whose id
+//!    is in the path (the caller's own survives), and
+//!    `/devices/{id}/revoke` ends the device *and* every session on
+//!    it, answering with how many died. A revoked session's token and
+//!    a revoked device's token both stop opening doors on the next
+//!    request.
 //!
 //! The test catches the failure mode the user is fixing on the web
 //! client: a form that drops the `captcha` field, sends the wrong
@@ -1019,4 +1026,298 @@ async fn a_recovery_confirm_with_an_unknown_token_id_is_not_an_oracle() {
             "the response echoes the tag back"
         );
     }
+}
+
+// --- the account security surface -------------------------------------------------------
+
+/// Brief sections 16-18 over the routes: the session list, the single-session revoke,
+/// and the device revoke that ends every session on the device.
+///
+/// The single-session route is pinned here because it was once wired to the device
+/// revoker — it passed the session id where a device id was expected, so a caller
+/// naming a real session read a 404, and the web client's per-row "revoke" control
+/// could never have worked. The wire contract this test defends is the one every
+/// client is written against: the id in `/auth/sessions/{id}/revoke` is a session's,
+/// and the id in `/devices/{id}/revoke` is a device's.
+#[tokio::test]
+async fn revoking_one_session_and_then_its_device_over_the_routes() {
+    let h = Harness::new();
+
+    // Two devices on one account: the register's own, and a login's.
+    let captcha = h.issue_captcha().await;
+    let register_body = json!({
+        "username": "ada",
+        "password": GOOD_PASSWORD,
+        "device": { "display_name": "Ada's laptop" },
+        "captcha": {
+            "challenge_id": captcha.challenge_id,
+            "answer": captcha.answer,
+        },
+    });
+    let first = h
+        .send(post_json(
+            "/v1/auth/register",
+            Some("203.0.113.10"),
+            &register_body,
+        ))
+        .await;
+    assert_eq!(
+        first.status,
+        StatusCode::CREATED,
+        "register should succeed; body={}",
+        first.text()
+    );
+    let first_grant = first.json();
+    let first_session = first_grant["session_id"]
+        .as_str()
+        .expect("session_id on the grant")
+        .to_string();
+    let first_device = first_grant["device_id"]
+        .as_str()
+        .expect("device_id on the grant")
+        .to_string();
+    let first_token = first_grant["access_token"]
+        .as_str()
+        .expect("access_token on the grant")
+        .to_string();
+
+    let captcha = h.issue_captcha().await;
+    let login_body = json!({
+        "identifier": "ada",
+        "password": GOOD_PASSWORD,
+        "device": { "display_name": "Ada's phone" },
+        "captcha": {
+            "challenge_id": captcha.challenge_id,
+            "answer": captcha.answer,
+        },
+    });
+    let second = h
+        .send(post_json(
+            "/v1/auth/login",
+            Some("198.51.100.7"),
+            &login_body,
+        ))
+        .await;
+    assert_eq!(
+        second.status,
+        StatusCode::OK,
+        "login should succeed; body={}",
+        second.text()
+    );
+    let second_grant = second.json();
+    let second_device = second_grant["device_id"]
+        .as_str()
+        .expect("device_id on the grant")
+        .to_string();
+    let second_token = second_grant["access_token"]
+        .as_str()
+        .expect("access_token on the grant")
+        .to_string();
+    assert_ne!(
+        second_device, first_device,
+        "a login with a different display name is a different device"
+    );
+
+    // The caller's own session list shows both sessions.
+    let sessions_resp = h
+        .send(build_req(
+            Method::GET,
+            "/v1/auth/sessions",
+            Some("198.51.100.8"),
+            Some(&second_token),
+            None,
+        ))
+        .await;
+    assert_eq!(
+        sessions_resp.status,
+        StatusCode::OK,
+        "the sessions list; body={}",
+        sessions_resp.text()
+    );
+    let sessions = sessions_resp.json()["sessions"]
+        .as_array()
+        .expect("sessions array")
+        .clone();
+    assert!(
+        sessions.len() >= 2,
+        "both devices' sessions are listed; got {}",
+        sessions.len()
+    );
+
+    // Revoke the *first* session by its session id, from the second device. This is
+    // the call the old wiring turned into a 404.
+    let revoke = h
+        .send(build_req(
+            Method::POST,
+            &format!("/v1/auth/sessions/{first_session}/revoke"),
+            Some("198.51.100.8"),
+            Some(&second_token),
+            Some(&json!({})),
+        ))
+        .await;
+    assert_eq!(
+        revoke.status,
+        StatusCode::NO_CONTENT,
+        "one session revoked by id; body={}",
+        revoke.text()
+    );
+
+    // The revoked session's token no longer opens a door, and the caller's own
+    // session is untouched — that is the "one" in the route's name.
+    let refused = h
+        .send(build_req(
+            Method::GET,
+            "/v1/auth/sessions",
+            Some("198.51.100.9"),
+            Some(&first_token),
+            None,
+        ))
+        .await;
+    assert_eq!(
+        refused.status,
+        StatusCode::UNAUTHORIZED,
+        "the revoked session's token is dead; body={}",
+        refused.text()
+    );
+    let still = h
+        .send(build_req(
+            Method::GET,
+            "/v1/auth/sessions",
+            Some("198.51.100.9"),
+            Some(&second_token),
+            None,
+        ))
+        .await;
+    assert_eq!(
+        still.status,
+        StatusCode::OK,
+        "the caller's own session survives a single-session revoke"
+    );
+
+    // Sign in again on the first device, so the device revoke below has a live
+    // session to end and the count it returns says so.
+    let captcha = h.issue_captcha().await;
+    let resume_body = json!({
+        "identifier": "ada",
+        "password": GOOD_PASSWORD,
+        "device": {
+            "display_name": "Ada's laptop",
+            "device_id": first_device,
+        },
+        "captcha": {
+            "challenge_id": captcha.challenge_id,
+            "answer": captcha.answer,
+        },
+    });
+    let third = h
+        .send(post_json(
+            "/v1/auth/login",
+            Some("198.51.100.11"),
+            &resume_body,
+        ))
+        .await;
+    assert_eq!(
+        third.status,
+        StatusCode::OK,
+        "the laptop signs back in; body={}",
+        third.text()
+    );
+    let third_grant = third.json();
+    assert_eq!(
+        third_grant["device_id"].as_str(),
+        Some(first_device.as_str()),
+        "claiming the device resumes it rather than minting a new one"
+    );
+    let third_token = third_grant["access_token"]
+        .as_str()
+        .expect("access_token on the grant")
+        .to_string();
+
+    // The device list shows the laptop as active before the revoke.
+    let devices_resp = h
+        .send(build_req(
+            Method::GET,
+            "/v1/devices",
+            Some("198.51.100.12"),
+            Some(&second_token),
+            None,
+        ))
+        .await;
+    assert_eq!(
+        devices_resp.status,
+        StatusCode::OK,
+        "the device list; body={}",
+        devices_resp.text()
+    );
+    let devices = devices_resp.json()["devices"]
+        .as_array()
+        .expect("devices array")
+        .clone();
+    let laptop = devices
+        .iter()
+        .find(|device| device["device_id"].as_str() == Some(first_device.as_str()))
+        .expect("the laptop is listed");
+    assert_eq!(laptop["status"], "active");
+
+    // The device revoke: one call, the device's sessions die with it, and the
+    // answer says how many.
+    let device_revoke = h
+        .send(build_req(
+            Method::POST,
+            &format!("/v1/devices/{first_device}/revoke"),
+            Some("198.51.100.12"),
+            Some(&second_token),
+            Some(&json!({})),
+        ))
+        .await;
+    assert_eq!(
+        device_revoke.status,
+        StatusCode::OK,
+        "device revoke; body={}",
+        device_revoke.text()
+    );
+    let body = device_revoke.json();
+    assert_eq!(body["ok"], true, "the answer confirms the revoke");
+    assert_eq!(
+        body["revoked"].as_u64(),
+        Some(1),
+        "exactly the laptop's one live session ended; body={}",
+        device_revoke.text()
+    );
+
+    // The laptop's fresh token is dead, and the device reads as revoked — the two
+    // facts a security screen shows after "this device is gone".
+    let dead = h
+        .send(build_req(
+            Method::GET,
+            "/v1/auth/sessions",
+            Some("198.51.100.13"),
+            Some(&third_token),
+            None,
+        ))
+        .await;
+    assert_eq!(
+        dead.status,
+        StatusCode::UNAUTHORIZED,
+        "the revoked device's session is gone; body={}",
+        dead.text()
+    );
+    let after = h
+        .send(build_req(
+            Method::GET,
+            "/v1/devices",
+            Some("198.51.100.13"),
+            Some(&second_token),
+            None,
+        ))
+        .await;
+    let devices = after.json()["devices"]
+        .as_array()
+        .expect("devices array")
+        .clone();
+    let laptop = devices
+        .iter()
+        .find(|device| device["device_id"].as_str() == Some(first_device.as_str()))
+        .expect("the revoked device is still listed");
+    assert_eq!(laptop["status"], "revoked");
 }

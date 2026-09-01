@@ -1,13 +1,19 @@
 'use client';
 
 /**
- * The Settings tab: the account's active devices and the password.
+ * The Settings tab: the account's devices, its live sessions, and the password.
  *
- * Sessions are server-owned facts — the list, each revocation, and the bulk sign-out all ask the
- * server and re-read the result, because another device's login or logout is invisible to local
- * state. The current session is identified by its own id (`grant.sessionId`), so it renders as
- * "This device" with no revoke control: the server refuses to let a session revoke itself, and a
- * button that always errors is a lie.
+ * Devices and sessions are two views of the same security question, and both are
+ * server-owned facts — the lists, each revocation, and the bulk sign-out all ask the
+ * server and re-read the result, because another device's login or logout is invisible
+ * to local state. A device row is the account-root view (a device stays listed as
+ * revoked after it is removed); a session row is the live view. Removing a device ends
+ * every session on it, which is why it asks for confirmation first: it is the one
+ * control here that signs somebody else out of the account entirely.
+ *
+ * The current session is identified by its own id (`grant.sessionId`), so it renders as
+ * "This device" with no revoke control: the server refuses to let a session revoke
+ * itself, and a button that always errors is a lie.
  *
  * Changing the password returns a fresh grant (new access and refresh tokens) that the SDK has
  * already installed on the live client; the panel's one extra duty is to persist that grant, so a
@@ -21,7 +27,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import type { AccountSession, Id } from '@migo/sdk';
+import type { AccountSession, DeviceSummary, Id } from '@migo/sdk';
 
 import { formatRelative } from '@/lib/format.js';
 import { getChoice, setChoice } from '@/lib/theme.js';
@@ -32,6 +38,81 @@ import { useMigo } from '@/lib/migo/use-migo.js';
 
 import { Spinner } from './spinner.js';
 import { BottomSheet } from './bottom-sheet.js';
+
+/** The presentational row for one of the account's devices. */
+export function DeviceRowView({
+  device,
+  busy,
+  onRemove,
+}: {
+  /** The wire row. */
+  device: DeviceSummary;
+  /** True while this row's removal is in flight. */
+  busy: boolean;
+  /**
+   * Requests this device's removal (never called for the current device or an already
+   * revoked one).
+   */
+  onRemove: (deviceId: Id) => void;
+}): ReactNode {
+  const revoked = device.status === 'revoked';
+  return (
+    <div className="person-row session-row">
+      <div className="person-main">
+        <span className="person-name">
+          {device.displayName}
+          {device.isCurrent ? <span className="tag tag-current">This device</span> : null}
+          {revoked ? <span className="tag tag-revoked">Revoked</span> : null}
+        </span>
+        <span className="person-sub">
+          {device.platform} · last seen {formatRelative(device.lastSeenAtMs)}
+          {device.hasCredential ? ' · holds a sign-in credential' : ''}
+        </span>
+      </div>
+      <div className="person-actions">
+        {device.isCurrent || revoked ? null : (
+          <button
+            type="button"
+            className="btn btn-ghost"
+            disabled={busy}
+            onClick={() => onRemove(device.deviceId)}
+            aria-label={`Remove device ${device.displayName}`}
+          >
+            {busy ? <Spinner /> : 'Remove'}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** The device list: every device the account knows, the current one marked. */
+export function DeviceList({
+  devices,
+  busyId,
+  onRemove,
+}: {
+  devices: DeviceSummary[];
+  /** The device whose removal is in flight, so only its row shows the busy state. */
+  busyId: Id | null;
+  onRemove: (deviceId: Id) => void;
+}): ReactNode {
+  if (devices.length === 0) {
+    return <p className="muted">No devices are registered.</p>;
+  }
+  return (
+    <div className="session-list">
+      {devices.map((device) => (
+        <DeviceRowView
+          key={device.deviceId}
+          device={device}
+          busy={busyId === device.deviceId}
+          onRemove={onRemove}
+        />
+      ))}
+    </div>
+  );
+}
 
 /** The presentational row for one active session. */
 export function SessionRow({
@@ -180,10 +261,12 @@ export function PasswordFormView({
   );
 }
 
-/** The Settings tab panel: loads the session list and owns the password draft. */
+/** The Settings tab panel: loads the device and session lists and owns the password draft. */
 export function SettingsPanel(): ReactNode {
   const { client } = useMigo();
 
+  const [devices, setDevices] = useState<DeviceSummary[] | null>(null);
+  const [removing, setRemoving] = useState<Id | null>(null);
   const [sessions, setSessions] = useState<AccountSession[] | null>(null);
   const [revoking, setRevoking] = useState<Id | null>(null);
   const [signingOut, setSigningOut] = useState(false);
@@ -205,7 +288,9 @@ export function SettingsPanel(): ReactNode {
       return;
     }
     try {
-      setSessions(await client.sessions());
+      const [deviceRows, sessionRows] = await Promise.all([client.devices(), client.sessions()]);
+      setDevices(deviceRows);
+      setSessions(sessionRows);
       setError(null);
     } catch (cause) {
       setError(friendlyError(cause));
@@ -215,6 +300,43 @@ export function SettingsPanel(): ReactNode {
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  const removeDevice = useCallback(
+    (deviceId: Id): void => {
+      if (!client || removing !== null) {
+        return;
+      }
+      const device = devices?.find((row) => row.deviceId === deviceId);
+      // Removing a device is the one control here that signs a device out of the account
+      // entirely — every session on it ends and its credential stops working — so it is
+      // never silent: the person names the device before the server acts.
+      const named = device ? `“${device.displayName}”` : 'this device';
+      const confirmed = window.confirm(
+        `Remove ${named}? Every session on it will be signed out, and it will not be able ` +
+          'to sign in with its credential again.',
+      );
+      if (!confirmed) {
+        return;
+      }
+      setRemoving(deviceId);
+      setNotice(null);
+      client
+        .revokeDevice({ device_id: deviceId })
+        .then((result) => {
+          setNotice(
+            `Device removed; ${result.revoked} session${result.revoked === 1 ? '' : 's'} ended.`,
+          );
+          return reload();
+        })
+        .catch((cause: unknown) => {
+          setError(friendlyError(cause));
+        })
+        .finally(() => {
+          setRemoving(null);
+        });
+    },
+    [client, devices, reload, removing],
+  );
 
   const revoke = useCallback(
     (sessionId: Id): void => {
@@ -302,6 +424,18 @@ export function SettingsPanel(): ReactNode {
 
       <section className="panel-section" aria-label="Devices">
         <h2 className="panel-heading">Devices</h2>
+        <p className="hint">Every device that can sign in to your account.</p>
+        {devices === null ? (
+          <div className="center-fill">
+            <Spinner />
+          </div>
+        ) : (
+          <DeviceList devices={devices} busyId={removing} onRemove={removeDevice} />
+        )}
+      </section>
+
+      <section className="panel-section" aria-label="Sessions">
+        <h2 className="panel-heading">Sessions</h2>
         <p className="hint">Every session currently signed in to your account.</p>
         {sessions === null ? (
           <div className="center-fill">

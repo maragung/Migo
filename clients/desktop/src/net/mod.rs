@@ -201,6 +201,8 @@ pub enum Command {
     Suggestions,
     /// Read the account's device list over REST for the security panel.
     Devices,
+    /// Remove one of the account's devices: its sessions end with it (brief section 18).
+    RevokeDevice { device_id: Id },
     /// Read the account's registered wallet addresses over REST.
     Wallets,
     /// Seal the account root into a `.migo` recovery container at `path`.
@@ -848,6 +850,9 @@ impl Worker {
             Command::SearchPeople { query } => self.search_people(query).await,
             Command::Suggestions => self.request_suggestions().await,
             Command::Devices => self.fetch_devices().await,
+            Command::RevokeDevice { device_id } => {
+                self.revoke_device(device_id).await;
+            }
             Command::Wallets => self.fetch_wallets().await,
             Command::ExportContainer { path, credential } => {
                 self.export_container(path, credential).await;
@@ -1684,6 +1689,37 @@ impl Worker {
             Err(error) => Event::Devices(Err(error.to_string())),
         };
         self.sink.send(event);
+    }
+
+    /// Removes one of the account's devices over REST, then re-reads the list.
+    ///
+    /// The toast names how many sessions ended with the device, because "gone" and "gone, with
+    /// its two sessions" are different facts to the person who pressed the button.
+    async fn revoke_device(&mut self, device_id: Id) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let outcome = signed
+            .rest
+            .revoke_device(&signed.access_token, device_id)
+            .await;
+        match outcome {
+            Ok(answer) => {
+                self.sink.toast(
+                    format!(
+                        "Device removed; {} session{} ended",
+                        answer.revoked,
+                        if answer.revoked == 1 { "" } else { "s" }
+                    ),
+                    ToastKind::Success,
+                );
+                self.fetch_devices().await;
+                self.fetch_sessions().await;
+            }
+            Err(error) => {
+                self.sink.toast(error.to_string(), ToastKind::Error);
+            }
+        }
     }
 
     /// Reads the account's registered wallet addresses over REST.

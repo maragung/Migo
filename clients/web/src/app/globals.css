@@ -2933,6 +2933,11 @@ main {
   background: var(--accent-soft-strong);
   border: 1px solid var(--accent-border);
 }
+.tag-revoked {
+  color: var(--text-faint);
+  background: transparent;
+  border: 1px solid var(--border);
+}
 
 /* The session list and its rows live in the Settings tab's Devices section. */
 .session-list {

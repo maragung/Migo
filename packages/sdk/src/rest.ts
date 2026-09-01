@@ -762,6 +762,21 @@ export class BootstrapClient {
     return (body.devices ?? []).map(parseDeviceSummary);
   }
 
+  /**
+   * `POST /v1/devices/{id}/revoke` — remove one of the caller's devices.
+   *
+   * The device can no longer authenticate, refresh, or open a WebSocket, and every session on
+   * it ends. Returns how many sessions died with it, so a security screen can confirm what
+   * "this phone is gone" actually removed.
+   */
+  async revokeDevice(accessToken: string, deviceId: Id): Promise<{ revoked: number }> {
+    const body = (await this.#post(`/v1/devices/${deviceId}/revoke`, {}, accessToken)) as Record<
+      string,
+      unknown
+    >;
+    return { revoked: Number(body['revoked']) };
+  }
+
   /** `GET /v1/wallets` — the caller's registered wallet addresses. */
   async wallets(accessToken: string): Promise<WalletSummary[]> {
     const body = (await this.#get('/v1/wallets', accessToken)) as {

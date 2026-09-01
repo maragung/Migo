@@ -295,6 +295,12 @@ pub struct AccountDevice {
     pub is_current: bool,
 }
 
+/// The answer to a device revoke: how many sessions ended with the device.
+#[derive(Debug, Deserialize)]
+pub struct DeviceRevoked {
+    pub revoked: u64,
+}
+
 /// One registered wallet, as the wallet endpoints report it. Address and metadata only — the
 /// private key behind it never left the device that derived it.
 ///
@@ -721,6 +727,25 @@ impl Rest {
         self.auth_expect_empty(
             access_token,
             &format!("/v1/wallets/{}", wallet_id.to_text()),
+            reqwest::Method::POST,
+            &(),
+        )
+        .await
+    }
+
+    /// Removes one of the caller's devices: `POST /v1/devices/{id}/revoke`.
+    ///
+    /// The device's sessions end with it — brief section 18 — so the answer says how many died,
+    /// which is the confirmation a security screen owes the person who just said "this phone is
+    /// gone".
+    pub async fn revoke_device(
+        &self,
+        access_token: &str,
+        device_id: Id,
+    ) -> Result<DeviceRevoked, RestError> {
+        self.auth_json(
+            access_token,
+            &format!("/v1/devices/{}/revoke", device_id.to_text()),
             reqwest::Method::POST,
             &(),
         )

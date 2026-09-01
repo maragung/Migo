@@ -630,7 +630,7 @@ async fn revoke_one_session(
     let context = auth.facts.context(now);
     state
         .authenticator()
-        .revoke_device(&auth.identity, session_id, &context)
+        .sign_out(&auth.identity, session_id, &context)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }

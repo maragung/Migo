@@ -182,6 +182,10 @@ private data class WalletBody(
 @Serializable
 private data class DevicesResponse(val devices: List<DeviceSummary> = emptyList())
 
+/** The answer to a device revoke: how many sessions ended with the device. */
+@Serializable
+data class DeviceRevoked(val ok: Boolean = false, val revoked: Long = 0)
+
 @Serializable
 private data class WalletsResponse(val wallets: List<WalletSummary> = emptyList())
 
@@ -492,6 +496,17 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
     /** The caller's own devices, for their security screen. */
     suspend fun devices(accessToken: String): List<DeviceSummary> =
         respond(send("GET", "/v1/devices", null, accessToken), DevicesResponse.serializer()).devices
+
+    /**
+     * Removes one of the caller's devices: `POST /v1/devices/{id}/revoke`.
+     *
+     * The device can no longer authenticate, refresh, or open a WebSocket, and every session on it
+     * ends (brief section 18) — which is why the answer says how many died.
+     */
+    suspend fun revokeDevice(accessToken: String, deviceId: Id): DeviceRevoked = respond(
+        send("POST", "/v1/devices/${deviceId.value}/revoke", "", accessToken),
+        DeviceRevoked.serializer(),
+    )
 
     /** The caller's registered wallet addresses. */
     suspend fun wallets(accessToken: String): List<WalletSummary> =

@@ -404,7 +404,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             AppState.Section.SEARCH -> Unit
             AppState.Section.WALLET -> if (!walletLoaded()) loadWallet()
             AppState.Section.ALERTS -> if (!alertsLoaded()) loadAlerts()
-            AppState.Section.CHATS, AppState.Section.GAMES, AppState.Section.PROFILE -> Unit
+            AppState.Section.PROFILE -> if (signedInState?.devices?.devices == null) loadDevices()
+            AppState.Section.CHATS, AppState.Section.GAMES -> Unit
         }
     }
 
@@ -1145,6 +1146,63 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 throw cancelled
             } catch (failure: Exception) {
                 signedIn { it.copy(alerts = it.alerts.copy(acknowledging = false), failure = readable(failure)) }
+            }
+        }
+    }
+
+    /** The Profile section's device read: every device the account knows, revoked ones included. */
+    fun loadDevices() {
+        val live = session ?: return
+        signedIn { it.copy(devices = it.devices.copy(loading = true, failure = null)) }
+        viewModelScope.launch {
+            try {
+                val rows = live.client.devices()
+                signedIn { it.copy(devices = it.devices.copy(loading = false, devices = rows)) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(devices = it.devices.copy(loading = false, failure = readable(failure))) }
+            }
+        }
+    }
+
+    /**
+     * Removes one of the account's devices.
+     *
+     * Its sessions end with it and its credential stops working, so a lost phone is gone from the
+     * account in one call. The list re-reads after, because the device's row is part of the
+     * answer — it stays, marked revoked.
+     */
+    fun revokeDevice(deviceId: String) {
+        val live = session ?: return
+        val id = try {
+            parseId(deviceId.trim())
+        } catch (_: WireError) {
+            signedIn { it.copy(devices = it.devices.copy(failure = "That is not a valid device id.")) }
+            return
+        }
+        signedIn { it.copy(devices = it.devices.copy(removing = it.devices.removing + deviceId, notice = null)) }
+        viewModelScope.launch {
+            try {
+                val answer = live.client.revokeDevice(id)
+                loadDevices()
+                signedIn {
+                    it.copy(
+                        devices = it.devices.copy(
+                            removing = it.devices.removing - deviceId,
+                            notice = "Device removed; ${answer.revoked} session" +
+                                (if (answer.revoked == 1L) "" else "s") + " ended.",
+                        ),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn {
+                    it.copy(
+                        devices = it.devices.copy(removing = it.devices.removing - deviceId, failure = readable(failure)),
+                    )
+                }
             }
         }
     }
