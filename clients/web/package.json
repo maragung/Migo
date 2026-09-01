@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "next dev --port 19992",
     "build": "next build",
+    "postbuild": "node tools/stamp-sw.mjs",
     "start": "node tools/serve.mjs",
     "serve": "node tools/serve.mjs",
     "typecheck": "tsc --noEmit",

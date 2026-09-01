@@ -1393,3 +1393,20 @@ Commit dari sheet adalah satu-satunya jalan perubahan endpoint di halaman.
 CSS `.server-disclosure*` diganti `.server-form*`; body picker di dalam
 sheet melepas frame-nya sendiri (border/shadow/padding) supaya tidak
 kotak-di-dalam-kotak.
+
+## 39. Register yang lega + service worker yang tahu diri (v0.13.2)
+
+**Kenapa masih ada yang melihat UI lama**: server sudah menyajikan bundle v0.13.1
+(HTML no-cache, CSS content-hashed), tetapi service worker memakai nama cache
+tetap `migo-web-v1` — byte sw.js tidak pernah berubah antar rilis, jadi cache
+lama menumpuk dan browser tidak wajib mengambil worker baru. Sekarang build
+menstempel nama cache dengan SHA commit (`tools/stamp-sw.mjs`, postbuild):
+setiap rilis mengubah byte sw.js → browser update worker → activate
+menghapus semua cache bernama lain → tidak ada shell/chunk lama yang selamat.
+
+**Layout register**: brand jadi wordmark compact satu baris (bukan hero
+bertumpuk yang memakan 60px), sub-kalimat dipendekkan, urutan field
+diatur identitas-dulu (username → email opsional → password), password
+menampilkan aturan minimal 10 karakter (dan minLength) sesuai config
+server, username/email dapat placeholder dan bebas spellcheck. Background
+gradient tetap fixed dan kartu scroll di layar pendek (warisan v0.13.1).

@@ -95,9 +95,7 @@ export default function RegisterPage(): ReactNode {
           </span>
           <h1>Migo</h1>
         </div>
-        <p className="auth-sub">
-          Create an account. Your encryption keys are generated on this device and never leave it.
-        </p>
+        <p className="auth-sub">Create an account — your keys are made here and never leave it.</p>
 
         <label className="field-label">
           Username
@@ -106,18 +104,9 @@ export default function RegisterPage(): ReactNode {
             value={username}
             onChange={(event) => setUsername(event.target.value)}
             autoComplete="username"
+            placeholder="the name friends will find you by"
+            spellCheck={false}
             autoFocus
-            required
-          />
-        </label>
-
-        <label className="field-label">
-          Password
-          <input
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            autoComplete="new-password"
             required
           />
         </label>
@@ -129,7 +118,21 @@ export default function RegisterPage(): ReactNode {
             value={email}
             onChange={(event) => setEmail(event.target.value)}
             autoComplete="email"
+            placeholder="you@example.com"
           />
+        </label>
+
+        <label className="field-label">
+          Password
+          <input
+            type="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            autoComplete="new-password"
+            minLength={10}
+            required
+          />
+          <span className="field-hint">At least 10 characters.</span>
         </label>
 
         {endpoint !== null ? <CaptchaWidget endpoint={endpoint} onChange={setCaptcha} /> : null}

@@ -466,20 +466,23 @@ main {
   padding: 32px 28px;
   color: #ffffff;
 }
+/* The brand is a compact wordmark row, not a stacked hero — the register card has real fields
+   to fit and every 40px of decoration is 40px of scrolling on a phone. */
 .auth-brand {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 6px;
 }
 .auth-brand .brand-mark {
-  font-size: 48px;
+  font-size: 26px;
+  line-height: 1;
   color: #ffffff;
   text-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
 }
 .auth-brand h1 {
-  font-size: 28px;
+  font-size: 24px;
   font-weight: 800;
   margin: 0;
   letter-spacing: -0.5px;
@@ -488,8 +491,14 @@ main {
 .auth-sub {
   text-align: center;
   color: rgba(255, 255, 255, 0.85);
-  margin: 0 0 24px;
+  margin: 0 0 18px;
   font-size: 14px;
+}
+/* A field's own small print (the password rule, say): inside the label, under the input. */
+.auth-screen .field-hint {
+  font-size: 12px;
+  font-weight: 400;
+  color: rgba(255, 255, 255, 0.75);
 }
 .auth-alt {
   margin-top: 14px;
