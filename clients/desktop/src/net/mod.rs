@@ -28,6 +28,7 @@
 pub mod gateway;
 pub mod quic;
 pub mod rest;
+pub mod tcp;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -56,6 +57,7 @@ use crate::model::{
 use crate::net::gateway::{Gateway, GatewayError};
 use crate::net::quic::QuicGateway;
 use crate::net::rest::{CaptchaChallenge, CaptchaProof, DeviceRequest, Rest, RestError};
+use crate::net::tcp::TcpGateway;
 use crate::vault::{self, SavedSession};
 
 /// When to warn that the one-time prekey pool is running down.
@@ -491,11 +493,12 @@ impl Retry {
 
 /// The live realtime connection, over whichever transport the session is riding.
 ///
-/// Both bindings speak MWP frames with the same send/receive shape, so the worker treats them
-/// identically: an enum rather than a shared trait object, because the set is closed by the
-/// brief (WebSocket default, QUIC second option) and a dyn would be vocabulary with no third
-/// implementation behind it.
+/// All three bindings speak MWP frames with the same send/receive shape, so the worker treats
+/// them identically: an enum rather than a shared trait object, because the set is closed by the
+/// brief (TCP the native default, WebSocket the web transport, QUIC the second option —
+/// section 138) and a dyn would be vocabulary with no fourth implementation behind it.
 enum Realtime {
+    Tcp(TcpGateway),
     WebSocket(Box<Gateway>),
     Quic(QuicGateway),
 }
@@ -504,6 +507,7 @@ impl Realtime {
     /// A fresh correlation id, for a request whose reply must be matched to it.
     fn correlate(&mut self) -> u32 {
         match self {
+            Self::Tcp(gateway) => gateway.correlate(),
             Self::WebSocket(gateway) => gateway.correlate(),
             Self::Quic(gateway) => gateway.correlate(),
         }
@@ -517,6 +521,10 @@ impl Realtime {
         value: &T,
     ) -> Result<(), GatewayError> {
         match self {
+            Self::Tcp(gateway) => gateway
+                .send(opcode, correlation, value)
+                .await
+                .map_err(|_| GatewayError::Transport),
             Self::WebSocket(gateway) => gateway.send(opcode, correlation, value).await,
             Self::Quic(gateway) => gateway
                 .send(opcode, correlation, value)
@@ -528,6 +536,10 @@ impl Realtime {
     /// Reads the next protocol frame off the live transport.
     async fn next_frame(&mut self) -> Result<Frame, GatewayError> {
         match self {
+            Self::Tcp(gateway) => gateway
+                .next_frame()
+                .await
+                .map_err(|_| GatewayError::Transport),
             Self::WebSocket(gateway) => gateway.next_frame().await,
             Self::Quic(gateway) => gateway
                 .next_frame()
@@ -538,12 +550,13 @@ impl Realtime {
 
     /// Closes politely, so the server retires the session rather than timing it out.
     ///
-    /// Consuming `self` rather than taking `&mut self` mirrors both underlying gateways' own
+    /// Consuming `self` rather than taking `&mut self` mirrors the underlying gateways' own
     /// close-by-ownership shape: a close is always the last thing that happens to a connection.
     async fn close(self) {
         match self {
             // The WebSocket gateway is a large struct (the TLS stream state machine); boxing
             // keeps the enum one pointer wide so the QUIC variant does not pay for its size.
+            Self::Tcp(mut gateway) => gateway.close().await,
             Self::WebSocket(gateway) => gateway.close().await,
             Self::Quic(mut gateway) => gateway.close().await,
         }
@@ -938,13 +951,41 @@ impl Worker {
         };
 
         self.sink.send(Event::Connection(Connection::Connecting));
-        // The endpoint names the transport. QUIC is the second option: tried first only when the
-        // user picked it, and a server that does not negotiate the bit is not an error — the
-        // worker falls back to the default WebSocket path and says so in the connection state.
-        let picked_quic = signed.server.transport == Transport::Quic;
+        // The endpoint names the transport. TCP is the native default; QUIC is the second option.
+        // Both are tried only when the user picked them, and a server that does not negotiate the
+        // bit is not an error — the worker falls back to the WebSocket path and says so in the
+        // connection state.
+        let picked = signed.server.transport;
         let mut fell_back = false;
-        let connected = if picked_quic {
-            match quic::connect(&signed.server, hello.clone()).await {
+        let mut fallback_reason = String::new();
+        let connected = match picked {
+            Transport::Tcp => match tcp::connect(&signed.server, hello.clone()).await {
+                Ok((gateway, welcome)) => {
+                    if welcome.features & features::TCP_TRANSPORT == 0 {
+                        // The contract, not a fault: the negotiated set is the intersection, and
+                        // this node did not offer the bit. Close cleanly and take the WebSocket
+                        // path rather than stranding the session on a transport the server never
+                        // agreed to.
+                        let mut gateway = gateway;
+                        gateway.close().await;
+                        fell_back = true;
+                        fallback_reason =
+                            "the server did not negotiate TCP; connected over WebSocket".to_owned();
+                        self.connect_websocket(hello).await
+                    } else {
+                        Ok((Realtime::Tcp(gateway), welcome))
+                    }
+                }
+                Err(_) => {
+                    // An unreachable TCP listener on a TCP-picked endpoint still has a working
+                    // WebSocket path; fall back rather than erroring a server the user can reach.
+                    fell_back = true;
+                    fallback_reason =
+                        "could not reach the TCP listener; connected over WebSocket".to_owned();
+                    self.connect_websocket(hello).await
+                }
+            },
+            Transport::Quic => match quic::connect(&signed.server, hello.clone()).await {
                 Ok((gateway, welcome)) => {
                     if welcome.features & features::QUIC == 0 {
                         // The contract, not a fault: the negotiated set is the intersection, and
@@ -954,6 +995,9 @@ impl Worker {
                         let mut gateway = gateway;
                         gateway.close().await;
                         fell_back = true;
+                        fallback_reason =
+                            "the server did not negotiate QUIC; connected over WebSocket"
+                                .to_owned();
                         self.connect_websocket(hello).await
                     } else {
                         Ok((Realtime::Quic(gateway), welcome))
@@ -963,20 +1007,20 @@ impl Worker {
                     // An unreachable QUIC listener on a QUIC-picked endpoint still has a working
                     // default path; fall back rather than erroring a server the user can reach.
                     fell_back = true;
+                    fallback_reason =
+                        "could not reach the QUIC listener; connected over WebSocket".to_owned();
                     self.connect_websocket(hello).await
                 }
-            }
-        } else {
-            self.connect_websocket(hello).await
+            },
+            Transport::WebSocket => self.connect_websocket(hello).await,
         };
         match connected {
             Ok((realtime, _welcome)) => {
                 self.gateway = Some(realtime);
                 self.retry = None;
                 if fell_back {
-                    self.sink.send(Event::Connection(Connection::Fallback(
-                        "the server did not negotiate QUIC; connected over WebSocket".to_owned(),
-                    )));
+                    self.sink
+                        .send(Event::Connection(Connection::Fallback(fallback_reason)));
                 } else {
                     self.sink.send(Event::Connection(Connection::Online));
                 }

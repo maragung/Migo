@@ -1,25 +1,29 @@
 //! The user-configured server endpoint, the persistent form the web and Android clients use.
 //!
 //! The shape is the same as the TypeScript SDK's `ServerEndpoint`: host, REST port, gateway port,
-//! transport (`WebSocket` or `Quic`), the realtime scheme (`Ws`, `Wss`, `Quic`, `QuicTls`), and the
-//! REST scheme (`Http`, `Https`). The transport enum's values are `WebSocket` (the default) and
-//! `Quic` (a real second option); QUIC needs a server with its optional QUIC listener enabled, and
-//! this client still connects over WebSocket on the wire, exactly as the web form does.
+//! transport (`Tcp`, `WebSocket`, or `Quic`), the realtime scheme, and the REST scheme. The
+//! transport enum's values are `Tcp` (the native default: raw TCP with length-prefixed binary
+//! frames, the mig33v46 heritage), `WebSocket` (the web client's transport; here for
+//! development and fallback), and `Quic` (the second option, negotiated via the `QUIC` feature
+//! bit).
 //!
 //! A self-hoster types a host and a port and picks a TLS posture. The form then derives the REST
-//! origin and the gateway WebSocket URL from the same fields, so the two endpoints can never
-//! disagree about which deployment is meant. That rule is what makes the persistence simple: the
-//! stored form is a single record, and the desktop reads it on every launch instead of rebuilding
-//! from a string the user had no way to validate.
+//! origin and the gateway address from the same fields, so the two endpoints can never disagree
+//! about which deployment is meant. That rule is what makes the persistence simple: the stored
+//! form is a single record, and the desktop reads it on every launch instead of rebuilding from
+//! a string the user had no way to validate.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// The realtime transport the user picked. `Quic` is a real second option: a server advertises it
-/// via the `QUIC` feature bit only when its optional QUIC listener is enabled. The desktop persists
-/// and validates the choice, and still speaks WebSocket on the wire.
+/// The realtime transport the user picked. `Tcp` is the native default — a server advertises it
+/// via the `TCP_TRANSPORT` feature bit only when its optional TCP listener is enabled, and a
+/// node that does not offer the bit falls back to WebSocket, which stays the web client's
+/// transport and this client's development path. `Quic` is the second option, negotiated via
+/// the `QUIC` bit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Transport {
+    Tcp,
     WebSocket,
     Quic,
 }
@@ -27,6 +31,7 @@ pub enum Transport {
 impl fmt::Display for Transport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Transport::Tcp => f.write_str("TCP"),
             Transport::WebSocket => f.write_str("WebSocket"),
             Transport::Quic => f.write_str("QUIC"),
         }
@@ -38,6 +43,13 @@ impl fmt::Display for Transport {
 pub enum WsScheme {
     Ws,
     Wss,
+}
+
+/// The TLS posture of the TCP transport: plain TCP, or TLS 1.3 over TCP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TcpScheme {
+    Tcp,
+    TcpTls,
 }
 
 /// The TLS posture of the QUIC transport.
@@ -57,6 +69,7 @@ pub enum RestScheme {
 /// The transport-paired realtime scheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scheme {
+    Tcp(TcpScheme),
     Ws(WsScheme),
     Quic(QuicScheme),
 }
@@ -83,14 +96,14 @@ pub fn is_loopback_host(host: &str) -> bool {
     lowered == "localhost" || lowered == "127.0.0.1" || lowered == "::1"
 }
 
-/// The dev-policy default: plain WebSocket on plain HTTP, with the gateway on the next port.
+/// The dev-policy default: plain TCP on plain HTTP, with the gateway on the next port.
 pub fn default_loopback_server_endpoint(host: impl Into<String>, port: u16) -> ServerEndpoint {
     ServerEndpoint {
         host: host.into().to_ascii_lowercase(),
         port,
         gateway_port: port.saturating_add(1),
-        transport: Transport::WebSocket,
-        scheme: Scheme::Ws(WsScheme::Ws),
+        transport: Transport::Tcp,
+        scheme: Scheme::Tcp(TcpScheme::Tcp),
         rest_scheme: RestScheme::Http,
     }
 }
@@ -231,6 +244,8 @@ pub fn rest_scheme_prefix(endpoint: &ServerEndpoint) -> &'static str {
 /// The gateway scheme prefix, taking the transport into account.
 pub fn gateway_scheme_prefix(endpoint: &ServerEndpoint) -> &'static str {
     match endpoint.scheme {
+        Scheme::Tcp(TcpScheme::TcpTls) => "tcps",
+        Scheme::Tcp(TcpScheme::Tcp) => "tcp",
         Scheme::Ws(WsScheme::Wss) => "wss",
         Scheme::Ws(WsScheme::Ws) => "ws",
         // Both QUIC variants are spelled `quic` at the URL level today; the TLS posture is
@@ -285,7 +300,6 @@ pub fn server_endpoint_from_url(url: &str) -> ServerEndpoint {
         rest_scheme,
     }
 }
-
 fn default_port_for(scheme: RestScheme) -> u16 {
     match scheme {
         RestScheme::Https => 443,
@@ -333,13 +347,13 @@ mod tests {
     }
 
     #[test]
-    fn default_loopback_uses_plain_pair() {
+    fn default_loopback_uses_plain_tcp_pair() {
         let endpoint = default_loopback_server_endpoint("localhost", 18080);
         assert_eq!(endpoint.host, "localhost");
         assert_eq!(endpoint.port, 18080);
         assert_eq!(endpoint.gateway_port, 18081);
-        assert_eq!(endpoint.transport, Transport::WebSocket);
-        assert_eq!(endpoint.scheme, Scheme::Ws(WsScheme::Ws));
+        assert_eq!(endpoint.transport, Transport::Tcp);
+        assert_eq!(endpoint.scheme, Scheme::Tcp(TcpScheme::Tcp));
         assert_eq!(endpoint.rest_scheme, RestScheme::Http);
     }
 
@@ -368,7 +382,14 @@ mod tests {
     fn derived_urls_match_the_documented_shapes() {
         let endpoint = default_loopback_server_endpoint("localhost", 18080);
         assert_eq!(rest_base_url(&endpoint), "http://localhost:18080");
-        assert_eq!(gateway_url(&endpoint), "ws://localhost:18081/ws");
+        // The loopback default is TCP, so the WebSocket URL question only has a WebSocket answer
+        // for a WebSocket endpoint; the loopback pair stays documented separately.
+        let ws_endpoint = ServerEndpoint {
+            transport: Transport::WebSocket,
+            scheme: Scheme::Ws(WsScheme::Ws),
+            ..endpoint.clone()
+        };
+        assert_eq!(gateway_url(&ws_endpoint), "ws://localhost:18081/ws");
     }
 
     #[test]

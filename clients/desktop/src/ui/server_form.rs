@@ -4,13 +4,14 @@
 //! and password. A user who has opened it picks the host, port and scheme, and on
 //! "Use this server" the disclosure closes and the choice becomes the new form input.
 //!
-//! The transport is the one choice that is not behind the disclosure: a WebSocket/QUIC pair of
+//! The transport is the one choice that is not behind the disclosure: a TCP/WebSocket/QUIC row of
 //! selectable labels rides directly under the toggle and one click commits the swap immediately —
 //! a transport change never needs the host and port re-confirmed, so it never lives in the draft.
-//! QUIC is a real second option, not a placeholder: the choice persists, is validated the same
-//! as WebSocket, and when picked the worker really does dial the QUIC listener (one stream, one
-//! session, length-prefixed frames) — falling back to WebSocket, said plainly in the connection
-//! state, when the server does not negotiate the bit. The form itself never blocks submit.
+//! TCP is the native default (one socket, one session, length-prefixed binary frames — the
+//! mig33v46 heritage); WebSocket is the web client's transport, kept here for development and
+//! fallback; QUIC is the second option, negotiated via the `QUIC` feature bit. When a picked
+//! transport is not negotiated the worker falls back to WebSocket and says so plainly in the
+//! connection state. The form itself never blocks submit.
 //!
 //! The widget writes its accepted endpoint through a callback rather than mutating the caller's
 //! state directly. The caller decides whether the new value is accepted into the form state and
@@ -25,7 +26,7 @@ use egui::{Align, ComboBox, Layout, RichText, Ui};
 
 use crate::config::{
     default_loopback_server_endpoint, is_loopback_host, parse_host, QuicScheme, RestScheme, Scheme,
-    ServerEndpoint, Transport, WsScheme,
+    ServerEndpoint, TcpScheme, Transport, WsScheme,
 };
 use crate::theme::{font, palette, space, text_style};
 use crate::ui::widgets::ghost_button;
@@ -132,6 +133,13 @@ pub fn show(
                     .color(colors.text_muted),
             );
             if ui
+                .selectable_label(value.transport == Transport::Tcp, "TCP")
+                .clicked()
+                && value.transport != Transport::Tcp
+            {
+                accepted = Some(swap_transport(value, Transport::Tcp));
+            }
+            if ui
                 .selectable_label(value.transport == Transport::WebSocket, "WebSocket")
                 .clicked()
                 && value.transport != Transport::WebSocket
@@ -146,14 +154,26 @@ pub fn show(
                 accepted = Some(swap_transport(value, Transport::Quic));
             }
         });
-        if value.transport == Transport::Quic {
-            ui.label(
-                RichText::new(
-                    "QUIC is a second option; it needs a server with the QUIC listener enabled. If the server does not offer it, this client falls back to WebSocket and says so.",
-                )
-                .font(egui::FontId::proportional(font::TINY))
-                .color(colors.text_muted),
-            );
+        match value.transport {
+            Transport::Tcp => {
+                ui.label(
+                    RichText::new(
+                        "TCP is the native default: one socket, one session, binary length-prefixed frames. It needs a server with the TCP listener enabled; if the server does not offer it, this client falls back to WebSocket and says so.",
+                    )
+                    .font(egui::FontId::proportional(font::TINY))
+                    .color(colors.text_muted),
+                );
+            }
+            Transport::Quic => {
+                ui.label(
+                    RichText::new(
+                        "QUIC is a second option; it needs a server with the QUIC listener enabled. If the server does not offer it, this client falls back to WebSocket and says so.",
+                    )
+                    .font(egui::FontId::proportional(font::TINY))
+                    .color(colors.text_muted),
+                );
+            }
+            Transport::WebSocket => {}
         }
 
         if open {
@@ -252,6 +272,20 @@ fn draw_fields(ui: &mut Ui, theme: crate::theme::Theme, state: &mut ServerFormSt
         );
         let (current_label, options): (&str, Vec<(&str, Scheme, RestScheme)>) =
             match state.transport {
+                Transport::Tcp => (
+                    match state.scheme {
+                        Scheme::Tcp(TcpScheme::TcpTls) => "TCP-TLS",
+                        _ => "TCP (plain, dev-only)",
+                    },
+                    vec![
+                        (
+                            "TCP (plain, dev-only)",
+                            Scheme::Tcp(TcpScheme::Tcp),
+                            RestScheme::Http,
+                        ),
+                        ("TCP-TLS", Scheme::Tcp(TcpScheme::TcpTls), RestScheme::Https),
+                    ],
+                ),
                 Transport::WebSocket => (
                     match state.scheme {
                         Scheme::Ws(WsScheme::Wss) => "WSS (TLS)",
@@ -327,6 +361,7 @@ struct SchemeWithRest {
 /// The transport's display name, shared by the summary line and the always-visible selector.
 fn transport_label(transport: Transport) -> &'static str {
     match transport {
+        Transport::Tcp => "TCP",
         Transport::WebSocket => "WebSocket",
         Transport::Quic => "QUIC",
     }
@@ -350,6 +385,13 @@ fn swap_transport(endpoint: &ServerEndpoint, transport: Transport) -> ServerEndp
 /// Android forms apply: loopback gets the plain dev pair, everything else the TLS pair.
 fn schemes_for_transport(transport: Transport, host: &str) -> (Scheme, RestScheme) {
     match transport {
+        Transport::Tcp => {
+            if is_loopback_host(host) {
+                (Scheme::Tcp(TcpScheme::Tcp), RestScheme::Http)
+            } else {
+                (Scheme::Tcp(TcpScheme::TcpTls), RestScheme::Https)
+            }
+        }
         Transport::WebSocket => {
             let pair = schemes_for_host(host);
             (pair.scheme, pair.rest_scheme)
@@ -389,6 +431,10 @@ fn build_endpoint(state: &ServerFormState) -> Result<ServerEndpoint, String> {
         parse_port(&state.gateway_port_text, "gateway port")?
     };
     let scheme = match state.transport {
+        Transport::Tcp => match state.scheme {
+            Scheme::Tcp(_) => state.scheme,
+            _ => return Err("TCP transport requires TCP or TCP-TLS scheme".to_owned()),
+        },
         Transport::WebSocket => match state.scheme {
             Scheme::Ws(WsScheme::Ws) | Scheme::Ws(WsScheme::Wss) => state.scheme,
             _ => return Err("WebSocket transport requires WS or WSS scheme".to_owned()),
