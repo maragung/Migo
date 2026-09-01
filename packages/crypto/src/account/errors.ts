@@ -24,7 +24,12 @@ export type AccountErrorKind =
   | 'OpenFailed'
   | 'BadSignature'
   | 'InvalidDerivation'
-  | 'KdfOutOfRange';
+  | 'KdfOutOfRange'
+  | 'ChainMismatch'
+  | 'NotATransaction'
+  | 'MalformedRlp'
+  | 'BadAddress'
+  | 'AddressChecksumFailed';
 
 /** Numbers and static strings only — never a secret, a credential, or a decrypted byte. */
 export type AccountErrorDetail = Readonly<Record<string, number | string>>;
@@ -106,5 +111,48 @@ export class AccountError extends Error {
   /** The Argon2id parameters in a header are outside the range this build will spend memory on. */
   static kdfOutOfRange(): AccountError {
     return new AccountError('KdfOutOfRange', 'container KDF parameters are out of range');
+  }
+
+  /**
+   * An RPC-observed chain id does not match the configured network. The transaction was never
+   * built: a chain-id mismatch is the replay/confusion case, and the honest response is to close
+   * the session, not to pick one of the two ids.
+   */
+  static chainMismatch(configured: number, observed: number): AccountError {
+    return new AccountError(
+      'ChainMismatch',
+      `chain id mismatch: configured ${configured}, RPC reported ${observed}`,
+      { configured, observed },
+    );
+  }
+
+  /** Bytes handed to the transaction parser are not an EIP-1559 envelope at all. */
+  static notATransaction(): AccountError {
+    return new AccountError('NotATransaction', 'not an EIP-1559 transaction');
+  }
+
+  /**
+   * A raw transaction or RLP item is structurally broken or non-canonical. The parser is
+   * deliberately strict — trailing bytes, non-minimal integers, and redundant length prefixes are
+   * all refused, because it parses bytes that arrived over a network.
+   *
+   * `what` is a static string chosen at the call site, never caller text.
+   */
+  static malformedRlp(what: string): AccountError {
+    return new AccountError('MalformedRlp', `malformed RLP: ${what}`, { what });
+  }
+
+  /** A recipient string is not an address: wrong length or not hex. */
+  static badAddress(): AccountError {
+    return new AccountError('BadAddress', 'not a valid address');
+  }
+
+  /**
+   * A mixed-case address string's EIP-55 checksum does not match its contents. Reported distinctly
+   * from {@link AccountError.badAddress} because the user's remedy is "fix the typo", not "the app
+   * is broken".
+   */
+  static addressChecksumFailed(): AccountError {
+    return new AccountError('AddressChecksumFailed', 'address checksum failed');
   }
 }

@@ -48,6 +48,27 @@ export {
 export { EvmWallet, eip55, EIP155_COIN_TYPE, EVM_BIP44_PATH } from './evm.js';
 
 export {
+  Eip1559Tx,
+  SignedTx,
+  recoverSender,
+  parseAddress,
+  checkChainId,
+  rlpEncode,
+  rlpDecode,
+  rlpUint,
+  rlpAsUint,
+  eip712EncodeType,
+  eip712TypeHash,
+  eip712EncodeValue,
+  eip712HashStruct,
+  eip712Digest,
+  Eip712Domain,
+  AVALANCHE_MAINNET,
+  FUJI_TESTNET,
+} from './tx.js';
+export type { Network, RlpItem, Eip712Value } from './tx.js';
+
+export {
   openContainer,
   sealContainer,
   sealContainerWith,
