@@ -1191,3 +1191,18 @@ HELLO dengan bit QUIC diminta → WELCOME dengan bit QUIC ter-negosiasi
 (features = irisan, jadi klien yang tidak meminta tetap tidak menerimanya —
 kontrak, bukan cacat). `cargo fmt`/`clippy -D warnings`/suite in-process hijau;
 test live hijau terhadap `152.53.102.150:18443`.
+
+## 33. Pilihan transport QUIC dinaikkan ke permukaan sign-in (v0.10.1)
+
+Transport picker sebelumnya hidup di dalam disclosure "Server" yang collapse
+secara default — ada, tapi tidak terlihat sampai dibuka. Sekarang di web
+(segmented control WebSocket | QUIC di bawah toggle, selalu terlihat) dan
+Android (radio transport langsung di bawah tombol Server), satu tap langsung
+meng-commit swap transport pada endpoint tersimpan dengan pasangan scheme yang
+benar (QUIC→QUIC/QUIC-TLS, WebSocket→WS/WSS via aturan loopback) — tanpa perlu
+buka panel dan konfirmasi ulang host/port. Catatan jujur QUIC ("butuh server
+dengan listener QUIC aktif; build ini masih terhubung via WebSocket") ikut
+tampil selama QUIC dipilih, dan ringkasan server kini menyebut transport
+aktif. Select transport duplikat di dalam panel web dihapus (satu sumber
+kebenaran); detail host/port/scheme tetap di dalam panel. `make kotlin-check`
+hijau; web build/test/lint/Prettier hijau; bundle baru di-deploy ke :19992.

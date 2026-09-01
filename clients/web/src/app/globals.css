@@ -2056,6 +2056,33 @@ main {
 .server-disclosure-row .field-label {
   margin: 0;
 }
+/* The always-visible transport switcher: the one server choice that is not behind the
+   disclosure. Kept compact so the collapsed form stays one toggle + one row. */
+.server-disclosure-transport {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 8px;
+}
+.server-disclosure-transport-label {
+  color: var(--text-faint);
+  font-size: 12px;
+  font-weight: 600;
+}
+.server-disclosure-segmented {
+  flex: 1;
+  margin: 0;
+  padding: 2px;
+}
+.server-disclosure-segmented button {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+/* The QUIC note sits beside the transport row, outside the panel, so it carries the
+   disclosure's own horizontal padding instead of the panel's. */
+.server-disclosure > .server-disclosure-note {
+  margin: 0 10px 8px;
+}
 .server-disclosure-note {
   margin: 0;
   padding: 6px 8px;

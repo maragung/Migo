@@ -219,11 +219,13 @@ fun SignInScreen(
 /**
  * The "Server" disclosure, mirroring `clients/web/src/components/server-form.tsx`.
  *
- * A user who has never opened it sees a single summary line ("localhost:18080", say)
- * and a chevron; opening it reveals the structured fields. The form's working state
- * stays local until "Use this server" is clicked -- so a half-typed entry is not
- * pushed into the bootstrap, and a failed sign-in does not have to re-fetch a
- * not-yet-confirmed host.
+ * A user who has never opened it sees a single summary line ("localhost:18080", say),
+ * a chevron, and the always-visible transport picker; opening it reveals the structured
+ * fields. The form's working state stays local until "Use this server" is clicked -- so
+ * a half-typed entry is not pushed into the bootstrap, and a failed sign-in does not
+ * have to re-fetch a not-yet-confirmed host. The transport is the exception: one tap on
+ * the picker commits the swap immediately, because changing transport never needs the
+ * host and port re-confirmed.
  *
  * The form holds its own local state for every field; the view model is only asked
  * for the previous value (to initialise the draft) and is given a new record on
@@ -262,11 +264,63 @@ private fun ServerDisclosure(
                 Text(text = "Server")
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = serverSummary(host, port, gatewayPort),
+                    text = serverSummary(host, port, gatewayPort, transport),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+        }
+        // The transport is the one server choice that is not behind the disclosure: the picker
+        // rides directly under the toggle and one tap commits the swap. A transport change never
+        // needs the host and port re-confirmed, so it never lives in the draft.
+        Text(
+            text = "Transport",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        TransportChoice(
+            value = value.transport,
+            enabled = enabled,
+            onChange = { chosen ->
+                if (chosen != value.transport) {
+                    // Swap the transport on the committed record, pairing the schemes the same
+                    // way the web form's pickTransport does: QUIC picks QUIC/QUIC-TLS by the
+                    // loopback rule, WebSocket restores the host's WS/WSS pair. The draft state
+                    // below re-initialises from the new value, so the open panel follows.
+                    val loopback = ServerEndpoint.isLoopbackHost(value.host)
+                    val next = when (chosen) {
+                        Transport.Quic -> ServerEndpoint(
+                            host = value.host,
+                            port = value.port,
+                            gatewayPort = value.gatewayPort,
+                            transport = Transport.Quic,
+                            gatewayScheme = if (loopback) GatewayScheme.Quic else GatewayScheme.QuicTls,
+                            restScheme = if (loopback) RestScheme.Http else RestScheme.Https,
+                        )
+                        Transport.WebSocket -> {
+                            val (gateway, rest) = ServerEndpoint.defaultSchemesForHost(value.host)
+                            ServerEndpoint(
+                                host = value.host,
+                                port = value.port,
+                                gatewayPort = value.gatewayPort,
+                                transport = Transport.WebSocket,
+                                gatewayScheme = gateway,
+                                restScheme = rest,
+                            )
+                        }
+                    }
+                    onCommit(next)
+                }
+            },
+        )
+        if (value.transport == Transport.Quic) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "QUIC is a second option; it needs a server with the QUIC listener " +
+                    "enabled. This build still connects over WebSocket.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         if (open) {
             Column(
@@ -317,35 +371,6 @@ private fun ServerDisclosure(
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "Transport",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                TransportChoice(
-                    value = transport,
-                    enabled = enabled,
-                    onChange = { chosen ->
-                        transport = chosen
-                        // Pair the scheme with the new transport, the same rule the web form's
-                        // updateTransport uses: QUIC defaults to plain/TLS by the loopback rule,
-                        // WebSocket restores the WS/WSS pair for the host.
-                        val loopback = ServerEndpoint.isLoopbackHost(host.trim())
-                        when (chosen) {
-                            Transport.Quic -> {
-                                gatewayScheme =
-                                    if (loopback) GatewayScheme.Quic else GatewayScheme.QuicTls
-                                restScheme = if (loopback) RestScheme.Http else RestScheme.Https
-                            }
-                            Transport.WebSocket -> {
-                                val (gateway, rest) = ServerEndpoint.defaultSchemesForHost(host.trim())
-                                gatewayScheme = gateway
-                                restScheme = rest
-                            }
-                        }
-                    },
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
                     text = "Scheme",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -358,15 +383,6 @@ private fun ServerDisclosure(
                     onGateway = { gatewayScheme = it },
                     onRest = { restScheme = it },
                 )
-                if (transport == Transport.Quic) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "QUIC is a second option; it needs a server with the QUIC listener " +
-                            "enabled. This build still connects over WebSocket.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
                 error?.let {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
@@ -409,11 +425,17 @@ private fun ServerDisclosure(
 }
 
 /** The single-line summary shown when the disclosure is collapsed. */
-private fun serverSummary(host: String, port: String, gatewayPort: String): String {
+private fun serverSummary(
+    host: String,
+    port: String,
+    gatewayPort: String,
+    transport: Transport,
+): String {
     val h = host.ifBlank { "unset" }
     val p = port.ifBlank { "?" }
     val g = if (gatewayPort.isBlank()) "auto" else gatewayPort
-    return "$h:$p  ·  gateway $g"
+    val t = if (transport == Transport.Quic) "QUIC" else "WebSocket"
+    return "$h:$p  ·  gateway $g  ·  $t"
 }
 
 /**

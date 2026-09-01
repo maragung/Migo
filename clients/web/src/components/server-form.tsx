@@ -4,13 +4,17 @@
  * The "Server" disclosure on the sign-in and registration forms.
  *
  * A user who has never opened this disclosure sees exactly the form they saw yesterday: identifier
- * and password. A user who has opened it picks the host, port, transport and scheme, and on
+ * and password. A user who has opened it picks the host, port and scheme, and on
  * "Use this server" the disclosure closes and the choice becomes the new form input.
  *
- * QUIC is a real second option, not a placeholder: the choice persists and is validated the same
- * as WebSocket. Connecting over it requires a server with the QUIC listener enabled, and this
- * client's wire path is still WebSocket. The form accepts the choice and never blocks submit, so
- * the user can save a QUIC-capable server and the rest of the surface (REST, captcha) proceeds.
+ * The transport is the one choice that is not behind the disclosure: a segmented control under the
+ * toggle shows WebSocket (the default) and QUIC (the second option) at all times, and one tap
+ * commits the swap immediately — a transport change never needs the host and port re-confirmed, so
+ * it never lives in the draft. QUIC is a real second option, not a placeholder: the choice persists
+ * and is validated the same as WebSocket. Connecting over it requires a server with the QUIC
+ * listener enabled, and this client's wire path is still WebSocket. The form accepts the choice and
+ * never blocks submit, so the user can save a QUIC-capable server and the rest of the surface
+ * (REST, captcha) proceeds.
  */
 
 import { useId, useState } from 'react';
@@ -63,7 +67,6 @@ export function ServerForm({ value, onCommit }: ServerFormProps): ReactNode {
   const summaryId = useId();
   const hostId = useId();
   const portId = useId();
-  const transportId = useId();
   const schemeId = useId();
 
   const updateHost = (host: string): void => {
@@ -80,18 +83,26 @@ export function ServerForm({ value, onCommit }: ServerFormProps): ReactNode {
     });
   };
 
-  const updateTransport = (transport: Transport): void => {
-    setDraft((current) => {
-      if (transport === 'Quic') {
-        return {
-          ...current,
-          transport,
-          scheme: isLoopbackHost(current.host) ? 'Quic' : 'QuicTls',
-          restScheme: isLoopbackHost(current.host) ? 'Http' : 'Https',
-        };
-      }
-      return { ...current, transport, ...defaultSchemesForTransport('WebSocket', current.host) };
-    });
+  /**
+   * Commits a transport swap on the committed endpoint, immediately. The transport is the one
+   * field that never lives in the draft: switching it does not need the host or port re-confirmed,
+   * so the user does not have to open the panel and press "Use this server" to make the choice
+   * stick. The scheme pair rides along (WebSocket restores the host's WS/WSS pair, QUIC picks
+   * QUIC/QUIC-TLS by the same loopback rule) so the committed record stays a valid pair.
+   */
+  const pickTransport = (transport: Transport): void => {
+    if (transport === value.transport) {
+      return;
+    }
+    const pair = defaultSchemesForTransport(transport, value.host);
+    const next: ServerEndpoint = {
+      ...value,
+      transport,
+      scheme: pair.scheme,
+      restScheme: pair.restScheme,
+    };
+    onCommit(next);
+    setDraft(toForm(next));
   };
 
   const commit = (): void => {
@@ -105,7 +116,7 @@ export function ServerForm({ value, onCommit }: ServerFormProps): ReactNode {
     }
   };
 
-  const summary = `${draft.host || 'unset'}:${draft.port || '?'}`;
+  const summary = `${draft.host || 'unset'}:${draft.port || '?'} · ${transportLabel(value.transport)}`;
   return (
     <section className="server-disclosure" aria-labelledby={summaryId}>
       <button
@@ -125,6 +136,37 @@ export function ServerForm({ value, onCommit }: ServerFormProps): ReactNode {
           </span>
         ) : null}
       </button>
+      <div className="server-disclosure-transport">
+        <span className="server-disclosure-transport-label">Transport</span>
+        <div
+          className="segmented server-disclosure-segmented"
+          role="group"
+          aria-label="Realtime transport"
+        >
+          <button
+            type="button"
+            className={value.transport === 'WebSocket' ? 'active' : ''}
+            aria-pressed={value.transport === 'WebSocket'}
+            onClick={() => pickTransport('WebSocket')}
+          >
+            WebSocket
+          </button>
+          <button
+            type="button"
+            className={value.transport === 'Quic' ? 'active' : ''}
+            aria-pressed={value.transport === 'Quic'}
+            onClick={() => pickTransport('Quic')}
+          >
+            QUIC
+          </button>
+        </div>
+      </div>
+      {value.transport === 'Quic' ? (
+        <p className="server-disclosure-note" role="status">
+          QUIC is a second option; it needs a server with the QUIC listener enabled. This client
+          still connects over WebSocket.
+        </p>
+      ) : null}
       {open ? (
         <div id={`${summaryId}-panel`} className="server-disclosure-panel">
           <div className="server-disclosure-row">
@@ -156,17 +198,6 @@ export function ServerForm({ value, onCommit }: ServerFormProps): ReactNode {
             </label>
           </div>
           <div className="server-disclosure-row">
-            <label className="field-label" htmlFor={transportId}>
-              Transport
-              <select
-                id={transportId}
-                value={draft.transport}
-                onChange={(event) => updateTransport(event.target.value as Transport)}
-              >
-                <option value="WebSocket">WebSocket</option>
-                <option value="Quic">QUIC</option>
-              </select>
-            </label>
             <label className="field-label" htmlFor={schemeId}>
               Scheme
               <select
@@ -195,12 +226,6 @@ export function ServerForm({ value, onCommit }: ServerFormProps): ReactNode {
               </select>
             </label>
           </div>
-          {draft.transport === 'Quic' ? (
-            <p className="server-disclosure-note" role="status">
-              QUIC is a second option; it needs a server with the QUIC listener enabled. This client
-              still connects over WebSocket.
-            </p>
-          ) : null}
           {error ? <p className="form-error">{error}</p> : null}
           <div className="server-disclosure-actions">
             <button type="button" className="btn btn-secondary" onClick={commit}>
@@ -211,6 +236,11 @@ export function ServerForm({ value, onCommit }: ServerFormProps): ReactNode {
       ) : null}
     </section>
   );
+}
+
+/** The transport's display name, shared by the summary line and the segmented control. */
+function transportLabel(transport: Transport): string {
+  return transport === 'Quic' ? 'QUIC' : 'WebSocket';
 }
 
 /** Picks a REST scheme that pairs with a transport scheme, the form's one explicit coupling. */
