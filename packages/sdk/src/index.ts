@@ -145,6 +145,18 @@ export { EconomyDomain } from './domains/economy.js';
 export { GamesDomain } from './domains/games.js';
 export type { SubmitOptions } from './domains/games.js';
 
+// --- the chain domain: JSON-RPC to a pinned public EVM network, not to the Migo server ---
+export { ChainClient, ChainError, AVALANCHE_MAINNET, FUJI_TESTNET } from './domains/chain.js';
+export type {
+  FeeEstimate,
+  GasSubject,
+  Network,
+  TrackOptions,
+  TrackResult,
+  TrackedOutcome,
+  TxState,
+} from './domains/chain.js';
+
 // --- the two end-to-end crypto policy layers ---
 export {
   SessionCrypto,
