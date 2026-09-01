@@ -7,10 +7,10 @@
 //! The transport is the one choice that is not behind the disclosure: a WebSocket/QUIC pair of
 //! selectable labels rides directly under the toggle and one click commits the swap immediately —
 //! a transport change never needs the host and port re-confirmed, so it never lives in the draft.
-//! QUIC is a real second option, not a placeholder: the choice persists and is validated the same
-//! as WebSocket. Connecting over it requires a server with the QUIC listener enabled, and this
-//! client's wire path is still WebSocket. The form accepts the choice and never blocks submit, so
-//! the user can save a QUIC-capable server and the rest of the surface (REST, captcha) proceeds.
+//! QUIC is a real second option, not a placeholder: the choice persists, is validated the same
+//! as WebSocket, and when picked the worker really does dial the QUIC listener (one stream, one
+//! session, length-prefixed frames) — falling back to WebSocket, said plainly in the connection
+//! state, when the server does not negotiate the bit. The form itself never blocks submit.
 //!
 //! The widget writes its accepted endpoint through a callback rather than mutating the caller's
 //! state directly. The caller decides whether the new value is accepted into the form state and
@@ -149,7 +149,7 @@ pub fn show(
         if value.transport == Transport::Quic {
             ui.label(
                 RichText::new(
-                    "QUIC is a second option; it needs a server with the QUIC listener enabled. This client still connects over WebSocket.",
+                    "QUIC is a second option; it needs a server with the QUIC listener enabled. If the server does not offer it, this client falls back to WebSocket and says so.",
                 )
                 .font(egui::FontId::proportional(font::TINY))
                 .color(colors.text_muted),

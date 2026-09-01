@@ -106,6 +106,7 @@ fn server_section(ui: &mut Ui, context: &mut Context<'_>) {
         Connection::Online => (colors.positive, "Connected"),
         Connection::Connecting => (colors.warning, "Connecting"),
         Connection::Offline => (colors.text_muted, "Offline"),
+        Connection::Fallback(_) => (colors.accent, "Connected"),
         Connection::Failed(_) => (colors.danger, "Disconnected"),
     };
     ui.horizontal(|ui| widgets::status_dot(ui, context.theme, color, label));

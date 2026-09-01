@@ -50,6 +50,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 # program to have a TLS stack that varies by host.
 tokio-tungstenite = { version = "0.30", features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "charset"] }
+# The QUIC transport (the optional second realtime path). quinn is rustls-only, like every other
+# TLS consumer in this graph — no OpenSSL anywhere. Same versions the server's listener uses, so
+# the two dependency graphs share one copy of the stack that must never fork.
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls", "log"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+anyhow = "1"
 futures-util = "0.3"
 
 serde = { version = "1", features = ["derive"] }

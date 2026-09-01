@@ -1221,3 +1221,28 @@ selama transport ter-commit adalah QUIC, dan baris ringkasan menyebut transport
 aktif. Tiga test baru untuk `swap_transport` (host publik → QUIC-TLS/HTTPS,
 loopback → QUIC/HTTP, balik ke WebSocket → pasangan host). Desktop
 fmt/clippy `-D warnings`/test (39) hijau.
+
+## 34. Desktop benar-benar terhubung via QUIC (v0.10.3)
+
+Sebelumnya memilih QUIC di desktop hanya mengubah label — wire-nya tetap
+WebSocket. Sekarang pilihan itu menunjuk wire sungguhan: `net/quic.rs`
+(quinn 0.11 + rustls TLS 1.3, versi sama persis dengan listener server)
+menghubungi endpoint terpilih — satu koneksi QUIC, satu stream dua-arah,
+satu sesi, framing length-prefix u32 BE per migo.md section 138. HELLO
+menambahkan bit QUIC (negosiasi = irisan, jadi bit harus diminta), WELCOME
+yang balik menentukan jalannya: bit QUIC ada → sesi hidup di QUIC
+(`Realtime::Quic`); bit tidak ada atau listener tak terjangkau → fallback
+bersih ke WebSocket default dengan status jujur
+`Connection::Fallback("Encrypted · WebSocket")` — server yang bekerja bukan
+layar error. Certificate verifier menerima leaf self-signed server dengan
+sengaja (sesi diautentikasi token di HELLO, postur yang sama dengan mesh
+federation); keep-alive 15 detik menjaga NAT tetap hangat; pembaca stream
+cancel-safe dengan buffer internal. Status pill di banner/chat/settings
+mengenali varian Fallback (hijau-teal "Connected", label pill menyebut
+transport). Catatan QUIC di form server diperbarui agar jujur: "jika server
+tidak menawarkannya, klien ini jatuh ke WebSocket dan mengatakannya." Test
+live baru `the_client_transport_completes_a_live_quic_handshake`
+(env-gated `MIGO_QUIC_LIVE_ADDR`) menjalankan panggilan yang sama dengan
+worker — handshake TLS 1.3 → stream → HELLO+bit QUIC → WELCOME dengan bit
+QUIC → round-trip PING terjawab — dan hijau terhadap produksi
+`152.53.102.150:18443`. Desktop fmt/clippy `-D warnings`/test (44) hijau.

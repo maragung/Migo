@@ -534,6 +534,7 @@ impl App {
                 Connection::Online => (colors_local.positive, "Connected"),
                 Connection::Connecting => (colors_local.warning, "Connecting"),
                 Connection::Offline => (colors_local.banner_ink, "Offline"),
+                Connection::Fallback(_) => (colors_local.accent, "Connected"),
                 Connection::Failed(_) => (colors_local.danger, "Disconnected"),
             }
         };

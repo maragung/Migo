@@ -425,6 +425,8 @@ fn connection_indicator<'a>(
         model::Connection::Online => (colors.positive, "Connected"),
         model::Connection::Connecting => (colors.warning, "Connecting"),
         model::Connection::Offline => (colors.text_muted, "Offline"),
+        // Live, but over the default transport rather than the picked one; the pill says both.
+        model::Connection::Fallback(_) => (colors.accent, "Connected"),
         model::Connection::Failed(_) => (colors.danger, "Disconnected"),
     }
 }

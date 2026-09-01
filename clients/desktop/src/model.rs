@@ -23,6 +23,11 @@ pub enum Connection {
     Online,
     /// The socket dropped or the handshake failed. Carries a message fit for a human.
     Failed(String),
+    /// The session is live, but over the default transport rather than the one the endpoint
+    /// names. A QUIC endpoint whose server did not negotiate the QUIC bit lands here and the
+    /// worker reconnects over WebSocket: a working server the client is speaking to on the
+    /// default path, said plainly instead of as an error.
+    Fallback(String),
 }
 
 impl Connection {
@@ -33,13 +38,14 @@ impl Connection {
             Self::Offline => "Offline",
             Self::Connecting => "Connecting",
             Self::Online => "Encrypted",
+            Self::Fallback(_) => "Encrypted · WebSocket",
             Self::Failed(_) => "Disconnected",
         }
     }
 
     #[must_use]
     pub fn is_online(&self) -> bool {
-        matches!(self, Self::Online)
+        matches!(self, Self::Online | Self::Fallback(_))
     }
 }
 

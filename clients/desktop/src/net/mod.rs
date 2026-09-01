@@ -26,6 +26,7 @@
 //! synchronised thundering herd.
 
 pub mod gateway;
+pub mod quic;
 pub mod rest;
 
 use std::collections::{HashMap, HashSet};
@@ -35,14 +36,15 @@ use std::time::Duration;
 
 use migo_core::{Id, OsRandom, Random, Timestamp};
 use migo_protocol::{
-    features, BadgesReq, ClientInfo, ConversationKind, EncryptionMode, FriendRespond, FriendTarget,
-    GiftCatalogueReq, GiftSend, InboxReq, LeaderboardReq, LedgerReq, MessageKind, NotificationAck,
-    Opcode, ProgressionReq, RelationshipListReq, RoomCreate, RoomJoinRequest, RoomLeaveRequest,
-    RoomListRequest, SearchReq, SubscribeRequest, SuggestReq, Topic, TopicKind, WalletReq,
+    features, BadgesReq, ClientInfo, ConversationKind, EncryptionMode, Frame, FriendRespond,
+    FriendTarget, GiftCatalogueReq, GiftSend, InboxReq, LeaderboardReq, LedgerReq, MessageKind,
+    NotificationAck, Opcode, ProgressionReq, RelationshipListReq, RoomCreate, RoomJoinRequest,
+    RoomLeaveRequest, RoomListRequest, SearchReq, SubscribeRequest, SuggestReq, Topic, TopicKind,
+    WalletReq,
 };
 use tokio::sync::mpsc;
 
-use crate::config::ServerEndpoint;
+use crate::config::{ServerEndpoint, Transport};
 use crate::crypto::content::{self, Content};
 use crate::crypto::envelope::Envelope;
 use crate::crypto::session::{DeviceKeys, SessionStore, ONE_TIME_PREKEY_COUNT};
@@ -52,6 +54,7 @@ use crate::model::{
     SessionRow, ToastKind,
 };
 use crate::net::gateway::{Gateway, GatewayError};
+use crate::net::quic::QuicGateway;
 use crate::net::rest::{CaptchaChallenge, CaptchaProof, DeviceRequest, Rest, RestError};
 use crate::vault::{self, SavedSession};
 
@@ -486,12 +489,73 @@ impl Retry {
     }
 }
 
+/// The live realtime connection, over whichever transport the session is riding.
+///
+/// Both bindings speak MWP frames with the same send/receive shape, so the worker treats them
+/// identically: an enum rather than a shared trait object, because the set is closed by the
+/// brief (WebSocket default, QUIC second option) and a dyn would be vocabulary with no third
+/// implementation behind it.
+enum Realtime {
+    WebSocket(Box<Gateway>),
+    Quic(QuicGateway),
+}
+
+impl Realtime {
+    /// A fresh correlation id, for a request whose reply must be matched to it.
+    fn correlate(&mut self) -> u32 {
+        match self {
+            Self::WebSocket(gateway) => gateway.correlate(),
+            Self::Quic(gateway) => gateway.correlate(),
+        }
+    }
+
+    /// Encodes and sends one frame on the live transport.
+    async fn send<T: migo_protocol::Encode>(
+        &mut self,
+        opcode: Opcode,
+        correlation: u32,
+        value: &T,
+    ) -> Result<(), GatewayError> {
+        match self {
+            Self::WebSocket(gateway) => gateway.send(opcode, correlation, value).await,
+            Self::Quic(gateway) => gateway
+                .send(opcode, correlation, value)
+                .await
+                .map_err(|_| GatewayError::Transport),
+        }
+    }
+
+    /// Reads the next protocol frame off the live transport.
+    async fn next_frame(&mut self) -> Result<Frame, GatewayError> {
+        match self {
+            Self::WebSocket(gateway) => gateway.next_frame().await,
+            Self::Quic(gateway) => gateway
+                .next_frame()
+                .await
+                .map_err(|_| GatewayError::Transport),
+        }
+    }
+
+    /// Closes politely, so the server retires the session rather than timing it out.
+    ///
+    /// Consuming `self` rather than taking `&mut self` mirrors both underlying gateways' own
+    /// close-by-ownership shape: a close is always the last thing that happens to a connection.
+    async fn close(self) {
+        match self {
+            // The WebSocket gateway is a large struct (the TLS stream state machine); boxing
+            // keeps the enum one pointer wide so the QUIC variant does not pay for its size.
+            Self::WebSocket(gateway) => gateway.close().await,
+            Self::Quic(mut gateway) => gateway.close().await,
+        }
+    }
+}
+
 /// The worker itself.
 struct Worker {
     sink: Sink,
     vault_path: PathBuf,
     signed: Option<Signed>,
-    gateway: Option<Gateway>,
+    gateway: Option<Realtime>,
     /// Armed while the gateway is down and a reconnect is still worth trying.
     retry: Option<Retry>,
     /// The room a leave is in flight for. The wire's acknowledgement names no room, so the
@@ -851,7 +915,6 @@ impl Worker {
         let Some(signed) = self.signed.as_ref() else {
             return;
         };
-        let url = crate::config::gateway_url(&signed.server);
         let hello = migo_protocol::Hello {
             protocol_version: migo_protocol::PROTOCOL_VERSION,
             client: ClientInfo {
@@ -875,11 +938,48 @@ impl Worker {
         };
 
         self.sink.send(Event::Connection(Connection::Connecting));
-        match Gateway::connect(&url, hello).await {
-            Ok((gateway, _welcome)) => {
-                self.gateway = Some(gateway);
+        // The endpoint names the transport. QUIC is the second option: tried first only when the
+        // user picked it, and a server that does not negotiate the bit is not an error — the
+        // worker falls back to the default WebSocket path and says so in the connection state.
+        let picked_quic = signed.server.transport == Transport::Quic;
+        let mut fell_back = false;
+        let connected = if picked_quic {
+            match quic::connect(&signed.server, hello.clone()).await {
+                Ok((gateway, welcome)) => {
+                    if welcome.features & features::QUIC == 0 {
+                        // The contract, not a fault: the negotiated set is the intersection, and
+                        // this node did not offer the bit. Close cleanly and take the default
+                        // path rather than stranding the session on a transport the server never
+                        // agreed to.
+                        let mut gateway = gateway;
+                        gateway.close().await;
+                        fell_back = true;
+                        self.connect_websocket(hello).await
+                    } else {
+                        Ok((Realtime::Quic(gateway), welcome))
+                    }
+                }
+                Err(_) => {
+                    // An unreachable QUIC listener on a QUIC-picked endpoint still has a working
+                    // default path; fall back rather than erroring a server the user can reach.
+                    fell_back = true;
+                    self.connect_websocket(hello).await
+                }
+            }
+        } else {
+            self.connect_websocket(hello).await
+        };
+        match connected {
+            Ok((realtime, _welcome)) => {
+                self.gateway = Some(realtime);
                 self.retry = None;
-                self.sink.send(Event::Connection(Connection::Online));
+                if fell_back {
+                    self.sink.send(Event::Connection(Connection::Fallback(
+                        "the server did not negotiate QUIC; connected over WebSocket".to_owned(),
+                    )));
+                } else {
+                    self.sink.send(Event::Connection(Connection::Online));
+                }
                 self.publish_keys().await;
                 // A fresh session holds no subscriptions, so the accounts this device watches for
                 // presence go back to "never subscribed" and the own-topic subscribe below is the
@@ -907,6 +1007,20 @@ impl Worker {
                     .send(Event::Connection(Connection::Failed(error.to_string())));
             }
         }
+    }
+
+    /// Opens the default WebSocket path. Shared by the non-QUIC endpoint and by the fallback from
+    /// a QUIC endpoint that did not negotiate the bit, so both build the same URL and HELLO.
+    async fn connect_websocket(
+        &self,
+        hello: migo_protocol::Hello,
+    ) -> Result<(Realtime, migo_protocol::Welcome), GatewayError> {
+        let Some(signed) = self.signed.as_ref() else {
+            return Err(GatewayError::Closed);
+        };
+        let url = crate::config::gateway_url(&signed.server);
+        let (gateway, welcome) = Gateway::connect(&url, hello).await?;
+        Ok((Realtime::WebSocket(Box::new(gateway)), welcome))
     }
 
     /// One scheduled reconnect attempt, run from the select loop.
