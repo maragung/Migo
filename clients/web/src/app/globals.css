@@ -638,19 +638,63 @@ main {
   overflow: hidden;
 }
 
-/* --- the app shell: a tab strip, a profile banner, the body --- */
+/* --- the app shell: two independent panels, a banner, the bodies --- */
 
 /*
- * The v0.9.0 shell (docs/design/new-client-ui.tsx) is a column: the teal tab strip, the orange
- * profile banner, the body — worn identically at every width, because the reference's mobile
- * view and PC view are the same model at different widths. The strip scrolls horizontally when
- * the open chats outgrow it; nothing hides at any size.
+ * The new-ui-02 shell (docs/design mockup `new-ui-02.tsx`) is a split: a left panel that owns
+ * the account's lists — its tab strip over the orange profile banner — and a right panel that
+ * runs on its own state, either its menu tabs or the open conversations. On a PC (≥1024px) the
+ * two sit side by side, the left at ~32%; below that they take turns, the left panel being the
+ * app until a conversation or a menu panel covers it. The `show-right` class is the layout's
+ * word for that takeover, and on a PC the media query below shows both panes whatever it says.
  */
 .app {
   display: flex;
   flex-direction: column;
   height: 100%;
   overflow: hidden;
+}
+.app-left,
+.app-right {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+/* The single-column story: exactly one pane is ever on screen below the PC breakpoint. */
+.app:not(.show-right) .app-right {
+  display: none;
+}
+.app.show-right .app-left {
+  display: none;
+}
+
+/* The PC split: both panes always on screen, the left panel about a third of the window. */
+@media (min-width: 1024px) {
+  .app {
+    flex-direction: row;
+  }
+  .app-left {
+    width: 32%;
+    min-width: 320px;
+    max-width: 520px;
+    border-right: 1px solid var(--border);
+  }
+  .app-right {
+    flex: 1 1 auto;
+  }
+  .app:not(.show-right) .app-right {
+    display: flex;
+  }
+  .app.show-right .app-left {
+    display: flex;
+  }
+  /* The menu pane's back control belongs to the single-column story alone. */
+  .pane-back {
+    display: none;
+  }
 }
 
 /* The strip: the reference's teal #00838F bar, chips rounded and scrollable. */
@@ -720,6 +764,162 @@ main {
 .tab-close:hover {
   opacity: 1;
   background: rgba(0, 0, 0, 0.22);
+}
+
+/*
+ * The right pane's two bars. The chat bar is the reference's slate-800 strip: the cyan
+ * "‹ Menu Panel" control, the chevrons that scroll the tab row, and one closable chip per open
+ * conversation. The menu bar is the pane's own teal header naming what it shows, with the
+ * mockup's small tab buttons — the same surface, worn in the two modes the right pane has.
+ */
+.chat-tab-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 6px;
+  background: #1e293b;
+  border-bottom: 1px solid #0f172a;
+  flex-shrink: 0;
+}
+.chat-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 8px;
+  background: #0e7490;
+  color: #ffffff;
+  font-size: var(--fs-meta);
+  font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.chat-back:hover {
+  background: #0891b2;
+}
+.chat-back:focus-visible {
+  outline: 1px solid var(--accent-bright);
+  outline-offset: 1px;
+}
+.chat-scroll {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #cbd5e1;
+  flex-shrink: 0;
+}
+.chat-scroll:hover {
+  background: #334155;
+  color: #ffffff;
+}
+.chat-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.chat-tabs::-webkit-scrollbar {
+  display: none;
+}
+.chat-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: none;
+  border-radius: 8px;
+  background: #334155;
+  color: #cbd5e1;
+  font-size: var(--fs-body-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition:
+    background var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+.chat-tab:hover {
+  background: #475569;
+  color: #ffffff;
+}
+.chat-tab:focus-visible {
+  outline: 1px solid var(--accent-bright);
+  outline-offset: 1px;
+}
+.chat-tab.active {
+  background: var(--accent-bright);
+  color: #ffffff;
+  font-weight: 700;
+}
+
+/* The menu bar: the teal header with the pane's own small tab buttons. */
+.panel-tab-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--nav-bg);
+  border-bottom: 1px solid color-mix(in srgb, var(--bg) 35%, var(--nav-bg));
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex-shrink: 0;
+}
+.panel-tab-bar::-webkit-scrollbar {
+  display: none;
+}
+.panel-tab-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #ffffff;
+  font-size: var(--fs-body-sm);
+  font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.panel-tab-title svg {
+  color: var(--gold);
+}
+.panel-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.panel-tab {
+  padding: 4px 10px;
+  border: none;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 20%, transparent);
+  color: color-mix(in srgb, #ffffff 82%, transparent);
+  font-size: var(--fs-meta);
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition:
+    background var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+.panel-tab:hover {
+  background: color-mix(in srgb, var(--bg) 32%, transparent);
+  color: #ffffff;
+}
+.panel-tab:focus-visible {
+  outline: 1px solid var(--accent-bright);
+  outline-offset: 1px;
+}
+.panel-tab.active {
+  background: var(--accent-bright);
+  color: #ffffff;
+  font-weight: 700;
 }
 
 /*
@@ -2522,18 +2722,16 @@ main {
   text-overflow: ellipsis;
 }
 
-/* --- responsive: the shell's three compositions --- */
+/* --- responsive: the shell at the widths it meets --- */
 
 /*
- * Mobile (<768px): the rail folds away, the header and the five-slot bottom bar fold out, and
- * the chats shell keeps its one-pane-at-a-time behaviour. With a thread open the global header
- * folds away too — the thread's own header, with its back button, is the only chrome that pane
- * needs.
+ * Mobile (<768px): the shell is the new-ui-02 single column — the left panel is the app, and a
+ * conversation or a menu panel covers it whole (`show-right`). The covering pane carries its own
+ * way back on its bar, so the thread's own back button stays hidden; on a phone the strip only
+ * tightens its padding so the chips that matter stay visible, and the banner's status line is
+ * the first thing to go when the width runs out.
  */
 @media (max-width: 768px) {
-  /* The shell is one model at every width; on a phone the strip only tightens its padding so
-   * the chips that matter stay visible, and the banner's status line is the first thing to go
-   * when the width runs out. */
   .tab-strip {
     gap: 4px;
     padding: 5px 6px;
@@ -2549,9 +2747,6 @@ main {
     border-left: none;
     border-right: none;
   }
-  .thread-header .back {
-    display: inline-grid;
-  }
   /* The header is crowded on a phone: the games control keeps its glyph and drops its word. */
   .games-label {
     display: none;
@@ -2562,12 +2757,12 @@ main {
 }
 
 /*
- * Tablet (768–1023px): the rail is already the icon rail at every width, so nothing changes
- * here — the tablet and the desktop differ only in how much room the body gets, which the grid
- * gives them without help.
+ * Tablet (768–1023px): still the single column — the PC split begins at 1024px, so a tablet
+ * wears the phone's one-pane-at-a-time model with the phone's room to spare. Nothing to do
+ * here; the pane switch is the same `show-right` handshake at every sub-PC width.
  */
 
-/* Desktop (≥1024px): the full rail. Wide monitors keep the content out of the margins. */
+/* Wide desktop (≥1440px): the panels may spread. The split itself is set at 1024px above. */
 @media (min-width: 1440px) {
   .panel {
     max-width: 760px;

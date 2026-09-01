@@ -1,27 +1,30 @@
 'use client';
 
 /**
- * The authenticated shell: one app, a tab strip, and every surface as a tab.
+ * The authenticated shell: a left panel of lists, a right panel that runs on its own.
  *
- * The v0.9.0 IA (docs/design/new-client-ui.tsx) is tab-based: five system tabs — Friends,
- * Chats, Rooms, Games, Feed — plus a closable chip for every open conversation and every
- * secondary panel. The tab list is session state, so it lives here rather than in the shell
- * component: a chat tab is added when a conversation opens and removed when its chip closes,
- * and the strip is just the drawing of that list.
+ * The new-ui-02 IA (docs/design mockup `new-ui-02.tsx`) is a split: the LEFT panel holds the
+ * account's lists behind its own tab state (`leftTab`), and the RIGHT panel holds either its
+ * menu tabs (`rightTab` — Feed, Games, Alerts, Search, TopUp, Profile, Settings) or the open
+ * conversations (`chatTabs` + `activeChat`). The two panels' states are independent on purpose:
+ * reading Games on the left never disturbs the thread open on the right, which is the model's
+ * whole offer. Below the PC breakpoint the panes take turns — `rightForced` remembers that a
+ * menu panel (not a chat) has taken over the phone's screen.
  *
  * The URL fragment stays the single source of truth for the open conversation (see
  * use-open-conversation.ts): every door into a thread — a conversation row, a room join, a
  * friend's row, a deep link — is `openConversation(id)`, and the fragment's effect below both
- * adds the chip and activates it. Closing a chip is the reverse: it removes the tab and, for
- * the conversation the fragment names, clears the fragment (so Back and the close button can
- * never disagree about what is open).
+ * adds the chip and activates it. "‹ Menu Panel" hides the thread without closing it — the
+ * fragment keeps naming the conversation, so the chip can bring it straight back — while
+ * closing a chip removes the tab and, for the conversation the fragment names, clears the
+ * fragment (so Back and the close button can never disagree about what is open).
  *
  * The rooms provider sits inside the conversations provider because the two lists describe the
  * same objects from two sides: a join notes the room in both, and the sidebar's room rows and
  * the thread header read the room record back out.
  *
  * The call manager wraps everything under the session gate — a call can start from a thread
- * header and must keep ringing across tab switches — and the overlay it feeds renders after
+ * header and must keep ringing across pane switches — and the overlay it feeds renders after
  * the app div so a live call sits over the whole shell, not inside one pane of it.
  */
 
@@ -32,7 +35,8 @@ import { ConversationKind } from '@migo/sdk';
 import type { ConversationSummary, Id } from '@migo/sdk';
 
 import { AppShell } from '@/components/app-shell.js';
-import type { PanelTab } from '@/components/app-shell.js';
+import type { PanelTab, SystemTab } from '@/components/app-shell.js';
+import type { RightTab } from '@/components/app-shell.js';
 import { FriendsPanel } from '@/components/friends-panel.js';
 import { GamesPanel } from '@/components/games-panel.js';
 import { NotificationsPanel } from '@/components/notifications-panel.js';
@@ -76,11 +80,12 @@ export default function ChatLayout({ children }: { children: ReactNode }): React
 }
 
 /**
- * The tab machine, inside the providers it reads.
+ * The pane machine, inside the providers it reads.
  *
- * `active` is one of: a system tab id, `chat:<conversationId>`, or `panel:<id>`. The open
- * conversations are held as a plain ordered id list; their chip titles are derived per render
- * from the conversation list (a room's name, a direct chat's peer) exactly the way the
+ * `activeChat` is the conversation the right pane shows, or null for its menu tabs; it follows
+ * the fragment but can be ducked out of ("‹ Menu Panel") without closing the conversation. The
+ * open conversations are held as a plain ordered id list; their chip titles are derived per
+ * render from the conversation list (a room's name, a direct chat's peer) exactly the way the
  * conversation rows derive theirs, so a tab always says what the row would.
  */
 function TabbedShell({ children }: { children: ReactNode }): ReactNode {
@@ -90,31 +95,29 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
   const rooms = useRooms();
 
   const [chatTabs, setChatTabs] = useState<Id[]>([]);
-  const [panelTabs, setPanelTabs] = useState<PanelTab[]>([]);
+  const [activeChat, setActiveChat] = useState<Id | null>(null);
   // A session opens on its conversations: the messenger's own first screen.
-  const [active, setActive] = useState<string>('chats');
+  const [leftTab, setLeftTab] = useState<SystemTab>('chats');
+  const [rightTab, setRightTab] = useState<RightTab>('feed');
+  // A menu panel covering the phone: the right pane's claim on a single-column screen.
+  const [rightForced, setRightForced] = useState(false);
 
-  // The fragment effect: every door into a thread lands here, whatever opened it.
+  // The fragment effect: every door into a thread lands here, whatever opened it. Clearing the
+  // fragment (Back, the last chip closing) lands here too, and ducks the right pane to its menu.
   useEffect(() => {
     if (openId === null) {
+      setActiveChat(null);
       return;
     }
     setChatTabs((prev) => (prev.includes(openId) ? prev : [...prev, openId]));
-    setActive(`chat:${openId}`);
+    setActiveChat(openId);
   }, [openId]);
-
-  // Clearing the fragment (Back, or the last chip closing) deactivates the thread surface.
-  useEffect(() => {
-    if (openId === null && active.startsWith('chat:')) {
-      setActive('chats');
-    }
-  }, [openId, active]);
 
   const selectChat = useCallback(
     (conversationId: Id): void => {
       if (conversationId === openId) {
-        // The thread is already the open one; the fragment is set, so only the active tab lags.
-        setActive(`chat:${conversationId}`);
+        // The thread is already the open one; only the right pane's mode lags behind the chip.
+        setActiveChat(conversationId);
         return;
       }
       openConversation(conversationId);
@@ -126,42 +129,41 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
     (conversationId: Id): void => {
       setChatTabs((prev) => prev.filter((id) => id !== conversationId));
       if (conversationId === openId) {
-        // Closing the open thread: fall through to the most recent remaining one, else the list.
+        // Closing the open thread: fall through to the most recent remaining one, else the menu.
         const remaining = chatTabs.filter((id) => id !== conversationId);
         const next = remaining.length > 0 ? remaining[remaining.length - 1] : undefined;
         if (next !== undefined) {
           openConversation(next);
         } else {
+          setActiveChat(null);
           closeConversation();
         }
-        return;
-      }
-      if (active === `chat:${conversationId}`) {
-        setActive('chats');
       }
     },
-    [chatTabs, openId, active],
+    [chatTabs, openId],
   );
 
-  const openPanel = useCallback((panel: PanelTab): void => {
-    setPanelTabs((prev) => (prev.includes(panel) ? prev : [...prev, panel]));
-    setActive(`panel:${panel}`);
+  // "‹ Menu Panel": the right pane keeps its chips but shows its menu tabs; on a phone the left
+  // panel takes the screen back.
+  const backToMenu = useCallback((): void => {
+    setActiveChat(null);
+    setRightForced(false);
   }, []);
 
-  const closePanel = useCallback(
-    (panel: PanelTab): void => {
-      setPanelTabs((prev) => prev.filter((id) => id !== panel));
-      if (active === `panel:${panel}`) {
-        setActive('chats');
-      }
-    },
-    [active],
-  );
+  const openPanel = useCallback((panel: PanelTab): void => {
+    setRightTab(panel);
+    setRightForced(true);
+    setActiveChat(null);
+  }, []);
 
-  // The cross-section navigation every deep surface shares: system tabs switch directly, the
-  // secondary panels arrive as tabs of their own.
+  const selectRightTab = useCallback((tab: RightTab): void => {
+    setRightTab(tab);
+  }, []);
+
+  // The cross-section navigation every deep surface shares: the system tabs drive the left
+  // panel, the secondary panels arrive in the right one.
   const navigate = useCallback(
-    (tab: 'friends' | 'chats' | 'rooms' | 'games' | 'feed' | PanelTab): void => {
+    (tab: SystemTab | PanelTab): void => {
       if (
         tab === 'friends' ||
         tab === 'chats' ||
@@ -169,7 +171,7 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
         tab === 'games' ||
         tab === 'feed'
       ) {
-        setActive(tab);
+        setLeftTab(tab);
         return;
       }
       openPanel(tab);
@@ -198,26 +200,8 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
     title: chipTitleOf(id, items, rooms, accountId, profiles),
   }));
 
-  const section = (() => {
-    if (active.startsWith('chat:') && openId !== null) {
-      return <main className="thread-area">{children}</main>;
-    }
-    if (active.startsWith('panel:')) {
-      const panel = active.slice('panel:'.length) as PanelTab;
-      switch (panel) {
-        case 'notifications':
-          return <NotificationsPanel />;
-        case 'search':
-          return <SearchPanel onOpenConversation={openInTab} />;
-        case 'wallet':
-          return <WalletPanel />;
-        case 'profile':
-          return <ProfilePanel onOpenSettings={() => openPanel('settings')} />;
-        case 'settings':
-          return <SettingsPanel />;
-      }
-    }
-    switch (active) {
+  const leftContent = (() => {
+    switch (leftTab) {
       case 'friends':
         return <FriendsPanel onOpenConversation={openInTab} />;
       case 'rooms':
@@ -233,23 +217,45 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
           </div>
         );
     }
-    return null;
+  })();
+
+  const rightContent = (() => {
+    switch (rightTab) {
+      case 'feed':
+        return <SpacePanel onOpenConversation={openInTab} />;
+      case 'games':
+        return <GamesPanel />;
+      case 'notifications':
+        return <NotificationsPanel />;
+      case 'search':
+        return <SearchPanel onOpenConversation={openInTab} />;
+      case 'wallet':
+        return <WalletPanel />;
+      case 'profile':
+        return <ProfilePanel onOpenSettings={() => openPanel('settings')} />;
+      case 'settings':
+        return <SettingsPanel />;
+    }
   })();
 
   return (
     <SectionNavProvider navigate={navigate}>
       <AppShell
-        active={active}
+        leftTab={leftTab}
+        leftContent={leftContent}
+        rightTab={rightTab}
+        rightContent={rightContent}
+        activeChat={activeChat}
         chatTabs={chatChips}
-        panelTabs={panelTabs}
-        onSelectSystem={(tab) => setActive(tab)}
+        showRight={activeChat !== null || rightForced}
+        onSelectSystem={setLeftTab}
+        onSelectRightTab={selectRightTab}
         onSelectChat={selectChat}
-        onSelectPanel={(panel) => setActive(`panel:${panel}`)}
         onCloseChat={closeChat}
-        onClosePanel={closePanel}
+        onBackToMenu={backToMenu}
         onOpenPanel={openPanel}
       >
-        {section}
+        {children}
       </AppShell>
       <CallOverlay />
     </SectionNavProvider>
