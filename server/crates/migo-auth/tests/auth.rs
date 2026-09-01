@@ -129,6 +129,7 @@ fn registration(username: &str) -> Registration {
         device: DeviceClaim::new(Platform::Web, "Firefox on Linux"),
         captcha: None,
         server: None,
+        identity_public_key: None,
     }
 }
 
@@ -1212,4 +1213,485 @@ async fn a_short_token_key_fails_at_construction() {
         Box::new(SeededRandom::new(1)) as Box<dyn Random>,
     )
     .expect_err("a key below the minimum is refused where somebody is watching");
+}
+
+// ---------------------------------------------------------------------------
+// The ML-DSA identity ceremonies (brief section 182)
+// ---------------------------------------------------------------------------
+
+/// A root secret and the two keys a client derives from it: the account's
+/// identity key and one device's credential.
+///
+/// The roots are fixed bytes rather than generated, so a signature that stops
+/// verifying is a change in the verification path and not a change in the
+/// inputs.
+struct RootSet {
+    identity: migo_account::identity::IdentityKey,
+    credential: migo_account::identity::DeviceCredential,
+}
+
+impl RootSet {
+    /// The root whose bytes are `seed`, with its device credential drawn from
+    /// its own `DEVICE` domain rather than the raw seed.
+    fn new(seed: u8, credential_seed: u8) -> Self {
+        let root = migo_account::MigoRoot::from_bytes(&[seed; 32]).expect("a 32-byte root");
+        let mut random = SeededRandom::new(u64::from(credential_seed));
+        Self {
+            identity: migo_account::identity::IdentityKey::from_root(&root),
+            credential: migo_account::identity::DeviceCredential::generate(&mut random),
+        }
+    }
+}
+
+/// A request context from the `n`-th documentation network, so one test's
+/// register/challenge/answer sequence does not share an anonymous bucket.
+fn ceremony_context(millis: i64, network: u8) -> RequestContext {
+    RequestContext::at(Timestamp::from_millis(millis))
+        .from_ip(format!("198.51.{network}.9").parse::<IpAddr>().unwrap())
+}
+
+/// Registers `username` carrying `set`'s keys: the identity key the account
+/// will verify against, and the device credential its first device holds.
+async fn register_with_root(harness: &Harness, username: &str, set: &RootSet) -> Grant {
+    let mut request = registration(username);
+    request.identity_public_key = Some(set.identity.public_key().to_vec());
+    request.device.credential_public_key = Some(set.credential.public_key().to_vec());
+    harness
+        .auth
+        .register(request, &ceremony_context(1_000, 4))
+        .await
+        .expect("a root-secret registration succeeds")
+}
+
+/// Asks for a login challenge for `identifier` on `device_id`.
+async fn login_challenge(
+    harness: &Harness,
+    identifier: &str,
+    device_id: Id,
+    millis: i64,
+    network: u8,
+) -> migo_auth::ChallengeView {
+    harness
+        .auth
+        .issue_identity_challenge(
+            migo_auth::IdentityChallengeRequest {
+                scope: migo_auth::IdentityChallengeScope::Login {
+                    identifier: identifier.to_string(),
+                    device_id,
+                },
+                device: DeviceClaim::new(Platform::Web, "unused"),
+            },
+            &ceremony_context(millis, network),
+        )
+        .await
+        .expect("a login challenge is issued")
+}
+
+#[tokio::test]
+async fn an_identity_login_opens_a_usable_session() {
+    let harness = Harness::new();
+    let set = RootSet::new(0x11, 0x22);
+    let grant = register_with_root(&harness, "vera", &set).await;
+
+    let view = login_challenge(&harness, "vera", grant.device_id, 2_000, 5).await;
+    assert!(!view.payload.is_empty(), "there are bytes to sign");
+    assert!(
+        view.expires_at.as_unix_ms() > 2_000,
+        "the challenge is answerable for some time after it is issued"
+    );
+    let answer = migo_auth::ChallengeAnswer {
+        challenge_id: view.challenge_id,
+        identity_signature: set.identity.sign_login(&view.payload).unwrap().to_vec(),
+        device_signature: set.credential.sign_login(&view.payload).unwrap().to_vec(),
+    };
+    let signed_in = harness
+        .auth
+        .answer_identity_challenge(answer, &ceremony_context(3_000, 6))
+        .await
+        .expect("both signatures verify");
+
+    identify(&harness.auth, &signed_in, 4_000)
+        .await
+        .expect("the session the ceremony opened is real");
+    assert_eq!(signed_in.account_id, grant.account_id);
+}
+
+#[tokio::test]
+async fn an_unknown_identifier_gets_the_same_challenge_and_the_same_refusal() {
+    let harness = Harness::new();
+    let stranger = RootSet::new(0x33, 0x44);
+
+    // No account "nobody" exists. The issue must still hand back a
+    // well-formed challenge, and the answer must fail with the same code a
+    // real-but-expired challenge would — never INVALID_CREDENTIALS, which is
+    // reserved for a signature that did not verify and would tell the prober
+    // the account was never there.
+    let view = login_challenge(
+        &harness,
+        "nobody",
+        Id::from_bytes([0xde, 0xad, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        2_000,
+        5,
+    )
+    .await;
+    assert!(!view.payload.is_empty());
+    let answer = migo_auth::ChallengeAnswer {
+        challenge_id: view.challenge_id,
+        identity_signature: stranger
+            .identity
+            .sign_login(&view.payload)
+            .unwrap()
+            .to_vec(),
+        device_signature: stranger
+            .credential
+            .sign_login(&view.payload)
+            .unwrap()
+            .to_vec(),
+    };
+    let error = harness
+        .auth
+        .answer_identity_challenge(answer, &ceremony_context(3_000, 6))
+        .await
+        .expect_err("a fake challenge is never answerable");
+    assert_eq!(error.code(), codes::CHALLENGE_INVALID);
+}
+
+#[tokio::test]
+async fn a_signature_by_the_wrong_key_is_invalid_credentials() {
+    let harness = Harness::new();
+    let set = RootSet::new(0x55, 0x66);
+    let other = RootSet::new(0x77, 0x88);
+    let grant = register_with_root(&harness, "vera", &set).await;
+
+    let view = login_challenge(&harness, "vera", grant.device_id, 2_000, 5).await;
+    let answer = migo_auth::ChallengeAnswer {
+        challenge_id: view.challenge_id,
+        identity_signature: other.identity.sign_login(&view.payload).unwrap().to_vec(),
+        device_signature: set.credential.sign_login(&view.payload).unwrap().to_vec(),
+    };
+    let error = harness
+        .auth
+        .answer_identity_challenge(answer, &ceremony_context(3_000, 6))
+        .await
+        .expect_err("the identity key is not the account's");
+    assert_eq!(error.code(), codes::INVALID_CREDENTIALS);
+}
+
+#[tokio::test]
+async fn a_login_challenge_answers_exactly_once() {
+    let harness = Harness::new();
+    let set = RootSet::new(0x99, 0xaa);
+    let grant = register_with_root(&harness, "vera", &set).await;
+
+    let view = login_challenge(&harness, "vera", grant.device_id, 2_000, 5).await;
+    let build_answer = || migo_auth::ChallengeAnswer {
+        challenge_id: view.challenge_id,
+        identity_signature: set.identity.sign_login(&view.payload).unwrap().to_vec(),
+        device_signature: set.credential.sign_login(&view.payload).unwrap().to_vec(),
+    };
+    harness
+        .auth
+        .answer_identity_challenge(build_answer(), &ceremony_context(3_000, 6))
+        .await
+        .expect("the first answer is accepted");
+    let replay = harness
+        .auth
+        .answer_identity_challenge(build_answer(), &ceremony_context(4_000, 7))
+        .await
+        .expect_err("a captured answer is worth nothing the second time");
+    assert_eq!(replay.code(), codes::CHALLENGE_INVALID);
+}
+
+#[tokio::test]
+async fn a_rotated_identity_is_retired_and_its_sessions_survive() {
+    let harness = Harness::new();
+    let set = RootSet::new(0xbb, 0xcc);
+    let successor = RootSet::new(0xdd, 0xee);
+    let grant = register_with_root(&harness, "vera", &set).await;
+    let identity = identify(&harness.auth, &grant, 2_000)
+        .await
+        .expect("signed in");
+
+    let view = harness
+        .auth
+        .issue_rotation_challenge(&identity, &ceremony_context(3_000, 5))
+        .await
+        .expect("an authenticated device may rotate");
+    harness
+        .auth
+        .rotate_identity(
+            &identity,
+            migo_auth::RotationAnswer {
+                challenge_id: view.challenge_id,
+                signature: set.identity.sign_rotate(&view.payload).unwrap().to_vec(),
+                new_public_key: successor.identity.public_key().to_vec(),
+            },
+            &ceremony_context(4_000, 6),
+        )
+        .await
+        .expect("the current key authorises its successor");
+
+    // Rotation is not a logout: the session opened under the old key keeps
+    // working, but only the successor can open the next one.
+    identify(&harness.auth, &grant, 5_000)
+        .await
+        .expect("existing sessions survive a rotation");
+    let next = login_challenge(&harness, "vera", grant.device_id, 6_000, 7).await;
+    let answer = migo_auth::ChallengeAnswer {
+        challenge_id: next.challenge_id,
+        identity_signature: set.identity.sign_login(&next.payload).unwrap().to_vec(),
+        device_signature: set.credential.sign_login(&next.payload).unwrap().to_vec(),
+    };
+    let error = harness
+        .auth
+        .answer_identity_challenge(answer, &ceremony_context(7_000, 8))
+        .await
+        .expect_err("the retired key no longer speaks for the account");
+    assert_eq!(error.code(), codes::INVALID_CREDENTIALS);
+
+    let again = login_challenge(&harness, "vera", grant.device_id, 8_000, 9).await;
+    let answer = migo_auth::ChallengeAnswer {
+        challenge_id: again.challenge_id,
+        identity_signature: successor
+            .identity
+            .sign_login(&again.payload)
+            .unwrap()
+            .to_vec(),
+        device_signature: set.credential.sign_login(&again.payload).unwrap().to_vec(),
+    };
+    harness
+        .auth
+        .answer_identity_challenge(answer, &ceremony_context(9_000, 10))
+        .await
+        .expect("the successor key is the account's identity now");
+
+    // Rotating to the key already in force is a conflict, not a no-op: a
+    // client that thinks it has a new key when it does not is a bug to surface.
+    let view = harness
+        .auth
+        .issue_rotation_challenge(&identity, &ceremony_context(10_000, 11))
+        .await
+        .expect("the device still rotates");
+    let error = harness
+        .auth
+        .rotate_identity(
+            &identity,
+            migo_auth::RotationAnswer {
+                challenge_id: view.challenge_id,
+                signature: successor
+                    .identity
+                    .sign_rotate(&view.payload)
+                    .unwrap()
+                    .to_vec(),
+                new_public_key: successor.identity.public_key().to_vec(),
+            },
+            &ceremony_context(11_000, 12),
+        )
+        .await
+        .expect_err("the same key twice is not a rotation");
+    assert_eq!(error.code(), codes::CONFLICT);
+}
+
+#[tokio::test]
+async fn an_add_device_challenge_restores_the_account_onto_a_new_device() {
+    let harness = Harness::new();
+    let set = RootSet::new(0x01, 0x02);
+    let new_device = RootSet::new(0x03, 0x04);
+    let grant = register_with_root(&harness, "vera", &set).await;
+
+    // The .migo container carries the account id; the new device describes
+    // itself and brings a credential it has not yet registered anywhere.
+    let view = harness
+        .auth
+        .issue_identity_challenge(
+            migo_auth::IdentityChallengeRequest {
+                scope: migo_auth::IdentityChallengeScope::AddDevice {
+                    account_id: grant.account_id,
+                },
+                device: DeviceClaim::new(Platform::Android, "Pixel 8"),
+            },
+            &ceremony_context(2_000, 5),
+        )
+        .await
+        .expect("the account id names a restorable account");
+    assert_ne!(
+        view.device_id, grant.device_id,
+        "the challenge binds a new device row"
+    );
+
+    let restored = harness
+        .auth
+        .answer_add_device(
+            migo_auth::AddDeviceAnswer {
+                challenge_id: view.challenge_id,
+                identity_signature: set.identity.sign_login(&view.payload).unwrap().to_vec(),
+                device_public_key: new_device.credential.public_key().to_vec(),
+                device_signature: new_device
+                    .credential
+                    .sign_login(&view.payload)
+                    .unwrap()
+                    .to_vec(),
+            },
+            &ceremony_context(3_000, 6),
+        )
+        .await
+        .expect("the root secret restores the account");
+    identify(&harness.auth, &restored, 4_000)
+        .await
+        .expect("the restored device holds a live session");
+
+    let identity = identify(&harness.auth, &restored, 4_000)
+        .await
+        .expect("signed in");
+    let list = harness
+        .auth
+        .devices(&identity, &ceremony_context(5_000, 7))
+        .await
+        .expect("the device list reads");
+    assert_eq!(list.len(), 2, "the pending row became a real device");
+    let added = list
+        .iter()
+        .find(|device| device.device_id == restored.device_id)
+        .expect("the new device is listed");
+    assert_eq!(added.status, "active");
+    assert!(
+        added.has_credential,
+        "the credential that signed is registered"
+    );
+    assert!(added.is_current, "the list is told which device is asking");
+}
+
+#[tokio::test]
+async fn a_password_account_can_adopt_its_root_secret_once() {
+    let harness = Harness::new();
+    let set = RootSet::new(0x05, 0x06);
+    let grant = harness.register_at("vera", 1_000).await;
+    let identity = identify(&harness.auth, &grant, 2_000)
+        .await
+        .expect("signed in");
+    let publish =
+        |identity_key: Vec<u8>, device_key: Option<Vec<u8>>| migo_auth::IdentityPublication {
+            identity_public_key: identity_key,
+            device_public_key: device_key,
+        };
+
+    // The first publication installs the key; the identical retry is fine;
+    // a different key is a rotation done through the wrong door.
+    harness
+        .auth
+        .publish_identity_key(
+            &identity,
+            publish(
+                set.identity.public_key().to_vec(),
+                Some(set.credential.public_key().to_vec()),
+            ),
+            &ceremony_context(3_000, 5),
+        )
+        .await
+        .expect("the legacy account adopts its key");
+    harness
+        .auth
+        .publish_identity_key(
+            &identity,
+            publish(
+                set.identity.public_key().to_vec(),
+                Some(set.credential.public_key().to_vec()),
+            ),
+            &ceremony_context(4_000, 6),
+        )
+        .await
+        .expect("an identical retry is the idempotent case");
+    let other = RootSet::new(0x07, 0x08);
+    let error = harness
+        .auth
+        .publish_identity_key(
+            &identity,
+            publish(other.identity.public_key().to_vec(), None),
+            &ceremony_context(5_000, 7),
+        )
+        .await
+        .expect_err("a different key is a conflict");
+    assert_eq!(error.code(), codes::CONFLICT);
+
+    // With both halves published, the ceremony works on the old account.
+    let view = login_challenge(&harness, "vera", grant.device_id, 6_000, 8).await;
+    let answer = migo_auth::ChallengeAnswer {
+        challenge_id: view.challenge_id,
+        identity_signature: set.identity.sign_login(&view.payload).unwrap().to_vec(),
+        device_signature: set.credential.sign_login(&view.payload).unwrap().to_vec(),
+    };
+    harness
+        .auth
+        .answer_identity_challenge(answer, &ceremony_context(7_000, 9))
+        .await
+        .expect("the adopted key is the account's identity");
+}
+
+#[tokio::test]
+async fn wallets_register_idempotently_and_archive_quietly() {
+    let harness = Harness::new();
+    let grant = harness.register_at("vera", 1_000).await;
+    let identity = identify(&harness.auth, &grant, 2_000)
+        .await
+        .expect("signed in");
+    let register = |label: &str| migo_auth::WalletRegistration {
+        address: "0xAb8482F84dD2dDec36209d36B85D89Aa3D5f14c8".to_string(),
+        chain_type: "evm".to_string(),
+        label: Some(label.to_string()),
+        derivation_index: 0,
+    };
+
+    let first = harness
+        .auth
+        .register_wallet(&identity, register("main"), &ceremony_context(3_000, 5))
+        .await
+        .expect("an address registers");
+    assert_eq!(first.address, "ab8482f84dd2ddec36209d36b85d89aa3d5f14c8");
+    assert_eq!(first.status, "active");
+
+    // The restore case: the same address on the same chain is the same
+    // wallet, whatever id was generated along the way.
+    let again = harness
+        .auth
+        .register_wallet(&identity, register("renamed"), &ceremony_context(4_000, 6))
+        .await
+        .expect("a re-registration is idempotent");
+    assert_eq!(again.wallet_id, first.wallet_id);
+    assert_eq!(again.label.as_deref(), Some("renamed"));
+
+    let list = harness
+        .auth
+        .wallets(&identity, &ceremony_context(5_000, 7))
+        .await
+        .expect("the wallet list reads");
+    assert_eq!(list.len(), 1, "one address, one wallet");
+
+    harness
+        .auth
+        .archive_wallet(&identity, first.wallet_id, &ceremony_context(6_000, 8))
+        .await
+        .expect("archiving your own wallet works");
+    harness
+        .auth
+        .archive_wallet(&identity, first.wallet_id, &ceremony_context(7_000, 9))
+        .await
+        .expect("archiving twice is quiet");
+    harness
+        .auth
+        .archive_wallet(
+            &identity,
+            Id::from_bytes([0xbe, 0xef, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            &ceremony_context(8_000, 10),
+        )
+        .await
+        .expect("an unknown id is quiet too");
+
+    let list = harness
+        .auth
+        .wallets(&identity, &ceremony_context(9_000, 11))
+        .await
+        .expect("the wallet list still reads");
+    assert_eq!(list.len(), 1, "the archived wallet stays in the history");
+    assert_eq!(list[0].status, "archived", "but it is marked as such");
+    assert!(list[0].archived_at.is_some(), "with the time it happened");
 }

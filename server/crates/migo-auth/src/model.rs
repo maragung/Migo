@@ -116,6 +116,10 @@ pub struct DeviceClaim {
     pub os_version: Option<String>,
     /// Model, if the client chooses to disclose it.
     pub device_model: Option<String>,
+    /// The device credential's ML-DSA-65 public key, when the client is
+    /// registering with a root secret and has a credential to introduce.
+    /// `None` on every legacy client.
+    pub credential_public_key: Option<Vec<u8>>,
 }
 
 impl DeviceClaim {
@@ -129,6 +133,7 @@ impl DeviceClaim {
             app_version: String::new(),
             os_version: None,
             device_model: None,
+            credential_public_key: None,
         }
     }
 
@@ -156,6 +161,20 @@ pub const MAX_APP_VERSION_CHARS: usize = 32;
 /// Longest OS version or model string.
 pub const MAX_DEVICE_DETAIL_CHARS: usize = 60;
 
+/// How long an ML-DSA challenge stays answerable. Five minutes (brief
+/// section 182): long enough for a human to find their `.migo` container,
+/// short enough that a captured payload is worth almost nothing.
+pub const IDENTITY_CHALLENGE_TTL_MS: i64 = 5 * 60 * 1_000;
+
+/// Longest wallet address, as hex with no prefix.
+pub const MAX_WALLET_ADDRESS_CHARS: usize = 40;
+
+/// Longest chain type label.
+pub const MAX_CHAIN_TYPE_CHARS: usize = 16;
+
+/// Longest wallet label.
+pub const MAX_WALLET_LABEL_CHARS: usize = 60;
+
 /// A new account.
 #[derive(Debug)]
 pub struct Registration {
@@ -175,6 +194,11 @@ pub struct Registration {
     pub country: Option<String>,
     /// The device this registration comes from.
     pub device: DeviceClaim,
+    /// The account identity's ML-DSA-65 public key, when the client is
+    /// registering with a root secret. The account is created with identity
+    /// login available from its first breath; `None` registers the
+    /// password-only account every legacy client still makes.
+    pub identity_public_key: Option<Vec<u8>>,
     /// Captcha proof, when the gate is engaged. `None` is rejected as
     /// `CAPTCHA_REQUIRED`; a present proof is consumed on the way in so
     /// the same `challenge_id` cannot be replayed across two attempts.
@@ -244,6 +268,244 @@ pub struct Refresh {
     /// different device than the one it was minted for is either a bug or a theft, and
     /// there is no way to tell which, so it is treated as the worse case.
     pub device_id: Id,
+}
+
+// --- the ML-DSA identity ceremonies (brief section 182) ---------------------
+
+/// Which ceremony a challenge is being requested for, and what the client
+/// has to prove to get a real one.
+///
+/// The two anonymous scopes are bound to facts a stranger cannot guess: a
+/// login challenge names a device id the account already trusts, and an
+/// add-device challenge names the account id a `.migo` container carries.
+/// An identifier alone — a username somebody typed — is never enough to
+/// learn whether an account exists, which is the property the fake
+/// challenge in the service exists to preserve.
+#[derive(Debug)]
+pub enum IdentityChallengeScope {
+    /// Sign in on a device the account already trusts.
+    Login {
+        /// Username, email, or phone — the same shapes sign-in accepts.
+        identifier: String,
+        /// The registered device asking.
+        device_id: Id,
+    },
+    /// Restore the account onto a new device from a `.migo` container.
+    AddDevice {
+        /// The account id from the container's metadata. Not the username:
+        /// an account id is unguessable, a username is not.
+        account_id: Id,
+    },
+}
+
+/// A request for an ML-DSA challenge.
+#[derive(Debug)]
+pub struct IdentityChallengeRequest {
+    /// What the challenge will authorize.
+    pub scope: IdentityChallengeScope,
+    /// Claims about the new device. Read for `AddDevice` only — a login
+    /// challenge is bound to a device that already exists.
+    pub device: DeviceClaim,
+}
+
+/// What a client gets back when it asks for a challenge.
+///
+/// The payload is the whole ceremony: the canonical MSE bytes of the
+/// protocol's `MlDsaChallenge`, signed exactly as received and never
+/// re-encoded by any client. The other fields are conveniences a client
+/// would otherwise have to decode the payload for.
+#[derive(Debug)]
+pub struct ChallengeView {
+    /// The canonical bytes to sign.
+    pub payload: Vec<u8>,
+    /// The challenge's id, echoed back in the answer.
+    pub challenge_id: Id,
+    /// The device the challenge is bound to. For add-device, the pending
+    /// device row that becomes the new device on success.
+    pub device_id: Id,
+    /// When the challenge stops being answerable.
+    pub expires_at: Timestamp,
+}
+
+/// An answer to a login challenge: both halves of the ceremony.
+///
+/// The identity signature proves the account (the root secret's identity
+/// domain); the device signature proves the device (the random per-device
+/// seed). Neither alone opens a session, which is why a root secret that
+/// leaks from a backup is not enough to impersonate a device that is still
+/// registered.
+#[derive(Debug)]
+pub struct ChallengeAnswer {
+    /// The challenge being answered.
+    pub challenge_id: Id,
+    /// Signature by the account identity key under the login context.
+    pub identity_signature: Vec<u8>,
+    /// Signature by the device credential under the device context.
+    pub device_signature: Vec<u8>,
+}
+
+/// An answer to an add-device challenge: the account's proof and the new
+/// device's introduction.
+#[derive(Debug)]
+pub struct AddDeviceAnswer {
+    /// The challenge being answered.
+    pub challenge_id: Id,
+    /// Signature by the account identity key under the login context.
+    pub identity_signature: Vec<u8>,
+    /// The new device's credential public key.
+    pub device_public_key: Vec<u8>,
+    /// Signature by the new device's credential under the device context,
+    /// proving the client holds the private half it is registering.
+    pub device_signature: Vec<u8>,
+}
+
+/// An answer to a rotation challenge.
+#[derive(Debug)]
+pub struct RotationAnswer {
+    /// The challenge being answered.
+    pub challenge_id: Id,
+    /// Signature by the *current* identity key under the rotate context:
+    /// only the key being retired can authorise its successor.
+    pub signature: Vec<u8>,
+    /// The successor's public key.
+    pub new_public_key: Vec<u8>,
+}
+
+/// The public halves an authenticated client is publishing on its own
+/// account.
+///
+/// This is the legacy-upgrade door (brief section 182, migration of
+/// password-era accounts): a client that just signed in with a password,
+/// built a root secret locally, and derived its identity key registers the
+/// public halves here. Idempotent by design — a retry sends the same keys
+/// and reconciles to the rows that already exist.
+#[derive(Debug)]
+pub struct IdentityPublication {
+    /// The account identity's ML-DSA-65 public key, 1952 bytes.
+    pub identity_public_key: Vec<u8>,
+    /// The caller's device credential public key, when it has one to
+    /// register. `None` leaves the device row's credential alone.
+    pub device_public_key: Option<Vec<u8>>,
+}
+
+/// One device of the caller's account, for their own security screen.
+#[derive(Clone, Debug)]
+pub struct DeviceSummary {
+    /// Which device, the id a revoke call names.
+    pub device_id: Id,
+    /// Name to show, as the client reported it.
+    pub display_name: String,
+    /// Claimed platform.
+    pub platform: Platform,
+    /// `active`, `pending`, or `revoked`.
+    pub status: String,
+    /// When the device was registered.
+    pub created_at: Timestamp,
+    /// When the device last connected.
+    pub last_seen_at: Timestamp,
+    /// Whether this device can take part in the ML-DSA login ceremony.
+    pub has_credential: bool,
+    /// Whether this is the device asking.
+    pub is_current: bool,
+}
+
+impl serde::Serialize for DeviceSummary {
+    /// Hand-written for the same reason as `SessionSummary`'s: `Platform` is
+    /// not serialisable, and the timestamps cross the wire as milliseconds.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("DeviceSummary", 8)?;
+        s.serialize_field("device_id", &self.device_id)?;
+        s.serialize_field("display_name", &self.display_name)?;
+        s.serialize_field("platform", self.platform.as_str())?;
+        s.serialize_field("status", &self.status)?;
+        s.serialize_field("created_at_ms", &self.created_at.as_unix_ms())?;
+        s.serialize_field("last_seen_at_ms", &self.last_seen_at.as_unix_ms())?;
+        s.serialize_field("has_credential", &self.has_credential)?;
+        s.serialize_field("is_current", &self.is_current)?;
+        s.end()
+    }
+}
+
+/// A wallet being registered on the caller's account.
+///
+/// Address and metadata only. The private key behind it never leaves the
+/// device, and the server would not know what to do with it if it arrived.
+#[derive(Debug)]
+pub struct WalletRegistration {
+    /// The EVM address. `0x`-prefixed and checksummed forms are accepted
+    /// and normalised to the canonical lowercase-hex form.
+    pub address: String,
+    /// `"evm"` today.
+    pub chain_type: String,
+    /// User-chosen label, if any.
+    pub label: Option<String>,
+    /// The `i` in `m/44'/60'/0'/0/i`, so a restore re-registers in order.
+    pub derivation_index: i32,
+}
+
+/// One registered wallet, for the caller's own wallet list.
+#[derive(Clone, Debug)]
+pub struct WalletSummary {
+    /// Which wallet, the id an archive call names.
+    pub wallet_id: Id,
+    /// Lowercase hex, no prefix — the canonical stored form.
+    pub address: String,
+    /// `"evm"` today.
+    pub chain_type: String,
+    /// User-chosen label, if any.
+    pub label: Option<String>,
+    /// The derivation index that produced this address.
+    pub derivation_index: i32,
+    /// `active` or `archived`.
+    pub status: String,
+    /// When the wallet was first registered.
+    pub created_at: Timestamp,
+    /// When the user archived it, if they did.
+    pub archived_at: Option<Timestamp>,
+}
+
+impl serde::Serialize for WalletSummary {
+    /// Timestamps as milliseconds, matching every other summary the API
+    /// returns.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("WalletSummary", 8)?;
+        s.serialize_field("wallet_id", &self.wallet_id)?;
+        s.serialize_field("address", &self.address)?;
+        s.serialize_field("chain_type", &self.chain_type)?;
+        if let Some(label) = &self.label {
+            s.serialize_field("label", label)?;
+        }
+        s.serialize_field("derivation_index", &self.derivation_index)?;
+        s.serialize_field("status", &self.status)?;
+        s.serialize_field("created_at_ms", &self.created_at.as_unix_ms())?;
+        if let Some(at) = self.archived_at {
+            s.serialize_field("archived_at_ms", &at.as_unix_ms())?;
+        }
+        s.end()
+    }
+}
+
+impl From<migo_store::traits::WalletRow> for WalletSummary {
+    /// The store row carries the status as an enum this crate's callers do
+    /// not see; the summary carries it as the one word a client renders.
+    fn from(row: migo_store::traits::WalletRow) -> Self {
+        Self {
+            wallet_id: row.wallet_id,
+            address: row.address,
+            chain_type: row.chain_type,
+            label: row.label,
+            derivation_index: row.derivation_index,
+            status: match row.status {
+                migo_store::model::WalletStatus::Active => "active",
+                migo_store::model::WalletStatus::Archived => "archived",
+            }
+            .to_string(),
+            created_at: row.created_at,
+            archived_at: row.archived_at,
+        }
+    }
 }
 
 /// What a successful authentication yields.

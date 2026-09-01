@@ -39,7 +39,9 @@ use migo_core::metrics::Registry;
 use migo_core::{Id, Random, Result, Secret, SeededRandom, Timestamp};
 use migo_protocol::{codes, NotificationKind, Platform};
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
-use migo_store::model::{notification_kind, NewAccount, NewDevice, Notification, PushProvider};
+use migo_store::model::{
+    notification_kind, DeviceStatus, NewAccount, NewDevice, Notification, PushProvider,
+};
 use migo_store::traits::{AccountStore, DeviceStore, NotifyStore};
 use migo_store::MemoryStore;
 
@@ -272,6 +274,8 @@ impl Harness {
                 app_version: "1.0.0".to_string(),
                 os_version: None,
                 device_model: None,
+                status: DeviceStatus::Active,
+                public_credential: None,
                 created_at: ts(SECOND),
             })
             .await

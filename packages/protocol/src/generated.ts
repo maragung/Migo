@@ -151,6 +151,8 @@ export const CODE = {
   CAPTCHA_REQUIRED: 1311,
   /** Recovery token does not exist or is no longer valid */
   RECOVERY_NOT_FOUND: 1312,
+  /** Identity challenge is unknown, expired, already used, or bound to another ceremony */
+  CHALLENGE_INVALID: 1313,
   RATE_LIMITED: 1400,
   QUOTA_EXCEEDED: 1401,
   SLOW_MODE_ACTIVE: 1402,
@@ -232,6 +234,7 @@ export const ERROR_SYMBOLS: Record<number, string> = {
   1310: 'CAPTCHA_EXPIRED',
   1311: 'CAPTCHA_REQUIRED',
   1312: 'RECOVERY_NOT_FOUND',
+  1313: 'CHALLENGE_INVALID',
   1400: 'RATE_LIMITED',
   1401: 'QUOTA_EXCEEDED',
   1402: 'SLOW_MODE_ACTIVE',

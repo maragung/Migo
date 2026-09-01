@@ -529,6 +529,91 @@ mod tests {
         ) -> migo_core::Result<()> {
             unimplemented!("the broadcast test never confirms a recovery flow")
         }
+        // --- the identity ceremonies: never reached from the gateway ----------------
+
+        async fn issue_identity_challenge(
+            &self,
+            _request: migo_auth::IdentityChallengeRequest,
+            _context: &migo_auth::RequestContext,
+        ) -> migo_core::Result<migo_auth::ChallengeView> {
+            unimplemented!("the broadcast test never issues an identity challenge")
+        }
+
+        async fn answer_identity_challenge(
+            &self,
+            _answer: migo_auth::ChallengeAnswer,
+            _context: &migo_auth::RequestContext,
+        ) -> migo_core::Result<Grant> {
+            unimplemented!("the broadcast test never answers an identity challenge")
+        }
+
+        async fn answer_add_device(
+            &self,
+            _answer: migo_auth::AddDeviceAnswer,
+            _context: &migo_auth::RequestContext,
+        ) -> migo_core::Result<Grant> {
+            unimplemented!("the broadcast test never answers an add-device challenge")
+        }
+
+        async fn issue_rotation_challenge(
+            &self,
+            _identity: &Identity,
+            _context: &migo_auth::RequestContext,
+        ) -> migo_core::Result<migo_auth::ChallengeView> {
+            unimplemented!("the broadcast test never issues a rotation challenge")
+        }
+
+        async fn rotate_identity(
+            &self,
+            _identity: &Identity,
+            _answer: migo_auth::RotationAnswer,
+            _context: &migo_auth::RequestContext,
+        ) -> migo_core::Result<()> {
+            unimplemented!("the broadcast test never rotates an identity")
+        }
+
+        async fn publish_identity_key(
+            &self,
+            _identity: &Identity,
+            _publication: migo_auth::IdentityPublication,
+            _context: &migo_auth::RequestContext,
+        ) -> migo_core::Result<()> {
+            unimplemented!("the broadcast test never publishes an identity key")
+        }
+
+        async fn devices(
+            &self,
+            _identity: &Identity,
+            _context: &migo_auth::RequestContext,
+        ) -> migo_core::Result<Vec<migo_auth::DeviceSummary>> {
+            unimplemented!("the broadcast test never lists devices")
+        }
+
+        async fn register_wallet(
+            &self,
+            _identity: &Identity,
+            _registration: migo_auth::WalletRegistration,
+            _context: &migo_auth::RequestContext,
+        ) -> migo_core::Result<migo_auth::WalletSummary> {
+            unimplemented!("the broadcast test never registers a wallet")
+        }
+
+        async fn wallets(
+            &self,
+            _identity: &Identity,
+            _context: &migo_auth::RequestContext,
+        ) -> migo_core::Result<Vec<migo_auth::WalletSummary>> {
+            unimplemented!("the broadcast test never lists wallets")
+        }
+
+        async fn archive_wallet(
+            &self,
+            _identity: &Identity,
+            _wallet_id: Id,
+            _context: &migo_auth::RequestContext,
+        ) -> migo_core::Result<()> {
+            unimplemented!("the broadcast test never archives a wallet")
+        }
     }
 
     /// A gateway over the real limiter and registry and an authenticator nothing reaches, mirroring

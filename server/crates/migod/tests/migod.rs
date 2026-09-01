@@ -635,6 +635,7 @@ async fn registered_account(app: &migod::App, username: &str) -> Id {
                 device: DeviceClaim::new(Platform::Web, "integration test"),
                 captcha: None,
                 server: None,
+                identity_public_key: None,
             },
             &RequestContext::at(Timestamp::from_millis(1)),
         )

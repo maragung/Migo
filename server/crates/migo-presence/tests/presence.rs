@@ -29,7 +29,7 @@ use migo_protocol::{
     codes, BandwidthMode, Platform, PresenceEvent, PresenceState, PresenceUpdate, RelationshipKind,
 };
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
-use migo_store::model::{NewAccount, NewDevice, Profile, Relationship, Visibility};
+use migo_store::model::{DeviceStatus, NewAccount, NewDevice, Profile, Relationship, Visibility};
 use migo_store::traits::{AccountStore, DeviceStore};
 use migo_store::MemoryStore;
 
@@ -143,6 +143,8 @@ impl Harness {
                 app_version: "0.1.0".to_string(),
                 os_version: Some("14".to_string()),
                 device_model: Some("Pixel 8".to_string()),
+                status: DeviceStatus::Active,
+                public_credential: None,
                 created_at: ts(SECOND),
             })
             .await

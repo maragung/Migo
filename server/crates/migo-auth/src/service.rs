@@ -47,19 +47,27 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use migo_account::identity::{
+    verify_identity, CONTEXT_LOGIN, CONTEXT_LOGIN_DEVICE, CONTEXT_ROTATE,
+};
+use migo_account::{IDENTITY_ALGORITHM, KEY_VERSION_ONE, PUBLIC_KEY_LEN};
 use migo_captcha::CaptchaProof;
 use migo_core::config::{AuthConfig, Config};
 use migo_core::metrics::Registry;
 use migo_core::{Error, Id, OsRandom, Random, Result, Secret, Timestamp};
 use migo_crypto::{MacKey, LABEL_RECOVERY};
-use migo_protocol::{codes, fault, Opcode, Platform};
+use migo_protocol::{
+    codes, fault, to_bytes, MlDsaChallenge, MlDsaPurpose, Opcode, Platform, PROTOCOL_VERSION,
+};
 use migo_ratelimit::{BucketKey, RateLimiter, Scope, SharedRateLimiter, TrustTier};
 use migo_store::model::{
-    Account, AccountStatus, AuditActorKind, AuditEntry, AuditTargetKind, Device, NewAccount,
-    NewDevice, NewSession, Profile, RevokeReason, Session, Visibility,
+    Account, AccountStatus, AuditActorKind, AuditEntry, AuditTargetKind, Device, DeviceStatus,
+    IdentityKeyStatus, NewAccount, NewDevice, NewSession, Profile, RevokeReason, Session,
+    Visibility, WalletStatus,
 };
 use migo_store::traits::{
-    AccountStore, DeviceStore, RecoveryRow, RecoveryStore, SafetyStore, SessionStore,
+    AccountStore, ChallengeStore, DeviceStore, IdentityKeyRow, IdentityStore, LoginChallengeRow,
+    RecoveryRow, RecoveryStore, SafetyStore, SessionStore, WalletRow, WalletStore,
 };
 use migo_store::{SharedStore, Store};
 use parking_lot::Mutex;
@@ -70,8 +78,12 @@ use crate::credential;
 use crate::lockout::{error_locked, LockoutConfig, LockoutGate};
 use crate::metrics::{Meters, RefreshOutcome, SignInOutcome};
 use crate::model::{
-    truncate_chars, DeviceClaim, Grant, Refresh, Registration, RequestContext, SessionSummary,
-    SignIn, MAX_APP_VERSION_CHARS, MAX_DEVICE_DETAIL_CHARS, MAX_DEVICE_NAME_CHARS,
+    truncate_chars, AddDeviceAnswer, ChallengeAnswer, ChallengeView, DeviceClaim, DeviceSummary,
+    Grant, IdentityChallengeRequest, IdentityChallengeScope, IdentityPublication, Refresh,
+    Registration, RequestContext, RotationAnswer, SessionSummary, SignIn, WalletRegistration,
+    WalletSummary, IDENTITY_CHALLENGE_TTL_MS, MAX_APP_VERSION_CHARS, MAX_CHAIN_TYPE_CHARS,
+    MAX_DEVICE_DETAIL_CHARS, MAX_DEVICE_NAME_CHARS, MAX_WALLET_ADDRESS_CHARS,
+    MAX_WALLET_LABEL_CHARS,
 };
 use crate::tier;
 use crate::token::{Claims, Signer};
@@ -204,7 +216,15 @@ pub fn open(
 
 impl<S, L> Auth<S, L>
 where
-    S: AccountStore + DeviceStore + SessionStore + SafetyStore + RecoveryStore + ?Sized,
+    S: AccountStore
+        + DeviceStore
+        + SessionStore
+        + SafetyStore
+        + RecoveryStore
+        + IdentityStore
+        + ChallengeStore
+        + WalletStore
+        + ?Sized,
     L: RateLimiter + ?Sized,
 {
     /// Builds an authenticator over a concrete or erased store and limiter.
@@ -544,6 +564,16 @@ where
         claim: &DeviceClaim,
         now: Timestamp,
     ) -> Result<Device> {
+        // A credential of the wrong length is a client that is wrong, not an
+        // input to trim: the length is part of what ML-DSA-65 is.
+        if let Some(key) = claim.credential_public_key.as_ref() {
+            if key.len() != PUBLIC_KEY_LEN {
+                return Err(fault::validation(
+                    "device.credential_public_key",
+                    &format!("must be {PUBLIC_KEY_LEN} bytes of encoded ML-DSA-65"),
+                ));
+            }
+        }
         if let Some(device_id) = claim.device_id {
             if let Some(existing) = self.store.device_by_id(device_id).await? {
                 if existing.account_id != account.account_id {
@@ -594,6 +624,15 @@ where
                     truncate_chars(&mut value, MAX_DEVICE_DETAIL_CHARS);
                     value
                 }),
+                // The ordinary path: the device is registered by a call that
+                // has already authenticated the account. The add-device
+                // ceremony is the one caller that registers a pending row
+                // and activates it on challenge consumption.
+                status: DeviceStatus::Active,
+                // Introduced alongside the registration when the client
+                // registered with a root secret; `None` for every legacy
+                // client. Validated before it gets here.
+                public_credential: claim.credential_public_key.clone(),
                 created_at: now,
             })
             .await
@@ -742,6 +781,149 @@ where
             gate.record_success(ip);
         }
     }
+
+    // --- the ML-DSA identity ceremonies ----------------------------------------
+
+    /// Looks an account up by whatever the sign-in form accepts: email,
+    /// phone, or username, folded. The one lookup every identifier-facing
+    /// path (password sign-in, recovery, challenge issue) shares, so the
+    /// three cannot drift into accepting different shapes.
+    async fn find_account(&self, identifier: &str) -> Result<Option<Account>> {
+        let identifier = identifier.trim();
+        if credential::looks_like_email(identifier) {
+            match credential::email(identifier) {
+                Ok(email) => Ok(self.store.account_by_email(&email).await?),
+                // A malformed identifier is not a validation error to the caller:
+                // telling somebody their email is badly formed is one bit more
+                // than "that account does not exist".
+                Err(_) => Ok(None),
+            }
+        } else if let Ok(phone) = credential::phone(identifier) {
+            Ok(self.store.account_by_phone(&phone).await?)
+        } else {
+            let folded = identifier.trim_start_matches('@').to_ascii_lowercase();
+            Ok(self.store.account_by_username(&folded).await?)
+        }
+    }
+
+    /// Builds and stores one challenge, bound to an account, a device, and
+    /// a purpose. The payload is the canonical MSE encoding the client will
+    /// sign, stored exactly as issued so the answer is verified against the
+    /// bytes that were sent, not against a re-encoding of them.
+    async fn mint_challenge(
+        &self,
+        account_id: Id,
+        device_id: Id,
+        purpose: MlDsaPurpose,
+        now: Timestamp,
+    ) -> Result<ChallengeView> {
+        let challenge_id = self.new_id(now);
+        let expires_at = now.saturating_add_millis(IDENTITY_CHALLENGE_TTL_MS);
+        let challenge = MlDsaChallenge {
+            protocol_version: PROTOCOL_VERSION,
+            purpose,
+            account_id,
+            device_id,
+            challenge_id,
+            // From the injected generator, never from anything the client
+            // controls: a nonce the client could predict is a challenge the
+            // client could pre-sign.
+            nonce: self.draw_nonce(),
+            issued_at: now,
+            expires_at,
+            server_region: self.signer.region().to_string(),
+        };
+        let payload = to_bytes(&challenge)
+            .map_err(|error| fault::internal(format!("a challenge could not be encoded: {error}")))?
+            .to_vec();
+        self.store
+            .put_login_challenge(LoginChallengeRow {
+                challenge_id,
+                account_id,
+                device_id,
+                purpose,
+                payload: payload.clone(),
+                expires_at,
+                consumed_at: None,
+                created_at: now,
+            })
+            .await?;
+        Ok(ChallengeView {
+            payload,
+            challenge_id,
+            device_id,
+            expires_at,
+        })
+    }
+
+    /// Builds a challenge that is never stored and never answerable.
+    ///
+    /// The enumeration defence for challenge issue: an unknown identifier, a
+    /// device that is not the account's, or an account that may not sign in
+    /// all produce this — a well-formed challenge over random ids, costing
+    /// what a real one costs to build. The client signs it, answers it, and
+    /// is told `CHALLENGE_INVALID`, exactly what an expired real challenge
+    /// would have said. Nothing along the way reveals which case it was.
+    fn fake_challenge(&self, now: Timestamp) -> Result<ChallengeView> {
+        let challenge = MlDsaChallenge {
+            protocol_version: PROTOCOL_VERSION,
+            purpose: MlDsaPurpose::Login,
+            account_id: self.new_id(now),
+            device_id: self.new_id(now),
+            challenge_id: self.new_id(now),
+            nonce: self.draw_nonce(),
+            issued_at: now,
+            expires_at: now.saturating_add_millis(IDENTITY_CHALLENGE_TTL_MS),
+            server_region: self.signer.region().to_string(),
+        };
+        let expires_at = challenge.expires_at;
+        let payload = to_bytes(&challenge)
+            .map_err(|error| fault::internal(format!("a challenge could not be encoded: {error}")))?
+            .to_vec();
+        Ok(ChallengeView {
+            payload,
+            challenge_id: challenge.challenge_id,
+            device_id: challenge.device_id,
+            expires_at,
+        })
+    }
+
+    /// Thirty-two bytes from the injected generator.
+    fn draw_nonce(&self) -> Vec<u8> {
+        let mut nonce = vec![0u8; 32];
+        let mut random = self.random.lock();
+        random.fill_bytes(&mut nonce);
+        nonce
+    }
+
+    /// Reads a live challenge and insists on its purpose, so a challenge
+    /// issued for one ceremony can never be answered for another even
+    /// before the purpose-mixed signature check would have caught it.
+    async fn challenge_for(
+        &self,
+        challenge_id: Id,
+        purpose: MlDsaPurpose,
+        now: Timestamp,
+    ) -> Result<Option<LoginChallengeRow>> {
+        Ok(self
+            .store
+            .get_login_challenge(challenge_id, now)
+            .await?
+            .filter(|row| row.purpose == purpose))
+    }
+
+    /// Verifies one ML-DSA signature, collapsing every failure into the
+    /// same refusal a wrong password produces. A wrong length, an
+    /// undecodable key, and a forged signature are one answer, so the
+    /// endpoint is not an oracle for which half failed.
+    fn check_signature(
+        public_key: &[u8],
+        payload: &[u8],
+        context: &[u8],
+        signature: &[u8],
+    ) -> std::result::Result<(), ()> {
+        verify_identity(public_key, payload, context, signature).map_err(|_| ())
+    }
 }
 
 impl<S: ?Sized, L: ?Sized> fmt::Debug for Auth<S, L> {
@@ -816,6 +998,17 @@ fn suspended(status: AccountStatus) -> Error {
     fault::error(codes::ACCOUNT_SUSPENDED, why)
 }
 
+/// The one refusal every unusable challenge produces: unknown, expired,
+/// already consumed, or issued for another ceremony. Deliberately a single
+/// code across all four (brief section 182) — the difference between them
+/// is exactly what a replay probe wants to learn.
+fn challenge_invalid() -> Error {
+    fault::error(
+        codes::CHALLENGE_INVALID,
+        "the challenge is unknown, expired, already used, or bound to another ceremony",
+    )
+}
+
 /// Seconds to milliseconds, without overflowing on a configured absurdity.
 fn seconds_to_millis(seconds: u64) -> i64 {
     i64::try_from(seconds.saturating_mul(1_000)).unwrap_or(i64::MAX)
@@ -863,6 +1056,9 @@ where
         + SessionStore
         + SafetyStore
         + RecoveryStore
+        + IdentityStore
+        + ChallengeStore
+        + WalletStore
         + ?Sized
         + Send
         + Sync
@@ -914,6 +1110,17 @@ where
             Some(username.folded()),
         )
         .inspect_err(|_| self.meters.registration_refused())?;
+        // Validated before the account exists: a registration that cannot
+        // complete must not leave half an account behind.
+        if let Some(public_key) = request.identity_public_key.as_ref() {
+            if public_key.len() != PUBLIC_KEY_LEN {
+                self.meters.registration_refused();
+                return Err(fault::validation(
+                    "identity_public_key",
+                    &format!("must be {PUBLIC_KEY_LEN} bytes of encoded ML-DSA-65"),
+                ));
+            }
+        }
 
         let now = context.now;
         let password_hash = self
@@ -964,6 +1171,36 @@ where
                 updated_at: now,
             })
             .await?;
+
+        // An account born with a root secret publishes its identity key up
+        // front, so the challenge login works from the first breath (brief
+        // section 182). A password-only registration — every legacy client —
+        // skips this and can publish later through the upgrade door.
+        if let Some(public_key) = request.identity_public_key.as_ref() {
+            let key_id = self.new_id(now);
+            self.store
+                .put_identity_key(IdentityKeyRow {
+                    key_id,
+                    account_id,
+                    algorithm: IDENTITY_ALGORITHM.to_string(),
+                    key_version: i32::from(KEY_VERSION_ONE),
+                    public_key: public_key.clone(),
+                    status: IdentityKeyStatus::Active,
+                    created_at: now,
+                    revoked_at: None,
+                })
+                .await?;
+            self.audit(
+                Some(account_id),
+                AuditActorKind::User,
+                "account.identity.created",
+                AuditTargetKind::IdentityKey,
+                Some(key_id),
+                format!("identity key v{KEY_VERSION_ONE} registered at account creation"),
+                context,
+            )
+            .await;
+        }
 
         let tier = tier::of_account(&account, now);
         let device = self.resolve_device(&account, &request.device, now).await?;
@@ -1033,26 +1270,7 @@ where
         }
 
         let identifier = request.identifier.trim();
-        let found = if credential::looks_like_email(identifier) {
-            match credential::email(identifier) {
-                Ok(email) => self.store.account_by_email(&email).await?,
-                // A malformed identifier is not a validation error to the caller: telling
-                // somebody their email is badly formed is one bit more than "those
-                // credentials are wrong", and the client already validates the field.
-                Err(_) => None,
-            }
-        } else if let Ok(phone) = credential::phone(identifier) {
-            // The sign-in form's label says "Username, email, or phone" and the brief
-            // accepts phone-registered accounts at the same door. The lookup runs after
-            // the email branch so an `@` in the identifier never falls through to a
-            // phone-shaped value, and the malformed-phone case (and anything else
-            // that is not email or a real E.164) skips silently to the placeholder
-            // verifier below.
-            self.store.account_by_phone(&phone).await?
-        } else {
-            let folded = identifier.trim_start_matches('@').to_ascii_lowercase();
-            self.store.account_by_username(&folded).await?
-        };
+        let found = self.find_account(identifier).await?;
 
         let Some(account) = found else {
             // Verify against the placeholder so this path costs what the real one costs.
@@ -1632,17 +1850,7 @@ where
         // shape is identical.
         let now = context.now;
         let identifier = identifier.trim();
-        let account = if credential::looks_like_email(identifier) {
-            match credential::email(identifier) {
-                Ok(email) => self.store.account_by_email(&email).await?,
-                Err(_) => None,
-            }
-        } else if let Ok(phone) = credential::phone(identifier) {
-            self.store.account_by_phone(&phone).await?
-        } else {
-            let folded = identifier.trim_start_matches('@').to_ascii_lowercase();
-            self.store.account_by_username(&folded).await?
-        };
+        let account = self.find_account(identifier).await?;
         // A short-lived fake account id is used when the identifier does
         // not resolve; it never escapes, never persists, and keeps the
         // work the recovery flow does for a real account (mint a row,
@@ -1752,6 +1960,708 @@ where
             context,
         )
         .await;
+        Ok(())
+    }
+
+    // --- the ML-DSA identity ceremonies (brief section 182) ------------------
+
+    async fn issue_identity_challenge(
+        &self,
+        request: IdentityChallengeRequest,
+        context: &RequestContext,
+    ) -> Result<ChallengeView> {
+        let now = context.now;
+        // Add-device writes two rows (the pending device and the challenge),
+        // so it carries the price of a registration; a login challenge writes
+        // one and carries the price of a sign-in attempt.
+        let price = match request.scope {
+            IdentityChallengeScope::AddDevice { .. } => self.prices.register,
+            IdentityChallengeScope::Login { .. } => self.prices.attempt,
+        };
+        self.charge_stranger(context, Opcode::Authenticate, price)
+            .await?;
+        match request.scope {
+            IdentityChallengeScope::Login {
+                identifier,
+                device_id,
+            } => {
+                // The challenge is real only when the identifier names an
+                // account that may sign in AND the device is that account's,
+                // active and credentialed. Anything else gets the fake — the
+                // same bytes, the same shape, no way to tell which happened.
+                let account = self.find_account(&identifier).await?;
+                let trusted = match &account {
+                    Some(account) if account.status.can_sign_in() => {
+                        match self.store.device_by_id(device_id).await? {
+                            Some(device) => {
+                                device.account_id == account.account_id
+                                    && device.status.may_authenticate()
+                                    && device.public_credential.is_some()
+                            }
+                            None => false,
+                        }
+                    }
+                    _ => false,
+                };
+                match (account, trusted) {
+                    (Some(account), true) => {
+                        self.mint_challenge(account.account_id, device_id, MlDsaPurpose::Login, now)
+                            .await
+                    }
+                    _ => self.fake_challenge(now),
+                }
+            }
+            IdentityChallengeScope::AddDevice { account_id } => {
+                // The account id comes from the .migo container, not from a
+                // username somebody typed, so a stranger probing for accounts
+                // has nothing to probe with. The device limit is enforced at
+                // issue time: a restore onto an account that is already full
+                // is refused here rather than at the answer, after the rows
+                // were written.
+                let account = self.store.account_by_id(account_id).await?;
+                let restorable = match &account {
+                    Some(account) if account.status.can_sign_in() => {
+                        let live = self.store.devices_for_account(account.account_id).await?;
+                        (live.len() as u32) < self.config.max_devices_per_user
+                    }
+                    _ => false,
+                };
+                let Some(account) = account.filter(|_| restorable) else {
+                    return self.fake_challenge(now);
+                };
+                // The pending row exists only to bind the challenge: it is
+                // invisible in the device list and cannot authenticate until
+                // the answer activates it.
+                let device_id = self.new_id(now);
+                let mut display_name = request.device.display_name.trim().to_string();
+                if display_name.is_empty() {
+                    display_name = default_device_name(request.device.platform).to_string();
+                }
+                truncate_chars(&mut display_name, MAX_DEVICE_NAME_CHARS);
+                let mut app_version = request.device.app_version.trim().to_string();
+                truncate_chars(&mut app_version, MAX_APP_VERSION_CHARS);
+                self.store
+                    .register_device(NewDevice {
+                        device_id,
+                        account_id: account.account_id,
+                        platform: request.device.platform,
+                        display_name,
+                        app_version,
+                        os_version: request.device.os_version.clone().map(|mut value| {
+                            truncate_chars(&mut value, MAX_DEVICE_DETAIL_CHARS);
+                            value
+                        }),
+                        device_model: request.device.device_model.clone().map(|mut value| {
+                            truncate_chars(&mut value, MAX_DEVICE_DETAIL_CHARS);
+                            value
+                        }),
+                        status: DeviceStatus::Pending,
+                        // Set on the answer, when the presented key has been
+                        // proven by a signature made with it.
+                        public_credential: None,
+                        created_at: now,
+                    })
+                    .await?;
+                self.mint_challenge(account.account_id, device_id, MlDsaPurpose::AddDevice, now)
+                    .await
+            }
+        }
+    }
+
+    async fn answer_identity_challenge(
+        &self,
+        answer: ChallengeAnswer,
+        context: &RequestContext,
+    ) -> Result<Grant> {
+        self.charge_stranger(context, Opcode::Authenticate, self.prices.attempt)
+            .await?;
+        let now = context.now;
+        let Some(row) = self
+            .challenge_for(answer.challenge_id, MlDsaPurpose::Login, now)
+            .await?
+        else {
+            return Err(challenge_invalid());
+        };
+
+        // Signatures first, consumption second: a wrong signature does not
+        // burn the challenge, so a client that mangled the payload gets its
+        // retry without a fresh ceremony. The consume is atomic in the
+        // store, so a race between two answers still admits exactly one.
+        let Some(account) = self.store.account_by_id(row.account_id).await? else {
+            self.charge_penalty(context, Opcode::Authenticate).await;
+            return Err(fault::invalid_credentials());
+        };
+        let Some(key) = self.store.active_identity_key(account.account_id).await? else {
+            self.charge_penalty(context, Opcode::Authenticate).await;
+            return Err(fault::invalid_credentials());
+        };
+        let device = self.store.device_by_id(row.device_id).await?;
+        let device = match device {
+            Some(device)
+                if device.account_id == account.account_id
+                    && device.status.may_authenticate()
+                    && device.public_credential.is_some() =>
+            {
+                device
+            }
+            _ => {
+                self.charge_penalty(context, Opcode::Authenticate).await;
+                self.audit(
+                    Some(row.account_id),
+                    AuditActorKind::System,
+                    "auth.identity.login_failed",
+                    AuditTargetKind::Device,
+                    Some(row.device_id),
+                    "challenge answer refused: the device check failed".to_string(),
+                    context,
+                )
+                .await;
+                return Err(fault::invalid_credentials());
+            }
+        };
+        let credential = device.public_credential.clone().unwrap_or_default();
+        if Self::check_signature(
+            &key.public_key,
+            &row.payload,
+            CONTEXT_LOGIN,
+            &answer.identity_signature,
+        )
+        .is_err()
+            || Self::check_signature(
+                &credential,
+                &row.payload,
+                CONTEXT_LOGIN_DEVICE,
+                &answer.device_signature,
+            )
+            .is_err()
+        {
+            self.charge_penalty(context, Opcode::Authenticate).await;
+            self.audit(
+                Some(row.account_id),
+                AuditActorKind::System,
+                "auth.identity.login_failed",
+                AuditTargetKind::Device,
+                Some(row.device_id),
+                "challenge answer refused: a signature did not verify".to_string(),
+                context,
+            )
+            .await;
+            return Err(fault::invalid_credentials());
+        }
+
+        // Both halves proven. Now the challenge is spent — the answer that
+        // lost a concurrent race is told exactly what an expired one is.
+        if self
+            .store
+            .consume_login_challenge(answer.challenge_id, now)
+            .await?
+            .is_none()
+        {
+            return Err(challenge_invalid());
+        }
+        // Only now, with both signatures proven, is it safe to say anything
+        // specific about the account — the same rule password sign-in obeys.
+        if !account.status.can_sign_in() {
+            return Err(suspended(account.status));
+        }
+
+        let tier = tier::of_account(&account, now);
+        let grant = self
+            .open_session(&account, &device, tier, now, context, None, None, false)
+            .await?;
+        self.store.record_login(account.account_id, now).await?;
+        self.meters.signin(SignInOutcome::Success);
+        self.audit(
+            Some(account.account_id),
+            AuditActorKind::User,
+            "auth.identity.login",
+            AuditTargetKind::Session,
+            Some(grant.session_id),
+            format!("challenge login on \"{}\"", device.display_name),
+            context,
+        )
+        .await;
+        Ok(grant)
+    }
+
+    async fn answer_add_device(
+        &self,
+        answer: AddDeviceAnswer,
+        context: &RequestContext,
+    ) -> Result<Grant> {
+        self.charge_stranger(context, Opcode::Authenticate, self.prices.attempt)
+            .await?;
+        let now = context.now;
+        if answer.device_public_key.len() != PUBLIC_KEY_LEN {
+            return Err(fault::validation(
+                "device_public_key",
+                &format!("must be {PUBLIC_KEY_LEN} bytes of encoded ML-DSA-65"),
+            ));
+        }
+        let Some(row) = self
+            .challenge_for(answer.challenge_id, MlDsaPurpose::AddDevice, now)
+            .await?
+        else {
+            return Err(challenge_invalid());
+        };
+
+        let Some(account) = self.store.account_by_id(row.account_id).await? else {
+            self.charge_penalty(context, Opcode::Authenticate).await;
+            return Err(fault::invalid_credentials());
+        };
+        let Some(key) = self.store.active_identity_key(account.account_id).await? else {
+            self.charge_penalty(context, Opcode::Authenticate).await;
+            return Err(fault::invalid_credentials());
+        };
+        if Self::check_signature(
+            &key.public_key,
+            &row.payload,
+            CONTEXT_LOGIN,
+            &answer.identity_signature,
+        )
+        .is_err()
+            || Self::check_signature(
+                &answer.device_public_key,
+                &row.payload,
+                CONTEXT_LOGIN_DEVICE,
+                &answer.device_signature,
+            )
+            .is_err()
+        {
+            self.charge_penalty(context, Opcode::Authenticate).await;
+            self.audit(
+                Some(row.account_id),
+                AuditActorKind::System,
+                "auth.identity.login_failed",
+                AuditTargetKind::Device,
+                Some(row.device_id),
+                "add-device answer refused: a signature did not verify".to_string(),
+                context,
+            )
+            .await;
+            return Err(fault::invalid_credentials());
+        }
+
+        if self
+            .store
+            .consume_login_challenge(answer.challenge_id, now)
+            .await?
+            .is_none()
+        {
+            return Err(challenge_invalid());
+        }
+        if !account.status.can_sign_in() {
+            return Err(suspended(account.status));
+        }
+
+        // The pending row becomes a device: active, and carrying the
+        // credential that just signed. Activation before the credential, so
+        // a failure between the two leaves an active device with no
+        // credential (which simply cannot use the ceremony) rather than a
+        // credentialed device that was never activated.
+        self.store.activate_device(row.device_id, now).await?;
+        self.store
+            .set_device_credential(row.device_id, &answer.device_public_key)
+            .await?;
+        let Some(device) = self.store.device_by_id(row.device_id).await? else {
+            return Err(fault::internal(
+                "the device row vanished between activation and session open",
+            ));
+        };
+
+        let tier = tier::of_account(&account, now);
+        let grant = self
+            .open_session(&account, &device, tier, now, context, None, None, false)
+            .await?;
+        self.store.record_login(account.account_id, now).await?;
+        self.meters.signin(SignInOutcome::Success);
+        self.audit(
+            Some(account.account_id),
+            AuditActorKind::User,
+            "account.device.added",
+            AuditTargetKind::Device,
+            Some(device.device_id),
+            format!(
+                "device \"{}\" restored from a root secret",
+                device.display_name
+            ),
+            context,
+        )
+        .await;
+        Ok(grant)
+    }
+
+    async fn issue_rotation_challenge(
+        &self,
+        identity: &Identity,
+        context: &RequestContext,
+    ) -> Result<ChallengeView> {
+        self.charge_account(identity, context, Opcode::Authenticate)
+            .await?;
+        let now = context.now;
+        let account = self.live_account(identity.account_id()).await?;
+        let device = self
+            .store
+            .device_by_id(identity.device_id())
+            .await?
+            .filter(|device| {
+                device.account_id == account.account_id && device.status.may_authenticate()
+            })
+            .ok_or_else(|| fault::error(codes::TOKEN_REVOKED, "the device was revoked"))?;
+        self.mint_challenge(
+            account.account_id,
+            device.device_id,
+            MlDsaPurpose::Rotate,
+            now,
+        )
+        .await
+    }
+
+    async fn rotate_identity(
+        &self,
+        identity: &Identity,
+        answer: RotationAnswer,
+        context: &RequestContext,
+    ) -> Result<()> {
+        self.charge_account(identity, context, Opcode::Authenticate)
+            .await?;
+        let now = context.now;
+        let Some(row) = self
+            .challenge_for(answer.challenge_id, MlDsaPurpose::Rotate, now)
+            .await?
+        else {
+            return Err(challenge_invalid());
+        };
+        // A rotate challenge issued to another account, or to another device
+        // of this one, is not this caller's to answer.
+        if row.account_id != identity.account_id() || row.device_id != identity.device_id() {
+            return Err(challenge_invalid());
+        }
+        if answer.new_public_key.len() != PUBLIC_KEY_LEN {
+            return Err(fault::validation(
+                "new_public_key",
+                &format!("must be {PUBLIC_KEY_LEN} bytes of encoded ML-DSA-65"),
+            ));
+        }
+        let account = self.live_account(identity.account_id()).await?;
+        let Some(current) = self.store.active_identity_key(account.account_id).await? else {
+            return Err(fault::invalid_credentials());
+        };
+        if current.public_key == answer.new_public_key {
+            return Err(fault::conflict(
+                "an identity rotation must install a different key",
+            ));
+        }
+        // Only the key being retired can authorise its successor: the
+        // signature is verified against the *current* key under the rotate
+        // context, which no login signature can satisfy.
+        Self::check_signature(
+            &current.public_key,
+            &row.payload,
+            CONTEXT_ROTATE,
+            &answer.signature,
+        )
+        .map_err(|_| fault::invalid_credentials())?;
+        if self
+            .store
+            .consume_login_challenge(answer.challenge_id, now)
+            .await?
+            .is_none()
+        {
+            return Err(challenge_invalid());
+        }
+
+        let key_id = self.new_id(now);
+        let successor_version = current.key_version + 1;
+        // One store call: the successor is inserted active and the
+        // predecessor retired together, so a failure in the middle can never
+        // leave the account with two live identities or none.
+        self.store
+            .rotate_identity_key(IdentityKeyRow {
+                key_id,
+                account_id: account.account_id,
+                algorithm: IDENTITY_ALGORITHM.to_string(),
+                key_version: successor_version,
+                public_key: answer.new_public_key,
+                status: IdentityKeyStatus::Active,
+                created_at: now,
+                revoked_at: None,
+            })
+            .await?;
+        self.audit(
+            Some(account.account_id),
+            AuditActorKind::User,
+            "account.identity.rotate",
+            AuditTargetKind::IdentityKey,
+            Some(key_id),
+            format!(
+                "identity key v{} rotated to v{}; sessions unaffected",
+                current.key_version, successor_version
+            ),
+            context,
+        )
+        .await;
+        Ok(())
+    }
+
+    async fn publish_identity_key(
+        &self,
+        identity: &Identity,
+        publication: IdentityPublication,
+        context: &RequestContext,
+    ) -> Result<()> {
+        self.charge_account(identity, context, Opcode::Authenticate)
+            .await?;
+        let now = context.now;
+        if publication.identity_public_key.len() != PUBLIC_KEY_LEN {
+            return Err(fault::validation(
+                "identity_public_key",
+                &format!("must be {PUBLIC_KEY_LEN} bytes of encoded ML-DSA-65"),
+            ));
+        }
+        if let Some(key) = publication.device_public_key.as_ref() {
+            if key.len() != PUBLIC_KEY_LEN {
+                return Err(fault::validation(
+                    "device_public_key",
+                    &format!("must be {PUBLIC_KEY_LEN} bytes of encoded ML-DSA-65"),
+                ));
+            }
+        }
+        let account = self.live_account(identity.account_id()).await?;
+        match self.store.active_identity_key(account.account_id).await? {
+            None => {
+                // The legacy account's first identity key: version one, the
+                // same row a root-secret registration would have created.
+                let key_id = self.new_id(now);
+                self.store
+                    .put_identity_key(IdentityKeyRow {
+                        key_id,
+                        account_id: account.account_id,
+                        algorithm: IDENTITY_ALGORITHM.to_string(),
+                        key_version: i32::from(KEY_VERSION_ONE),
+                        public_key: publication.identity_public_key,
+                        status: IdentityKeyStatus::Active,
+                        created_at: now,
+                        revoked_at: None,
+                    })
+                    .await?;
+                self.audit(
+                    Some(account.account_id),
+                    AuditActorKind::User,
+                    "account.identity.created",
+                    AuditTargetKind::IdentityKey,
+                    Some(key_id),
+                    format!("identity key v{KEY_VERSION_ONE} registered on a password-era account"),
+                    context,
+                )
+                .await;
+            }
+            Some(existing) if existing.public_key == publication.identity_public_key => {
+                // The idempotent retry: the account already carries exactly
+                // this key, which is what an upgrade that ran twice does.
+            }
+            Some(_) => {
+                return Err(fault::conflict(
+                    "the account already has a different identity key; rotate instead",
+                ));
+            }
+        }
+        if let Some(public_key) = publication.device_public_key.as_ref() {
+            let device = self
+                .store
+                .device_by_id(identity.device_id())
+                .await?
+                .filter(|device| device.account_id == account.account_id)
+                .ok_or_else(|| fault::not_found("device"))?;
+            match device.public_credential.as_deref() {
+                None => {
+                    self.store
+                        .set_device_credential(device.device_id, public_key)
+                        .await?;
+                }
+                // Same rule as the identity key: an identical retry is fine,
+                // a different credential belongs to a different device.
+                Some(existing) if existing == public_key.as_slice() => {}
+                Some(_) => {
+                    return Err(fault::conflict(
+                        "the device already holds a different credential; add the device again instead",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // --- devices and wallets ----------------------------------------------------
+
+    async fn devices(
+        &self,
+        identity: &Identity,
+        // The context is part of the trait's shape — every operation that can
+        // charge or audit takes one — but this one reads a list the caller
+        // owns and charges nothing.
+        _context: &RequestContext,
+    ) -> Result<Vec<DeviceSummary>> {
+        let list = self
+            .store
+            .devices_for_account(identity.account_id())
+            .await?;
+        Ok(list
+            .into_iter()
+            .map(|device| DeviceSummary {
+                status: match device.status {
+                    DeviceStatus::Pending => "pending",
+                    DeviceStatus::Active => "active",
+                    DeviceStatus::Revoked => "revoked",
+                }
+                .to_string(),
+                has_credential: device.public_credential.is_some(),
+                is_current: device.device_id == identity.device_id(),
+                device_id: device.device_id,
+                display_name: device.display_name,
+                platform: device.platform,
+                created_at: device.created_at,
+                last_seen_at: device.last_seen_at,
+            })
+            .collect())
+    }
+
+    async fn register_wallet(
+        &self,
+        identity: &Identity,
+        registration: WalletRegistration,
+        context: &RequestContext,
+    ) -> Result<WalletSummary> {
+        self.charge_account(identity, context, Opcode::Authenticate)
+            .await?;
+        let now = context.now;
+        let account = self.live_account(identity.account_id()).await?;
+        // Normalise to the canonical form the store's unique index holds:
+        // no 0x prefix, lowercase, exactly forty hex characters. The
+        // checksummed and prefixed forms a human pastes are accepted and
+        // folded, never rejected.
+        let address = registration
+            .address
+            .trim()
+            .trim_start_matches("0x")
+            .to_ascii_lowercase();
+        if address.len() != MAX_WALLET_ADDRESS_CHARS
+            || !address.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(fault::validation(
+                "address",
+                "must be a 40-character hex EVM address",
+            ));
+        }
+        let mut chain_type = registration.chain_type.trim().to_ascii_lowercase();
+        if chain_type.is_empty() {
+            chain_type = "evm".to_string();
+        }
+        truncate_chars(&mut chain_type, MAX_CHAIN_TYPE_CHARS);
+        let mut label = registration.label.map(|value| value.trim().to_string());
+        if label.as_deref() == Some("") {
+            label = None;
+        }
+        if let Some(label) = label.as_mut() {
+            truncate_chars(label, MAX_WALLET_LABEL_CHARS);
+        }
+
+        // Read before writing, so the audit can tell a first registration
+        // from the idempotent re-registration a restore performs.
+        let existing = self
+            .store
+            .wallets_for_account(account.account_id)
+            .await?
+            .into_iter()
+            .any(|wallet| wallet.address == address && wallet.chain_type == chain_type);
+        self.store
+            .put_wallet(WalletRow {
+                wallet_id: self.new_id(now),
+                account_id: account.account_id,
+                address: address.clone(),
+                chain_type: chain_type.clone(),
+                label,
+                derivation_index: registration.derivation_index,
+                status: WalletStatus::Active,
+                created_at: now,
+                archived_at: None,
+            })
+            .await?;
+        // The put is idempotent per address, so the row that stands may be
+        // the one registered last year — read back what the account actually
+        // holds rather than assuming the id just generated survived.
+        let summary = self
+            .store
+            .wallets_for_account(account.account_id)
+            .await?
+            .into_iter()
+            .find(|wallet| wallet.address == address && wallet.chain_type == chain_type)
+            .map(WalletSummary::from)
+            .ok_or_else(|| {
+                fault::internal("the wallet just registered is missing from the account's list")
+            })?;
+        if !existing {
+            self.audit(
+                Some(account.account_id),
+                AuditActorKind::User,
+                "account.wallet.register",
+                AuditTargetKind::Wallet,
+                Some(summary.wallet_id),
+                format!("wallet {address} registered on chain {chain_type}"),
+                context,
+            )
+            .await;
+        }
+        Ok(summary)
+    }
+
+    async fn wallets(
+        &self,
+        identity: &Identity,
+        // Same shape rule as `devices`: a read of the caller's own list.
+        _context: &RequestContext,
+    ) -> Result<Vec<WalletSummary>> {
+        let list = self
+            .store
+            .wallets_for_account(identity.account_id())
+            .await?;
+        Ok(list.into_iter().map(WalletSummary::from).collect())
+    }
+
+    async fn archive_wallet(
+        &self,
+        identity: &Identity,
+        wallet_id: Id,
+        context: &RequestContext,
+    ) -> Result<()> {
+        self.charge_account(identity, context, Opcode::Authenticate)
+            .await?;
+        let now = context.now;
+        // Only an active wallet of the caller's own is archived; anything
+        // else is a no-op, because the list the client reads from already
+        // reflects the outcome it wanted.
+        let existing = self
+            .store
+            .wallets_for_account(identity.account_id())
+            .await?
+            .into_iter()
+            .find(|wallet| wallet.wallet_id == wallet_id);
+        if let Some(wallet) = existing.filter(|wallet| wallet.status == WalletStatus::Active) {
+            let address = wallet.address.clone();
+            self.store
+                .archive_wallet(wallet_id, identity.account_id(), now)
+                .await?;
+            self.audit(
+                Some(identity.account_id()),
+                AuditActorKind::User,
+                "account.wallet.archive",
+                AuditTargetKind::Wallet,
+                Some(wallet_id),
+                format!("wallet {address} archived"),
+                context,
+            )
+            .await;
+        }
         Ok(())
     }
 }

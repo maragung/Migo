@@ -118,6 +118,8 @@ object Code {
     const val CAPTCHA_REQUIRED: Long = 1311L
     /** Recovery token does not exist or is no longer valid */
     const val RECOVERY_NOT_FOUND: Long = 1312L
+    /** Identity challenge is unknown, expired, already used, or bound to another ceremony */
+    const val CHALLENGE_INVALID: Long = 1313L
     const val RATE_LIMITED: Long = 1400L
     const val QUOTA_EXCEEDED: Long = 1401L
     const val SLOW_MODE_ACTIVE: Long = 1402L
@@ -198,6 +200,7 @@ object Code {
         CAPTCHA_EXPIRED,
         CAPTCHA_REQUIRED,
         RECOVERY_NOT_FOUND,
+        CHALLENGE_INVALID,
         RATE_LIMITED,
         QUOTA_EXCEEDED,
         SLOW_MODE_ACTIVE,
@@ -274,6 +277,7 @@ val ERROR_SYMBOLS: Map<Long, String> = mapOf(
     1310L to "CAPTCHA_EXPIRED",
     1311L to "CAPTCHA_REQUIRED",
     1312L to "RECOVERY_NOT_FOUND",
+    1313L to "CHALLENGE_INVALID",
     1400L to "RATE_LIMITED",
     1401L to "QUOTA_EXCEEDED",
     1402L to "SLOW_MODE_ACTIVE",
@@ -349,6 +353,7 @@ val ERROR_HTTP_STATUS: Map<Long, Int> = mapOf(
     1310L to 400,
     1311L to 400,
     1312L to 404,
+    1313L to 401,
     1400L to 429,
     1401L to 429,
     1402L to 429,

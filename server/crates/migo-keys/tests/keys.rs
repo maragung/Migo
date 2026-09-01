@@ -44,7 +44,7 @@ use migo_keys::traits::Keyring;
 use migo_keys::Bundle;
 use migo_protocol::{codes, Opcode, Platform};
 use migo_ratelimit::{BucketKey, Policies, RateLimiter, Scope, TrustTier, Verdict};
-use migo_store::model::{NewAccount, NewDevice};
+use migo_store::model::{DeviceStatus, NewAccount, NewDevice};
 use migo_store::traits::{AccountStore, DeviceStore, KeyStore};
 use migo_store::MemoryStore;
 
@@ -291,6 +291,8 @@ impl Harness {
                 app_version: "0.1.0".to_string(),
                 os_version: Some("14".to_string()),
                 device_model: Some("Pixel 8".to_string()),
+                status: DeviceStatus::Active,
+                public_credential: None,
                 created_at: ts(NOW - SECOND),
             })
             .await

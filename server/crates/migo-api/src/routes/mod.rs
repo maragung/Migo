@@ -6,6 +6,7 @@
 //! New resource groups (users, rooms, media, and the rest of the section 118 public surface)
 //! are added by writing a module here and merging it into [`v1`]; nothing else changes.
 
+mod account;
 mod auth;
 mod config;
 mod health;
@@ -28,7 +29,10 @@ pub(crate) fn mount() -> Router<ApiState> {
 
 /// The versioned API surface.
 fn v1() -> Router<ApiState> {
-    Router::new().merge(auth::routes()).merge(config::routes())
+    Router::new()
+        .merge(auth::routes())
+        .merge(account::routes())
+        .merge(config::routes())
 }
 
 /// The media data plane. Mounted at the root, not under `/v1`: these are the byte

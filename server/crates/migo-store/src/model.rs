@@ -329,6 +329,10 @@ pub enum AuditTargetKind {
     Bot = 11,
     /// A server node.
     Node = 12,
+    /// One version of an account's ML-DSA identity key.
+    IdentityKey = 13,
+    /// A registered EVM wallet address.
+    Wallet = 14,
 }
 
 impl AuditTargetKind {
@@ -357,6 +361,8 @@ impl AuditTargetKind {
             10 => Self::Transaction,
             11 => Self::Bot,
             12 => Self::Node,
+            13 => Self::IdentityKey,
+            14 => Self::Wallet,
             _ => return None,
         })
     }

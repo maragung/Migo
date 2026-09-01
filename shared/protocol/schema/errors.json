@@ -286,6 +286,12 @@
       "doc": "Recovery token does not exist or is no longer valid"
     },
     {
+      "code": 1313,
+      "symbol": "CHALLENGE_INVALID",
+      "http": 401,
+      "doc": "Identity challenge is unknown, expired, already used, or bound to another ceremony"
+    },
+    {
       "code": 1400,
       "symbol": "RATE_LIMITED",
       "http": 429

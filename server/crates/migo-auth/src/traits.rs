@@ -20,7 +20,11 @@ use migo_ratelimit::TrustTier;
 use migo_store::traits::RecoveryRow;
 
 use crate::capability::Capabilities;
-use crate::model::{Grant, Refresh, Registration, RequestContext, SessionSummary, SignIn};
+use crate::model::{
+    AddDeviceAnswer, ChallengeAnswer, ChallengeView, DeviceSummary, Grant,
+    IdentityChallengeRequest, IdentityPublication, Refresh, Registration, RequestContext,
+    RotationAnswer, SessionSummary, SignIn, WalletRegistration, WalletSummary,
+};
 use crate::token::Claims;
 
 /// How recently the human must have authenticated for a sensitive operation.
@@ -302,6 +306,131 @@ pub trait Authenticator: Send + Sync {
         token_id: Id,
         tag: &[u8],
         new_password: &Secret,
+        context: &RequestContext,
+    ) -> Result<()>;
+
+    // --- the ML-DSA identity ceremonies (brief section 182) ------------------
+
+    /// Issues a single-use ML-DSA challenge for a login or add-device
+    /// ceremony.
+    ///
+    /// The returned [`ChallengeView`] carries the canonical MSE payload the
+    /// client signs byte for byte. When the scope does not name a real
+    /// account-and-device pair, the response is still a well-formed
+    /// challenge — built from random ids, never stored, never answerable —
+    /// so the endpoint cannot be used to learn which accounts exist. An
+    /// answer to such a challenge fails exactly the way an expired one
+    /// does: `CHALLENGE_INVALID`.
+    async fn issue_identity_challenge(
+        &self,
+        request: IdentityChallengeRequest,
+        context: &RequestContext,
+    ) -> Result<ChallengeView>;
+
+    /// Answers a login challenge with both signatures and opens a session.
+    ///
+    /// The identity signature must verify against the account's active
+    /// identity key; the device signature against the registered device's
+    /// credential. A failure of either is `INVALID_CREDENTIALS` — the same
+    /// code, and the same answer, as a wrong password. A challenge that is
+    /// unknown, expired, already consumed, or issued for another purpose is
+    /// `CHALLENGE_INVALID`.
+    async fn answer_identity_challenge(
+        &self,
+        answer: ChallengeAnswer,
+        context: &RequestContext,
+    ) -> Result<Grant>;
+
+    /// Answers an add-device challenge: introduces a new device's
+    /// credential and opens the restored device's first session.
+    ///
+    /// The identity signature must verify against the account's active key;
+    /// the device signature against the public key presented alongside it,
+    /// proving the client holds the credential it is registering. On
+    /// success the pending device row the challenge was bound to becomes
+    /// active and carries that credential.
+    async fn answer_add_device(
+        &self,
+        answer: AddDeviceAnswer,
+        context: &RequestContext,
+    ) -> Result<Grant>;
+
+    /// Issues a rotation challenge to the caller's own authenticated
+    /// device.
+    ///
+    /// Rotate challenges are never anonymous: the caller is already signed
+    /// in, and the ceremony's purpose is to prove that the *old* identity
+    /// key authorises the new one — a session token alone must not be able
+    /// to replace the account's identity.
+    async fn issue_rotation_challenge(
+        &self,
+        identity: &Identity,
+        context: &RequestContext,
+    ) -> Result<ChallengeView>;
+
+    /// Answers a rotation challenge and installs the successor identity
+    /// key.
+    ///
+    /// The signature must be by the current active key under the rotate
+    /// context. On success the successor becomes the active version, the
+    /// predecessor is marked rotated, and every existing session —
+    /// including the caller's — stays alive: rotation is not a logout.
+    async fn rotate_identity(
+        &self,
+        identity: &Identity,
+        answer: RotationAnswer,
+        context: &RequestContext,
+    ) -> Result<()>;
+
+    /// Publishes the caller's identity and device public keys on an
+    /// existing account — the legacy upgrade door.
+    ///
+    /// Idempotent: publishing the keys the account already carries is
+    /// `Ok(())`; publishing a *different* identity key is `CONFLICT`,
+    /// because replacing an identity is what [`Authenticator::rotate_identity`]
+    /// is for, and a device row that already holds a different credential
+    /// is refused for the same reason.
+    async fn publish_identity_key(
+        &self,
+        identity: &Identity,
+        publication: IdentityPublication,
+        context: &RequestContext,
+    ) -> Result<()>;
+
+    // --- devices and wallets ---------------------------------------------------
+
+    /// The caller's devices, for their own security screen.
+    async fn devices(
+        &self,
+        identity: &Identity,
+        context: &RequestContext,
+    ) -> Result<Vec<DeviceSummary>>;
+
+    /// Registers a wallet address on the caller's account. Idempotent per
+    /// `(account, chain, address)`: a restore that re-registers what it
+    /// already registered updates the label and index and changes nothing
+    /// else.
+    async fn register_wallet(
+        &self,
+        identity: &Identity,
+        registration: WalletRegistration,
+        context: &RequestContext,
+    ) -> Result<WalletSummary>;
+
+    /// The caller's wallets, active ones first.
+    async fn wallets(
+        &self,
+        identity: &Identity,
+        context: &RequestContext,
+    ) -> Result<Vec<WalletSummary>>;
+
+    /// Archives one of the caller's wallets. Unknown ids and other owners'
+    /// wallets are quietly `Ok(())`: the list the client reads from already
+    /// reflects the outcome.
+    async fn archive_wallet(
+        &self,
+        identity: &Identity,
+        wallet_id: Id,
         context: &RequestContext,
     ) -> Result<()>;
 }

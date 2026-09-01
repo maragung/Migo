@@ -1956,6 +1956,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
+ "migo-account",
  "migo-cache",
  "migo-captcha",
  "migo-core",

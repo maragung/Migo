@@ -58,7 +58,7 @@ pub(crate) fn routes() -> Router<ApiState> {
 /// What a client claims about the device a session runs on. Every field is a claim; none of it
 /// grants anything (see `migo_auth`'s device model).
 #[derive(Deserialize)]
-struct DeviceRequest {
+pub(crate) struct DeviceRequest {
     #[serde(default)]
     device_id: Option<Id>,
     #[serde(default)]
@@ -70,11 +70,15 @@ struct DeviceRequest {
     os_version: Option<String>,
     #[serde(default)]
     device_model: Option<String>,
+    /// The device credential's ML-DSA-65 public key, base64, when the client
+    /// registered with a root secret.
+    #[serde(default)]
+    credential_public_key: Option<String>,
 }
 
 impl DeviceRequest {
     /// Turns the claim into the authenticator's device type.
-    fn into_claim(self) -> DeviceClaim {
+    pub(crate) fn into_claim(self) -> Result<DeviceClaim, crate::ApiError> {
         let platform = self
             .platform
             .as_deref()
@@ -88,8 +92,30 @@ impl DeviceRequest {
         }
         claim.os_version = self.os_version;
         claim.device_model = self.device_model;
-        claim
+        claim.credential_public_key = self
+            .credential_public_key
+            .as_deref()
+            .map(decode_key)
+            .transpose()?;
+        Ok(claim)
     }
+}
+
+/// Decodes a base64 ML-DSA public key from a request body.
+///
+/// A wrong encoding is a client that is wrong, not an input to repair: the
+/// authenticator checks the length, the route checks the encoding, and
+/// neither guesses.
+fn decode_key(value: &str) -> Result<Vec<u8>, crate::ApiError> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|_| {
+            crate::ApiError::from(migo_protocol::fault::validation(
+                "public key",
+                "must be base64-encoded",
+            ))
+        })
 }
 
 /// Maps a platform name to the claimed platform, defaulting to `Unknown` for anything else.
@@ -131,6 +157,11 @@ struct RegisterRequest {
     /// reaches the authenticator.
     #[serde(default)]
     server: Option<ServerEndpointBody>,
+    /// The account identity's ML-DSA-65 public key, base64, when the
+    /// client is registering with a root secret. Absent on every
+    /// legacy client.
+    #[serde(default)]
+    identity_public_key: Option<String>,
 }
 
 /// A sign-in request. One identifier field because a user does not think of a username and an
@@ -276,7 +307,7 @@ struct LogoutRequest {
 
 /// The session a successful bootstrap yields. The token fields are the caller's own credentials.
 #[derive(Serialize)]
-struct GrantResponse {
+pub(crate) struct GrantResponse {
     account_id: Id,
     device_id: Id,
     session_id: Id,
@@ -323,7 +354,12 @@ async fn register(
         password: Secret::new(body.password),
         locale: body.locale,
         country: body.country,
-        device: body.device.into_claim(),
+        device: body.device.into_claim()?,
+        identity_public_key: body
+            .identity_public_key
+            .as_deref()
+            .map(decode_key)
+            .transpose()?,
         captcha: body.captcha.map(migo_auth::CaptchaProof::from),
         server,
     };
@@ -350,7 +386,7 @@ async fn login(
     let sign_in = SignIn {
         identifier: body.identifier,
         password: Secret::new(body.password),
-        device: body.device.into_claim(),
+        device: body.device.into_claim()?,
         captcha: body.captcha.map(migo_auth::CaptchaProof::from),
         server,
     };
