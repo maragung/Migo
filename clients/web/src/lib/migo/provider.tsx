@@ -34,6 +34,7 @@ import type {
 import { defaultServerEndpoint } from '@/lib/config.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { deviceDisplayName, webHello } from '@/lib/migo/hello.js';
+import { saveAccountRecord } from '@/lib/storage/account-record-store.js';
 import {
   clearKeyStoreSnapshot,
   loadKeyStoreSnapshot,
@@ -86,7 +87,18 @@ export interface MigoContextValue {
     server: ServerEndpoint,
     captcha: CaptchaProof | null,
   ) => Promise<void>;
-  login: (form: LoginForm, server: ServerEndpoint, captcha: CaptchaProof | null) => Promise<void>;
+  /**
+   * Signs in to an existing account. The optional {@link KeyStore} is the restore path: a
+   * `.migo` account file opened on the login screen rebuilds the founding identity from the
+   * root, and that store is handed here so the session runs as the account's founding device —
+   * root present, E2EE history readable — instead of as a fresh additional device.
+   */
+  login: (
+    form: LoginForm,
+    server: ServerEndpoint,
+    captcha: CaptchaProof | null,
+    restored?: KeyStore,
+  ) => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -290,6 +302,14 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
         await Promise.all([
           saveSession({ grant }),
           saveKeyStoreSnapshot(created.keyStore.snapshot()),
+          // The account record is what the login screen reads to offer "Continue as {username}";
+          // a founding registration always holds the root.
+          saveAccountRecord({
+            username: form.username.trim(),
+            accountId: grant.accountId,
+            hasRoot: true,
+            savedAt: Date.now(),
+          }),
         ]);
         wireInbound(created);
         void created.presence.setPresence(PresenceState.Online).catch(() => {});
@@ -310,6 +330,7 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
       form: LoginForm,
       server: ServerEndpoint,
       captcha: CaptchaProof | null,
+      restored?: KeyStore,
     ): Promise<void> => {
       setError(null);
       setStatus('connecting');
@@ -319,7 +340,12 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
         // Best-effort, see register above.
       }
       try {
-        const created = buildClient({ server });
+        // A restored key store is founding-grade (the identity is derived from the root, so it
+        // reproduces the founding device's published bundle); without one this is the plain
+        // path, a fresh additional-device identity.
+        const created = buildClient(
+          restored === undefined ? { server } : { server, keyStore: restored },
+        );
         const grant = await created.login({
           identifier: form.identifier.trim(),
           password: form.password,
@@ -328,6 +354,12 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
         await Promise.all([
           saveSession({ grant }),
           saveKeyStoreSnapshot(created.keyStore.snapshot()),
+          saveAccountRecord({
+            username: form.identifier.trim(),
+            accountId: grant.accountId,
+            hasRoot: created.keyStore.root() !== null,
+            savedAt: Date.now(),
+          }),
         ]);
         wireInbound(created);
         void created.presence.setPresence(PresenceState.Online).catch(() => {});

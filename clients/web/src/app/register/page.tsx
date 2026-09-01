@@ -7,6 +7,7 @@ import { useRouter } from 'next/navigation';
 
 import { BottomSheet } from '@/components/bottom-sheet.js';
 import { CaptchaWidget } from '@/components/captcha-widget.js';
+import { SaveAccountSheet } from '@/components/save-account-sheet.js';
 import { ServerForm, transportLabel } from '@/components/server-form.js';
 import { Spinner } from '@/components/spinner.js';
 import { ThemeToggle } from '@/components/theme-toggle.js';
@@ -18,7 +19,7 @@ import type { CaptchaProof, ServerEndpoint } from '@migo/sdk';
 
 /** Create a new account. Identity keys are generated on this device and never leave it. */
 export default function RegisterPage(): ReactNode {
-  const { status, error, register } = useMigo();
+  const { status, error, register, client, accountId } = useMigo();
   const router = useRouter();
 
   const [username, setUsername] = useState('');
@@ -27,15 +28,18 @@ export default function RegisterPage(): ReactNode {
   const [endpoint, setEndpoint] = useState<ServerEndpoint | null>(null);
   const [endpointReady, setEndpointReady] = useState(false);
   const [serverSheetOpen, setServerSheetOpen] = useState(false);
+  const [saveOfferOpen, setSaveOfferOpen] = useState(false);
   const [captcha, setCaptcha] = useState<CaptchaProof | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const submitting = status === 'connecting';
 
   useEffect(() => {
-    if (status === 'ready') {
+    // The hand-off to the chat shell waits out the save-account offer: the root is only in
+    // memory until this moment passes, and the offer is the one chance to seal it into a file.
+    if (status === 'ready' && !saveOfferOpen) {
       router.replace('/chat');
     }
-  }, [status, router]);
+  }, [status, saveOfferOpen, router]);
 
   useEffect(() => {
     let cancelled = false;
@@ -68,6 +72,9 @@ export default function RegisterPage(): ReactNode {
     setValidationError(null);
     try {
       await register({ username, password, email: email || undefined }, endpoint, captcha);
+      // The account exists and this browser holds its founding root; offer the one-time file save
+      // before the redirect carries the user away.
+      setSaveOfferOpen(true);
     } catch {
       // The provider surfaces the reason through `error`; keep the form populated for a retry.
     }
@@ -153,7 +160,7 @@ export default function RegisterPage(): ReactNode {
         </p>
 
         {endpointReady && endpoint !== null ? (
-          <div className="auth-card-footer">
+          <div className="auth-card-links">
             <button
               type="button"
               className="auth-server-link"
@@ -171,6 +178,17 @@ export default function RegisterPage(): ReactNode {
             value={endpoint}
             onCommit={onServerConfirmed}
             onTransportPick={onServerCommit}
+          />
+        </BottomSheet>
+      ) : null}
+
+      {saveOfferOpen ? (
+        <BottomSheet title="Save your account" onClose={() => setSaveOfferOpen(false)}>
+          <SaveAccountSheet
+            username={username.trim()}
+            accountId={accountId ?? ''}
+            root={client?.keyStore.root()?.asBytes() ?? null}
+            onDone={() => setSaveOfferOpen(false)}
           />
         </BottomSheet>
       ) : null}

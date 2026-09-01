@@ -1410,3 +1410,32 @@ diatur identitas-dulu (username → email opsional → password), password
 menampilkan aturan minimal 10 karakter (dan minLength) sesuai config
 server, username/email dapat placeholder dan bebas spellcheck. Background
 gradient tetap fixed dan kartu scroll di layar pendek (warisan v0.13.1).
+
+## 40. File akun .migo: ditawarkan setelah register, dipulihkan saat login (v0.13.3)
+
+**Setelah register**: kartu registrasi menawarkan sheet "Save your account"
+— akun otomatis tersimpan di IndexedDB browser (record username +
+account id + snapshot key store), dan pengguna ditawari mengunduh file
+akun `migo-<username>.migo`: kontainer terenkripsi Argon2id (64 MiB,
+3 pass) + XChaCha20-Poly1305 dari `@migo/crypto`, dilindungi recovery
+credential pilihan pengguna (minimal 8 byte, bukan password akun,
+§182). Credential dinilai lokal sebelum hashing dijalankan; redirect ke
+chat menunggu penawaran ini selesai karena root hanya lengkap di momen
+ini. Perangkat tanpa root mendapat satu kalimat jujur, tanpa tombol mati.
+
+**Saat login**: browser yang pernah masuk menampilkan chip
+"Continue as {username}" — tinggal password; "Use a different account"
+membuka form lengkap. Browser yang belum mengenal akun mendapat tautan
+"Restore from account file" (kiri bawah kartu, server tetap kanan):
+pilih file .migo + recovery credential → `openContainer` → root →
+`KeyStore.founding` mereproduksi identitas founding device secara
+deterministik (seeds E2EE diturunkan dari domain root yang sama) →
+sign in dengan username + password seperti biasa, dan sesi berjalan
+sebagai perangkat founding (root ada, riwayat E2EE terbaca), bukan
+perangkat tambahan. Kegagalan open selalu satu kalimat (§182): salah
+credential, file berubah, dan file asing tidak dibedakan.
+
+**Provider**: login menerima `restored?: KeyStore` opsional; record
+akun ditulis pada register dan login sukses, dan sengaja tidak dihapus
+saat logout — logout mengakhiri sesi, bukan hubungan browser dengan
+akun.

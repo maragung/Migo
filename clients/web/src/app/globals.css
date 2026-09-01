@@ -531,10 +531,13 @@ main {
 .auth-screen .muted {
   color: rgba(255, 255, 255, 0.75);
 }
-/* The card's bottom corner: the one link that opens the server sheet. */
-.auth-card-footer {
+/* The card's bottom corner: the links that open the restore and server sheets. Restore sits
+   left, server right, so the row reads "what am I signing in with" before "where". */
+.auth-card-links {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
   margin-top: 4px;
 }
 .auth-server-link {
@@ -547,10 +550,42 @@ main {
   text-decoration: underline dotted rgba(224, 247, 250, 0.6);
   text-underline-offset: 3px;
   cursor: pointer;
+  white-space: nowrap;
 }
 .auth-server-link:hover {
   color: #ffffff;
   text-decoration-style: solid;
+}
+.auth-restore-link {
+  background: transparent;
+  border: none;
+  padding: 4px 0;
+  color: #e0f7fa;
+  font-size: 12px;
+  text-decoration: underline dotted rgba(224, 247, 250, 0.6);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.auth-restore-link:hover {
+  color: #ffffff;
+  text-decoration-style: solid;
+}
+/* The remembered account, when this browser has one: one chip, then only the password. */
+.auth-account-chip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 13px;
+}
+.auth-account-chip strong {
+  color: #ffffff;
 }
 .auth-screen .captcha-widget {
   background: rgba(255, 255, 255, 0.85);
@@ -3793,6 +3828,19 @@ button.activity-row-btn:focus-visible {
   margin: 0;
   color: var(--text-dim);
   font-size: 13px;
+}
+
+/* The save/restore sheets' bodies: one column, the crypto work is slow enough that the buttons
+   must stay where they were while it runs. */
+.save-account,
+.restore-account {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.save-account .hint,
+.restore-account .hint {
+  margin: 0;
 }
 
 /* The confirm screen: every line the signature will cover, labelled and exact. */
