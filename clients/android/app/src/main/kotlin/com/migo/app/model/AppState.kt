@@ -61,11 +61,11 @@ sealed interface AppState {
     /**
      * Signed in. The conversation list is always present; [open] is the chat on top of it.
      *
-     * The [section] is which destination the shell is showing — the same tab model the web client's
-     * strip carries: Friends, Chats, Rooms, Games and Feed as the system tabs, with the panels
-     * (Alerts, Search, Wallet, Profile) opened from the banner's avatar menu. Each section's data
-     * lives in its own holder below, loaded on first entry and reloaded on demand; a section never
-     * yet visited holds nulls, and its screen draws its skeleton.
+     * The [section] is which destination the shell is showing — the new-ui-02 model's left panel:
+     * Friends, Chats, Rooms, Games and Feed as the system tabs, with the panels (Alerts, Search,
+     * Wallet, Profile) opened from the banner's avatar menu and covering the screen. Each section's
+     * data lives in its own holder below, loaded on first entry and reloaded on demand; a section
+     * never yet visited holds nulls, and its screen draws its skeleton.
      */
     data class SignedIn(
         val username: String,
@@ -80,6 +80,12 @@ sealed interface AppState {
         val failure: String? = null,
         /** The destination on screen; Chats is where a session starts, as it does on every client. */
         val section: Section = Section.CHATS,
+        /**
+         * The left panel's own tab, in the new-ui-02 model: the five system tabs drive the strip,
+         * while the panels (Alerts, Search, Wallet, Profile) cover the screen the way a chat does.
+         * A panel's back returns here, so covering the shell never disturbs what the strip shows.
+         */
+        val stripSection: Section = Section.CHATS,
         val rooms: RoomsState = RoomsState(),
         val space: SpaceState = SpaceState(),
         val friends: FriendsState = FriendsState(),
@@ -90,9 +96,16 @@ sealed interface AppState {
 
     /**
      * The shell's destinations. The first five are the reference's system tabs, in strip order; the
-     * rest are the panels the banner's avatar menu opens.
+     * rest are the panels the banner's avatar menu opens — they cover the screen rather than joining
+     * the strip, which is the new-ui-02 model's phone story.
      */
-    enum class Section { FRIENDS, CHATS, ROOMS, GAMES, FEED, ALERTS, SEARCH, WALLET, PROFILE }
+    enum class Section {
+        FRIENDS, CHATS, ROOMS, GAMES, FEED, ALERTS, SEARCH, WALLET, PROFILE;
+
+        /** True for the four panels the banner's menu opens, which cover the strip rather than join it. */
+        val isPanel: Boolean
+            get() = this == ALERTS || this == SEARCH || this == WALLET || this == PROFILE
+    }
 }
 
 /** The Rooms directory: the server's catalogue plus the browsing state around it. */

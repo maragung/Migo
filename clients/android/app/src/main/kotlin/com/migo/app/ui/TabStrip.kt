@@ -27,12 +27,12 @@ import androidx.compose.ui.unit.dp
 import com.migo.app.model.AppState
 
 /**
- * The tab strip: the reference's top navigation, as every client now draws it.
+ * The left panel's tab strip: the new-ui-02 model's top navigation, as every client draws it.
  *
- * Five system tabs — Friends, Chats, Rooms, Games, Feed — plus one chip for the conversation being
- * read, with its own close mark. The strip sits above the banner and stays on screen while a thread
- * is open, which is the whole difference from the bottom bar it replaces: a thread no longer takes
- * the shell's navigation away, because closing the thread is what the chip's ✕ is for.
+ * Five system tabs — Friends, Chats, Rooms, Games, Feed — the lists and streams a messenger
+ * lives in. A conversation is no longer a chip here: in the new model a chat covers the screen
+ * the way a menu panel does, carrying its own way back, so the strip is the lists and nothing
+ * else — which is also why it never has to stand down for a thread again.
  *
  * The strip scrolls horizontally rather than wrapping: the reference's strip is one row on every
  * screen size, and a second row would push the banner down by the height of a tab.
@@ -40,10 +40,8 @@ import com.migo.app.model.AppState
 @Composable
 fun TabStrip(
     section: AppState.Section,
-    openChatTitle: String?,
     unread: Long,
     onSelect: (AppState.Section) -> Unit,
-    onCloseChat: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val extra = LocalMigoExtra.current
@@ -55,57 +53,45 @@ fun TabStrip(
                 .padding(end = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // While a chat chip is showing, the system tabs stand down: the thread is the active
-            // tab, exactly as the reference's mobile view composes it.
-            val chatOpen = openChatTitle != null
             StripChip(
                 label = "Friends",
                 glyph = TabGlyph.FRIENDS,
-                active = !chatOpen && section == AppState.Section.FRIENDS,
+                active = section == AppState.Section.FRIENDS,
                 onClick = { onSelect(AppState.Section.FRIENDS) },
             )
             StripChip(
                 label = "Chats",
                 glyph = TabGlyph.CHATS,
-                active = !chatOpen && section == AppState.Section.CHATS,
+                active = section == AppState.Section.CHATS,
                 badge = unread,
                 onClick = { onSelect(AppState.Section.CHATS) },
             )
             StripChip(
                 label = "Rooms",
                 glyph = TabGlyph.ROOMS,
-                active = !chatOpen && section == AppState.Section.ROOMS,
+                active = section == AppState.Section.ROOMS,
                 onClick = { onSelect(AppState.Section.ROOMS) },
             )
             StripChip(
                 label = "Games",
                 glyph = TabGlyph.GAMES,
-                active = !chatOpen && section == AppState.Section.GAMES,
+                active = section == AppState.Section.GAMES,
                 onClick = { onSelect(AppState.Section.GAMES) },
             )
             StripChip(
                 label = "Feed",
                 glyph = TabGlyph.FEED,
-                active = !chatOpen && section == AppState.Section.FEED,
+                active = section == AppState.Section.FEED,
                 onClick = { onSelect(AppState.Section.FEED) },
             )
-            if (openChatTitle != null) {
-                StripChip(
-                    label = openChatTitle,
-                    glyph = TabGlyph.CHATS,
-                    active = true,
-                    onClick = { },
-                    onClose = onCloseChat,
-                )
-            }
         }
     }
 }
 
 /**
- * One chip: a glyph, a label, the active fill and underline, and — for a conversation — its own
- * close mark. The rounded fill and the orange underline are the two marks the reference puts on the
- * chosen tab; an idle chip is the strip's own ink on the strip's own surface.
+ * One chip: a glyph, a label, the active fill and underline, and — for the conversation list —
+ * its unread badge. The rounded fill and the orange underline are the two marks the reference
+ * puts on the chosen tab; an idle chip is the strip's own ink on the strip's own surface.
  */
 @Composable
 private fun StripChip(
@@ -115,7 +101,6 @@ private fun StripChip(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     badge: Long = 0L,
-    onClose: (() -> Unit)? = null,
 ) {
     val extra = LocalMigoExtra.current
     Column(
@@ -154,19 +139,6 @@ private fun StripChip(
                         modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
                     )
                 }
-            }
-            if (onClose != null) {
-                Spacer(modifier = Modifier.width(7.dp))
-                // A character rather than an icon, for the same reason every glyph here is drawn:
-                // no icon dependency, and it scales with the system font size.
-                Text(
-                    text = "✕",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = extra.bannerInk.copy(alpha = 0.85f),
-                    modifier = Modifier
-                        .clickable(onClick = onClose)
-                        .padding(2.dp),
-                )
             }
         }
         // The active tab's orange underline. Drawn (transparently) on every chip so the row's

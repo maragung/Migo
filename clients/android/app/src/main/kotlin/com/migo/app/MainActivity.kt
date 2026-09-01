@@ -26,6 +26,7 @@ import com.migo.app.ui.ConversationsScreen
 import com.migo.app.ui.FriendsScreen
 import com.migo.app.ui.GamesScreen
 import com.migo.app.ui.MigoTheme
+import com.migo.app.ui.PanelBar
 import com.migo.app.ui.ProfileBanner
 import com.migo.app.ui.ProfileScreen
 import com.migo.app.ui.RoomsScreen
@@ -34,6 +35,7 @@ import com.migo.app.ui.SignInScreen
 import com.migo.app.ui.SpaceScreen
 import com.migo.app.ui.TabStrip
 import com.migo.app.ui.WalletScreen
+import com.migo.app.ui.panelTitle
 
 /**
  * The only activity.
@@ -43,11 +45,11 @@ import com.migo.app.ui.WalletScreen
  * answer to that question, able to disagree with the first. The back gesture is handled where it
  * means something, which is the open chat.
  *
- * The signed-in screen is the shell every client now draws: a tab strip (Friends, Chats, Rooms,
- * Games, Feed, plus the conversation being read as its own closable chip) above an orange profile
- * banner whose avatar menu carries the panels and the way out. The strip stays on screen while a
- * thread is open -- closing the thread is what its chip's close mark and the back gesture are for
- * -- so the shell's navigation is never taken away by reading a message.
+ * The signed-in screen is the new-ui-02 left panel: a tab strip (Friends, Chats, Rooms, Games,
+ * Feed) above an orange profile banner whose avatar menu carries the panels and the way out. A
+ * conversation and a menu panel both cover this shell rather than joining it -- on a PC they
+ * would be the right pane -- and each carries its own way back, so the strip's navigation is
+ * never taken away by reading a message.
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -102,57 +104,65 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
 }
 
 /**
- * The signed-in shell: the tab strip, the banner, and whichever tab is active.
+ * The signed-in shell: the new-ui-02 model, as a phone wears it.
  *
- * A chat is a tab like the reference composes it: while one is open it renders in place of the
- * section screens, under the same strip, and everything that leaves it -- a system tab, the chip's
- * close mark, the back gesture -- closes it.
+ * The left panel is the app: the tab strip (Friends, Chats, Rooms, Games, Feed) above the orange
+ * profile banner whose avatar menu carries the panels and the way out. A conversation and a menu
+ * panel (Alerts, Search, Wallet, Profile) both COVER the screen rather than joining the strip —
+ * on a PC they would be the right pane — and each carries its own way back: the thread's header
+ * and back gesture, the panel's "‹ Menu Panel" bar. Covering the shell never disturbs the strip:
+ * a panel's back returns to the tab the strip still shows, held in [AppState.SignedIn.stripSection].
  */
 @Composable
 private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel) {
     val open = state.open
     BackHandler(enabled = open != null, onBack = model::closeChat)
+    BackHandler(
+        enabled = open == null && state.section.isPanel,
+        onBack = { model.selectSection(state.stripSection) },
+    )
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        TabStrip(
-            section = state.section,
-            openChatTitle = open?.title,
-            unread = state.conversations.sumOf { it.unread },
-            onSelect = { section ->
-                // A system tab takes over from the thread: choosing a destination is leaving the
-                // conversation, exactly as closing its chip is.
-                if (open != null) model.closeChat()
-                model.selectSection(section)
+    when {
+        open != null -> ChatScreen(
+            chat = open,
+            onBack = model::closeChat,
+            onDraft = model::setDraft,
+            onSend = model::send,
+            onLeave = open.roomId?.let { roomId ->
+                { model.leaveRoom(open.conversationId, roomId) }
             },
-            onCloseChat = model::closeChat,
-        )
-        ProfileBanner(
-            username = state.username,
-            connection = state.connection,
-            balance = state.wallet.balance,
-            onAction = { action ->
-                when (action) {
-                    BannerAction.PROFILE -> model.selectSection(AppState.Section.PROFILE)
-                    BannerAction.WALLET -> model.selectSection(AppState.Section.WALLET)
-                    BannerAction.ALERTS -> model.selectSection(AppState.Section.ALERTS)
-                    BannerAction.SEARCH -> model.selectSection(AppState.Section.SEARCH)
-                    BannerAction.SIGN_OUT -> model.signOut()
-                }
-            },
+            modifier = Modifier.fillMaxSize(),
         )
 
-        if (open != null) {
-            ChatScreen(
-                chat = open,
-                onBack = model::closeChat,
-                onDraft = model::setDraft,
-                onSend = model::send,
-                onLeave = open.roomId?.let { roomId ->
-                    { model.leaveRoom(open.conversationId, roomId) }
-                },
-                modifier = Modifier.weight(1f),
+        // A menu panel covers the screen, with the model's own bar as its way back.
+        state.section.isPanel -> Column(modifier = Modifier.fillMaxSize()) {
+            PanelBar(
+                title = panelTitle(state.section),
+                onBack = { model.selectSection(state.stripSection) },
             )
-        } else {
+            SectionScreen(state = state, model = model, modifier = Modifier.weight(1f))
+        }
+
+        else -> Column(modifier = Modifier.fillMaxSize()) {
+            TabStrip(
+                section = state.section,
+                unread = state.conversations.sumOf { it.unread },
+                onSelect = model::selectSection,
+            )
+            ProfileBanner(
+                username = state.username,
+                connection = state.connection,
+                balance = state.wallet.balance,
+                onAction = { action ->
+                    when (action) {
+                        BannerAction.PROFILE -> model.selectSection(AppState.Section.PROFILE)
+                        BannerAction.WALLET -> model.selectSection(AppState.Section.WALLET)
+                        BannerAction.ALERTS -> model.selectSection(AppState.Section.ALERTS)
+                        BannerAction.SEARCH -> model.selectSection(AppState.Section.SEARCH)
+                        BannerAction.SIGN_OUT -> model.signOut()
+                    }
+                },
+            )
             SectionScreen(state = state, model = model, modifier = Modifier.weight(1f))
         }
     }

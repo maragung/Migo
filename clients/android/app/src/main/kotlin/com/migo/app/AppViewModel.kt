@@ -388,9 +388,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * A section never yet visited holds nulls; this is the moment they become a read. Re-entering a
      * section keeps what it holds (the conversations list refreshes through its own control), so a
      * tour through the tab strip costs one read per section, not one per visit.
+     *
+     * The five system tabs also drive the left panel's own state; a panel covers the screen without
+     * disturbing it, so its back returns to the tab the strip still shows.
      */
     fun selectSection(section: AppState.Section) {
-        signedIn { it.copy(section = section) }
+        signedIn { state ->
+            val strip = if (section.isPanel) state.stripSection else section
+            state.copy(section = section, stripSection = strip)
+        }
         when (section) {
             AppState.Section.ROOMS -> if (signedInState?.rooms?.rooms == null) loadRooms()
             AppState.Section.FEED -> if (!spaceLoaded()) loadSpace()
