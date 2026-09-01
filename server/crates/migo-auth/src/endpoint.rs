@@ -35,6 +35,10 @@ pub enum Transport {
     /// A WebSocket on `/ws`. The plain and TLS pairs are the
     /// [`WsScheme`] variants.
     WebSocket,
+    /// A raw TCP socket speaking the length-prefixed frame stream —
+    /// the native client's default (brief section 138). The plain and
+    /// TLS pairs are the [`TcpScheme`] variants.
+    Tcp,
     /// QUIC. The plain and TLS pairs are the [`QuicScheme`] variants.
     /// Currently exposed for symmetry with the form; the gateway
     /// does not yet answer on QUIC.
@@ -48,6 +52,7 @@ impl Transport {
     pub fn as_str(self) -> &'static str {
         match self {
             Transport::WebSocket => "WebSocket",
+            Transport::Tcp => "Tcp",
             Transport::Quic => "Quic",
         }
     }
@@ -77,11 +82,24 @@ pub enum QuicScheme {
     QuicTls,
 }
 
+/// The TLS posture of the TCP transport. Mirrors [`WsScheme`]: the
+/// loopback dev listener is plain, and a deployment reachable from
+/// outside this machine fronts the socket with a TLS 1.3 terminator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TcpScheme {
+    /// Plain socket.
+    Tcp,
+    /// TLS 1.3 over the socket.
+    TcpTls,
+}
+
 /// The scheme paired with the realtime transport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Scheme {
     /// A WebSocket scheme, plain or TLS.
     Ws(WsScheme),
+    /// A TCP scheme, plain or TLS.
+    Tcp(TcpScheme),
     /// A QUIC scheme, plain or TLS.
     Quic(QuicScheme),
 }
@@ -263,6 +281,7 @@ mod tests {
     #[test]
     fn transport_has_a_stable_wire_name() {
         assert_eq!(Transport::WebSocket.as_str(), "WebSocket");
+        assert_eq!(Transport::Tcp.as_str(), "Tcp");
         assert_eq!(Transport::Quic.as_str(), "Quic");
     }
 }

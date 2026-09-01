@@ -93,7 +93,8 @@ pub mod traits;
 
 pub use crate::capability::Capabilities;
 pub use crate::endpoint::{
-    is_loopback_host, QuicScheme, RestScheme, Scheme, ServerEndpoint, Transport, WsScheme,
+    is_loopback_host, QuicScheme, RestScheme, Scheme, ServerEndpoint, TcpScheme, Transport,
+    WsScheme,
 };
 pub use crate::model::{
     AddDeviceAnswer, ChallengeAnswer, ChallengeView, DeviceClaim, DeviceSummary, Grant,

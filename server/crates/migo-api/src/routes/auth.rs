@@ -219,21 +219,25 @@ impl ServerEndpointBody {
         }
         let transport = match self.transport.as_deref() {
             None | Some("WebSocket" | "websocket") => Transport::WebSocket,
+            Some("Tcp" | "tcp" | "TCP") => Transport::Tcp,
             Some("Quic" | "quic" | "QUIC") => Transport::Quic,
             Some(_other) => {
                 return Err(crate::ApiError::from(migo_protocol::fault::validation(
                     "server.transport",
-                    "unknown transport; expected WebSocket or Quic",
+                    "unknown transport; expected WebSocket, Tcp, or Quic",
                 )));
             }
         };
         let scheme = match self.scheme.as_deref() {
             None => match transport {
                 Transport::WebSocket => Scheme::Ws(WsScheme::Wss),
+                Transport::Tcp => Scheme::Tcp(migo_auth::TcpScheme::TcpTls),
                 Transport::Quic => Scheme::Quic(migo_auth::QuicScheme::QuicTls),
             },
             Some("Ws" | "ws" | "WS") => Scheme::Ws(WsScheme::Ws),
             Some("Wss" | "wss" | "WSS") => Scheme::Ws(WsScheme::Wss),
+            Some("Tcp" | "tcp" | "TCP") => Scheme::Tcp(migo_auth::TcpScheme::Tcp),
+            Some("TcpTls" | "tcp-tls" | "TCP-TLS") => Scheme::Tcp(migo_auth::TcpScheme::TcpTls),
             Some("Quic" | "quic") => Scheme::Quic(migo_auth::QuicScheme::Quic),
             Some("QuicTls" | "quic-tls" | "QUIC-TLS") => {
                 Scheme::Quic(migo_auth::QuicScheme::QuicTls)
@@ -241,13 +245,15 @@ impl ServerEndpointBody {
             Some(_) => {
                 return Err(crate::ApiError::from(migo_protocol::fault::validation(
                     "server.scheme",
-                    "unknown scheme; expected Ws, Wss, Quic, or QuicTls",
+                    "unknown scheme; expected Ws, Wss, Tcp, TcpTls, Quic, or QuicTls",
                 )));
             }
         };
         let rest_scheme = match self.rest_scheme.as_deref() {
             None => match scheme {
-                Scheme::Ws(WsScheme::Wss) => RestScheme::Https,
+                Scheme::Ws(WsScheme::Wss)
+                | Scheme::Tcp(migo_auth::TcpScheme::TcpTls)
+                | Scheme::Quic(migo_auth::QuicScheme::QuicTls) => RestScheme::Https,
                 _ => RestScheme::Http,
             },
             Some("Http" | "http") => RestScheme::Http,
