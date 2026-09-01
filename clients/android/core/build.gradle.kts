@@ -65,5 +65,19 @@ dependencies {
     implementation("com.goterl:lazysodium-android:5.1.0@aar")
     implementation("net.java.dev.jna:jna:5.14.0@aar")
 
+    // BouncyCastle, for the account-root primitives the sodium bundle does not carry: ML-DSA-65
+    // (FIPS 204), Argon2id at arbitrary lane counts, Keccak-256 and the secp256k1 point arithmetic
+    // BIP-32 walks over. Same rule as sodium applies — nothing in this module implements a
+    // cryptographic transform of its own; this is the second audited library the account port
+    // assembles standards constructions (HKDF domains, BIP-32/44, the .migo container) on top of.
+    implementation("org.bouncycastle:bcprov-jdk18on:1.81")
+
     testImplementation("junit:junit:4.13.2")
+    // The desktop halves of the lazysodium pair, test-only. The AAR above bundles an .so that only
+    // loads on a device, and the conformance vectors have to run on the host JVM inside
+    // :core:testDebugUnitTest — so the tests inject this handle through Sodium.overrideForTesting.
+    // The plain JNA jar (not the AAR) carries the desktop native bridge the JVM needs; the class
+    // files are the same version as the AAR's, so the test classpath agrees with the device's.
+    testImplementation("com.goterl:lazysodium-java:5.1.0")
+    testImplementation("net.java.dev.jna:jna:5.14.0")
 }

@@ -2,6 +2,7 @@ package com.migo.core.net
 
 import com.migo.core.wire.Id
 import java.io.IOException
+import java.util.Base64
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.KSerializer
@@ -129,6 +130,61 @@ private data class RefreshRequest(
 @Serializable
 private data class LogoutRequest(@SerialName("session_id") val sessionId: String)
 
+/** One body shape covers both anonymous ceremonies; the purpose picks the reading. */
+@Serializable
+private data class ChallengeRequest(
+    val purpose: String,
+    val identifier: String? = null,
+    @SerialName("device_id") val deviceId: String? = null,
+    @SerialName("account_id") val accountId: String? = null,
+    val device: DeviceRequest? = null,
+)
+
+@Serializable
+private data class TwoSignatureAnswer(
+    @SerialName("challenge_id") val challengeId: String,
+    @SerialName("identity_signature") val identitySignature: String,
+    @SerialName("device_signature") val deviceSignature: String,
+)
+
+@Serializable
+private data class AddDeviceAnswer(
+    @SerialName("challenge_id") val challengeId: String,
+    @SerialName("identity_signature") val identitySignature: String,
+    @SerialName("device_public_key") val devicePublicKey: String,
+    @SerialName("device_signature") val deviceSignature: String,
+)
+
+@Serializable
+private data class RotationAnswer(
+    @SerialName("challenge_id") val challengeId: String,
+    val signature: String,
+    @SerialName("new_public_key") val newPublicKey: String,
+)
+
+@Serializable
+private data class KeyPublication(
+    @SerialName("identity_public_key") val identityPublicKey: String,
+    @SerialName("device_public_key") val devicePublicKey: String?,
+)
+
+// No default on chainType on purpose: the Json instance skips default-equal fields, and the
+// server's own default for a missing chain_type is the empty string, not "evm" — a wallet
+// silently registered with no chain would be a row every client has to special-case.
+@Serializable
+private data class WalletBody(
+    val address: String,
+    @SerialName("chain_type") val chainType: String,
+    val label: String? = null,
+    @SerialName("derivation_index") val derivationIndex: Int,
+)
+
+@Serializable
+private data class DevicesResponse(val devices: List<DeviceSummary> = emptyList())
+
+@Serializable
+private data class WalletsResponse(val wallets: List<WalletSummary> = emptyList())
+
 /**
  * A session, as the server issues it.
  *
@@ -164,6 +220,47 @@ private data class ErrorBody(
     val symbol: String,
     val message: String,
     @SerialName("retry_after_ms") val retryAfterMs: Long? = null,
+)
+
+/**
+ * An issued ML-DSA challenge: the canonical payload to sign, byte for byte.
+ *
+ * The payload is base64 and the client decodes it and signs the decoded bytes — it never
+ * re-encodes a challenge, which is what keeps three ports from disagreeing about what was
+ * signed. `expiresAtMs` is display material for a "challenge expired" message, nothing more.
+ */
+@Serializable
+class IdentityChallenge(
+    val payload: String,
+    @SerialName("challenge_id") val challengeId: String,
+    @SerialName("device_id") val deviceId: String,
+    @SerialName("expires_at_ms") val expiresAtMs: Long,
+)
+
+/** One device of the caller's account, for their own security screen. */
+@Serializable
+data class DeviceSummary(
+    @SerialName("device_id") val deviceId: String,
+    @SerialName("display_name") val displayName: String,
+    val platform: String,
+    val status: String,
+    @SerialName("created_at_ms") val createdAtMs: Long,
+    @SerialName("last_seen_at_ms") val lastSeenAtMs: Long,
+    @SerialName("has_credential") val hasCredential: Boolean,
+    @SerialName("is_current") val isCurrent: Boolean,
+)
+
+/** One registered wallet, for the caller's own wallet list. Address and metadata only. */
+@Serializable
+data class WalletSummary(
+    @SerialName("wallet_id") val walletId: String,
+    val address: String,
+    @SerialName("chain_type") val chainType: String,
+    val label: String? = null,
+    @SerialName("derivation_index") val derivationIndex: Int,
+    val status: String,
+    @SerialName("created_at_ms") val createdAtMs: Long,
+    @SerialName("archived_at_ms") val archivedAtMs: Long? = null,
 )
 
 /**
@@ -254,6 +351,183 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
         }
     }
 
+    // --- the ML-DSA identity ceremonies ---------------------------------------------
+    //
+    // A second front door to a session: a client holding the account root asks for a challenge,
+    // signs the canonical bytes it is given with both the identity key and the device credential,
+    // and answers with the two signatures. The signatures arrive here already made — this class
+    // transports bytes, it does not hold keys, which keeps the crypto in the account package and
+    // the network in this one.
+
+    /** Asks for a login challenge bound to a registered device. */
+    suspend fun identityLoginChallenge(identifier: String, deviceId: Id): IdentityChallenge =
+        respond(
+            send(
+                "POST",
+                "/v1/auth/identity/challenge",
+                json.encodeToString(
+                    ChallengeRequest.serializer(),
+                    ChallengeRequest(purpose = "login", identifier = identifier, deviceId = deviceId.value),
+                ),
+            ),
+            IdentityChallenge.serializer(),
+        )
+
+    /** Asks for an add-device challenge: restoring the account onto a new device from a container. */
+    suspend fun addDeviceChallenge(accountId: Id, device: DeviceRequest): IdentityChallenge =
+        respond(
+            send(
+                "POST",
+                "/v1/auth/identity/challenge",
+                json.encodeToString(
+                    ChallengeRequest.serializer(),
+                    ChallengeRequest(purpose = "add-device", accountId = accountId.value, device = device),
+                ),
+            ),
+            IdentityChallenge.serializer(),
+        )
+
+    /** Answers a login challenge with both signatures and receives a session. */
+    suspend fun identityLogin(
+        challengeId: Id,
+        identitySignature: ByteArray,
+        deviceSignature: ByteArray,
+    ): Grant = respond(
+        send(
+            "POST",
+            "/v1/auth/identity/login",
+            json.encodeToString(
+                TwoSignatureAnswer.serializer(),
+                TwoSignatureAnswer(
+                    challengeId = challengeId.value,
+                    identitySignature = Base64.getEncoder().encodeToString(identitySignature),
+                    deviceSignature = Base64.getEncoder().encodeToString(deviceSignature),
+                ),
+            ),
+        ),
+        Grant.serializer(),
+    )
+
+    /** Answers an add-device challenge: introduces the new device's credential, receives a session. */
+    suspend fun addDevice(
+        challengeId: Id,
+        identitySignature: ByteArray,
+        devicePublicKey: ByteArray,
+        deviceSignature: ByteArray,
+    ): Grant = respond(
+        send(
+            "POST",
+            "/v1/auth/identity/add-device",
+            json.encodeToString(
+                AddDeviceAnswer.serializer(),
+                AddDeviceAnswer(
+                    challengeId = challengeId.value,
+                    identitySignature = Base64.getEncoder().encodeToString(identitySignature),
+                    devicePublicKey = Base64.getEncoder().encodeToString(devicePublicKey),
+                    deviceSignature = Base64.getEncoder().encodeToString(deviceSignature),
+                ),
+            ),
+        ),
+        Grant.serializer(),
+    )
+
+    /** Asks, as the caller's own authenticated device, for a rotation challenge. */
+    suspend fun rotationChallenge(accessToken: String): IdentityChallenge =
+        respond(
+            send("POST", "/v1/auth/identity/rotate/challenge", "", accessToken),
+            IdentityChallenge.serializer(),
+        )
+
+    /** Answers a rotation challenge with the current key's signature and the successor's public key. */
+    suspend fun rotateIdentity(
+        accessToken: String,
+        challengeId: Id,
+        signature: ByteArray,
+        newPublicKey: ByteArray,
+    ) {
+        send(
+            "POST",
+            "/v1/auth/identity/rotate",
+            json.encodeToString(
+                RotationAnswer.serializer(),
+                RotationAnswer(
+                    challengeId = challengeId.value,
+                    signature = Base64.getEncoder().encodeToString(signature),
+                    newPublicKey = Base64.getEncoder().encodeToString(newPublicKey),
+                ),
+            ),
+            accessToken,
+        ).use { if (!it.isSuccessful) throw failure(it) }
+    }
+
+    /**
+     * Publishes the caller's identity (and optionally device) public keys on a password-era
+     * account — the legacy upgrade door, idempotent by design.
+     */
+    suspend fun publishIdentityKey(
+        accessToken: String,
+        identityPublicKey: ByteArray,
+        devicePublicKey: ByteArray?,
+    ) {
+        send(
+            "POST",
+            "/v1/auth/identity/key",
+            json.encodeToString(
+                KeyPublication.serializer(),
+                KeyPublication(
+                    identityPublicKey = Base64.getEncoder().encodeToString(identityPublicKey),
+                    devicePublicKey = devicePublicKey?.let { Base64.getEncoder().encodeToString(it) },
+                ),
+            ),
+            accessToken,
+        ).use { if (!it.isSuccessful) throw failure(it) }
+    }
+
+    // --- the device and wallet surfaces ----------------------------------------------
+    //
+    // The authenticated read/write surface of the account's own metadata. Nothing here moves a
+    // secret in either direction: the device list carries a public key's presence, and the wallet
+    // registry carries an address.
+
+    /** The caller's own devices, for their security screen. */
+    suspend fun devices(accessToken: String): List<DeviceSummary> =
+        respond(send("GET", "/v1/devices", null, accessToken), DevicesResponse.serializer()).devices
+
+    /** The caller's registered wallet addresses. */
+    suspend fun wallets(accessToken: String): List<WalletSummary> =
+        respond(send("GET", "/v1/wallets", null, accessToken), WalletsResponse.serializer()).wallets
+
+    /** Registers (or idempotently re-registers) a wallet address on the caller's account. */
+    suspend fun registerWallet(
+        accessToken: String,
+        address: String,
+        derivationIndex: Int,
+        chainType: String = "evm",
+        label: String? = null,
+    ): WalletSummary = respond(
+        send(
+            "PUT",
+            "/v1/wallets",
+            json.encodeToString(
+                WalletBody.serializer(),
+                WalletBody(
+                    address = address,
+                    chainType = chainType,
+                    label = label,
+                    derivationIndex = derivationIndex,
+                ),
+            ),
+            accessToken,
+        ),
+        WalletSummary.serializer(),
+    )
+
+    /** Archives one of the caller's wallets. */
+    suspend fun archiveWallet(accessToken: String, walletId: Id) {
+        send("POST", "/v1/wallets/${walletId.value}", "", accessToken)
+            .use { if (!it.isSuccessful) throw failure(it) }
+    }
+
     /**
      * Posts a JSON body to one of the four bootstrap endpoints and reads a [Grant] back.
      *
@@ -283,6 +557,46 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
             }
         }
     }
+
+    /**
+     * Issues one request with an optional body and bearer token, shared by every endpoint above.
+     *
+     * A null body means the method carries none (GET, or a POST whose handler reads no body); a
+     * GET must not be given a body at all, since OkHttp rejects one and the server would not read
+     * it anyway.
+     */
+    private suspend fun send(method: String, path: String, body: String?, accessToken: String? = null): Response {
+        val builder = Request.Builder().url(base + path)
+        if (accessToken != null) {
+            builder.header("Authorization", "Bearer $accessToken")
+        }
+        when {
+            body != null -> builder.method(method, body.toRequestBody(JSON_MEDIA))
+            method == "GET" -> builder.get()
+            else -> builder.method(method, ByteArray(0).toRequestBody(JSON_MEDIA))
+        }
+        return execute(builder.build())
+    }
+
+    /**
+     * Reads a 2xx response body into one shape, with the same failure mapping the bootstrap
+     * endpoints use: the server's error envelope when it answered with one, [RestError.Malformed]
+     * when a 2xx body was not the shape this client expects.
+     */
+    private suspend fun <T> respond(response: Response, serializer: KSerializer<T>): T =
+        response.use {
+            if (!it.isSuccessful) throw failure(it)
+            val text = try {
+                it.body?.string().orEmpty()
+            } catch (_: IOException) {
+                throw RestError.Transport
+            }
+            try {
+                json.decodeFromString(serializer, text)
+            } catch (_: Exception) {
+                throw RestError.Malformed
+            }
+        }
 
     /**
      * Issues one request and turns OkHttp's callback into a suspension.
