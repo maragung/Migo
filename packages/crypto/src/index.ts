@@ -15,6 +15,12 @@
  * * {@link ratchet} — the Double Ratchet: a fresh key per message, forward secrecy, self-healing.
  * * {@link senderKey} — group messaging at O(1) per message instead of once per recipient.
  *
+ * And the account root, which extends the same promise from messages to the account itself:
+ *
+ * * {@link account} — one 32-byte root secret, five isolated domains (ML-DSA-65 identity, EVM
+ *   wallets, the founding device's E2EE seeds, the `.migo` backup container), each byte-for-byte
+ *   the same as `server/crates/migo-account`.
+ *
  * Nothing here is written from scratch. ADR-0003 allows audited implementations only, and the
  * reason is narrow and specific: a hand-rolled primitive that is wrong still produces
  * random-looking bytes, still round-trips against itself, and still passes every test a team
@@ -34,9 +40,12 @@ export * as identity from './identity.js';
 export * as x3dh from './x3dh.js';
 export * as ratchet from './ratchet.js';
 export * as senderKey from './sender-key.js';
+export * as account from './account/index.js';
 
 export { CryptoError } from './errors.js';
 export type { CryptoErrorKind, CryptoErrorDetail } from './errors.js';
+export { AccountError } from './account/errors.js';
+export type { AccountErrorKind, AccountErrorDetail } from './account/errors.js';
 export { MacKey, TAG_LEN as MAC_TAG_LEN, MIN_TAG_LEN as MAC_MIN_TAG_LEN } from './mac.js';
 export { SymmetricKey, KEY_LEN, NONCE_LEN, TAG_LEN as AEAD_TAG_LEN } from './aead.js';
 export type { Label } from './kdf.js';

@@ -25,13 +25,16 @@ export type {
   CaptchaProof,
   ConfigLimits,
   DeviceDescriptor,
+  DeviceSummary,
   FetchLike,
   Grant,
+  IdentityChallenge,
   LoginParams,
   NodeConfig,
   RefreshParams,
   RegisterParams,
   ServerConfig,
+  WalletSummary,
 } from './rest.js';
 
 // --- the user-configured server endpoint (host, port, scheme, transport) ---

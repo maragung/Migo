@@ -1246,3 +1246,73 @@ live baru `the_client_transport_completes_a_live_quic_handshake`
 worker — handshake TLS 1.3 → stream → HELLO+bit QUIC → WELCOME dengan bit
 QUIC → round-trip PING terjawab — dan hijau terhadap produksi
 `152.53.102.150:18443`. Desktop fmt/clippy `-D warnings`/test (44) hijau.
+
+## 35. Transport TCP native: satu warisan mig33v46, tiga jalur (v0.11.0)
+
+Desain transport-bindings baru (migo.md section 138) membagi jalurnya dengan
+jelas: client native (desktop, Android) bicara raw TCP dengan framing biner
+length-prefix u32 big-endian — warisan mig33v46 — web client tetap WebSocket
+karena browser tidak punya TCP socket API, dan QUIC menjadi opsi kedua untuk
+semua; federasi antar-node tetap TLS 1.3 over TCP. Bit fitur TCP_TRANSPORT
+(21) hanya di-advertise selama listener benar-benar terikat, dan negosiasi
+tetap irisan — klien yang tidak meminta tidak menerimanya. Di server,
+`MIGO_TCP__BIND` membuka listener TCP yang membawa surface realtime penuh:
+satu koneksi = satu sesi, frame dibatasi MAX_FRAME_BYTES yang dicek _sebelum_
+body hostile di-buffer, dan pembacaan cancel-safe dengan buffer milik
+transport. End-to-end test menjalankan kontrak fitur penuh (HELLO → WELCOME
+dengan bit TCP → round-trip) plus prefiks hostile yang harus ditolak. Desktop
+dan Android memakai TCP sebagai transport native default dengan fallback
+jujur ke WebSocket — label status selalu menyebut transport yang benar-benar
+dipakai. CI server/desktop hijau; build Android hijau di Actions.
+
+## 36. Satu akun, satu root 32-byte: identitas ML-DSA-65, dompet EVM, kontainer .migo (v0.12.0)
+
+**Desain** (migo.md section 134-137): seluruh akun diturunkan dari satu rahasia
+root 32-byte yang digenerate di device dan tidak pernah meninggalkannya. Setiap
+kegunaan adalah satu ekspansi HKDF-SHA-256 sendiri dengan label ber-versi —
+`MIGO/IDENTITY/V1` (login ML-DSA-65 / FIPS 204), `MIGO/EVM/V1` (BIP-32/BIP-44
+coin 60), `MIGO/E2EE/V1` (seed identity X3DH device pendiri), `MIGO/BACKUP/V1`
+(jadwal kunci kontainer); kredensial per-device sengaja TIDAK diturunkan dari
+root agar root yang bocor sendirian tidak bisa menyamar jadi device terdaftar.
+Server tidak menyimpan material privat sama sekali — hanya public key.
+
+**migo-account**: crate referensi Rust dengan vektor lintas-bahasa. Modul
+root/identity/evm/container digenangi test, dan vektor konformansi
+(`shared/protocol/vectors/crypto/account-{domains,evm,mldsa,container}.json`)
+dipakai Rust, Python, TypeScript, dan Kotlin untuk memastikan empat platform
+menurunkan byte yang sama. Port TypeScript (`packages/crypto/src/account/`,
+@noble/post-quant + @noble/scure/bip32 + hash-wasm) dan port Android
+(`:core`, lazysodium untuk primitif dasar + BouncyCastle untuk ML-DSA-65,
+Keccak-256 dan aritmetika secp256k1 BIP-32) lulus vektor yang sama;
+SDK web mendapat 11 metode REST identitas (`identityLoginChallenge`,
+`addDeviceChallenge`, `identityLogin`, `addDevice`, `rotationChallenge`,
+`rotateIdentity`, `publishIdentityKey`, `devices`, `wallets`,
+`registerWallet`, `archiveWallet`) yang mirror `account.rs`.
+
+**Server** (migrasi 0004: tabel identity_keys, login_challenge, wallet, plus
+kolom status/public_credential di device): login tanpa password jadi upacara
+challenge — klien meminta challenge
+Login (identifier di-resolve lewat email/telepon/username, device harus milik
+akun dan aktif), menandatangani payload dengan kunci identitas (context
+`migo-auth-login-v1`) dan kunci device (`migo-auth-device-v1`), lalu menerima
+Grant. Challenge palsu menyamarkan akun yang tidak ada (anti-enumeration).
+AddDevice memakai `account_id` dari kontainer .migo, menegakkan limit device
+saat issue, dan membuat baris Pending; rotasi identitas jalan di context
+terpisah `migo-auth-rotate-v1`. Dompet EVM diregistrasi dengan alamat + index
+derivasi, bisa diarsip. Semua upacara mencatat security event untuk audit.
+
+**Desktop**: device pendiri menyimpan root + identity E2EE deterministik +
+kredensial acak; device tambahan (sign-in password) TANPA root; device hasil
+restore (impor kontainer) mendapat root kembali. Vault MIGOVLT1 bertambah
+field opsional FIELD_ROOT/FIELD_DEVICE_CREDENTIAL dan tetap membuka vault
+lama. Refresh token gagal di device pemegang root otomatis jatuh ke login
+upacara ML-DSA (sign payload apa adanya, tanpa re-encode). Backup .migo dibuat
+hanya dari device pemegang root (UI jujur menyebutnya), restore lewat form
+sendiri; registrasi mendaftarkan dompet index 0 otomatis dan device
+menyinkronkan dompet 0..7 ke server; panel Settings menampilkan daftar device
+(dengan tanda kredensial/current) dan dompet dengan tombol Archive.
+
+**Keamanan & CI**: gerbang CI baru memindai diff terhadap pola rahasia
+(brief section 183) agar token/kunci tidak pernah ter-commit. Pintu akhir:
+server 1750 test hijau, desktop 56 test hijau, web/TS 29 test vektor akun
+hijau, lint/fmt/clippy bersih di seluruh workspace.

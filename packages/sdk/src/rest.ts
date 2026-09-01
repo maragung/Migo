@@ -4,9 +4,12 @@
  *
  * A client cannot open the realtime transport without an access token, and it cannot get an access
  * token over a transport it has not opened yet. Section 118 permits exactly this bootstrap over
- * REST and nothing more — once a session is minted, everything else happens on the socket. So this
- * client is deliberately small: {@link BootstrapClient.register}, {@link BootstrapClient.login},
- * {@link BootstrapClient.refresh}, {@link BootstrapClient.logout}, and {@link BootstrapClient.config}.
+ * REST and nothing more — once a session is minted, everything else happens on the socket. Beyond
+ * the password bootstrap ({@link BootstrapClient.register}, {@link BootstrapClient.login},
+ * {@link BootstrapClient.refresh}, {@link BootstrapClient.logout}, {@link BootstrapClient.config})
+ * it also carries the account-management calls that sit beside a session — sessions, password,
+ * recovery, contact — and the ML-DSA identity ceremonies with the device and wallet registry they
+ * unlock, which a client holding a `.migo` account root uses instead of a password (§182).
  *
  * The wire format here is REST-native JSON in snake_case, which is not the camelCase the protocol
  * structs use on the socket — so this module maps between the two by hand rather than sharing the
@@ -152,6 +155,59 @@ export interface Grant {
   isNewAccount: boolean;
 }
 
+/**
+ * An issued ML-DSA identity challenge: the canonical bytes to sign, and the device the answer is
+ * bound to.
+ *
+ * `payload` is the server's canonical challenge, already base64-decoded to the exact bytes the
+ * caller signs — a client signs it as given and never re-encodes it, which is what keeps the ports
+ * from disagreeing about what was signed. (Android's mirror keeps the base64 text and decodes at
+ * the call site; the SDK decodes here, the same way {@link parseId} turns id text into an {@link Id},
+ * so a caller hands the bytes straight to `account.IdentityKey.signLogin`.) `expiresAtMs` is
+ * display material for a "challenge expired" message, nothing more.
+ */
+export interface IdentityChallenge {
+  payload: Uint8Array;
+  challengeId: Id;
+  deviceId: Id;
+  expiresAtMs: number;
+}
+
+/**
+ * One device of the caller's account, for their own security screen.
+ *
+ * Metadata only — `hasCredential` is whether the device can take part in the ML-DSA login ceremony,
+ * never the credential itself. Timestamps are Unix milliseconds.
+ */
+export interface DeviceSummary {
+  deviceId: Id;
+  displayName: string;
+  platform: string;
+  status: string;
+  createdAtMs: number;
+  lastSeenAtMs: number;
+  hasCredential: boolean;
+  isCurrent: boolean;
+}
+
+/**
+ * One registered wallet, for the caller's own wallet list.
+ *
+ * Address and metadata only; the private key behind it never leaves the device. `address` is the
+ * canonical lowercase hex without a `0x` prefix, `label` and `archivedAtMs` are present only when
+ * set, and timestamps are Unix milliseconds.
+ */
+export interface WalletSummary {
+  walletId: Id;
+  address: string;
+  chainType: string;
+  label?: string;
+  derivationIndex: number;
+  status: string;
+  createdAtMs: number;
+  archivedAtMs?: number;
+}
+
 /** The node's identity, as a client needs to display and route to it. */
 export interface NodeConfig {
   id: string;
@@ -254,6 +310,110 @@ function parseGrant(body: unknown): Grant {
     refreshExpiresAtMs: Number(g['refresh_expires_at_ms']),
     capabilities: asBigInt(g['capabilities']),
     isNewAccount: Boolean(g['is_new_account']),
+  };
+}
+
+/** The standard base64 alphabet (padded), the encoding the server's `STANDARD` engine reads and writes. */
+const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+const BASE64_LOOKUP: ReadonlyMap<string, number> = new Map(
+  Array.from(BASE64_ALPHABET, (ch, index) => [ch, index] as const),
+);
+
+/**
+ * Encodes bytes as standard base64 with padding — the form the identity routes expect for every
+ * signature and public key. Written out rather than reaching for `btoa`/`Buffer`, so it behaves the
+ * same in a browser, a worker, and Node, and produces exactly what the server's `STANDARD` decoder
+ * reads.
+ */
+function toBase64(bytes: Uint8Array): string {
+  let out = '';
+  let i = 0;
+  for (; i + 2 < bytes.length; i += 3) {
+    const n = ((bytes[i] ?? 0) << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0);
+    out +=
+      BASE64_ALPHABET.charAt((n >> 18) & 63) +
+      BASE64_ALPHABET.charAt((n >> 12) & 63) +
+      BASE64_ALPHABET.charAt((n >> 6) & 63) +
+      BASE64_ALPHABET.charAt(n & 63);
+  }
+  const remaining = bytes.length - i;
+  if (remaining === 1) {
+    const n = (bytes[i] ?? 0) << 16;
+    out += `${BASE64_ALPHABET.charAt((n >> 18) & 63)}${BASE64_ALPHABET.charAt((n >> 12) & 63)}==`;
+  } else if (remaining === 2) {
+    const n = ((bytes[i] ?? 0) << 16) | ((bytes[i + 1] ?? 0) << 8);
+    out += `${BASE64_ALPHABET.charAt((n >> 18) & 63)}${BASE64_ALPHABET.charAt((n >> 12) & 63)}${BASE64_ALPHABET.charAt((n >> 6) & 63)}=`;
+  }
+  return out;
+}
+
+/**
+ * Decodes standard base64 (padding and stray whitespace tolerated) into bytes. Used for the one
+ * field that arrives base64 and must be consumed as bytes — a challenge {@link IdentityChallenge.payload}
+ * the caller signs.
+ */
+function fromBase64(text: string): Uint8Array {
+  const clean = text.replace(/[^A-Za-z0-9+/]/g, '');
+  const out = new Uint8Array((clean.length * 3) >> 2);
+  let outIndex = 0;
+  let buffer = 0;
+  let bits = 0;
+  for (const ch of clean) {
+    const value = BASE64_LOOKUP.get(ch);
+    if (value === undefined) {
+      continue;
+    }
+    buffer = (buffer << 6) | value;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out[outIndex] = (buffer >> bits) & 0xff;
+      outIndex += 1;
+    }
+  }
+  return out.subarray(0, outIndex);
+}
+
+/** Maps a `ChallengeViewBody` JSON body into an {@link IdentityChallenge}, decoding its payload. */
+function parseIdentityChallenge(body: unknown): IdentityChallenge {
+  const b = body as Record<string, unknown>;
+  return {
+    payload: fromBase64(String(b['payload'])),
+    challengeId: parseId(String(b['challenge_id'])),
+    deviceId: parseId(String(b['device_id'])),
+    expiresAtMs: Number(b['expires_at_ms']),
+  };
+}
+
+/** Maps a `DeviceSummary` JSON row into the SDK's typed view. */
+function parseDeviceSummary(row: Record<string, unknown>): DeviceSummary {
+  return {
+    deviceId: parseId(String(row['device_id'])),
+    displayName: String(row['display_name']),
+    platform: String(row['platform']),
+    status: String(row['status']),
+    createdAtMs: Number(row['created_at_ms']),
+    lastSeenAtMs: Number(row['last_seen_at_ms']),
+    hasCredential: Boolean(row['has_credential']),
+    isCurrent: Boolean(row['is_current']),
+  };
+}
+
+/** Maps a `WalletSummary` JSON row into the SDK's typed view, omitting the fields the server omits. */
+function parseWalletSummary(row: Record<string, unknown>): WalletSummary {
+  const label = row['label'];
+  const archivedAt = row['archived_at_ms'];
+  return {
+    walletId: parseId(String(row['wallet_id'])),
+    address: String(row['address']),
+    chainType: String(row['chain_type']),
+    derivationIndex: Number(row['derivation_index']),
+    status: String(row['status']),
+    createdAtMs: Number(row['created_at_ms']),
+    ...(typeof label === 'string' ? { label } : {}),
+    ...(archivedAt !== undefined && archivedAt !== null
+      ? { archivedAtMs: Number(archivedAt) }
+      : {}),
   };
 }
 
@@ -458,6 +618,183 @@ export class BootstrapClient {
    */
   async logout(accessToken: string, sessionId: Id): Promise<void> {
     await this.#post('/v1/auth/logout', { session_id: sessionId }, accessToken);
+  }
+
+  // --- the ML-DSA identity ceremonies ----------------------------------------
+  //
+  // The second front door to a session (§182): a client holding a `.migo` account root asks for a
+  // challenge, signs the canonical bytes it is given with both the account identity key and the
+  // device credential, and answers with the signatures. Signatures and public keys cross the wire
+  // as standard base64; the payload to sign is decoded for the caller (see {@link IdentityChallenge}).
+
+  /**
+   * `POST /v1/auth/identity/challenge` (login) — a challenge bound to a registered device.
+   *
+   * `identifier` names the account (username or email) and `deviceId` the registered device the
+   * answer will be signed on; both are required for a login challenge.
+   */
+  async identityLoginChallenge(params: {
+    identifier: string;
+    deviceId: Id;
+  }): Promise<IdentityChallenge> {
+    const body = {
+      purpose: 'login',
+      identifier: params.identifier,
+      device_id: params.deviceId,
+    };
+    return parseIdentityChallenge(await this.#post('/v1/auth/identity/challenge', body));
+  }
+
+  /**
+   * `POST /v1/auth/identity/challenge` (add-device) — a challenge for restoring the account onto a
+   * new device from a `.migo` container.
+   *
+   * `accountId` comes from the opened container; `device` describes the new device the restored
+   * session will run on.
+   */
+  async addDeviceChallenge(params: {
+    accountId: Id;
+    device: DeviceDescriptor;
+  }): Promise<IdentityChallenge> {
+    const body = {
+      purpose: 'add-device',
+      account_id: params.accountId,
+      device: deviceBody(params.device),
+    };
+    return parseIdentityChallenge(await this.#post('/v1/auth/identity/challenge', body));
+  }
+
+  /**
+   * `POST /v1/auth/identity/login` — answer a login challenge with both signatures and receive a
+   * session.
+   *
+   * The login ceremony requires the account identity signature *and* the device credential
+   * signature, each over the challenge payload under its own context, so a leaked root alone cannot
+   * sign in as a still-registered device.
+   */
+  async identityLogin(params: {
+    challengeId: Id;
+    identitySignature: Uint8Array;
+    deviceSignature: Uint8Array;
+  }): Promise<Grant> {
+    const body = {
+      challenge_id: params.challengeId,
+      identity_signature: toBase64(params.identitySignature),
+      device_signature: toBase64(params.deviceSignature),
+    };
+    return parseGrant(await this.#post('/v1/auth/identity/login', body));
+  }
+
+  /**
+   * `POST /v1/auth/identity/add-device` — answer an add-device challenge: introduce the new
+   * device's credential public key and its signature, and receive the restored session.
+   */
+  async addDevice(params: {
+    challengeId: Id;
+    identitySignature: Uint8Array;
+    devicePublicKey: Uint8Array;
+    deviceSignature: Uint8Array;
+  }): Promise<Grant> {
+    const body = {
+      challenge_id: params.challengeId,
+      identity_signature: toBase64(params.identitySignature),
+      device_public_key: toBase64(params.devicePublicKey),
+      device_signature: toBase64(params.deviceSignature),
+    };
+    return parseGrant(await this.#post('/v1/auth/identity/add-device', body));
+  }
+
+  /**
+   * `POST /v1/auth/identity/rotate/challenge` — ask, as the caller's own authenticated device, for
+   * a rotation challenge. Requires the caller's access token.
+   */
+  async rotationChallenge(accessToken: string): Promise<IdentityChallenge> {
+    return parseIdentityChallenge(
+      await this.#post('/v1/auth/identity/rotate/challenge', {}, accessToken),
+    );
+  }
+
+  /**
+   * `POST /v1/auth/identity/rotate` — answer a rotation challenge with the current key's signature
+   * (under the rotate context) and the successor's public key. Answers 204, so there is nothing to
+   * return.
+   */
+  async rotateIdentity(
+    accessToken: string,
+    params: { challengeId: Id; signature: Uint8Array; newPublicKey: Uint8Array },
+  ): Promise<void> {
+    const body = {
+      challenge_id: params.challengeId,
+      signature: toBase64(params.signature),
+      new_public_key: toBase64(params.newPublicKey),
+    };
+    await this.#post('/v1/auth/identity/rotate', body, accessToken);
+  }
+
+  /**
+   * `POST /v1/auth/identity/key` — publish the caller's identity (and optionally device) public
+   * keys on a password-era account: the legacy upgrade door, idempotent by design. Answers 204.
+   */
+  async publishIdentityKey(
+    accessToken: string,
+    params: { identityPublicKey: Uint8Array; devicePublicKey?: Uint8Array },
+  ): Promise<void> {
+    const body = {
+      identity_public_key: toBase64(params.identityPublicKey),
+      ...(params.devicePublicKey !== undefined
+        ? { device_public_key: toBase64(params.devicePublicKey) }
+        : {}),
+    };
+    await this.#post('/v1/auth/identity/key', body, accessToken);
+  }
+
+  // --- the device and wallet surfaces ----------------------------------------
+  //
+  // The authenticated read/write surface of the account's own metadata. Nothing here moves a secret
+  // in either direction: the device list carries a public key's presence, and the wallet registry
+  // carries an address.
+
+  /** `GET /v1/devices` — the caller's own devices, for their security screen. */
+  async devices(accessToken: string): Promise<DeviceSummary[]> {
+    const body = (await this.#get('/v1/devices', accessToken)) as {
+      devices?: Record<string, unknown>[];
+    };
+    return (body.devices ?? []).map(parseDeviceSummary);
+  }
+
+  /** `GET /v1/wallets` — the caller's registered wallet addresses. */
+  async wallets(accessToken: string): Promise<WalletSummary[]> {
+    const body = (await this.#get('/v1/wallets', accessToken)) as {
+      wallets?: Record<string, unknown>[];
+    };
+    return (body.wallets ?? []).map(parseWalletSummary);
+  }
+
+  /**
+   * `PUT /v1/wallets` — register (or idempotently re-register) a wallet address on the caller's
+   * account.
+   *
+   * `chainType` defaults to `"evm"`, the only chain this release supports; `label` is optional and
+   * `derivationIndex` is the `i` in `m/44'/60'/0'/0/i`, so a restore re-registers in order.
+   */
+  async registerWallet(
+    accessToken: string,
+    params: { address: string; derivationIndex: number; chainType?: string; label?: string },
+  ): Promise<WalletSummary> {
+    const body = {
+      address: params.address,
+      chain_type: params.chainType ?? 'evm',
+      derivation_index: params.derivationIndex,
+      ...(params.label !== undefined ? { label: params.label } : {}),
+    };
+    return parseWalletSummary(
+      (await this.#put('/v1/wallets', body, accessToken)) as Record<string, unknown>,
+    );
+  }
+
+  /** `POST /v1/wallets/{wallet_id}` — archive one of the caller's wallets. Answers 204. */
+  async archiveWallet(accessToken: string, walletId: Id): Promise<void> {
+    await this.#post(`/v1/wallets/${walletId}`, {}, accessToken);
   }
 
   /** `GET /v1/config` — the node identity, feature bits, and policy limits, unauthenticated. */
