@@ -71,8 +71,8 @@ use async_trait::async_trait;
 use migo_core::config::StoreConfig;
 use migo_core::{Error, Id, Result, Secret, Timestamp};
 use migo_protocol::{
-    fault, ConversationKind, EncryptionMode, MessageKind, Platform, RelationshipKind, RoomKind,
-    RoomRole,
+    fault, ConversationKind, EncryptionMode, MessageKind, MlDsaPurpose, Platform, RelationshipKind,
+    RoomKind, RoomRole,
 };
 use sea_orm::sea_query::{
     Alias, Expr, ExprTrait, Func, IntoCondition, LikeExpr, LockBehavior, LockType, NullOrdering,
@@ -94,19 +94,20 @@ use crate::migration::{Migrator, MIGRATION_LOCK_KEY};
 use crate::model::{
     advanced_token, game_status, notification_kind, Account, AccountStatus, AdvanceGame, Appended,
     AuditEntry, BadgeAward, Bot, Conversation, ConversationMember, ConversationPosition,
-    ConversationSummary, Currency, Cursor, Device, Entitlement, GameSession, GiftSent, KeyBundle,
-    LedgerAccount, LedgerAccountKind, LedgerLeg, LedgerTransaction, MediaObject, NewAccount,
-    NewBot, NewDevice, NewGame, NewMessage, NewOutboxEvent, NewPeer, NewRoom, NewSession,
-    NewTransaction, NewXpAward, Notification, OutboxRecord, Patch, PeerRecord, Posted, Profile,
-    ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship,
-    Report, RevokeReason, Room, RoomMember, Scope, Session, Standing, StoredMessage, Visibility,
-    XpChange,
+    ConversationSummary, Currency, Cursor, Device, DeviceStatus, Entitlement, GameSession,
+    GiftSent, IdentityKeyStatus, KeyBundle, LedgerAccount, LedgerAccountKind, LedgerLeg,
+    LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice, NewGame, NewMessage,
+    NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward, Notification,
+    OutboxRecord, Patch, PeerRecord, Posted, Profile, ProfilePatch, Progression, PublishedKeys,
+    PushRegistration, PushTarget, Receipt, Relationship, Report, RevokeReason, Room, RoomMember,
+    Scope, Session, Standing, StoredMessage, Visibility, WalletStatus, XpChange,
 };
 use crate::traits::{
-    canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore, DeviceStore,
-    EconomyStore, FederationStore, GameStore, KeyStore, MediaStore, MessagingStore, NotifyStore,
+    canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore,
+    ChallengeStore, DeviceStore, EconomyStore, FederationStore, GameStore, IdentityKeyRow,
+    IdentityStore, KeyStore, LoginChallengeRow, MediaStore, MessagingStore, NotifyStore,
     ProgressionStore, RecoveryRow, RecoveryStore, RoomKindFilter, RoomStore, SafetyStore,
-    SessionStore, SocialStore, Store, MAX_LEDGER_LEGS,
+    SessionStore, SocialStore, Store, WalletRow, WalletStore, MAX_LEDGER_LEGS,
 };
 
 /// A duplicate key. Postgres reports which index, and the caller needs to know:
@@ -393,6 +394,10 @@ struct DeviceRow {
     os_version: Option<String>,
     /// Hardware model, when the client reports one.
     device_model: Option<String>,
+    /// Lifecycle state, the `device.status` numbering.
+    status: i16,
+    /// The device credential's ML-DSA public key, when it has one.
+    public_credential: Option<Vec<u8>>,
     /// Registration instant.
     created_at: OffsetDateTime,
     /// Last activity, coarse.
@@ -411,6 +416,8 @@ impl From<DeviceRow> for Device {
             app_version: row.app_version,
             os_version: row.os_version,
             device_model: row.device_model,
+            status: DeviceStatus::from_i16(row.status),
+            public_credential: row.public_credential,
             created_at: instant_of(row.created_at),
             last_seen_at: instant_of(row.last_seen_at),
             revoked_at: row.revoked_at.map(instant_of),
@@ -1096,6 +1103,8 @@ impl DeviceStore for PostgresStore {
             app_version: new.app_version,
             os_version: new.os_version,
             device_model: new.device_model,
+            status: new.status.to_i16(),
+            public_credential: new.public_credential,
             created_at: stamp_of(new.created_at),
             last_seen_at: stamp_of(new.created_at),
             revoked_at: None,
@@ -1108,6 +1117,8 @@ impl DeviceStore for PostgresStore {
             app_version: Set(row.app_version.clone()),
             os_version: Set(row.os_version.clone()),
             device_model: Set(row.device_model.clone()),
+            status: Set(row.status),
+            public_credential: Set(row.public_credential.clone()),
             created_at: Set(row.created_at),
             last_seen_at: Set(row.last_seen_at),
             ..Default::default()
@@ -1137,6 +1148,9 @@ impl DeviceStore for PostgresStore {
         Ok(entity::device::Entity::find()
             .filter(entity::device::Column::AccountId.eq(uuid_of(account_id)))
             .filter(entity::device::Column::RevokedAt.is_null())
+            // Pending rows are add-device challenges that were never consumed;
+            // they hold no credential and must not appear in a device list.
+            .filter(entity::device::Column::Status.ne(DeviceStatus::Pending.to_i16()))
             .order_by_asc(entity::device::Column::CreatedAt)
             .order_by_asc(entity::device::Column::DeviceId)
             .into_partial_model::<DeviceRow>()
@@ -1175,11 +1189,67 @@ impl DeviceStore for PostgresStore {
             .filter(entity::device::Column::RevokedAt.is_null())
             .set(entity::device::ActiveModel {
                 revoked_at: Set(Some(stamp_of(at))),
+                status: Set(DeviceStatus::Revoked.to_i16()),
                 ..Default::default()
             })
             .exec(&self.db)
             .await
             .context("revoke_device")?;
+        Ok(())
+    }
+
+    async fn activate_device(&self, device_id: Id, at: Timestamp) -> Result<()> {
+        // The pending -> active transition is what an add-device challenge
+        // buys. The update is guarded on `status = pending`, so a second
+        // activation of an already-active device affects nothing and falls
+        // through to the check below, which distinguishes the harmless case
+        // (active) from the two the caller must hear about (unknown, revoked).
+        let stamped = stamp_of(at);
+        let activated = entity::device::Entity::update_many()
+            .filter(entity::device::Column::DeviceId.eq(uuid_of(device_id)))
+            .filter(entity::device::Column::Status.eq(DeviceStatus::Pending.to_i16()))
+            .set(entity::device::ActiveModel {
+                status: Set(DeviceStatus::Active.to_i16()),
+                last_seen_at: Set(stamped),
+                ..Default::default()
+            })
+            .exec(&self.db)
+            .await
+            .context("activate_device")?;
+        if activated.rows_affected > 0 {
+            return Ok(());
+        }
+        let row = entity::device::Entity::find_by_id(uuid_of(device_id))
+            .into_partial_model::<DeviceRow>()
+            .one(&self.db)
+            .await
+            .context("activate_device: look")?;
+        match row {
+            None => Err(fault::not_found("device")),
+            Some(device) if device.revoked_at.is_some() => {
+                Err(fault::conflict("a revoked device cannot be reactivated"))
+            }
+            Some(_) => Ok(()),
+        }
+    }
+
+    async fn set_device_credential(&self, device_id: Id, public_key: &[u8]) -> Result<()> {
+        // Idempotent by design: the legacy upgrade path retries with the same
+        // key, and the second write must land as quietly as the first. A
+        // missing device is an error — a credential for a row that does not
+        // exist is a caller bug, not a race.
+        let updated = entity::device::Entity::update_many()
+            .filter(entity::device::Column::DeviceId.eq(uuid_of(device_id)))
+            .set(entity::device::ActiveModel {
+                public_credential: Set(Some(public_key.to_vec())),
+                ..Default::default()
+            })
+            .exec(&self.db)
+            .await
+            .context("set_device_credential")?;
+        if updated.rows_affected == 0 {
+            return Err(fault::not_found("device"));
+        }
         Ok(())
     }
 }
@@ -6006,24 +6076,357 @@ impl RecoveryStore for PostgresStore {
 
     async fn recovery_delete_expired(&self, before: Timestamp, limit: u32) -> Result<u64> {
         // A bounded sweep: the index on `expires_at` keeps the scan to live
-        // rows, and the limit stops a sweeper that has been broken for a
-        // long time from holding a lock proportional to the cleanup debt.
-        // The caller loops until the return is zero.
-        // `DeleteMany` in SeaORM does not expose a `.limit(...)` here, so we
-        // route the bounded delete through `execute_unprepared`; the
-        // timestamp is a `i64` literal and the limit is `u32` literal, both
-        // already numeric, so a malformed input is not a SQL injection
-        // vector here either.
+        // rows, and the limit stops a sweeper that has been broken for a long
+        // time from holding a lock proportional to the cleanup debt. The
+        // caller loops until the return is zero.
+        //
+        // Postgres DELETE takes no LIMIT, so the bound is applied to the
+        // selecting half of a delete-in-subquery, and both values are bound
+        // through `sql` rather than formatted into the text. The string
+        // formatting this call used to do never produced valid SQL at all —
+        // Postgres rejected the LIMIT, and the timestamp rendered unquoted —
+        // which is why this method now has a contract case behind it.
         let result = self
             .db
-            .execute_unprepared(&format!(
-                "delete from password_recovery where expires_at <= {} limit {}",
-                stamp_of(before),
-                limit,
+            .execute_raw(sql(
+                "delete from password_recovery where token_id in \
+                 (select token_id from password_recovery where expires_at <= $1 limit $2)",
+                [stamp_value(before), Value::from(i64::from(limit))],
             ))
             .await
             .context("recovery_delete_expired")?;
         Ok(result.rows_affected())
+    }
+}
+
+#[async_trait]
+
+/// An `identity_keys` row as it sits in the database.
+impl From<entity::identity_keys::Model> for IdentityKeyRow {
+    fn from(row: entity::identity_keys::Model) -> Self {
+        Self {
+            key_id: id_of(row.key_id),
+            account_id: id_of(row.account_id),
+            algorithm: row.algorithm,
+            key_version: row.key_version,
+            public_key: row.public_key,
+            status: IdentityKeyStatus::from_i16(row.status),
+            created_at: instant_of(row.created_at),
+            revoked_at: row.revoked_at.map(instant_of),
+        }
+    }
+}
+
+/// The insert for a new identity key. Shared by `put_identity_key` and the
+/// second half of `rotate_identity_key`, which write the same shape — once
+/// against the pool and once inside a transaction.
+fn identity_key_insert(row: &IdentityKeyRow) -> entity::identity_keys::ActiveModel {
+    entity::identity_keys::ActiveModel {
+        key_id: Set(uuid_of(row.key_id)),
+        account_id: Set(uuid_of(row.account_id)),
+        algorithm: Set(row.algorithm.clone()),
+        key_version: Set(row.key_version),
+        public_key: Set(row.public_key.clone()),
+        status: Set(row.status.to_i16()),
+        created_at: Set(stamp_of(row.created_at)),
+        revoked_at: Set(row.revoked_at.map(stamp_of)),
+    }
+}
+
+/// The unique index on `(account_id, key_version)`, mapped to the caller's
+/// vocabulary: a duplicate version is a versioning mistake, not a collision.
+fn identity_key_conflict(error: DbErr) -> Error {
+    on_conflict(error, "identity_keys", |name| match name {
+        "identity_keys_account_version_key" => Some(fault::already_exists("identity key version")),
+        "identity_keys_account_id_fkey" => Some(fault::not_found("account")),
+        _ => None,
+    })
+}
+
+#[async_trait]
+impl IdentityStore for PostgresStore {
+    async fn put_identity_key(&self, row: IdentityKeyRow) -> Result<()> {
+        entity::identity_keys::Entity::insert(identity_key_insert(&row))
+            .exec(&self.db)
+            .await
+            .map_err(identity_key_conflict)?;
+        Ok(())
+    }
+
+    async fn identity_keys(&self, account_id: Id) -> Result<Vec<IdentityKeyRow>> {
+        Ok(entity::identity_keys::Entity::find()
+            .filter(entity::identity_keys::Column::AccountId.eq(uuid_of(account_id)))
+            .order_by_desc(entity::identity_keys::Column::KeyVersion)
+            .all(&self.db)
+            .await
+            .context("identity_keys")?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    async fn active_identity_key(&self, account_id: Id) -> Result<Option<IdentityKeyRow>> {
+        Ok(entity::identity_keys::Entity::find()
+            .filter(entity::identity_keys::Column::AccountId.eq(uuid_of(account_id)))
+            .filter(entity::identity_keys::Column::Status.eq(IdentityKeyStatus::Active.to_i16()))
+            .one(&self.db)
+            .await
+            .context("active_identity_key")?
+            .map(Into::into))
+    }
+
+    async fn rotate_identity_key(&self, new: IdentityKeyRow) -> Result<()> {
+        // The same posture as `rotate_session`: lock the current active key,
+        // check the successor arithmetic, mark it rotated, insert the successor,
+        // commit. A crash anywhere in between rolls the whole thing back, which
+        // is the property the rotation contract is named after — an account is
+        // never left with two live identities or none.
+        let transaction = self.begin("rotate_identity_key").await?;
+        let current: Option<IdentityKeyRow> = entity::identity_keys::Entity::find()
+            .filter(entity::identity_keys::Column::AccountId.eq(uuid_of(new.account_id)))
+            .filter(entity::identity_keys::Column::Status.eq(IdentityKeyStatus::Active.to_i16()))
+            .lock(LockType::Update)
+            .one(&transaction)
+            .await
+            .context("rotate_identity_key: lock current")?
+            .map(Into::into);
+        let expected = current.as_ref().map_or(1, |key| key.key_version + 1);
+        if new.key_version != expected {
+            return Err(fault::conflict("identity key version is not the successor"));
+        }
+        if let Some(previous) = &current {
+            entity::identity_keys::Entity::update_many()
+                .filter(entity::identity_keys::Column::KeyId.eq(uuid_of(previous.key_id)))
+                .set(entity::identity_keys::ActiveModel {
+                    status: Set(IdentityKeyStatus::Rotated.to_i16()),
+                    ..Default::default()
+                })
+                .exec(&transaction)
+                .await
+                .context("rotate_identity_key: retire predecessor")?;
+        }
+        entity::identity_keys::Entity::insert(identity_key_insert(&new))
+            .exec(&transaction)
+            .await
+            .map_err(identity_key_conflict)?;
+        transaction
+            .commit()
+            .await
+            .context("rotate_identity_key: commit")?;
+        Ok(())
+    }
+
+    async fn revoke_identity_key(&self, key_id: Id, account_id: Id, at: Timestamp) -> Result<()> {
+        // Scoped to the owning account so one account cannot revoke another's
+        // key by guessing an id; `revoked_at is null` keeps the first instant.
+        entity::identity_keys::Entity::update_many()
+            .filter(entity::identity_keys::Column::KeyId.eq(uuid_of(key_id)))
+            .filter(entity::identity_keys::Column::AccountId.eq(uuid_of(account_id)))
+            .filter(entity::identity_keys::Column::RevokedAt.is_null())
+            .set(entity::identity_keys::ActiveModel {
+                status: Set(IdentityKeyStatus::Revoked.to_i16()),
+                revoked_at: Set(Some(stamp_of(at))),
+                ..Default::default()
+            })
+            .exec(&self.db)
+            .await
+            .context("revoke_identity_key")?;
+        Ok(())
+    }
+}
+
+/// A `login_challenge` row as it sits in the database.
+impl From<entity::login_challenge::Model> for LoginChallengeRow {
+    fn from(row: entity::login_challenge::Model) -> Self {
+        Self {
+            challenge_id: id_of(row.challenge_id),
+            account_id: id_of(row.account_id),
+            device_id: id_of(row.device_id),
+            purpose: MlDsaPurpose::from_wire(u32::from(u16::try_from(row.purpose).unwrap_or(0))),
+            payload: row.payload,
+            expires_at: instant_of(row.expires_at),
+            consumed_at: row.consumed_at.map(instant_of),
+            created_at: instant_of(row.created_at),
+        }
+    }
+}
+
+#[async_trait]
+impl ChallengeStore for PostgresStore {
+    async fn put_login_challenge(&self, row: LoginChallengeRow) -> Result<()> {
+        // Plain insert, no upsert: a challenge id is minted per request and a
+        // collision is a caller bug the unique primary key should surface.
+        entity::login_challenge::Entity::insert(entity::login_challenge::ActiveModel {
+            challenge_id: Set(uuid_of(row.challenge_id)),
+            account_id: Set(uuid_of(row.account_id)),
+            device_id: Set(uuid_of(row.device_id)),
+            purpose: Set(row.purpose.to_wire() as i16),
+            payload: Set(row.payload),
+            expires_at: Set(stamp_of(row.expires_at)),
+            consumed_at: Set(row.consumed_at.map(stamp_of)),
+            created_at: Set(stamp_of(row.created_at)),
+        })
+        .exec(&self.db)
+        .await
+        .map_err(|error| {
+            on_conflict(error, "login_challenge", |name| match name {
+                "login_challenge_pkey" => Some(fault::already_exists("login challenge")),
+                "login_challenge_account_id_fkey" => Some(fault::not_found("account")),
+                "login_challenge_device_id_fkey" => Some(fault::not_found("device")),
+                _ => None,
+            })
+        })?;
+        Ok(())
+    }
+
+    async fn get_login_challenge(
+        &self,
+        challenge_id: Id,
+        now: Timestamp,
+    ) -> Result<Option<LoginChallengeRow>> {
+        Ok(
+            entity::login_challenge::Entity::find_by_id(uuid_of(challenge_id))
+                .one(&self.db)
+                .await
+                .context("get_login_challenge")?
+                .filter(|row| row.expires_at > stamp_of(now))
+                .map(Into::into),
+        )
+    }
+
+    async fn consume_login_challenge(
+        &self,
+        challenge_id: Id,
+        now: Timestamp,
+    ) -> Result<Option<LoginChallengeRow>> {
+        // The atomic "stamp and return", the same statement shape as
+        // `recovery_consume`: zero rows returned means consumed, expired, or
+        // unknown, and the caller answers all three identically so a replay
+        // learns nothing.
+        let stamped = stamp_of(now);
+        let update = entity::login_challenge::Entity::update_many()
+            .filter(entity::login_challenge::Column::ChallengeId.eq(uuid_of(challenge_id)))
+            .filter(entity::login_challenge::Column::ConsumedAt.is_null())
+            .filter(entity::login_challenge::Column::ExpiresAt.gt(stamped))
+            .set(entity::login_challenge::ActiveModel {
+                consumed_at: Set(Some(stamped)),
+                ..Default::default()
+            });
+        let updated = update
+            .exec_with_returning(&self.db)
+            .await
+            .context("consume_login_challenge")?;
+        Ok(updated.into_iter().next().map(Into::into))
+    }
+
+    async fn delete_expired_login_challenges(&self, before: Timestamp, limit: u32) -> Result<u64> {
+        // Same bounded sweep as `recovery_delete_expired`, for the same reasons;
+        // the index on `expires_at` keeps it off the live rows. Delete-in-
+        // subquery because Postgres DELETE takes no LIMIT, values bound
+        // through `sql`.
+        let result = self
+            .db
+            .execute_raw(sql(
+                "delete from login_challenge where challenge_id in \
+                 (select challenge_id from login_challenge where expires_at <= $1 limit $2)",
+                [stamp_value(before), Value::from(i64::from(limit))],
+            ))
+            .await
+            .context("delete_expired_login_challenges")?;
+        Ok(result.rows_affected())
+    }
+}
+
+/// A `wallet` row as it sits in the database.
+impl From<entity::wallet::Model> for WalletRow {
+    fn from(row: entity::wallet::Model) -> Self {
+        Self {
+            wallet_id: id_of(row.wallet_id),
+            account_id: id_of(row.account_id),
+            address: row.address,
+            chain_type: row.chain_type,
+            label: row.label,
+            derivation_index: row.derivation_index,
+            status: WalletStatus::from_i16(row.status),
+            created_at: instant_of(row.created_at),
+            archived_at: row.archived_at.map(instant_of),
+        }
+    }
+}
+
+#[async_trait]
+impl WalletStore for PostgresStore {
+    async fn put_wallet(&self, row: WalletRow) -> Result<()> {
+        // Upsert on `(account_id, chain_type, address)`: re-registering the
+        // same address — which is exactly what a restore from a .migo
+        // container does — refreshes the label and derivation index instead of
+        // failing, while the database keeps the original registration instant.
+        // The unique index is a partial-expression-free triple, so the conflict
+        // target is spelled as columns.
+        entity::wallet::Entity::insert(entity::wallet::ActiveModel {
+            wallet_id: Set(uuid_of(row.wallet_id)),
+            account_id: Set(uuid_of(row.account_id)),
+            address: Set(row.address.clone()),
+            chain_type: Set(row.chain_type.clone()),
+            label: Set(row.label.clone()),
+            derivation_index: Set(row.derivation_index),
+            status: Set(row.status.to_i16()),
+            created_at: Set(stamp_of(row.created_at)),
+            archived_at: Set(row.archived_at.map(stamp_of)),
+        })
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::columns([
+                entity::wallet::Column::AccountId,
+                entity::wallet::Column::ChainType,
+                entity::wallet::Column::Address,
+            ])
+            .update_columns([
+                entity::wallet::Column::Label,
+                entity::wallet::Column::DerivationIndex,
+                entity::wallet::Column::Status,
+            ])
+            .to_owned(),
+        )
+        .exec(&self.db)
+        .await
+        .map_err(|error| {
+            on_conflict(error, "wallet", |name| match name {
+                "wallet_account_id_fkey" => Some(fault::not_found("account")),
+                _ => None,
+            })
+        })?;
+        Ok(())
+    }
+
+    async fn wallets_for_account(&self, account_id: Id) -> Result<Vec<WalletRow>> {
+        Ok(entity::wallet::Entity::find()
+            .filter(entity::wallet::Column::AccountId.eq(uuid_of(account_id)))
+            .order_by_asc(entity::wallet::Column::Status)
+            .order_by_desc(entity::wallet::Column::CreatedAt)
+            .all(&self.db)
+            .await
+            .context("wallets_for_account")?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    async fn archive_wallet(&self, wallet_id: Id, account_id: Id, at: Timestamp) -> Result<()> {
+        // Scoped to the owner; a miss (unknown id, other owner) is a no-op so
+        // the list the client reads from already reflects the outcome.
+        entity::wallet::Entity::update_many()
+            .filter(entity::wallet::Column::WalletId.eq(uuid_of(wallet_id)))
+            .filter(entity::wallet::Column::AccountId.eq(uuid_of(account_id)))
+            .filter(entity::wallet::Column::ArchivedAt.is_null())
+            .set(entity::wallet::ActiveModel {
+                status: Set(WalletStatus::Archived.to_i16()),
+                archived_at: Set(Some(stamp_of(at))),
+                ..Default::default()
+            })
+            .exec(&self.db)
+            .await
+            .context("archive_wallet")?;
+        Ok(())
     }
 }
 

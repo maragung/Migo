@@ -15,8 +15,8 @@
 
 use migo_core::{Id, Result, Secret, Timestamp};
 use migo_protocol::{
-    codes, ConversationKind, EncryptionMode, MessageKind, Platform, RelationshipKind, RoomKind,
-    RoomRole,
+    codes, ConversationKind, EncryptionMode, MessageKind, MlDsaPurpose, Platform, RelationshipKind,
+    RoomKind, RoomRole,
 };
 use migo_store::model::*;
 use migo_store::traits::*;
@@ -96,6 +96,8 @@ async fn seed_device(store: &SharedStore, account_id: Id, value: u128) -> Id {
             app_version: "0.1.0".to_string(),
             os_version: Some("14".to_string()),
             device_model: Some("Pixel 8".to_string()),
+            status: DeviceStatus::Active,
+            public_credential: None,
             created_at: ts(2_000),
         })
         .await
@@ -475,6 +477,303 @@ pub async fn revoking_a_device_hides_it_but_keeps_the_row(store: &SharedStore) {
     assert_eq!(listed[0].device_id, id(12));
     let revoked = store.device_by_id(device_id).await.unwrap().unwrap();
     assert_eq!(revoked.revoked_at, Some(ts(6_000)));
+}
+
+// --- identity keys --------------------------------------------------------
+
+pub async fn rotation_retires_the_predecessor_and_refuses_to_skip_a_version(store: &SharedStore) {
+    let account_id = seed_account(store, 1, "alice").await;
+
+    let first = IdentityKeyRow {
+        key_id: id(21),
+        account_id,
+        algorithm: "ML-DSA-65".to_string(),
+        key_version: 1,
+        public_key: vec![1; 1952],
+        status: IdentityKeyStatus::Active,
+        created_at: ts(2_000),
+        revoked_at: None,
+    };
+    store.put_identity_key(first.clone()).await.unwrap();
+    // A duplicate version is refused: it is a versioning mistake, not a retry.
+    expect_code(store.put_identity_key(first).await, codes::ALREADY_EXISTS);
+
+    let active = store
+        .active_identity_key(account_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(active.key_id, id(21));
+
+    // Rotation appends version 2 and retires version 1 in one step.
+    let second = IdentityKeyRow {
+        key_id: id(22),
+        account_id,
+        algorithm: "ML-DSA-65".to_string(),
+        key_version: 2,
+        public_key: vec![2; 1952],
+        status: IdentityKeyStatus::Active,
+        created_at: ts(3_000),
+        revoked_at: None,
+    };
+    store.rotate_identity_key(second).await.unwrap();
+
+    let versions = store.identity_keys(account_id).await.unwrap();
+    assert_eq!(versions.len(), 2, "rotation appends, it does not replace");
+    assert_eq!(versions[0].key_version, 2, "listed newest first");
+    assert_eq!(versions[0].status, IdentityKeyStatus::Active);
+    assert_eq!(versions[1].status, IdentityKeyStatus::Rotated);
+
+    // A rotation that is not the successor is refused — the caller's picture
+    // of the account went stale mid-flight, and a second active key must not
+    // be the result.
+    let stale = IdentityKeyRow {
+        key_id: id(23),
+        account_id,
+        algorithm: "ML-DSA-65".to_string(),
+        key_version: 4,
+        public_key: vec![4; 1952],
+        status: IdentityKeyStatus::Active,
+        created_at: ts(4_000),
+        revoked_at: None,
+    };
+    expect_code(store.rotate_identity_key(stale).await, codes::CONFLICT);
+
+    // The first version can still be revoked outright, and revocation of the
+    // active key leaves the account without one until a new key is registered.
+    store
+        .revoke_identity_key(id(22), account_id, ts(5_000))
+        .await
+        .unwrap();
+    assert!(
+        store
+            .active_identity_key(account_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "revoking the active key leaves no active key"
+    );
+    let revoked = store.identity_keys(account_id).await.unwrap();
+    assert_eq!(revoked[0].revoked_at, Some(ts(5_000)));
+    assert_eq!(revoked[0].status, IdentityKeyStatus::Revoked);
+}
+
+// --- login challenges -----------------------------------------------------
+
+pub async fn a_login_challenge_is_consumed_exactly_once(store: &SharedStore) {
+    let account_id = seed_account(store, 1, "alice").await;
+    let device_id = seed_device(store, account_id, 11).await;
+
+    let row = LoginChallengeRow {
+        challenge_id: id(31),
+        account_id,
+        device_id,
+        purpose: MlDsaPurpose::Login,
+        payload: b"canonical-challenge-bytes".to_vec(),
+        expires_at: ts(20_000),
+        consumed_at: None,
+        created_at: ts(10_000),
+    };
+    store.put_login_challenge(row).await.unwrap();
+
+    // Live before expiry.
+    let live = store
+        .get_login_challenge(id(31), ts(15_000))
+        .await
+        .unwrap()
+        .expect("live challenge reads back");
+    assert_eq!(live.payload, b"canonical-challenge-bytes".to_vec());
+
+    // First consume succeeds and returns the row as it was.
+    let consumed = store
+        .consume_login_challenge(id(31), ts(15_000))
+        .await
+        .unwrap()
+        .expect("first consume succeeds");
+    assert_eq!(consumed.account_id, account_id);
+    assert_eq!(consumed.device_id, device_id);
+    assert_eq!(consumed.purpose, MlDsaPurpose::Login);
+
+    // A replay is indistinguishable from a miss: Ok(None), nothing written.
+    assert!(
+        store
+            .consume_login_challenge(id(31), ts(15_000))
+            .await
+            .unwrap()
+            .is_none(),
+        "a consumed challenge cannot be consumed again"
+    );
+    assert!(
+        store
+            .consume_login_challenge(id(99), ts(15_000))
+            .await
+            .unwrap()
+            .is_none(),
+        "an unknown challenge id is the same non-event"
+    );
+
+    // An expired challenge is refused even on first presentation.
+    store
+        .put_login_challenge(LoginChallengeRow {
+            challenge_id: id(32),
+            account_id,
+            device_id,
+            purpose: MlDsaPurpose::AddDevice,
+            payload: b"canonical-challenge-bytes-2".to_vec(),
+            expires_at: ts(20_000),
+            consumed_at: None,
+            created_at: ts(10_000),
+        })
+        .await
+        .unwrap();
+    assert!(
+        store
+            .consume_login_challenge(id(32), ts(20_000))
+            .await
+            .unwrap()
+            .is_none(),
+        "expiry is half-open: expires_at <= now is dead"
+    );
+
+    // The sweep takes expired rows and only expired rows.
+    store
+        .put_login_challenge(LoginChallengeRow {
+            challenge_id: id(33),
+            account_id,
+            device_id,
+            purpose: MlDsaPurpose::Rotate,
+            payload: b"canonical-challenge-bytes-3".to_vec(),
+            expires_at: ts(19_000),
+            consumed_at: None,
+            created_at: ts(10_000),
+        })
+        .await
+        .unwrap();
+    let removed = store
+        .delete_expired_login_challenges(ts(20_000), 100)
+        .await
+        .unwrap();
+    assert!(removed >= 1, "the expired challenge was swept");
+}
+
+// --- wallets ---------------------------------------------------------------
+
+pub async fn wallet_registration_is_idempotent_per_address(store: &SharedStore) {
+    let account_id = seed_account(store, 1, "alice").await;
+
+    let first = WalletRow {
+        wallet_id: id(41),
+        account_id,
+        address: "701fa81de5c8a61bfa8c4f815bab3768d56f1865".to_string(),
+        chain_type: "evm".to_string(),
+        label: Some("main".to_string()),
+        derivation_index: 0,
+        status: WalletStatus::Active,
+        created_at: ts(2_000),
+        archived_at: None,
+    };
+    store.put_wallet(first.clone()).await.unwrap();
+    // A restore re-registers the same address: refresh, not duplicate.
+    store
+        .put_wallet(WalletRow {
+            wallet_id: id(42),
+            account_id,
+            address: first.address.clone(),
+            chain_type: first.chain_type.clone(),
+            label: Some("renamed".to_string()),
+            derivation_index: 0,
+            status: WalletStatus::Active,
+            created_at: ts(3_000),
+            archived_at: None,
+        })
+        .await
+        .unwrap();
+
+    let listed = store.wallets_for_account(account_id).await.unwrap();
+    assert_eq!(listed.len(), 1, "the same address registers once");
+    assert_eq!(listed[0].label, Some("renamed".to_string()));
+    assert_eq!(
+        listed[0].created_at,
+        ts(2_000),
+        "the first registration time survives"
+    );
+
+    // Archiving is a hide, not a delete, and stays hidden.
+    store
+        .archive_wallet(listed[0].wallet_id, account_id, ts(4_000))
+        .await
+        .unwrap();
+    let archived = store.wallets_for_account(account_id).await.unwrap();
+    assert_eq!(archived[0].status, WalletStatus::Archived);
+    assert_eq!(archived[0].archived_at, Some(ts(4_000)));
+
+    // Another account's archive call is a no-op.
+    let other = seed_account(store, 2, "bob").await;
+    store
+        .archive_wallet(id(41), other, ts(5_000))
+        .await
+        .unwrap();
+    let still = store.wallets_for_account(account_id).await.unwrap();
+    assert_eq!(still[0].archived_at, Some(ts(4_000)));
+}
+
+// --- device lifecycle ------------------------------------------------------
+
+pub async fn a_pending_device_is_invisible_until_activated(store: &SharedStore) {
+    let account_id = seed_account(store, 1, "alice").await;
+    seed_device(store, account_id, 11).await;
+
+    // The add-device flow registers the row pending, credential in hand.
+    let pending_id = id(12);
+    store
+        .register_device(NewDevice {
+            device_id: pending_id,
+            account_id,
+            platform: Platform::Desktop,
+            display_name: "New laptop".to_string(),
+            app_version: "0.12.0".to_string(),
+            os_version: None,
+            device_model: None,
+            status: DeviceStatus::Pending,
+            public_credential: Some(vec![7; 1952]),
+            created_at: ts(2_000),
+        })
+        .await
+        .unwrap();
+
+    let listed = store.devices_for_account(account_id).await.unwrap();
+    assert_eq!(
+        listed.len(),
+        1,
+        "a pending device is not in the device list"
+    );
+
+    // Consumption activates it; the credential is readable on the row.
+    store.activate_device(pending_id, ts(3_000)).await.unwrap();
+    store
+        .set_device_credential(pending_id, &[9; 1952])
+        .await
+        .unwrap();
+    let device = store.device_by_id(pending_id).await.unwrap().unwrap();
+    assert_eq!(device.status, DeviceStatus::Active);
+    assert_eq!(device.public_credential, Some(vec![9; 1952]));
+
+    // Activation is idempotent on an active device, refused on a revoked one.
+    store.activate_device(pending_id, ts(3_500)).await.unwrap();
+    store.revoke_device(pending_id, ts(4_000)).await.unwrap();
+    expect_code(
+        store.activate_device(pending_id, ts(4_500)).await,
+        codes::CONFLICT,
+    );
+    // An unknown device is an error, not a silent no-op.
+    expect_code(
+        store.activate_device(id(99), ts(4_500)).await,
+        codes::NOT_FOUND,
+    );
+    expect_code(
+        store.set_device_credential(id(99), &[0; 32]).await,
+        codes::NOT_FOUND,
+    );
 }
 
 // --- sessions -------------------------------------------------------------
@@ -2560,6 +2859,10 @@ macro_rules! for_each_contract_case {
         $case!(search_clamps_an_abusive_limit);
         $case!(last_seen_never_moves_backwards);
         $case!(revoking_a_device_hides_it_but_keeps_the_row);
+        $case!(rotation_retires_the_predecessor_and_refuses_to_skip_a_version);
+        $case!(a_login_challenge_is_consumed_exactly_once);
+        $case!(wallet_registration_is_idempotent_per_address);
+        $case!(a_pending_device_is_invisible_until_activated);
         $case!(a_rotated_token_cannot_be_exchanged_twice);
         $case!(a_session_carries_its_own_authentication_time);
         $case!(reuse_detection_kills_the_whole_family);

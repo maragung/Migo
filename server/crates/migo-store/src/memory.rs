@@ -38,19 +38,20 @@ use parking_lot::RwLock;
 use crate::model::{
     advanced_token, game_status, notification_kind, report_status, Account, AccountStatus,
     AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, Conversation, ConversationMember,
-    ConversationPosition, ConversationSummary, Currency, Cursor, Device, Entitlement, GameSession,
-    GiftSent, KeyBundle, LedgerAccount, LedgerAccountKind, LedgerTransaction, MediaObject,
-    NewAccount, NewBot, NewDevice, NewGame, NewMessage, NewOutboxEvent, NewPeer, NewRoom,
-    NewSession, NewTransaction, NewXpAward, Notification, OutboxRecord, Patch, PeerRecord, Posted,
-    Profile, ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Receipt,
-    Relationship, Report, RevokeReason, Room, RoomMember, Scope, Session, Standing, StoredMessage,
-    Visibility, XpChange,
+    ConversationPosition, ConversationSummary, Currency, Cursor, Device, DeviceStatus, Entitlement,
+    GameSession, GiftSent, IdentityKeyStatus, KeyBundle, LedgerAccount, LedgerAccountKind,
+    LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice, NewGame, NewMessage,
+    NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward, Notification,
+    OutboxRecord, Patch, PeerRecord, Posted, Profile, ProfilePatch, Progression, PublishedKeys,
+    PushRegistration, PushTarget, Receipt, Relationship, Report, RevokeReason, Room, RoomMember,
+    Scope, Session, Standing, StoredMessage, Visibility, WalletStatus, XpChange,
 };
 use crate::traits::{
-    canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore, DeviceStore,
-    EconomyStore, FederationStore, GameStore, KeyStore, MediaStore, MessagingStore, NotifyStore,
+    canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore,
+    ChallengeStore, DeviceStore, EconomyStore, FederationStore, GameStore, IdentityKeyRow,
+    IdentityStore, KeyStore, LoginChallengeRow, MediaStore, MessagingStore, NotifyStore,
     ProgressionStore, RecoveryRow, RecoveryStore, RoomKindFilter, RoomStore, SafetyStore,
-    SessionStore, SocialStore, Store, MAX_LEDGER_LEGS,
+    SessionStore, SocialStore, Store, WalletRow, WalletStore, MAX_LEDGER_LEGS,
 };
 
 /// Case-insensitive index key for a name, email, or slug.
@@ -200,6 +201,15 @@ struct State {
     /// `password_recovery` table; consumed or expired rows are dropped by
     /// the background sweeper.
     recovery: HashMap<Id, RecoveryRow>,
+    /// ML-DSA identity keys, keyed by `key_id`. Mirrors the `identity_keys`
+    /// table; an account's keys are filtered out of this map on read.
+    identity_keys: HashMap<Id, IdentityKeyRow>,
+    /// Single-use ML-DSA login challenges, keyed by `challenge_id`. Mirrors
+    /// the `login_challenge` table; expired rows are dropped lazily on read.
+    login_challenges: HashMap<Id, LoginChallengeRow>,
+    /// Registered EVM wallets, keyed by `wallet_id`. Mirrors the `wallet`
+    /// table.
+    wallets: HashMap<Id, WalletRow>,
 }
 
 impl State {
@@ -562,6 +572,8 @@ impl DeviceStore for MemoryStore {
             app_version: new.app_version,
             os_version: new.os_version,
             device_model: new.device_model,
+            status: new.status,
+            public_credential: new.public_credential,
             created_at: new.created_at,
             last_seen_at: new.created_at,
             revoked_at: None,
@@ -579,7 +591,9 @@ impl DeviceStore for MemoryStore {
         let mut devices: Vec<Device> = s
             .devices
             .values()
-            .filter(|d| d.account_id == account_id && d.revoked_at.is_none())
+            .filter(|d| {
+                d.account_id == account_id && d.revoked_at.is_none() && d.status.may_authenticate()
+            })
             .cloned()
             .collect();
         devices.sort_by_key(|d| (d.created_at, d.device_id));
@@ -598,11 +612,38 @@ impl DeviceStore for MemoryStore {
         Ok(())
     }
 
+    async fn activate_device(&self, device_id: Id, at: Timestamp) -> Result<()> {
+        let mut s = self.state.write();
+        let Some(device) = s.devices.get_mut(&device_id) else {
+            return Err(fault::not_found("device"));
+        };
+        if device.revoked_at.is_some() {
+            return Err(fault::conflict("a revoked device cannot be reactivated"));
+        }
+        if device.status == DeviceStatus::Pending {
+            device.status = DeviceStatus::Active;
+            if at > device.last_seen_at {
+                device.last_seen_at = at;
+            }
+        }
+        Ok(())
+    }
+
+    async fn set_device_credential(&self, device_id: Id, public_key: &[u8]) -> Result<()> {
+        let mut s = self.state.write();
+        let Some(device) = s.devices.get_mut(&device_id) else {
+            return Err(fault::not_found("device"));
+        };
+        device.public_credential = Some(public_key.to_vec());
+        Ok(())
+    }
+
     async fn revoke_device(&self, device_id: Id, at: Timestamp) -> Result<()> {
         let mut s = self.state.write();
         if let Some(device) = s.devices.get_mut(&device_id) {
             if device.revoked_at.is_none() {
                 device.revoked_at = Some(at);
+                device.status = DeviceStatus::Revoked;
             }
         }
         Ok(())
@@ -3348,6 +3389,221 @@ impl RecoveryStore for MemoryStore {
             removed += 1;
         }
         Ok(removed)
+    }
+}
+
+#[async_trait]
+impl IdentityStore for MemoryStore {
+    async fn put_identity_key(&self, row: IdentityKeyRow) -> Result<()> {
+        let mut s = self.state.write();
+        if !s.accounts.contains_key(&row.account_id) {
+            return Err(fault::not_found("account"));
+        }
+        let duplicate = s
+            .identity_keys
+            .values()
+            .any(|k| k.account_id == row.account_id && k.key_version == row.key_version);
+        if duplicate {
+            return Err(fault::already_exists("identity key version"));
+        }
+        s.identity_keys.insert(row.key_id, row);
+        Ok(())
+    }
+
+    async fn identity_keys(&self, account_id: Id) -> Result<Vec<IdentityKeyRow>> {
+        let s = self.state.read();
+        let mut keys: Vec<IdentityKeyRow> = s
+            .identity_keys
+            .values()
+            .filter(|k| k.account_id == account_id)
+            .cloned()
+            .collect();
+        keys.sort_by_key(|k| std::cmp::Reverse(k.key_version));
+        Ok(keys)
+    }
+
+    async fn active_identity_key(&self, account_id: Id) -> Result<Option<IdentityKeyRow>> {
+        let s = self.state.read();
+        Ok(s.identity_keys
+            .values()
+            .find(|k| k.account_id == account_id && k.status == IdentityKeyStatus::Active)
+            .cloned())
+    }
+
+    async fn rotate_identity_key(&self, new: IdentityKeyRow) -> Result<()> {
+        let mut s = self.state.write();
+        if !s.accounts.contains_key(&new.account_id) {
+            return Err(fault::not_found("account"));
+        }
+        let current = s
+            .identity_keys
+            .values()
+            .find(|k| k.account_id == new.account_id && k.status == IdentityKeyStatus::Active)
+            .map(|k| (k.key_id, k.key_version));
+        // The successor check is the store's to make: a caller that believes it
+        // is appending version 3 while version 5 is live is a caller whose
+        // picture of the account went stale mid-flight, and the honest answer
+        // is an error, not a second active key.
+        let expected = current.as_ref().map_or(1, |(_, v)| v + 1);
+        if new.key_version != expected {
+            return Err(fault::conflict("identity key version is not the successor"));
+        }
+        if let Some((previous_id, _)) = current {
+            if let Some(previous) = s.identity_keys.get_mut(&previous_id) {
+                previous.status = IdentityKeyStatus::Rotated;
+            }
+        }
+        s.identity_keys.insert(new.key_id, new);
+        Ok(())
+    }
+
+    async fn revoke_identity_key(&self, key_id: Id, account_id: Id, at: Timestamp) -> Result<()> {
+        let mut s = self.state.write();
+        let Some(key) = s.identity_keys.get_mut(&key_id) else {
+            return Ok(());
+        };
+        if key.account_id != account_id {
+            return Ok(());
+        }
+        if key.revoked_at.is_none() {
+            key.revoked_at = Some(at);
+            key.status = IdentityKeyStatus::Revoked;
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ChallengeStore for MemoryStore {
+    async fn put_login_challenge(&self, row: LoginChallengeRow) -> Result<()> {
+        self.state
+            .write()
+            .login_challenges
+            .insert(row.challenge_id, row);
+        Ok(())
+    }
+
+    async fn get_login_challenge(
+        &self,
+        challenge_id: Id,
+        now: Timestamp,
+    ) -> Result<Option<LoginChallengeRow>> {
+        let mut s = self.state.write();
+        let Some(row) = s.login_challenges.get(&challenge_id).cloned() else {
+            return Ok(None);
+        };
+        if row.expires_at <= now {
+            s.login_challenges.remove(&challenge_id);
+            return Ok(None);
+        }
+        Ok(Some(row))
+    }
+
+    async fn consume_login_challenge(
+        &self,
+        challenge_id: Id,
+        now: Timestamp,
+    ) -> Result<Option<LoginChallengeRow>> {
+        // Atomic in the same way `recovery_consume` is: consumed, expired, and
+        // unknown all return `Ok(None)` with nothing written, so the caller
+        // cannot distinguish a replay from a miss — which is the property the
+        // single-use contract needs.
+        let mut s = self.state.write();
+        let Some(row) = s.login_challenges.get_mut(&challenge_id) else {
+            return Ok(None);
+        };
+        if row.consumed_at.is_some() || row.expires_at <= now {
+            return Ok(None);
+        }
+        row.consumed_at = Some(now);
+        Ok(Some(row.clone()))
+    }
+
+    async fn delete_expired_login_challenges(&self, before: Timestamp, limit: u32) -> Result<u64> {
+        let mut s = self.state.write();
+        let mut removed = 0u64;
+        // Deterministic order, for the same reason as the recovery sweep.
+        let mut ids: Vec<Id> = s
+            .login_challenges
+            .iter()
+            .filter(|(_, row)| row.expires_at <= before)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort();
+        for id in ids {
+            if removed >= u64::from(limit) {
+                break;
+            }
+            if s.login_challenges.remove(&id).is_some() {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+}
+
+#[async_trait]
+impl WalletStore for MemoryStore {
+    async fn put_wallet(&self, row: WalletRow) -> Result<()> {
+        let mut s = self.state.write();
+        if !s.accounts.contains_key(&row.account_id) {
+            return Err(fault::not_found("account"));
+        }
+        // Idempotent per (account, chain, address): a restore re-registers the
+        // same wallets and the second pass must refresh, not duplicate. The
+        // unique index on the Postgres side is what keeps this honest there.
+        if let Some(existing) = s.wallets.values().find(|w| {
+            w.account_id == row.account_id
+                && w.chain_type == row.chain_type
+                && w.address == row.address
+        }) {
+            let existing_id = existing.wallet_id;
+            let existing_created = existing.created_at;
+            let existing_archived = existing.archived_at;
+            let target = s.wallets.get_mut(&existing_id).expect("found above");
+            target.label = row.label;
+            target.derivation_index = row.derivation_index;
+            target.status = row.status;
+            target.created_at = existing_created;
+            target.archived_at = existing_archived;
+            return Ok(());
+        }
+        s.wallets.insert(row.wallet_id, row);
+        Ok(())
+    }
+
+    async fn wallets_for_account(&self, account_id: Id) -> Result<Vec<WalletRow>> {
+        let s = self.state.read();
+        let mut wallets: Vec<WalletRow> = s
+            .wallets
+            .values()
+            .filter(|w| w.account_id == account_id)
+            .cloned()
+            .collect();
+        // Active first, then newest — the order a restore replays them in and
+        // the order the client lists them.
+        wallets.sort_by(|a, b| {
+            (a.status == WalletStatus::Archived)
+                .cmp(&(b.status == WalletStatus::Archived))
+                .then(b.created_at.cmp(&a.created_at))
+                .then(b.wallet_id.cmp(&a.wallet_id))
+        });
+        Ok(wallets)
+    }
+
+    async fn archive_wallet(&self, wallet_id: Id, account_id: Id, at: Timestamp) -> Result<()> {
+        let mut s = self.state.write();
+        let Some(wallet) = s.wallets.get_mut(&wallet_id) else {
+            return Ok(());
+        };
+        if wallet.account_id != account_id {
+            return Ok(());
+        }
+        if wallet.archived_at.is_none() {
+            wallet.archived_at = Some(at);
+            wallet.status = WalletStatus::Archived;
+        }
+        Ok(())
     }
 }
 

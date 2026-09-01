@@ -252,6 +252,80 @@ function splitItem(entry) {
   return { doc, code: code.join(' ').replace(/\s+/g, ' ').trim() };
 }
 
+/**
+ * Parses one comma-separated table-body item (or an `add column` definition) into
+ * the table: a `primary key` clause, a `foreign key` clause, a check-style
+ * constraint to skip, or a column. Returns the column it added, if any.
+ */
+function parseItem(table, raw, at) {
+  const { doc, code } = splitItem(raw);
+  if (code === '') return null;
+
+  const pk = /^primary key \(([^)]+)\)$/i.exec(code);
+  if (pk) {
+    table.primaryKey = pk[1].split(',').map((c) => c.trim());
+    return null;
+  }
+  const fk =
+    /^foreign key \(([^)]+)\) references (\w+) \(([^)]+)\)(?: on delete (\w+(?: \w+)?))?$/i.exec(
+      code,
+    );
+  if (fk) {
+    table.foreignKeys.push({
+      columns: fk[1].split(',').map((c) => c.trim()),
+      table: fk[2],
+      references: fk[3].split(',').map((c) => c.trim()),
+      onDelete: fk[4] ?? null,
+    });
+    return null;
+  }
+  // Row-level invariants are enforced by the database and cannot be expressed on a
+  // struct, so they are recognised in order to be skipped rather than misread as a
+  // column called `check`.
+  if (/^(check|unique|constraint) /i.test(code)) return null;
+
+  const column = /^(\w+)\s+([a-z]+(?:\s*\(\s*\d+\s*\))?)\s*(.*)$/i.exec(code);
+  if (!column) {
+    fail(at, `unrecognised table-body item: ${code.slice(0, 72)}`);
+    return null;
+  }
+  const [, colName, typeText, rest] = column;
+  const modifiers = rest.trim();
+
+  const inlineFk = /references (\w+) \((\w+)\)(?: on delete (\w+(?: \w+)?))?/i.exec(modifiers);
+  if (inlineFk) {
+    table.foreignKeys.push({
+      columns: [colName],
+      table: inlineFk[1],
+      references: [inlineFk[2]],
+      onDelete: inlineFk[3] ?? null,
+    });
+  }
+  if (/^primary key\b/i.test(modifiers)) table.primaryKey.push(colName);
+
+  // Everything a column may say after its type. Anything else is a modifier the
+  // generator has never seen, and guessing at it is how a nullable column becomes
+  // a non-null field that panics on the first NULL.
+  const leftovers = modifiers
+    .replace(/primary key/i, '')
+    .replace(/not null/i, '')
+    .replace(/references \w+ \(\w+\)(?: on delete \w+(?: \w+)?)?/i, '')
+    .replace(/default [^,]*/i, '')
+    .replace(/\bunique\b/i, '')
+    .trim();
+  if (leftovers !== '') fail(at, `unrecognised column modifier: "${leftovers}"`);
+
+  const parsed = {
+    name: colName,
+    doc,
+    type: sqlType(typeText.replace(/\s+/g, '').toLowerCase(), at),
+    // A primary key is not null whether or not anyone wrote it down.
+    nullable: !/not null/i.test(modifiers) && !/^primary key\b/i.test(modifiers),
+  };
+  table.columns.push(parsed);
+  return parsed;
+}
+
 // ---------------------------------------------------------------- parsing
 const tables = [];
 
@@ -275,6 +349,32 @@ for (const file of readdirSync(MIGRATIONS)
     // A partition has the parent's columns by definition; the entity addresses the parent.
     if (/^create table \w+ partition of /i.test(head)) continue;
 
+    // `alter table X add column …` grows a table an earlier migration created. The
+    // definition is parsed by exactly the rules a create-table column is, then merged
+    // into that table's entry: the entities must describe each table as it exists
+    // after *every* migration has run, not as the migration that created it left it.
+    // A column the table already has is a mistake in the migration, and the generator
+    // says so rather than emitting a struct with two fields of the same name.
+    const alter = /^alter table (\w+) add column (.*);\s*$/i.exec(head);
+    if (alter) {
+      const [, name, definition] = alter;
+      const target = tables.find((t) => t.name === name);
+      if (!target) {
+        fail(where, `alter table adds a column to "${name}", which no earlier migration creates`);
+        continue;
+      }
+      const entry = stmt.doc
+        .map((text) => ({ text: `-- ${text}`, line: stmt.line }))
+        .concat([{ text: definition, line: stmt.line }]);
+      const newName = /^(\w+)\s/.exec(definition)?.[1];
+      if (newName && target.columns.some((c) => c.name === newName)) {
+        fail(where, `alter table adds "${newName}" to "${name}", which already has it`);
+        continue;
+      }
+      parseItem(target, entry, where);
+      continue;
+    }
+
     const open = /^create table (\w+) \(/i.exec(head);
     if (!open) {
       fail(where, `unrecognised statement: ${head.slice(0, 72)}…`);
@@ -295,71 +395,7 @@ for (const file of readdirSync(MIGRATIONS)
     };
 
     for (const raw of topLevelItems(inner, where)) {
-      const { doc, code } = splitItem(raw);
-      if (code === '') continue;
-      const at = `${stmt.file}:${raw[0].line}`;
-
-      const pk = /^primary key \(([^)]+)\)$/i.exec(code);
-      if (pk) {
-        table.primaryKey = pk[1].split(',').map((c) => c.trim());
-        continue;
-      }
-      const fk =
-        /^foreign key \(([^)]+)\) references (\w+) \(([^)]+)\)(?: on delete (\w+(?: \w+)?))?$/i.exec(
-          code,
-        );
-      if (fk) {
-        table.foreignKeys.push({
-          columns: fk[1].split(',').map((c) => c.trim()),
-          table: fk[2],
-          references: fk[3].split(',').map((c) => c.trim()),
-          onDelete: fk[4] ?? null,
-        });
-        continue;
-      }
-      // Row-level invariants are enforced by the database and cannot be expressed on a
-      // struct, so they are recognised in order to be skipped rather than misread as a
-      // column called `check`.
-      if (/^(check|unique|constraint) /i.test(code)) continue;
-
-      const column = /^(\w+)\s+([a-z]+(?:\s*\(\s*\d+\s*\))?)\s*(.*)$/i.exec(code);
-      if (!column) {
-        fail(at, `unrecognised table-body item: ${code.slice(0, 72)}`);
-        continue;
-      }
-      const [, colName, typeText, rest] = column;
-      const modifiers = rest.trim();
-
-      const inlineFk = /references (\w+) \((\w+)\)(?: on delete (\w+(?: \w+)?))?/i.exec(modifiers);
-      if (inlineFk) {
-        table.foreignKeys.push({
-          columns: [colName],
-          table: inlineFk[1],
-          references: [inlineFk[2]],
-          onDelete: inlineFk[3] ?? null,
-        });
-      }
-      if (/^primary key\b/i.test(modifiers)) table.primaryKey.push(colName);
-
-      // Everything a column may say after its type. Anything else is a modifier the
-      // generator has never seen, and guessing at it is how a nullable column becomes
-      // a non-null field that panics on the first NULL.
-      const leftovers = modifiers
-        .replace(/primary key/i, '')
-        .replace(/not null/i, '')
-        .replace(/references \w+ \(\w+\)(?: on delete \w+(?: \w+)?)?/i, '')
-        .replace(/default [^,]*/i, '')
-        .replace(/\bunique\b/i, '')
-        .trim();
-      if (leftovers !== '') fail(at, `unrecognised column modifier: "${leftovers}"`);
-
-      table.columns.push({
-        name: colName,
-        doc,
-        type: sqlType(typeText.replace(/\s+/g, '').toLowerCase(), at),
-        // A primary key is not null whether or not anyone wrote it down.
-        nullable: !/not null/i.test(modifiers) && !/^primary key\b/i.test(modifiers),
-      });
+      parseItem(table, raw, `${stmt.file}:${raw[0].line}`);
     }
 
     if (table.primaryKey.length === 0) fail(where, `table ${name} has no primary key`);

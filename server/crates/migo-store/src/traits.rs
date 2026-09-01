@@ -24,7 +24,7 @@
 
 use async_trait::async_trait;
 use migo_core::{Id, Result, Timestamp};
-use migo_protocol::{fault, RelationshipKind};
+use migo_protocol::{fault, MlDsaPurpose, RelationshipKind};
 
 use crate::model::{
     Account, AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, Conversation, ConversationMember,
@@ -174,6 +174,17 @@ pub trait DeviceStore: Send + Sync {
     /// Updates the last-seen stamp. Called often, so it must stay a single-row
     /// write with no read first.
     async fn touch_device(&self, device_id: Id, at: Timestamp) -> Result<()>;
+
+    /// Activates a pending device. Called when an add-device challenge is
+    /// consumed; a no-op on an already-active device, an error on an unknown
+    /// or revoked one, because both mean the caller's picture of the world is
+    /// wrong and that should not pass silently.
+    async fn activate_device(&self, device_id: Id, at: Timestamp) -> Result<()>;
+
+    /// Records or replaces a device's login-credential public key. Idempotent:
+    /// the legacy upgrade path may retry with the same key, and the second
+    /// write must not be an error.
+    async fn set_device_credential(&self, device_id: Id, public_key: &[u8]) -> Result<()>;
 
     /// Revokes a device. Its sessions must be revoked by the caller in the same
     /// operation; the store does not do it implicitly, because a silent cascade
@@ -1213,6 +1224,166 @@ pub trait RecoveryStore: Send + Sync {
     async fn recovery_delete_expired(&self, before: Timestamp, limit: u32) -> Result<u64>;
 }
 
+/// A row in the `identity_keys` table: one version of an account's ML-DSA
+/// identity (brief section 182).
+///
+/// Not the E2EE `identity_key` table — that one is the 64-byte
+/// Ed25519||X25519 pair X3DH starts from, lives at one row per device, and
+/// predates this table by three migrations. The names are adjacent; the keys
+/// have nothing to do with each other.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdentityKeyRow {
+    /// Primary key.
+    pub key_id: Id,
+    /// Owning account.
+    pub account_id: Id,
+    /// Algorithm name, e.g. "ML-DSA-65". A column, not a constant, so the
+    /// next algorithm is a new row (agility, brief section 182).
+    pub algorithm: String,
+    /// 1-based version, unique per account.
+    pub key_version: i32,
+    /// The public half only. 1952 bytes for ML-DSA-65.
+    pub public_key: Vec<u8>,
+    /// Active, rotated, or revoked.
+    pub status: crate::model::IdentityKeyStatus,
+    /// When this version was registered.
+    pub created_at: Timestamp,
+    /// When this version was revoked, if it was.
+    pub revoked_at: Option<Timestamp>,
+}
+
+/// Storage for the account's ML-DSA identity keys.
+///
+/// The server only ever holds public material here; the seed stays on the
+/// device that derived it. Rotation is one store call rather than a
+/// put-then-update sequence because the two writes must not be separable: a
+/// crash between them is an account with either two live identities or none.
+#[async_trait]
+pub trait IdentityStore: Send + Sync {
+    /// Inserts a key. Rejects a duplicate `(account_id, key_version)`, which
+    /// is how an idempotent retry is told apart from a versioning mistake.
+    async fn put_identity_key(&self, row: IdentityKeyRow) -> Result<()>;
+
+    /// The account's keys, newest version first.
+    async fn identity_keys(&self, account_id: Id) -> Result<Vec<IdentityKeyRow>>;
+
+    /// The one active key, if the account has one.
+    async fn active_identity_key(&self, account_id: Id) -> Result<Option<IdentityKeyRow>>;
+
+    /// Appends `new` as active and marks every other key of the account
+    /// rotated, in one operation. `new.key_version` must be the successor of
+    /// the current active version; the store enforces that rather than
+    /// trusting the caller's arithmetic.
+    async fn rotate_identity_key(&self, new: IdentityKeyRow) -> Result<()>;
+
+    /// Revokes one key by id. Revoking the active key is allowed — that is
+    /// what an emergency withdrawal is — and leaves the account without an
+    /// active identity until a new one is registered.
+    async fn revoke_identity_key(&self, key_id: Id, account_id: Id, at: Timestamp) -> Result<()>;
+}
+
+/// A row in the `login_challenge` table: one single-use ML-DSA challenge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoginChallengeRow {
+    /// Primary key, surfaced to the client as the id to answer.
+    pub challenge_id: Id,
+    /// The account the challenge authenticates.
+    pub account_id: Id,
+    /// The device the challenge is bound to. For add-device, the pending row.
+    pub device_id: Id,
+    /// Login, add-device, or rotate — from the protocol's `MlDsaPurpose`.
+    pub purpose: MlDsaPurpose,
+    /// The exact canonical bytes the client must sign, stored as issued.
+    pub payload: Vec<u8>,
+    /// When the challenge stops being accepted. Five minutes by policy.
+    pub expires_at: Timestamp,
+    /// Stamped on first successful use.
+    pub consumed_at: Option<Timestamp>,
+    /// When the challenge was issued.
+    pub created_at: Timestamp,
+}
+
+/// Storage for single-use ML-DSA login challenges.
+///
+/// The same shape as the recovery store: a short-lived row whose interesting
+/// transition is "consume", which must be atomic — the second presentation of
+/// a challenge sees exactly what an expired one does, so replay tells the
+/// attacker nothing about which of the two happened.
+#[async_trait]
+pub trait ChallengeStore: Send + Sync {
+    /// Inserts a new challenge.
+    async fn put_login_challenge(&self, row: LoginChallengeRow) -> Result<()>;
+
+    /// Reads a challenge by id, live ones only.
+    async fn get_login_challenge(
+        &self,
+        challenge_id: Id,
+        now: Timestamp,
+    ) -> Result<Option<LoginChallengeRow>>;
+
+    /// Stamps the row as consumed, returning the row as it was on a successful
+    /// transition (unconsumed and unexpired). `Ok(None)` when the transition
+    /// cannot happen — already consumed, expired, or unknown — and the caller
+    /// answers all three identically.
+    async fn consume_login_challenge(
+        &self,
+        challenge_id: Id,
+        now: Timestamp,
+    ) -> Result<Option<LoginChallengeRow>>;
+
+    /// Deletes rows whose `expires_at` is at or before `before`, bounded by
+    /// `limit`, for the same sweeper that owns the captcha and recovery rows.
+    async fn delete_expired_login_challenges(&self, before: Timestamp, limit: u32) -> Result<u64>;
+}
+
+/// A row in the `wallet` table: one registered EVM address.
+///
+/// An address, not a wallet: the private key never leaves the device, and the
+/// server stores exactly what a directory needs — which account shows this
+/// address, and which derivation index produced it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WalletRow {
+    /// Primary key.
+    pub wallet_id: Id,
+    /// Owning account.
+    pub account_id: Id,
+    /// Lowercase hex, 40 characters, no 0x prefix — the canonical form.
+    pub address: String,
+    /// "evm" today.
+    pub chain_type: String,
+    /// User-chosen display label, if any.
+    pub label: Option<String>,
+    /// The `i` in `m/44'/60'/0'/0/i`, so a restore re-registers in order.
+    pub derivation_index: i32,
+    /// Active or archived.
+    pub status: crate::model::WalletStatus,
+    /// When the wallet was first registered.
+    pub created_at: Timestamp,
+    /// When the user archived it, if they did.
+    pub archived_at: Option<Timestamp>,
+}
+
+/// Storage for the EVM wallet registry.
+///
+/// Display and recovery metadata only: no balances, no broadcasting, no RPC —
+/// the brief is explicit that none of that exists in this version, and a store
+/// method for it would be the first lie.
+#[async_trait]
+pub trait WalletStore: Send + Sync {
+    /// Registers a wallet. Idempotent per `(account_id, chain_type, address)`:
+    /// re-registering the same address updates the label and derivation index
+    /// rather than failing, which is what a restore from a `.migo` container
+    /// does.
+    async fn put_wallet(&self, row: WalletRow) -> Result<()>;
+
+    /// The account's wallets, active ones first, newest first within that.
+    async fn wallets_for_account(&self, account_id: Id) -> Result<Vec<WalletRow>>;
+
+    /// Archives a wallet. Unknown ids and other owners' wallets are `Ok(())`,
+    /// because the list the client reads from already reflects the outcome.
+    async fn archive_wallet(&self, wallet_id: Id, account_id: Id, at: Timestamp) -> Result<()>;
+}
+
 /// Everything, for the composition root.
 ///
 /// Domain crates should depend on the narrow traits instead. This exists so
@@ -1236,6 +1407,9 @@ pub trait Store:
     + SafetyStore
     + CaptchaStore
     + RecoveryStore
+    + IdentityStore
+    + ChallengeStore
+    + WalletStore
     + Send
     + Sync
     + 'static

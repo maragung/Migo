@@ -10,7 +10,7 @@ use migo_core::Secret;
 use migo_protocol::{MessageKind, Platform};
 
 use super::*;
-use crate::model::Visibility;
+use crate::model::{DeviceStatus, Visibility};
 
 // --- fixtures -------------------------------------------------------------
 
@@ -65,6 +65,8 @@ async fn seed_device(store: &MemoryStore, account_id: Id, value: u128) -> Id {
             app_version: "0.1.0".to_string(),
             os_version: Some("14".to_string()),
             device_model: Some("Pixel 8".to_string()),
+            status: DeviceStatus::Active,
+            public_credential: None,
             created_at: ts(2_000),
         })
         .await

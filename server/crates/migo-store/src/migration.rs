@@ -68,6 +68,7 @@ impl MigratorTrait for Migrator {
             Box::new(Initial),
             Box::new(CaptchaChallenges),
             Box::new(Recovery),
+            Box::new(IdentityLogin),
         ]
     }
 }
@@ -166,6 +167,36 @@ impl MigrationTrait for Recovery {
         Err(DbErr::Migration(
             "0003_password_recovery cannot be rolled back: create a new database instead"
                 .to_owned(),
+        ))
+    }
+}
+
+/// `0004_identity_login` -- the ML-DSA account identity, single-use login
+/// challenges, the EVM wallet registry, and the device status/credential
+/// columns. See `server/migrations/0004_identity_login.sql` for the shape and
+/// the naming note beside the pre-existing E2EE `identity_key` table.
+struct IdentityLogin;
+
+impl MigrationName for IdentityLogin {
+    fn name(&self) -> &str {
+        "0004_identity_login"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for IdentityLogin {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!("../../../migrations/0004_identity_login.sql"))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Same posture as every migration before it.
+        Err(DbErr::Migration(
+            "0004_identity_login cannot be rolled back: create a new database instead".to_owned(),
         ))
     }
 }

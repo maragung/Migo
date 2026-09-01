@@ -8,7 +8,7 @@
 //! [`crate::model`], so nothing above the store has to know that SeaORM exists — which
 //! is the property that lets the ORM be replaced without touching a caller.
 //!
-//! 35 tables. Regenerate with `make entities` after changing a migration.
+//! 38 tables. Regenerate with `make entities` after changing a migration.
 
 #![allow(dead_code)]
 
@@ -27,10 +27,12 @@ pub mod federation_outbox;
 pub mod game_session;
 pub mod gift_sent;
 pub mod identity_key;
+pub mod identity_keys;
 pub mod ledger_account;
 pub mod ledger_entry;
 pub mod ledger_snapshot;
 pub mod ledger_transaction;
+pub mod login_challenge;
 pub mod media_object;
 pub mod message;
 pub mod node_peer;
@@ -46,4 +48,5 @@ pub mod room_member;
 pub mod room_moderation_action;
 pub mod session;
 pub mod signed_prekey;
+pub mod wallet;
 pub mod xp_award;

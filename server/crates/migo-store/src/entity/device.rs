@@ -58,6 +58,17 @@ pub struct Model {
     pub last_seen_at: TimeDateTimeWithTimeZone,
     /// The `revoked_at` column.
     pub revoked_at: Option<TimeDateTimeWithTimeZone>,
+    /// 1 pending, 2 active, 3 revoked. Every device that exists today is active --
+    /// `revoked_at` already carries the third state -- so the column arrives with a
+    /// default rather than a backfill.
+    pub status: i16,
+    /// The ML-DSA public key of the device credential (1952 bytes for ML-DSA-65).
+    /// Null on devices registered before this migration, and filled in the first
+    /// time such a device signs in with the new flow or completes the legacy
+    /// upgrade. The seed behind it is random per device and never derived from the
+    /// root, so a leaked root secret alone cannot impersonate a registered device.
+    #[sea_orm(column_type = "VarBinary(StringLen::None)")]
+    pub public_credential: Option<Vec<u8>>,
 }
 
 /// Foreign keys leaving `device`.

@@ -104,6 +104,121 @@ impl AccountStatus {
     }
 }
 
+/// Lifecycle state of an ML-DSA identity key (brief section 182).
+///
+/// An account has exactly one `Active` key at a time; rotation appends the next
+/// `key_version` as `Active` and flips the previous row to `Rotated` in the same
+/// transaction, so no failure in between leaves the account without a usable
+/// identity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IdentityKeyStatus {
+    /// Signable and accepted for challenge verification.
+    #[default]
+    Active = 1,
+    /// Superseded by a newer version. Old sessions stay alive; new
+    /// authentications must use the successor.
+    Rotated = 2,
+    /// Withdrawn entirely (compromise). Nothing accepts it again.
+    Revoked = 3,
+}
+
+impl IdentityKeyStatus {
+    /// Numeric form, as stored.
+    #[must_use]
+    pub const fn to_i16(self) -> i16 {
+        self as i16
+    }
+
+    /// Parses the stored form. An unknown value reads as
+    /// [`IdentityKeyStatus::Revoked`]: a row this build does not understand
+    /// must not verify signatures.
+    #[must_use]
+    pub const fn from_i16(value: i16) -> Self {
+        match value {
+            1 => Self::Active,
+            2 => Self::Rotated,
+            _ => Self::Revoked,
+        }
+    }
+}
+
+/// Lifecycle state of a device row (brief section 182).
+///
+/// `Pending` exists for the add-device flow: the challenge is bound to a device
+/// id, and the row is created when the challenge is issued but only becomes
+/// usable when the challenge is consumed. An abandoned challenge therefore
+/// leaves a row that cannot authenticate anything.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DeviceStatus {
+    /// Created for an unconsumed add-device challenge. No sessions, no
+    /// credential checks against it.
+    Pending = 1,
+    /// Registered and usable.
+    #[default]
+    Active = 2,
+    /// Withdrawn. `revoked_at` carries the when; this carries the state.
+    Revoked = 3,
+}
+
+impl DeviceStatus {
+    /// Numeric form, as stored.
+    #[must_use]
+    pub const fn to_i16(self) -> i16 {
+        self as i16
+    }
+
+    /// Parses the stored form. An unknown value reads as
+    /// [`DeviceStatus::Revoked`]: a device this build does not understand must
+    /// not be allowed in.
+    #[must_use]
+    pub const fn from_i16(value: i16) -> Self {
+        match value {
+            1 => Self::Pending,
+            2 => Self::Active,
+            _ => Self::Revoked,
+        }
+    }
+
+    /// Whether the device may hold sessions.
+    #[must_use]
+    pub const fn may_authenticate(self) -> bool {
+        matches!(self, Self::Active)
+    }
+}
+
+/// Lifecycle state of a registered wallet (brief section 182).
+///
+/// Archiving is a client-facing "hide this" — the address stays registered so a
+/// re-registration of the same derivation index is recognised as the same
+/// wallet rather than a duplicate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WalletStatus {
+    /// Listed for the account.
+    #[default]
+    Active = 1,
+    /// Hidden by the user; `archived_at` carries the when.
+    Archived = 2,
+}
+
+impl WalletStatus {
+    /// Numeric form, as stored.
+    #[must_use]
+    pub const fn to_i16(self) -> i16 {
+        self as i16
+    }
+
+    /// Parses the stored form. An unknown value reads as
+    /// [`WalletStatus::Archived`]: a row this build does not understand is
+    /// hidden, which fails safe for display material.
+    #[must_use]
+    pub const fn from_i16(value: i16) -> Self {
+        match value {
+            1 => Self::Active,
+            _ => Self::Archived,
+        }
+    }
+}
+
 /// Who may see a thing, or do a thing to you.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Visibility {
@@ -395,6 +510,12 @@ pub struct Device {
     pub os_version: Option<String>,
     /// Model, if the client disclosed it.
     pub device_model: Option<String>,
+    /// Lifecycle state. `Pending` rows exist only to bind an add-device
+    /// challenge; `Active` rows may hold sessions.
+    pub status: DeviceStatus,
+    /// The ML-DSA public key of this device's login credential, if it has one.
+    /// `None` on devices registered before the identity flow existed.
+    pub public_credential: Option<Vec<u8>>,
     /// Registration time.
     pub created_at: Timestamp,
     /// Last time the device connected.
@@ -420,6 +541,13 @@ pub struct NewDevice {
     pub os_version: Option<String>,
     /// Model, if disclosed.
     pub device_model: Option<String>,
+    /// Lifecycle state at registration. Callers that register an ordinary
+    /// device after authentication pass `Active`; the add-device flow is the
+    /// one caller that passes `Pending` and activates on challenge consumption.
+    pub status: DeviceStatus,
+    /// The device credential's ML-DSA public key, when it is known at
+    /// registration time.
+    pub public_credential: Option<Vec<u8>>,
     /// Registration time.
     pub created_at: Timestamp,
 }
