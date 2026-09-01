@@ -61,8 +61,8 @@ pub enum Screen {
 /// rather than it simply being unreachable without an account.
 ///
 /// The order is the information architecture — the reference's tab strip (Friends, Chats, Rooms,
-/// Games, Feed) first, then the secondary panels that arrive as closable chips of their own, the
-/// same list the web client's strip and the Android client's strip carry, because it is one
+/// Games, Feed) first, then the panels that the right pane's own bar carries, the same split the
+/// web client's two panes and the Android client's covering screens draw, because it is one
 /// product.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Place {
@@ -103,6 +103,15 @@ impl Place {
         }
     }
 
+    /// The right pane's own word, on its menu bar — the reference calls the credits pane "TopUp".
+    #[must_use]
+    pub fn right_label(self) -> &'static str {
+        match self {
+            Self::Wallet => "TopUp",
+            other => other.label(),
+        }
+    }
+
     /// The five places that are always on the strip, in the reference's order.
     pub const SYSTEM_TABS: [Self; 5] = [
         Self::Friends,
@@ -112,17 +121,22 @@ impl Place {
         Self::Feed,
     ];
 
+    /// The places the right pane's menu bar offers, in the reference's order. Feed and Games
+    /// appear here as well as on the strip because the panes are independent: reading Games in
+    /// the right pane never disturbs what the left panel shows.
+    pub const RIGHT_TABS: [Self; 6] = [
+        Self::Feed,
+        Self::Games,
+        Self::Alerts,
+        Self::Search,
+        Self::Wallet,
+        Self::Settings,
+    ];
+
     /// Whether the place is one of the strip's permanent five.
     #[must_use]
     pub fn is_system_tab(self) -> bool {
         Self::SYSTEM_TABS.contains(&self)
-    }
-
-    /// Whether the place is a secondary panel — one that arrives as a closable chip, opened from
-    /// the banner's account menu or a link, rather than living on the strip.
-    #[must_use]
-    pub fn is_panel(self) -> bool {
-        !self.is_system_tab()
     }
 }
 

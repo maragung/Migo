@@ -1469,3 +1469,38 @@ push: Windows hijau di antara rilis, bukan baru ketahuan rusak saat tag.
 Check saja, bukan clippy — clippy sudah berjalan di Linux, dan job ini
 hanya menjawab satu pertanyaan: apakah klien masih dikompilasi untuk host
 Windows? Aset bertambah dua (zip + sidecar), release menjadi 10 aset.
+
+## 43. Model UI baru new-ui-02: dua panel independen di semua client (v0.13.5)
+
+Mockup referensi `new-ui-02.tsx` mengganti strip tab global + satu body
+dengan split dua panel yang independen. **Panel kiri** (~32% di PC,
+seluruh layar di ponsel) memiliki strip tealnya sendiri (Friends, Chats,
+Rooms, Games, Feed — tab Chats tetap dipertahankan karena daftar
+percakapan adalah permukaan messenger) di atas banner profil oranye.
+**Panel kanan** berjalan dengan state-nya sendiri: tab menu-nya (Feed,
+Games, Alerts, Search, TopUp, Profile, Settings) saat tidak ada
+percakapan aktif, atau bar chat slate-800 dengan chip percakapan yang
+bisa ditutup plus tombol "‹ Menu Panel" saat ada. Klik di kiri tidak
+pernah mengganggu kanan — itulah tawaran model ini. Di bawah breakpoint
+PC kedua panel bergantian: kiri adalah aplikasi, chat/panel menu
+menutupinya dengan tombol kembali di barnya masing-masing.
+
+- **Web**: `AppShell` dirombak jadi dua kolom (`.app-left`/`.app-right`,
+  grid 32%/flex di ≥1024px, satu kolom bergantian di bawahnya); komponen
+  baru `ChatTabBar` (back + chevron scroll + chip) dan `PanelTabBar`
+  (judul "Panel: X" + tombol kecil); mesin tab di `chat/layout.tsx`
+  memegang `leftTab`/`rightTab`/`chatTabs`/`activeChat` terpisah, dengan
+  fragment URL tetap satu sumber kebenaran percakapan terbuka — "‹ Menu
+  Panel" menyembunyikan thread tanpa menutupnya.
+- **Android**: chat dan panel menu (Alerts, Search, Wallet, Profile)
+  kini MENUTUPI shell dengan barnya sendiri (`PanelBar` baru, "‹ Menu
+  Panel"), bukan menjadi tab di strip; strip kiri kehilangan chip chat.
+  `stripSection` di `AppState` mengingat tab kiri saat panel menutupi,
+  sehingga back kembali ke tab yang tadi dilihat.
+- **Desktop**: egui `Panel::left("left-pane")` 32% (300–540px) berisi
+  strip + banner + konten tab sistem; `CentralPanel` jadi panel kanan
+  dengan `chat_bar` (slate, back + chip) atau `panel_bar` (teal,
+  "✦ Panel: X" + tombol Feed/Games/Alerts/Search/TopUp/Settings).
+  `Place::RIGHT_TABS` + `right_label()` (Wallet→"TopUp") menggantikan
+  chip panel yang bisa ditutup; `select_place` merutekan tab sistem ke
+  kiri dan panel ke kanan.
