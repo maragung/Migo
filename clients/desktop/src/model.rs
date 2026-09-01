@@ -328,6 +328,175 @@ pub struct EvmWalletRow {
     pub label: Option<String>,
 }
 
+// --- the chain wallet (§184) ---------------------------------------------------
+
+/// The EVM networks this build can name. The user picks a network, never a URL — §184's rule,
+/// because a self-supplied RPC is the classic way a wallet gets shown a fake chain.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ChainNetwork {
+    /// Avalanche C-Chain mainnet. Real money; the build's default for *display*, with a clear
+    /// warning on the first send.
+    #[default]
+    Mainnet,
+    /// Avalanche Fuji testnet. The verification network — feature checks run here, never on
+    /// mainnet.
+    Fuji,
+}
+
+impl ChainNetwork {
+    /// The name every surface labels the network by.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Mainnet => "Avalanche C-Chain (mainnet)",
+            Self::Fuji => "Avalanche Fuji (testnet)",
+        }
+    }
+
+    /// The network's own constant: chain id and pinned RPC, from the reference crate so no
+    /// client-side table can drift from the one the signing code verifies against.
+    #[must_use]
+    pub fn network(self) -> migo_account::Network {
+        match self {
+            Self::Mainnet => migo_account::AVALANCHE_MAINNET,
+            Self::Fuji => migo_account::FUJI_TESTNET,
+        }
+    }
+
+    /// Which network a chain id belongs to, for rows that carry only the id.
+    #[must_use]
+    pub fn of_chain_id(chain_id: u64) -> Option<Self> {
+        if chain_id == migo_account::AVALANCHE_MAINNET.chain_id {
+            Some(Self::Mainnet)
+        } else if chain_id == migo_account::FUJI_TESTNET.chain_id {
+            Some(Self::Fuji)
+        } else {
+            None
+        }
+    }
+}
+
+/// A built-but-unsigned AVAX transfer: every field the confirmation screen shows, exactly as it
+/// will be signed.
+///
+/// The send flow's one rule, from spec #40: what is signed is what was displayed. The worker
+/// builds this from the RPC's own answers, the UI displays all of it, and the confirm button
+/// sends it back verbatim — the signing path re-parses the checksummed recipient from this
+/// struct, so a `to` that survived a tamper fails the checksum there rather than moving value.
+#[derive(Debug, Clone)]
+pub struct PreparedTx {
+    /// The network the transaction will be signed for.
+    pub network: ChainNetwork,
+    /// The sender, EIP-55 checksummed.
+    pub from: String,
+    /// The recipient, EIP-55 checksummed — the string the user confirmed.
+    pub to: String,
+    /// The amount, wei. AVAX has 18 decimals.
+    pub value_wei: u128,
+    /// The priority fee ceiling, wei per gas.
+    pub max_priority_fee_per_gas: u128,
+    /// The total fee ceiling, wei per gas.
+    pub max_fee_per_gas: u128,
+    /// The gas limit, from `eth_estimateGas`.
+    pub gas_limit: u64,
+    /// The account's next nonce, from `eth_getTransactionCount`.
+    pub nonce: u64,
+}
+
+/// One tracked AVAX transaction as the Activity list draws it: the vault record's projection,
+/// taken where the worker reduces it so no UI code touches the vault's types.
+#[derive(Debug, Clone)]
+pub struct ChainTxRow {
+    /// The transaction hash, `0x`-prefixed hex — the handle the chain knows it by.
+    pub tx_hash: String,
+    /// The network the transaction was signed for, by name — a chain this build cannot name
+    /// still gets its record, labelled by its chain id rather than mislabelled.
+    pub network: String,
+    /// The recipient, EIP-55 checksummed.
+    pub to: String,
+    /// The amount, wei.
+    pub value_wei: u128,
+    /// The fee ceiling that was confirmed, wei.
+    pub fee_wei: u128,
+    /// When the transaction was broadcast.
+    pub at: Timestamp,
+    /// Spec #41's own word for where the transaction stands.
+    pub outcome: String,
+    /// The block that included the transaction, once one did.
+    pub block: Option<u64>,
+    /// The gas the receipt says the block actually spent, once a receipt answered.
+    pub gas_used: Option<u128>,
+}
+
+/// A wei amount as AVAX, 18 decimals, trailing zeros trimmed: the amount a person typed is the
+/// amount they should read back.
+#[must_use]
+pub fn avax(wei: u128) -> String {
+    decimal_of(wei, 18)
+}
+
+/// A wei amount as nAVAX, 9 decimals — §184's unit for gas, so fees never read as a tiny
+/// fraction of a coin nobody can compare against anything.
+#[must_use]
+pub fn navax(wei: u128) -> String {
+    decimal_of(wei, 9)
+}
+
+/// A wei-scale integer as a fixed-point decimal string with `decimals` fractional digits.
+fn decimal_of(value: u128, decimals: u32) -> String {
+    let unit = 10u128.pow(decimals);
+    let whole = value / unit;
+    let fraction = value % unit;
+    if fraction == 0 {
+        return whole.to_string();
+    }
+    let mut digits = format!("{fraction:0>width$}", width = decimals as usize);
+    while digits.ends_with('0') {
+        digits.pop();
+    }
+    format!("{whole}.{digits}")
+}
+
+/// A typed AVAX amount into wei. Accepts `1`, `1.5`, `0.000000000000000001`; refuses an empty
+/// string, a sign, a second decimal point, more than 18 fractional digits, and any value a
+/// `u128` cannot hold — the form's last line of defense before a string becomes money.
+#[must_use]
+pub fn parse_avax(text: &str) -> Option<u128> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let (whole, fraction) = match text.split_once('.') {
+        Some((whole, fraction)) => (whole, fraction),
+        None => (text, ""),
+    };
+    if whole.is_empty() && fraction.is_empty() {
+        return None;
+    }
+    if !whole.chars().all(|c| c.is_ascii_digit()) || !fraction.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if fraction.len() > 18 {
+        return None;
+    }
+    let whole = if whole.is_empty() {
+        0
+    } else {
+        whole.parse::<u128>().ok()?
+    };
+    let unit = 10u128.pow(18);
+    let scaled = whole.checked_mul(unit)?;
+    let fraction = if fraction.is_empty() {
+        0
+    } else {
+        fraction
+            .parse::<u128>()
+            .ok()?
+            .checked_mul(10u128.pow(18 - fraction.len() as u32))?
+    };
+    scaled.checked_add(fraction)
+}
+
 /// One room in the public directory, reduced to what a join decision needs.
 ///
 /// The wire's [`migo_protocol::RoomSummary`] carries more (public id, kind, language, country);
@@ -642,5 +811,57 @@ mod tests {
         assert_eq!(date(Timestamp::from_unix_ms(0)), "1970-01-01");
         // A negative timestamp (pre-1970) must still come out a real date, not a panic.
         assert_eq!(date(Timestamp::from_unix_ms(-86_400_000)), "1969-12-31");
+    }
+
+    /// A typed amount is the amount read back, and the forms a person can type are the forms a
+    /// parser accepts — the send form's string becomes wei exactly once, here.
+    #[test]
+    fn avax_amounts_round_trip_between_text_and_wei() {
+        let unit = 1_000_000_000_000_000_000u128; // 10^18
+        assert_eq!("1", avax(unit));
+        assert_eq!("1.5", avax(unit + unit / 2));
+        assert_eq!("0.000000000000000001", avax(1));
+        assert_eq!("0", avax(0));
+
+        assert_eq!(Some(unit), parse_avax("1"));
+        assert_eq!(Some(unit + unit / 2), parse_avax("1.5"));
+        assert_eq!(Some(1), parse_avax("0.000000000000000001"));
+        assert_eq!(Some(unit + 1), parse_avax("1.000000000000000001"));
+        assert_eq!(Some(0), parse_avax("0"));
+        assert_eq!(None, parse_avax("."));
+        assert_eq!(Some(1_500_000_000_000_000), parse_avax("0.0015"));
+
+        // The refusals: empty, signed, non-decimal, over-precise, and too large for a u128.
+        assert_eq!(None, parse_avax(""));
+        assert_eq!(None, parse_avax("-1"));
+        assert_eq!(None, parse_avax("1,5"));
+        assert_eq!(None, parse_avax("1.2.3"));
+        assert_eq!(None, parse_avax("0.0000000000000000001")); // 19 digits
+        assert_eq!(None, parse_avax(&"9".repeat(40)));
+    }
+
+    /// Gas reads in nAVAX, per §184: a fee ceiling of one gwei is one nAVAX, and the trailing
+    /// zeros a raw fixed-point rendering would carry are not shown.
+    #[test]
+    fn fees_read_as_navax() {
+        assert_eq!("1", navax(1_000_000_000));
+        assert_eq!("2.5", navax(2_500_000_000));
+        assert_eq!("0.000000001", navax(1));
+        assert_eq!("0", navax(0));
+    }
+
+    /// The networks this build can name are exactly two, and a chain id maps back to its network
+    /// or to none at all — a record from a chain this build never spoke of renders unlabeled,
+    /// not as the wrong network.
+    #[test]
+    fn chain_networks_name_both_ids_and_no_others() {
+        assert_eq!(43114, ChainNetwork::Mainnet.network().chain_id);
+        assert_eq!(43113, ChainNetwork::Fuji.network().chain_id);
+        assert_eq!(
+            Some(ChainNetwork::Mainnet),
+            ChainNetwork::of_chain_id(43114)
+        );
+        assert_eq!(Some(ChainNetwork::Fuji), ChainNetwork::of_chain_id(43113));
+        assert_eq!(None, ChainNetwork::of_chain_id(1));
     }
 }

@@ -31,7 +31,7 @@ use crate::ui::rooms::RoomsState;
 use crate::ui::search::SearchState;
 use crate::ui::settings::SettingsState;
 use crate::ui::space::SpaceState;
-use crate::ui::wallet::WalletState;
+use crate::ui::wallet::{TrackingTx, WalletState};
 use crate::ui::{widgets, Context, Place, Screen};
 
 /// The whole application state.
@@ -365,6 +365,93 @@ impl App {
                 }
                 Event::Gifts(rows) => {
                     self.wallet.gifts = rows;
+                }
+                Event::ChainBalance {
+                    network,
+                    address,
+                    balance,
+                } => {
+                    // A balance names the network it came from; a stale panel of another
+                    // network is not updated by it.
+                    if self.wallet.chain.network == network {
+                        self.wallet.chain.address = address;
+                        match balance {
+                            Ok(wei) => {
+                                self.wallet.chain.balance = Some(wei);
+                                self.wallet.chain.error = None;
+                            }
+                            Err(error) => {
+                                self.wallet.chain.error = Some(error);
+                            }
+                        }
+                    }
+                }
+                Event::ChainPrepared(result) => match result {
+                    Ok(tx) => {
+                        self.wallet.chain.prepared = Some(tx);
+                        self.wallet.chain.prepare_error = None;
+                    }
+                    Err(error) => {
+                        self.wallet.chain.prepare_error = Some(error);
+                    }
+                },
+                Event::ChainSent(result) => match result {
+                    Ok(tx_hash) => {
+                        // Acceptance is not confirmation: the send window is done, and the
+                        // honest part — watching where the transaction actually ends — begins.
+                        self.wallet.chain.tracking = Some(TrackingTx {
+                            tx_hash,
+                            state: "BROADCAST".to_owned(),
+                        });
+                        self.wallet.chain.prepared = None;
+                        self.wallet.chain.prepare_error = None;
+                        self.wallet.chain.send_error = None;
+                        self.wallet.chain.recipient.clear();
+                        self.wallet.chain.amount.clear();
+                        self.wallet.chain.mainnet_acknowledged = false;
+                        self.wallet.chain.send_open = false;
+                    }
+                    Err(error) => {
+                        self.wallet.chain.send_error = Some(error);
+                    }
+                },
+                Event::ChainState { tx_hash, state } => {
+                    if let Some(tracking) = self.wallet.chain.tracking.as_mut() {
+                        if tracking.tx_hash == tx_hash {
+                            tracking.state = state;
+                        }
+                    }
+                }
+                Event::ChainSettled { tx_hash, outcome } => {
+                    if self
+                        .wallet
+                        .chain
+                        .tracking
+                        .as_ref()
+                        .is_some_and(|tracking| tracking.tx_hash == tx_hash)
+                    {
+                        self.wallet.chain.tracking = None;
+                        // Each ending says itself, including the unresolved one.
+                        let toast = match outcome.as_str() {
+                            "CONFIRMED" => Toast::success(format!(
+                                "AVAX send confirmed · {}",
+                                &tx_hash[..16.min(tx_hash.len())]
+                            )),
+                            "EXPIRED" => Toast::info(format!(
+                                "AVAX send expired without an answer · {}",
+                                &tx_hash[..16.min(tx_hash.len())]
+                            )),
+                            other => Toast::error(format!(
+                                "AVAX send {} · {}",
+                                other.to_lowercase(),
+                                &tx_hash[..16.min(tx_hash.len())]
+                            )),
+                        };
+                        self.toasts.push(toast);
+                    }
+                }
+                Event::ChainActivity(rows) => {
+                    self.wallet.chain.activity = rows;
                 }
                 Event::People(rows) => {
                     if self.search.query.trim().is_empty() {

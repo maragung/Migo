@@ -67,6 +67,45 @@ const FIELD_ROOT: u32 = 2;
 /// The optional-field id under which the ML-DSA device credential seed lives.
 const FIELD_DEVICE_CREDENTIAL: u32 = 3;
 
+/// The optional-field id under which this client's tracked AVAX transactions live (§184).
+///
+/// The chain has no "list transactions by sender" without an indexer, so the Activity list is a
+/// client-side record — and it is sealed under the passphrase like everything else here, because
+/// it is the account's financial history. Only the record rides: no key material, no private
+/// bytes, nothing the chain itself could not republish.
+const FIELD_TXS: u32 = 4;
+
+/// One tracked AVAX transaction: what was sent, and how the tracker ended.
+///
+/// Written at broadcast with the outcome it had then and updated when the tracker settles, so a
+/// crash mid-tracking loses the ending but never the fact that value left. The fields are the
+/// ones the send screen confirmed — the same rule as the signature itself: what is recorded is
+/// what was displayed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxRecord {
+    /// The transaction hash, the handle the chain knows it by.
+    pub tx_hash: [u8; 32],
+    /// The chain the transaction was signed for — EIP-155's replay protection, restated.
+    pub chain_id: u64,
+    /// The recipient.
+    pub to: [u8; 20],
+    /// The amount, wei.
+    pub value_wei: u128,
+    /// The fee ceiling the user confirmed: `max_fee_per_gas * gas_limit`, wei.
+    pub fee_wei: u128,
+    /// The gas limit that was signed.
+    pub gas_limit: u64,
+    /// When the transaction was broadcast, unix seconds.
+    pub at_unix: u64,
+    /// Spec #41's own word for where the transaction stands: `PENDING` at broadcast, one of the
+    /// tracker's endings once it settles.
+    pub outcome: String,
+    /// The block that included the transaction, once one did.
+    pub block: Option<u64>,
+    /// The gas the block actually spent on it, from the receipt — the ceiling's honest companion.
+    pub gas_used: Option<u128>,
+}
+
 /// A saved sign-in, so launching the client is one passphrase rather than a full login.
 ///
 /// The access token is deliberately absent: it lives for minutes, so persisting it would buy nothing
@@ -337,7 +376,8 @@ fn encode_keys(keys: &DeviceKeys) -> Result<Vec<u8>, VaultError> {
 
     let optionals = u32::from(keys.session.is_some())
         + u32::from(keys.root.is_some())
-        + u32::from(keys.device_credential_seed.is_some());
+        + u32::from(keys.device_credential_seed.is_some())
+        + u32::from(!keys.txs.is_empty());
     w.write_u32(optionals);
     if let Some(saved) = &keys.session {
         w.optional(FIELD_SESSION, |w| {
@@ -357,8 +397,47 @@ fn encode_keys(keys: &DeviceKeys) -> Result<Vec<u8>, VaultError> {
         w.optional(FIELD_DEVICE_CREDENTIAL, |w| w.write_bytes(seed))
             .map_err(|_| VaultError::Malformed)?;
     }
+    // Newest last, so the list reads the way the Activity screen does.
+    if !keys.txs.is_empty() {
+        w.optional(FIELD_TXS, |w| {
+            w.list_len(keys.txs.len())?;
+            for record in &keys.txs {
+                write_tx(w, record)?;
+            }
+            Ok(())
+        })
+        .map_err(|_| VaultError::Malformed)?;
+    }
     w.leave();
     w.finish_vec().map_err(|_| VaultError::Malformed)
+}
+
+/// One record inside FIELD_TXS. A `u128` rides as its 16 big-endian bytes, the only form the
+/// wire codec has that cannot lose a digit of a wei value.
+fn write_tx(w: &mut Writer, record: &TxRecord) -> migo_wire::Result<()> {
+    w.write_bytes(&record.tx_hash)?;
+    w.write_u64(record.chain_id);
+    w.write_bytes(&record.to)?;
+    w.write_bytes(&record.value_wei.to_be_bytes())?;
+    w.write_bytes(&record.fee_wei.to_be_bytes())?;
+    w.write_u64(record.gas_limit);
+    w.write_u64(record.at_unix);
+    w.write_str(&record.outcome)?;
+    match record.block {
+        Some(block) => {
+            w.write_bool(true);
+            w.write_u64(block);
+        }
+        None => w.write_bool(false),
+    }
+    match record.gas_used {
+        Some(gas) => {
+            w.write_bool(true);
+            w.write_bytes(&gas.to_be_bytes())?;
+        }
+        None => w.write_bool(false),
+    }
+    Ok(())
 }
 
 fn decode_keys(plaintext: &[u8]) -> Result<DeviceKeys, VaultError> {
@@ -380,6 +459,7 @@ fn decode_keys(plaintext: &[u8]) -> Result<DeviceKeys, VaultError> {
     let mut session = None;
     let mut root = None;
     let mut device_credential_seed = None;
+    let mut txs = Vec::new();
     for _ in 0..optionals {
         let (field, mut inner) = r.read_optional().map_err(|_| VaultError::Malformed)?;
         // An unknown id is skipped, not an error: the sub-reader is length-scoped, so a newer build's
@@ -396,6 +476,8 @@ fn decode_keys(plaintext: &[u8]) -> Result<DeviceKeys, VaultError> {
             root = Some(seed32(&mut inner)?);
         } else if field == FIELD_DEVICE_CREDENTIAL {
             device_credential_seed = Some(seed32(&mut inner)?);
+        } else if field == FIELD_TXS {
+            txs = read_txs(&mut inner)?;
         }
     }
     r.leave();
@@ -407,7 +489,74 @@ fn decode_keys(plaintext: &[u8]) -> Result<DeviceKeys, VaultError> {
         session,
         root,
         device_credential_seed,
+        txs,
     })
+}
+
+/// The records inside FIELD_TXS. A malformed record refuses the whole field rather than being
+/// half-read: an Activity list that silently dropped its middle is a lie about where money went.
+fn read_txs(r: &mut Reader) -> Result<Vec<TxRecord>, VaultError> {
+    let count = r.read_list_len().map_err(|_| VaultError::Malformed)?;
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        let tx_hash = fixed32(r)?;
+        let chain_id = r.read_u64().map_err(|_| VaultError::Malformed)?;
+        let to = fixed20(r)?;
+        let value_wei = read_u128(r)?;
+        let fee_wei = read_u128(r)?;
+        let gas_limit = r.read_u64().map_err(|_| VaultError::Malformed)?;
+        let at_unix = r.read_u64().map_err(|_| VaultError::Malformed)?;
+        let outcome = r.read_string().map_err(|_| VaultError::Malformed)?;
+        let block = if r.read_bool().map_err(|_| VaultError::Malformed)? {
+            Some(r.read_u64().map_err(|_| VaultError::Malformed)?)
+        } else {
+            None
+        };
+        let gas_used = if r.read_bool().map_err(|_| VaultError::Malformed)? {
+            Some(read_u128(r)?)
+        } else {
+            None
+        };
+        out.push(TxRecord {
+            tx_hash,
+            chain_id,
+            to,
+            value_wei,
+            fee_wei,
+            gas_limit,
+            at_unix,
+            outcome,
+            block,
+            gas_used,
+        });
+    }
+    Ok(out)
+}
+
+fn fixed20(r: &mut Reader) -> Result<[u8; 20], VaultError> {
+    r.read_bytes()
+        .map_err(|_| VaultError::Malformed)?
+        .as_slice()
+        .try_into()
+        .map_err(|_| VaultError::Malformed)
+}
+
+fn fixed32(r: &mut Reader) -> Result<[u8; 32], VaultError> {
+    r.read_bytes()
+        .map_err(|_| VaultError::Malformed)?
+        .as_slice()
+        .try_into()
+        .map_err(|_| VaultError::Malformed)
+}
+
+/// A `u128` from its 16 big-endian bytes, refusing any other length.
+fn read_u128(r: &mut Reader) -> Result<u128, VaultError> {
+    let bytes = r.read_bytes().map_err(|_| VaultError::Malformed)?;
+    let array: [u8; 16] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| VaultError::Malformed)?;
+    Ok(u128::from_be_bytes(array))
 }
 
 fn seed32(r: &mut Reader) -> Result<[u8; 32], VaultError> {
@@ -546,5 +695,64 @@ mod tests {
         assert_eq!(keys.session, Some(saved));
         assert!(keys.root.is_none());
         assert!(keys.device_credential_seed.is_none());
+    }
+
+    /// The Activity list round trips through the sealed body: a broadcast record with its ending
+    /// unset, and a settled one with it — the two shapes the send flow actually writes. A list
+    /// that came back without its wei magnitudes intact would be a quieter lie than no list.
+    #[test]
+    fn the_tracked_transaction_list_round_trips() {
+        let path = scratch("migo-vault-txs-roundtrip.bin");
+        let root = migo_account::MigoRoot::from_bytes(&[7u8; 32]).expect("32 bytes is a root");
+        let mut keys = DeviceKeys::founding(&root);
+        keys.txs = vec![
+            TxRecord {
+                tx_hash: [0x11; 32],
+                chain_id: 43114,
+                to: [0xcd; 20],
+                value_wei: 1_000_000_000_000_000_000, // 1 AVAX
+                fee_wei: 675_000_000_000_000,         // 21000 gas at 32+1 gwei
+                gas_limit: 21_000,
+                at_unix: 1_800_000_000,
+                outcome: "PENDING".to_owned(),
+                block: None,
+                gas_used: None,
+            },
+            TxRecord {
+                tx_hash: [0x22; 32],
+                chain_id: 43113,
+                to: [0xce; 20],
+                value_wei: 1,
+                fee_wei: 2,
+                gas_limit: 21_000,
+                at_unix: 1_800_000_001,
+                outcome: "CONFIRMED".to_owned(),
+                block: Some(42),
+                gas_used: Some(21_000),
+            },
+        ];
+
+        save(&path, "correct horse battery", &keys).expect("saved");
+        let opened = load(&path, "correct horse battery").expect("opened");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(keys.txs, opened.txs);
+    }
+
+    /// A vault written before FIELD_TXS existed opens with an empty list, and a vault whose
+    /// optional count names the field still decodes when the field is absent because the list
+    /// was empty — the encoder omits the field rather than writing a length-prefixed nothing.
+    #[test]
+    fn a_body_from_before_the_tx_field_decodes_an_empty_list() {
+        let path = scratch("migo-vault-pre-txs.bin");
+        let root = migo_account::MigoRoot::from_bytes(&[8u8; 32]).expect("32 bytes is a root");
+        let mut keys = DeviceKeys::founding(&root);
+        keys.txs.clear();
+
+        save(&path, "correct horse battery", &keys).expect("saved");
+        let opened = load(&path, "correct horse battery").expect("opened");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(opened.txs.is_empty());
     }
 }

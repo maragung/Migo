@@ -25,6 +25,7 @@
 //! a node restarting with ten thousand clients attached gets them back in a spread rather than as one
 //! synchronised thundering herd.
 
+pub mod chain;
 pub mod gateway;
 pub mod quic;
 pub mod rest;
@@ -50,15 +51,16 @@ use crate::crypto::content::{self, Content};
 use crate::crypto::envelope::Envelope;
 use crate::crypto::session::{DeviceKeys, SessionStore, ONE_TIME_PREKEY_COUNT};
 use crate::model::{
-    self, Account, AlertRow, Body, Connection, Conversation, Delivery, DeviceRow, EvmWalletRow,
-    GiftRow, LeaderRow, LedgerRow, Message, PersonRow, Progression, Relationship, RelationshipKind,
-    RoomRow, SessionRow, ToastKind,
+    self, Account, AlertRow, Body, ChainNetwork, ChainTxRow, Connection, Conversation, Delivery,
+    DeviceRow, EvmWalletRow, GiftRow, LeaderRow, LedgerRow, Message, PersonRow, PreparedTx,
+    Progression, Relationship, RelationshipKind, RoomRow, SessionRow, ToastKind,
 };
+use crate::net::chain::{ChainClient, TrackOptions};
 use crate::net::gateway::{Gateway, GatewayError};
 use crate::net::quic::QuicGateway;
 use crate::net::rest::{CaptchaChallenge, CaptchaProof, DeviceRequest, Grant, Rest, RestError};
 use crate::net::tcp::TcpGateway;
-use crate::vault::{self, SavedSession};
+use crate::vault::{self, SavedSession, TxRecord};
 
 /// When to warn that the one-time prekey pool is running down.
 ///
@@ -225,6 +227,39 @@ pub enum Command {
     },
     /// Archive one of the account's registered wallet addresses.
     ArchiveWallet { wallet_id: Id },
+    /// Refresh the AVAX balance of the account's first wallet on one network.
+    ///
+    /// A pull, never a poll (§184): the wallet surface asks when the user asks, and the worker
+    /// holds nothing open between asks.
+    ChainBalance { network: ChainNetwork },
+    /// Build one AVAX transfer: parse the recipient, read the nonce, gas and fees from the
+    /// network, and answer with the full transaction the confirm screen must show before
+    /// anything is signed (spec #40).
+    ChainPrepare {
+        network: ChainNetwork,
+        /// The recipient as typed. The worker parses it — EIP-55 checksum and all — because a
+        /// refusal worth reading is one the worker writes, not a parse error the form has to
+        /// translate.
+        recipient: String,
+        /// The amount as typed, in AVAX. Parsed to wei here for the same reason.
+        amount_avax: String,
+    },
+    /// Sign and broadcast exactly the transaction the confirm screen displayed.
+    ///
+    /// The prepared values ride back verbatim — the signing path re-derives every field from
+    /// them, so what is signed is what was shown, and a tampered `to` fails the EIP-55 checksum
+    /// here rather than moving value.
+    ChainSend { tx: PreparedTx },
+    /// Internal: a tracker task finished following one broadcast transaction. Sent by the
+    /// tracker into this worker's own loop, because the Activity list — and its next sealing
+    /// into the vault — belongs to the loop, not the task.
+    ChainSettled {
+        network: ChainNetwork,
+        tx_hash: String,
+        outcome: String,
+        block: Option<u64>,
+        gas_used: Option<u128>,
+    },
     /// Stop the worker. Sent on window close.
     Shutdown,
 }
@@ -341,10 +376,34 @@ pub enum Event {
     ///
     /// A failure rides the same event rather than dying as a toast for the same reason the session
     /// list's does: "could not check" and "you have one device" are different facts and only one
-    /// of them should reassure anybody.
+    /// should reassure anybody.
     Devices(Result<Vec<DeviceRow>, String>),
     /// The account's registered wallet addresses.
     Wallets(Result<Vec<EvmWalletRow>, String>),
+    /// The AVAX balance of the account's first wallet, in wei, on the network asked.
+    ///
+    /// The EIP-55 address rides along because the same read is what discovers it. A `None`
+    /// address is not an error state of the network: it is this device not holding the account
+    /// root, which is a fact about the device and worth its own sentence on the wallet surface.
+    ChainBalance {
+        network: ChainNetwork,
+        address: Option<String>,
+        balance: Result<u128, String>,
+    },
+    /// A built AVAX transfer ready for the confirm screen, or the reason nothing could be built.
+    ChainPrepared(Result<PreparedTx, String>),
+    /// A broadcast was accepted — carries the tx hash, which is *acceptance*, never confirmation
+    /// (spec #41) — or the reason the endpoint refused it.
+    ChainSent(Result<String, String>),
+    /// The tracker passed through a state for one transaction: `PENDING` on first sight, or the
+    /// ending it reached. Progress, so the wallet surface can show the ladder honestly.
+    ChainState { tx_hash: String, state: String },
+    /// A tracker finished following one transaction. The ending is spec #41's own word; the
+    /// Activity list arrives separately, already reduced.
+    ChainSettled { tx_hash: String, outcome: String },
+    /// This account's tracked AVAX transactions (Activity), newest first. Sent at sign-in and
+    /// after every send and settle, because the list is the worker's to keep, not the UI's.
+    ChainActivity(Vec<ChainTxRow>),
     /// Something worth a line at the bottom of the window.
     Toast { text: String, kind: ToastKind },
 }
@@ -365,6 +424,10 @@ impl Net {
     /// window, is never.
     pub fn spawn(ctx: egui::Context, vault_path: PathBuf) -> Self {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
+        // The worker keeps its own sending end, so a tracker task can report its ending into the
+        // loop that owns the Activity list; cloning before the thread takes the receiver keeps
+        // this handle's `send` alive for the UI.
+        let worker_commands = command_tx.clone();
         let (event_tx, event_rx) = std_mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("migo-net".to_owned())
@@ -391,7 +454,7 @@ impl Net {
                     events: event_tx,
                     ctx,
                 };
-                runtime.block_on(Worker::new(sink, vault_path).run(command_rx));
+                runtime.block_on(Worker::new(sink, worker_commands, vault_path).run(command_rx));
             })
             .ok();
         Self {
@@ -427,6 +490,7 @@ impl Drop for Net {
 }
 
 /// The worker's end of the event channel, paired with the egui context to wake.
+#[derive(Clone)]
 struct Sink {
     events: std_mpsc::Sender<Event>,
     ctx: egui::Context,
@@ -602,6 +666,9 @@ impl Realtime {
 /// The worker itself.
 struct Worker {
     sink: Sink,
+    /// The command channel's sending end, so a spawned tracker task can report its ending into
+    /// the loop that owns the Activity list — the same loop that will seal it into the vault.
+    commands: mpsc::UnboundedSender<Command>,
     vault_path: PathBuf,
     signed: Option<Signed>,
     gateway: Option<Realtime>,
@@ -610,17 +677,31 @@ struct Worker {
     /// The room a leave is in flight for. The wire's acknowledgement names no room, so the
     /// request's own id is the only thing that can say which room the ack answers.
     pending_leave: Option<Id>,
+    /// This account's tracked AVAX transactions (§184's Activity list), in memory between
+    /// passphrase moments — this worker deliberately does not hold the passphrase after unlock,
+    /// so the list is re-sealed into the vault only when a sign-in next opens it.
+    ///
+    /// The account id rides along so a different account signing in over the same window never
+    /// inherits another account's history.
+    txs: Option<(Id, Vec<TxRecord>)>,
+    /// One HTTP client for every chain call. A `reqwest::Client` shares its connection pool, so
+    /// cloning it per operation is free, and the chain conversation stays off the Migo session's
+    /// client entirely.
+    chain_http: reqwest::Client,
 }
 
 impl Worker {
-    fn new(sink: Sink, vault_path: PathBuf) -> Self {
+    fn new(sink: Sink, commands: mpsc::UnboundedSender<Command>, vault_path: PathBuf) -> Self {
         Self {
             sink,
+            commands,
             vault_path,
             signed: None,
             gateway: None,
             retry: None,
             pending_leave: None,
+            txs: None,
+            chain_http: reqwest::Client::new(),
         }
     }
 
@@ -784,6 +865,25 @@ impl Worker {
             Command::ArchiveWallet { wallet_id } => {
                 self.archive_wallet(wallet_id).await;
             }
+            Command::ChainBalance { network } => self.chain_balance(network).await,
+            Command::ChainPrepare {
+                network,
+                recipient,
+                amount_avax,
+            } => {
+                self.chain_prepare(network, recipient, amount_avax).await;
+            }
+            Command::ChainSend { tx } => self.chain_send(tx).await,
+            Command::ChainSettled {
+                network,
+                tx_hash,
+                outcome,
+                block,
+                gas_used,
+            } => {
+                self.chain_settled(network, tx_hash, outcome, block, gas_used)
+                    .await;
+            }
             Command::Shutdown => {}
         }
     }
@@ -870,6 +970,18 @@ impl Worker {
             username: identifier.clone(),
             refresh_token: grant.refresh_token.clone(),
         });
+        // The Activity list this process already holds for this account is newer than whatever
+        // the vault last sealed; a different account's list never crosses over.
+        if self
+            .txs
+            .as_ref()
+            .is_some_and(|(id, _)| *id == grant.account_id)
+        {
+            keys.txs = self
+                .txs
+                .as_ref()
+                .map_or_else(Vec::new, |(_, txs)| txs.clone());
+        }
         if let Err(error) = vault::save(&self.vault_path, &passphrase, &keys) {
             return self.fail(error.to_string());
         }
@@ -961,6 +1073,18 @@ impl Worker {
             refresh_token: grant.refresh_token.clone(),
             ..saved.clone()
         });
+        // As at sign-in: this process's own record of the same account's transactions is the
+        // newer copy, and it is the one that gets sealed.
+        if self
+            .txs
+            .as_ref()
+            .is_some_and(|(id, _)| *id == grant.account_id)
+        {
+            keys.txs = self
+                .txs
+                .as_ref()
+                .map_or_else(Vec::new, |(_, txs)| txs.clone());
+        }
         if let Err(error) = vault::save(&self.vault_path, &passphrase, &keys) {
             return self.fail(error.to_string());
         }
@@ -1036,6 +1160,9 @@ impl Worker {
             safety_number,
             holds_root,
         };
+        // The Activity list is sealed with the keys it arrived with; it becomes the worker's to
+        // keep from here until the session ends.
+        let txs = keys.txs.clone();
         let sessions = SessionStore::new(keys);
 
         self.signed = Some(Signed {
@@ -1049,8 +1176,10 @@ impl Worker {
             members: HashMap::new(),
             watched: HashSet::new(),
         });
+        self.txs = Some((account_id, txs));
 
         self.sink.send(Event::SignedIn(account));
+        self.sink.send(Event::ChainActivity(self.chain_rows()));
         self.connect().await;
     }
 
@@ -1687,6 +1816,300 @@ impl Worker {
         }
     }
 
+    // --- the chain wallet (§184) --------------------------------------------------
+
+    /// What a device without the root is told, in one sentence, wherever the AVAX wallet is
+    /// asked for. Additional devices have no wallet here at all — the address is a function of
+    /// the root — and pretending otherwise would be a wallet surface that cannot send.
+    const NO_ROOT_ON_DEVICE: &str =
+        "this device does not hold the account root, so it has no AVAX \
+     wallet; open the wallet on the device that holds the account backup";
+
+    /// A chain client for one operation, pinned to the network's own RPC constant.
+    fn chain_client(&self, network: ChainNetwork) -> ChainClient {
+        ChainClient::connect(network.network(), self.chain_http.clone())
+    }
+
+    /// The account's first wallet: its EIP-55 address and its AVAX balance on one network.
+    ///
+    /// Wallet 0 is the wallet a registration mints and the only one the send flow offers; a
+    /// user past index zero rotates addresses on purpose and is not this surface's caller.
+    async fn chain_balance(&mut self, network: ChainNetwork) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let Some(root) = signed.sessions.keys().root() else {
+            return self.sink.send(Event::ChainBalance {
+                network,
+                address: None,
+                balance: Err(Self::NO_ROOT_ON_DEVICE.to_owned()),
+            });
+        };
+        let Ok(wallet) = migo_account::EvmWallet::from_root(&root, 0) else {
+            return self.sink.send(Event::ChainBalance {
+                network,
+                address: None,
+                balance: Err("the account root did not derive a wallet".to_owned()),
+            });
+        };
+        let address = wallet.address_checksummed();
+        let mut client = self.chain_client(network);
+        let balance = client
+            .get_balance(wallet.address())
+            .await
+            .map_err(|error| error.to_string());
+        self.sink.send(Event::ChainBalance {
+            network,
+            address: Some(address),
+            balance,
+        });
+    }
+
+    /// Builds one AVAX transfer from the RPC's own answers, and nothing else.
+    ///
+    /// Parse failures happen before a single RPC leaves: a bad recipient or a bad amount is a
+    /// form problem, and the network is not asked to confirm the shape of a text field.
+    async fn chain_prepare(
+        &mut self,
+        network: ChainNetwork,
+        recipient: String,
+        amount_avax: String,
+    ) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let to = match migo_account::parse_address(recipient.trim()) {
+            Ok(to) => to,
+            Err(error) => return self.sink.send(Event::ChainPrepared(Err(error.to_string()))),
+        };
+        let Some(value) = model::parse_avax(&amount_avax) else {
+            return self.sink.send(Event::ChainPrepared(Err(
+                "the amount is not a valid AVAX amount, e.g. 1.5".to_owned(),
+            )));
+        };
+        let Some(root) = signed.sessions.keys().root() else {
+            return self.sink.send(Event::ChainPrepared(
+                Err(Self::NO_ROOT_ON_DEVICE.to_owned()),
+            ));
+        };
+        let Ok(wallet) = migo_account::EvmWallet::from_root(&root, 0) else {
+            return self.sink.send(Event::ChainPrepared(Err(
+                "the account root did not derive a wallet".to_owned(),
+            )));
+        };
+
+        let mut client = self.chain_client(network);
+        // The fees, the gas, and the nonce are three reads the confirm screen quotes, so all
+        // three are asked before the prepared transaction exists — a prepared transaction with a
+        // guessed field is a confirmation screen that lies about one of its lines.
+        let fees = match client.get_fees().await {
+            Ok(fees) => fees,
+            Err(error) => return self.sink.send(Event::ChainPrepared(Err(error.to_string()))),
+        };
+        let gas_limit = match client
+            .estimate_gas(Some(wallet.address()), &to, value)
+            .await
+        {
+            Ok(gas) => gas,
+            Err(error) => return self.sink.send(Event::ChainPrepared(Err(error.to_string()))),
+        };
+        let nonce = match client.get_nonce(wallet.address()).await {
+            Ok(nonce) => nonce,
+            Err(error) => return self.sink.send(Event::ChainPrepared(Err(error.to_string()))),
+        };
+
+        self.sink.send(Event::ChainPrepared(Ok(PreparedTx {
+            network,
+            from: wallet.address_checksummed(),
+            to: migo_account::evm::eip55(&to),
+            value_wei: value,
+            max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
+            max_fee_per_gas: fees.max_fee_per_gas,
+            gas_limit,
+            nonce,
+        })));
+    }
+
+    /// Signs and broadcasts exactly the transaction the confirm screen displayed.
+    ///
+    /// Every field is re-derived from the prepared struct the UI sent back: the recipient is
+    /// re-parsed (an EIP-55 checksum that survived a tamper fails here), the sender is checked
+    /// against this device's own wallet 0, and the chain id comes from the named network — never
+    /// from a field a screen could have edited. What is signed is what was shown.
+    async fn chain_send(&mut self, tx: PreparedTx) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let to = match migo_account::parse_address(tx.to.trim()) {
+            Ok(to) => to,
+            Err(error) => return self.sink.send(Event::ChainSent(Err(error.to_string()))),
+        };
+        let Some(root) = signed.sessions.keys().root() else {
+            return self
+                .sink
+                .send(Event::ChainSent(Err(Self::NO_ROOT_ON_DEVICE.to_owned())));
+        };
+        let Ok(wallet) = migo_account::EvmWallet::from_root(&root, 0) else {
+            return self.sink.send(Event::ChainSent(Err(
+                "the account root did not derive a wallet".to_owned(),
+            )));
+        };
+        // The `from` on screen must be this device's wallet 0: a prepared transaction carried
+        // over from another device, or an older derivation, is refused rather than signed with
+        // the wrong key for the right-looking screen.
+        if tx.from != wallet.address_checksummed() {
+            return self.sink.send(Event::ChainSent(Err(
+                "the prepared transaction names a different sender; prepare it again here"
+                    .to_owned(),
+            )));
+        }
+
+        let body = migo_account::Eip1559Tx {
+            chain_id: tx.network.network().chain_id,
+            nonce: tx.nonce,
+            max_priority_fee_per_gas: tx.max_priority_fee_per_gas,
+            max_fee_per_gas: tx.max_fee_per_gas,
+            gas_limit: tx.gas_limit,
+            to,
+            value: tx.value_wei,
+            data: Vec::new(),
+        };
+        let signed_tx = match body.sign(&wallet) {
+            Ok(signed) => signed,
+            Err(error) => return self.sink.send(Event::ChainSent(Err(error.to_string()))),
+        };
+
+        let mut client = self.chain_client(tx.network);
+        let tx_hash = match client.broadcast(&signed_tx).await {
+            Ok(answered) => answered,
+            Err(error) => return self.sink.send(Event::ChainSent(Err(error.to_string()))),
+        };
+
+        // The record is written at broadcast, not at settle: a crash mid-tracking loses the
+        // ending, never the fact that value left.
+        let record = TxRecord {
+            tx_hash: *signed_tx.tx_hash(),
+            chain_id: body.chain_id,
+            to,
+            value_wei: body.value,
+            fee_wei: body
+                .max_fee_per_gas
+                .saturating_mul(u128::from(body.gas_limit)),
+            gas_limit: body.gas_limit,
+            at_unix: u64::try_from(Timestamp::now().as_unix_ms().max(0) / 1000)
+                .expect("unix seconds fit in u64 by construction"),
+            outcome: "PENDING".to_owned(),
+            block: None,
+            gas_used: None,
+        };
+        let account_id = signed.account.account_id;
+        let records = self.txs.get_or_insert_with(|| (account_id, Vec::new()));
+        records.1.insert(0, record);
+
+        // Acceptance, not confirmation — the tracker task below is the only thing that can say
+        // CONFIRMED, and it says so through this worker's own command loop.
+        self.sink.send(Event::ChainSent(Ok(tx_hash.clone())));
+        self.sink.send(Event::ChainActivity(self.chain_rows()));
+
+        let sink = self.sink.clone();
+        let commands = self.commands.clone();
+        let network = tx.network;
+        let http = self.chain_http.clone();
+        let hash = tx_hash;
+        tokio::spawn(async move {
+            let mut client = ChainClient::connect(network.network(), http);
+            let states_sink = sink.clone();
+            let states_hash = hash.clone();
+            let (outcome, block, gas_used) = match client
+                .track(&hash, &TrackOptions::default(), move |state| {
+                    states_sink.send(Event::ChainState {
+                        tx_hash: states_hash.clone(),
+                        state: state.to_owned(),
+                    });
+                })
+                .await
+            {
+                Ok(result) => (
+                    result.outcome.label().to_owned(),
+                    result.block_number,
+                    result.gas_used,
+                ),
+                // An endpoint that cannot be asked at all is still an unresolved ending, and
+                // EXPIRED is the honest name for one this client watched for its whole deadline.
+                Err(_) => ("EXPIRED".to_owned(), None, None),
+            };
+            let _ = commands.send(Command::ChainSettled {
+                network,
+                tx_hash: hash,
+                outcome,
+                block,
+                gas_used,
+            });
+        });
+    }
+
+    /// A tracker finished: the record's ending is written where the vault will next read it.
+    ///
+    /// `network` is carried for the command's own readability and the record is keyed by hash —
+    /// the hash is the one thing the chain, the tracker and the user all agree on.
+    async fn chain_settled(
+        &mut self,
+        network: ChainNetwork,
+        tx_hash: String,
+        outcome: String,
+        block: Option<u64>,
+        gas_used: Option<u128>,
+    ) {
+        let _ = network;
+        if let Some((_, records)) = self.txs.as_mut() {
+            for record in &mut *records {
+                if hex_of(&record.tx_hash) == tx_hash {
+                    record.outcome.clone_from(&outcome);
+                    if block.is_some() {
+                        record.block = block;
+                    }
+                    if gas_used.is_some() {
+                        record.gas_used = gas_used;
+                    }
+                    break;
+                }
+            }
+        }
+        self.sink.send(Event::ChainSettled {
+            tx_hash,
+            outcome: outcome.clone(),
+        });
+        self.sink.send(Event::ChainActivity(self.chain_rows()));
+    }
+
+    /// The tracked-transaction list as the wallet surface draws it, newest first.
+    fn chain_rows(&self) -> Vec<ChainTxRow> {
+        self.txs
+            .as_ref()
+            .map(|(_, records)| {
+                records
+                    .iter()
+                    .map(|record| ChainTxRow {
+                        tx_hash: format!("0x{}", hex_of(&record.tx_hash)),
+                        network: ChainNetwork::of_chain_id(record.chain_id).map_or_else(
+                            || format!("chain {}", record.chain_id),
+                            |n| n.label().to_owned(),
+                        ),
+                        to: migo_account::evm::eip55(&record.to),
+                        value_wei: record.value_wei,
+                        fee_wei: record.fee_wei,
+                        at: Timestamp::from_unix_ms(
+                            i64::try_from(record.at_unix).expect("unix seconds fit in i64") * 1000,
+                        ),
+                        outcome: record.outcome.clone(),
+                        block: record.block,
+                        gas_used: record.gas_used,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Seals the account root into a `.migo` recovery container at `path`.
     ///
     /// The container names the account, so the next device can run the add-device ceremony from
@@ -1843,6 +2266,14 @@ impl Worker {
             username: username.clone(),
             refresh_token: grant.refresh_token.clone(),
         });
+        // A container restore onto the device that already tracked this account's transactions
+        // keeps the newer in-memory list; anything else keeps the vault's own.
+        if self.txs.as_ref().is_some_and(|(id, _)| *id == account_id) {
+            keys.txs = self
+                .txs
+                .as_ref()
+                .map_or_else(Vec::new, |(_, txs)| txs.clone());
+        }
         if let Err(error) = vault::save(&self.vault_path, &passphrase, &keys) {
             return self.fail(error.to_string());
         }
@@ -2719,6 +3150,16 @@ impl Worker {
 fn base64_decode(text: &str) -> Option<Vec<u8>> {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.decode(text).ok()
+}
+
+/// Bytes as lowercase hex, no prefix — the form every chain surface and vector file writes.
+fn hex_of(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 /// Projects decrypted [`Content`] onto the UI's [`Body`].

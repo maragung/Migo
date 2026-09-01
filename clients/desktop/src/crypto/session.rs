@@ -73,6 +73,14 @@ pub struct DeviceKeys {
     /// Random, not root-derived — that is the whole two-signature design: a root that leaks from a
     /// backup alone holds the account half of the login ceremony and none of the device half.
     pub device_credential_seed: Option<[u8; 32]>,
+    /// This client's tracked AVAX transactions (§184's Activity list), sealed into the vault as
+    /// FIELD_TXS. Present here rather than in a separate file for the same reason the saved
+    /// sign-in is: it is account history, useless without the account and safe beside it.
+    ///
+    /// Mid-session updates stay in the worker's memory and are re-sealed the next time the
+    /// passphrase is available — the same trade the one-time prekey pool makes, for the same
+    /// reason: this process deliberately does not hold the passphrase after unlock.
+    pub txs: Vec<crate::vault::TxRecord>,
 }
 
 impl DeviceKeys {
@@ -99,6 +107,7 @@ impl DeviceKeys {
             session: None,
             root: Some(root.as_bytes().try_into().expect("the root is 32 bytes")),
             device_credential_seed: Some(credential),
+            txs: Vec::new(),
         }
     }
 
@@ -122,6 +131,7 @@ impl DeviceKeys {
             session: None,
             root: None,
             device_credential_seed: Some(credential),
+            txs: Vec::new(),
         }
     }
 
