@@ -67,6 +67,44 @@ pub enum AccountError {
     /// must be refused before the allocation, not after.
     #[error("container KDF parameters are out of range")]
     KdfOutOfRange,
+
+    /// An RPC-observed chain id does not match the configured network. The
+    /// transaction was never built: a chain-id mismatch is the
+    /// replay/confusion case, and the honest response is to close the
+    /// session, not to pick one of the two ids.
+    #[error("chain id mismatch: configured {configured}, RPC reported {observed}")]
+    ChainMismatch {
+        /// The chain id the client is configured for.
+        configured: u64,
+        /// The chain id the RPC reported.
+        observed: u64,
+    },
+
+    /// Bytes handed to the transaction parser are not an EIP-1559 envelope
+    /// at all — wrong type byte, wrong field count, or structurally not the
+    /// list shape a type-2 transaction is.
+    #[error("not an EIP-1559 transaction")]
+    NotATransaction,
+
+    /// A raw transaction or RLP item is structurally broken or non-canonical.
+    /// The parser is deliberately strict — trailing bytes, non-minimal
+    /// integers, and redundant length prefixes are all refused, because it
+    /// parses bytes that arrived over a network.
+    #[error("malformed RLP: {what}")]
+    MalformedRlp {
+        /// What was wrong. A static string, never input-derived text.
+        what: &'static str,
+    },
+
+    /// A recipient string is not an address: wrong length or not hex.
+    #[error("not a valid address")]
+    BadAddress,
+
+    /// A mixed-case address string's EIP-55 checksum does not match its
+    /// contents. Reported distinctly from [`AccountError::BadAddress`]
+    /// because the user's remedy is "fix the typo", not "the app is broken".
+    #[error("address checksum failed")]
+    AddressChecksumFailed,
 }
 
 /// Convenience alias used throughout the crate.

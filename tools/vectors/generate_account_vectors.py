@@ -6,7 +6,7 @@ from the specifications rather than from the Rust code — the same house rule a
 `generate_crypto_vectors.py`: expected bytes must come from a *different* codebase
 than the one under test, so a shared bug cannot hide behind a green build.
 
-Two constructions are produced here:
+Two constructions are produced here, and two more that build on the wallet:
 
 * Domain-separated seeds (``account-domains.json``): ``HKDF-SHA256`` (RFC 5869)
   splits one 32-byte account root into a seed per purpose — identity, EVM wallet,
@@ -19,6 +19,15 @@ Two constructions are produced here:
   address via a secp256k1 public key, Keccak-256, and the EIP-55 checksum. secp256k1
   point arithmetic and Keccak-f[1600] have no home in `hashlib` or `cryptography`,
   so both are implemented here from their specifications.
+* Transactions (``account-tx.json``): EIP-1559 bodies and signing hashes over the
+  same wallets — RLP written from the Ethereum specification's appendix, ECDSA
+  public-key recovery from the curve. Signature bytes are NOT pinned (the ports
+  sign with their own libraries and prove validity by recovering the sender);
+  one case is a real mainnet C-Chain transaction, pinned raw, so the parse and
+  recovery paths are checked against the chain and not only against this file.
+* Typed data (``account-eip712.json``): EIP-712 domain separators, hashStructs,
+  and digests over a recursive value model, anchored on the EIP's own worked
+  example — digest and signature both.
 
 Everything written from scratch is checked against published test vectors before a
 single output file is produced (see :func:`self_check`). That ordering is the whole
@@ -354,6 +363,327 @@ def eip55(address: bytes) -> str:
     return "0x" + out
 
 
+# --- RLP, from the specification ---------------------------------------------
+#
+# Four length-prefix rules and one recursion. The encoder writes the canonical
+# form (a one-byte string below 0x80 is the byte itself; zero is the empty
+# string), and the decoder refuses everything the encoder would not have
+# written — the account transactions parse bytes that arrived over a network,
+# where a tolerant decoder is a differential oracle at best.
+
+RlpItem = bytes | list["RlpItem"]
+
+
+def rlp_encode(item: RlpItem) -> bytes:
+    if isinstance(item, bytes):
+        if len(item) == 1 and item[0] < 0x80:
+            return item
+        return _rlp_prefix(len(item), 0x80) + item
+    payload = b"".join(rlp_encode(child) for child in item)
+    return _rlp_prefix(len(payload), 0xC0) + payload
+
+
+def rlp_uint(value: int) -> bytes:
+    """The minimal big-endian encoding; zero is the empty string — the one
+    integer rule most hand-rolled encoders get wrong."""
+    if value == 0:
+        return b""
+    length = (value.bit_length() + 7) // 8
+    return value.to_bytes(length, "big")
+
+
+def _rlp_prefix(length: int, offset: int) -> bytes:
+    if length <= 55:
+        return bytes([offset + length])
+    length_bytes = length.to_bytes((length.bit_length() + 7) // 8, "big")
+    return bytes([offset + 55 + len(length_bytes)]) + length_bytes
+
+
+def rlp_decode(data: bytes) -> RlpItem:
+    """Strict: consumes exactly the input, rejects non-minimal lengths."""
+    item, consumed = _rlp_decode_item(data, 0)
+    if consumed != len(data):
+        raise ValueError("trailing bytes after a complete RLP item")
+    return item
+
+
+def _rlp_decode_item(data: bytes, offset: int) -> tuple[RlpItem, int]:
+    if offset >= len(data):
+        raise ValueError("RLP input ends where an item was expected")
+    first = data[offset]
+    if first < 0x80:
+        return data[offset : offset + 1], offset + 1
+    if first <= 0xB7:  # short string
+        length, start = first - 0x80, offset + 1
+    elif first <= 0xBF:  # long string
+        lol = first - 0xB7
+        length, start = _rlp_read_length(data, offset + 1, lol)
+    elif first <= 0xF7:  # short list
+        length, start = first - 0xC0, offset + 1
+    else:  # long list
+        lol = first - 0xF7
+        length, start = _rlp_read_length(data, offset + 1, lol)
+    end = start + length
+    if end > len(data):
+        raise ValueError("RLP input ends inside an item")
+    payload = data[start:end]
+    if first <= 0xBF and length == 1 and payload[0] < 0x80:
+        raise ValueError("single byte below 0x80 must encode as itself")
+    if first >= 0xC0:
+        items: list[RlpItem] = []
+        at = start
+        while at < end:
+            child, at = _rlp_decode_item(data, at)
+            items.append(child)
+        return items, end
+    return payload, end
+
+
+def _rlp_read_length(data: bytes, at: int, length_of_length: int) -> tuple[int, int]:
+    if at + length_of_length > len(data):
+        raise ValueError("RLP input ends inside a length prefix")
+    length_bytes = data[at : at + length_of_length]
+    if length_bytes[0] == 0:
+        raise ValueError("RLP length has a leading zero byte")
+    length = int.from_bytes(length_bytes, "big")
+    if length <= 55:
+        raise ValueError("RLP length written in long form for a short-form payload")
+    return length, at + length_of_length
+
+
+# --- EIP-1559 (type-2) transactions ------------------------------------------
+#
+# The serialized form is 0x02 || RLP([the nine fields, y_parity, r, s]) — a FLAT
+# list of twelve items, unlike legacy transactions where the signature wraps an
+# already-encoded body. The signing hash covers only the first nine items:
+# keccak256(0x02 || RLP(fields)). The access list is always empty in this build.
+
+EIP1559_TYPE = b"\x02"
+
+
+def eip1559_body(
+    chain_id: int,
+    nonce: int,
+    max_priority_fee_per_gas: int,
+    max_fee_per_gas: int,
+    gas_limit: int,
+    to: bytes,
+    value: int,
+    data: bytes,
+) -> list[RlpItem]:
+    return [
+        rlp_uint(chain_id),
+        rlp_uint(nonce),
+        rlp_uint(max_priority_fee_per_gas),
+        rlp_uint(max_fee_per_gas),
+        rlp_uint(gas_limit),
+        to,
+        rlp_uint(value),
+        data,
+        [],  # access list, always empty in this build
+    ]
+
+
+def eip1559_signing_hash(body: list[RlpItem]) -> bytes:
+    return keccak256(EIP1559_TYPE + rlp_encode(body))
+
+
+# --- ECDSA public-key recovery -----------------------------------------------
+
+
+def _inv_mod_n(value: int) -> int:
+    return pow(value % SECP256K1_N, SECP256K1_N - 2, SECP256K1_N)
+
+
+def ecdsa_recover(digest: bytes, r: int, s: int, parity: int) -> Point:
+    """Recover the public key from a signature over `digest`. `parity` is the
+    y-parity bit (0/1); EIP-1559 carries it as the tenth field of the envelope."""
+    if not 1 <= r < SECP256K1_N:
+        raise ValueError("r out of range")
+    x = r  # parity 2/3 (x + n) never occurs in a type-2 transaction
+    y_squared = (pow(x, 3, SECP256K1_P) + 7) % SECP256K1_P
+    y = pow(y_squared, (SECP256K1_P + 1) // 4, SECP256K1_P)
+    if pow(y, 2, SECP256K1_P) != y_squared:
+        raise ValueError("r is not an x-coordinate on the curve")
+    if y % 2 != parity:
+        y = SECP256K1_P - y
+    z = int.from_bytes(digest, "big")
+    r_inv = _inv_mod_n(r)
+    u1 = (-z * r_inv) % SECP256K1_N
+    u2 = (s * r_inv) % SECP256K1_N
+    point = point_add(point_mul(u1, SECP256K1_G), point_mul(u2, (x, y)))
+    if point is None:
+        raise ValueError("recovery produced the point at infinity")
+    return point
+
+
+def eip1559_recover_sender(raw: bytes) -> bytes:
+    """Decode a raw type-2 transaction and recover its sender. The full pipeline
+    a conformance port must reproduce: strict RLP decode, body re-encode,
+    signing hash, ECDSA recovery, address derivation."""
+    if raw[:1] != EIP1559_TYPE:
+        raise ValueError("not a type-2 transaction")
+    items = rlp_decode(raw[1:])
+    if not isinstance(items, list) or len(items) != 12:
+        raise ValueError("not a 12-item EIP-1559 envelope")
+    body = items[:9]
+    parity = int.from_bytes(items[9], "big")
+    r = int.from_bytes(items[10], "big")
+    s = int.from_bytes(items[11], "big")
+    if parity not in (0, 1):
+        raise ValueError("y-parity is not a bit")
+    if len(items[10]) != 32 or len(items[11]) != 32:
+        raise ValueError("r or s is not 32 bytes")
+    if s > SECP256K1_N // 2:
+        raise ValueError("high-s signature")
+    if int.from_bytes(body[0], "big") == 0:
+        raise ValueError("chain id zero")
+    digest = eip1559_signing_hash(body)
+    return eth_address(ecdsa_recover(digest, r, s, parity))
+
+
+# --- RFC 6979 deterministic ECDSA (self-check only) --------------------------
+#
+# Exists to check this file's EIP-712 implementation against the EIP's published
+# worked example *signature*, not just its digest: signing the digest with
+# the example's private key under RFC 6979 must reproduce the published
+    # r/s byte for byte. No account vector is signed by this; the ports sign
+    # with their own libraries and prove validity by recovery.
+
+
+def rfc6979_k(private_key: int, digest: bytes) -> int:
+    x_octets = private_key.to_bytes(32, "big")
+    z = int.from_bytes(digest, "big")
+    z2 = z - SECP256K1_N if z >= SECP256K1_N else z
+    h1 = z2.to_bytes(32, "big")
+    v = b"\x01" * 32
+    k = b"\x00" * 32
+    k = hmac.new(k, v + b"\x00" + x_octets + h1, hashlib.sha256).digest()
+    v = hmac.new(k, v, hashlib.sha256).digest()
+    k = hmac.new(k, v + b"\x01" + x_octets + h1, hashlib.sha256).digest()
+    v = hmac.new(k, v, hashlib.sha256).digest()
+    while True:
+        v = hmac.new(k, v, hashlib.sha256).digest()
+        candidate = int.from_bytes(v, "big")
+        if 1 <= candidate < SECP256K1_N:
+            return candidate
+        k = hmac.new(k, v + b"\x00", hashlib.sha256).digest()
+        v = hmac.new(k, v, hashlib.sha256).digest()
+
+
+def ecdsa_sign_rfc6979(private_key: int, digest: bytes) -> tuple[int, int]:
+    z = int.from_bytes(digest, "big") % SECP256K1_N
+    nonce = rfc6979_k(private_key, digest)
+    point = public_point(nonce)
+    r = point[0] % SECP256K1_N
+    s = (_inv_mod_n(nonce) * (z + r * private_key)) % SECP256K1_N
+    return r, s
+
+
+# --- EIP-712 typed-data hashing ----------------------------------------------
+
+
+def eip712_encode_type(primary: str, referenced: list[str]) -> str:
+    """The primary struct's declaration followed by every referenced struct's
+    declaration, sorted by name. The appendix is the part of EIP-712 every
+    hand-rolled implementation gets wrong: a struct that references other
+    structs does not hash its bare declaration but the declaration with all
+    referenced types riding along. Sorting the declaration strings is
+    equivalent to sorting by name because `(` (0x28) sorts below every
+    character that can continue an identifier."""
+    return primary + "".join(sorted(referenced))
+
+
+def eip712_type_hash(primary: str, referenced: list[str]) -> bytes:
+    return keccak256(eip712_encode_type(primary, referenced).encode("ascii"))
+
+
+def _unhex(value: str) -> bytes:
+    """Hex from a vector file, with or without the 0x prefix."""
+    if value.startswith(("0x", "0X")):
+        value = value[2:]
+    return bytes.fromhex(value)
+
+
+def eip712_encode_value(value: dict) -> bytes:
+    """The 32-byte encodeData contribution of one typed value. Structs arrive
+    as {"struct": {...}} and contribute their own hashStruct, recursively."""
+    if "struct" in value:
+        struct = value["struct"]
+        return eip712_hash_struct(
+            eip712_type_hash(struct["primary_type"], struct["referenced_types"]),
+            [eip712_encode_value(v) for v in struct["values"]],
+        )
+    kind = value["type"]
+    if kind == "address":
+        return b"\x00" * 12 + _unhex(value["value"])
+    if kind in ("uint256", "bytes32"):
+        out = _unhex(value["value"])
+        if kind == "uint256" and len(out) < 32:  # JSON carries small integers short
+            out = b"\x00" * (32 - len(out)) + out
+        return out
+    if kind == "string":
+        return keccak256(value["value"].encode("utf-8"))
+    if kind == "bytes":
+        return keccak256(_unhex(value["value"]))
+    if kind == "array":
+        return keccak256(b"".join(eip712_encode_value(v) for v in value["values"]))
+    raise ValueError(f"unknown EIP-712 value type {kind}")
+
+
+def eip712_hash_struct(type_hash: bytes, encoded_values: list[bytes]) -> bytes:
+    return keccak256(type_hash + b"".join(encoded_values))
+
+
+def eip712_domain_separator(domain: dict) -> bytes:
+    """hashStruct(EIP712Domain) over exactly the fields that are present, in
+    the EIP's fixed order (name, version, chainId, verifyingContract, salt)."""
+    members: list[bytes] = []
+    if "name" in domain:
+        members.append(keccak256(domain["name"].encode("utf-8")))
+    if "version" in domain:
+        members.append(keccak256(domain["version"].encode("utf-8")))
+    if "chain_id" in domain:
+        # encodeData left-pads every atomic value to 32 bytes — a small chainId
+        # contributes 31 zero bytes, not its minimal integer encoding.
+        members.append(domain["chain_id"].to_bytes(32, "big"))
+    if "verifying_contract" in domain:
+        members.append(b"\x00" * 12 + _unhex(domain["verifying_contract"]))
+    if "salt" in domain:
+        members.append(_unhex(domain["salt"]))
+    present = []
+    if "name" in domain:
+        present.append("string name")
+    if "version" in domain:
+        present.append("string version")
+    if "chain_id" in domain:
+        present.append("uint256 chainId")
+    if "verifying_contract" in domain:
+        present.append("address verifyingContract")
+    if "salt" in domain:
+        present.append("bytes32 salt")
+    type_hash = keccak256(("EIP712Domain(" + ",".join(present) + ")").encode("ascii"))
+    return eip712_hash_struct(type_hash, members)
+
+
+def eip712_digest(domain_separator: bytes, struct_hash: bytes) -> bytes:
+    return keccak256(b"\x19\x01" + domain_separator + struct_hash)
+
+
+def _mail_person(name: str, address: str, person_decl: str) -> dict:
+    """One Person value of the EIP-712 worked example, as a vector-struct."""
+    return {
+        "struct": {
+            "primary_type": person_decl,
+            "referenced_types": [],
+            "values": [
+                {"type": "string", "value": name},
+                {"type": "address", "value": address},
+            ],
+        }
+    }
+
+
 # --- self-check-only primitives: Base58Check and RIPEMD-160 ------------------
 #
 # These read and reproduce the *published Bitcoin* BIP-32 test vector, nothing
@@ -548,6 +878,60 @@ KECCAK_VECTORS = [
     ),
 ]
 
+# RLP examples from the specification's own appendix, plus the boundary that
+# decides short form from long form (a 55-byte payload is the largest short
+# string; one more byte needs a length-of-length). The expected side is the
+# exact hex the spec prints.
+RLP_VECTORS = [
+    (b"dog", "83646f67"),
+    ([b"cat", b"dog"], "c88363617483646f67"),
+    (b"", "80"),
+    (b"\x00", "00"),
+    (b"\x0f", "0f"),
+    (b"\x04\x00", "820400"),
+    ([[], []], "c2c0c0"),
+]
+RLP_LOREM = b"Lorem ipsum dolor sit amet, consectetur adipisicing elit"  # 56 bytes
+assert len(RLP_LOREM) == 56
+
+# A real Avalanche C-Chain mainnet type-2 transaction, byte for byte as a
+# public RPC endpoint served it. This is the only place the transaction formats
+# are checked against the chain itself rather than against this file's own
+# beliefs: decoding this raw must recover the sender the block explorer
+# attributes it to, and its Keccak-256 digest must be its hash. A client that
+# is merely self-consistent can still disagree with the chain; this case is
+# how that disagreement is caught before funds depend on it.
+AVAX_TX_RAW = bytes.fromhex(
+    "02f89382a86a83032deb8416af0f5d84222d8d2382ea609428d9ccedf1b7ac9b3f090f4f029"
+    "2837de87c1d3980a46a96ea181d6eb3586a6a5f18396c454587132cdd454500000000000000"
+    "01a05d81fa9a00c080a045e2a143cf835f959944d884ee17fe82ddfaf4e838b19c31f97765e"
+    "d1a71314aa039c8f0891a9148b6033cb040b64c6150b6bb210866ea8dbbcfa5b5da055f0ed9"
+)
+AVAX_TX_SENDER = "53e5024c1252e81ada67b61ab0ae64f5b9a7e0a3"
+AVAX_TX_HASH = "681da1c7f76629f2b0ba57fedff17dabab57bf84ed9553919ba438098bfe9811"
+
+# EIP-712's worked example ("Ether Mail"), exactly as the EIP prints it: the
+# domain separator, the message's hashStruct, and the final digest are all
+# published values, and so is the signature — taken with the example's private
+# key (keccak256("cow"), the "Cow" sender's own key) under RFC 6979. The digest
+# and the signature together pin the whole construction: a wrong encodeType, a
+# wrong member ordering, or a wrong padding rule cannot reproduce both.
+EIP712_MAIL_DOMAIN = {
+    "name": "Ether Mail",
+    "version": "1",
+    "chain_id": 1,
+    "verifying_contract": "cc" * 20,
+}
+EIP712_MAIL_DOMAIN_SEPARATOR = "f2cee375fa42b42143804025fc449deafd50cc031ca257e0b194a650a912090f"
+EIP712_MAIL_STRUCT_HASH = "c52c0ee5d84264471806290a3f2c4cecfc5490626bf912d01f240d7a274b371e"
+EIP712_MAIL_DIGEST = "be609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2"
+EIP712_MAIL_FROM_ADDRESS = "cd2a3d9f938e13cd947ec05abc7fe734df8dd826"  # "Cow"
+EIP712_MAIL_TO_ADDRESS = "bb" * 20  # "Bob"
+EIP712_COW_KEY = 0xC85EF7D79691FE79573B1A7064C19C1A9819EBDBD1FAAAB1A8EC92344438AAF4
+EIP712_MAIL_SIG_R = 0x4355C47D63924E8A72E509B65029052EB6C299D53A04E167C5775FD466751C9D
+EIP712_MAIL_SIG_S = 0x07299936D304C153F6443DFA05F40FF007D72911B6F72307F996231605B91562
+EIP712_MAIL_SIG_PARITY = 1  # the EIP prints v = 0x1c
+
 
 # --- self checks against published vectors ----------------------------------
 
@@ -655,6 +1039,83 @@ def self_check() -> list[str]:
     ), "EIP-155 example address mismatch"
     checked.append("EIP-155 example key -> address (secp256k1 + Keccak-256 + EIP-55)")
 
+    # RLP — the specification's appendix examples, the 55/56 boundary, and the
+    # two strictness rules a tolerant decoder would quietly accept: a single
+    # byte below 0x80 must encode as itself (so 0x81 0x05 is not RLP), and an
+    # item must consume exactly the input it was given.
+    for item, want in RLP_VECTORS:
+        got = rlp_encode(item).hex()
+        assert got == want, f"RLP encode mismatch: {got} != {want}"
+        assert rlp_encode(rlp_decode(bytes.fromhex(want))) == bytes.fromhex(
+            want
+        ), f"RLP round trip broken for {want}"
+    assert rlp_uint(0) == b"", "RLP zero is not the empty string"
+    assert rlp_encode(rlp_uint(1024)).hex() == "820400", "RLP integer 1024 mismatch"
+    assert rlp_encode(b"x" * 55).hex() == "b7" + "78" * 55, "55-byte string is short form"
+    assert rlp_encode(RLP_LOREM).hex() == "b838" + RLP_LOREM.hex(), "56-byte string is long form"
+    for bad, why in [
+        (bytes.fromhex("8105"), "single byte below 0x80 in long form"),
+        (bytes.fromhex("b8012a"), "length 1 in long form"),
+        (bytes.fromhex("b9002a2a"), "length with a leading zero"),
+        (bytes.fromhex("83") + b"dog" + b"\x00", "trailing bytes"),
+    ]:
+        try:
+            rlp_decode(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"strict RLP decoder accepted {why}")
+    checked.append("RLP (spec appendix examples, 55/56 boundary, strict decoding)")
+
+    # A real Avalanche C-Chain mainnet transaction. Keccak-256 of the raw bytes
+    # is its hash — pinning the serialized form — and sender recovery through
+    # this file's own RLP decoder, body re-encode, signing hash, and ECDSA
+    # recovery lands on the address the chain attributes it to. This is the
+    # single check that would have caught both transaction-format mistakes this
+    # generator exists to prevent: a nested signature envelope, or a signing
+    # hash computed over the wrong fields.
+    assert keccak256(AVAX_TX_RAW).hex() == AVAX_TX_HASH, "C-Chain tx hash mismatch"
+    assert (
+        eip1559_recover_sender(AVAX_TX_RAW).hex() == AVAX_TX_SENDER
+    ), "C-Chain tx sender recovery mismatch"
+    checked.append("Avalanche C-Chain transaction (hash + sender recovery, chain-sourced)")
+
+    # EIP-712 — the specification's "Ether Mail" worked example, digest first,
+    # then the signature. The domain separator and hashStruct are checked so a
+    # failure names which half of the construction is wrong; the digest and the
+    # RFC 6979 signature (r and s, with the EIP's own private key) are the
+    # published values, and recovery with the published parity returns the
+    # example sender's public key, closing the loop on the parity bit too.
+    assert eip55(eth_address(public_point(EIP712_COW_KEY))) == (
+        "0xCD2a3d9F938E13CD947Ec05AbC7FE734Df8DD826"
+    ), "the EIP-712 example key does not own the example sender address"
+    person_decl = "Person(string name,address wallet)"
+    mail_decl = "Mail(Person from,Person to,string contents)"
+    assert eip712_encode_type(mail_decl, [person_decl]) == (
+        "Mail(Person from,Person to,string contents)Person(string name,address wallet)"
+    ), "EIP-712 encodeType does not append the referenced struct"
+    mail_values = [
+        _mail_person("Cow", EIP712_MAIL_FROM_ADDRESS, person_decl),
+        _mail_person("Bob", EIP712_MAIL_TO_ADDRESS, person_decl),
+        {"type": "string", "value": "Hello, Bob!"},
+    ]
+    mail_type_hash = eip712_type_hash(mail_decl, [person_decl])
+    mail_struct_hash = eip712_hash_struct(
+        mail_type_hash, [eip712_encode_value(v) for v in mail_values]
+    )
+    mail_separator = eip712_domain_separator(EIP712_MAIL_DOMAIN)
+    mail_digest = eip712_digest(mail_separator, mail_struct_hash)
+    assert mail_separator.hex() == EIP712_MAIL_DOMAIN_SEPARATOR, "EIP-712 domain separator mismatch"
+    assert mail_struct_hash.hex() == EIP712_MAIL_STRUCT_HASH, "EIP-712 hashStruct mismatch"
+    assert mail_digest.hex() == EIP712_MAIL_DIGEST, "EIP-712 digest mismatch"
+    sig_r, sig_s = ecdsa_sign_rfc6979(EIP712_COW_KEY, mail_digest)
+    assert sig_r == EIP712_MAIL_SIG_R, "EIP-712 example signature r mismatch"
+    assert sig_s == EIP712_MAIL_SIG_S, "EIP-712 example signature s mismatch"
+    assert ecdsa_recover(mail_digest, sig_r, sig_s, EIP712_MAIL_SIG_PARITY) == (
+        public_point(EIP712_COW_KEY)
+    ), "EIP-712 example signature does not recover to the sender's key"
+    checked.append("EIP-712 Ether Mail example (separator, hashStruct, digest, RFC 6979 signature)")
+
     return checked
 
 
@@ -732,11 +1193,323 @@ def evm_file() -> dict:
     }
 
 
+def _evm_wallet(root: bytes, index: int) -> tuple[int, bytes]:
+    """(private key, address) of the EVM wallet at an address index, from the
+    account root — the same derivation `account-evm.json` pins."""
+    seed = domain_seed(root, EVM_DOMAIN)
+    key, _ = bip32_derive(seed, EVM_PATH_PREFIX + [index])
+    return key, eth_address(public_point(key))
+
+
+def tx_file() -> dict:
+    cases = []
+    # The recipient is a wallet of a *different* root, so no case can send to
+    # its own sender and every case's `to` differs from its `sender` at a glance.
+    _, recipient = _evm_wallet(ROOT_B, 0)
+    scenarios = [
+        # (name, root, index, chain_id, nonce, priority, max_fee, gas, value, data)
+        (
+            "native-mainnet",
+            ROOT_A,
+            0,
+            43114,
+            0,
+            2_000_000_000,
+            30_000_000_000,
+            21_000,
+            1_500_000_000_000_000_000,
+            b"",
+        ),
+        (
+            "native-second-address",
+            ROOT_A,
+            1,
+            43114,
+            3,
+            1_000_000_000,
+            25_000_000_000,
+            21_000,
+            250_000_000_000_000,
+            b"",
+        ),
+        (
+            "native-fuji",
+            ROOT_B,
+            7,
+            43113,
+            1,
+            1_500_000_000,
+            28_000_000_000,
+            21_000,
+            2_000_000_000_000_000_000,
+            b"",
+        ),
+        (
+            "one-wei-zero-priority",
+            ROOT_C,
+            0,
+            43114,
+            0,
+            0,
+            25_000_000_000,
+            21_000,
+            1,
+            b"",
+        ),
+        (
+            "high-nonce",
+            ROOT_B,
+            0,
+            43113,
+            4_294_967_295,
+            2_500_000_000,
+            50_000_000_000,
+            21_000,
+            123_456_789,
+            b"",
+        ),
+        (
+            "with-calldata",
+            ROOT_A,
+            0,
+            43114,
+            7,
+            2_000_000_000,
+            30_000_000_000,
+            30_000,
+            0,
+            # an ERC-20 transfer(address,uint256) selector with the recipient and
+            # a 4-decimal amount padded to 32 bytes — exercises `data` and a
+            # zero `value` (both encode as RLP's empty string) in one case.
+            bytes.fromhex("a9059cbb" + "00" * 12 + recipient.hex() + "00" * 31 + "04"),
+        ),
+    ]
+    for name, root, index, chain_id, nonce, priority, max_fee, gas, value, data in scenarios:
+        key, sender = _evm_wallet(root, index)
+        body = eip1559_body(chain_id, nonce, priority, max_fee, gas, recipient, value, data)
+        cases.append(
+            {
+                "name": name,
+                "root": root.hex(),
+                "index": index,
+                "chain_id": chain_id,
+                "nonce": nonce,
+                "max_priority_fee_per_gas": priority,
+                "max_fee_per_gas": max_fee,
+                "gas_limit": gas,
+                "recipient": recipient.hex(),
+                "value_wei": value,
+                "data": data.hex(),
+                "sender": sender.hex(),
+                "body_rlp": rlp_encode(body).hex(),
+                "signing_hash": eip1559_signing_hash(body).hex(),
+                "provenance": "independent-python-rlp-secp256k1",
+            }
+        )
+
+    # The chain-sourced case: a real mainnet transaction, pinned byte for byte.
+    # Its decoded fields are produced by this file's own decoder from the pinned
+    # raw, and the self-check has already proved that the raw recovers to the
+    # sender and hashes to the hash before any file is written.
+    items = rlp_decode(AVAX_TX_RAW[1:])
+    body = items[:9]
+    cases.append(
+        {
+            "name": "avalanche-c-chain-observed",
+            "provenance": "chain-sourced",
+            "$comment": (
+                "A real Avalanche C-Chain mainnet type-2 transaction, served by a "
+                "public RPC endpoint. The consumer must decode `raw` (strictly), "
+                "re-encode its body, and recover `sender` from the signature, and "
+                "keccak256(`raw`) must equal `tx_hash`. A client that is merely "
+                "self-consistent can still disagree with the chain; this case is "
+                "how that is caught."
+            ),
+            "chain_id": int.from_bytes(body[0], "big"),
+            "nonce": int.from_bytes(body[1], "big"),
+            "max_priority_fee_per_gas": int.from_bytes(body[2], "big"),
+            "max_fee_per_gas": int.from_bytes(body[3], "big"),
+            "gas_limit": int.from_bytes(body[4], "big"),
+            "recipient": body[5].hex(),
+            "value_wei": int.from_bytes(body[6], "big"),
+            "data": body[7].hex(),
+            "sender": AVAX_TX_SENDER,
+            "raw": AVAX_TX_RAW.hex(),
+            "tx_hash": AVAX_TX_HASH,
+        }
+    )
+
+    return {
+        "$comment": (
+            "EIP-1559 (type-2) transaction bodies and signing hashes from the "
+            "account roots: body = RLP([chain_id, nonce, max_priority_fee_per_gas, "
+            "max_fee_per_gas, gas_limit, to, value, data, access_list]) with the "
+            "access list always empty, and signing_hash = keccak256(0x02 || body)."
+        ),
+        "provenance": "computed by tools/vectors/generate_account_vectors.py: RLP written from the specification and self-checked against its appendix examples and strictness rules, secp256k1 from the curve parameters, Keccak-256 from the published digests; the chain-sourced case is a real mainnet transaction whose hash and sender recovery are pinned",
+        "note": (
+            "SIGNATURES ARE DELIBERATELY NOT PINNED. The ports sign with their own "
+            "library and their own nonce, so pinned signature bytes could only be "
+            "met by copying them. A port proves its signing path instead by "
+            "recovering the sender from its own raw transaction and getting "
+            "`sender` back. The pinned bytes are the deterministic ones: `body_rlp` "
+            "(which a port must produce before signing) and `signing_hash` (which "
+            "it must hash before signing). Integer fields are JSON numbers; "
+            "`value_wei` is wei, AVAX's 18 decimals. The last case is chain-sourced "
+            "and carries `raw`/`tx_hash` instead of a body to re-encode."
+        ),
+        "cases": cases,
+    }
+
+
+def eip712_file() -> dict:
+    person_decl = "Person(string name,address wallet)"
+    mail_decl = "Mail(Person from,Person to,string contents)"
+    mail_values = [
+        _mail_person("Cow", EIP712_MAIL_FROM_ADDRESS, person_decl),
+        _mail_person("Bob", EIP712_MAIL_TO_ADDRESS, person_decl),
+        {"type": "string", "value": "Hello, Bob!"},
+    ]
+
+    send_decl = "Send(address wallet,address to,uint256 amount,uint256 nonce)"
+    bag_decl = "Bag(address account,bytes32 id,uint256 count,string label,bytes memo)"
+    batch_decl = "Batch(Transfer[] items)"
+    transfer_decl = "Transfer(address from,address to,uint256 amount)"
+
+    def struct(primary: str, referenced: list[str], values: list[dict]) -> dict:
+        return {"struct": {"primary_type": primary, "referenced_types": referenced, "values": values}}
+
+    cases = []
+
+    def add_case(name: str, domain: dict, message: dict, provenance: str) -> None:
+        sep = eip712_domain_separator(domain)
+        ms = message["struct"]
+        type_hash = eip712_type_hash(ms["primary_type"], ms["referenced_types"])
+        struct_hash = eip712_hash_struct(
+            type_hash, [eip712_encode_value(v) for v in ms["values"]]
+        )
+        cases.append(
+            {
+                "name": name,
+                "domain": domain,
+                "message": message,
+                "encode_type": eip712_encode_type(ms["primary_type"], ms["referenced_types"]),
+                "expected": {
+                    "type_hash": type_hash.hex(),
+                    "domain_separator": sep.hex(),
+                    "struct_hash": struct_hash.hex(),
+                    "digest": eip712_digest(sep, struct_hash).hex(),
+                },
+                "provenance": provenance,
+            }
+        )
+
+    # The specification's own worked example, expected values and all.
+    add_case(
+        "eip712-spec-example",
+        EIP712_MAIL_DOMAIN,
+        struct(mail_decl, [person_decl], mail_values),
+        "eip712-spec-example",
+    )
+    # Domain-field presence: only name+version.
+    add_case(
+        "domain-name-version",
+        {"name": "Migo", "version": "1"},
+        struct(send_decl, [], [
+            {"type": "address", "value": "ab" * 20},
+            {"type": "address", "value": "cd" * 20},
+            {"type": "uint256", "value": "0de0b6b3a7640000"},  # 1e18 wei, short hex
+            {"type": "uint256", "value": "01"},
+        ]),
+        "independent-python-keccak-eip712",
+    )
+    # All five domain fields, including the salt.
+    add_case(
+        "domain-all-five-fields",
+        {
+            "name": "Migo",
+            "version": "1",
+            "chain_id": 43114,
+            "verifying_contract": "28d9ccedf1b7ac9b3f090f4f0292837de87c1d39",
+            "salt": "00" * 32,
+        },
+        struct(send_decl, [], [
+            {"type": "address", "value": "ab" * 20},
+            {"type": "address", "value": "cd" * 20},
+            {"type": "uint256", "value": "00" * 30 + "0102"},
+            {"type": "uint256", "value": "00"},
+        ]),
+        "independent-python-keccak-eip712",
+    )
+    # Every atomic value type at least once, including bytes and bytes32.
+    add_case(
+        "atomic-types",
+        {"name": "Migo", "version": "1", "chain_id": 43113},
+        struct(bag_decl, [], [
+            {"type": "address", "value": "ef" * 20},
+            {"type": "bytes32", "value": "aa" * 32},
+            {"type": "uint256", "value": "ff"},
+            {"type": "string", "value": "activity: 1 AVAX from faucet"},
+            {"type": "bytes", "value": "deadbeef"},
+        ]),
+        "independent-python-keccak-eip712",
+    )
+    # A struct array, and a struct referencing a struct: two referenced-type
+    # declarations appended in name order, and an array hashed as the Keccak of
+    # its elements' encodings — both rules are where hand-rolled ports break.
+    add_case(
+        "struct-array-and-references",
+        {"name": "Migo", "version": "1", "chain_id": 43114, "verifying_contract": "ab" * 20},
+        struct(batch_decl, [transfer_decl], [
+            {
+                "type": "array",
+                "values": [
+                    struct(transfer_decl, [], [
+                        {"type": "address", "value": "11" * 20},
+                        {"type": "address", "value": "22" * 20},
+                        {"type": "uint256", "value": "05"},
+                    ]),
+                    struct(transfer_decl, [], [
+                        {"type": "address", "value": "33" * 20},
+                        {"type": "address", "value": "44" * 20},
+                        {"type": "uint256", "value": "07"},
+                    ]),
+                ],
+            }
+        ]),
+        "independent-python-keccak-eip712",
+    )
+
+    return {
+        "$comment": (
+            "EIP-712 typed-data hashing: domain separator, hashStruct, and final "
+            "digest over the value tree each case carries. The value model is "
+            "recursive: {\"type\", \"value\"} for atomic values, {\"struct\": "
+            "{\"primary_type\", \"referenced_types\", \"values\"}} for structs, and "
+            "{\"type\": \"array\", \"values\": [...]} for arrays."
+        ),
+        "provenance": "computed by tools/vectors/generate_account_vectors.py: Keccak-256 from the published digests, encodeType/encodeData written from EIP-712 and self-checked against the specification's worked example — domain separator, hashStruct, digest, and the RFC 6979 signature taken with the example's own private key — before emission",
+        "note": (
+            "uint256 and bytes32 values are hex WITHOUT a 0x prefix and may be "
+            "shorter than 32 bytes (left-pad to 32); addresses are 20-byte hex; "
+            "`domain` carries only the fields it uses, and the separator is built "
+            "from exactly those, in the EIP's fixed order. `encode_type` is the "
+            "full string hashed into the type hash, referenced declarations "
+            "appended in name order — pinned for readability, since it is the rule "
+            "most ports get wrong. The spec-example case's expected values are the "
+            "EIP's published ones, not this file's own computation."
+        ),
+        "cases": cases,
+    }
+
+
 # --- driver ------------------------------------------------------------------
 
 FILES = {
     "account-domains.json": domains_file,
     "account-evm.json": evm_file,
+    "account-tx.json": tx_file,
+    "account-eip712.json": eip712_file,
 }
 
 

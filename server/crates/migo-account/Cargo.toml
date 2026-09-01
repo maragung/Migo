@@ -20,11 +20,15 @@ ml-dsa = { version = "0.1", default-features = false, features = [
     "alloc",
     "zeroize",
 ] }
-# secp256k1 for the EVM wallet domain — the audited curve implementation, used
-# for exactly the operations BIP-32 needs (scalar arithmetic and point
-# tweaking); no key generation, because the wallet key always arrives as a
-# derived scalar rather than a random one.
-secp256k1 = { version = "0.33", default-features = false, features = ["alloc"] }
+# secp256k1 for the EVM wallet domain — the audited curve implementation. The
+# wallet key always arrives as a derived scalar rather than a random one, so
+# no key generation; `recovery` adds public-key recovery, which transaction
+# signing needs for the y-parity and the conformance tests need to prove a
+# signature belongs to the wallet that made it.
+secp256k1 = { version = "0.33", default-features = false, features = [
+    "alloc",
+    "recovery",
+] }
 # Keccak-256 for Ethereum addresses. Not SHA3-256: Ethereum kept the original
 # Keccak padding, and `sha3` would silently produce the wrong address — the
 # kind of mistake that looks exactly like a working wallet until funds move.

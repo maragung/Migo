@@ -146,15 +146,29 @@ can see both derivations side by side.
 ### `crypto/account-*.json`
 
 The unified-account vectors, consumed by `migo-account`'s runner (the Rust half;
-TypeScript and Kotlin consumers land with their ports). Four files, two
+TypeScript and Kotlin consumers land with their ports). Six files, three
 provenances, and the split is the point:
 
-* `account-domains.json`, `account-evm.json` — **independent-python**, from
+* `account-domains.json`, `account-evm.json`, `account-tx.json`,
+  `account-eip712.json` — **independent-python**, from
   `tools/vectors/generate_account_vectors.py`. The generator implements HKDF
-  from RFC 5869, BIP-32 from its specification and EIP-55 from the EIP, each
+  from RFC 5869, BIP-32 from its specification, EIP-55 from the EIP, RLP from
+  the Ethereum specification's appendix, and EIP-712 from its EIP — each
   self-checked against that document's own published vectors before it emits
-  anything. Domain seeds, the founding device's E2EE sub-seeds, and
-  `m/44'/60'/0'/0/i` addresses are checked against it.
+  anything. Domain seeds, the founding device's E2EE sub-seeds,
+  `m/44'/60'/0'/0/i` addresses, EIP-1559 bodies and signing hashes, and EIP-712
+  domain separators / hashStructs / digests are checked against it.
+* `account-tx.json` also carries one **chain-sourced** case: a real Avalanche
+  C-Chain mainnet type-2 transaction, pinned raw, whose sender recovery and
+  hash the Rust runner verifies against the chain-observed values. A client
+  that is merely self-consistent can still disagree with the chain; that case
+  is how the disagreement is caught. Signature bytes are deliberately not
+  pinned anywhere in this file — the ports sign with their own libraries and
+  prove validity by recovering the sender from their own raw transaction.
+* `account-eip712.json`'s first case is the EIP-712 specification's own "Ether
+  Mail" worked example, expected values pinned to the EIP's published digest
+  and signature (verified by the generator against an RFC 6979 implementation
+  before emission).
 * `account-mldsa.json`, `account-container.json` — **rust-reference**, written
   by `server/crates/migo-account/examples/write_reference_vectors.rs`. ML-DSA-65
   has no script-reproducible published vector set, and the container's bytes are
@@ -162,7 +176,7 @@ provenances, and the split is the point:
   files test the *ports*, not the crate. The case-level `provenance` field says
   so, and the Rust runner re-asserts it before trusting a case.
 
-Regenerate all four with `make vectors` (the two Python files also have a
+Regenerate all six with `make vectors` (the four Python files also have a
 `--check` mode in `vector-check`; the two rust-reference files are instead
 re-derived byte for byte by `test-vectors-rust`, which is the same guarantee
 expressed as a test).

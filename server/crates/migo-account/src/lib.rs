@@ -62,6 +62,7 @@ pub mod error;
 pub mod evm;
 pub mod identity;
 pub mod root;
+pub mod tx;
 
 pub use container::{open_container, seal_container, AccountFile, ContainerParams, HEADER_LEN};
 pub use error::{AccountError, Result};
@@ -73,4 +74,9 @@ pub use identity::{
 pub use root::{
     founding_device_e2ee_seeds, MigoRoot, DOMAIN_BACKUP, DOMAIN_DEVICE, DOMAIN_E2EE, DOMAIN_EVM,
     DOMAIN_IDENTITY,
+};
+pub use tx::{
+    eip712_digest, eip712_encode_type, eip712_hash_struct, eip712_type_hash, parse_address,
+    recover_sender, rlp_decode, rlp_uint, Eip1559Tx, Eip712Domain, Eip712Value, Network, Rlp,
+    SignedTx, AVALANCHE_MAINNET, FUJI_TESTNET,
 };

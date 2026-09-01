@@ -1,0 +1,267 @@
+{
+  "$comment": "EIP-712 typed-data hashing: domain separator, hashStruct, and final digest over the value tree each case carries. The value model is recursive: {\"type\", \"value\"} for atomic values, {\"struct\": {\"primary_type\", \"referenced_types\", \"values\"}} for structs, and {\"type\": \"array\", \"values\": [...]} for arrays.",
+  "provenance": "computed by tools/vectors/generate_account_vectors.py: Keccak-256 from the published digests, encodeType/encodeData written from EIP-712 and self-checked against the specification's worked example — domain separator, hashStruct, digest, and the RFC 6979 signature taken with the example's own private key — before emission",
+  "note": "uint256 and bytes32 values are hex WITHOUT a 0x prefix and may be shorter than 32 bytes (left-pad to 32); addresses are 20-byte hex; `domain` carries only the fields it uses, and the separator is built from exactly those, in the EIP's fixed order. `encode_type` is the full string hashed into the type hash, referenced declarations appended in name order — pinned for readability, since it is the rule most ports get wrong. The spec-example case's expected values are the EIP's published ones, not this file's own computation.",
+  "cases": [
+    {
+      "name": "eip712-spec-example",
+      "domain": {
+        "name": "Ether Mail",
+        "version": "1",
+        "chain_id": 1,
+        "verifying_contract": "cccccccccccccccccccccccccccccccccccccccc"
+      },
+      "message": {
+        "struct": {
+          "primary_type": "Mail(Person from,Person to,string contents)",
+          "referenced_types": [
+            "Person(string name,address wallet)"
+          ],
+          "values": [
+            {
+              "struct": {
+                "primary_type": "Person(string name,address wallet)",
+                "referenced_types": [],
+                "values": [
+                  {
+                    "type": "string",
+                    "value": "Cow"
+                  },
+                  {
+                    "type": "address",
+                    "value": "cd2a3d9f938e13cd947ec05abc7fe734df8dd826"
+                  }
+                ]
+              }
+            },
+            {
+              "struct": {
+                "primary_type": "Person(string name,address wallet)",
+                "referenced_types": [],
+                "values": [
+                  {
+                    "type": "string",
+                    "value": "Bob"
+                  },
+                  {
+                    "type": "address",
+                    "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "string",
+              "value": "Hello, Bob!"
+            }
+          ]
+        }
+      },
+      "encode_type": "Mail(Person from,Person to,string contents)Person(string name,address wallet)",
+      "expected": {
+        "type_hash": "a0cedeb2dc280ba39b857546d74f5549c3a1d7bdc2dd96bf881f76108e23dac2",
+        "domain_separator": "f2cee375fa42b42143804025fc449deafd50cc031ca257e0b194a650a912090f",
+        "struct_hash": "c52c0ee5d84264471806290a3f2c4cecfc5490626bf912d01f240d7a274b371e",
+        "digest": "be609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2"
+      },
+      "provenance": "eip712-spec-example"
+    },
+    {
+      "name": "domain-name-version",
+      "domain": {
+        "name": "Migo",
+        "version": "1"
+      },
+      "message": {
+        "struct": {
+          "primary_type": "Send(address wallet,address to,uint256 amount,uint256 nonce)",
+          "referenced_types": [],
+          "values": [
+            {
+              "type": "address",
+              "value": "abababababababababababababababababababab"
+            },
+            {
+              "type": "address",
+              "value": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+            },
+            {
+              "type": "uint256",
+              "value": "0de0b6b3a7640000"
+            },
+            {
+              "type": "uint256",
+              "value": "01"
+            }
+          ]
+        }
+      },
+      "encode_type": "Send(address wallet,address to,uint256 amount,uint256 nonce)",
+      "expected": {
+        "type_hash": "da1305035624fd75348ab1758f501c1d68a5a525e39c95cbaf75d128d2b2cb16",
+        "domain_separator": "94b3d597b1cbcc9d7c3a75a17da240f832b34d8b87a1c4cc154689c8101d555a",
+        "struct_hash": "5472f2a96df8d07ad1a2887f95ab185c20a02f0750ce6c90427592339387712a",
+        "digest": "2ff5e07b7e28c0acf62297209390dbe127721c5763f0b27f4441c8a7186d8af3"
+      },
+      "provenance": "independent-python-keccak-eip712"
+    },
+    {
+      "name": "domain-all-five-fields",
+      "domain": {
+        "name": "Migo",
+        "version": "1",
+        "chain_id": 43114,
+        "verifying_contract": "28d9ccedf1b7ac9b3f090f4f0292837de87c1d39",
+        "salt": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "message": {
+        "struct": {
+          "primary_type": "Send(address wallet,address to,uint256 amount,uint256 nonce)",
+          "referenced_types": [],
+          "values": [
+            {
+              "type": "address",
+              "value": "abababababababababababababababababababab"
+            },
+            {
+              "type": "address",
+              "value": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+            },
+            {
+              "type": "uint256",
+              "value": "0000000000000000000000000000000000000000000000000000000000000102"
+            },
+            {
+              "type": "uint256",
+              "value": "00"
+            }
+          ]
+        }
+      },
+      "encode_type": "Send(address wallet,address to,uint256 amount,uint256 nonce)",
+      "expected": {
+        "type_hash": "da1305035624fd75348ab1758f501c1d68a5a525e39c95cbaf75d128d2b2cb16",
+        "domain_separator": "a61e9d33ccf1c75e34de37b6791d998496b8a25ee5c17804c2be79066fa42f82",
+        "struct_hash": "e12770e1515f30494593eea0141ee97d19ea8dfb7c5261d63421cc1e6d796d1a",
+        "digest": "85976f908d81ae2e4ef95398ff9161208c948212a8e6217b8ee895cdd712ede9"
+      },
+      "provenance": "independent-python-keccak-eip712"
+    },
+    {
+      "name": "atomic-types",
+      "domain": {
+        "name": "Migo",
+        "version": "1",
+        "chain_id": 43113
+      },
+      "message": {
+        "struct": {
+          "primary_type": "Bag(address account,bytes32 id,uint256 count,string label,bytes memo)",
+          "referenced_types": [],
+          "values": [
+            {
+              "type": "address",
+              "value": "efefefefefefefefefefefefefefefefefefefef"
+            },
+            {
+              "type": "bytes32",
+              "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            {
+              "type": "uint256",
+              "value": "ff"
+            },
+            {
+              "type": "string",
+              "value": "activity: 1 AVAX from faucet"
+            },
+            {
+              "type": "bytes",
+              "value": "deadbeef"
+            }
+          ]
+        }
+      },
+      "encode_type": "Bag(address account,bytes32 id,uint256 count,string label,bytes memo)",
+      "expected": {
+        "type_hash": "f3e4d81185be1a528bc8e7b08edfd3195b49993390c81f60da1dae3790666844",
+        "domain_separator": "cd905366455518e8b5245eb30a6344260777fd2835a01ba05980234810760dbf",
+        "struct_hash": "2528ea0a2a7e115c9f5ffbd49933945aecf808a7399b219daf26fe2901949922",
+        "digest": "bd21790e274357be0f6468e25b0512711d2add85eb1c05b92ccc781808a8b55b"
+      },
+      "provenance": "independent-python-keccak-eip712"
+    },
+    {
+      "name": "struct-array-and-references",
+      "domain": {
+        "name": "Migo",
+        "version": "1",
+        "chain_id": 43114,
+        "verifying_contract": "abababababababababababababababababababab"
+      },
+      "message": {
+        "struct": {
+          "primary_type": "Batch(Transfer[] items)",
+          "referenced_types": [
+            "Transfer(address from,address to,uint256 amount)"
+          ],
+          "values": [
+            {
+              "type": "array",
+              "values": [
+                {
+                  "struct": {
+                    "primary_type": "Transfer(address from,address to,uint256 amount)",
+                    "referenced_types": [],
+                    "values": [
+                      {
+                        "type": "address",
+                        "value": "1111111111111111111111111111111111111111"
+                      },
+                      {
+                        "type": "address",
+                        "value": "2222222222222222222222222222222222222222"
+                      },
+                      {
+                        "type": "uint256",
+                        "value": "05"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "struct": {
+                    "primary_type": "Transfer(address from,address to,uint256 amount)",
+                    "referenced_types": [],
+                    "values": [
+                      {
+                        "type": "address",
+                        "value": "3333333333333333333333333333333333333333"
+                      },
+                      {
+                        "type": "address",
+                        "value": "4444444444444444444444444444444444444444"
+                      },
+                      {
+                        "type": "uint256",
+                        "value": "07"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "encode_type": "Batch(Transfer[] items)Transfer(address from,address to,uint256 amount)",
+      "expected": {
+        "type_hash": "e78a94893ecc1b394a9b2aea2d0f04dcfb6f16c8b445551b6c7b12f77d0ca457",
+        "domain_separator": "1beb52ceb940db0ea7572eb7fd5cba60111963a09d7fe5d69dbd4567680d6ca4",
+        "struct_hash": "20571382f66c7109f7907301a41624323704fbff7711b04f3dcbd4430cef2c1e",
+        "digest": "497a769840055ae172e9fad7cfc56f1c3028213d4f0e5cf1d9250d45b688cd47"
+      },
+      "provenance": "independent-python-keccak-eip712"
+    }
+  ]
+}
