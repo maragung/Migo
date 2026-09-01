@@ -893,6 +893,11 @@ impl Worker {
         // already worked.
         if root.is_some() {
             self.publish_root_material().await;
+            // And the account's first wallet: a registration is the moment wallet 0 comes into
+            // existence, so it is registered now rather than waiting for a settings screen to
+            // ask. Idempotent, like the publish above — a device that signs in again reconciles
+            // to the same rows.
+            self.sync_wallets().await;
         }
     }
 
