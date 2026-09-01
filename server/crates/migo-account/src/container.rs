@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn the_account_name_rides_along_and_the_nameless_bytes_do_not_move() {
-        let (root, file) = sample();
+        let (_, file) = sample();
         // The three-field form is the byte contract the conformance vectors
         // pin: adding an optional field must not move it by one byte.
         let plain = serde_json::to_string(&file).expect("serialises");
