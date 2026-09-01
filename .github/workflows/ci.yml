@@ -283,6 +283,36 @@ jobs:
       - name: Clippy, warnings denied
         run: make lint-desktop
 
+  # --------------------------------------------------------------- desktop (windows)
+  # The release workflow ships a Windows x86_64 build of the desktop client, so Windows has
+  # to stay green between releases too, not just discover breakage at tag time. `cargo check`
+  # only (no link): on Windows the GUI stack needs no system packages at all — eframe's glow
+  # backend links the OpenGL that ships with the OS — so a check job is enough to catch any
+  # `#[cfg(unix)]`-only API or unix-gated dependency that slips into the client or the five
+  # server crates it depends on by path, at a fraction of a full build's minutes.
+  desktop-windows:
+    name: Desktop client — Windows check
+    runs-on: windows-latest
+    timeout-minutes: 30
+    needs: gates
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clients/desktop
+          key: desktop-check-windows
+
+      - name: Check
+        working-directory: clients/desktop
+        shell: bash
+        # A plain check, not clippy: clippy already runs on Linux, and this job exists to
+        # answer one question -- does the client still compile for the Windows host? A
+        # warning the Linux clippy gate lets through is the Linux gate's business.
+        run: cargo check --locked --workspace
+
   # ------------------------------------------------------------------ typescript
   # The mirror of `server`: this job has pnpm and no Rust toolchain, so it runs the -js
   # halves of the shared gates. It used to probe for a root package.json and skip itself

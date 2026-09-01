@@ -17,6 +17,9 @@
 #     (attached to the GitHub Release).
 #   * client_web, the statically exported web bundle from clients/web/out, as a .tar.gz.
 #   * client_desktop, a stripped Linux x86_64 binary of the native egui client, as a .tar.gz.
+#   * client_desktop, the same client for Windows x86_64 (MSVC), as a .zip — a Windows user
+#     unpacks a .tar.gz only reluctantly, so the Windows asset follows the platform's own
+#     convention.
 #   * client_android, the Android app APK (debug variant — the repository holds no
 #     release-signing key, so a signed release build is not something CI can honestly
 #     produce yet).
@@ -410,3 +413,67 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber
+
+  # ---------------------------------------------------------------- desktop binary (windows)
+  # The same client, cross-built for nothing: this is a native build on a Windows runner, not a
+  # cross-compile from Linux. The desktop client's platform-specific surface is small and already
+  # gated (vault file permissions have a `#[cfg(not(unix))]` fallback; the `dirs` crate resolves
+  # config and data directories to %APPDATA% on Windows), and eframe's glow backend links the
+  # system OpenGL that ships with Windows — no equivalent of the Linux job's apt-get list exists
+  # here, which is most of why this job is so much shorter.
+  client-desktop-windows:
+    name: client_desktop — Windows x86_64 binary
+    runs-on: windows-latest
+    timeout-minutes: 45
+    needs: create-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Stable, matching the Linux desktop job and ci.yml. The MSVC toolchain the runner
+      # preinstalls is what dtolnay/rust-toolchain's default host target resolves to.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Same workspace as the Linux desktop job but a key of its own: the two hosts must
+          # never share cache entries, and the Linux job's key (release-desktop) already names
+          # the other host's artifacts.
+          workspaces: clients/desktop
+          key: release-desktop-windows
+
+      - name: Build the release binary
+        working-directory: clients/desktop
+        # --locked, exactly as the Linux job: a release builds the dependency graph that was
+        # reviewed, not one cargo silently re-resolves.
+        run: cargo build --release --locked
+
+      # Bash on windows-latest is Git Bash: sha256sum and coreutils are present, and the
+      # repository's packaging steps stay one language across both desktop jobs. bsdtar (the
+      # tar.exe Windows ships) infers the archive format from the extension with -a, so the
+      # same command line that would produce a .tar.gz produces the .zip a Windows user
+      # expects. An explicit `shell: bash` on every step keeps the runner's default (pwsh)
+      # from reinterpreting them.
+      - name: Package the zip and checksum
+        shell: bash
+        run: |
+          version="${TAG#v}"
+          triple="x86_64-pc-windows-msvc"
+          name="client_desktop-${version}-${triple}"
+          bin="clients/desktop/target/release/migo-desktop.exe"
+          test -f "$bin" || { echo "desktop binary not found at $bin" >&2; exit 1; }
+          mkdir -p "dist/${name}"
+          cp "$bin" "dist/${name}/migo-desktop.exe"
+          # LICENSE if the repository carries one at the root; harmless if it does not.
+          cp LICENSE "dist/${name}/" 2>/dev/null || true
+          # -a makes the .zip extension (not .tar.gz) choose the archive format.
+          tar -a -c -f "dist/${name}.zip" -C dist "${name}"
+          ( cd dist && sha256sum "${name}.zip" > "${name}.zip.sha256" )
+          ls -l dist
+
+      - name: Attach to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/*.zip dist/*.sha256 --clobber

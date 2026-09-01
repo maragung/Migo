@@ -1450,3 +1450,22 @@ Kolom field sedikit lebih lebar (1.15fr) karena input adalah pekerjaan
 utama; gambar challenge tetap 200px. Di ponsel grid runtuh menjadi
 susunan biasa — field lalu captcha — persis seperti sebelumnya, dan
 kartu login tidak tersentuh (tetap 420px; form-nya tidak punya captcha).
+
+## 42. Client desktop untuk Windows: build native MSVC di CI dan release (v0.13.4)
+
+Rilis kini menghasilkan `client_desktop-<versi>-x86_64-pc-windows-msvc.zip`
+bersama tarball Linux-nya — pengguna Windows membongkar .zip, konvensi
+platformnya sendiri, bukan .tar.gz yang hanya dibuka dengan berat hati.
+Buildnya native di runner windows-latest (MSVC), bukan cross-compile, dan
+jauh lebih pendek dari job Linux-nya: eframe bersinar di OpenGL yang
+sudah dibawa Windows, jadi tidak ada padanan daftar apt-get, dan
+permukaan spesifik-platform klien memang kecil — permission file vault
+sudah punya fallback `#[cfg(not(unix))]`, path data lewat crate `dirs`
+yang me-resolve ke %APPDATA%. Pengemasan memakai Git Bash (sha256sum
+tersedia) dan bsdtar `-a` yang menyimpulkan format zip dari ekstensi.
+
+CI juga menambah job `desktop-windows` (`cargo check --locked`) di setiap
+push: Windows hijau di antara rilis, bukan baru ketahuan rusak saat tag.
+Check saja, bukan clippy — clippy sudah berjalan di Linux, dan job ini
+hanya menjawab satu pertanyaan: apakah klien masih dikompilasi untuk host
+Windows? Aset bertambah dua (zip + sidecar), release menjadi 10 aset.
