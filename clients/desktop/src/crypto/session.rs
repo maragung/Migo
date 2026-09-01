@@ -28,7 +28,8 @@
 
 use std::collections::HashMap;
 
-use migo_core::{Id, OsRandom};
+use migo_account::{DeviceCredential, IdentityKey, MigoRoot};
+use migo_core::{Id, OsRandom, Random};
 use migo_crypto::identity::{KeyPair, SignedPrekey, PUBLIC_KEY_LEN};
 use migo_crypto::x3dh::{initiate, respond, InitialMessage, PrekeyBundle};
 use migo_crypto::{IdentityPublic, IdentitySecret, RatchetSession};
@@ -59,25 +60,95 @@ pub struct DeviceKeys {
     /// The saved sign-in, when the vault held one. Present here rather than in a separate file because
     /// it is sealed under the same passphrase and is useless without the keys beside it.
     pub session: Option<crate::vault::SavedSession>,
+    /// The unified account root, when this device holds one.
+    ///
+    /// `None` on a device that signed in with a password before the account had a root and never
+    /// restored a container — such a device is a passenger, not a founder: it cannot sign the
+    /// identity half of a challenge, and only a `.migo` container or the founding device can change
+    /// that. Stored as the raw 32 bytes so the vault format never depends on the reference crate's
+    /// types, and rebuilt through [`MigoRoot::from_bytes`] at every use.
+    pub root: Option<[u8; 32]>,
+    /// The ML-DSA device credential's seed, when this device has one.
+    ///
+    /// Random, not root-derived — that is the whole two-signature design: a root that leaks from a
+    /// backup alone holds the account half of the login ceremony and none of the device half.
+    pub device_credential_seed: Option<[u8; 32]>,
 }
 
 impl DeviceKeys {
-    /// Generates a complete, fresh set: identity, one signed prekey, and [`ONE_TIME_PREKEY_COUNT`]
-    /// one-time prekeys.
-    pub fn generate() -> Self {
+    /// Generates the founding device of a new account: the E2EE identity is *derived* from the
+    /// root's E2EE domain, so a `.migo` container that carries the root also carries the ability
+    /// to recover this device's E2EE history. Only the founding device gets this — additional
+    /// devices generate their own, which is what keeps a container restore from silently becoming
+    /// a second copy of one device's ratchets.
+    pub fn founding(root: &MigoRoot) -> Self {
         let mut random = OsRandom;
-        let identity = IdentitySecret::generate(&mut random);
+        let (signing, exchange) = migo_account::founding_device_e2ee_seeds(root);
+        let identity = IdentitySecret::from_seeds(signing, exchange);
         let signed_prekey = KeyPair::generate(&mut random);
         let one_time = (1..=ONE_TIME_PREKEY_COUNT)
             .map(|id| (id, KeyPair::generate(&mut random)))
             .collect();
+        let mut credential = [0u8; 32];
+        random.fill_bytes(&mut credential);
         Self {
             identity,
             signed_prekey_id: 1,
             signed_prekey,
             one_time,
             session: None,
+            root: Some(root.as_bytes().try_into().expect("the root is 32 bytes")),
+            device_credential_seed: Some(credential),
         }
+    }
+
+    /// Generates an additional device of an existing account: fresh random E2EE identity, fresh
+    /// device credential, and no root. This is the password sign-in shape — the device can take
+    /// part in future ML-DSA logins as *itself*, but it is not the account.
+    pub fn additional() -> Self {
+        let mut random = OsRandom;
+        let identity = IdentitySecret::generate(&mut random);
+        let signed_prekey = KeyPair::generate(&mut random);
+        let one_time = (1..=ONE_TIME_PREKEY_COUNT)
+            .map(|id| (id, KeyPair::generate(&mut random)))
+            .collect();
+        let mut credential = [0u8; 32];
+        random.fill_bytes(&mut credential);
+        Self {
+            identity,
+            signed_prekey_id: 1,
+            signed_prekey,
+            one_time,
+            session: None,
+            root: None,
+            device_credential_seed: Some(credential),
+        }
+    }
+
+    /// The account root, when this device holds one.
+    #[must_use]
+    pub fn root(&self) -> Option<MigoRoot> {
+        self.root
+            .as_ref()
+            .and_then(|bytes| MigoRoot::from_bytes(bytes).ok())
+    }
+
+    /// The account's ML-DSA identity key, when this device holds the root.
+    ///
+    /// Every ceremony — login, add-device, rotation — signs with this key, so a device without a
+    /// root has no `identity_key` and the worker refuses the ceremony locally rather than sending
+    /// the server a signature it cannot make.
+    #[must_use]
+    pub fn identity_key(&self) -> Option<IdentityKey> {
+        self.root().map(|root| IdentityKey::from_root(&root))
+    }
+
+    /// This device's ML-DSA credential, when it has one.
+    #[must_use]
+    pub fn device_credential(&self) -> Option<DeviceCredential> {
+        self.device_credential_seed
+            .as_ref()
+            .and_then(|seed| DeviceCredential::from_seed(seed).ok())
     }
 
     /// This device's public identity, for the safety number and for `KEY_PUBLISH`.
@@ -320,4 +391,79 @@ pub fn bundle_from_wire(
 
 fn fixed32(bytes: &[u8]) -> Option<[u8; PUBLIC_KEY_LEN]> {
     bytes.try_into().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The founding device's E2EE identity is a function of the root, not a fresh draw: two
+    /// founding devices of the same root agree on the identity seeds, which is what makes the
+    /// account's E2EE history recoverable from a `.migo` container that carries the root.
+    #[test]
+    fn the_founding_identity_is_a_function_of_the_root() {
+        let root = MigoRoot::from_bytes(&[9u8; 32]).expect("32 bytes is a root");
+        let first = DeviceKeys::founding(&root);
+        let second = DeviceKeys::founding(&root);
+
+        assert_eq!(
+            first.identity.expose_signing_seed(),
+            second.identity.expose_signing_seed()
+        );
+        assert_eq!(
+            first.identity.expose_exchange_seed(),
+            second.identity.expose_exchange_seed()
+        );
+
+        // And it is the E2EE domain's derivation exactly — the reference crate's answer, not a
+        // parallel implementation of the same idea.
+        let (signing, exchange) = migo_account::founding_device_e2ee_seeds(&root);
+        assert_eq!(first.identity.expose_signing_seed(), signing);
+        assert_eq!(first.identity.expose_exchange_seed(), exchange);
+
+        // The founding device is the one shape that carries the root.
+        assert_eq!(
+            first.root,
+            Some(root.as_bytes().try_into().expect("32 bytes"))
+        );
+        assert!(first.device_credential_seed.is_some());
+        // The prekeys stay random: forward secrecy must not be a function of the account.
+        assert_ne!(
+            first.signed_prekey.expose_seed(),
+            second.signed_prekey.expose_seed()
+        );
+    }
+
+    /// An additional device has no root and a fresh identity: two password sign-ins on the same
+    /// account are two devices, and neither inherits the founding device's ratchets.
+    #[test]
+    fn an_additional_device_is_its_own_device() {
+        let first = DeviceKeys::additional();
+        let second = DeviceKeys::additional();
+
+        assert!(first.root.is_none());
+        assert_ne!(
+            first.identity.expose_signing_seed(),
+            second.identity.expose_signing_seed()
+        );
+        assert!(first.device_credential_seed.is_some());
+        assert_ne!(first.device_credential_seed, second.device_credential_seed);
+        // Without a root there is no identity key: the worker refuses the ceremony locally rather
+        // than asking the server whether it can sign.
+        assert!(first.identity_key().is_none());
+        assert!(first.device_credential().is_some());
+    }
+
+    /// A founding device's identity key is the root's identity domain, so the login signature it
+    /// makes is the signature the server's challenge verifies.
+    #[test]
+    fn the_identity_key_comes_from_the_root() {
+        let root = MigoRoot::from_bytes(&[11u8; 32]).expect("32 bytes is a root");
+        let keys = DeviceKeys::founding(&root);
+        let identity = keys.identity_key().expect("a root means an identity key");
+        assert_eq!(
+            identity.public_key(),
+            migo_account::IdentityKey::from_root(&root).public_key()
+        );
+    }
 }

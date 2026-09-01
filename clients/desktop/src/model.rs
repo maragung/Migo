@@ -175,6 +175,10 @@ pub struct Account {
     /// The safety number for this device's identity key: the fingerprint a user reads aloud to a
     /// contact to confirm nobody is in the middle. Grouped for reading, never for parsing.
     pub safety_number: String,
+    /// Whether this device holds the account root: it can seal a `.migo` backup, sign future
+    /// add-device ceremonies, and derive the wallet addresses. A password-only device is a
+    /// passenger, and the backup form says so rather than letting a button fail at the last step.
+    pub holds_root: bool,
 }
 
 /// One edge in the signed-in account's social graph, as the interface draws it.
@@ -286,6 +290,42 @@ pub struct SessionRow {
     /// Whether this row is the session this window is running on. Revoking it is sign-out by
     /// another name, so the panel refuses the button rather than offering it.
     pub current: bool,
+}
+
+/// One device of the account, for the security panel — the account-root view rather than the
+/// session view: which machines hold a login credential, and which of them is this one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceRow {
+    pub device_id: Id,
+    /// What the device called itself when it registered.
+    pub display_name: String,
+    /// The platform it claimed: `desktop`, `android`, `web`, …
+    pub platform: String,
+    /// `active`, `pending`, or `revoked`.
+    pub status: String,
+    /// When the device was registered.
+    pub created_at: Option<Timestamp>,
+    /// When the device last connected.
+    pub last_seen: Option<Timestamp>,
+    /// Whether the device can take part in the ML-DSA login ceremony.
+    pub has_credential: bool,
+    /// Whether this row is the device asking.
+    pub is_current: bool,
+}
+
+/// One registered wallet address, for the security panel's account-root section. Address and
+/// metadata only — the key behind it never left the device that derived it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvmWalletRow {
+    pub wallet_id: Id,
+    /// Canonical lowercase hex, no prefix.
+    pub address: String,
+    /// The derivation index that produced this address, the `i` in `m/44'/60'/0'/0/i`.
+    pub derivation_index: i32,
+    /// `active` or `archived`.
+    pub status: String,
+    /// A user-chosen label, if any.
+    pub label: Option<String>,
 }
 
 /// One room in the public directory, reduced to what a join decision needs.

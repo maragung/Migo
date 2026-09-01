@@ -46,6 +46,15 @@ pub struct AuthState {
     /// (held in egui's temp data so it does not reset on every frame), but the typed-but-not-yet
     /// accepted values live here so they survive a screen switch.
     pub server_form: ServerFormState,
+    /// The restore form: where the `.migo` container is, and the recovery credential that opens it.
+    ///
+    /// The credential is as secret as a password and is wiped with the rest; the path is not secret
+    /// but lives beside it so the form is one struct. `restore_username` is not a secret at all:
+    /// it is the account's name, stored beside the session so the unlock screen greets the right
+    /// person and a later passwordless login can name the account to the server.
+    pub restore_path: String,
+    pub restore_credential: String,
+    pub restore_username: String,
 }
 
 impl Default for AuthState {
@@ -61,6 +70,9 @@ impl Default for AuthState {
             busy: false,
             captcha: CaptchaState::default(),
             server_form,
+            restore_path: String::new(),
+            restore_credential: String::new(),
+            restore_username: String::new(),
         }
     }
 }
@@ -70,7 +82,12 @@ impl AuthState {
     pub fn clear_secrets(&mut self) {
         // Overwrite before dropping. `String::clear` keeps the allocation, so zeroing first means the
         // bytes are not left sitting in a buffer the allocator may hand out unchanged.
-        for field in [&mut self.password, &mut self.passphrase, &mut self.confirm] {
+        for field in [
+            &mut self.password,
+            &mut self.passphrase,
+            &mut self.confirm,
+            &mut self.restore_credential,
+        ] {
             let filled = "\0".repeat(field.len());
             field.replace_range(.., &filled);
             field.clear();
@@ -105,6 +122,19 @@ impl AuthState {
             && !self.identifier.trim().is_empty()
             && !self.password.is_empty()
             && self.passphrase.len() >= crate::vault::MIN_PASSPHRASE_BYTES
+    }
+
+    /// Whether the restore form is complete enough to submit.
+    ///
+    /// The confirm field is required here unlike sign-in: a restore writes a brand-new vault, and a
+    /// passphrase mistyped on a one-shot form would seal the only copy of the account's keys under
+    /// something the user cannot reproduce.
+    fn restore_ready(&self) -> bool {
+        !self.server.host.trim().is_empty()
+            && !self.restore_path.trim().is_empty()
+            && !self.restore_credential.is_empty()
+            && self.passphrase.len() >= crate::vault::MIN_PASSPHRASE_BYTES
+            && self.passphrase == self.confirm
     }
 }
 
@@ -169,6 +199,7 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState, scree
                     Screen::Unlock => unlock(ui, context, state),
                     Screen::SignIn => sign_in(ui, context, state),
                     Screen::Register => register(ui, context, state),
+                    Screen::Restore => restore(ui, context, state),
                     // The opening screen has no form: the worker has not said yet whether a vault
                     // exists, and guessing would mean redrawing the whole screen a moment later.
                     Screen::Opening => opening(ui, context),
@@ -337,6 +368,14 @@ fn sign_in(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
             state.busy = false;
             context.go(Screen::Register);
         }
+        ui.add_space(space::XS);
+        // The third door: not a password, but the container a founding device sealed. It is offered
+        // from sign-in because it is the same situation — an existing account, a new machine.
+        if widgets::ghost_button(ui, context.theme, "Restore from a backup").clicked() {
+            state.clear_secrets();
+            state.busy = false;
+            context.go(Screen::Restore);
+        }
     });
 }
 
@@ -407,6 +446,97 @@ fn register(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
     ui.add_space(space::MD);
     ui.vertical_centered(|ui| {
         if widgets::ghost_button(ui, context.theme, "I already have an account").clicked() {
+            state.clear_secrets();
+            state.busy = false;
+            context.go(Screen::SignIn);
+        }
+    });
+}
+
+/// The restore form: a `.migo` container plus its recovery credential, onto this device.
+///
+/// The container holds the account root, so opening it *is* the sign-in — the ML-DSA add-device
+/// ceremony runs before a vault is written, and the passphrase below seals the new vault rather
+/// than opening anything. A restore is a new device: fresh E2EE keys, its own login credential,
+/// the account root the container carried.
+fn restore(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
+    widgets::header(
+        ui,
+        context.theme,
+        "Restore your account",
+        Some("From a .migo backup container."),
+    );
+    ui.add_space(space::LG);
+
+    draw_server_disclosure(ui, context, state);
+    widgets::field(
+        ui,
+        context.theme,
+        "Username",
+        &mut state.restore_username,
+        false,
+        "your account's name, for next time",
+    );
+    widgets::field(
+        ui,
+        context.theme,
+        "Container file",
+        &mut state.restore_path,
+        false,
+        "e.g. migo-backup.migo",
+    );
+    widgets::field(
+        ui,
+        context.theme,
+        "Recovery credential",
+        &mut state.restore_credential,
+        true,
+        "the words you chose when the backup was made",
+    );
+    widgets::field(
+        ui,
+        context.theme,
+        "New vault passphrase",
+        &mut state.passphrase,
+        true,
+        "at least 8 characters",
+    );
+    widgets::field(
+        ui,
+        context.theme,
+        "Confirm passphrase",
+        &mut state.confirm,
+        true,
+        "",
+    );
+    if !state.confirm.is_empty() && state.passphrase != state.confirm {
+        problem(ui, context, "The two passphrases do not match.");
+        ui.add_space(space::SM);
+    }
+    hint(
+        ui,
+        context,
+        "The recovery credential opens the container and is never sent anywhere. The vault passphrase encrypts your keys on this computer and cannot be reset.",
+    );
+    ui.add_space(space::LG);
+
+    let ready = state.restore_ready() && !state.busy;
+    if widgets::primary_button(ui, context.theme, "Restore", ready).clicked() {
+        let path = std::path::PathBuf::from(state.restore_path.trim());
+        context.issue(Command::ImportContainer {
+            path,
+            credential: state.restore_credential.clone(),
+            passphrase: state.passphrase.clone(),
+            username: state.restore_username.clone(),
+            server: state.server.clone(),
+        });
+        state.busy = true;
+        state.clear_secrets();
+    }
+
+    ui.add_space(space::MD);
+    ui.vertical_centered(|ui| {
+        if widgets::ghost_button(ui, context.theme, "Back to sign in").clicked() {
             state.clear_secrets();
             state.busy = false;
             context.go(Screen::SignIn);

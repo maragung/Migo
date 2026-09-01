@@ -8,7 +8,9 @@
 
 use std::time::Duration;
 
+use base64::Engine as _;
 use migo_core::{Id, Timestamp};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// A REST failure, already reduced to something worth showing a person.
@@ -265,6 +267,112 @@ struct SessionsBody {
     sessions: Vec<SessionSummary>,
 }
 
+// --- the account-root surface: wire shapes -----------------------------------
+
+/// A challenge for one of the ML-DSA ceremonies, as the challenge endpoint issues it.
+///
+/// `payload` is the canonical encoding, base64 — the bytes to sign exactly as received, never
+/// re-encoded, which is what keeps three ports from disagreeing about what was signed.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IdentityChallenge {
+    /// The bytes to sign, base64.
+    pub payload: String,
+    pub challenge_id: Id,
+}
+
+/// One device of the account, as `GET /v1/devices` reports it — the caller's own security screen.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccountDevice {
+    pub device_id: Id,
+    pub display_name: String,
+    pub platform: String,
+    /// `active`, `pending`, or `revoked`.
+    pub status: String,
+    pub created_at_ms: i64,
+    pub last_seen_at_ms: i64,
+    /// Whether this device can take part in the ML-DSA login ceremony.
+    pub has_credential: bool,
+    pub is_current: bool,
+}
+
+/// One registered wallet, as the wallet endpoints report it. Address and metadata only — the
+/// private key behind it never left the device that derived it.
+///
+/// The response carries the chain type and timestamps as well; they are deliberately not fields
+/// here, for the same reason `Grant`'s extras are not: a field this client never reads is a field
+/// that drifts out of step with the server without anything noticing.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegisteredWallet {
+    pub wallet_id: Id,
+    /// Canonical lowercase hex, no prefix.
+    pub address: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    pub derivation_index: i32,
+    pub status: String,
+}
+
+#[derive(Debug, Serialize)]
+struct IdentityChallengeBody<'a> {
+    purpose: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identifier: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_id: Option<Id>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_id: Option<Id>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device: Option<&'a DeviceRequest>,
+}
+
+#[derive(Debug, Serialize)]
+struct IdentityLoginBody<'a> {
+    challenge_id: Id,
+    identity_signature: &'a str,
+    device_signature: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct AddDeviceBody<'a> {
+    challenge_id: Id,
+    identity_signature: &'a str,
+    device_public_key: &'a str,
+    device_signature: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct PublishKeyBody<'a> {
+    identity_public_key: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_public_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct WalletBody<'a> {
+    address: &'a str,
+    chain_type: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<&'a str>,
+    derivation_index: i32,
+}
+
+#[derive(Debug, Deserialize)]
+struct DevicesBody {
+    #[serde(default)]
+    devices: Vec<AccountDevice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WalletsBody {
+    #[serde(default)]
+    wallets: Vec<RegisteredWallet>,
+}
+
+/// Standard base64 with padding, the form every account-root endpoint speaks.
+fn b64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 /// An HTTP client bound to one server.
 pub struct Rest {
     http: reqwest::Client,
@@ -441,6 +549,221 @@ impl Rest {
             .http
             .delete(url)
             .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|_| RestError::Transport)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(self.failure(response).await)
+        }
+    }
+
+    // --- the account-root surface ---------------------------------------------
+
+    /// Asks for the ML-DSA login ceremony's payload: `POST /v1/auth/identity/challenge`
+    /// with purpose `login`.
+    ///
+    /// `identifier` names the account and `device_id` names *this* device — the one whose
+    /// credential will co-sign. The server answers identically whether the pair is real, so a
+    /// stranger probing for usernames learns nothing from the shape of the reply.
+    pub async fn identity_login_challenge(
+        &self,
+        identifier: &str,
+        device_id: Id,
+    ) -> Result<IdentityChallenge, RestError> {
+        self.post(
+            "/v1/auth/identity/challenge",
+            &IdentityChallengeBody {
+                purpose: "login",
+                identifier: Some(identifier),
+                device_id: Some(device_id),
+                account_id: None,
+                device: None,
+            },
+        )
+        .await
+    }
+
+    /// Asks for the add-device ceremony's payload: `POST /v1/auth/identity/challenge`
+    /// with purpose `add-device`.
+    ///
+    /// `account_id` is the id the `.migo` container carried; `device` describes the machine the
+    /// account is being restored onto, which the server registers as pending until the answer
+    /// proves the identity signature.
+    pub async fn identity_add_device_challenge(
+        &self,
+        account_id: Id,
+        device: &DeviceRequest,
+    ) -> Result<IdentityChallenge, RestError> {
+        self.post(
+            "/v1/auth/identity/challenge",
+            &IdentityChallengeBody {
+                purpose: "add-device",
+                identifier: None,
+                device_id: None,
+                account_id: Some(account_id),
+                device: Some(device),
+            },
+        )
+        .await
+    }
+
+    /// Answers a login challenge with both signatures: `POST /v1/auth/identity/login`.
+    ///
+    /// The identity signature is the account half of the ceremony and the device signature is the
+    /// device half; the server requires both, which is what makes a root secret leaked from a
+    /// backup alone insufficient to sign in as a registered device.
+    pub async fn identity_login(
+        &self,
+        challenge_id: Id,
+        identity_signature: &[u8],
+        device_signature: &[u8],
+    ) -> Result<Grant, RestError> {
+        self.post(
+            "/v1/auth/identity/login",
+            &IdentityLoginBody {
+                challenge_id,
+                identity_signature: &b64(identity_signature),
+                device_signature: &b64(device_signature),
+            },
+        )
+        .await
+    }
+
+    /// Answers an add-device challenge: `POST /v1/auth/identity/add-device`.
+    ///
+    /// Carries the identity signature plus the *new* device's credential public key and its
+    /// signature over the same payload, which is the proof that activates the pending device row.
+    pub async fn identity_add_device(
+        &self,
+        challenge_id: Id,
+        identity_signature: &[u8],
+        device_public_key: &[u8],
+        device_signature: &[u8],
+    ) -> Result<Grant, RestError> {
+        self.post(
+            "/v1/auth/identity/add-device",
+            &AddDeviceBody {
+                challenge_id,
+                identity_signature: &b64(identity_signature),
+                device_public_key: &b64(device_public_key),
+                device_signature: &b64(device_signature),
+            },
+        )
+        .await
+    }
+
+    /// Publishes the caller's identity (and optionally device) public key:
+    /// `POST /v1/auth/identity/key`.
+    ///
+    /// The legacy upgrade door, idempotent by design — a retry sends the same keys and the server
+    /// reconciles to the rows that already exist, so the worker can call it after every password
+    /// sign-in on a device that holds a root, without first asking whether it already did.
+    pub async fn publish_identity_key(
+        &self,
+        access_token: &str,
+        identity_public_key: &[u8],
+        device_public_key: Option<&[u8]>,
+    ) -> Result<(), RestError> {
+        self.auth_expect_empty(
+            access_token,
+            "/v1/auth/identity/key",
+            reqwest::Method::POST,
+            &PublishKeyBody {
+                identity_public_key: &b64(identity_public_key),
+                device_public_key: device_public_key.map(b64),
+            },
+        )
+        .await
+    }
+
+    /// The caller's own devices: `GET /v1/devices`.
+    pub async fn devices(&self, access_token: &str) -> Result<Vec<AccountDevice>, RestError> {
+        let body = self
+            .auth_json::<(), DevicesBody>(access_token, "/v1/devices", reqwest::Method::GET, &())
+            .await?;
+        Ok(body.devices)
+    }
+
+    /// The caller's registered wallet addresses: `GET /v1/wallets`.
+    pub async fn wallets(&self, access_token: &str) -> Result<Vec<RegisteredWallet>, RestError> {
+        let body = self
+            .auth_json::<(), WalletsBody>(access_token, "/v1/wallets", reqwest::Method::GET, &())
+            .await?;
+        Ok(body.wallets)
+    }
+
+    /// Registers (or idempotently re-registers) a wallet address: `PUT /v1/wallets`.
+    pub async fn register_wallet(
+        &self,
+        access_token: &str,
+        address: &str,
+        derivation_index: i32,
+        label: Option<&str>,
+    ) -> Result<RegisteredWallet, RestError> {
+        self.auth_json(
+            access_token,
+            "/v1/wallets",
+            reqwest::Method::PUT,
+            &WalletBody {
+                address,
+                chain_type: "evm",
+                label,
+                derivation_index,
+            },
+        )
+        .await
+    }
+
+    /// Archives one of the caller's wallets: `POST /v1/wallets/{id}`, answered 204.
+    pub async fn archive_wallet(&self, access_token: &str, wallet_id: Id) -> Result<(), RestError> {
+        self.auth_expect_empty(
+            access_token,
+            &format!("/v1/wallets/{}", wallet_id.to_text()),
+            reqwest::Method::POST,
+            &(),
+        )
+        .await
+    }
+
+    /// One authenticated request that answers with a JSON body.
+    async fn auth_json<B: Serialize, T: DeserializeOwned>(
+        &self,
+        access_token: &str,
+        path: &str,
+        method: reqwest::Method,
+        body: &B,
+    ) -> Result<T, RestError> {
+        let url = format!("{}{path}", self.base);
+        let response = self
+            .http
+            .request(method, url)
+            .bearer_auth(access_token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|_| RestError::Transport)?;
+        if !response.status().is_success() {
+            return Err(self.failure(response).await);
+        }
+        response.json::<T>().await.map_err(|_| RestError::Malformed)
+    }
+
+    /// One authenticated request that answers 204 and nothing else.
+    async fn auth_expect_empty<B: Serialize>(
+        &self,
+        access_token: &str,
+        path: &str,
+        method: reqwest::Method,
+        body: &B,
+    ) -> Result<(), RestError> {
+        let url = format!("{}{path}", self.base);
+        let response = self
+            .http
+            .request(method, url)
+            .bearer_auth(access_token)
+            .json(body)
             .send()
             .await
             .map_err(|_| RestError::Transport)?;

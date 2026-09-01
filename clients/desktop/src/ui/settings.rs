@@ -52,11 +52,46 @@ impl SessionsView {
     }
 }
 
+/// What a list-shaped REST answer currently shows, for the account-root surfaces.
+///
+/// The same four states as [`SessionsView`] — never asked, loading, answered, refused — over any
+/// row type, because the honest-uncertainty rule is not about sessions in particular: a panel that
+/// shows an empty list where a failure belongs is lying with the most reassuring answer available.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum Fetch<T> {
+    #[default]
+    NotAsked,
+    Loading,
+    Ready(Vec<T>),
+    Unavailable(String),
+}
+
+impl<T> Fetch<T> {
+    /// Files a REST outcome, with the same shape [`SessionsView::from_result`] pins.
+    pub fn from_result(result: Result<Vec<T>, String>) -> Self {
+        match result {
+            Ok(list) => Self::Ready(list),
+            Err(reason) => Self::Unavailable(reason),
+        }
+    }
+}
+
 /// Everything the settings pane holds between frames.
 #[derive(Default)]
 pub struct SettingsState {
     /// The device list, as last asked or answered.
     pub sessions: SessionsView,
+    /// The account's devices — the account-root view, not the session view.
+    pub devices: Fetch<crate::model::DeviceRow>,
+    /// The account's registered wallet addresses.
+    pub wallets: Fetch<crate::model::EvmWalletRow>,
+    /// The backup form: where to write the `.migo` container and the credential that will open it.
+    ///
+    /// The credential is a secret and is wiped the moment it leaves for the worker; the path is a
+    /// path.
+    pub backup_path: String,
+    pub backup_credential: String,
+    pub backup_confirm: String,
 }
 
 /// Draws the settings pane.
@@ -81,7 +116,11 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
                     ui.add_space(space::LG);
                     theme_section(ui, context);
                     ui.add_space(space::LG);
-                    devices_section(ui, context, state);
+                    sessions_section(ui, context, state);
+                    ui.add_space(space::LG);
+                    account_section(ui, context, state);
+                    ui.add_space(space::LG);
+                    backup_section(ui, context, state);
                     ui.add_space(space::XL);
                     sign_out_section(ui, context);
                 });
@@ -152,8 +191,12 @@ fn theme_section(ui: &mut Ui, context: &mut Context<'_>) {
     });
 }
 
-/// The device list, its refresh, and per-row revoke.
-fn devices_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
+/// The session list, its refresh, and per-row revoke.
+///
+/// Titled "Sessions" rather than "Devices" because the account-root surface below lists devices:
+/// a session is a login this week, a device is a machine with a login credential, and conflating
+/// the two would make the security story harder to read rather than easier.
+fn sessions_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
     let colors = palette(context.theme);
     widgets::subheader(ui, context.theme, "Devices");
 
@@ -278,6 +321,326 @@ fn session_row(ui: &mut Ui, context: &Context<'_>, row: &SessionRow, revoke: &mu
                 });
             });
         });
+}
+
+/// The account-root surface: the machines that hold a login credential, and the wallet addresses
+/// derived from the root. Reads both on the user's click, like the session list above.
+fn account_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
+    let colors = palette(context.theme);
+    widgets::subheader(ui, context.theme, "Account");
+
+    // --- devices ---------------------------------------------------------------
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("Devices that can sign in to this account.")
+                .font(egui::FontId::proportional(font::SMALL))
+                .color(colors.text_muted),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui
+                .add_enabled(
+                    !matches!(state.devices, Fetch::Loading),
+                    egui::Button::new("Refresh"),
+                )
+                .clicked()
+            {
+                state.devices = Fetch::Loading;
+                context.issue(Command::Devices);
+            }
+        });
+    });
+    ui.add_space(space::SM);
+    match &state.devices {
+        Fetch::NotAsked => {
+            ui.label(
+                RichText::new("Not checked yet. Refresh to list this account's devices.")
+                    .font(egui::FontId::proportional(font::SMALL))
+                    .color(colors.text_muted),
+            );
+        }
+        Fetch::Loading => {
+            ui.spinner();
+        }
+        Fetch::Unavailable(reason) => {
+            ui.label(
+                RichText::new(format!("Device list unavailable: {reason}"))
+                    .font(egui::FontId::proportional(font::SMALL))
+                    .color(colors.warning),
+            );
+        }
+        Fetch::Ready(rows) => {
+            if rows.is_empty() {
+                ui.label(
+                    RichText::new("The server listed no devices.")
+                        .font(egui::FontId::proportional(font::SMALL))
+                        .color(colors.text_muted),
+                );
+            }
+            for row in rows {
+                device_row(ui, context, row);
+                ui.add_space(space::XS);
+            }
+        }
+    }
+
+    ui.add_space(space::LG);
+
+    // --- wallets ---------------------------------------------------------------
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("Wallet addresses the account root derives.")
+                .font(egui::FontId::proportional(font::SMALL))
+                .color(colors.text_muted),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui
+                .add_enabled(
+                    !matches!(state.wallets, Fetch::Loading),
+                    egui::Button::new("Refresh"),
+                )
+                .clicked()
+            {
+                state.wallets = Fetch::Loading;
+                context.issue(Command::Wallets);
+            }
+        });
+    });
+    ui.add_space(space::SM);
+    match &state.wallets {
+        Fetch::NotAsked => {
+            ui.label(
+                RichText::new("Not checked yet. Refresh to list this account's wallets.")
+                    .font(egui::FontId::proportional(font::SMALL))
+                    .color(colors.text_muted),
+            );
+        }
+        Fetch::Loading => {
+            ui.spinner();
+        }
+        Fetch::Unavailable(reason) => {
+            ui.label(
+                RichText::new(format!("Wallet list unavailable: {reason}"))
+                    .font(egui::FontId::proportional(font::SMALL))
+                    .color(colors.warning),
+            );
+        }
+        Fetch::Ready(rows) => {
+            if rows.is_empty() {
+                ui.label(
+                    RichText::new("No wallet addresses are registered.")
+                        .font(egui::FontId::proportional(font::SMALL))
+                        .color(colors.text_muted),
+                );
+            }
+            let mut archive: Option<Id> = None;
+            for row in rows {
+                wallet_row(ui, context, row, &mut archive);
+                ui.add_space(space::XS);
+            }
+            if let Some(wallet_id) = archive {
+                state.wallets = Fetch::Loading;
+                context.issue(Command::ArchiveWallet { wallet_id });
+            }
+        }
+    }
+}
+
+/// One account device row.
+///
+/// The credential mark is the security question a device list exists to answer: a device *with* a
+/// credential can take part in the passwordless ceremony, and one appearing that the user does not
+/// recognise is the moment to rotate.
+fn device_row(ui: &mut Ui, context: &Context<'_>, row: &crate::model::DeviceRow) {
+    let colors = palette(context.theme);
+    egui::Frame::new()
+        .fill(colors.surface_raised)
+        .corner_radius(egui::CornerRadius::same(crate::theme::radius::MD))
+        .inner_margin(egui::Margin::same(space::MD as i8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(widgets::elide(&row.display_name, 40))
+                            .font(egui::FontId::proportional(font::BODY))
+                            .color(colors.text),
+                    );
+                    let mut detail = row.platform.clone();
+                    if let Some(at) = row.created_at {
+                        detail.push_str(&format!(" \u{00B7} added {}", crate::model::date(at)));
+                    }
+                    if let Some(at) = row.last_seen {
+                        detail.push_str(&format!(" \u{00B7} last seen {}", crate::model::date(at)));
+                    }
+                    if row.has_credential {
+                        detail.push_str(" \u{00B7} holds a login credential");
+                    }
+                    if row.is_current {
+                        detail.push_str(" \u{00B7} this device");
+                    }
+                    ui.label(
+                        RichText::new(detail)
+                            .text_style(crate::theme::named(text_style::CAPTION))
+                            .color(colors.text_muted),
+                    );
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(if row.is_current {
+                            "current"
+                        } else {
+                            &row.status
+                        })
+                        .text_style(crate::theme::named(text_style::CAPTION))
+                        .color(colors.text_muted),
+                    );
+                });
+            });
+        });
+}
+
+/// One wallet row: the address in monospace, the derivation index beside it, and the archive
+/// button an address no longer in use wants.
+///
+/// Archiving is honest about what it is: the address leaves the account's active list, but the
+/// root still derives it and registering it again brings it back. A hover says exactly that, so
+/// the button is not mistaken for deleting a key.
+fn wallet_row(
+    ui: &mut Ui,
+    context: &Context<'_>,
+    row: &crate::model::EvmWalletRow,
+    archive: &mut Option<Id>,
+) {
+    let colors = palette(context.theme);
+    egui::Frame::new()
+        .fill(colors.surface_raised)
+        .corner_radius(egui::CornerRadius::same(crate::theme::radius::MD))
+        .inner_margin(egui::Margin::same(space::MD as i8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(&row.address)
+                        .font(egui::FontId::monospace(font::SMALL))
+                        .color(colors.text),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if row.status == "archived" {
+                        ui.label(
+                            RichText::new(format!(
+                                "archived \u{00B7} \u{23}{}",
+                                row.derivation_index
+                            ))
+                            .text_style(crate::theme::named(text_style::CAPTION))
+                            .color(colors.text_muted),
+                        );
+                    } else {
+                        let label = match &row.label {
+                            Some(text) => {
+                                format!("\u{23}{} \u{00B7} {}", row.derivation_index, text)
+                            }
+                            None => format!("\u{23}{}", row.derivation_index),
+                        };
+                        ui.label(
+                            RichText::new(label)
+                                .text_style(crate::theme::named(text_style::CAPTION))
+                                .color(colors.text_muted),
+                        );
+                        if widgets::ghost_button(ui, context.theme, "Archive")
+                            .on_hover_text(
+                                "Takes the address off the account's active list. The root still \
+                                 derives it; registering it again brings it back.",
+                            )
+                            .clicked()
+                        {
+                            *archive = Some(row.wallet_id);
+                        }
+                    }
+                });
+            });
+        });
+}
+
+/// The `.migo` backup form.
+///
+/// Offered only on a device that holds the root, because a backup is a copy of the root and a
+/// device without one has nothing to copy. The credential is confirmed twice for the same reason
+/// the restore form's passphrase is: the container is the account, and a credential mistyped on a
+/// one-shot form would seal it under something nobody can reproduce.
+fn backup_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
+    let colors = palette(context.theme);
+    widgets::subheader(ui, context.theme, "Account backup");
+
+    let holds_root = context.account.is_some_and(|account| account.holds_root);
+    if !holds_root {
+        ui.label(
+            RichText::new(
+                "This device signs in with your password and does not hold the account root, so \
+                 it cannot make a backup. Seal one from a device that restored or created the \
+                 account.",
+            )
+            .font(egui::FontId::proportional(font::SMALL))
+            .color(colors.text_muted),
+        );
+        return;
+    }
+
+    ui.label(
+        RichText::new(
+            "Seals the account root into a portable container: enough to restore the account onto \
+             another device, and nothing without the credential you choose here.",
+        )
+        .font(egui::FontId::proportional(font::SMALL))
+        .color(colors.text_muted),
+    );
+    ui.add_space(space::SM);
+    widgets::field(
+        ui,
+        context.theme,
+        "Save as",
+        &mut state.backup_path,
+        false,
+        "e.g. migo-backup.migo",
+    );
+    widgets::field(
+        ui,
+        context.theme,
+        "Recovery credential",
+        &mut state.backup_credential,
+        true,
+        "long enough to stay unguessable",
+    );
+    widgets::field(
+        ui,
+        context.theme,
+        "Confirm credential",
+        &mut state.backup_confirm,
+        true,
+        "",
+    );
+
+    let credential_ready = !state.backup_credential.is_empty()
+        && state.backup_credential == state.backup_confirm
+        && !state.backup_path.trim().is_empty();
+    let mismatch =
+        !state.backup_confirm.is_empty() && state.backup_credential != state.backup_confirm;
+    if mismatch {
+        ui.label(
+            RichText::new("The two credentials do not match.")
+                .font(egui::FontId::proportional(font::SMALL))
+                .color(colors.danger),
+        );
+    }
+    ui.add_space(space::SM);
+    if widgets::primary_button(ui, context.theme, "Seal backup", credential_ready).clicked() {
+        let path = std::path::PathBuf::from(state.backup_path.trim());
+        context.issue(Command::ExportContainer {
+            path,
+            credential: state.backup_credential.clone(),
+        });
+        // Wipe the credential the moment it leaves for the worker; the path stays, because a
+        // second backup usually goes to the same kind of place.
+        state.backup_credential.clear();
+        state.backup_confirm.clear();
+    }
 }
 
 /// Sign out.

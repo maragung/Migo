@@ -314,6 +314,12 @@ impl App {
                     self.settings_panel.sessions =
                         crate::ui::settings::SessionsView::from_result(result);
                 }
+                Event::Devices(result) => {
+                    self.settings_panel.devices = crate::ui::settings::Fetch::from_result(result);
+                }
+                Event::Wallets(result) => {
+                    self.settings_panel.wallets = crate::ui::settings::Fetch::from_result(result);
+                }
                 Event::Rooms(rows) => {
                     self.rooms.rooms = rows;
                     self.rooms.loaded = true;

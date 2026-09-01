@@ -47,6 +47,8 @@ pub enum Screen {
     SignIn,
     /// Create a new account.
     Register,
+    /// Restore an account from a `.migo` container onto this device.
+    Restore,
     /// Signed in.
     Chat,
 }

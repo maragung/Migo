@@ -58,6 +58,15 @@ use crate::crypto::session::DeviceKeys;
 /// The optional-field id under which the saved sign-in lives in the vault body.
 const FIELD_SESSION: u32 = 1;
 
+/// The optional-field id under which the unified account root lives.
+///
+/// Stored as the raw 32 bytes, sealed with everything else, and present only on a device that
+/// founded the account or restored a `.migo` container onto it.
+const FIELD_ROOT: u32 = 2;
+
+/// The optional-field id under which the ML-DSA device credential seed lives.
+const FIELD_DEVICE_CREDENTIAL: u32 = 3;
+
 /// A saved sign-in, so launching the client is one passphrase rather than a full login.
 ///
 /// The access token is deliberately absent: it lives for minutes, so persisting it would buy nothing
@@ -326,7 +335,9 @@ fn encode_keys(keys: &DeviceKeys) -> Result<Vec<u8>, VaultError> {
             .map_err(|_| VaultError::Malformed)?;
     }
 
-    let optionals = u32::from(keys.session.is_some());
+    let optionals = u32::from(keys.session.is_some())
+        + u32::from(keys.root.is_some())
+        + u32::from(keys.device_credential_seed.is_some());
     w.write_u32(optionals);
     if let Some(saved) = &keys.session {
         w.optional(FIELD_SESSION, |w| {
@@ -337,6 +348,14 @@ fn encode_keys(keys: &DeviceKeys) -> Result<Vec<u8>, VaultError> {
             w.write_str(&saved.refresh_token)
         })
         .map_err(|_| VaultError::Malformed)?;
+    }
+    if let Some(root) = &keys.root {
+        w.optional(FIELD_ROOT, |w| w.write_bytes(root))
+            .map_err(|_| VaultError::Malformed)?;
+    }
+    if let Some(seed) = &keys.device_credential_seed {
+        w.optional(FIELD_DEVICE_CREDENTIAL, |w| w.write_bytes(seed))
+            .map_err(|_| VaultError::Malformed)?;
     }
     w.leave();
     w.finish_vec().map_err(|_| VaultError::Malformed)
@@ -359,6 +378,8 @@ fn decode_keys(plaintext: &[u8]) -> Result<DeviceKeys, VaultError> {
 
     let optionals = r.read_u32().map_err(|_| VaultError::Malformed)?;
     let mut session = None;
+    let mut root = None;
+    let mut device_credential_seed = None;
     for _ in 0..optionals {
         let (field, mut inner) = r.read_optional().map_err(|_| VaultError::Malformed)?;
         // An unknown id is skipped, not an error: the sub-reader is length-scoped, so a newer build's
@@ -371,6 +392,10 @@ fn decode_keys(plaintext: &[u8]) -> Result<DeviceKeys, VaultError> {
                 username: inner.read_string().map_err(|_| VaultError::Malformed)?,
                 refresh_token: inner.read_string().map_err(|_| VaultError::Malformed)?,
             });
+        } else if field == FIELD_ROOT {
+            root = Some(seed32(&mut inner)?);
+        } else if field == FIELD_DEVICE_CREDENTIAL {
+            device_credential_seed = Some(seed32(&mut inner)?);
         }
     }
     r.leave();
@@ -380,6 +405,8 @@ fn decode_keys(plaintext: &[u8]) -> Result<DeviceKeys, VaultError> {
         signed_prekey,
         one_time,
         session,
+        root,
+        device_credential_seed,
     })
 }
 
@@ -391,4 +418,133 @@ fn seed32(r: &mut Reader) -> Result<[u8; 32], VaultError> {
         .map_err(|_| VaultError::Malformed)?;
     bytes.zeroize();
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::session::DeviceKeys;
+
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(name)
+    }
+
+    fn saved_session() -> SavedSession {
+        SavedSession {
+            server_url: "https://migo.example".to_owned(),
+            account_id: Id::from_bytes([1; 16]),
+            device_id: Id::from_bytes([2; 16]),
+            username: "whoever".to_owned(),
+            refresh_token: "single-use".to_owned(),
+        }
+    }
+
+    /// A founding device's vault carries the root and the credential, and both have to come back:
+    /// the root is the account, and a credential that did not survive its own backup would make
+    /// the device unable to take part in its own future logins.
+    #[test]
+    fn a_founding_device_round_trips_with_its_root_and_credential() {
+        let path = scratch("migo-vault-founding-roundtrip.bin");
+        let root = migo_account::MigoRoot::from_bytes(&[7u8; 32]).expect("32 bytes is a root");
+        let mut keys = DeviceKeys::founding(&root);
+        keys.session = Some(saved_session());
+
+        save(&path, "correct horse battery", &keys).expect("saved");
+        let opened = load(&path, "correct horse battery").expect("opened");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(opened.root, keys.root);
+        assert_eq!(opened.device_credential_seed, keys.device_credential_seed);
+        assert_eq!(opened.session, keys.session);
+        assert_eq!(
+            opened.identity.expose_signing_seed(),
+            keys.identity.expose_signing_seed()
+        );
+        assert_eq!(
+            opened.identity.expose_exchange_seed(),
+            keys.identity.expose_exchange_seed()
+        );
+        assert_eq!(opened.signed_prekey_id, keys.signed_prekey_id);
+    }
+
+    /// A wrong passphrase is refused, and the refusal does not leak which field would have been
+    /// inside — the sealed body is one blob and the tag fails for all of it at once.
+    #[test]
+    fn a_founding_vault_refuses_the_wrong_passphrase() {
+        let path = scratch("migo-vault-wrong-passphrase.bin");
+        let root = migo_account::MigoRoot::from_bytes(&[8u8; 32]).expect("32 bytes is a root");
+        let mut keys = DeviceKeys::founding(&root);
+        keys.session = Some(saved_session());
+
+        save(&path, "correct horse battery", &keys).expect("saved");
+        let outcome = load(&path, "wrong horse battery");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(matches!(outcome, Err(VaultError::Locked)));
+    }
+
+    /// A body written before the account-root fields existed — no optionals at all — still opens,
+    /// as a device that signed in with a password before the upgrade does.
+    #[test]
+    fn a_body_from_before_the_root_still_decodes() {
+        let identity = migo_crypto::IdentitySecret::generate(&mut OsRandom);
+        let prekey = migo_crypto::identity::KeyPair::generate(&mut OsRandom);
+        let mut w = Writer::new();
+        w.enter().expect("enter");
+        w.write_bytes(&identity.expose_signing_seed())
+            .expect("write");
+        w.write_bytes(&identity.expose_exchange_seed())
+            .expect("write");
+        w.write_u32(1);
+        w.write_bytes(&prekey.expose_seed()).expect("write");
+        w.list_len(0).expect("empty list");
+        w.write_u32(0); // no optional fields
+        w.leave();
+        let plaintext = w.finish_vec().expect("body");
+
+        let keys = decode_keys(&plaintext).expect("decoded");
+        assert!(keys.root.is_none());
+        assert!(keys.device_credential_seed.is_none());
+        assert!(keys.session.is_none());
+        assert_eq!(keys.signed_prekey_id, 1);
+        assert_eq!(
+            keys.identity.expose_signing_seed(),
+            identity.expose_signing_seed()
+        );
+    }
+
+    /// A body carrying only the session optional — the exact shape a pre-root build saved on every
+    /// successful sign-in — decodes the session and leaves the root fields empty, rather than
+    /// misreading the older field id as one of the new ones.
+    #[test]
+    fn a_session_only_body_decodes_the_session_and_nothing_else() {
+        let identity = migo_crypto::IdentitySecret::generate(&mut OsRandom);
+        let prekey = migo_crypto::identity::KeyPair::generate(&mut OsRandom);
+        let saved = saved_session();
+        let mut w = Writer::new();
+        w.enter().expect("enter");
+        w.write_bytes(&identity.expose_signing_seed())
+            .expect("write");
+        w.write_bytes(&identity.expose_exchange_seed())
+            .expect("write");
+        w.write_u32(4);
+        w.write_bytes(&prekey.expose_seed()).expect("write");
+        w.list_len(0).expect("empty list");
+        w.write_u32(1); // one optional: the session
+        w.optional(FIELD_SESSION, |w| {
+            w.write_str(&saved.server_url)?;
+            w.write_id(&saved.account_id);
+            w.write_id(&saved.device_id);
+            w.write_str(&saved.username)?;
+            w.write_str(&saved.refresh_token)
+        })
+        .expect("session field");
+        w.leave();
+        let plaintext = w.finish_vec().expect("body");
+
+        let keys = decode_keys(&plaintext).expect("decoded");
+        assert_eq!(keys.session, Some(saved));
+        assert!(keys.root.is_none());
+        assert!(keys.device_credential_seed.is_none());
+    }
 }

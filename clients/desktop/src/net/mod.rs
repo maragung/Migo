@@ -50,13 +50,13 @@ use crate::crypto::content::{self, Content};
 use crate::crypto::envelope::Envelope;
 use crate::crypto::session::{DeviceKeys, SessionStore, ONE_TIME_PREKEY_COUNT};
 use crate::model::{
-    self, Account, AlertRow, Body, Connection, Conversation, Delivery, GiftRow, LeaderRow,
-    LedgerRow, Message, PersonRow, Progression, Relationship, RelationshipKind, RoomRow,
-    SessionRow, ToastKind,
+    self, Account, AlertRow, Body, Connection, Conversation, Delivery, DeviceRow, EvmWalletRow,
+    GiftRow, LeaderRow, LedgerRow, Message, PersonRow, Progression, Relationship, RelationshipKind,
+    RoomRow, SessionRow, ToastKind,
 };
 use crate::net::gateway::{Gateway, GatewayError};
 use crate::net::quic::QuicGateway;
-use crate::net::rest::{CaptchaChallenge, CaptchaProof, DeviceRequest, Rest, RestError};
+use crate::net::rest::{CaptchaChallenge, CaptchaProof, DeviceRequest, Grant, Rest, RestError};
 use crate::net::tcp::TcpGateway;
 use crate::vault::{self, SavedSession};
 
@@ -197,6 +197,34 @@ pub enum Command {
     SearchPeople { query: String },
     /// Ask the social graph for its own suggestions.
     Suggestions,
+    /// Read the account's device list over REST for the security panel.
+    Devices,
+    /// Read the account's registered wallet addresses over REST.
+    Wallets,
+    /// Seal the account root into a `.migo` recovery container at `path`.
+    ///
+    /// The credential is the recovery credential the user chose for the container — a second
+    /// secret, deliberately not the vault passphrase and not the account password, because a
+    /// backup sealed under either of those is a backup one breach opens.
+    ExportContainer { path: PathBuf, credential: String },
+    /// Restore the account from a `.migo` container onto this device: the add-device ceremony,
+    /// a fresh vault, and the session that follows.
+    ImportContainer {
+        /// The container file.
+        path: PathBuf,
+        /// The recovery credential the container was sealed with.
+        credential: String,
+        /// The passphrase for the new vault this restore creates.
+        passphrase: String,
+        /// The account's username, as the person knows it. The ceremony itself needs only the
+        /// account id the container names; the username is stored beside the session so the
+        /// unlock screen greets the right person and a later passwordless login can name the
+        /// account to the server, which resolves names and not ids.
+        username: String,
+        server: ServerEndpoint,
+    },
+    /// Archive one of the account's registered wallet addresses.
+    ArchiveWallet { wallet_id: Id },
     /// Stop the worker. Sent on window close.
     Shutdown,
 }
@@ -309,6 +337,14 @@ pub enum Event {
     Gifts(Vec<GiftRow>),
     /// Accounts found by search or offered as suggestions.
     People(Vec<PersonRow>),
+    /// The account's devices for the security panel, or the reason they could not be had.
+    ///
+    /// A failure rides the same event rather than dying as a toast for the same reason the session
+    /// list's does: "could not check" and "you have one device" are different facts and only one
+    /// of them should reassure anybody.
+    Devices(Result<Vec<DeviceRow>, String>),
+    /// The account's registered wallet addresses.
+    Wallets(Result<Vec<EvmWalletRow>, String>),
     /// Something worth a line at the bottom of the window.
     Toast { text: String, kind: ToastKind },
 }
@@ -730,6 +766,24 @@ impl Worker {
             }
             Command::SearchPeople { query } => self.search_people(query).await,
             Command::Suggestions => self.request_suggestions().await,
+            Command::Devices => self.fetch_devices().await,
+            Command::Wallets => self.fetch_wallets().await,
+            Command::ExportContainer { path, credential } => {
+                self.export_container(path, credential).await;
+            }
+            Command::ImportContainer {
+                path,
+                credential,
+                passphrase,
+                username,
+                server,
+            } => {
+                self.import_container(path, credential, passphrase, username, server)
+                    .await;
+            }
+            Command::ArchiveWallet { wallet_id } => {
+                self.archive_wallet(wallet_id).await;
+            }
             Command::Shutdown => {}
         }
     }
@@ -791,7 +845,24 @@ impl Worker {
         // A vault whose passphrase just opened keeps its keys; otherwise this device is new and needs
         // a fresh identity. Generating one unconditionally would silently replace the key peers have
         // verified, and every safety number would change with no explanation.
-        let mut keys = existing.unwrap_or_else(DeviceKeys::generate);
+        //
+        // A *new* identity gets the account-root treatment: a registration is the founding device of
+        // a brand-new account, so it mints the root, derives its E2EE identity from the root's E2EE
+        // domain (recoverable from a `.migo` container, which is the point), and enrols a device
+        // credential. A sign-in is an *additional* device of an account that exists: fresh random
+        // E2EE identity, fresh credential, no root — additional devices never inherit the founding
+        // device's material.
+        let mut keys = match existing {
+            Some(keys) => keys,
+            None if register => {
+                DeviceKeys::founding(&migo_account::MigoRoot::generate(&mut OsRandom))
+            }
+            None => DeviceKeys::additional(),
+        };
+        // Captured before `establish` takes the keys: the account-root follow-ups (publishing the
+        // identity, registering the first wallet) happen once the session exists, but they need the
+        // material the session store is about to own.
+        let root = keys.root();
         keys.session = Some(SavedSession {
             server_url: crate::config::rest_base_url(&server),
             account_id: grant.account_id,
@@ -814,6 +885,15 @@ impl Worker {
             grant.access_token,
         )
         .await;
+
+        // The legacy upgrade door: a device that holds the root tells the server so, idempotently,
+        // on every sign-in. A server that already has the keys reconciles to the same rows; one
+        // that has never seen them records them now, which is what makes the account
+        // ML-DSA-loginable at all. A refusal here is a toast, not a failed sign-in — the password
+        // already worked.
+        if root.is_some() {
+            self.publish_root_material().await;
+        }
     }
 
     /// Fetches a captcha challenge for a form.
@@ -856,7 +936,16 @@ impl Worker {
         };
         let grant = match rest.refresh(&saved.refresh_token, saved.device_id).await {
             Ok(grant) => grant,
-            Err(error) => return self.fail(error.to_string()),
+            Err(error) => {
+                // A dead refresh token is not a dead account on a device that holds the root: the
+                // ML-DSA login ceremony signs in without a password, using the very keys the
+                // vault just gave back. Only when that too is impossible — no root, no credential,
+                // or a server that refuses — does the refresh failure stand as the answer.
+                match self.ceremony_login(&rest, &keys, &saved).await {
+                    Some(grant) => grant,
+                    None => return self.fail(error.to_string()),
+                }
+            }
         };
 
         // The server rotates the refresh token on every exchange, so the vault has to be rewritten or
@@ -884,6 +973,41 @@ impl Worker {
         .await;
     }
 
+    /// The passwordless sign-in: the ML-DSA login ceremony, run from a vault that holds the root
+    /// and this device's credential.
+    ///
+    /// `None` means "this device cannot sign in this way" — no root, no credential, a challenge
+    /// that would not issue, a signature that failed — and the caller reports the failure of the
+    /// thing it was actually trying (the refresh exchange), rather than a stack of ceremony detail
+    /// the user cannot act on. The server's own anti-enumeration shape makes this the right
+    /// behaviour: an unknown identifier and a wrong password produce the same `CHALLENGE_INVALID`,
+    /// so a ceremony error message would only ever be this client's guess.
+    async fn ceremony_login(
+        &mut self,
+        rest: &Rest,
+        keys: &DeviceKeys,
+        saved: &SavedSession,
+    ) -> Option<Grant> {
+        let identity = keys.identity_key()?;
+        let credential = keys.device_credential()?;
+        let challenge = rest
+            .identity_login_challenge(&saved.username, saved.device_id)
+            .await
+            .ok()?;
+        // Signed exactly as received, never re-encoded: the server verifies against the bytes it
+        // stored, so a canonicalising client would sign a different message and fail.
+        let payload = base64_decode(&challenge.payload)?;
+        let identity_signature = identity.sign_login(&payload).ok()?;
+        let device_signature = credential.sign_login(&payload).ok()?;
+        rest.identity_login(
+            challenge.challenge_id,
+            &identity_signature,
+            &device_signature,
+        )
+        .await
+        .ok()
+    }
+
     /// Brings up the gateway connection and publishes this device's public keys.
     #[allow(clippy::too_many_arguments)]
     async fn establish(
@@ -898,12 +1022,14 @@ impl Worker {
         access_token: String,
     ) {
         let safety_number = model::safety_number(&keys.identity_public().fingerprint());
+        let holds_root = keys.root.is_some();
         let account = Account {
             account_id,
             device_id,
             session_id,
             username,
             safety_number,
+            holds_root,
         };
         let sessions = SessionStore::new(keys);
 
@@ -1390,6 +1516,345 @@ impl Worker {
                 self.sink.toast(error.to_string(), ToastKind::Error);
             }
         }
+    }
+
+    // --- the account-root surface -----------------------------------------------
+
+    /// Reads the account's devices over REST for the security panel.
+    async fn fetch_devices(&mut self) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let outcome = signed.rest.devices(&signed.access_token).await;
+        let event = match outcome {
+            Ok(list) => {
+                let rows = list
+                    .into_iter()
+                    .map(|device| DeviceRow {
+                        device_id: device.device_id,
+                        display_name: if device.display_name.is_empty() {
+                            model::short_id(device.device_id)
+                        } else {
+                            device.display_name
+                        },
+                        platform: device.platform,
+                        status: device.status,
+                        created_at: Some(Timestamp::from_unix_ms(device.created_at_ms)),
+                        last_seen: Some(Timestamp::from_unix_ms(device.last_seen_at_ms)),
+                        has_credential: device.has_credential,
+                        is_current: device.is_current,
+                    })
+                    .collect::<Vec<_>>();
+                Event::Devices(Ok(rows))
+            }
+            Err(error) => Event::Devices(Err(error.to_string())),
+        };
+        self.sink.send(event);
+    }
+
+    /// Reads the account's registered wallet addresses over REST.
+    async fn fetch_wallets(&mut self) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let outcome = signed.rest.wallets(&signed.access_token).await;
+        let event = match outcome {
+            Ok(list) => {
+                let rows = list
+                    .into_iter()
+                    .map(|wallet| EvmWalletRow {
+                        wallet_id: wallet.wallet_id,
+                        address: wallet.address,
+                        derivation_index: wallet.derivation_index,
+                        status: wallet.status,
+                        label: wallet.label,
+                    })
+                    .collect::<Vec<_>>();
+                Event::Wallets(Ok(rows))
+            }
+            Err(error) => Event::Wallets(Err(error.to_string())),
+        };
+        self.sink.send(event);
+    }
+
+    /// Publishes the identity and device-credential public keys: the legacy upgrade door.
+    ///
+    /// Idempotent by the server's design, so the worker calls it after every sign-in on a device
+    /// that holds the root rather than tracking whether it already did — a retry reconciles to the
+    /// rows that exist. Only the public halves cross the wire; nothing here can leak the root.
+    async fn publish_root_material(&mut self) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let Some(identity) = signed.sessions.keys().identity_key() else {
+            return;
+        };
+        let Some(credential) = signed.sessions.keys().device_credential() else {
+            return;
+        };
+        if let Err(error) = signed
+            .rest
+            .publish_identity_key(
+                &signed.access_token,
+                &identity.public_key(),
+                Some(&credential.public_key()),
+            )
+            .await
+        {
+            // A toast rather than a failed sign-in: the password already worked, and the keys
+            // publish again on the next sign-in.
+            self.sink.toast(
+                format!("could not publish the account identity: {error}"),
+                ToastKind::Error,
+            );
+        }
+    }
+
+    /// Registers any of the root's first wallets the server does not know yet.
+    ///
+    /// The address is a pure function of the root, so "which wallets exist" is server state, not a
+    /// matter of opinion: every address the root derives that is not registered gets registered,
+    /// which after a container restore re-creates the wallet list in derivation order, and on a
+    /// brand-new account registers the one wallet that has existed since the root did.
+    async fn sync_wallets(&mut self) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let Some(root) = signed.sessions.keys().root() else {
+            return;
+        };
+        let Ok(known) = signed.rest.wallets(&signed.access_token).await else {
+            return;
+        };
+        let registered: HashSet<String> = known
+            .into_iter()
+            .map(|wallet| wallet.address.to_ascii_lowercase())
+            .collect();
+        // The first eight indexes cover a personal account generously; a user past that has made a
+        // habit of wallet rotation and can archive and register from a client that shows the list.
+        for index in 0..8u32 {
+            let Ok(wallet) = migo_account::EvmWallet::from_root(&root, index) else {
+                return;
+            };
+            // EIP-55 is the canonical form; the comparison lowercases so a wallet another client
+            // registered in a different case is recognised as the same address, not re-registered.
+            let address = wallet.address_checksummed();
+            if registered.contains(&address.to_ascii_lowercase()) {
+                continue;
+            }
+            if let Err(error) = signed
+                .rest
+                .register_wallet(&signed.access_token, &address, index as i32, None)
+                .await
+            {
+                self.sink.toast(
+                    format!("could not register wallet {index}: {error}"),
+                    ToastKind::Error,
+                );
+                return;
+            }
+        }
+        self.fetch_wallets().await;
+    }
+
+    /// Archives one registered wallet address.
+    ///
+    /// The address stays the address — it is a pure function of the root — but it leaves the
+    /// account's active list, which is what other clients read. Deriving it again is not
+    /// "restoring" it; registering it again is.
+    async fn archive_wallet(&mut self, wallet_id: Id) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let outcome = signed
+            .rest
+            .archive_wallet(&signed.access_token, wallet_id)
+            .await;
+        match outcome {
+            Ok(()) => {
+                self.sink
+                    .toast("Wallet address archived", ToastKind::Success);
+                self.fetch_wallets().await;
+            }
+            Err(error) => {
+                self.sink.toast(error.to_string(), ToastKind::Error);
+            }
+        }
+    }
+
+    /// Seals the account root into a `.migo` recovery container at `path`.
+    ///
+    /// The container names the account, so the next device can run the add-device ceremony from
+    /// the file alone; the recovery credential that opens it never leaves the user's head.
+    async fn export_container(&mut self, path: PathBuf, credential: String) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let Some(root) = signed.sessions.keys().root() else {
+            self.sink.toast(
+                "this device does not hold the account root; make the backup on a device that \
+                 does, or keep the container you already have",
+                ToastKind::Error,
+            );
+            return;
+        };
+        let account_id = signed.account.account_id;
+        let now = u64::try_from(Timestamp::now().as_unix_ms().max(0) / 1000)
+            .expect("unix seconds fit in u64 by construction");
+        let file = migo_account::AccountFile::new(&root, now).for_account(&account_id.to_text());
+        let container = match migo_account::seal_container(&credential, &file, &mut OsRandom) {
+            Ok(bytes) => bytes,
+            Err(error) => return self.sink.toast(error.to_string(), ToastKind::Error),
+        };
+        if let Err(error) = std::fs::write(&path, &container) {
+            return self.sink.toast(error.to_string(), ToastKind::Error);
+        }
+        self.sink.toast(
+            format!("account backup written to {}", path.display()),
+            ToastKind::Success,
+        );
+    }
+
+    /// Restores the account from a `.migo` container onto this device: the add-device ceremony,
+    /// a new vault, and the session that follows.
+    ///
+    /// The restored device holds the root — it can sign future add-device ceremonies and derive
+    /// the wallets — but its E2EE identity is fresh and random, not the founding device's: a
+    /// restore is a new device, and new devices never inherit another device's ratchets. Only the
+    /// founding device's E2EE history is a function of the root, and only its own backup restores
+    /// onto it as itself.
+    async fn import_container(
+        &mut self,
+        path: PathBuf,
+        credential: String,
+        passphrase: String,
+        username: String,
+        server: ServerEndpoint,
+    ) {
+        // The ceremony writes a vault; a machine that already has one keeps it, because the keys
+        // inside it are the identity every peer has verified and overwriting them is not something
+        // a restore should be able to do in passing.
+        if vault::exists(&self.vault_path) {
+            return self.fail(
+                "this device already has a vault; remove it deliberately before restoring onto \
+                 this machine"
+                    .to_owned(),
+            );
+        }
+        self.sink.send(Event::Connection(Connection::Connecting));
+
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => return self.fail(error.to_string()),
+        };
+        let file = match migo_account::open_container(&credential, &bytes) {
+            Ok(file) => file,
+            Err(error) => return self.fail(error.to_string()),
+        };
+        let root = match file.root() {
+            Ok(root) => root,
+            Err(error) => return self.fail(error.to_string()),
+        };
+        let Some(account_id) = file
+            .account_id
+            .as_deref()
+            .and_then(|text| Id::parse(text).ok())
+        else {
+            return self.fail(
+                "this container does not name its account (it was sealed by an older build); \
+                 sign in with your password instead"
+                    .to_owned(),
+            );
+        };
+
+        let rest = match Rest::new(&crate::config::rest_base_url(&server)) {
+            Ok(rest) => rest,
+            Err(error) => return self.fail(error.to_string()),
+        };
+
+        // The new device: fresh E2EE identity, fresh credential, plus the root the container carried.
+        let mut keys = DeviceKeys::additional();
+        keys.root = Some(
+            root.as_bytes()
+                .try_into()
+                .expect("the root is 32 bytes by construction"),
+        );
+        let identity = migo_account::IdentityKey::from_root(&root);
+        let device_credential = keys
+            .device_credential()
+            .expect("additional() mints a credential");
+
+        // The ceremony: describe the new device, sign the canonical payload with the identity key
+        // (the account half) and the new credential (the device half), and present both.
+        let device = DeviceRequest::describe(None);
+        let challenge = match rest
+            .identity_add_device_challenge(account_id, &device)
+            .await
+        {
+            Ok(challenge) => challenge,
+            Err(error) => return self.fail(error.to_string()),
+        };
+        let payload = match base64_decode(&challenge.payload) {
+            Some(bytes) => bytes,
+            None => return self.fail("the server's challenge payload was not base64".to_owned()),
+        };
+        let identity_signature = match identity.sign_login(&payload) {
+            Ok(signature) => signature,
+            Err(error) => return self.fail(error.to_string()),
+        };
+        let device_signature = match device_credential.sign_login(&payload) {
+            Ok(signature) => signature,
+            Err(error) => return self.fail(error.to_string()),
+        };
+        let grant = match rest
+            .identity_add_device(
+                challenge.challenge_id,
+                &identity_signature,
+                &device_credential.public_key(),
+                &device_signature,
+            )
+            .await
+        {
+            Ok(grant) => grant,
+            Err(error) => return self.fail(error.to_string()),
+        };
+
+        // The grant identifies the account by id; the username is a profile concern, not a session
+        // one, and the server does not echo it back. The form's field is the greeting and the
+        // identifier a later passwordless login needs; if the person left it blank, the account id
+        // stands in, honestly unpronounceable.
+        let username = {
+            let typed = username.trim();
+            if typed.is_empty() {
+                account_id.to_text()
+            } else {
+                typed.to_owned()
+            }
+        };
+        keys.session = Some(SavedSession {
+            server_url: crate::config::rest_base_url(&server),
+            account_id,
+            device_id: grant.device_id,
+            username: username.clone(),
+            refresh_token: grant.refresh_token.clone(),
+        });
+        if let Err(error) = vault::save(&self.vault_path, &passphrase, &keys) {
+            return self.fail(error.to_string());
+        }
+
+        self.establish(
+            server,
+            rest,
+            keys,
+            grant.account_id,
+            grant.device_id,
+            grant.session_id,
+            username,
+            grant.access_token,
+        )
+        .await;
+        self.publish_root_material().await;
+        self.sync_wallets().await;
     }
 
     /// Encrypts one text message for every device of every other member, and sends it.
@@ -2240,6 +2705,15 @@ impl Worker {
             .send(Event::Connection(Connection::Failed(text.clone())));
         self.sink.toast(text, ToastKind::Error);
     }
+}
+
+/// Decodes standard base64, as the challenge payloads and signature fields arrive.
+///
+/// A challenge payload that does not decode is a server the client cannot talk to, so the caller
+/// treats `None` as a protocol error rather than retrying bytes that will never be a signature.
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.decode(text).ok()
 }
 
 /// Projects decrypted [`Content`] onto the UI's [`Body`].

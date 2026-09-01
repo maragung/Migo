@@ -30,6 +30,11 @@ migo-core = { path = "../../server/crates/migo-core" }
 migo-wire = { path = "../../server/crates/migo-wire" }
 migo-protocol = { path = "../../server/crates/migo-protocol" }
 migo-crypto = { path = "../../server/crates/migo-crypto" }
+# The unified account root: one ML-DSA-65 identity, the EVM wallet derivation, and the `.migo`
+# recovery container all live in this reference crate, shared verbatim with the server so the two
+# never disagree about a domain label or a signing context. Path dependency across the workspace
+# boundary, exactly like the four crates above.
+migo-account = { path = "../../server/crates/migo-account" }
 
 # `glow` rather than the default `wgpu` backend: this is a chat window, not a renderer. GL 3.3 is
 # available on every machine that can run a browser, the dependency tree is a fraction of wgpu's,
