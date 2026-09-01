@@ -61,8 +61,16 @@ test('a founding snapshot round-trips the root and the tracked transactions', ()
 
   const restored = KeyStore.restore(store.snapshot());
 
-  assert.deepEqual(restored.root()?.asBytes(), root.asBytes(), 'the root did not survive the snapshot');
-  assert.equal(restored.trackedTxs().length, 1, 'the tracked transaction did not survive the snapshot');
+  assert.deepEqual(
+    restored.root()?.asBytes(),
+    root.asBytes(),
+    'the root did not survive the snapshot',
+  );
+  assert.equal(
+    restored.trackedTxs().length,
+    1,
+    'the tracked transaction did not survive the snapshot',
+  );
   const record = restored.trackedTxs()[0];
   assert.ok(record !== undefined, 'the tracked transaction was absent');
   assert.equal(record.outcome, 'PENDING');

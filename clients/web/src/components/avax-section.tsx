@@ -75,11 +75,7 @@ export function networkName(chainId: number): string {
  * receipt, and the confirmed ceiling until then — a confirmed spend should never overstate what it
  * cost, and an unconfirmed one should never understate it.
  */
-export function feeLabel(row: {
-  gasUsed?: bigint;
-  block?: number;
-  feeWei: bigint;
-}): string {
+export function feeLabel(row: { gasUsed?: bigint; block?: number; feeWei: bigint }): string {
   if (row.gasUsed !== undefined && row.block !== undefined) {
     return `fee ${row.gasUsed} gas`;
   }
@@ -246,7 +242,12 @@ export function AvaxSection(): ReactNode {
           // with a guessed field is a confirmation screen that lies about one of its lines.
           const [fees, gasLimit, nonce] = await Promise.all([
             chain.getFees(),
-            chain.estimateGas({ from: wallet.address(), to, value: valueWei, data: new Uint8Array(0) }),
+            chain.estimateGas({
+              from: wallet.address(),
+              to,
+              value: valueWei,
+              data: new Uint8Array(0),
+            }),
             chain.getNonce(wallet.address()),
           ]);
           if (networkRef.current !== network) {
@@ -347,9 +348,7 @@ export function AvaxSection(): ReactNode {
             const result = await new ChainClient({ network: chainNetwork }).track(txHash, {
               onState: (state) => {
                 setTracking((current) =>
-                  current !== null && current.txHash === txHash
-                    ? { txHash, state }
-                    : current,
+                  current !== null && current.txHash === txHash ? { txHash, state } : current,
                 );
               },
             });
@@ -360,7 +359,9 @@ export function AvaxSection(): ReactNode {
             outcome = 'EXPIRED';
           }
           settle(client, txHash, outcome, block, gasUsed);
-          setTracking((current) => (current !== null && current.txHash === txHash ? null : current));
+          setTracking((current) =>
+            current !== null && current.txHash === txHash ? null : current,
+          );
           setActivity([...client.keyStore.trackedTxs()]);
           persistKeyStore();
         } catch (cause) {
@@ -604,9 +605,7 @@ function AvaxSendForm({
             <button
               type="button"
               className="btn btn-primary"
-              disabled={
-                busy || (prepared.network === 'mainnet' && !acknowledged)
-              }
+              disabled={busy || (prepared.network === 'mainnet' && !acknowledged)}
               onClick={() => onSend(prepared)}
             >
               Confirm send

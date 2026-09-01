@@ -115,9 +115,7 @@ test('an activity row shows the outcome word in its own tone', () => {
   assert.match(pending, new RegExp(`0x${'5a'.repeat(6)}`));
 
   const confirmed = renderToStaticMarkup(
-    <ChainTxLine
-      row={{ ...base, outcome: 'CONFIRMED', block: 620_000_000, gasUsed: 21_000n }}
-    />,
+    <ChainTxLine row={{ ...base, outcome: 'CONFIRMED', block: 620_000_000, gasUsed: 21_000n }} />,
   );
   assert.match(confirmed, /confirmed/);
   assert.match(confirmed, /fee 21000 gas/);
