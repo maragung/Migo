@@ -227,6 +227,10 @@ def main() -> int:
         "MEMBER_ROLE_SET", "ANNOUNCEMENT_POST", "GAME_START", "USER_AGENT",
         "MAX_PAGE", "MAX_LEDGER_LEGS", "NOT_FOUND", "PERMISSION_DENIED",
         "READ_ONLY", "LOW_DATA", "ULTRA_LOW_DATA", "END_TO_END",
+        # Section 184's wallet: the one spec-41 state whose name carries an
+        # underscore, and the encrypted vault field that holds the client's
+        # own transaction list. Chain-side names, not schema tokens.
+        "AWAITING_CONFIRMATION", "FIELD_TXS",
     }
     # Opcodes the brief plans but has not implemented are legitimate, provided
     # they are declared in the section 145 registry under a SPEC marker rather
