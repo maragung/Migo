@@ -147,11 +147,11 @@ Async runtime tokio
 
 Protocol:
 Binary-first. Wire protocol realtime adalah MWP/1, sebuah binary framing dengan payload MSE. Lihat section 136 sampai 145.
-WebSocket di atas TCP sebagai transport realtime default. Satu MWP frame per satu binary WebSocket message. Text frame TIDAK BOLEH digunakan. permessage-deflate WAJIB dimatikan karena kompresi diputuskan per frame oleh MWP sendiri.
-QUIC sebagai transport realtime kedua (opsi) untuk client yang mendukungnya, dinegosiasikan lewat feature bit QUIC. Server hanya mengiklankan bit QUIC bila listener QUIC diaktifkan. Framing di atas QUIC dan TCP memakai length prefix u32 big-endian.
+TCP sebagai transport realtime default untuk client native (Android dan desktop), dengan length prefix u32 big-endian diikuti satu frame MWP — struktur paket data biner seperti mig33v46. WebSocket sebagai transport realtime default untuk client web, dengan satu MWP frame per satu binary WebSocket message. Text frame TIDAK BOLEH digunakan. permessage-deflate WAJIB dimatikan karena kompresi diputuskan per frame oleh MWP sendiri.
+QUIC sebagai transport realtime kedua (opsi) untuk semua client yang mendukungnya, dinegosiasikan lewat feature bit QUIC. Server hanya mengiklankan bit QUIC bila listener QUIC diaktifkan. Framing di atas QUIC stream dan TCP memakai length prefix u32 big-endian.
 HTTPS di atas HTTP/1.1, HTTP/2, atau HTTP/3 hanya untuk REST dan public API, upload media, admin, dan health endpoint. Bukan untuk chat.
 Server-to-server federation memakai TLS 1.3 di atas TCP sebagai transport default, dengan QUIC/TLS 1.3 sebagai opsi kedua bila tersedia, membawa binary federation packet. Lihat section 169.
-Transport tanpa enkripsi TIDAK BOLEH ada, termasuk di environment development.
+Transport tanpa enkripsi TIDAK BOLEH ada di produksi, termasuk di environment development.
 
 Database:
 PostgreSQL sebagai source of truth untuk data transactional dan message. Tabel message dipartisi per bulan.
@@ -629,7 +629,7 @@ Payload kecil TIDAK BOLEH dikompresi, karena overhead header kompresi dapat lebi
 
 Connection reuse:
 
-Satu WebSocket atau QUIC connection per instance aplikasi untuk semua fitur realtime. TIDAK BOLEH membuka koneksi terpisah per fitur
+Satu koneksi TCP, WebSocket, atau QUIC per instance aplikasi untuk semua fitur realtime. TIDAK BOLEH membuka koneksi terpisah per fitur
 HTTP/2 atau HTTP/3 dengan connection reuse untuk REST
 
 Media:
@@ -1804,7 +1804,8 @@ Voice note menggunakan codec speech dengan bitrate rendah
 
 Transport yang dipakai:
 
-WebSocket dengan binary frame sebagai transport realtime utama
+TCP dengan binary frame length-prefixed sebagai transport realtime utama untuk client native
+WebSocket dengan binary frame sebagai transport realtime utama untuk client web
 QUIC bila dinegosiasikan
 HTTP/2 atau HTTP/3 untuk REST dan media
 
@@ -1823,7 +1824,7 @@ App Router
 TypeScript
 Responsive layout
 PWA support
-Binary WebSocket client, MWP/1
+Binary WebSocket client, MWP/1 — transport web (browser tidak menyediakan akses TCP socket)
 Web Crypto untuk E2E, dengan CryptoKey non-extractable
 IndexedDB untuk key material dan cache
 Offline outbox yang durable
@@ -1844,7 +1845,7 @@ Room database
 WorkManager untuk retry upload dan outbox
 Foreground service hanya bila benar-benar diperlukan
 Android Keystore untuk key non-exportable
-Binary WebSocket client, MWP/1, dengan QUIC bila feature bit QUIC dinegosiasikan
+Binary TCP client, MWP/1, dengan length prefix u32 big-endian — default. WebSocket untuk development, QUIC bila feature bit QUIC dinegosiasikan
 WebRTC untuk voice dan video call
 Audio recorder untuk voice note
 
@@ -2229,6 +2230,12 @@ Bit yang sudah ditetapkan:
 13 TRACING
 14 RESUME
 15 ECONOMY
+16 VOICE_NOTE
+17 CALLS
+18 GROUP_CALL
+19 FEDERATION
+20 RICH_PRESENCE
+21 TCP_TRANSPORT
 
 Bit yang direncanakan. STATUS: SPEC:
 
@@ -2857,6 +2864,7 @@ MIGO_NODE__SIGNING_KEY
 MIGO_HTTP__BIND
 MIGO_HTTP__PUBLIC_URL
 MIGO_QUIC__BIND
+MIGO_TCP__BIND
 MIGO_STORE__BACKEND
 MIGO_STORE__URL
 MIGO_CACHE__BACKEND
@@ -3146,7 +3154,7 @@ Crash report TIDAK BOLEH memuat dump memori yang berisi key material atau plaint
 
 Migo memiliki dua permukaan yang terpisah dan sengaja berbeda.
 
-Pertama, realtime surface. Binary MWP/1 di atas WebSocket atau QUIC. Semua chat, room, presence, typing, reaction, friend event, notification, voice note signaling, call signaling, game event, dan bot command berjalan di sini. JSON TIDAK BOLEH dipakai di sini.
+Pertama, realtime surface. Binary MWP/1 di atas TCP untuk client native, WebSocket untuk client web, atau QUIC. Semua chat, room, presence, typing, reaction, friend event, notification, voice note signaling, call signaling, game event, dan bot command berjalan di sini. JSON TIDAK BOLEH dipakai di sini.
 
 Kedua, REST surface berbasis JSON. Hanya untuk hal yang bukan realtime.
 
@@ -3792,9 +3800,23 @@ Alasan angkanya. Sebuah pesan chat dengan empat id, satu timestamp, dan tiga enu
 
 138. TRANSPORT BINDINGS
 
-STATUS: BUILT untuk WebSocket, length-prefixed stream, dan listener QUIC opsional (diaktifkan lewat MIGO_QUIC__BIND; bit QUIC hanya diiklankan saat listener aktif). STATUS: SPEC untuk QUIC datagram dan jalur data QUIC pada client.
+STATUS: BUILT untuk WebSocket (web), TCP listener untuk client native (diaktifkan lewat MIGO_TCP__BIND), length-prefixed stream, dan listener QUIC opsional (diaktifkan lewat MIGO_QUIC__BIND; bit QUIC hanya diiklankan saat listener aktif). STATUS: SPEC untuk QUIC datagram dan jalur data QUIC pada client.
 
-WebSocket:
+Per client:
+
+Client web memakai WebSocket, karena browser tidak menyediakan akses TCP socket
+Client native (Android dan desktop) memakai TCP sebagai transport default, seperti tradisi messenger biner sejak mig33: satu socket TCP, satu sesi, paket biner length-prefixed. WebSocket pada client native hanya untuk development dan fallback
+QUIC tetap opsi kedua untuk semua client, dinegosiasikan lewat feature bit
+Federation antar node memakai TCP dengan TLS 1.3
+
+TCP (default untuk client native):
+
+Length prefix u32 big-endian diikuti frame MWP. Struktur paket data biner yang sama sejak mig33v46: socket stream, panjang didepan, frame setelahnya
+Satu koneksi TCP per instance aplikasi, satu sesi per koneksi
+Diaktifkan di server lewat MIGO_TCP__BIND. Server mengiklankan bit TCP hanya saat listener TCP aktif
+TLS 1.3 di atas TCP wajib untuk deployment produksi (sama seperti federation); plaintext hanya untuk development loopback
+
+WebSocket (default untuk client web):
 
 Satu MWP frame per satu binary WebSocket message
 Text frame TIDAK BOLEH dipakai. Menerima text frame adalah protocol violation dan koneksi ditutup
@@ -3808,9 +3830,9 @@ Untuk QUIC stream, framing memakai length prefix u32 big-endian diikuti frame
 Dinegosiasikan melalui feature bit QUIC. Server mengiklankan bit QUIC hanya bila listener QUIC diaktifkan lewat konfigurasi; TCP/WebSocket tetap menjadi transport default
 Keuntungan utamanya adalah tidak ada head-of-line blocking dan reconnect yang lebih cepat saat berpindah jaringan
 
-TCP:
+Federation TCP:
 
-Length prefix u32 big-endian diikuti frame. Dipakai untuk federation dan untuk testing
+Length prefix u32 big-endian diikuti frame, TLS 1.3 di atas TCP sebagai default. Dipakai untuk komunikasi antar node
 
 HTTP:
 
@@ -3818,7 +3840,7 @@ REST fallback membawa payload struct yang sama dalam bentuk JSON, hanya untuk de
 
 Aturan umum:
 
-TLS 1.3 wajib pada semua transport. Tidak ada transport plaintext, termasuk di development
+TLS 1.3 wajib pada semua transport produksi. Plaintext hanya di development loopback
 Panjang frame maksimum MAX_FRAME_BYTES yaitu 262144 byte, diperiksa sebelum alokasi buffer
 
 

@@ -81,6 +81,8 @@ pub mod features {
     pub const FEDERATION: u64 = 1 << 19;
     /// Custom status and activity (section 26)
     pub const RICH_PRESENCE: u64 = 1 << 20;
+    /// Raw TCP realtime listener available for native clients (section 138)
+    pub const TCP_TRANSPORT: u64 = 1 << 21;
 
     /// Everything this build understands.
     pub const ALL: u64 = COMPRESSION
@@ -103,7 +105,8 @@ pub mod features {
         | CALLS
         | GROUP_CALL
         | FEDERATION
-        | RICH_PRESENCE;
+        | RICH_PRESENCE
+        | TCP_TRANSPORT;
 }
 
 /// Stable protocol error codes. Frozen once released.

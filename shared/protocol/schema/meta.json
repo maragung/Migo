@@ -52,7 +52,8 @@
     { "name": "CALLS",          "bit": 17, "description": "1:1 voice/video calls (section 165/166/180)" },
     { "name": "GROUP_CALL",     "bit": 18, "description": "SFU group calls (section 166)" },
     { "name": "FEDERATION",     "bit": 19, "description": "Server-to-server mesh (section 169/170)" },
-    { "name": "RICH_PRESENCE",  "bit": 20, "description": "Custom status and activity (section 26)" }
+    { "name": "RICH_PRESENCE",  "bit": 20, "description": "Custom status and activity (section 26)" },
+    { "name": "TCP_TRANSPORT",  "bit": 21, "description": "Raw TCP realtime listener available for native clients (section 138)" }
   ],
   "delivery_classes": [
     { "name": "Critical",    "description": "Never dropped. Lagging session is closed with RESUME_REQUIRED instead" },

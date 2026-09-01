@@ -59,9 +59,11 @@ object Feature {
     val FEDERATION: ULong = 524288uL
     /** Custom status and activity (section 26) */
     val RICH_PRESENCE: ULong = 1048576uL
+    /** Raw TCP realtime listener available for native clients (section 138) */
+    val TCP_TRANSPORT: ULong = 2097152uL
 
     /** Everything this build understands. */
-    val ALL: ULong = COMPRESSION or BATCHING or E2E_V1 or GROUP_E2E_V1 or PRESENCE or TYPING or ROOMS or MEDIA_UPLOAD or GAMES or BOTS or TRANSLATION or VOICE_MESSAGE or QUIC or TRACING or RESUME or ECONOMY or VOICE_NOTE or CALLS or GROUP_CALL or FEDERATION or RICH_PRESENCE
+    val ALL: ULong = COMPRESSION or BATCHING or E2E_V1 or GROUP_E2E_V1 or PRESENCE or TYPING or ROOMS or MEDIA_UPLOAD or GAMES or BOTS or TRANSLATION or VOICE_MESSAGE or QUIC or TRACING or RESUME or ECONOMY or VOICE_NOTE or CALLS or GROUP_CALL or FEDERATION or RICH_PRESENCE or TCP_TRANSPORT
 }
 
 /** Stable protocol error codes. Frozen once released. */
