@@ -20,8 +20,21 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** The three audited libraries ADR-0003 allows; every crypto primitive must come from one of them. */
-const AUDITED = new Set(['@noble/ciphers', '@noble/curves', '@noble/hashes']);
+/**
+ * The audited libraries the crypto package may depend on. The ADR-0003 trio carried the E2EE
+ * stack; ADR-0013's account port added three more, each for a primitive the trio does not carry
+ * and each from the same audited shelf: `@noble/post-quantum` for ML-DSA-65 (same authors and
+ * audit posture as the rest of `@noble`), `@scure/bip32` for BIP-32/44 walking, and `hash-wasm`
+ * for Argon2id. Nothing else — a fifth family fails the manifest test below.
+ */
+const AUDITED = new Set([
+  '@noble/ciphers',
+  '@noble/curves',
+  '@noble/hashes',
+  '@noble/post-quantum',
+  '@scure/bip32',
+  'hash-wasm',
+]);
 
 /** What the SDK is allowed to import from outside its own tree: the workspace packages, no more. */
 const SDK_ALLOWED = new Set(['@migo/crypto', '@migo/protocol', '@migo/wire']);
@@ -49,11 +62,19 @@ function stripComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
 }
 
-/** The absolute paths of every `.ts` source file directly under `dir`. */
+/** The absolute paths of every `.ts` source file under `dir`, subdirectories included — the
+ * account port lives in `src/account/`, and a policy that skips it is not a policy. */
 function tsFiles(dir: string): string[] {
-  return readdirSync(dir)
-    .filter((name) => name.endsWith('.ts'))
-    .map((name) => path.join(dir, name));
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...tsFiles(full));
+    } else if (entry.name.endsWith('.ts')) {
+      out.push(full);
+    }
+  }
+  return out;
 }
 
 /** The npm package name an import specifier resolves to (`@noble/ciphers/chacha.js` -> `@noble/ciphers`). */
@@ -83,13 +104,14 @@ function cryptoSource(): string {
     .join('\n');
 }
 
-test('the crypto package declares only the three audited @noble libraries as dependencies', () => {
+test('the crypto package declares only the audited libraries as dependencies', () => {
   const manifest = JSON.parse(
     readFileSync(path.join(ROOT, 'packages', 'crypto', 'package.json'), 'utf8'),
   ) as { dependencies?: Record<string, string> };
   const deps = Object.keys(manifest.dependencies ?? {}).sort();
-  // Exactly the audited trio — no fourth crypto dependency slipped in, audited or not.
-  assert.deepEqual(deps, ['@noble/ciphers', '@noble/curves', '@noble/hashes']);
+  // Exactly the audited set — no unaudited crypto dependency slipped in, and no audited
+  // library the package does not actually use (a stale entry hides a removed import).
+  assert.deepEqual(deps, [...AUDITED].sort());
 });
 
 test('every external import in the crypto package resolves to an audited @noble library', () => {
@@ -114,8 +136,13 @@ test('each named primitive is the audited implementation, not a look-alike', () 
     ['HKDF', /hkdf[^;]*from\s*['"]@noble\/hashes/],
     ['SHA-256', /sha256[^;]*from\s*['"]@noble\/hashes/],
     ['HMAC', /hmac[^;]*from\s*['"]@noble\/hashes/],
+    ['Keccak-256 (EVM addresses)', /keccak_256[^;]*from\s*['"]@noble\/hashes/],
     ['Ed25519', /ed25519[^;]*from\s*['"]@noble\/curves/],
     ['X25519', /x25519[^;]*from\s*['"]@noble\/curves/],
+    ['secp256k1 (EVM keys)', /secp256k1[^;]*from\s*['"]@noble\/curves/],
+    ['ML-DSA-65 (account identity)', /ml_dsa65[^;]*from\s*['"]@noble\/post-quantum/],
+    ['BIP-32/44 (EVM derivation)', /HDKey[^;]*from\s*['"]@scure\/bip32/],
+    ['Argon2id (container key stretch)', /argon2id[^;]*from\s*['"]hash-wasm/],
   ];
   for (const [name, pattern] of bindings) {
     assert.match(source, pattern, `${name} is not imported from its audited @noble library`);

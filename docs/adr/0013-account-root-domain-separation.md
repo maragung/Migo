@@ -89,4 +89,7 @@ secp256k1 is not — and no amount of ML-DSA upstream changes that.
 Reference implementation: `server/crates/migo-account` (Rust, consumed by the
 server for verification and by desktop in full), ported byte-for-byte to
 `packages/crypto` (TypeScript) and `clients/android/core` (Kotlin), with
-cross-port test vectors pinning the derivations.
+cross-port test vectors pinning the derivations. The TypeScript port draws its
+account-only primitives from the same audited shelf as ADR-0003's trio:
+`@noble/post-quantum` (ML-DSA-65), `@scure/bip32` (BIP-32/44), and `hash-wasm`
+(Argon2id) — each added to the SDK's provenance gate, not exempted from it.
