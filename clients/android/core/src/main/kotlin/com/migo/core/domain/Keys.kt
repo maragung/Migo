@@ -1,5 +1,7 @@
 package com.migo.core.domain
 
+import com.migo.core.account.MigoRoot
+import com.migo.core.account.foundingDeviceE2eeSeeds
 import com.migo.core.crypto.IdentityPublic
 import com.migo.core.crypto.IdentitySecret
 import com.migo.core.crypto.KeyPair
@@ -18,6 +20,7 @@ import com.migo.core.session.LocalKeyStore
 import com.migo.core.session.PeerBundleSource
 import com.migo.core.store.DeviceKeys
 import com.migo.core.store.SavedSession
+import com.migo.core.store.TxRecord
 import com.migo.core.wire.Id
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -111,10 +114,21 @@ class KeyStore private constructor(
     private var signedPrekey: SignedPrekeyEntry,
     private var nextSignedPrekeyId: Long,
     private var nextOneTimePrekeyId: Long,
+    /** The account root, when this device founded the account or restored a container onto it. */
+    private val heldRoot: MigoRoot?,
 ) : LocalKeyStore, IdentityProvider {
 
     private val lock = ReentrantLock()
     private val oneTimePrekeys = HashMap<Long, KeyPair>()
+
+    /**
+     * The account root this device holds, or null on an additional device.
+     *
+     * The same object the vault sealed, so a snapshot taken now and saved later writes the same
+     * root back. Additional devices never hold one: they sign in with a password and get fresh
+     * random material, which is what keeps the account's E2EE history out of every later device.
+     */
+    val root: MigoRoot? get() = heldRoot
 
     /**
      * This device's long-term identity secret. Backs both crypto layers.
@@ -228,7 +242,12 @@ class KeyStore private constructor(
      * returned map is a fresh copy, so a save that happens while a prekey is being consumed writes a
      * coherent pool rather than one being mutated underneath it.
      */
-    fun export(session: SavedSession?): DeviceKeys = lock.withLock {
+    /**
+     * The caller's tracked AVAX transactions ride along with the key material, held by the caller
+     * between saves the same way the prekey pool is: the list is the wallet surface's live state,
+     * and every save seals whatever the caller currently holds.
+     */
+    fun export(session: SavedSession?, txs: List<TxRecord> = emptyList()): DeviceKeys = lock.withLock {
         DeviceKeys(
             identity = identityKey,
             signedPrekeyId = signedPrekey.keyId,
@@ -237,6 +256,8 @@ class KeyStore private constructor(
             nextSignedPrekeyId = nextSignedPrekeyId,
             nextOneTimePrekeyId = nextOneTimePrekeyId,
             session = session,
+            root = heldRoot,
+            txs = txs,
         )
     }
 
@@ -265,7 +286,24 @@ class KeyStore private constructor(
          */
         fun create(oneTimePrekeyCount: Int = DEFAULT_ONE_TIME_PREKEYS): KeyStore {
             val identity = IdentitySecret.generate()
-            val store = KeyStore(identity, buildSignedPrekey(identity, 1L), 2L, 1L)
+            val store = KeyStore(identity, buildSignedPrekey(identity, 1L), 2L, 1L, null)
+            store.replenishOneTimePrekeys(oneTimePrekeyCount)
+            return store
+        }
+
+        /**
+         * The founding device of a brand-new account: the root is minted by the caller, and the
+         * E2EE identity is *derived from it* rather than generated, which is what makes the
+         * account's whole key history recoverable from a `.migo` container later. The E2EE
+         * protocol above the seeds is unchanged — only the origin of the seeds differs from
+         * [create], which remains the additional-device path.
+         */
+        fun founding(root: MigoRoot, oneTimePrekeyCount: Int = DEFAULT_ONE_TIME_PREKEYS): KeyStore {
+            val (signing, exchange) = foundingDeviceE2eeSeeds(root)
+            val identity = IdentitySecret.fromSeeds(signing, exchange)
+            signing.fill(0)
+            exchange.fill(0)
+            val store = KeyStore(identity, buildSignedPrekey(identity, 1L), 2L, 1L, root)
             store.replenishOneTimePrekeys(oneTimePrekeyCount)
             return store
         }
@@ -289,6 +327,7 @@ class KeyStore private constructor(
                 entry,
                 keys.nextSignedPrekeyId,
                 keys.nextOneTimePrekeyId,
+                keys.root,
             )
             store.oneTimePrekeys.putAll(keys.oneTime)
             return store

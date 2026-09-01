@@ -5,11 +5,15 @@ import android.os.Build
 import com.migo.core.ConnectionState
 import com.migo.core.MigoClient
 import com.migo.core.MigoClientOptions
+import com.migo.core.account.EvmWallet
+import com.migo.core.account.IdentityKey
+import com.migo.core.account.MigoRoot
 import com.migo.core.domain.KeyStore
 import com.migo.core.store.GatewayScheme
 import com.migo.core.store.ServerEndpoint
 import com.migo.core.store.SessionStore
 import com.migo.core.store.Transport
+import com.migo.core.store.TxRecord
 import com.migo.core.store.Vault
 import com.migo.core.store.VaultError
 import com.migo.core.wire.Id
@@ -77,7 +81,16 @@ class MigoSession private constructor(
     private val store: SessionStore,
 ) {
     /**
-     * Seals the current identity, prekeys and grant into the vault.
+     * This device's tracked AVAX transactions, newest first — the wallet surface's live list.
+     *
+     * Seeded from the vault at construction and sealed back on every [persist], which is the same
+     * trade the prekey pool makes: the list survives process death in the encrypted vault, and
+     * between saves it lives here where the send flow can mutate it.
+     */
+    val trackedTxs: MutableList<TxRecord> = ArrayList()
+
+    /**
+     * Seals the current identity, prekeys, grant and tracked transactions into the vault.
      *
      * Call it after connecting and after anything that changes key material, because both refreshing
      * and replenishing rotate values the next launch needs: a refresh token that was rotated but not
@@ -87,7 +100,7 @@ class MigoSession private constructor(
      * @throws VaultError.NotWritten when the file could not be replaced
      */
     suspend fun persist() {
-        val keys = client.snapshot(username)
+        val keys = client.snapshot(username, trackedTxs.toList())
         withContext(Dispatchers.IO) { vault.save(keys) }
     }
 
@@ -114,6 +127,30 @@ class MigoSession private constructor(
      */
     suspend fun close() {
         client.close()
+    }
+
+    /**
+     * Publishes the root's account material: the ML-DSA identity key, and any of the root's first
+     * wallets the server does not know yet.
+     *
+     * Best-effort by design — a failure here is not a failed sign-in, because the password already
+     * worked and the calls are idempotent: the next sign-in tries again. The address is a pure
+     * function of the root, so "which wallets exist" is server state, not a matter of opinion, and
+     * every address the root derives that is not registered gets registered.
+     */
+    private suspend fun enrolAccountMaterial() {
+        val root = client.keyStore.root ?: return
+        try {
+            client.publishIdentityKey(IdentityKey.fromRoot(root).publicKey())
+            val known = client.registeredWallets().map { it.address }.toSet()
+            val wallet = EvmWallet.fromRoot(root, 0)
+            val address = wallet.addressChecksummed()
+            if (address !in known) {
+                client.registerWallet(address, 0)
+            }
+        } catch (_: Exception) {
+            // Deliberately quiet: the material publishes again on the next sign-in.
+        }
     }
 
     companion object {
@@ -155,16 +192,25 @@ class MigoSession private constructor(
                 hooks,
             )
             val session = MigoSession(client, saved.username, vault, store)
+            session.trackedTxs.addAll(keys.txs)
             // Refresh before connecting: the stored access token is minutes old at best and hours old
             // in practice, and a handshake with an expired one fails in a way that looks like a bad
             // password. The refresh rotates the token, so the persist below is not optional.
             val grant = client.refreshWith(saved.refreshToken, saved.deviceId)
             client.resume(grant)
+            session.enrolAccountMaterial()
             session.persist()
             return session
         }
 
-        /** Registers a new account and a first device, minting a fresh identity for it. */
+        /**
+         * Registers a new account and its founding device.
+         *
+         * A registration is the founding device of a brand-new account (§182), so it mints the
+         * account root and derives the E2EE identity from the root's E2EE domain — recoverable from
+         * a `.migo` container, which is the point. After the account exists, the root's public
+         * material is published and wallet 0 registered, idempotently.
+         */
         suspend fun register(
             context: Context,
             appVersion: String,
@@ -174,9 +220,11 @@ class MigoSession private constructor(
             hooks: SessionHooks = SessionHooks(),
         ): MigoSession {
             val (vault, store) = reset(context)
-            val client = build(endpoint, appVersion, null, KeyStore.create(), store, hooks)
+            val root = MigoRoot.generate()
+            val client = build(endpoint, appVersion, null, KeyStore.founding(root), store, hooks)
             val session = MigoSession(client, username, vault, store)
             client.register(username, password)
+            session.enrolAccountMaterial()
             session.persist()
             return session
         }
@@ -218,7 +266,13 @@ class MigoSession private constructor(
                 val client =
                     build(endpoint, appVersion, deviceId, KeyStore.restore(keys), store, hooks)
                 val session = MigoSession(client, identifier, vault, store)
+                session.trackedTxs.addAll(keys.txs)
                 client.login(identifier, password)
+                // A device that holds the root re-publishes its material on every sign-in: the
+                // call is idempotent, and it is the legacy upgrade door that makes an account
+                // created before the root existed ML-DSA-loginable the day its founding device
+                // signs in again.
+                session.enrolAccountMaterial()
                 session.persist()
                 return session
             }

@@ -12,24 +12,38 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.migo.app.model.AppState
+import com.migo.app.model.ChainNetworkChoice
+import com.migo.app.model.ChainState
+import com.migo.app.model.ChainTxRow
+import com.migo.app.model.PreparedChainTx
+import com.migo.app.model.avaxOf
+import com.migo.app.model.navaxOf
 import com.migo.core.protocol.GiftListing
 import com.migo.core.protocol.LedgerEntryWire
 import com.migo.core.protocol.RelationshipKind
@@ -48,12 +62,20 @@ fun WalletScreen(
     state: AppState.SignedIn,
     onSendGift: (sku: String, recipient: Id) -> Unit,
     onRefresh: () -> Unit,
+    onChainNetwork: (ChainNetworkChoice) -> Unit,
+    onChainBalance: () -> Unit,
+    onChainPrepare: (recipient: String, amount: String) -> Unit,
+    onChainAcknowledged: (Boolean) -> Unit,
+    onChainCancel: () -> Unit,
+    onChainSend: (PreparedChainTx) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // The picker survives recomposition but not process death: a gift half-addressed is cheaply
     // re-chosen, and GiftListing is not a saveable type.
-    var picking: GiftListing? by androidx.compose.runtime.remember { mutableStateOf<GiftListing?>(null) }
+    var picking: GiftListing? by remember { mutableStateOf<GiftListing?>(null) }
     var recipientField by rememberSaveable { mutableStateOf("") }
+    // The AVAX send form's own visibility; its text survives rotation in saveables below.
+    var chainSending by rememberSaveable { mutableStateOf(false) }
 
     val kindFriend: Long = RelationshipKind.Friend.wire.toLong()
     val friends = state.friends.entries.filter { it.kind == kindFriend }
@@ -87,6 +109,16 @@ fun WalletScreen(
                             emphasise = false,
                         )
                     }
+                }
+
+                // The AVAX side (§184): one named network at a time, balance by explicit refresh.
+                item {
+                    ChainPanel(
+                        chain = state.wallet.chain,
+                        onNetwork = onChainNetwork,
+                        onBalance = onChainBalance,
+                        onSend = { chainSending = true },
+                    )
                 }
 
                 // Progression: level and the bar behind it.
@@ -159,6 +191,15 @@ fun WalletScreen(
                     }
                 }
 
+                // The AVAX activity: the account's own tracked sends, newest first.
+                if (state.wallet.chain.activity.isNotEmpty()) {
+                    item { SectionLabel(text = "AVAX activity") }
+                    items(state.wallet.chain.activity, key = { it.txHash }) { row ->
+                        ChainTxLine(row = row)
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    }
+                }
+
                 // The leaderboard.
                 if (state.wallet.leaders.isNotEmpty()) {
                     item { SectionLabel(text = "Leaderboard") }
@@ -226,6 +267,24 @@ fun WalletScreen(
                     }
                 }
             }
+        }
+        // The AVAX send form: one screen, form then full transaction, mirroring the desktop
+        // client's send window. It closes itself the moment a broadcast is accepted -- what
+        // follows is the tracking line's business, not the form's.
+        LaunchedEffect(state.wallet.chain.tracking) {
+            if (state.wallet.chain.tracking != null) chainSending = false
+        }
+        if (chainSending) {
+            ChainSendForm(
+                chain = state.wallet.chain,
+                onPrepare = onChainPrepare,
+                onAcknowledged = onChainAcknowledged,
+                onCancel = {
+                    chainSending = false
+                    onChainCancel()
+                },
+                onSend = onChainSend,
+            )
         }
     }
 }
@@ -307,3 +366,257 @@ fun ledgerAmount(entry: LedgerEntryWire): String =
 /** The XP bar's filled fraction, clamped into 0..1 — an unfilled bar is honest, NaN% is not. */
 fun xpFraction(into: Long, total: Long): Float =
     if (total <= 0L) 0f else (into.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+
+/**
+ * The AVAX panel (§184): one named network at a time, wallet 0's address, a balance the user asks
+ * for, and the way out to the send form.
+ *
+ * The network is two names and no URL — a self-supplied RPC is the classic way a wallet gets shown
+ * a fake chain. The balance is a pull, never a poll, and an error stays on screen because "could
+ * not check" and "zero" are different facts.
+ */
+@Composable
+private fun ChainPanel(
+    chain: ChainState,
+    onNetwork: (ChainNetworkChoice) -> Unit,
+    onBalance: () -> Unit,
+    onSend: () -> Unit,
+) {
+    val clipboard = LocalClipboardManager.current
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+        SectionLabel(text = "AVAX")
+        Row(
+            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp),
+        ) {
+            FilterChip(
+                selected = chain.network == ChainNetworkChoice.MAINNET,
+                onClick = { onNetwork(ChainNetworkChoice.MAINNET) },
+                label = { Text("Mainnet") },
+            )
+            FilterChip(
+                selected = chain.network == ChainNetworkChoice.FUJI,
+                onClick = { onNetwork(ChainNetworkChoice.FUJI) },
+                label = { Text("Fuji (testnet)") },
+            )
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        // The address, EIP-55: the form a person can check a character of, and a copy button
+        // because nobody retypes forty-two characters without introducing a typo.
+        chain.address?.let { address ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = address,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = { clipboard.setText(AnnotatedString(address)) }) { Text("Copy") }
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = chain.balance?.let { avaxOf(it) + " AVAX" } ?: "balance after a refresh",
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onBalance) { Text("Refresh") }
+        }
+        chain.error?.let { error ->
+            Text(text = error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+        chain.tracking?.let { tracking ->
+            Text(
+                text = "tracking " + tracking.txHash.take(14) + "… · " + tracking.state,
+                style = MaterialTheme.typography.bodySmall,
+                color = LocalMigoExtra.current.faint,
+            )
+        }
+        OutlinedButton(onClick = onSend, enabled = chain.tracking == null, modifier = Modifier.fillMaxWidth()) {
+            Text("Send AVAX")
+        }
+    }
+}
+
+/**
+ * The AVAX send form: one screen, form then full transaction.
+ *
+ * The confirm half shows every field before anything is signed, and the confirm button hands the
+ * prepared struct back verbatim — the view model re-parses and re-checks it, so what is signed is
+ * what was shown (spec #40). Mainnet is real money, and the first send on it says so before the
+ * button unlocks.
+ */
+@Composable
+private fun ChainSendForm(
+    chain: ChainState,
+    onPrepare: (recipient: String, amount: String) -> Unit,
+    onAcknowledged: (Boolean) -> Unit,
+    onCancel: () -> Unit,
+    onSend: (PreparedChainTx) -> Unit,
+) {
+    var recipient by rememberSaveable { mutableStateOf("") }
+    var amount by rememberSaveable { mutableStateOf("") }
+    val prepared = chain.prepared
+    Column(modifier = Modifier.fillMaxWidth().padding(16.dp).imePadding()) {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            shape = MaterialTheme.shapes.medium,
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                if (prepared == null) {
+                    Text(
+                        text = "Send AVAX · " + chain.network.label,
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = recipient,
+                        onValueChange = { recipient = it },
+                        label = { Text("Recipient address (0x…)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = amount,
+                        onValueChange = { amount = it },
+                        label = { Text("Amount (AVAX)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    chain.prepareError?.let { error ->
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = error,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row {
+                        TextButton(onClick = onCancel) { Text("Cancel") }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = { onPrepare(recipient, amount) },
+                            enabled = recipient.isNotBlank() && amount.isNotBlank(),
+                        ) { Text("Build") }
+                    }
+                } else {
+                    Text(text = "Confirm the transaction", style = MaterialTheme.typography.titleMedium)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    PreparedLine(label = "From", value = prepared.from)
+                    PreparedLine(label = "To", value = prepared.to)
+                    PreparedLine(label = "Amount", value = avaxOf(prepared.valueWei) + " AVAX")
+                    PreparedLine(
+                        label = "Max fee",
+                        value = navaxOf(
+                            prepared.maxFeePerGas.multiply(java.math.BigInteger.valueOf(prepared.gasLimit)),
+                        ) + " nAVAX",
+                    )
+                    PreparedLine(
+                        label = "Max priority fee",
+                        value = navaxOf(prepared.maxPriorityFeePerGas) + " nAVAX",
+                    )
+                    PreparedLine(label = "Gas limit", value = prepared.gasLimit.toString())
+                    PreparedLine(label = "Nonce", value = prepared.nonce.toString())
+                    PreparedLine(label = "Chain", value = prepared.network.label)
+                    if (prepared.network == ChainNetworkChoice.MAINNET) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = chain.mainnetAcknowledged,
+                                onCheckedChange = onAcknowledged,
+                            )
+                            Text(
+                                text = "This is mainnet AVAX — real money, sent to the address above, not reversible.",
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                    chain.sendError?.let { error ->
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = error,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row {
+                        TextButton(onClick = onCancel) { Text("Back") }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = { onSend(prepared) },
+                            enabled = chain.tracking == null &&
+                                (prepared.network != ChainNetworkChoice.MAINNET || chain.mainnetAcknowledged),
+                        ) { Text("Confirm send") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** One line of the confirm screen: a label, and the exact value that will be signed. */
+@Composable
+private fun PreparedLine(label: String, value: String) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = LocalMigoExtra.current.faint,
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            fontFamily = FontFamily.Monospace,
+        )
+    }
+}
+
+/**
+ * One tracked AVAX send as the Activity list draws it.
+ *
+ * The fee reads as a ceiling until the receipt replaces it with the gas actually spent — a
+ * confirmed spend should never overstate what it cost. The hash is the explorer's handle:
+ * shortened here, whole in the clipboard copy.
+ */
+@Composable
+private fun ChainTxLine(row: ChainTxRow) {
+    val clipboard = LocalClipboardManager.current
+    val extra = LocalMigoExtra.current
+    val (word, tone) = when (row.outcome) {
+        "CONFIRMED" -> "confirmed" to MaterialTheme.colorScheme.secondary
+        "REVERTED", "DROPPED" -> row.outcome.lowercase() to MaterialTheme.colorScheme.error
+        "EXPIRED" -> "expired" to extra.gold
+        else -> row.outcome to extra.faint
+    }
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "-" + avaxOf(row.valueWei) + " AVAX",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = word,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = tone,
+            )
+        }
+        OneLine(text = "to " + row.to.take(10) + "… · " + row.network)
+        val fee = if (row.gasUsed != null && row.block != null) {
+            "fee " + row.gasUsed + " gas"
+        } else {
+            "fee ≤ " + navaxOf(row.feeWei) + " nAVAX"
+        }
+        OneLine(
+            text = listOfNotNull(fee, row.block?.let { "block $it" }, clockTime(row.at)).joinToString(" · "),
+        )
+        TextButton(onClick = { clipboard.setText(AnnotatedString(row.txHash)) }) {
+            Text(text = row.txHash.take(14) + "…", style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}

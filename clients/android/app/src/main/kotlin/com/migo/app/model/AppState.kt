@@ -13,6 +13,7 @@ import com.migo.core.protocol.RoomSummary
 import com.migo.core.protocol.SuggestedUser
 import com.migo.core.store.ServerEndpoint
 import com.migo.core.wire.Id
+import java.math.BigInteger
 
 /**
  * Everything the interface draws, as one immutable value.
@@ -166,6 +167,102 @@ data class WalletState(
     val catalogue: List<GiftListing> = emptyList(),
     /** True while the wallet's combined read is in flight. */
     val loading: Boolean = false,
+    /** The AVAX side (§184): one network at a time, balance by explicit refresh. */
+    val chain: ChainState = ChainState(),
+)
+
+/**
+ * The two first-class Avalanche networks the wallet surface knows (§184).
+ *
+ * The user picks a network by name, never a URL — a self-supplied RPC is the classic way a wallet
+ * gets shown a fake chain (spec #44). The pinned endpoint travels with the choice in the core
+ * `Network` constants; this enum is the interface's word for the same two names.
+ */
+enum class ChainNetworkChoice(val label: String) {
+    MAINNET("Avalanche C-Chain (mainnet)"),
+    FUJI("Avalanche Fuji (testnet)"),
+}
+
+/**
+ * The built transaction awaiting its confirmation, exactly as it was displayed.
+ *
+ * The send screen shows every field, and the confirm button hands this struct back verbatim; the
+ * view model re-parses the recipient's EIP-55 checksum and checks the sender against this device's
+ * wallet 0 before anything is signed, so what is signed is what was shown (spec #40).
+ */
+data class PreparedChainTx(
+    val network: ChainNetworkChoice,
+    val chainId: Long,
+    /** The sender, EIP-55 checksummed. */
+    val from: String,
+    /** The recipient, EIP-55 checksummed — the string the user confirmed. */
+    val to: String,
+    /** The amount, wei. AVAX has 18 decimals. */
+    val valueWei: BigInteger,
+    val maxPriorityFeePerGas: BigInteger,
+    val maxFeePerGas: BigInteger,
+    val gasLimit: Long,
+    val nonce: Long,
+)
+
+/** One in-flight send as the surface shows it: the explorer's handle and spec #41's own word. */
+data class TrackingChainTx(
+    val txHash: String,
+    val state: String,
+)
+
+/** One tracked AVAX transaction as the Activity list draws it. */
+data class ChainTxRow(
+    /** The transaction hash, `0x`-prefixed hex. */
+    val txHash: String,
+    /** The network by name; an unknown chain id labels itself honestly. */
+    val network: String,
+    /** The recipient, EIP-55 checksummed. */
+    val to: String,
+    val valueWei: BigInteger,
+    /** The fee ceiling that was confirmed, wei. */
+    val feeWei: BigInteger,
+    val gasLimit: Long,
+    /** Unix milliseconds of the broadcast. */
+    val at: Long,
+    /** Spec #41's own word for where the transaction stands. */
+    val outcome: String,
+    /** The block that included the transaction, once one did. */
+    val block: Long? = null,
+    /** The gas the receipt says the block actually spent, once a receipt answered. */
+    val gasUsed: BigInteger? = null,
+)
+
+/**
+ * The AVAX wallet surface's state.
+ *
+ * A balance is a pull, never a poll: [balance] is whatever the last refresh the user asked for
+ * answered, and an error stays on screen because "could not check" and "zero" are different facts
+ * and only one of them should reassure anybody.
+ */
+data class ChainState(
+    /** The network the surface is on. Mainnet is the default for *display*; the first send on it
+     *  says what mainnet means before the button that spends unlocks. */
+    val network: ChainNetworkChoice = ChainNetworkChoice.MAINNET,
+    /** The wallet's EIP-55 address, once a read discovered it. Null until then, and null forever
+     *  on a device without the root — the read's error carries that sentence instead. */
+    val address: String? = null,
+    /** The balance in wei, after the last refresh. */
+    val balance: BigInteger? = null,
+    /** Why the last refresh could not answer. */
+    val error: String? = null,
+    /** The built transaction awaiting confirmation. */
+    val prepared: PreparedChainTx? = null,
+    /** Why nothing could be built. */
+    val prepareError: String? = null,
+    /** Why a broadcast was refused. */
+    val sendError: String? = null,
+    /** The acknowledgement on a mainnet send: real money, said before the button unlocks. */
+    val mainnetAcknowledged: Boolean = false,
+    /** The in-flight send, from acceptance to its ending. */
+    val tracking: TrackingChainTx? = null,
+    /** This account's tracked transactions, newest first. */
+    val activity: List<ChainTxRow> = emptyList(),
 )
 
 /** The Alerts section: the durable inbox and its read state. */
@@ -247,3 +344,45 @@ data class ChatMessage(
      */
     val unsupported: Boolean = false,
 )
+
+/**
+ * A wei amount as AVAX, 18 decimals, trailing zeros trimmed: the amount a person typed is the
+ * amount they should read back.
+ */
+fun avaxOf(wei: BigInteger): String = decimalOf(wei, 18)
+
+/** A wei amount as nAVAX (§184's fee unit): 9 decimals, trailing zeros trimmed. */
+fun navaxOf(wei: BigInteger): String = decimalOf(wei, 9)
+
+private fun decimalOf(wei: BigInteger, decimals: Int): String {
+    val whole = wei.divide(BigInteger.TEN.pow(decimals))
+    var fraction = wei.subtract(whole.multiply(BigInteger.TEN.pow(decimals))).toString(10)
+    if (fraction.all { it == '0' }) return whole.toString(10)
+    while (fraction.length < decimals) fraction = "0$fraction"
+    return "${whole}.${fraction.trimEnd('0')}"
+}
+
+/**
+ * The send form's amount string as wei, or null when it is not an amount this chain accepts.
+ *
+ * The refusals are the ones the desktop client enforces too: empty, signed, non-decimal, a second
+ * dot, more than 18 fractional digits, or too large for the u128 the wire carries.
+ */
+fun parseAvaxAmount(text: String): BigInteger? {
+    val trimmed = text.trim()
+    if (trimmed.isEmpty()) return null
+    val parts = trimmed.split('.')
+    if (parts.size > 2) return null
+    val (whole, fraction) = parts[0] to parts.getOrElse(1) { "" }
+    if (whole.isEmpty() && fraction.isEmpty()) return null
+    if (whole.any { !it.isDigit() } || fraction.any { !it.isDigit() }) return null
+    if (fraction.length > 18) return null
+    val unit = BigInteger.TEN.pow(18)
+    val wholeWei = (if (whole.isEmpty()) BigInteger.ZERO else BigInteger(whole, 10)).multiply(unit)
+    val fractionWei = if (fraction.isEmpty()) {
+        BigInteger.ZERO
+    } else {
+        BigInteger(fraction, 10).multiply(BigInteger.TEN.pow(18 - fraction.length))
+    }
+    return wholeWei.add(fractionWei)
+}

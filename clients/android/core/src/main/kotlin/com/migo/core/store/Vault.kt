@@ -1,6 +1,7 @@
 package com.migo.core.store
 
 import android.content.Context
+import com.migo.core.account.MigoRoot
 import com.migo.core.crypto.AEAD_KEY_LEN
 import com.migo.core.crypto.AEAD_NONCE_LEN
 import com.migo.core.crypto.AEAD_TAG_LEN
@@ -159,11 +160,27 @@ class DeviceKeys(
     val nextOneTimePrekeyId: Long,
     /** The saved sign-in, when there is one. */
     val session: SavedSession?,
+    /**
+     * The unified account root, on the device that founded the account or restored a `.migo`
+     * container onto it. Null on every additional device: they never inherit the founding
+     * device's material, which is what keeps a lost phone from being a lost account.
+     */
+    val root: MigoRoot?,
+    /**
+     * This account's tracked AVAX transactions, newest first.
+     *
+     * Held by the caller between saves the same way the prekey pool is: the record list is the
+     * app's live state, and every vault save seals whatever the caller holds — so a broadcast
+     * mid-session persists on the next persist() the app performs, and the list survives the
+     * process death in between.
+     */
+    val txs: List<TxRecord> = emptyList(),
 ) {
     /** Public shape only; no seed and no token. */
     override fun toString(): String =
         "DeviceKeys(identity: ${identity.public()}, signed_prekey_id: $signedPrekeyId, " +
-            "one_time_count: ${oneTime.size}, session: ${session ?: "none"})"
+            "one_time_count: ${oneTime.size}, session: ${session ?: "none"}, " +
+            "root: ${if (root != null) "held" else "none"}, tx_count: ${txs.size})"
 
     /**
      * Drops the one-time prekeys.
@@ -361,6 +378,20 @@ class Vault private constructor(private val file: File, private val wrappingKey:
                 sub.str(session.refreshToken)
             }
         }
+        // The root is present only on a device that holds it, and the tx list only when it has
+        // entries: an optional field that exists to say "nothing here" costs every older build a
+        // skip for no information.
+        val root = keys.root
+        if (root != null) {
+            w.optional(FIELD_ROOT) { sub -> sub.bytes(root.asBytes()) }
+        }
+        val txs = keys.txs
+        if (txs.isNotEmpty()) {
+            w.optional(FIELD_TXS) { sub ->
+                sub.listLen(txs.size)
+                for (record in txs) writeTxRecord(sub, record)
+            }
+        }
         w.leave()
         return w.finish()
     }
@@ -401,6 +432,8 @@ class Vault private constructor(private val file: File, private val wrappingKey:
         var session: SavedSession? = null
         var nextSignedPrekeyId: Long? = null
         var nextOneTimePrekeyId: Long? = null
+        var root: MigoRoot? = null
+        var txs: List<TxRecord> = emptyList()
         val optionalCount = r.u32()
         for (i in 0L until optionalCount) {
             val (fieldId, sub) = r.optional()
@@ -410,6 +443,20 @@ class Vault private constructor(private val file: File, private val wrappingKey:
                 FIELD_KEY_COUNTERS.toLong() -> {
                     nextSignedPrekeyId = sub.u32()
                     nextOneTimePrekeyId = sub.u32()
+                }
+                FIELD_ROOT.toLong() -> {
+                    // A wrong length refuses the whole vault rather than wrapping a short read:
+                    // a root is 32 bytes by construction, and anything else is not a root this
+                    // build can be responsible for.
+                    val bytes = sub.bytes()
+                    if (bytes.size != MigoRoot.LEN) throw VaultError.Unreadable
+                    root = MigoRoot.fromBytes(bytes)
+                }
+                FIELD_TXS.toLong() -> {
+                    val count = sub.listLen()
+                    val records = ArrayList<TxRecord>(count)
+                    for (j in 0 until count) records.add(readTxRecord(sub))
+                    txs = records
                 }
                 // Any other field was written by a newer build and is skipped by its length.
                 else -> {}
@@ -428,6 +475,8 @@ class Vault private constructor(private val file: File, private val wrappingKey:
             nextSignedPrekeyId ?: (signedPrekeyId + 1L),
             nextOneTimePrekeyId ?: ((oneTime.keys.maxOrNull() ?: 0L) + 1L),
             session,
+            root,
+            txs,
         )
     }
 
@@ -447,6 +496,12 @@ class Vault private constructor(private val file: File, private val wrappingKey:
         /** The optional-field id under which the saved sign-in lives. */
         private const val FIELD_SESSION = 1
         private const val FIELD_KEY_COUNTERS = 2
+
+        /** The optional-field id under which the unified account root lives. */
+        private const val FIELD_ROOT = 3
+
+        /** The optional-field id under which this device's tracked AVAX transactions live. */
+        private const val FIELD_TXS = 4
 
         /**
          * A ceiling on the one-time prekeys a vault may claim to hold.

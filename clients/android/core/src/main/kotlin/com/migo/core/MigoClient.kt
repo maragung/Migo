@@ -31,6 +31,7 @@ import com.migo.core.net.Grant
 import com.migo.core.net.RealtimeTransport
 import com.migo.core.net.Rest
 import com.migo.core.net.TcpGateway
+import com.migo.core.net.WalletSummary
 import com.migo.core.protocol.Acknowledged
 import com.migo.core.protocol.BandwidthMode
 import com.migo.core.protocol.ClientInfo
@@ -64,6 +65,7 @@ import com.migo.core.session.SessionCrypto
 import com.migo.core.session.SessionPersistence
 import com.migo.core.store.DeviceKeys
 import com.migo.core.store.SavedSession
+import com.migo.core.store.TxRecord
 import com.migo.core.wire.Id
 import com.migo.core.wire.NIL_ID
 import com.migo.core.wire.parseId
@@ -560,8 +562,11 @@ class MigoClient private constructor(
      * it to show which account a device is signed in as before anything is unlocked. Nothing here
      * crosses the network; the refresh token in it is a credential and the vault is the only place it
      * belongs.
+     *
+     * [txs] is the caller's tracked-transaction list, sealed with the keys so a broadcast mid-session
+     * persists on the next save the caller performs — the same ownership the prekey pool has.
      */
-    fun snapshot(username: String): DeviceKeys {
+    fun snapshot(username: String, txs: List<TxRecord> = emptyList()): DeviceKeys {
         val session = requireConnected()
         return keyStore.export(
             SavedSession(
@@ -571,8 +576,41 @@ class MigoClient private constructor(
                 username = username,
                 refreshToken = session.grant.refreshToken,
             ),
+            txs,
         )
     }
+
+    // --- account identity, over REST ---
+
+    /**
+     * Publishes the account's ML-DSA identity key, idempotently.
+     *
+     * The legacy upgrade door (§182): a device that holds the root tells the server so on every
+     * sign-in. A server that already has the key reconciles to the same row; one that has never
+     * seen it records it now, which is what makes the account identity-loginable at all.
+     */
+    suspend fun publishIdentityKey(identityPublicKey: ByteArray) {
+        rest.publishIdentityKey(requireConnected().grant.accessToken, identityPublicKey, null)
+    }
+
+    /** The account's registered wallet addresses, as the server knows them. */
+    suspend fun registeredWallets(): List<WalletSummary> =
+        rest.wallets(requireConnected().grant.accessToken)
+
+    /**
+     * Registers one of the root's wallets with the server.
+     *
+     * The address is a pure function of the root, so "which wallets exist" is server state, not a
+     * matter of opinion: a caller reconciles by registering any derived address the server does
+     * not know yet.
+     */
+    suspend fun registerWallet(
+        address: String,
+        derivationIndex: Int,
+        chainType: String = "evm",
+        label: String? = null,
+    ): WalletSummary =
+        rest.registerWallet(requireConnected().grant.accessToken, address, derivationIndex, chainType, label)
 
     // --- topic subscription ---
 

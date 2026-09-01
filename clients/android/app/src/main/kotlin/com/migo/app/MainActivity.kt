@@ -219,6 +219,12 @@ private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifie
             state = state,
             onSendGift = model::sendGift,
             onRefresh = model::loadWallet,
+            onChainNetwork = model::selectChainNetwork,
+            onChainBalance = model::refreshChainBalance,
+            onChainPrepare = model::prepareChainSend,
+            onChainAcknowledged = model::setChainAcknowledged,
+            onChainCancel = model::cancelChainPrepare,
+            onChainSend = model::confirmChainSend,
             modifier = modifier,
         )
 

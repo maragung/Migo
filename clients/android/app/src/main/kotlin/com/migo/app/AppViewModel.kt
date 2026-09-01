@@ -6,17 +6,33 @@ import androidx.lifecycle.viewModelScope
 import com.migo.app.model.ActivityCategory
 import com.migo.app.model.ActivityRow
 import com.migo.app.model.AppState
+import com.migo.app.model.ChainNetworkChoice
+import com.migo.app.model.ChainTxRow
 import com.migo.app.model.ChatMessage
 import com.migo.app.model.ChatState
 import com.migo.app.model.ConversationRow
+import com.migo.app.model.PreparedChainTx
+import com.migo.app.model.TrackingChainTx
+import com.migo.app.model.parseAvaxAmount
 import com.migo.app.session.MigoSession
 import com.migo.app.session.SessionHooks
 import com.migo.core.ConnectionState
+import com.migo.core.account.AVALANCHE_MAINNET
+import com.migo.core.account.Eip1559Tx
+import com.migo.core.account.EvmWallet
+import com.migo.core.account.FUJI_TESTNET
+import com.migo.core.account.Network
+import com.migo.core.account.eip55
+import com.migo.core.account.parseAddress
 import com.migo.core.crypto.Content
 import com.migo.core.domain.IncomingMessage
 import com.migo.core.domain.MessageDeletion
 import com.migo.core.domain.SendOptions
 import com.migo.core.domain.Subscription
+import com.migo.core.net.ChainClient
+import com.migo.core.net.TrackOptions
+import com.migo.core.net.TrackOutcome
+import com.migo.core.net.TrackResult
 import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.ConversationSummary
 import com.migo.core.protocol.InboxItem
@@ -29,9 +45,11 @@ import com.migo.core.protocol.TypingEvent
 import com.migo.core.protocol.TypingState
 import com.migo.core.store.ServerEndpoint
 import com.migo.core.store.Settings
+import com.migo.core.store.TxRecord
 import com.migo.core.wire.Id
 import com.migo.core.wire.WireError
 import com.migo.core.wire.parseId
+import java.math.BigInteger
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -673,6 +691,420 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // --- the chain wallet (§184) ---------------------------------------------------
+
+    /**
+     * What a device without the root is told, in one sentence, wherever the AVAX wallet is asked
+     * for. Additional devices have no wallet here at all — the address is a function of the root —
+     * and pretending otherwise would be a wallet surface that cannot send.
+     */
+    private val noRootOnDevice =
+        "This device does not hold the account root, so it has no AVAX wallet; open the wallet on the device that holds the account backup."
+
+    /** The two names the surface offers, resolved to the pinned `Network` constant each carries. */
+    private fun networkOf(choice: ChainNetworkChoice): Network = when (choice) {
+        ChainNetworkChoice.MAINNET -> AVALANCHE_MAINNET
+        ChainNetworkChoice.FUJI -> FUJI_TESTNET
+    }
+
+    /** The session's tracked list as the Activity surface draws it. The list is kept newest first. */
+    private fun chainActivity(live: MigoSession): List<ChainTxRow> = live.trackedTxs.map { record ->
+        ChainTxRow(
+            txHash = "0x" + hexOf(record.txHash),
+            network = networkName(record.chainId),
+            to = eip55(record.to),
+            valueWei = record.valueWei,
+            feeWei = record.feeWei,
+            gasLimit = record.gasLimit,
+            at = record.atUnix * 1000,
+            outcome = record.outcome,
+            block = record.block,
+            gasUsed = record.gasUsed,
+        )
+    }
+
+    /** A chain id as its network's name; one this build cannot name labels itself honestly. */
+    private fun networkName(chainId: Long): String = when (chainId) {
+        AVALANCHE_MAINNET.chainId -> AVALANCHE_MAINNET.name
+        FUJI_TESTNET.chainId -> FUJI_TESTNET.name
+        else -> "chain $chainId"
+    }
+
+    /**
+     * Lowercase hex for the public material the chain surface shows: transaction hashes and
+     * nothing else. The core's own `hexOf` is internal to it, and widening the SDK's surface for
+     * two display sites is the worse trade.
+     */
+    private fun hexOf(bytes: ByteArray): String {
+        val digits = "0123456789abcdef"
+        val out = StringBuilder(bytes.size * 2)
+        for (b in bytes) {
+            val value = b.toInt() and 0xff
+            out.append(digits[value ushr 4]).append(digits[value and 0x0f])
+        }
+        return out.toString()
+    }
+
+    /**
+     * Switches the AVAX surface to a network, by name — never a URL, §184's rule against
+     * self-supplied RPCs.
+     *
+     * Everything the other network's RPC said is cleared, because a balance from one chain is a
+     * lie beside another's name. The address and the Activity list survive the switch: the address
+     * is the same wallet on every network, and the list is the account's history, not one
+     * network's.
+     */
+    fun selectChainNetwork(choice: ChainNetworkChoice) {
+        val current = signedInState?.wallet?.chain ?: return
+        if (current.network == choice) return
+        signedIn {
+            it.copy(
+                wallet = it.wallet.copy(
+                    chain = it.wallet.chain.copy(
+                        network = choice,
+                        balance = null,
+                        error = null,
+                        prepared = null,
+                        prepareError = null,
+                        sendError = null,
+                    ),
+                ),
+            )
+        }
+    }
+
+    /**
+     * Wallet 0's balance on the chosen network, by explicit refresh only.
+     *
+     * A pull, never a poll: the balance shown is whatever the last refresh answered, and an error
+     * stays on screen because "could not check" and "zero" are different facts.
+     */
+    fun refreshChainBalance() {
+        val live = session ?: return
+        val choice = signedInState?.wallet?.chain?.network ?: return
+        signedIn { it.copy(wallet = it.wallet.copy(chain = it.wallet.chain.copy(error = null))) }
+        viewModelScope.launch {
+            val root = live.client.keyStore.root
+            if (root == null) {
+                signedIn {
+                    it.copy(wallet = it.wallet.copy(chain = it.wallet.chain.copy(address = null, error = noRootOnDevice)))
+                }
+                return@launch
+            }
+            val wallet = EvmWallet.fromRoot(root, 0)
+            try {
+                val balance = ChainClient(networkOf(choice)).getBalance(wallet.address())
+                // Only the network still on screen may answer: a balance from a network the user
+                // has since switched away from is a lie beside the other network's name.
+                if (signedInState?.wallet?.chain?.network != choice) return@launch
+                signedIn {
+                    it.copy(
+                        wallet = it.wallet.copy(
+                            chain = it.wallet.chain.copy(
+                                address = wallet.addressChecksummed(),
+                                balance = balance,
+                            ),
+                        ),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                if (signedInState?.wallet?.chain?.network != choice) return@launch
+                signedIn {
+                    it.copy(
+                        wallet = it.wallet.copy(
+                            chain = it.wallet.chain.copy(
+                                address = wallet.addressChecksummed(),
+                                error = readable(failure),
+                            ),
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Builds one AVAX transfer from the RPC's own answers, and nothing else.
+     *
+     * Parse failures happen before a single RPC leaves: a bad recipient or a bad amount is a form
+     * problem, and the network is not asked to confirm the shape of a text field. The fees, the
+     * gas and the nonce are the three lines the confirm screen quotes, so all three are asked
+     * before the prepared transaction exists — a prepared transaction with a guessed field is a
+     * confirmation screen that lies about one of its lines.
+     */
+    fun prepareChainSend(recipient: String, amount: String) {
+        val live = session ?: return
+        val choice = signedInState?.wallet?.chain?.network ?: return
+        signedIn {
+            it.copy(wallet = it.wallet.copy(chain = it.wallet.chain.copy(prepared = null, prepareError = null)))
+        }
+        val to = try {
+            parseAddress(recipient.trim())
+        } catch (failure: Exception) {
+            signedIn {
+                it.copy(wallet = it.wallet.copy(chain = it.wallet.chain.copy(prepareError = failure.message)))
+            }
+            return
+        }
+        val value = parseAvaxAmount(amount) ?: run {
+            signedIn {
+                it.copy(
+                    wallet = it.wallet.copy(
+                        chain = it.wallet.chain.copy(prepareError = "The amount is not a valid AVAX amount, e.g. 1.5"),
+                    ),
+                )
+            }
+            return
+        }
+        val root = live.client.keyStore.root
+        if (root == null) {
+            signedIn { it.copy(wallet = it.wallet.copy(chain = it.wallet.chain.copy(prepareError = noRootOnDevice))) }
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val wallet = EvmWallet.fromRoot(root, 0)
+                val client = ChainClient(networkOf(choice))
+                val fees = client.getFees()
+                val gasLimit = client.estimateGas(to, value, ByteArray(0))
+                val nonce = client.getNonce(wallet.address())
+                if (signedInState?.wallet?.chain?.network != choice) return@launch
+                signedIn {
+                    it.copy(
+                        wallet = it.wallet.copy(
+                            chain = it.wallet.chain.copy(
+                                prepared = PreparedChainTx(
+                                    network = choice,
+                                    chainId = networkOf(choice).chainId,
+                                    from = wallet.addressChecksummed(),
+                                    to = eip55(to),
+                                    valueWei = value,
+                                    maxPriorityFeePerGas = fees.maxPriorityFeePerGas,
+                                    maxFeePerGas = fees.maxFeePerGas,
+                                    gasLimit = gasLimit,
+                                    nonce = nonce,
+                                ),
+                            ),
+                        ),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                if (signedInState?.wallet?.chain?.network != choice) return@launch
+                signedIn {
+                    it.copy(wallet = it.wallet.copy(chain = it.wallet.chain.copy(prepareError = readable(failure))))
+                }
+            }
+        }
+    }
+
+    /** Records the mainnet acknowledgement: real money, said before the button that spends unlocks. */
+    fun setChainAcknowledged(acknowledged: Boolean) {
+        signedIn {
+            it.copy(wallet = it.wallet.copy(chain = it.wallet.chain.copy(mainnetAcknowledged = acknowledged)))
+        }
+    }
+
+    /** Drops a prepared transaction without sending it. */
+    fun cancelChainPrepare() {
+        signedIn {
+            it.copy(
+                wallet = it.wallet.copy(
+                    chain = it.wallet.chain.copy(prepared = null, prepareError = null, mainnetAcknowledged = false),
+                ),
+            )
+        }
+    }
+
+    /**
+     * Signs and broadcasts exactly the transaction the confirm screen displayed.
+     *
+     * Every field is re-derived from the prepared struct the screen sent back: the recipient is
+     * re-parsed (an EIP-55 checksum that survived a tamper fails here), the sender is checked
+     * against this device's own wallet 0, and the chain id comes from the named network — never
+     * from a field a screen could have edited. What is signed is what was shown (spec #40).
+     *
+     * The record is written at broadcast, not at settle: a crash mid-tracking loses the ending,
+     * never the fact that value left. Acceptance is what the broadcast reports — the tracker below
+     * is the only thing that can say CONFIRMED (spec #41).
+     */
+    fun confirmChainSend(tx: PreparedChainTx) {
+        val live = session ?: return
+        if (signedInState?.wallet?.chain?.tracking != null) return
+        val to = try {
+            parseAddress(tx.to.trim())
+        } catch (failure: Exception) {
+            signedIn { it.copy(wallet = it.wallet.copy(chain = it.wallet.chain.copy(sendError = failure.message))) }
+            return
+        }
+        val root = live.client.keyStore.root
+        if (root == null) {
+            signedIn { it.copy(wallet = it.wallet.copy(chain = it.wallet.chain.copy(sendError = noRootOnDevice))) }
+            return
+        }
+        val wallet = EvmWallet.fromRoot(root, 0)
+        // The `from` on screen must be this device's wallet 0: a prepared transaction carried over
+        // from another device, or an older derivation, is refused rather than signed with the
+        // wrong key for the right-looking screen.
+        if (tx.from != wallet.addressChecksummed()) {
+            signedIn {
+                it.copy(
+                    wallet = it.wallet.copy(
+                        chain = it.wallet.chain.copy(
+                            sendError = "The prepared transaction names a different sender; prepare it again here",
+                        ),
+                    ),
+                )
+            }
+            return
+        }
+        val network = networkOf(tx.network)
+        val body = Eip1559Tx(
+            chainId = network.chainId,
+            nonce = tx.nonce,
+            maxPriorityFeePerGas = tx.maxPriorityFeePerGas,
+            maxFeePerGas = tx.maxFeePerGas,
+            gasLimit = tx.gasLimit,
+            to = to,
+            value = tx.valueWei,
+            data = ByteArray(0),
+        )
+        viewModelScope.launch {
+            try {
+                val signedTx = body.sign(wallet)
+                val txHash = ChainClient(network).broadcast(signedTx)
+
+                live.trackedTxs.add(
+                    0,
+                    TxRecord(
+                        txHash = signedTx.txHash.copyOf(),
+                        chainId = body.chainId,
+                        to = to,
+                        valueWei = body.value,
+                        feeWei = body.maxFeePerGas.multiply(BigInteger.valueOf(body.gasLimit)),
+                        gasLimit = body.gasLimit,
+                        atUnix = System.currentTimeMillis() / 1000,
+                        outcome = "PENDING",
+                        block = null,
+                        gasUsed = null,
+                    ),
+                )
+                // Acceptance, not confirmation — the surface's tracking line says BROADCAST and
+                // only the tracker below can upgrade that.
+                signedIn {
+                    it.copy(
+                        wallet = it.wallet.copy(
+                            chain = it.wallet.chain.copy(
+                                tracking = TrackingChainTx(txHash, "BROADCAST"),
+                                prepared = null,
+                                prepareError = null,
+                                mainnetAcknowledged = false,
+                                activity = chainActivity(live),
+                            ),
+                        ),
+                    )
+                }
+                // The vault write is a save of what already happened, so its failure is a banner
+                // rather than a send error: the transaction is out, and the user should know the
+                // record of it may not survive the next launch.
+                try {
+                    live.persist()
+                } catch (failure: Exception) {
+                    signedIn { it.copy(failure = "The vault could not be saved: ${readable(failure)}") }
+                }
+
+                val result = try {
+                    ChainClient(network).track(
+                        txHash,
+                        TrackOptions(onState = { state ->
+                            signedIn { current ->
+                                val tracking = current.wallet.chain.tracking
+                                if (tracking != null && tracking.txHash == txHash) {
+                                    current.copy(
+                                        wallet = current.wallet.copy(
+                                            chain = current.wallet.chain.copy(tracking = tracking.copy(state = state)),
+                                        ),
+                                    )
+                                } else {
+                                    current
+                                }
+                            }
+                        }),
+                    )
+                } catch (failure: Exception) {
+                    // An endpoint that cannot be asked at all is still an unresolved ending, and
+                    // EXPIRED is the honest name for one this client watched for its whole
+                    // deadline.
+                    TrackResult(TrackOutcome.Expired, txHash = txHash)
+                }
+                settleChainTx(live, txHash, result)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(wallet = it.wallet.copy(chain = it.wallet.chain.copy(sendError = readable(failure)))) }
+            }
+        }
+    }
+
+    /**
+     * A tracker finished: the record's ending is written where the vault will next read it, and
+     * the ending says itself — including the unresolved one.
+     */
+    private suspend fun settleChainTx(live: MigoSession, txHash: String, result: TrackResult) {
+        val outcome = when (result.outcome) {
+            TrackOutcome.Confirmed -> "CONFIRMED"
+            TrackOutcome.Reverted -> "REVERTED"
+            TrackOutcome.Dropped -> "DROPPED"
+            TrackOutcome.Expired -> "EXPIRED"
+        }
+        val shortHash = txHash.take(16)
+        val index = live.trackedTxs.indexOfFirst { "0x" + hexOf(it.txHash) == txHash }
+        if (index >= 0) {
+            val old = live.trackedTxs.removeAt(index)
+            live.trackedTxs.add(
+                index,
+                TxRecord(
+                    old.txHash,
+                    old.chainId,
+                    old.to,
+                    old.valueWei,
+                    old.feeWei,
+                    old.gasLimit,
+                    old.atUnix,
+                    outcome,
+                    result.blockNumber ?: old.block,
+                    result.gasUsed ?: old.gasUsed,
+                ),
+            )
+        }
+        signedIn { current ->
+            val tracking = current.wallet.chain.tracking
+            current.copy(
+                wallet = current.wallet.copy(
+                    chain = current.wallet.chain.copy(
+                        tracking = if (tracking?.txHash == txHash) null else tracking,
+                        activity = chainActivity(live),
+                    ),
+                ),
+                failure = when (outcome) {
+                    "CONFIRMED" -> current.failure
+                    "EXPIRED" -> "AVAX send expired without an answer · $shortHash"
+                    else -> "AVAX send ${outcome.lowercase()} · $shortHash"
+                },
+            )
+        }
+        try {
+            live.persist()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            signedIn { it.copy(failure = "The vault could not be saved: ${readable(failure)}") }
+        }
+    }
+
     /** The Alerts inbox read. */
     fun loadAlerts() {
         val live = session ?: return
@@ -791,6 +1223,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         // The wallet's combined read also fills the banner's $MIG balance, so the session starts
         // with it -- the desktop client issues its wallet command at sign-in for the same reason.
         loadWallet()
+        // The AVAX Activity list rides the session's own tracked records: no read, no server call
+        // -- the vault already answered it when it handed back the session.
+        signedIn {
+            it.copy(wallet = it.wallet.copy(chain = it.wallet.chain.copy(activity = chainActivity(opened))))
+        }
     }
 
     /** A pushed notification: the Feed stream and the Alerts inbox re-read, the digest follows. */
