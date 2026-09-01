@@ -31,11 +31,11 @@ Three constraints shape the decision:
 
 ## Options
 
-| Option | Recovery story | Domain separation | Spec compliance |
-| --- | --- | --- | --- |
-| Keep per-device randomness, add server-side key escrow | server can restore | none | violates anti-escrow (§46, crypto crate docs) |
-| One master keypair, derive everything from it | one secret | broken — one algorithm's key material feeds another | forbidden by the brief |
-| Root secret + HKDF domain labels; each domain consumes its own seed through the standard construction of that domain | one secret, one container | enforced by construction | what the brief specifies |
+| Option                                                                                                               | Recovery story            | Domain separation                                   | Spec compliance                               |
+| -------------------------------------------------------------------------------------------------------------------- | ------------------------- | --------------------------------------------------- | --------------------------------------------- |
+| Keep per-device randomness, add server-side key escrow                                                               | server can restore        | none                                                | violates anti-escrow (§46, crypto crate docs) |
+| One master keypair, derive everything from it                                                                        | one secret                | broken — one algorithm's key material feeds another | forbidden by the brief                        |
+| Root secret + HKDF domain labels; each domain consumes its own seed through the standard construction of that domain | one secret, one container | enforced by construction                            | what the brief specifies                      |
 
 ## Decision
 
@@ -83,7 +83,7 @@ future signature scheme is a new row, not a migration. The EVM wallet in this
 release is address display and registration only; on-chain balances, RPC, and
 transaction signing are explicitly out of scope and the UI must not imply
 otherwise. The honest quantum story is stated once, in the product surface:
-Migo *authentication* is post-quantum, the EVM wallet is not, because EOA
+Migo _authentication_ is post-quantum, the EVM wallet is not, because EOA
 secp256k1 is not — and no amount of ML-DSA upstream changes that.
 
 Reference implementation: `server/crates/migo-account` (Rust, consumed by the
