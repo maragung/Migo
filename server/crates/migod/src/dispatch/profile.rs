@@ -119,6 +119,16 @@ pub(crate) async fn handle_suggestions(
     // graph also owns, so a block silently removes a suggestion rather than leaking a
     // name the caller may not see.
     let ids: Vec<migo_core::Id> = suggestions.iter().map(|s| s.account_id).collect();
+    // An empty graph is the ordinary state of a brand-new account, and the answer is an
+    // empty list — not a failed read. The guard is not cosmetic: `profiles` refuses an
+    // empty batch by contract (`field_required("user_ids")`), so forwarding one would
+    // turn every fresh account's first SUGGESTIONS into an error, and the client panel
+    // that awaits it would render the refusal instead of the empty friends list.
+    if ids.is_empty() {
+        return ctx.reply(&SearchResponse {
+            results: Vec::new(),
+        });
+    }
     let cards = svc.profiles(&who, &ids).await?;
     let by_id: std::collections::HashMap<migo_core::Id, migo_social::model::ProfileCard> = cards
         .into_iter()

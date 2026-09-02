@@ -109,3 +109,44 @@ async fn friend_request_accepted_becomes_friend() {
         "alice should now count bob as a friend"
     );
 }
+
+/// The seam the `SUGGESTIONS` handler composes: `suggest` answers an *empty* list for an
+/// empty graph (never an error), while `profiles` refuses an empty batch by contract.
+///
+/// The handler collects the suggestion ids and resolves their names through `profiles` —
+/// so a fresh account, whose graph suggests nobody, hands that composition an empty id
+/// list. The handler guards the empty case and replies with an empty suggestion list; this
+/// test pins the two halves of the seam so the guard cannot silently lose its reason: if
+/// `suggest` ever stopped answering empty, or `profiles` ever stopped refusing empty, the
+/// composition contract written in the handler's comment would no longer hold.
+#[tokio::test]
+async fn an_empty_graph_suggests_nobody_and_profiles_refuses_an_empty_batch() {
+    let (svc, store) = harness();
+    person(&store, 9, "nobody").await;
+    let nobody = Caller::new(
+        Id::from(9u128),
+        Id::from(109u128),
+        TrustTier::Established,
+        Timestamp::from_millis(NOW),
+    );
+
+    let suggestions = svc
+        .suggest(&nobody, None)
+        .await
+        .expect("an empty graph is not an error, just an empty answer");
+    assert!(
+        suggestions.is_empty(),
+        "an account with no graph must be told there is nothing to suggest, not refused"
+    );
+
+    let empty: Vec<Id> = Vec::new();
+    let refused = svc
+        .profiles(&nobody, &empty)
+        .await
+        .expect_err("an empty profile batch is a malformed request, never a valid read");
+    assert_eq!(
+        refused.code(),
+        migo_protocol::generated::codes::FIELD_REQUIRED,
+        "the refusal must be the field-required fault the handler guards against"
+    );
+}

@@ -1684,3 +1684,32 @@ preflight CORS yang tidak diberi) menjadi `TransportError` — sehingga
 web menyampaikan "Could not reach the Migo server", bukan pesan kosong.
 Test `rest-transport.test.ts`: TypeError → TransportError, reject tanpa
 pesan tetap bernama, verdict server tetap `RemoteError` murni.
+
+## 51. SUGGESTIONS dengan graf kosong: daftar kosong, bukan error (v0.14.8)
+
+Laporan produksi: "tambah fitur cari teman dan tambahkan ke daftar
+pertemanan". Fiturnya ternyata sudah ada lengkap — server (`search`
+prefix username + contains display name, case-folded, privacy-filtered),
+web (panel Friends: kolom cari + tombol Add friend + Requests
+Accept/Decline), Android (FriendsScreen + SearchScreen), desktop (Search
+place, PEOPLE + Add). Probe SDK live membuktikan alur
+search → request → accept → edge pertemanan dua arah bekerja di produksi.
+
+Yang rusak bukan fiturnya, tapi **pintu masuknya**: probe UI headless
+menemukan panel Friends gagal total dengan error mentah `user_ids` dan
+spinner abadi. Akarnya di `handle_suggestions`: handler mengumpulkan id
+dari hasil `suggest()` lalu menyerahkannya ke `profiles()` — padahal
+`profiles()` menolak batch kosong (`field_required("user_ids")`) dan
+akun baru (atau siapa pun yang grafnya belum punya saran) menghasilkan
+nol saran. Satu RPC SUGGESTIONS yang gagal itu menjatuhkan seluruh
+`reload()` panel web (Promise.all) — jadi kolom pencarian, daftar
+teman, dan tombol Add friend tidak pernah sempat dirender. Klien
+Android dan desktop yang memuat saran di startup kena penyakit yang
+sama.
+
+Perbaikan: handler menjawab daftar kosong saat tidak ada saran — graf
+kosong adalah keadaan wajar akun baru, bukan kegagalan baca. Test
+`an_empty_graph_suggests_nobody_and_profiles_refuses_an_empty_batch`
+di spec_social mengunci dua sisi seam yang disusun handler: `suggest`
+wajib menjawab Vec kosong (bukan error), `profiles` wajib menolak batch
+kosong — sehingga guard di handler tidak kehilangan alasannya.
