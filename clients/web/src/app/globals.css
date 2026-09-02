@@ -457,6 +457,12 @@ main {
 .auth-card {
   width: 100%;
   max-width: 420px;
+  /* A grid item's automatic minimum is its content's minimum, and the card's links row used to
+     set that at ~405px — wider than a 412px phone's card slot (viewport minus the screen's 20px
+     padding), which pushed the whole page sideways and cut the card's right edge off. Zero lets
+     the card take its track's width; the links row below wraps so nothing inside needs the
+     extra room. */
+  min-width: 0;
   background: rgba(255, 255, 255, 0.14);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
@@ -532,9 +538,12 @@ main {
   color: rgba(255, 255, 255, 0.75);
 }
 /* The card's bottom corner: the links that open the restore and server sheets. Restore sits
-   left, server right, so the row reads "what am I signing in with" before "where". */
+   left, server right, so the row reads "what am I signing in with" before "where". The row
+   wraps on a phone: kept to one line its two buttons' minimum width is larger than the card's,
+   which is what pushed the login card past the viewport edge in the first place. */
 .auth-card-links {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: baseline;
   gap: 8px;
@@ -551,6 +560,11 @@ main {
   text-underline-offset: 3px;
   cursor: pointer;
   white-space: nowrap;
+  /* A self-hosted server's address can outgrow the card on a phone; ellipsis keeps the row
+     the card's width instead of the card the row's. */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .auth-server-link:hover {
   color: #ffffff;
@@ -920,6 +934,25 @@ main {
   background: var(--accent-bright);
   color: #ffffff;
   font-weight: 700;
+}
+
+/*
+ * The single-column story (below the 1024px PC split, the right pane is the whole screen):
+ * the back control and the title plus five tabs do not fit one 360–412px line, and the
+ * shrunken remainder made "TopUp Profile Settings" read as cut-off — the tabs scrolled, but
+ * nothing on screen said so. Below the split the tabs take their own full-width row and keep
+ * their horizontal scroll for the day there are more of them; on a PC nothing changes.
+ */
+@media (max-width: 1023px) {
+  .panel-tab-bar {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+  .panel-tabs {
+    margin-left: 0;
+    width: 100%;
+    overflow-x: auto;
+  }
 }
 
 /*

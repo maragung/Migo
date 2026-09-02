@@ -31,6 +31,11 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 1,
   viewportFit: 'cover',
+  // Android's default is `resizes-visual`: the on-screen keyboard covers the layout viewport,
+  // so the composer sat under it and the message list kept its full height. Resizing the
+  // layout instead shrinks the shell to the visible viewport, which is what a messenger
+  // needs — the input rides just above the keyboard. (iOS ignores the key.)
+  interactiveWidget: 'resizes-content',
 };
 
 export default function RootLayout({ children }: { children: ReactNode }): ReactNode {
