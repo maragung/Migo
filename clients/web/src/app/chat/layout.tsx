@@ -5,7 +5,8 @@
  *
  * The new-ui-02 IA (docs/design mockup `new-ui-02.tsx`) is a split: the LEFT panel holds the
  * account's lists behind its own tab state (`leftTab`), and the RIGHT panel holds either its
- * menu tabs (`rightTab` — Feed, Games, Alerts, Search, TopUp, Profile, Settings) or the open
+ * menu tabs (`rightTab` — Feed, Games, TopUp, Profile, Settings; Alerts and Search arrive
+ * through the banner menu) or the open
  * conversations (`chatTabs` + `activeChat`). The two panels' states are independent on purpose:
  * reading Games on the left never disturbs the thread open on the right, which is the model's
  * whole offer. Below the PC breakpoint the panes take turns — `rightForced` remembers that a
@@ -45,7 +46,6 @@ import { RequireReady } from '@/components/require-ready.js';
 import { RoomsPanel } from '@/components/rooms-panel.js';
 import { SearchPanel } from '@/components/search-panel.js';
 import { SettingsPanel } from '@/components/settings-panel.js';
-import { Sidebar } from '@/components/sidebar.js';
 import { SpacePanel } from '@/components/space-panel.js';
 import { WalletPanel } from '@/components/wallet-panel.js';
 import { CallOverlay } from '@/components/call-overlay.js';
@@ -96,8 +96,8 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
 
   const [chatTabs, setChatTabs] = useState<Id[]>([]);
   const [activeChat, setActiveChat] = useState<Id | null>(null);
-  // A session opens on its conversations: the messenger's own first screen.
-  const [leftTab, setLeftTab] = useState<SystemTab>('chats');
+  // A session opens on its people: the mockup's first tab is Main (the friends list).
+  const [leftTab, setLeftTab] = useState<SystemTab>('friends');
   const [rightTab, setRightTab] = useState<RightTab>('feed');
   // A menu panel covering the phone: the right pane's claim on a single-column screen.
   const [rightForced, setRightForced] = useState(false);
@@ -164,13 +164,7 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
   // panel, the secondary panels arrive in the right one.
   const navigate = useCallback(
     (tab: SystemTab | PanelTab): void => {
-      if (
-        tab === 'friends' ||
-        tab === 'chats' ||
-        tab === 'rooms' ||
-        tab === 'games' ||
-        tab === 'feed'
-      ) {
+      if (tab === 'friends' || tab === 'rooms' || tab === 'games' || tab === 'feed') {
         setLeftTab(tab);
         return;
       }
@@ -210,12 +204,6 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
         return <GamesPanel />;
       case 'feed':
         return <SpacePanel onOpenConversation={openInTab} />;
-      case 'chats':
-        return (
-          <div className="chats-pane">
-            <Sidebar />
-          </div>
-        );
     }
   })();
 

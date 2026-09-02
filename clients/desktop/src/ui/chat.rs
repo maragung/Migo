@@ -1,4 +1,4 @@
-//! The chat screen: a conversation list, a thread, and a composer.
+//! The chat screen: the open conversation as its own tab — header, thread, composer.
 //!
 //! # Why the message store is a map, not a list
 //!
@@ -40,12 +40,6 @@ pub struct ChatState {
     pub typing: HashMap<Id, Vec<Id>>,
     /// The composer's contents for the open conversation.
     pub draft: String,
-    /// The account id typed into the new-conversation field.
-    pub new_peer: String,
-    /// Whether the new-conversation row is showing.
-    pub composing_new: bool,
-    /// Whether the account panel is open.
-    pub account_open: bool,
     /// The last typing state reported, so a keystroke does not send one frame per character.
     pub typing_sent: bool,
     /// True until the first message that must be scrolled into view has been.
@@ -137,20 +131,6 @@ impl ChatState {
 }
 
 /// Orders delivery states so a later one never overwrites an earlier one.
-/// One conversation list row, owned.
-///
-/// The list is drawn from data resolved out of [`ChatState`] before the loop starts, because opening a
-/// conversation writes back into that same state. Owning the strings is what makes the two safe to do
-/// in one pass, and naming the shape keeps the six values from becoming an unreadable tuple.
-struct Row {
-    conversation_id: Id,
-    title: String,
-    preview: Option<String>,
-    time: Option<String>,
-    unread: u32,
-    encrypted: bool,
-}
-
 fn delivery_rank(state: Delivery) -> u8 {
     match state {
         Delivery::Failed => 0,
@@ -160,145 +140,13 @@ fn delivery_rank(state: Delivery) -> u8 {
     }
 }
 
-/// Draws the Chats tab: the conversation list as a pane of its own, centred, with the account
-/// footer beneath it.
-///
-/// In the v3 shell a conversation is no longer opened *beside* this list — opening one lands a
-/// closable tab on the strip and the thread takes the whole pane (see [`thread`]). The list is
-/// therefore the Chats tab's whole content, and it is centred the way the reference centres it,
-/// because a conversation list stretched across a maximised window is mostly empty margin.
-pub fn list(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState) {
-    let colors = palette(context.theme);
-    let width = 560.0_f32.min(ui.available_width());
-    let margin = (ui.available_width() - width) / 2.0;
-    ui.horizontal(|ui| {
-        ui.add_space(margin);
-        ui.allocate_ui_with_layout(
-            egui::vec2(width, ui.available_height()),
-            Layout::top_down(Align::Min),
-            |ui| list_pane(ui, context, state),
-        );
-    });
-    // Hairlines framing the centred column, so it reads as a pane rather than as a float.
-    let height = ui.min_rect().height();
-    let top = ui.min_rect().top();
-    for at in [margin - 1.0, margin + width] {
-        if at >= 0.0 {
-            let rect = egui::Rect::from_min_size(egui::pos2(at, top), egui::vec2(1.0, height));
-            ui.painter()
-                .rect_filled(rect, egui::CornerRadius::ZERO, colors.border);
-        }
-    }
-}
-
 /// The open conversation as its own tab: header, messages, composer, with nothing beside them.
+///
+/// There is no conversation list pane any more — the reference's model is that a conversation
+/// opens as a closable tab on the right pane's bar (see the shell's chat bar) from wherever a
+/// person or room is found, so this thread is the whole of the chat surface.
 pub fn thread(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState) {
     thread_pane(ui, context, state);
-}
-
-/// The conversation list, its header, and the new-conversation row.
-fn list_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState) {
-    let colors = palette(context.theme);
-    let me = context.account.map(|a| a.account_id);
-
-    ui.add_space(space::MD);
-    ui.horizontal(|ui| {
-        ui.add_space(space::MD);
-        ui.label(
-            RichText::new("Conversations")
-                .font(egui::FontId::proportional(font::SUBTITLE))
-                .color(colors.text)
-                .strong(),
-        );
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add_space(space::MD);
-            if ui
-                .button(RichText::new("+").font(egui::FontId::proportional(font::TITLE)))
-                .on_hover_text("Start a conversation")
-                .clicked()
-            {
-                state.composing_new = !state.composing_new;
-            }
-        });
-    });
-    ui.add_space(space::SM);
-
-    if state.composing_new {
-        ui.horizontal(|ui| {
-            ui.add_space(space::MD);
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut state.new_peer)
-                    .hint_text("account id")
-                    .desired_width(ui.available_width() - space::XXL - space::MD),
-            );
-            let submitted = response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-            if (ui.button("Go").clicked() || submitted) && !state.new_peer.trim().is_empty() {
-                context.issue(Command::StartDirect {
-                    username: state.new_peer.trim().to_owned(),
-                });
-                state.new_peer.clear();
-                state.composing_new = false;
-            }
-        });
-        ui.add_space(space::SM);
-    }
-
-    widgets::divider(ui, context.theme);
-
-    let footer = 56.0;
-    let list_height = (ui.available_height() - footer).max(0.0);
-    egui::ScrollArea::vertical()
-        .id_salt("conversations")
-        .max_height(list_height)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            if state.conversations.is_empty() {
-                widgets::empty_state(
-                    ui,
-                    context.theme,
-                    "No conversations yet",
-                    "Use + and paste someone's account id to start one.",
-                );
-                return;
-            }
-            // Resolved first because the click handler mutates `state.selected`, and the borrow
-            // checker is right to object to mutating what the loop is reading.
-            let rows: Vec<Row> = state
-                .conversations
-                .iter()
-                .map(|conversation| Row {
-                    conversation_id: conversation.conversation_id,
-                    title: me
-                        .map(|me| conversation.display_title(me, &state.names))
-                        .unwrap_or_else(|| model::short_id(conversation.conversation_id)),
-                    preview: conversation.preview.clone(),
-                    time: conversation.updated_at.map(model::clock),
-                    unread: conversation.unread,
-                    encrypted: conversation.encrypted,
-                })
-                .collect();
-
-            for row in rows {
-                let response = widgets::conversation_row(
-                    ui,
-                    context.theme,
-                    widgets::RowContent {
-                        title: &row.title,
-                        preview: row.preview.as_deref(),
-                        time: row.time.as_deref(),
-                        unread: row.unread,
-                        selected: state.selected == Some(row.conversation_id),
-                        encrypted: row.encrypted,
-                    },
-                );
-                if response.clicked() {
-                    open(context, state, row.conversation_id);
-                }
-            }
-        });
-
-    widgets::divider(ui, context.theme);
-    account_footer(ui, context, state);
 }
 
 /// Opens a conversation and asks for anything missing from its history.
@@ -335,99 +183,6 @@ pub fn open(context: &mut Context<'_>, state: &mut ChatState, conversation_id: I
         .find(|c| c.conversation_id == conversation_id)
     {
         conversation.unread = 0;
-    }
-}
-
-/// The signed-in account, its safety number, and sign-out.
-fn account_footer(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState) {
-    let colors = palette(context.theme);
-    let Some(account) = context.account else {
-        return;
-    };
-
-    ui.add_space(space::SM);
-    ui.horizontal(|ui| {
-        ui.add_space(space::MD);
-        widgets::avatar(ui, context.theme, &account.username, 28.0);
-        ui.add_space(space::SM);
-        ui.vertical(|ui| {
-            ui.label(
-                RichText::new(widgets::elide(&account.username, 18))
-                    .font(egui::FontId::proportional(font::SMALL))
-                    .color(colors.text),
-            );
-            let (color, label) = connection_indicator(context, &colors);
-            ui.horizontal(|ui| widgets::status_dot(ui, context.theme, color, label));
-        });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add_space(space::MD);
-            if ui.button("\u{2699}").on_hover_text("Account").clicked() {
-                state.account_open = !state.account_open;
-            }
-        });
-    });
-    ui.add_space(space::SM);
-
-    if state.account_open {
-        egui::Frame::new()
-            .fill(colors.surface_raised)
-            .inner_margin(egui::Margin::same(space::MD as i8))
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new("Safety number")
-                        .text_style(crate::theme::named(crate::theme::text_style::OVERLINE))
-                        .color(colors.text_muted),
-                );
-                ui.add_space(space::XS);
-                // Shown as a monospace block so a pair of people can read it to each other aloud and
-                // compare. That comparison is the only thing that detects a substituted identity key,
-                // and it is worth the four lines it costs.
-                ui.label(
-                    RichText::new(&account.safety_number)
-                        .font(egui::FontId::monospace(font::SMALL))
-                        .color(colors.text),
-                );
-                ui.add_space(space::XS);
-                ui.label(
-                    RichText::new(
-                        "Compare this with the other person, in a call or in person. If it differs, \
-                         stop and do not trust the conversation.",
-                    )
-                    .font(egui::FontId::proportional(font::TINY))
-                    .color(colors.text_muted),
-                );
-                ui.add_space(space::MD);
-                ui.label(
-                    RichText::new(format!("Account {}", model::short_id(account.account_id)))
-                        .font(egui::FontId::proportional(font::TINY))
-                        .color(colors.text_muted),
-                );
-                ui.label(
-                    RichText::new(format!("Device {}", model::short_id(account.device_id)))
-                        .font(egui::FontId::proportional(font::TINY))
-                        .color(colors.text_muted),
-                );
-                ui.add_space(space::MD);
-                if widgets::ghost_button(ui, context.theme, "Sign out").clicked() {
-                    state.account_open = false;
-                    context.issue(Command::SignOut);
-                }
-            });
-    }
-}
-
-/// The colour and word for the current connection state.
-fn connection_indicator<'a>(
-    context: &'a Context<'_>,
-    colors: &crate::theme::Palette,
-) -> (egui::Color32, &'a str) {
-    match context.connection {
-        model::Connection::Online => (colors.positive, "Connected"),
-        model::Connection::Connecting => (colors.warning, "Connecting"),
-        model::Connection::Offline => (colors.text_muted, "Offline"),
-        // Live, but over the default transport rather than the picked one; the pill says both.
-        model::Connection::Fallback(_) => (colors.accent, "Connected"),
-        model::Connection::Failed(_) => (colors.danger, "Disconnected"),
     }
 }
 

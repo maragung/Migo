@@ -22,7 +22,7 @@ import com.migo.app.model.AppState
 import com.migo.app.ui.AlertsScreen
 import com.migo.app.ui.BannerAction
 import com.migo.app.ui.ChatScreen
-import com.migo.app.ui.ConversationsScreen
+import com.migo.app.ui.ErrorBanner
 import com.migo.app.ui.FriendsScreen
 import com.migo.app.ui.GamesScreen
 import com.migo.app.ui.MigoTheme
@@ -45,8 +45,8 @@ import com.migo.app.ui.panelTitle
  * answer to that question, able to disagree with the first. The back gesture is handled where it
  * means something, which is the open chat.
  *
- * The signed-in screen is the new-ui-02 left panel: a tab strip (Friends, Chats, Rooms, Games,
- * Feed) above an orange profile banner whose avatar menu carries the panels and the way out. A
+ * The signed-in screen is the new-ui-02 left panel: a tab strip (Main, Rooms, Games, Feed) above
+ * an orange profile banner whose avatar menu carries the panels and the way out. A
  * conversation and a menu panel both cover this shell rather than joining it -- on a PC they
  * would be the right pane -- and each carries its own way back, so the strip's navigation is
  * never taken away by reading a message.
@@ -106,8 +106,8 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
 /**
  * The signed-in shell: the new-ui-02 model, as a phone wears it.
  *
- * The left panel is the app: the tab strip (Friends, Chats, Rooms, Games, Feed) above the orange
- * profile banner whose avatar menu carries the panels and the way out. A conversation and a menu
+ * The left panel is the app: the tab strip (Main, Rooms, Games, Feed) above the orange profile
+ * banner whose avatar menu carries the panels and the way out. A conversation and a menu
  * panel (Alerts, Search, Wallet, Profile) both COVER the screen rather than joining the strip —
  * on a PC they would be the right pane — and each carries its own way back: the thread's header
  * and back gesture, the panel's "‹ Menu Panel" bar. Covering the shell never disturbs the strip:
@@ -146,7 +146,6 @@ private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel) {
         else -> Column(modifier = Modifier.fillMaxSize()) {
             TabStrip(
                 section = state.section,
-                unread = state.conversations.sumOf { it.unread },
                 onSelect = model::selectSection,
             )
             ProfileBanner(
@@ -163,12 +162,13 @@ private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel) {
                     }
                 },
             )
+            ErrorBanner(message = state.failure, onDismiss = model::dismissFailure)
             SectionScreen(state = state, model = model, modifier = Modifier.weight(1f))
         }
     }
 }
 
-/** The section screens, as the tab strip's five destinations and the banner's panels. */
+/** The section screens, as the tab strip's four destinations and the banner's panels. */
 @Composable
 private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifier: Modifier = Modifier) {
     when (state.section) {
@@ -179,16 +179,6 @@ private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifie
             onRespond = model::friendRespond,
             onStartDirect = model::startDirectWith,
             onRefresh = model::loadFriends,
-            modifier = modifier,
-        )
-
-        AppState.Section.CHATS -> ConversationsScreen(
-            state = state,
-            onOpen = model::open,
-            onRefresh = model::refreshConversations,
-            onStartDirect = model::startDirect,
-            onSignOut = model::signOut,
-            onDismissFailure = model::dismissFailure,
             modifier = modifier,
         )
 

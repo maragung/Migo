@@ -29,10 +29,11 @@ import com.migo.app.model.AppState
 /**
  * The left panel's tab strip: the new-ui-02 model's top navigation, as every client draws it.
  *
- * Five system tabs — Friends, Chats, Rooms, Games, Feed — the lists and streams a messenger
- * lives in. A conversation is no longer a chip here: in the new model a chat covers the screen
- * the way a menu panel does, carrying its own way back, so the strip is the lists and nothing
- * else — which is also why it never has to stand down for a thread again.
+ * Four system tabs — Main (friends), Rooms, Games, Feed — the lists and streams a messenger
+ * lives in. A conversation is never a chip here, exactly as the reference draws it: in the new
+ * model a chat covers the screen the way a menu panel does, carrying its own way back, so the
+ * strip is the lists and nothing else — which is also why it never has to stand down for a
+ * thread again.
  *
  * The strip scrolls horizontally rather than wrapping: the reference's strip is one row on every
  * screen size, and a second row would push the banner down by the height of a tab.
@@ -40,7 +41,6 @@ import com.migo.app.model.AppState
 @Composable
 fun TabStrip(
     section: AppState.Section,
-    unread: Long,
     onSelect: (AppState.Section) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -54,17 +54,10 @@ fun TabStrip(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             StripChip(
-                label = "Friends",
+                label = "Main",
                 glyph = TabGlyph.FRIENDS,
                 active = section == AppState.Section.FRIENDS,
                 onClick = { onSelect(AppState.Section.FRIENDS) },
-            )
-            StripChip(
-                label = "Chats",
-                glyph = TabGlyph.CHATS,
-                active = section == AppState.Section.CHATS,
-                badge = unread,
-                onClick = { onSelect(AppState.Section.CHATS) },
             )
             StripChip(
                 label = "Rooms",
@@ -89,9 +82,9 @@ fun TabStrip(
 }
 
 /**
- * One chip: a glyph, a label, the active fill and underline, and — for the conversation list —
- * its unread badge. The rounded fill and the orange underline are the two marks the reference
- * puts on the chosen tab; an idle chip is the strip's own ink on the strip's own surface.
+ * One chip: a glyph, a label, the active fill and underline. The rounded fill and the orange
+ * underline are the two marks the reference puts on the chosen tab; an idle chip is the strip's
+ * own ink on the strip's own surface.
  */
 @Composable
 private fun StripChip(
@@ -100,7 +93,6 @@ private fun StripChip(
     active: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    badge: Long = 0L,
 ) {
     val extra = LocalMigoExtra.current
     Column(

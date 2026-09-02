@@ -60,16 +60,14 @@ pub enum Screen {
 /// would let the auth flow "navigate" to it, and a sign-out would have to remember to reset it
 /// rather than it simply being unreachable without an account.
 ///
-/// The order is the information architecture — the reference's tab strip (Friends, Chats, Rooms,
-/// Games, Feed) first, then the panels that the right pane's own bar carries, the same split the
+/// The order is the information architecture — the reference's tab strip (Main, Rooms, Games,
+/// Feed) first, then the panels that the right pane's own bar carries, the same split the
 /// web client's two panes and the Android client's covering screens draw, because it is one
 /// product.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Place {
     /// The social graph: friends, requests, adding by id.
     Friends,
-    /// The conversation list — where a session starts, per the messenger-first spec.
-    Chat,
     /// The public room directory and the way in.
     Rooms,
     /// The games the server referees, and where they are played.
@@ -91,8 +89,7 @@ impl Place {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::Friends => "Friends",
-            Self::Chat => "Chats",
+            Self::Friends => "Main",
             Self::Rooms => "Rooms",
             Self::Games => "Games",
             Self::Feed => "Feed",
@@ -112,28 +109,18 @@ impl Place {
         }
     }
 
-    /// The five places that are always on the strip, in the reference's order.
-    pub const SYSTEM_TABS: [Self; 5] = [
-        Self::Friends,
-        Self::Chat,
-        Self::Rooms,
-        Self::Games,
-        Self::Feed,
-    ];
+    /// The four places that are always on the strip, in the reference's order. A conversation
+    /// is not one of them: it opens as its own closable tab on the right pane's bar (see the
+    /// shell's chat bar), which is the reference's whole model.
+    pub const SYSTEM_TABS: [Self; 4] = [Self::Friends, Self::Rooms, Self::Games, Self::Feed];
 
     /// The places the right pane's menu bar offers, in the reference's order. Feed and Games
     /// appear here as well as on the strip because the panes are independent: reading Games in
-    /// the right pane never disturbs what the left panel shows.
-    pub const RIGHT_TABS: [Self; 6] = [
-        Self::Feed,
-        Self::Games,
-        Self::Alerts,
-        Self::Search,
-        Self::Wallet,
-        Self::Settings,
-    ];
+    /// the right pane never disturbs what the left panel shows. Alerts and Search are not on
+    /// the bar — the reference keeps them off it, and the banner's menu opens them.
+    pub const RIGHT_TABS: [Self; 4] = [Self::Feed, Self::Games, Self::Wallet, Self::Settings];
 
-    /// Whether the place is one of the strip's permanent five.
+    /// Whether the place is one of the strip's permanent four.
     #[must_use]
     pub fn is_system_tab(self) -> bool {
         Self::SYSTEM_TABS.contains(&self)
@@ -163,12 +150,6 @@ pub struct Context<'a> {
     /// settings panel that had to round-trip the network thread to flip a palette would feel broken
     /// on a bad link.
     pub theme_choice: &'a mut Option<Theme>,
-    /// A place change requested by a link on the screen, applied after the frame.
-    ///
-    /// The same reasoning as [`Context::navigate`] again: a search hit that opens a chat moves the
-    /// window, not the socket, and routing that through the worker would make a click's
-    /// responsiveness depend on the network thread.
-    pub open_place: &'a mut Option<Place>,
 }
 
 impl Context<'_> {
@@ -185,10 +166,5 @@ impl Context<'_> {
     /// Asks to redraw the whole window in the other theme once this frame is finished.
     pub fn want_theme(&mut self, theme: Theme) {
         *self.theme_choice = Some(theme);
-    }
-
-    /// Asks to show a different place once this frame is finished.
-    pub fn go_place(&mut self, place: Place) {
-        *self.open_place = Some(place);
     }
 }

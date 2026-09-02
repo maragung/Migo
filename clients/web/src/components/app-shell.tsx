@@ -5,9 +5,10 @@
  *
  * The new-ui-02 model (docs/design mockup `new-ui-02.tsx`) replaces the v0.9.0 single strip
  * over one body with a split: a LEFT panel (~32% on a PC, the whole screen on a phone) that
- * owns the account's lists — its own teal tab strip (Friends, Chats, Rooms, Games, Feed) over
+ * owns the account's lists — its own teal tab strip (Main, Rooms, Games, Feed) over
  * the orange profile banner — and a RIGHT panel that runs on its own state: its menu tabs
- * (Feed, Games, Alerts, Search, TopUp, Profile, Settings) when no conversation is active, or
+ * (Feed, Games, TopUp, Profile, Settings — Alerts and Search open from the banner menu) when no
+ * conversation is active, or
  * the chat tab bar with its closable conversation chips and "‹ Menu Panel" control when one
  * is. Clicking around the left panel never disturbs the right, and that independence is the
  * model's whole offer.

@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent, ReactNode } from 'react';
 
-import { ConversationKind, RelationshipKind } from '@migo/sdk';
-import type { Id, PresenceState, RelationshipEntry, SuggestedUser } from '@migo/sdk';
+import { ConversationKind, PresenceState, RelationshipKind } from '@migo/sdk';
+import type { Id, PresenceState as PresenceStateValue, RelationshipEntry, SuggestedUser } from '@migo/sdk';
 
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { friendlyError } from '@/lib/migo/errors.js';
@@ -13,9 +13,13 @@ import { useMigo } from '@/lib/migo/use-migo.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
 
 import { Avatar } from './avatar.js';
+import { ConnectionBadge } from './connection-badge.js';
 import { ContextMenu } from './context-menu.js';
 import { useContextMenu } from './context-menu.js';
 import type { ContextAction } from './context-menu.js';
+import { Icon } from './icons.js';
+import { NewConversationDialog } from './new-conversation-dialog.js';
+import { PresencePicker } from './presence-picker.js';
 import { Spinner } from './spinner.js';
 import { UserProfileModal } from './user-profile-modal.js';
 
@@ -67,6 +71,27 @@ export function FriendsPanel({
   const [busy, setBusy] = useState<ReadonlySet<Id>>(new Set());
   // The person whose profile modal is open, if any.
   const [selected, setSelected] = useState<Id | null>(null);
+  // The account's own presence and mood, published from the picker the sidebar used to own.
+  const [myPresence, setMyPresence] = useState<PresenceStateValue>(PresenceState.Online);
+  const [myStatus, setMyStatus] = useState('');
+  // The New-conversation dialog, formerly the sidebar header's plus button.
+  const [dialogOpen, setDialogOpen] = useState(false);
+
+  // The account's own presence is a publish, not a read: the picker holds the state and the
+  // panel performs the call, exactly the posture the sidebar kept.
+  const onPresenceChange = useCallback(
+    (state: PresenceStateValue, nextStatus: string): void => {
+      if (!client) {
+        return;
+      }
+      setMyPresence(state);
+      setMyStatus(nextStatus);
+      void client.presence
+        .setPresence(state, nextStatus.trim().length > 0 ? { customStatus: nextStatus } : {})
+        .catch(() => {});
+    },
+    [client],
+  );
 
   const reload = useCallback(async (): Promise<void> => {
     if (!client) {
@@ -204,6 +229,13 @@ export function FriendsPanel({
     <div className="panel">
       <h1 className="panel-title">Friends</h1>
 
+      {/* The connection line and the presence picker moved in with the friends list when the
+          Chats tab left the strip: they are the account's ambient state, and Main is where the
+          mockup keeps them. The New-conversation control rides along so a direct chat is still
+          one click from the people it starts from. */}
+      <ConnectionBadge />
+      <PresencePicker state={myPresence} status={myStatus} onChange={onPresenceChange} />
+
       <form className="panel-search" role="search" onSubmit={(event) => void onSearch(event)}>
         <input
           type="search"
@@ -215,6 +247,16 @@ export function FriendsPanel({
         />
         <button type="submit" className="btn">
           Search
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={() => setDialogOpen(true)}
+          aria-label="New conversation"
+          title="New conversation"
+        >
+          <Icon name="plus" size={16} />
+          <span>New chat</span>
         </button>
       </form>
 
@@ -377,6 +419,8 @@ export function FriendsPanel({
           }}
         />
       ) : null}
+
+      {dialogOpen ? <NewConversationDialog onClose={() => setDialogOpen(false)} /> : null}
     </div>
   );
 }

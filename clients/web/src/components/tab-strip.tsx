@@ -10,10 +10,6 @@
  * opens. The strip keeps the teal `#00838F`; the active chip is the brighter `#00ACC1` over
  * the orange underline, exactly the pairing the mockup draws. It scrolls horizontally when it
  * overflows rather than hiding anything: a tab that is off-screen is still a tab.
- *
- * The real app keeps one tab the mockup does not draw — Chats, the conversation list — because
- * a messenger without its recent-conversations list is a phone without a call log; it sits
- * between Friends and Rooms, where the v0.9.0 strip always kept it.
  */
 
 import type { ReactNode } from 'react';
@@ -22,7 +18,7 @@ import { Icon } from './icons.js';
 import type { IconName } from './icons.js';
 
 /** The system tabs — the lists and streams a messenger lives in, in the reference's order. */
-export type SystemTab = 'friends' | 'chats' | 'rooms' | 'games' | 'feed';
+export type SystemTab = 'friends' | 'rooms' | 'games' | 'feed';
 
 /** The secondary panels the right pane can show, shared with the banner menu that opens them. */
 export type PanelTab = 'notifications' | 'search' | 'wallet' | 'profile' | 'settings';
@@ -39,8 +35,7 @@ function chipClass(...parts: Array<string | false>): string {
 }
 
 const SYSTEM_TABS: ReadonlyArray<SystemSection> = [
-  { id: 'friends', label: 'Friends', icon: 'friends' },
-  { id: 'chats', label: 'Chats', icon: 'chats' },
+  { id: 'friends', label: 'Main', icon: 'friends' },
   { id: 'rooms', label: 'Rooms', icon: 'rooms' },
   { id: 'games', label: 'Games', icon: 'game' },
   { id: 'feed', label: 'Feed', icon: 'space' },

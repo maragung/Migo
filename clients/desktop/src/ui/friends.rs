@@ -43,6 +43,10 @@ pub struct FriendsState {
     pub search: String,
     /// The add-friend field's contents.
     pub add_input: String,
+    /// The username typed into the new-chat field.
+    pub new_peer: String,
+    /// Whether the new-chat field is showing.
+    pub composing_new: bool,
 }
 
 impl FriendsState {
@@ -154,7 +158,7 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut FriendsState) {
 
                     add_row(ui, context, state);
                     ui.add_space(space::SM);
-                    search_row(ui, state);
+                    search_row(ui, context, state);
                     ui.add_space(space::LG);
 
                     if state.entries.is_empty() {
@@ -224,13 +228,39 @@ fn add_row(ui: &mut Ui, context: &mut Context<'_>, state: &mut FriendsState) {
     });
 }
 
-/// The search field.
-fn search_row(ui: &mut Ui, state: &mut FriendsState) {
-    ui.add(
-        egui::TextEdit::singleline(&mut state.search)
-            .hint_text("Search")
-            .desired_width(f32::INFINITY),
-    );
+/// The search field, with the new-chat toggle beside it.
+///
+/// The reference has no Chats tab: a conversation opens from wherever a person is found, as a
+/// closable tab of its own. This field is the Main pane's door — the same "New chat" the web
+/// client's friends panel offers — and typing a username here opens the thread directly.
+fn search_row(ui: &mut Ui, context: &mut Context<'_>, state: &mut FriendsState) {
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut state.search)
+                .hint_text("Search")
+                .desired_width(ui.available_width() - 96.0),
+        );
+        if ui.button("+ Chat").clicked() {
+            state.composing_new = !state.composing_new;
+        }
+    });
+    if state.composing_new {
+        ui.horizontal(|ui| {
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut state.new_peer)
+                    .hint_text("account id")
+                    .desired_width(ui.available_width() - 84.0),
+            );
+            let submitted = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.button("Go").clicked() || submitted) && !state.new_peer.trim().is_empty() {
+                context.issue(Command::StartDirect {
+                    username: state.new_peer.trim().to_owned(),
+                });
+                state.new_peer.clear();
+                state.composing_new = false;
+            }
+        });
+    }
 }
 
 /// One titled group of rows.
@@ -263,12 +293,26 @@ fn section(
     ui.add_space(space::XS);
 
     let mut actions: Vec<(Id, bool)> = Vec::new();
+    let mut message: Option<Id> = None;
     for entry in entries {
-        row(ui, context, state, entry, with_actions, &mut actions);
+        row(
+            ui,
+            context,
+            state,
+            entry,
+            with_actions,
+            &mut actions,
+            &mut message,
+        );
         ui.add_space(space::XS);
     }
     for (user_id, accept) in actions {
         context.issue(Command::RespondFriend { user_id, accept });
+    }
+    // A Message click asked for a thread: the create's answer opens the tab (see
+    // `Event::ConversationCreated`), the same open-on-create the web panel does.
+    if let Some(peer) = message {
+        context.issue(Command::StartDirectById { peer });
     }
     ui.add_space(space::SM);
 }
@@ -281,6 +325,7 @@ fn row(
     entry: &Relationship,
     with_actions: bool,
     actions: &mut Vec<(Id, bool)>,
+    message: &mut Option<Id>,
 ) {
     let colors = palette(context.theme);
     let name = state
@@ -309,6 +354,12 @@ fn row(
                 ui.add_space(space::XS);
                 if widgets::ghost_button(ui, context.theme, "Decline").clicked() {
                     actions.push((entry.user_id, false));
+                }
+            } else if entry.kind == RelationshipKind::Friend {
+                // The reference has no Chats tab: a thread opens from the person, so a friend's
+                // row carries the Message action the web panel's rows carry.
+                if widgets::ghost_button(ui, context.theme, "Message").clicked() {
+                    *message = Some(entry.user_id);
                 }
             } else if entry.kind == RelationshipKind::PendingOutgoing {
                 widgets::pill(ui, "waiting", colors.text_muted, colors.surface_raised);

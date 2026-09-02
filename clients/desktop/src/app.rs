@@ -112,7 +112,7 @@ impl App {
             theme,
             net,
             screen: Screen::Opening,
-            place: Place::Chat,
+            place: Place::Friends,
             right_place: Place::Feed,
             open_chats: Vec::new(),
             active_chat: None,
@@ -179,7 +179,7 @@ impl App {
                     // A session starts at its dashboard, and with none of the previous session's
                     // graph or device list: those describe an account, and this may be a
                     // different one signing in over the same window.
-                    self.place = Place::Chat;
+                    self.place = Place::Friends;
                     self.right_place = Place::Feed;
                     self.open_chats.clear();
                     self.active_chat = None;
@@ -216,7 +216,7 @@ impl App {
                     self.search = SearchState::default();
                     self.wallet = WalletState::default();
                     self.activity.clear();
-                    self.place = Place::Chat;
+                    self.place = Place::Friends;
                     self.right_place = Place::Feed;
                     self.open_chats.clear();
                     self.active_chat = None;
@@ -226,6 +226,11 @@ impl App {
                 Event::CaptchaUnavailable { reason } => self.auth.captcha.unavailable(reason),
                 Event::CaptchaRefused => self.auth.captcha.refused(),
                 Event::Conversations(list) => self.chat.set_conversations(list),
+                // A conversation this client asked for: open it as a tab, the one way there is.
+                // The list refresh that follows will fill its row in; the tab does not wait for it.
+                Event::ConversationCreated { conversation_id } => {
+                    self.open_conversation(conversation_id);
+                }
                 Event::History {
                     conversation_id,
                     messages,
@@ -495,9 +500,8 @@ impl App {
     /// still a tab: hiding it would strand the surface it names behind no control at all.
     fn tab_strip(&mut self, ui: &mut egui::Ui) {
         let colors = palette(self.theme);
-        // Resolved before the panel closure so the chip loop never borrows the chat state it
+        // Resolved before the panel closure so the chip loop never borrows the place it
         // mutates through the click handlers.
-        let unread: u32 = self.chat.conversations.iter().map(|c| c.unread).sum();
         let place = self.place;
 
         let mut selected: Option<Place> = None;
@@ -513,15 +517,10 @@ impl App {
                     .show_viewport(ui, |ui, _viewport| {
                         ui.horizontal_centered(|ui| {
                             for candidate in Place::SYSTEM_TABS {
-                                let label = if candidate == Place::Chat && unread > 0 {
-                                    format!("Chats ({unread})")
-                                } else {
-                                    candidate.label().to_owned()
-                                };
                                 let outcome = widgets::tab_chip(
                                     ui,
                                     self.theme,
-                                    &label,
+                                    candidate.label(),
                                     Some(candidate),
                                     place == candidate,
                                     false,
@@ -906,7 +905,7 @@ impl App {
                     self.commands.push(Command::Suggestions);
                 }
             }
-            Place::Chat | Place::Games | Place::Settings => {}
+            Place::Games | Place::Settings => {}
         }
     }
 
@@ -920,7 +919,6 @@ impl App {
         let mut commands = std::mem::take(&mut self.commands);
         let mut navigate = None;
         let mut theme_choice = None;
-        let mut open_place = None;
         let server = self.auth.server.clone();
         let mut context = Context {
             theme: self.theme,
@@ -930,7 +928,6 @@ impl App {
             commands: &mut commands,
             navigate: &mut navigate,
             theme_choice: &mut theme_choice,
-            open_place: &mut open_place,
         };
         crate::ui::chat::open(&mut context, &mut self.chat, conversation_id);
         self.commands = commands;
@@ -996,7 +993,6 @@ impl eframe::App for App {
                 .show(ui, |ui| {
                     self.tab_strip(ui);
                     self.banner(ui, &mut theme_choice);
-                    let mut open_place = None;
                     let mut context = Context {
                         theme: self.theme,
                         connection: &self.connection,
@@ -1005,10 +1001,8 @@ impl eframe::App for App {
                         commands: &mut self.commands,
                         navigate: &mut navigate,
                         theme_choice: &mut theme_choice,
-                        open_place: &mut open_place,
                     };
                     match self.place {
-                        Place::Chat => crate::ui::chat::list(ui, &mut context, &mut self.chat),
                         Place::Rooms => crate::ui::rooms::show(
                             ui,
                             &mut context,
@@ -1027,9 +1021,6 @@ impl eframe::App for App {
                         // The panels are the right pane's tabs; the strip can never land here.
                         Place::Alerts | Place::Search | Place::Wallet | Place::Settings => {}
                     }
-                    if let Some(place) = open_place {
-                        self.select_place(place);
-                    }
                 });
         }
 
@@ -1040,7 +1031,6 @@ impl eframe::App for App {
                     if self.active_chat.is_some() {
                         // A chat tab: the bar carries the chips, the thread is the whole pane.
                         self.chat_bar(ui);
-                        let mut open_place = None;
                         let mut context = Context {
                             theme: self.theme,
                             connection: &self.connection,
@@ -1049,16 +1039,11 @@ impl eframe::App for App {
                             commands: &mut self.commands,
                             navigate: &mut navigate,
                             theme_choice: &mut theme_choice,
-                            open_place: &mut open_place,
                         };
                         crate::ui::chat::thread(ui, &mut context, &mut self.chat);
-                        if let Some(place) = open_place {
-                            self.select_place(place);
-                        }
                     } else {
                         // The menu pane: its own bar, then the tab it names.
                         self.panel_bar(ui);
-                        let mut open_place = None;
                         let mut context = Context {
                             theme: self.theme,
                             connection: &self.connection,
@@ -1067,7 +1052,6 @@ impl eframe::App for App {
                             commands: &mut self.commands,
                             navigate: &mut navigate,
                             theme_choice: &mut theme_choice,
-                            open_place: &mut open_place,
                         };
                         match self.right_place {
                             Place::Feed => {
@@ -1099,10 +1083,7 @@ impl eframe::App for App {
                                 &mut self.settings_panel,
                             ),
                             // The system tabs are the left panel's; this pane can never land here.
-                            Place::Friends | Place::Chat | Place::Rooms => {}
-                        }
-                        if let Some(place) = open_place {
-                            self.select_place(place);
+                            Place::Friends | Place::Rooms => {}
                         }
                     }
                     // Whatever opened a conversation this frame opened a tab: the chip lands on
@@ -1118,7 +1099,6 @@ impl eframe::App for App {
                     // struct per frame on the one screen that has a form, rather than reworking
                     // the context the other three panes share.
                     let server = self.auth.server.clone();
-                    let mut open_place = None;
                     let mut context = Context {
                         theme: self.theme,
                         connection: &self.connection,
@@ -1127,7 +1107,6 @@ impl eframe::App for App {
                         commands: &mut self.commands,
                         navigate: &mut navigate,
                         theme_choice: &mut theme_choice,
-                        open_place: &mut open_place,
                     };
                     crate::ui::auth::show(ui, &mut context, &mut self.auth, screen);
                 }

@@ -218,49 +218,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Starts a direct conversation with the account whose id is [peer].
-     *
-     * An id rather than a name because there is no directory endpoint yet: the search opcodes are
-     * still spec in the brief, so asking for a username here would be a field that cannot work.
-     */
-    fun startDirect(peer: String) {
-        val live = session ?: return
-        val peerId = try {
-            parseId(peer.trim())
-        } catch (_: WireError) {
-            signedIn { it.copy(failure = "That is not a valid account id.") }
-            return
-        }
-
-        viewModelScope.launch {
-            try {
-                val summary = live.client.startConversation(
-                    ConversationKind.Direct,
-                    listOf(live.client.accountId, peerId),
-                )
-                learnNames(live, listOf(summary))
-                val fresh = row(live, summary)
-                signedIn { current ->
-                    val absent = current.conversations.none {
-                        it.conversationId == fresh.conversationId
-                    }
-                    val rows = if (absent) {
-                        listOf(fresh) + current.conversations
-                    } else {
-                        current.conversations
-                    }
-                    current.copy(conversations = rows, failure = null)
-                }
-                open(fresh.conversationId, fresh.title)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (failure: Exception) {
-                signedIn { it.copy(failure = readable(failure)) }
-            }
-        }
-    }
-
-    /**
      * Opens a chat and loads its recent history.
      *
      * The catch-up call hands every event back through the SDK's decrypt path, so the messages arrive
@@ -405,7 +362,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             AppState.Section.WALLET -> if (!walletLoaded()) loadWallet()
             AppState.Section.ALERTS -> if (!alertsLoaded()) loadAlerts()
             AppState.Section.PROFILE -> if (signedInState?.devices?.devices == null) loadDevices()
-            AppState.Section.CHATS, AppState.Section.GAMES -> Unit
+            AppState.Section.GAMES -> Unit
         }
     }
 
@@ -460,7 +417,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 noteRoom(joined)
                 signedIn { current ->
                     current.copy(
-                        section = AppState.Section.CHATS,
                         rooms = current.rooms.copy(joining = current.rooms.joining - room.roomId),
                     )
                 }
@@ -508,7 +464,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val joined: RoomJoinResponse = live.client.rooms.create(slug, name, kind, topic)
                 noteRoom(joined)
-                signedIn { it.copy(section = AppState.Section.CHATS) }
                 open(joined.conversationId, joined.room.name)
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -638,7 +593,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 signedIn { current ->
                     val absent = current.conversations.none { it.conversationId == fresh.conversationId }
                     current.copy(
-                        section = AppState.Section.CHATS,
                         conversations = if (absent) listOf(fresh) + current.conversations else current.conversations,
                     )
                 }

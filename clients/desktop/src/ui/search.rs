@@ -159,7 +159,6 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SearchState, cha
                     .clicked()
                     {
                         crate::ui::chat::open(context, chat, *conversation_id);
-                        context.go_place(crate::ui::Place::Chat);
                     }
                 }
                 ui.add_space(space::SM);

@@ -362,7 +362,6 @@ fn room_row(
     if open {
         if let Some(conversation_id) = joined_conversation {
             crate::ui::chat::open(context, chat, conversation_id);
-            context.go_place(crate::ui::Place::Chat);
         }
     }
     if leave {

@@ -329,6 +329,35 @@ fn account_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsS
     let colors = palette(context.theme);
     widgets::subheader(ui, context.theme, "Account");
 
+    // --- safety number ---------------------------------------------------------
+    // The fingerprint of this device's identity key, home here since the conversation list that
+    // used to carry it left the shell. Shown as a monospace block so a pair of people can read it
+    // to each other aloud and compare — that comparison is the only thing that detects a
+    // substituted identity key, and it is worth the four lines it costs.
+    if let Some(account) = context.account {
+        ui.label(
+            RichText::new("Safety number")
+                .text_style(crate::theme::named(crate::theme::text_style::OVERLINE))
+                .color(colors.text_muted),
+        );
+        ui.add_space(space::XS);
+        ui.label(
+            RichText::new(&account.safety_number)
+                .font(egui::FontId::monospace(font::SMALL))
+                .color(colors.text),
+        );
+        ui.add_space(space::XS);
+        ui.label(
+            RichText::new(
+                "Compare this with the other person, in a call or in person. If it differs, \
+                 stop and do not trust the conversation.",
+            )
+            .font(egui::FontId::proportional(font::TINY))
+            .color(colors.text_muted),
+        );
+        ui.add_space(space::LG);
+    }
+
     // --- devices ---------------------------------------------------------------
     ui.horizontal(|ui| {
         ui.label(

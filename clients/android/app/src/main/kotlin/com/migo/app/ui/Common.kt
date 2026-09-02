@@ -319,7 +319,7 @@ fun clockTime(millis: Long): String {
 }
 
 /** The tab strip's glyphs, in strip order. */
-enum class TabGlyph { FRIENDS, CHATS, ROOMS, GAMES, FEED }
+enum class TabGlyph { FRIENDS, ROOMS, GAMES, FEED }
 
 /**
  * A tab-strip glyph, drawn with the Canvas rather than typed or imported.
@@ -351,19 +351,6 @@ private fun DrawScope.drawGlyph(kind: TabGlyph, color: Color, stroke: Float) {
             drawCircle(color = color, radius = size.width * 0.11f, center = p(0.72f, 0.36f), style = Stroke(width = stroke))
             drawLine(color, p(0.56f, 0.88f), p(0.74f, 0.62f), stroke, cap)
             drawLine(color, p(0.74f, 0.62f), p(0.92f, 0.88f), stroke, cap)
-        }
-
-        TabGlyph.CHATS -> {
-            // A speech bubble with a tail.
-            drawRoundRect(
-                color = color,
-                topLeft = p(0.08f, 0.15f),
-                size = androidx.compose.ui.geometry.Size(size.width * 0.84f, size.height * 0.57f),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx()),
-                style = Stroke(width = stroke, cap = cap),
-            )
-            drawLine(color, p(0.3f, 0.72f), p(0.22f, 0.9f), stroke, cap)
-            drawLine(color, p(0.22f, 0.9f), p(0.48f, 0.72f), stroke, cap)
         }
 
         TabGlyph.ROOMS -> {

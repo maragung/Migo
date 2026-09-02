@@ -93,17 +93,6 @@ pub fn place_icon(ui: &mut Ui, theme: Theme, place: crate::ui::Place, active: bo
     // A unit box: (0,0) top-left to (1,1) bottom-right, scaled to the allocation.
     let p = |x: f32, y: f32| egui::pos2(min.x + x * side, min.y + y * side);
     match place {
-        crate::ui::Place::Chat => {
-            // A speech bubble: a rounded box with a tail.
-            painter.rect_stroke(
-                egui::Rect::from_min_max(p(0.08, 0.15), p(0.92, 0.72)),
-                4.0,
-                stroke,
-                egui::StrokeKind::Inside,
-            );
-            painter.line_segment([p(0.3, 0.72), p(0.22, 0.9)], stroke);
-            painter.line_segment([p(0.22, 0.9), p(0.48, 0.72)], stroke);
-        }
         crate::ui::Place::Rooms => {
             // A hash: the glyph the whole product marks rooms with.
             for x in [0.32, 0.68] {

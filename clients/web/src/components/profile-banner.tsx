@@ -27,10 +27,12 @@ import type { PanelTab } from './tab-strip.js';
 const MENU: ReadonlyArray<{
   panel: PanelTab;
   label: string;
-  icon: 'user' | 'wallet' | 'settings';
+  icon: 'bell' | 'search' | 'user' | 'wallet' | 'settings';
 }> = [
   { panel: 'profile', label: 'My Profile', icon: 'user' },
   { panel: 'wallet', label: 'My Credits & TopUp', icon: 'wallet' },
+  { panel: 'notifications', label: 'Alerts', icon: 'bell' },
+  { panel: 'search', label: 'Search', icon: 'search' },
   { panel: 'settings', label: 'Settings', icon: 'settings' },
 ];
 

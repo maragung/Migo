@@ -79,14 +79,14 @@ sealed interface AppState {
         val open: ChatState? = null,
         /** A transient failure banner: a send that did not go, a page that did not load. */
         val failure: String? = null,
-        /** The destination on screen; Chats is where a session starts, as it does on every client. */
-        val section: Section = Section.CHATS,
+        /** The destination on screen; Main (the friends list) is where a session starts, as on every client. */
+        val section: Section = Section.FRIENDS,
         /**
-         * The left panel's own tab, in the new-ui-02 model: the five system tabs drive the strip,
+         * The left panel's own tab, in the new-ui-02 model: the four system tabs drive the strip,
          * while the panels (Alerts, Search, Wallet, Profile) cover the screen the way a chat does.
          * A panel's back returns here, so covering the shell never disturbs what the strip shows.
          */
-        val stripSection: Section = Section.CHATS,
+        val stripSection: Section = Section.FRIENDS,
         val rooms: RoomsState = RoomsState(),
         val space: SpaceState = SpaceState(),
         val friends: FriendsState = FriendsState(),
@@ -97,12 +97,12 @@ sealed interface AppState {
     ) : AppState
 
     /**
-     * The shell's destinations. The first five are the reference's system tabs, in strip order; the
+     * The shell's destinations. The first four are the reference's system tabs, in strip order; the
      * rest are the panels the banner's avatar menu opens — they cover the screen rather than joining
      * the strip, which is the new-ui-02 model's phone story.
      */
     enum class Section {
-        FRIENDS, CHATS, ROOMS, GAMES, FEED, ALERTS, SEARCH, WALLET, PROFILE;
+        FRIENDS, ROOMS, GAMES, FEED, ALERTS, SEARCH, WALLET, PROFILE;
 
         /** True for the four panels the banner's menu opens, which cover the strip rather than join it. */
         val isPanel: Boolean

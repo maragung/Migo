@@ -1086,27 +1086,9 @@ main {
   overflow: hidden;
 }
 .app-body > .panel,
-.app-body > .chats-pane,
 .app-body > .thread-area {
   flex: 1;
   min-height: 0;
-}
-
-/* The chats list as a tab: the sidebar pane, centred and edged like any panel. */
-.chats-pane {
-  width: 100%;
-  max-width: 640px;
-  margin: 0 auto;
-  display: flex;
-  flex-direction: column;
-  border-left: 1px solid var(--border);
-  border-right: 1px solid var(--border);
-  overflow: hidden;
-}
-.chats-pane .sidebar {
-  flex: 1;
-  min-height: 0;
-  border-right: none;
 }
 
 /* --- the Games tab: the catalogue as cards --- */
@@ -2741,11 +2723,6 @@ main {
   }
   .banner-status {
     display: none;
-  }
-  .chats-pane {
-    max-width: none;
-    border-left: none;
-    border-right: none;
   }
   /* The header is crowded on a phone: the games control keeps its glyph and drops its word. */
   .games-label {

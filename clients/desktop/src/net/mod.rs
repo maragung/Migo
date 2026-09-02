@@ -301,6 +301,13 @@ pub enum Event {
     CaptchaRefused,
     /// The full conversation list.
     Conversations(Vec<Conversation>),
+    /// The server's answer to a conversation this client asked to create.
+    ///
+    /// Sent separately from [`Event::Conversations`] because asking is already intent: every
+    /// caller of `StartDirect` — a friend's Message action, a search hit, the new-chat field —
+    /// asked because it wants the thread open, so the id arrives on its own and the shell can
+    /// open the tab without guessing which conversation in the refreshed list is the new one.
+    ConversationCreated { conversation_id: Id },
     /// A page of history, oldest first.
     History {
         conversation_id: Id,
@@ -2935,6 +2942,9 @@ impl Worker {
                 summary.members.clone().unwrap_or_default(),
             );
         }
+        self.sink.send(Event::ConversationCreated {
+            conversation_id: summary.conversation_id,
+        });
         self.request_conversations().await;
     }
 

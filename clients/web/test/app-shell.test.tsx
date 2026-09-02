@@ -1,13 +1,13 @@
 /**
  * What the messenger shell offers as the app's navigation.
  *
- * The new-ui-02 shell is two independent panels: a left panel with its own tab strip (Friends,
- * Chats, Rooms, Games, Feed — the lists and streams a messenger lives in) over the orange
- * profile banner, and a right panel that runs on its own state — its menu tab bar (Feed, Games,
- * Alerts, Search, TopUp, Profile, Settings) when no conversation is active, or the chat tab bar
- * with one closable chip per open conversation and the "‹ Menu Panel" way back when one is.
- * The shell is the app's whole navigation, so its offer is its contract: a surface that
- * vanished would strand its panel behind no control at all.
+ * The new-ui-02 shell is two independent panels: a left panel with its own tab strip (Main,
+ * Rooms, Games, Feed — the lists and streams the reference draws) over the orange profile
+ * banner, and a right panel that runs on its own state — its menu tab bar (Feed, Games, TopUp,
+ * Profile, Settings) when no conversation is active, or the chat tab bar with one closable chip
+ * per open conversation and the "‹ Menu Panel" way back when one is. The shell is the app's
+ * whole navigation, so its offer is its contract: a surface that vanished would strand its
+ * panel behind no control at all — which is why Alerts and Search live in the banner menu.
  *
  * The shell reads the signed-in account from the Migo context, so the renderer is fed a minimal
  * context double the way `calls.test.tsx` feeds its manager; `renderToStaticMarkup` runs no
@@ -65,7 +65,7 @@ const NOOP = {
 function chatShell(tabs: ChatTabChip[], active: Id | null): ReactNode {
   return (
     <AppShell
-      leftTab="chats"
+      leftTab="friends"
       leftContent={<p>left</p>}
       rightTab="feed"
       rightContent={<p>right</p>}
@@ -79,15 +79,15 @@ function chatShell(tabs: ChatTabChip[], active: Id | null): ReactNode {
   );
 }
 
-test('the left strip offers the five system tabs in the reference order', () => {
+test('the left strip offers the four system tabs in the reference order', () => {
   const markup = render(chatShell([], null));
 
   // The pattern anchors on the whole class attribute so the icon/label spans inside a chip
   // (tab-chip-icon, tab-chip-label) never count — only the chip buttons do.
   const chips = markup.match(/class="tab-chip( active)?"/g) ?? [];
-  assert.equal(chips.length, 5, 'five system tabs on the left strip, nothing else');
+  assert.equal(chips.length, 4, 'four system tabs on the left strip, nothing else');
   let at = -1;
-  for (const label of ['Friends', 'Chats', 'Rooms', 'Games', 'Feed']) {
+  for (const label of ['Main', 'Rooms', 'Games', 'Feed']) {
     const found = markup.indexOf(`tab-chip-label">${label}</span>`);
     assert.ok(found !== -1, `the "${label}" tab is missing from the strip`);
     assert.ok(found > at, `the "${label}" tab is out of the reference order`);
@@ -99,7 +99,7 @@ test('the right pane in menu mode offers its own panel tabs', () => {
   const markup = render(chatShell([], null));
 
   assert.ok(markup.includes('Panel: Feed'), 'the menu bar must name the pane it is showing');
-  for (const label of ['Feed', 'Games', 'Alerts', 'Search', 'TopUp', 'Profile', 'Settings']) {
+  for (const label of ['Feed', 'Games', 'TopUp', 'Profile', 'Settings']) {
     assert.ok(
       markup.includes(`>${label}</button>`),
       `the "${label}" panel tab is missing from the menu bar`,
@@ -160,7 +160,7 @@ test('the banner carries the account menu and the theme control', () => {
 test('the theme control follows the theme it is handed', () => {
   const dark = render(
     <AppShell
-      leftTab="chats"
+      leftTab="friends"
       leftContent={<p>left</p>}
       rightTab="feed"
       rightContent={<p>right</p>}
@@ -175,7 +175,7 @@ test('the theme control follows the theme it is handed', () => {
   );
   const light = render(
     <AppShell
-      leftTab="chats"
+      leftTab="friends"
       leftContent={<p>left</p>}
       rightTab="feed"
       rightContent={<p>right</p>}
