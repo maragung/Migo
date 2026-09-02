@@ -4,7 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent, ReactNode } from 'react';
 
 import { ConversationKind, PresenceState, RelationshipKind } from '@migo/sdk';
-import type { Id, PresenceState as PresenceStateValue, RelationshipEntry, SuggestedUser } from '@migo/sdk';
+import type {
+  Id,
+  PresenceState as PresenceStateValue,
+  RelationshipEntry,
+  SuggestedUser,
+} from '@migo/sdk';
 
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { friendlyError } from '@/lib/migo/errors.js';

@@ -121,17 +121,6 @@ private fun StripChip(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.widthIn(max = 132.dp),
             )
-            if (badge > 0) {
-                Spacer(modifier = Modifier.width(6.dp))
-                Surface(color = extra.bannerB, shape = RoundedCornerShape(999.dp)) {
-                    Text(
-                        text = badge.coerceAtMost(99).toString(),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = extra.bannerInk,
-                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
-                    )
-                }
-            }
         }
         // The active tab's orange underline. Drawn (transparently) on every chip so the row's
         // baselines stay level whether or not the chip is the chosen one.
