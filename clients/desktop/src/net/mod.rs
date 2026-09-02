@@ -686,6 +686,12 @@ struct Worker {
     /// The room a leave is in flight for. The wire's acknowledgement names no room, so the
     /// request's own id is the only thing that can say which room the ack answers.
     pending_leave: Option<Id>,
+    /// The founding keys a registration attempt minted but has not yet made stick (§12). A
+    /// registration that fails after the server heard it must be retried with the *same* keys:
+    /// a fresh root would be a different identity key, which the server can only answer with
+    /// USERNAME_TAKEN. Cleared the moment the vault is written — from then on the vault is the
+    /// keys' home.
+    pending_registration: Option<DeviceKeys>,
     /// This account's tracked AVAX transactions (§184's Activity list), in memory between
     /// passphrase moments — this worker deliberately does not hold the passphrase after unlock,
     /// so the list is re-sealed into the vault only when a sign-in next opens it.
@@ -709,6 +715,7 @@ impl Worker {
             gateway: None,
             retry: None,
             pending_leave: None,
+            pending_registration: None,
             txs: None,
             chain_http: reqwest::Client::new(),
         }
@@ -932,14 +939,47 @@ impl Worker {
             challenge_id: &answer.challenge_id,
             answer: &answer.answer,
         });
+
+        // A registration's keys are resolved *before* the request (§12): the vault's when a
+        // passphrase just opened one, else a founding set minted once and reused across retries.
+        // The identity key travels with the request, so a retry whose first attempt already
+        // landed reconciles into the account that attempt made instead of being refused as a
+        // taken name. A sign-in mints nothing here — an additional device's keys never touch the
+        // account root.
+        let registration_keys = if register {
+            Some(match existing {
+                Some(keys) => keys,
+                None => self.pending_registration.take().unwrap_or_else(|| {
+                    DeviceKeys::founding(&migo_account::MigoRoot::generate(&mut OsRandom))
+                }),
+            })
+        } else {
+            None
+        };
+        let identity_public_key = registration_keys
+            .as_ref()
+            .and_then(|keys| keys.identity_key())
+            .map(|identity| identity.public_key().to_vec());
         let grant = if register {
-            rest.register(&identifier, &password, device, proof).await
+            rest.register(
+                &identifier,
+                &password,
+                device,
+                proof,
+                identity_public_key.as_deref(),
+            )
+            .await
         } else {
             rest.login(&identifier, &password, device, proof).await
         };
         let grant = match grant {
             Ok(grant) => grant,
             Err(error) => {
+                // §12: the attempt failed, not the account — hold the founding keys for the
+                // retry, whatever took the request down.
+                if let Some(keys) = registration_keys {
+                    self.pending_registration = Some(keys);
+                }
                 // A captcha refusal is not a dead form: the attempt consumed the challenge
                 // either way, so tell the UI to drop it and draw a fresh one, and let the
                 // ordinary failure path below keep the form standing for the retry.
@@ -953,6 +993,10 @@ impl Worker {
                 return self.fail(error.to_string());
             }
         };
+        // The account exists and the vault below is about to hold the keys, so whatever a failed
+        // attempt left pending is spent: a later registration is a genuinely new account and
+        // must mint a genuinely new root.
+        self.pending_registration = None;
 
         // A vault whose passphrase just opened keeps its keys; otherwise this device is new and needs
         // a fresh identity. Generating one unconditionally would silently replace the key peers have
@@ -964,11 +1008,8 @@ impl Worker {
         // credential. A sign-in is an *additional* device of an account that exists: fresh random
         // E2EE identity, fresh credential, no root — additional devices never inherit the founding
         // device's material.
-        let mut keys = match existing {
+        let mut keys = match registration_keys {
             Some(keys) => keys,
-            None if register => {
-                DeviceKeys::founding(&migo_account::MigoRoot::generate(&mut OsRandom))
-            }
             None => DeviceKeys::additional(),
         };
         // Captured before `establish` takes the keys: the account-root follow-ups (publishing the

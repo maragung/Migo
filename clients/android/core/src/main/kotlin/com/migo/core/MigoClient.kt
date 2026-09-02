@@ -452,11 +452,13 @@ class MigoClient private constructor(
     /**
      * Registers a new account for this device, then connects.
      *
-     * Returns the grant so the caller can persist it, alongside a [snapshot] of the key material, and
-     * later [resume] without registering again.
+     * [identityPublicKey] is the account identity's ML-DSA-65 public key when the caller already
+     * holds the account root; it rides with the request so the server can reconcile a retry whose
+     * first attempt already landed (§12). Returns the grant so the caller can persist it, alongside
+     * a [snapshot] of the key material, and later [resume] without registering again.
      */
-    suspend fun register(username: String, password: String): Grant {
-        val grant = rest.register(username, password, deviceRequest(), options.locale)
+    suspend fun register(username: String, password: String, identityPublicKey: ByteArray? = null): Grant {
+        val grant = rest.register(username, password, deviceRequest(), options.locale, identityPublicKey)
         establish(grant)
         return grant
     }

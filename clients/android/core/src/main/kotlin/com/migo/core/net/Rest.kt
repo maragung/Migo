@@ -112,6 +112,10 @@ private data class RegisterRequest(
     val password: String,
     val locale: String,
     val device: DeviceRequest,
+    // The account identity's ML-DSA-65 public key, base64, when the registering device already
+    // holds the account root (§12). Null by default and the Json instance skips it, so a
+    // password-only caller's wire shape is unchanged.
+    @SerialName("identity_public_key") val identityPublicKey: String? = null,
 )
 
 @Serializable
@@ -308,16 +312,30 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
         else -> "wss://$base/ws"
     }
 
-    /** Creates an account and a first device. */
+    /**
+     * Creates an account and a first device.
+     *
+     * [identityPublicKey] is the account identity's ML-DSA-65 public key when the caller already
+     * holds the account root: it makes registration idempotent (§12), because a retry whose first
+     * attempt already landed is answered with a reconciliation instead of USERNAME_TAKEN. Omitted
+     * from the wire when null.
+     */
     suspend fun register(
         username: String,
         password: String,
         device: DeviceRequest,
         locale: String = "en",
+        identityPublicKey: ByteArray? = null,
     ): Grant = post(
         "/v1/auth/register",
         RegisterRequest.serializer(),
-        RegisterRequest(username, password, locale, device),
+        RegisterRequest(
+            username,
+            password,
+            locale,
+            device,
+            identityPublicKey?.let { Base64.getEncoder().encodeToString(it) },
+        ),
     )
 
     /**

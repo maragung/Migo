@@ -94,6 +94,13 @@ export interface RegisterParams {
   country?: string;
   device: DeviceDescriptor;
   /**
+   * The account identity's ML-DSA-65 public key, when the registering device already holds the
+   * account root it is about to found. Sending it is what makes registration idempotent
+   * (brief §12): a retry that carries the same key reconciles into the account the first attempt
+   * already made, instead of being refused as a taken name.
+   */
+  identityPublicKey?: Uint8Array;
+  /**
    * When the server returns `CAPTCHA_REQUIRED` for a state it gates, the client supplies the
    * proof on a retry. Omitted on the first attempt.
    */
@@ -452,6 +459,9 @@ export class BootstrapClient {
       ...(params.phone !== undefined ? { phone: params.phone } : {}),
       ...(params.locale !== undefined ? { locale: params.locale } : {}),
       ...(params.country !== undefined ? { country: params.country } : {}),
+      ...(params.identityPublicKey !== undefined
+        ? { identity_public_key: toBase64(params.identityPublicKey) }
+        : {}),
       ...(params.captcha !== undefined ? { captcha: captchaBody(params.captcha) } : {}),
     };
     return parseGrant(await this.#post('/v1/auth/register', body));

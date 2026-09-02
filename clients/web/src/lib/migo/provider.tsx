@@ -120,6 +120,11 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
   const serverRef = useRef<ServerEndpoint | null>(null);
   const inboundOffRef = useRef<(() => void) | null>(null);
   const persistScheduledRef = useRef(false);
+  // The root a registration attempt minted but has not yet made stick (§12). A registration that
+  // fails after the server heard it must be retried with the *same* root: a fresh one would be a
+  // different identity key, which the server can only answer with USERNAME_TAKEN. Cleared the
+  // moment the account exists locally — from then on the key-store snapshot is the root's home.
+  const pendingRootRef = useRef<account.MigoRoot | null>(null);
 
   // --- key-store persistence (coalesced to at most once per microtask) ---
 
@@ -280,11 +285,17 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
         // A registration is the founding device of a brand-new account (§182): the root is minted
         // here, the E2EE identity is derived from the root's E2EE domain, and both seal into the
         // snapshot below — which is what a `.migo` container can later be rebuilt from.
-        const root = account.MigoRoot.generate();
+        //
+        // The root is reused across attempts (§12): a retry after a failed request is the same
+        // account-to-be, not a new one, and the identity key travels with the request so the
+        // server can reconcile a retry whose first attempt already landed.
+        const root = pendingRootRef.current ?? account.MigoRoot.generate();
+        pendingRootRef.current = root;
         const created = buildClient({ server, keyStore: KeyStore.founding(root) });
         const params: Omit<RegisterParams, 'device'> = {
           username: form.username.trim(),
           password: form.password,
+          identityPublicKey: account.IdentityKey.fromRoot(root).publicKey(),
         };
         if (form.email?.trim()) {
           params.email = form.email.trim();
@@ -314,6 +325,9 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
         wireInbound(created);
         void created.presence.setPresence(PresenceState.Online).catch(() => {});
         void enrolAccountMaterial(created, grant, server);
+        // The root has a durable home now (the snapshot above), so a later registration is a
+        // genuinely new account and must mint a genuinely new root.
+        pendingRootRef.current = null;
         markReady(grant);
       } catch (cause) {
         await teardown();

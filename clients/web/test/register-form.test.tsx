@@ -251,3 +251,80 @@ test('MigoClient.register omits the captcha block when no proof is supplied', as
   const body: Record<string, unknown> = JSON.parse(String(registerCall.init.body));
   assert.equal(body.captcha, undefined, 'no captcha key is sent when no proof is supplied');
 });
+
+test('MigoClient.register carries the identity key as base64 when a founding root is supplied', async () => {
+  const calls: CapturedCall[] = [];
+  const client = MigoClient.create({
+    server: ENDPOINT,
+    hello: {
+      platform: Platform.Web,
+      appVersion: 'test',
+      locale: 'en-US',
+      bandwidthMode: BandwidthMode.Auto,
+    },
+    deviceDisplayName: 'Test Browser',
+    fetch: makeFetchDouble(calls),
+    webSocketFactory: refusingSocket,
+  });
+  // A deterministic root, so the derived identity key is stable and the assertion can compare
+  // bytes rather than shape: 32 bytes is what the account root is (§182).
+  const { account, KeyStore } = await import('@migo/sdk');
+  const root = account.MigoRoot.fromBytes(new Uint8Array(32).fill(7));
+  const identityKey = account.IdentityKey.fromRoot(root).publicKey();
+
+  try {
+    await client.register({
+      username: USERNAME,
+      password: PASSWORD,
+      identityPublicKey: identityKey,
+    });
+  } catch {
+    // The socket handshake will fail under node; the bootstrap call is the one we assert on.
+  }
+  const registerCall = calls.find((c) => c.url.endsWith('/v1/auth/register'));
+  assert.ok(registerCall !== undefined, 'a /v1/auth/register POST must have been made');
+  // eslint-disable-next-line @typescript-eslint/no-base-to-string, @typescript-eslint/no-unsafe-assignment
+  const body: Record<string, unknown> = JSON.parse(String(registerCall.init.body));
+  // The ML-DSA-65 public key is 1952 bytes; whatever its exact length here, the body must carry
+  // the standard-base64 of exactly those bytes and nothing else.
+  const encoded = body.identity_public_key;
+  assert.equal(typeof encoded, 'string', 'the identity key crosses as a base64 string');
+  const decoded = Buffer.from(String(encoded), 'base64');
+  assert.deepEqual(
+    new Uint8Array(decoded),
+    identityKey,
+    'the base64 round-trips to the exact key bytes the caller supplied',
+  );
+
+  // And the same call without the key must not carry the field at all, so a password-only
+  // client's wire shape is unchanged.
+  const bareCalls: CapturedCall[] = [];
+  const bare = MigoClient.create({
+    server: ENDPOINT,
+    hello: {
+      platform: Platform.Web,
+      appVersion: 'test',
+      locale: 'en-US',
+      bandwidthMode: BandwidthMode.Auto,
+    },
+    deviceDisplayName: 'Test Browser',
+    fetch: makeFetchDouble(bareCalls),
+    webSocketFactory: refusingSocket,
+  });
+  try {
+    await bare.register({ username: USERNAME, password: PASSWORD });
+  } catch {
+    // The handshake is not under test here either.
+  }
+  const bareCall = bareCalls.find((c) => c.url.endsWith('/v1/auth/register'));
+  assert.ok(bareCall !== undefined, 'a /v1/auth/register POST must have been made');
+  // eslint-disable-next-line @typescript-eslint/no-base-to-string, @typescript-eslint/no-unsafe-assignment
+  const bareBody: Record<string, unknown> = JSON.parse(String(bareCall.init.body));
+  assert.equal(
+    bareBody.identity_public_key,
+    undefined,
+    'no identity key is sent when the caller supplies none',
+  );
+  // The key store exercises the founding path too; referencing it keeps the import honest.
+  assert.ok(KeyStore.founding(root).root() !== null, 'the founding key store holds the root');
+});

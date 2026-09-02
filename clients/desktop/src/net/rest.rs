@@ -92,6 +92,9 @@ struct RegisterRequest<'a> {
     device: DeviceRequest,
     #[serde(skip_serializing_if = "Option::is_none")]
     captcha: Option<CaptchaProof<'a>>,
+    /// The ML-DSA-65 public key, standard base64, when the registering device holds the root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity_public_key: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -448,19 +451,27 @@ impl Rest {
     /// `captcha` is the proof for the challenge the form fetched; `None` sends no proof at all,
     /// which a server with the gate on answers with `CAPTCHA_REQUIRED`. The caller decides what
     /// that refusal means to the user.
+    ///
+    /// `identity_public_key` is the account identity's ML-DSA-65 public key when this device
+    /// already holds the root it is founding the account with. Sending it is what makes the
+    /// registration idempotent (brief §12): a retry carrying the same key reconciles into the
+    /// account the first attempt already made. `None` registers the password-only account.
     pub async fn register(
         &self,
         username: &str,
         password: &str,
         device: DeviceRequest,
         captcha: Option<CaptchaProof<'_>>,
+        identity_public_key: Option<&[u8]>,
     ) -> Result<Grant, RestError> {
+        let identity_public_key = identity_public_key.map(b64);
         let body = RegisterRequest {
             username,
             password,
             locale: "en",
             device,
             captcha,
+            identity_public_key: identity_public_key.as_deref(),
         };
         self.post("/v1/auth/register", &body).await
     }

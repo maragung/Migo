@@ -204,12 +204,24 @@ class MigoSession private constructor(
         }
 
         /**
+         * The root a registration attempt minted but has not yet made stick (§12). A registration
+         * that fails after the server heard it must be retried with the *same* root: a fresh one
+         * would be a different identity key, which the server can only answer with USERNAME_TAKEN.
+         * Cleared the moment the account exists durably — from then on the session vault is the
+         * root's home. Companion-scoped because each failed attempt tears the session down.
+         */
+        private var pendingRegistrationRoot: MigoRoot? = null
+
+        /**
          * Registers a new account and its founding device.
          *
          * A registration is the founding device of a brand-new account (§182), so it mints the
          * account root and derives the E2EE identity from the root's E2EE domain — recoverable from
-         * a `.migo` container, which is the point. After the account exists, the root's public
-         * material is published and wallet 0 registered, idempotently.
+         * a `.migo` container, which is the point. The root is reused across attempts (§12): a
+         * retry after a failed request is the same account-to-be, not a new one, and the identity
+         * key travels with the request so the server can reconcile a retry whose first attempt
+         * already landed. After the account exists, the root's public material is published and
+         * wallet 0 registered, idempotently.
          */
         suspend fun register(
             context: Context,
@@ -220,12 +232,13 @@ class MigoSession private constructor(
             hooks: SessionHooks = SessionHooks(),
         ): MigoSession {
             val (vault, store) = reset(context)
-            val root = MigoRoot.generate()
+            val root = pendingRegistrationRoot ?: MigoRoot.generate().also { pendingRegistrationRoot = it }
             val client = build(endpoint, appVersion, null, KeyStore.founding(root), store, hooks)
             val session = MigoSession(client, username, vault, store)
-            client.register(username, password)
+            client.register(username, password, IdentityKey.fromRoot(root).publicKey())
             session.enrolAccountMaterial()
             session.persist()
+            pendingRegistrationRoot = null
             return session
         }
 
