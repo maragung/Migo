@@ -153,6 +153,8 @@ export const CODE = {
   RECOVERY_NOT_FOUND: 1312,
   /** Identity challenge is unknown, expired, already used, or bound to another ceremony */
   CHALLENGE_INVALID: 1313,
+  /** Registration retried after the account already existed; the existing account was kept and the retry was folded into it */
+  REGISTRATION_RECONCILED: 1314,
   RATE_LIMITED: 1400,
   QUOTA_EXCEEDED: 1401,
   SLOW_MODE_ACTIVE: 1402,
@@ -235,6 +237,7 @@ export const ERROR_SYMBOLS: Record<number, string> = {
   1311: 'CAPTCHA_REQUIRED',
   1312: 'RECOVERY_NOT_FOUND',
   1313: 'CHALLENGE_INVALID',
+  1314: 'REGISTRATION_RECONCILED',
   1400: 'RATE_LIMITED',
   1401: 'QUOTA_EXCEEDED',
   1402: 'SLOW_MODE_ACTIVE',

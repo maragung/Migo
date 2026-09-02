@@ -137,6 +137,7 @@ impl RefreshOutcome {
 /// The counters, resolved once at construction.
 pub(crate) struct Meters {
     registrations: Arc<Counter>,
+    registrations_reconciled: Arc<Counter>,
     registrations_refused: Arc<Counter>,
     signin: Vec<Arc<Counter>>,
     refresh: Vec<Arc<Counter>>,
@@ -166,6 +167,11 @@ impl Meters {
             registrations_refused: registry.counter(
                 "migo_auth_registrations_refused_total",
                 "Registration attempts refused, for any reason.",
+                &[],
+            ),
+            registrations_reconciled: registry.counter(
+                "migo_auth_registrations_reconciled_total",
+                "Registration retries folded into an existing account (brief section 12).",
                 &[],
             ),
             signin: SignInOutcome::ALL
@@ -228,6 +234,10 @@ impl Meters {
 
     pub(crate) fn registration_refused(&self) {
         self.registrations_refused.inc();
+    }
+
+    pub(crate) fn reconciled_registration(&self) {
+        self.registrations_reconciled.inc();
     }
 
     pub(crate) fn signin(&self, outcome: SignInOutcome) {

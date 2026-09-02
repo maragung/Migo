@@ -1253,12 +1253,24 @@ fn ceremony_context(millis: i64, network: u8) -> RequestContext {
 /// Registers `username` carrying `set`'s keys: the identity key the account
 /// will verify against, and the device credential its first device holds.
 async fn register_with_root(harness: &Harness, username: &str, set: &RootSet) -> Grant {
+    register_with_root_from(harness, username, set, 1_000, 4).await
+}
+
+/// The same registration, from a chosen time and documentation network, so a
+/// retry does not share its first attempt's anonymous bucket.
+async fn register_with_root_from(
+    harness: &Harness,
+    username: &str,
+    set: &RootSet,
+    millis: i64,
+    network: u8,
+) -> Grant {
     let mut request = registration(username);
     request.identity_public_key = Some(set.identity.public_key().to_vec());
     request.device.credential_public_key = Some(set.credential.public_key().to_vec());
     harness
         .auth
-        .register(request, &ceremony_context(1_000, 4))
+        .register(request, &ceremony_context(millis, network))
         .await
         .expect("a root-secret registration succeeds")
 }
@@ -1285,6 +1297,90 @@ async fn login_challenge(
         )
         .await
         .expect("a login challenge is issued")
+}
+
+#[tokio::test]
+async fn a_registration_retry_folds_into_the_account_it_already_made() {
+    let harness = Harness::new();
+    let set = RootSet::new(0x55, 0x66);
+    let first = register_with_root(&harness, "wren", &set).await;
+
+    // The network eats the response; the client, still holding the same root,
+    // retries the identical registration. The account must not duplicate —
+    // the retry is answered with a grant for the one account that exists.
+    let second = register_with_root_from(&harness, "wren", &set, 2_000, 10).await;
+    assert_eq!(
+        second.account_id, first.account_id,
+        "the retry reconciles into the existing account"
+    );
+    assert!(
+        !second.is_new_account,
+        "the reconciled grant is not a new account"
+    );
+    identify(&harness.auth, &second, 3_000)
+        .await
+        .expect("the reconciled session is real");
+
+    // Exactly one account exists under the name.
+    let dup = harness
+        .auth
+        .register(registration("wren"), &ceremony_context(4_000, 7))
+        .await;
+    assert!(
+        dup.is_err(),
+        "a password-only registration of the taken name is still refused"
+    );
+}
+
+#[tokio::test]
+async fn a_retry_with_someone_elses_keys_is_refused() {
+    let harness = Harness::new();
+    let owner = RootSet::new(0x77, 0x88);
+    register_with_root(&harness, "linnet", &owner).await;
+
+    // A different client generated a different root and picked the same
+    // username. Nothing about its retry may fold into the owner's account —
+    // the verdict stays USERNAME_TAKEN.
+    let impostor = RootSet::new(0x99, 0xaa);
+    let mut request = registration("linnet");
+    request.identity_public_key = Some(impostor.identity.public_key().to_vec());
+    request.device.credential_public_key = Some(impostor.credential.public_key().to_vec());
+    let collision = harness
+        .auth
+        .register(request, &ceremony_context(2_000, 8))
+        .await
+        .expect_err("a foreign key cannot take an existing name");
+    assert_eq!(
+        collision.code(),
+        migo_protocol::codes::USERNAME_TAKEN,
+        "the refusal is the ordinary name collision; got {:?}",
+        collision
+    );
+}
+
+#[tokio::test]
+async fn a_retry_with_the_right_key_but_a_wrong_password_is_refused() {
+    let harness = Harness::new();
+    let set = RootSet::new(0xbb, 0xcc);
+    register_with_root(&harness, "robin", &set).await;
+
+    // The key matches but the password does not: reconcile never becomes a
+    // password oracle, and the answer is the generic invalid-credentials
+    // fault rather than anything name-specific.
+    let mut request = registration("robin");
+    request.password = Secret::new("wrong horse wrong staple");
+    request.identity_public_key = Some(set.identity.public_key().to_vec());
+    let refused = harness
+        .auth
+        .register(request, &ceremony_context(2_000, 9))
+        .await
+        .expect_err("a wrong password never reconciles");
+    assert_eq!(
+        refused.code(),
+        migo_protocol::codes::INVALID_CREDENTIALS,
+        "the refusal is invalid credentials; got {:?}",
+        refused
+    );
 }
 
 #[tokio::test]

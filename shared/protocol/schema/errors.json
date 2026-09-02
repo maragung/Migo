@@ -292,6 +292,12 @@
       "doc": "Identity challenge is unknown, expired, already used, or bound to another ceremony"
     },
     {
+      "code": 1314,
+      "symbol": "REGISTRATION_RECONCILED",
+      "http": 409,
+      "doc": "Registration retried after the account already existed; the existing account was kept and the retry was folded into it"
+    },
+    {
       "code": 1400,
       "symbol": "RATE_LIMITED",
       "http": 429

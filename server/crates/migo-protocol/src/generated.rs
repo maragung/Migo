@@ -163,6 +163,8 @@ pub mod codes {
     pub const RECOVERY_NOT_FOUND: u32 = 1312;
     /// Identity challenge is unknown, expired, already used, or bound to another ceremony
     pub const CHALLENGE_INVALID: u32 = 1313;
+    /// Registration retried after the account already existed; the existing account was kept and the retry was folded into it
+    pub const REGISTRATION_RECONCILED: u32 = 1314;
     pub const RATE_LIMITED: u32 = 1400;
     pub const QUOTA_EXCEEDED: u32 = 1401;
     pub const SLOW_MODE_ACTIVE: u32 = 1402;
@@ -248,6 +250,7 @@ pub mod codes {
         CAPTCHA_REQUIRED,
         RECOVERY_NOT_FOUND,
         CHALLENGE_INVALID,
+        REGISTRATION_RECONCILED,
         RATE_LIMITED,
         QUOTA_EXCEEDED,
         SLOW_MODE_ACTIVE,
@@ -374,6 +377,7 @@ pub fn error_symbol(code: u32) -> Option<&'static str> {
         codes::CAPTCHA_REQUIRED => "CAPTCHA_REQUIRED",
         codes::RECOVERY_NOT_FOUND => "RECOVERY_NOT_FOUND",
         codes::CHALLENGE_INVALID => "CHALLENGE_INVALID",
+        codes::REGISTRATION_RECONCILED => "REGISTRATION_RECONCILED",
         codes::RATE_LIMITED => "RATE_LIMITED",
         codes::QUOTA_EXCEEDED => "QUOTA_EXCEEDED",
         codes::SLOW_MODE_ACTIVE => "SLOW_MODE_ACTIVE",
@@ -454,6 +458,7 @@ pub fn error_http_status(code: u32) -> u16 {
         codes::CAPTCHA_REQUIRED => 400,
         codes::RECOVERY_NOT_FOUND => 404,
         codes::CHALLENGE_INVALID => 401,
+        codes::REGISTRATION_RECONCILED => 409,
         codes::RATE_LIMITED => 429,
         codes::QUOTA_EXCEEDED => 429,
         codes::SLOW_MODE_ACTIVE => 429,

@@ -1128,7 +1128,7 @@ where
             .await?;
 
         let account_id = self.new_id(now);
-        let account = self
+        let account = match self
             .store
             .create_account(NewAccount {
                 account_id,
@@ -1141,18 +1141,32 @@ where
                 created_at: now,
             })
             .await
-            .map_err(|error| {
+        {
+            Ok(account) => account,
+            Err(error) => {
                 self.meters.registration_refused();
                 // The store reports a collision generically, because it does not know
                 // which unique index tripped. A username collision is by far the most
                 // common and the only one a client can act on, so it gets the specific
                 // code.
-                if error.code() == codes::ALREADY_EXISTS {
-                    fault::error(codes::USERNAME_TAKEN, "that username is taken")
-                } else {
-                    error
+                if error.code() != codes::ALREADY_EXISTS {
+                    return Err(error);
                 }
-            })?;
+                // §12: a retried registration must not mint a second account. The
+                // account already exists under this username; the only retry that
+                // may fold into it is one whose identity key is the account's own
+                // active key — the proof the first attempt came from this client,
+                // because that key was generated on this device and never left it.
+                // A retry with a different (or no) identity key keeps the
+                // USERNAME_TAKEN answer: for a different key that is the honest
+                // "someone else owns that name" verdict, and without a key there is
+                // nothing to reconcile on but the password, which sign-in already
+                // exists to check.
+                return self
+                    .reconcile_registration(&request, &username, context)
+                    .await;
+            }
+        };
 
         self.store
             .create_profile(Profile {
@@ -2677,4 +2691,102 @@ fn normalise_locale(raw: &str) -> String {
         return "en".to_string();
     }
     trimmed.to_lowercase()
+}
+
+impl<S, L> Auth<S, L>
+where
+    S: AccountStore
+        + DeviceStore
+        + SessionStore
+        + SafetyStore
+        + RecoveryStore
+        + IdentityStore
+        + ChallengeStore
+        + WalletStore
+        + ?Sized,
+    L: RateLimiter + ?Sized,
+{
+    /// The §12 half of registration: what happens when the account already
+    /// exists. Called from `register` on a store collision for the username,
+    /// with the request that collided.
+    ///
+    /// A retry may fold into the existing account only when the identity key
+    /// it carries is the account's active key. The check is a comparison of
+    /// public bytes, never a disclosure: a mismatched key learns nothing
+    /// beyond the USERNAME_TAKEN verdict it would have received anyway, and
+    /// the identity-key read it costs is priced by the register charge that
+    /// already ran. The account's password is verified too, so a leaked
+    /// username plus a stolen identity key alone cannot be replayed into a
+    /// session.
+    async fn reconcile_registration(
+        &self,
+        request: &Registration,
+        username: &credential::Username,
+        context: &RequestContext,
+    ) -> Result<Grant> {
+        let taken = fault::error(codes::USERNAME_TAKEN, "that username is taken");
+        let Some(existing) = self.store.account_by_username(username.folded()).await? else {
+            // The collision was on the email or phone index, not the username.
+            // Nothing here can reconcile that; the generic answer is the honest one.
+            return Err(taken);
+        };
+
+        let Some(public_key) = request.identity_public_key.as_ref() else {
+            // A password-only registration carries nothing to reconcile on; the
+            // sign-in endpoint is the reconciliation path for that client.
+            return Err(taken);
+        };
+        let Some(active) = self.store.active_identity_key(existing.account_id).await? else {
+            // The name's owner registered without an identity key (a legacy
+            // password-only account): no key match is possible.
+            return Err(taken);
+        };
+        if public_key.as_slice() != active.public_key.as_slice() {
+            return Err(taken);
+        }
+        // Only now, with the account proven to be this client's own, does the
+        // password get checked — and a wrong password is the generic
+        // invalid-credentials fault, so the reconcile path cannot be used as a
+        // password oracle for somebody else's name.
+        if self
+            .verify_password(
+                request.password.expose(),
+                &existing.password_hash,
+                &self.meters,
+            )
+            .await?
+            .is_none()
+        {
+            return Err(fault::invalid_credentials());
+        }
+        if !existing.status.can_sign_in() {
+            return Err(suspended(existing.status));
+        }
+
+        let now = context.now;
+        let tier = tier::of_account(&existing, now);
+        let device = self.resolve_device(&existing, &request.device, now).await?;
+        let grant = self
+            .open_session(&existing, &device, tier, now, context, None, None, false)
+            .await?;
+        self.store.record_login(existing.account_id, now).await?;
+        let server = request.server_or_default();
+        self.audit(
+            Some(existing.account_id),
+            AuditActorKind::User,
+            "account.register.reconciled",
+            AuditTargetKind::Account,
+            Some(existing.account_id),
+            format!(
+                "registration retry for @{} folded into the existing account via {}:{}",
+                username.display(),
+                server.host,
+                server.port
+            ),
+            context,
+        )
+        .await;
+        self.meters.reconciled_registration();
+        Ok(grant)
+    }
 }
