@@ -34,8 +34,8 @@ use migo_core::config::Config;
 use migo_core::metrics::Registry;
 use migo_core::{Id, PublicId, Random, Result, SeededRandom, Timestamp};
 use migo_protocol::{
-    codes, EncryptionMode, Opcode, RoomJoinRequest, RoomKind, RoomLeaveRequest, RoomListRequest,
-    RoomMemberEvent, RoomRole, RoomStateEvent,
+    codes, EncryptionMode, Opcode, RelationshipKind, RoomJoinRequest, RoomKind, RoomLeaveRequest,
+    RoomListRequest, RoomMemberEvent, RoomRole, RoomStateEvent,
 };
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 use migo_rooms::fanout::{Broadcast, Fanout};
@@ -49,7 +49,7 @@ use migo_rooms::permission;
 use migo_rooms::service::Rooms;
 use migo_rooms::traits::Roomkeeper;
 use migo_rooms::view::ONLINE_COUNT_UNSET;
-use migo_store::model::{join_policy, Relationship, RelationshipKind, Room, RoomMember};
+use migo_store::model::{join_policy, Relationship, Room, RoomMember};
 use migo_store::traits::{RoomStore, SocialStore};
 use migo_store::MemoryStore;
 

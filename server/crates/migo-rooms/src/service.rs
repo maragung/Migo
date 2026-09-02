@@ -56,11 +56,11 @@ use async_trait::async_trait;
 use migo_core::metrics::Registry;
 use migo_core::{Id, OsRandom, Random, Result, Timestamp};
 use migo_protocol::{
-    codes, fault, Opcode, RoomJoinRequest, RoomJoinResponse, RoomKind, RoomLeaveRequest,
-    RoomListRequest, RoomListResponse, RoomMemberEvent, RoomRole, RoomSummary,
+    codes, fault, Opcode, RelationshipKind, RoomJoinRequest, RoomJoinResponse, RoomKind,
+    RoomLeaveRequest, RoomListRequest, RoomListResponse, RoomMemberEvent, RoomRole, RoomSummary,
 };
 use migo_ratelimit::{BucketKey, RateLimiter, SharedRateLimiter};
-use migo_store::model::{join_policy, NewRoom, Patch, RelationshipKind, Room, RoomMember};
+use migo_store::model::{join_policy, NewRoom, Patch, Room, RoomMember};
 use migo_store::traits::{MessagingStore, RoomStore, SocialStore};
 use migo_store::{SharedStore, Store};
 use parking_lot::Mutex;

@@ -221,7 +221,6 @@ impl RoomsConfig {
     pub fn from_node(node: &NodeConfig) -> Self {
         Self {
             home_region: node.region.clone(),
-            ..Self::default()
         }
     }
 }
