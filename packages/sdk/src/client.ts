@@ -61,6 +61,8 @@ import type {
 import { BootstrapClient } from './rest.js';
 import type {
   AccountSession,
+  AdminStanding,
+  AdminView,
   CaptchaChallenge,
   CaptchaMode,
   CaptchaProof,
@@ -700,6 +702,40 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   async revokeDevice(params: { device_id: Id }): Promise<{ revoked: number }> {
     const ctx = this.#requireConnected();
     return this.#bootstrap.revokeDevice(ctx.grant.accessToken, params.device_id);
+  }
+
+  // --- the global-admin management surface -----------------------------------
+
+  /**
+   * What the signed-in account may open: owner of the deployment, global admin, or
+   * neither. Ask this before fetching anything, so the management surface can stay
+   * hidden entirely for accounts that hold neither role.
+   */
+  async adminStanding(): Promise<AdminStanding> {
+    const ctx = this.#requireConnected();
+    return this.#bootstrap.adminStanding(ctx.grant.accessToken);
+  }
+
+  /** Every global admin, with usernames resolved for the owner's list. Owner-only. */
+  async globalAdmins(): Promise<AdminView[]> {
+    const ctx = this.#requireConnected();
+    return this.#bootstrap.globalAdmins(ctx.grant.accessToken);
+  }
+
+  /**
+   * Appoints a global admin by username, with or without the leading `@`. Idempotent: a
+   * repeated appointment keeps the original grant. Owner-only.
+   */
+  async grantGlobalAdmin(params: { username: string }): Promise<AdminView> {
+    const ctx = this.#requireConnected();
+    return this.#bootstrap.grantGlobalAdmin(ctx.grant.accessToken, params.username);
+  }
+
+  /** Revokes a global admin; revoking an account that is not one is quietly `ok`. Owner-only. */
+  async revokeGlobalAdmin(params: { account_id: Id }): Promise<{ ok: true }> {
+    const ctx = this.#requireConnected();
+    await this.#bootstrap.revokeGlobalAdmin(ctx.grant.accessToken, params.account_id);
+    return { ok: true };
   }
 
   /**

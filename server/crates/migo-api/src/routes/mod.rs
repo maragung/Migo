@@ -7,6 +7,7 @@
 //! are added by writing a module here and merging it into [`v1`]; nothing else changes.
 
 mod account;
+mod admins;
 mod auth;
 mod config;
 mod health;
@@ -32,6 +33,7 @@ fn v1() -> Router<ApiState> {
     Router::new()
         .merge(auth::routes())
         .merge(account::routes())
+        .merge(admins::routes())
         .merge(config::routes())
 }
 

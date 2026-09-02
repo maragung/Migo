@@ -38,6 +38,7 @@ import type { ReactNode } from 'react';
 import { ConversationKind } from '@migo/sdk';
 import type { ConversationSummary, Id } from '@migo/sdk';
 
+import { AdminsPanel } from '@/components/admins-panel.js';
 import { AppShell } from '@/components/app-shell.js';
 import type { PanelTab, SystemTab } from '@/components/app-shell.js';
 import type { RightTabChip, RightTabKind } from '@/components/app-shell.js';
@@ -107,6 +108,7 @@ const KIND_TITLES: Readonly<Record<Exclude<RightTabKind, 'chat'>, string>> = {
   wallet: 'TopUp',
   profile: 'Profile',
   settings: 'Settings',
+  admins: 'Admins',
 };
 
 /** A chat tab's identity, so a conversation can never open twice. */
@@ -281,6 +283,8 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
         return <ProfilePanel onOpenSettings={() => openRightTab('settings')} />;
       case 'settings':
         return <SettingsPanel />;
+      case 'admins':
+        return <AdminsPanel />;
       case 'chat':
         return null;
     }

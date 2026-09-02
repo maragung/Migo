@@ -374,6 +374,40 @@ impl Authenticator for FakeAuth {
     ) -> migo_core::Result<()> {
         unimplemented!("the gateway never archives a wallet")
     }
+
+    async fn admin_standing(
+        &self,
+        _identity: &Identity,
+        _context: &migo_auth::RequestContext,
+    ) -> migo_core::Result<migo_auth::AdminStanding> {
+        unimplemented!("the gateway never asks for admin standing")
+    }
+
+    async fn global_admins(
+        &self,
+        _identity: &Identity,
+        _context: &migo_auth::RequestContext,
+    ) -> migo_core::Result<Vec<migo_auth::AdminView>> {
+        unimplemented!("the gateway never lists global admins")
+    }
+
+    async fn grant_global_admin(
+        &self,
+        _identity: &Identity,
+        _username: &str,
+        _context: &migo_auth::RequestContext,
+    ) -> migo_core::Result<migo_auth::AdminView> {
+        unimplemented!("the gateway never grants global admins")
+    }
+
+    async fn revoke_global_admin(
+        &self,
+        _identity: &Identity,
+        _account_id: Id,
+        _context: &migo_auth::RequestContext,
+    ) -> migo_core::Result<()> {
+        unimplemented!("the gateway never revokes global admins")
+    }
 }
 
 // ---------------------------------------------------------------------------

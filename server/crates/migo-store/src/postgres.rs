@@ -95,8 +95,8 @@ use crate::model::{
     advanced_token, game_status, notification_kind, Account, AccountStatus, AdvanceGame, Appended,
     AuditEntry, BadgeAward, Bot, Conversation, ConversationMember, ConversationPosition,
     ConversationSummary, Currency, Cursor, Device, DeviceStatus, Entitlement, GameSession,
-    GiftSent, IdentityKeyStatus, KeyBundle, LedgerAccount, LedgerAccountKind, LedgerLeg,
-    LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice, NewGame, NewMessage,
+    GiftSent, GlobalAdmin, IdentityKeyStatus, KeyBundle, LedgerAccount, LedgerAccountKind,
+    LedgerLeg, LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice, NewGame, NewMessage,
     NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward, Notification,
     OutboxRecord, Patch, PeerRecord, Posted, Profile, ProfilePatch, Progression, PublishedKeys,
     PushRegistration, PushTarget, Receipt, Relationship, Report, RevokeReason, Room, RoomMember,
@@ -104,10 +104,10 @@ use crate::model::{
 };
 use crate::traits::{
     canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore,
-    ChallengeStore, DeviceStore, EconomyStore, FederationStore, GameStore, IdentityKeyRow,
-    IdentityStore, KeyStore, LoginChallengeRow, MediaStore, MessagingStore, NotifyStore,
-    ProgressionStore, RecoveryRow, RecoveryStore, RoomKindFilter, RoomStore, SafetyStore,
-    SessionStore, SocialStore, Store, WalletRow, WalletStore, MAX_LEDGER_LEGS,
+    ChallengeStore, DeviceStore, EconomyStore, FederationStore, GameStore, GlobalAdminStore,
+    IdentityKeyRow, IdentityStore, KeyStore, LoginChallengeRow, MediaStore, MessagingStore,
+    NotifyStore, ProgressionStore, RecoveryRow, RecoveryStore, RoomKindFilter, RoomStore,
+    SafetyStore, SessionStore, SocialStore, Store, WalletRow, WalletStore, MAX_LEDGER_LEGS,
 };
 
 /// A duplicate key. Postgres reports which index, and the caller needs to know:
@@ -6427,6 +6427,75 @@ impl WalletStore for PostgresStore {
             .await
             .context("archive_wallet")?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl GlobalAdminStore for PostgresStore {
+    async fn put_global_admin(&self, admin: GlobalAdmin) -> Result<GlobalAdmin> {
+        // Insert-or-return-the-existing-row. The primary key is the account, so
+        // `on_conflict do nothing` plus a re-read is the whole "re-appointing
+        // keeps the original grant" rule: the row that is already there is the
+        // authority, and the timestamp the caller sent is not.
+        entity::global_admin::Entity::insert(entity::global_admin::ActiveModel {
+            account_id: Set(uuid_of(admin.account_id)),
+            granted_by: Set(uuid_of(admin.granted_by)),
+            granted_at: Set(stamp_of(admin.granted_at)),
+        })
+        .on_conflict_do_nothing()
+        .exec(&self.db)
+        .await
+        .map_err(|error| {
+            on_conflict(error, "global_admin", |name| match name {
+                "global_admin_account_id_fkey" | "global_admin_granted_by_fkey" => {
+                    Some(fault::not_found("account"))
+                }
+                _ => None,
+            })
+        })?;
+        let row = entity::global_admin::Entity::find_by_id(uuid_of(admin.account_id))
+            .one(&self.db)
+            .await
+            .context("global_admin")?
+            .ok_or_else(|| fault::internal("global_admin insert vanished"))?;
+        Ok(GlobalAdmin {
+            account_id: id_of(row.account_id),
+            granted_by: id_of(row.granted_by),
+            granted_at: instant_of(row.granted_at),
+        })
+    }
+
+    async fn remove_global_admin(&self, account_id: Id) -> Result<bool> {
+        let outcome = entity::global_admin::Entity::delete_by_id(uuid_of(account_id))
+            .exec(&self.db)
+            .await
+            .context("remove_global_admin")?;
+        Ok(outcome.rows_affected > 0)
+    }
+
+    async fn global_admins(&self) -> Result<Vec<GlobalAdmin>> {
+        let rows = entity::global_admin::Entity::find()
+            .order_by_asc(entity::global_admin::Column::GrantedAt)
+            .all(&self.db)
+            .await
+            .context("global_admins")?;
+        Ok(rows
+            .into_iter()
+            .map(|row| GlobalAdmin {
+                account_id: id_of(row.account_id),
+                granted_by: id_of(row.granted_by),
+                granted_at: instant_of(row.granted_at),
+            })
+            .collect())
+    }
+
+    async fn is_global_admin(&self, account_id: Id) -> Result<bool> {
+        let exists = entity::global_admin::Entity::find_by_id(uuid_of(account_id))
+            .one(&self.db)
+            .await
+            .context("global_admin lookup")?
+            .is_some();
+        Ok(exists)
     }
 }
 

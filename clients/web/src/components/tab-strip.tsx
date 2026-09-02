@@ -26,7 +26,7 @@ import type { IconName } from './icons.js';
 export type SystemTab = 'friends' | 'chats' | 'rooms' | 'games' | 'feed';
 
 /** The secondary panels the right pane can show, shared with the banner menu that opens them. */
-export type PanelTab = 'notifications' | 'search' | 'wallet' | 'profile' | 'settings';
+export type PanelTab = 'notifications' | 'search' | 'wallet' | 'profile' | 'settings' | 'admins';
 
 interface SystemSection {
   id: SystemTab;
@@ -54,6 +54,7 @@ export const PANEL_LABELS: Readonly<Record<PanelTab, string>> = {
   wallet: 'Wallet',
   profile: 'Profile',
   settings: 'Settings',
+  admins: 'Admins',
 };
 
 /**

@@ -19,6 +19,8 @@ export type { MigoClientOptions, ClientHello, PrekeyReplenishPolicy } from './cl
 export { BootstrapClient } from './rest.js';
 export type {
   AccountSession,
+  AdminStanding,
+  AdminView,
   BootstrapOptions,
   CaptchaChallenge,
   CaptchaMode,

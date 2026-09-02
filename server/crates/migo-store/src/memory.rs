@@ -39,19 +39,19 @@ use crate::model::{
     advanced_token, game_status, notification_kind, report_status, Account, AccountStatus,
     AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, Conversation, ConversationMember,
     ConversationPosition, ConversationSummary, Currency, Cursor, Device, DeviceStatus, Entitlement,
-    GameSession, GiftSent, IdentityKeyStatus, KeyBundle, LedgerAccount, LedgerAccountKind,
-    LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice, NewGame, NewMessage,
-    NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward, Notification,
-    OutboxRecord, Patch, PeerRecord, Posted, Profile, ProfilePatch, Progression, PublishedKeys,
-    PushRegistration, PushTarget, Receipt, Relationship, Report, RevokeReason, Room, RoomMember,
-    Scope, Session, Standing, StoredMessage, Visibility, WalletStatus, XpChange,
+    GameSession, GiftSent, GlobalAdmin, IdentityKeyStatus, KeyBundle, LedgerAccount,
+    LedgerAccountKind, LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice, NewGame,
+    NewMessage, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward,
+    Notification, OutboxRecord, Patch, PeerRecord, Posted, Profile, ProfilePatch, Progression,
+    PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship, Report, RevokeReason, Room,
+    RoomMember, Scope, Session, Standing, StoredMessage, Visibility, WalletStatus, XpChange,
 };
 use crate::traits::{
     canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore,
-    ChallengeStore, DeviceStore, EconomyStore, FederationStore, GameStore, IdentityKeyRow,
-    IdentityStore, KeyStore, LoginChallengeRow, MediaStore, MessagingStore, NotifyStore,
-    ProgressionStore, RecoveryRow, RecoveryStore, RoomKindFilter, RoomStore, SafetyStore,
-    SessionStore, SocialStore, Store, WalletRow, WalletStore, MAX_LEDGER_LEGS,
+    ChallengeStore, DeviceStore, EconomyStore, FederationStore, GameStore, GlobalAdminStore,
+    IdentityKeyRow, IdentityStore, KeyStore, LoginChallengeRow, MediaStore, MessagingStore,
+    NotifyStore, ProgressionStore, RecoveryRow, RecoveryStore, RoomKindFilter, RoomStore,
+    SafetyStore, SessionStore, SocialStore, Store, WalletRow, WalletStore, MAX_LEDGER_LEGS,
 };
 
 /// Case-insensitive index key for a name, email, or slug.
@@ -210,6 +210,9 @@ struct State {
     /// Registered EVM wallets, keyed by `wallet_id`. Mirrors the `wallet`
     /// table.
     wallets: HashMap<Id, WalletRow>,
+    /// Global admins for public rooms, keyed by the appointed account. Mirrors
+    /// the `global_admin` table.
+    global_admins: HashMap<Id, GlobalAdmin>,
 }
 
 impl State {
@@ -243,6 +246,18 @@ impl MemoryStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The audit actions recorded so far, in order, for tests that assert a
+    /// trail was left without needing the rows' other columns.
+    #[must_use]
+    pub fn audit_actions(&self) -> Vec<String> {
+        self.state
+            .read()
+            .audit
+            .iter()
+            .map(|entry| entry.action.clone())
+            .collect()
     }
 
     /// Row counts, for tests and for the `/debug/store` endpoint in development.
@@ -3604,6 +3619,52 @@ impl WalletStore for MemoryStore {
             wallet.status = WalletStatus::Archived;
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl GlobalAdminStore for MemoryStore {
+    async fn put_global_admin(&self, admin: GlobalAdmin) -> Result<GlobalAdmin> {
+        let mut s = self.state.write();
+        if !s.accounts.contains_key(&admin.account_id) {
+            return Err(fault::not_found("account"));
+        }
+        if !s.accounts.contains_key(&admin.granted_by) {
+            return Err(fault::not_found("account"));
+        }
+        // Refreshing an existing appointment keeps the original grant: the row
+        // says who is an admin today, and the audit trail says every time they
+        // were made one. Rewriting `granted_at` here would make the list read
+        // newer than the authority it records.
+        if let Some(existing) = s.global_admins.get(&admin.account_id) {
+            return Ok(existing.clone());
+        }
+        s.global_admins.insert(admin.account_id, admin.clone());
+        Ok(admin)
+    }
+
+    async fn remove_global_admin(&self, account_id: Id) -> Result<bool> {
+        let mut s = self.state.write();
+        Ok(s.global_admins.remove(&account_id).is_some())
+    }
+
+    async fn global_admins(&self) -> Result<Vec<GlobalAdmin>> {
+        let s = self.state.read();
+        let mut admins: Vec<GlobalAdmin> = s.global_admins.values().cloned().collect();
+        // Ordered by grant time, so the management screen reads as a history of
+        // appointments rather than as whatever order the hash map chose.
+        admins.sort_by(|a, b| {
+            a.granted_at
+                .as_millis()
+                .cmp(&b.granted_at.as_millis())
+                .then_with(|| a.account_id.cmp(&b.account_id))
+        });
+        Ok(admins)
+    }
+
+    async fn is_global_admin(&self, account_id: Id) -> Result<bool> {
+        let s = self.state.read();
+        Ok(s.global_admins.contains_key(&account_id))
     }
 }
 

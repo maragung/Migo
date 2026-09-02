@@ -61,7 +61,7 @@ use migo_protocol::{
 };
 use migo_ratelimit::{BucketKey, RateLimiter, SharedRateLimiter};
 use migo_store::model::{join_policy, NewRoom, Patch, Room, RoomMember};
-use migo_store::traits::{MessagingStore, RoomStore, SocialStore};
+use migo_store::traits::{GlobalAdminStore, MessagingStore, RoomStore, SocialStore};
 use migo_store::{SharedStore, Store};
 use parking_lot::Mutex;
 
@@ -159,7 +159,7 @@ pub fn open(
 
 impl<S, L> Rooms<S, L>
 where
-    S: RoomStore + MessagingStore + SocialStore + ?Sized,
+    S: RoomStore + MessagingStore + SocialStore + GlobalAdminStore + ?Sized,
     L: RateLimiter + ?Sized,
 {
     /// Assembles the service and registers every series at zero.
@@ -360,6 +360,43 @@ where
             ));
         }
         Ok((actor, subject))
+    }
+
+    /// The preamble a **global admin's** sanction uses in a public room.
+    ///
+    /// A global admin moderates every public room without belonging to it: the
+    /// deployment appointed them, not the room. Two of [`Self::require_over`]'s
+    /// four checks still stand — an account id is required, and the actor cannot
+    /// aim at itself — and so do both owner protections: the owner is not a rank,
+    /// and no override reaches them. What falls away is membership, the permission
+    /// bit, and the rank comparison, because standing that comes from outside the
+    /// room is not below anything inside it.
+    async fn require_public_over(
+        &self,
+        caller: &Caller,
+        room: &Room,
+        subject_id: Id,
+    ) -> Result<RoomMember> {
+        if subject_id.is_nil() {
+            return Err(fault::validation("subject_id", "an account id is required"));
+        }
+        if subject_id == caller.account_id {
+            return Err(fault::conflict(
+                "a moderation action cannot be aimed at its own actor",
+            ));
+        }
+        let subject = self
+            .store
+            .room_member(room.room_id, subject_id)
+            .await?
+            .ok_or_else(|| fault::not_found("room member"))?;
+        if subject.role == RoomRole::Owner || subject_id == room.owner_id {
+            return Err(fault::permission_denied(
+                "the room owner cannot be acted on",
+            ));
+        }
+        self.meters.authorize(AuthorizeOutcome::Granted);
+        Ok(subject)
     }
 
     /// This account's role in the room, for a summary, or `None`.
@@ -583,7 +620,7 @@ fn member_event(
 #[async_trait]
 impl<S, L> Roomkeeper for Rooms<S, L>
 where
-    S: RoomStore + MessagingStore + SocialStore + ?Sized + Send + Sync,
+    S: RoomStore + MessagingStore + SocialStore + GlobalAdminStore + ?Sized + Send + Sync,
     L: RateLimiter + ?Sized + Send + Sync,
 {
     async fn create(&self, caller: &Caller, request: NewRoomRequest) -> Result<RoomSummary> {
@@ -1267,9 +1304,20 @@ where
         Self::validate_sanction(&sanction)?;
         self.charge_flat(caller, MODERATION_COST).await?;
         let room = self.load_room(room_id).await?;
-        let (_actor, subject) = self
-            .require_over(caller, &room, subject_id, sanction.permission())
-            .await?;
+        // A global admin's standing is checked before the room's own
+        // authorization, because a designation that arrived from outside the
+        // room is exactly the membership and permission bits it does not hold.
+        // Public rooms only: a managed room is a single owner's walled garden,
+        // and the deployment does not moderate it by proxy.
+        let subject = if room.kind == RoomKind::Public
+            && self.store.is_global_admin(caller.account_id).await?
+        {
+            self.require_public_over(caller, &room, subject_id).await?
+        } else {
+            self.require_over(caller, &room, subject_id, sanction.permission())
+                .await?
+                .1
+        };
         self.meters.sanction(sanction_kind(&sanction));
         // Every arm passes the *other* sanction's expiry back unchanged, because
         // `set_room_sanction` writes both columns and a caller that sent `None` for

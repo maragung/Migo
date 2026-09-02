@@ -37,6 +37,19 @@ const MENU: ReadonlyArray<{
 ];
 
 /**
+ * The owner-only entry, rendered apart from the everyday menu because its
+ * visibility is a server answer, not a build constant: the deployment's
+ * Owner/CEO is named in configuration, and a client that asked nothing would
+ * either show every account a tab that only errors or hide it from the one
+ * account that needs it.
+ */
+const OWNER_ENTRY: {
+  panel: PanelTab;
+  label: string;
+  icon: 'shield';
+} = { panel: 'admins', label: 'Global Admins', icon: 'shield' };
+
+/**
  * @param onOpenPanel Opens a secondary panel as a tab — what every menu entry does.
  * @param theme Pins the theme control's appearance; defaults to the persisted theme.
  * @param onToggleTheme Called when the theme control is clicked.
@@ -54,7 +67,29 @@ export function ProfileBanner({
   const self = useProfile(accountId);
   const [menuOpen, setMenuOpen] = useState(false);
   const [coins, setCoins] = useState<number | null>(null);
+  const [owner, setOwner] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+
+  // The admin entry appears only for the account the deployment names as its
+  // Owner/CEO. One read per session, absent on failure rather than wrong — a
+  // client that cannot ask is a client that shows nothing it cannot stand behind.
+  useEffect(() => {
+    if (!client) {
+      return;
+    }
+    let cancelled = false;
+    client
+      .adminStanding()
+      .then((standing) => {
+        if (!cancelled) {
+          setOwner(standing.owner);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
 
   // The balance chip is the resting glance, not the ledger: one read per session, absent on
   // failure rather than wrong — the same contract the sidebar's coin badge keeps.
@@ -133,6 +168,20 @@ export function ProfileBanner({
                 <span>{entry.label}</span>
               </button>
             ))}
+            {owner ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="banner-menu-item"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onOpenPanel(OWNER_ENTRY.panel);
+                }}
+              >
+                <Icon name={OWNER_ENTRY.icon} size={16} />
+                <span>{OWNER_ENTRY.label}</span>
+              </button>
+            ) : null}
             <div className="banner-menu-divider" aria-hidden="true" />
             <button
               type="button"

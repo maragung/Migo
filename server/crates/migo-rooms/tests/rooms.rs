@@ -32,7 +32,7 @@ use std::sync::Arc;
 use migo_cache::MemoryCache;
 use migo_core::config::Config;
 use migo_core::metrics::Registry;
-use migo_core::{Id, PublicId, Random, Result, SeededRandom, Timestamp};
+use migo_core::{Id, PublicId, Random, Result, Secret, SeededRandom, Timestamp};
 use migo_protocol::{
     codes, EncryptionMode, Opcode, RelationshipKind, RoomJoinRequest, RoomKind, RoomLeaveRequest,
     RoomListRequest, RoomMemberEvent, RoomRole, RoomStateEvent,
@@ -49,8 +49,8 @@ use migo_rooms::permission;
 use migo_rooms::service::Rooms;
 use migo_rooms::traits::Roomkeeper;
 use migo_rooms::view::ONLINE_COUNT_UNSET;
-use migo_store::model::{join_policy, Relationship, Room, RoomMember};
-use migo_store::traits::{RoomStore, SocialStore};
+use migo_store::model::{join_policy, GlobalAdmin, NewAccount, Relationship, Room, RoomMember};
+use migo_store::traits::{AccountStore, GlobalAdminStore, RoomStore, SocialStore};
 use migo_store::MemoryStore;
 
 /// One second in milliseconds.
@@ -224,6 +224,39 @@ impl Harness {
                 .await
                 .expect("the edge is written");
         }
+    }
+
+    /// Writes a bare account row, so a designation that foreign-keys to
+    /// `account` has something to point at. The room fixtures never register
+    /// anybody; the global-admin rows are the first thing here that cares.
+    async fn account(&self, account: u128, millis: i64) {
+        self.store
+            .create_account(NewAccount {
+                account_id: id(account),
+                username: format!("account-{account}"),
+                email: None,
+                phone: None,
+                password_hash: Secret::new("not-a-hash"),
+                locale: "en".to_string(),
+                country: None,
+                created_at: ts(millis),
+            })
+            .await
+            .expect("the account row is written");
+    }
+
+    /// Appoints a global admin, the way the owner's management surface does.
+    async fn appoint(&self, granter: u128, admin: u128, millis: i64) {
+        self.account(granter, millis).await;
+        self.account(admin, millis).await;
+        self.store
+            .put_global_admin(GlobalAdmin {
+                account_id: id(admin),
+                granted_by: id(granter),
+                granted_at: ts(millis),
+            })
+            .await
+            .expect("the designation is written");
     }
 
     /// Sets a role as Alice, who owns the room.
@@ -3931,4 +3964,159 @@ async fn no_metric_is_labelled_by_an_account_or_a_room() {
         text.contains("migo_rooms_listings_total"),
         "and it must still name the series"
     );
+}
+
+// --- global admins -------------------------------------------------------------
+
+#[tokio::test]
+async fn a_global_admin_sanctions_in_a_public_room_without_belonging_to_it() {
+    let harness = Harness::new();
+    let room = harness.founded().await;
+    harness.appoint(ALICE, DAVE, NOW).await;
+
+    // Dave has no membership row at all, and even a room-admin target is
+    // below a designation that arrived from outside the room.
+    harness
+        .promote(room, BOB, RoomRole::Admin, NOW + 3 * SECOND)
+        .await;
+    harness
+        .rooms
+        .sanction(
+            &caller(DAVE, DAVE_TABLET, LATER),
+            room,
+            id(BOB),
+            Sanction::Ban {
+                duration_ms: Some(DAY),
+                reason: Some("aturan spam".to_string()),
+            },
+        )
+        .await
+        .expect("a global admin moderates every public room");
+    assert!(
+        harness
+            .member_row(room, BOB)
+            .await
+            .is_banned(ts(LATER + SECOND)),
+        "the ban landed"
+    );
+}
+
+#[tokio::test]
+async fn a_designation_is_not_immunity_inside_the_room() {
+    // Dave joined as an ordinary member and holds the global designation.
+    // The room owner can still moderate him: the designation widens what its
+    // holder may do, it does not narrow what the room may do to him.
+    let harness = Harness::new();
+    let room = harness.founded().await;
+    harness
+        .join(DAVE, DAVE_TABLET, room, NOW + 3 * SECOND)
+        .await;
+    harness.appoint(ALICE, DAVE, NOW).await;
+
+    harness
+        .rooms
+        .sanction(
+            &caller(ALICE, ALICE_PHONE, LATER),
+            room,
+            id(DAVE),
+            Sanction::Kick,
+        )
+        .await
+        .expect("the owner outranks a member, designation or not");
+    assert!(
+        !harness.member_row(room, DAVE).await.is_active(),
+        "the kick landed"
+    );
+}
+
+#[tokio::test]
+async fn the_room_owner_is_beyond_a_global_admin() {
+    let harness = Harness::new();
+    let room = harness.founded().await;
+    harness.appoint(ALICE, DAVE, NOW).await;
+
+    let error = harness
+        .rooms
+        .sanction(
+            &caller(DAVE, DAVE_TABLET, LATER),
+            room,
+            id(ALICE),
+            Sanction::Kick,
+        )
+        .await
+        .expect_err("the owner cannot be acted on, by anybody, at any level");
+    assert_eq!(error.code(), codes::PERMISSION_DENIED);
+}
+
+#[tokio::test]
+async fn a_global_admin_does_not_moderate_a_managed_room() {
+    let harness = Harness::new();
+    harness.appoint(ALICE, DAVE, NOW).await;
+    let managed = harness
+        .rooms
+        .create(
+            &caller(ALICE, ALICE_PHONE, NOW),
+            NewRoomRequest {
+                kind: RoomKind::Managed,
+                slug: "managed-hall".to_string(),
+                ..request(LOBBY, "Lobby")
+            },
+        )
+        .await
+        .expect("the managed room is created")
+        .room_id;
+    harness.join(BOB, BOB_LAPTOP, managed, NOW + SECOND).await;
+
+    let error = harness
+        .rooms
+        .sanction(
+            &caller(DAVE, DAVE_TABLET, LATER),
+            managed,
+            id(BOB),
+            Sanction::Kick,
+        )
+        .await
+        .expect_err("a managed room is a single owner\'s walled garden");
+    assert_eq!(error.code(), codes::NOT_A_MEMBER);
+}
+
+#[tokio::test]
+async fn a_global_admin_cannot_act_on_itself_even_in_a_public_room() {
+    let harness = Harness::new();
+    let room = harness.founded().await;
+    harness
+        .join(DAVE, DAVE_TABLET, room, NOW + 3 * SECOND)
+        .await;
+    harness.appoint(ALICE, DAVE, NOW).await;
+
+    let error = harness
+        .rooms
+        .sanction(
+            &caller(DAVE, DAVE_TABLET, LATER),
+            room,
+            id(DAVE),
+            Sanction::Kick,
+        )
+        .await
+        .expect_err("a moderation action cannot be aimed at its own actor");
+    assert!(error.code() != codes::PERMISSION_DENIED);
+}
+
+#[tokio::test]
+async fn a_stranger_without_the_designation_is_still_refused() {
+    let harness = Harness::new();
+    let room = harness.founded().await;
+    harness.account(STRANGER, NOW).await;
+
+    let error = harness
+        .rooms
+        .sanction(
+            &caller(STRANGER, STRANGER_PHONE, LATER),
+            room,
+            id(BOB),
+            Sanction::Kick,
+        )
+        .await
+        .expect_err("the designation is the whole of the override");
+    assert_eq!(error.code(), codes::NOT_A_MEMBER);
 }

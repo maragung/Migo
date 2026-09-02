@@ -29,6 +29,7 @@ use std::path::PathBuf;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
+use crate::id::Id;
 use crate::secret::Secret;
 use crate::telemetry::LogFormat;
 
@@ -374,6 +375,17 @@ pub struct AuthConfig {
     /// The progressive sign-in lockout: repeated wrong passwords for one account
     /// (across every identifier and network) buy increasingly long time-outs.
     pub lockout: LockoutConfig,
+    /// The Migo Owner/CEO's account, if this deployment names one.
+    ///
+    /// The one account that may open the global-admin management surface and
+    /// appoint the admins of public rooms. `None` — the default — means the
+    /// deployment has no owner and the whole surface stays closed: nobody can
+    /// appoint a global admin, and the honest answer to the client that asks is
+    /// "not you". Named in configuration rather than derived from data because
+    /// it is authority, and authority that any account could claim by
+    /// registering first is not authority.
+    #[serde(default)]
+    pub owner_account_id: Option<Id>,
 }
 
 impl Default for AuthConfig {
@@ -388,6 +400,7 @@ impl Default for AuthConfig {
             registration_cost: None,
             captcha_threshold: Some(3),
             lockout: LockoutConfig::default(),
+            owner_account_id: None,
         }
     }
 }

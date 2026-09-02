@@ -62,12 +62,13 @@ use migo_protocol::{
 use migo_ratelimit::{BucketKey, RateLimiter, Scope, SharedRateLimiter, TrustTier};
 use migo_store::model::{
     Account, AccountStatus, AuditActorKind, AuditEntry, AuditTargetKind, Device, DeviceStatus,
-    IdentityKeyStatus, NewAccount, NewDevice, NewSession, Profile, RevokeReason, Session,
-    Visibility, WalletStatus,
+    GlobalAdmin, IdentityKeyStatus, NewAccount, NewDevice, NewSession, Profile, RevokeReason,
+    Session, Visibility, WalletStatus,
 };
 use migo_store::traits::{
-    AccountStore, ChallengeStore, DeviceStore, IdentityKeyRow, IdentityStore, LoginChallengeRow,
-    RecoveryRow, RecoveryStore, SafetyStore, SessionStore, WalletRow, WalletStore,
+    AccountStore, ChallengeStore, DeviceStore, GlobalAdminStore, IdentityKeyRow, IdentityStore,
+    LoginChallengeRow, RecoveryRow, RecoveryStore, SafetyStore, SessionStore, WalletRow,
+    WalletStore,
 };
 use migo_store::{SharedStore, Store};
 use parking_lot::Mutex;
@@ -78,11 +79,11 @@ use crate::credential;
 use crate::lockout::{error_locked, LockoutConfig, LockoutGate};
 use crate::metrics::{Meters, RefreshOutcome, SignInOutcome};
 use crate::model::{
-    truncate_chars, AddDeviceAnswer, ChallengeAnswer, ChallengeView, DeviceClaim, DeviceSummary,
-    Grant, IdentityChallengeRequest, IdentityChallengeScope, IdentityPublication, Refresh,
-    Registration, RequestContext, RotationAnswer, SessionSummary, SignIn, WalletRegistration,
-    WalletSummary, IDENTITY_CHALLENGE_TTL_MS, MAX_APP_VERSION_CHARS, MAX_CHAIN_TYPE_CHARS,
-    MAX_DEVICE_DETAIL_CHARS, MAX_DEVICE_NAME_CHARS, MAX_WALLET_ADDRESS_CHARS,
+    truncate_chars, AddDeviceAnswer, AdminStanding, AdminView, ChallengeAnswer, ChallengeView,
+    DeviceClaim, DeviceSummary, Grant, IdentityChallengeRequest, IdentityChallengeScope,
+    IdentityPublication, Refresh, Registration, RequestContext, RotationAnswer, SessionSummary,
+    SignIn, WalletRegistration, WalletSummary, IDENTITY_CHALLENGE_TTL_MS, MAX_APP_VERSION_CHARS,
+    MAX_CHAIN_TYPE_CHARS, MAX_DEVICE_DETAIL_CHARS, MAX_DEVICE_NAME_CHARS, MAX_WALLET_ADDRESS_CHARS,
     MAX_WALLET_LABEL_CHARS,
 };
 use crate::tier;
@@ -475,6 +476,20 @@ where
             .charge(&keys, opcode.cost(), identity.tier, context.now)
             .await?
             .into_result()
+    }
+
+    /// Admits only the account named by `owner_account_id` in config.
+    ///
+    /// The owner is named in configuration rather than derived from data, so the
+    /// check is a comparison and not a lookup — and a deployment that names no
+    /// owner has closed the surface for everyone, including the operator who
+    /// forgot to set the value.
+    fn require_owner(&self, identity: &Identity) -> Result<()> {
+        if self.config.owner_account_id == Some(identity.account_id()) {
+            Ok(())
+        } else {
+            Err(fault::permission_denied("owner"))
+        }
     }
 
     // --- session minting -------------------------------------------------------
@@ -1059,6 +1074,7 @@ where
         + IdentityStore
         + ChallengeStore
         + WalletStore
+        + GlobalAdminStore
         + ?Sized
         + Send
         + Sync
@@ -2672,6 +2688,116 @@ where
                 AuditTargetKind::Wallet,
                 Some(wallet_id),
                 format!("wallet {address} archived"),
+                context,
+            )
+            .await;
+        }
+        Ok(())
+    }
+
+    async fn admin_standing(
+        &self,
+        identity: &Identity,
+        // A read of the caller's own standing, same shape rule as `devices`.
+        _context: &RequestContext,
+    ) -> Result<AdminStanding> {
+        Ok(AdminStanding {
+            owner: self.config.owner_account_id == Some(identity.account_id()),
+            admin: self.store.is_global_admin(identity.account_id()).await?,
+        })
+    }
+
+    async fn global_admins(
+        &self,
+        identity: &Identity,
+        _context: &RequestContext,
+    ) -> Result<Vec<AdminView>> {
+        self.require_owner(identity)?;
+        let mut views = Vec::new();
+        for row in self.store.global_admins().await? {
+            // The foreign key cascades, so a vanished account takes its grant
+            // with it; the lookup is only to resolve the username a human
+            // reads, and a row that somehow lost its account is skipped rather
+            // than allowed to blank the owner's whole list.
+            let Some(account) = self.store.account_by_id(row.account_id).await? else {
+                continue;
+            };
+            views.push(AdminView {
+                account_id: row.account_id,
+                username: account.username,
+                granted_by: row.granted_by,
+                granted_at: row.granted_at,
+            });
+        }
+        Ok(views)
+    }
+
+    async fn grant_global_admin(
+        &self,
+        identity: &Identity,
+        username: &str,
+        context: &RequestContext,
+    ) -> Result<AdminView> {
+        self.require_owner(identity)?;
+        self.charge_account(identity, context, Opcode::Authenticate)
+            .await?;
+        // Folded the same way sign-in folds its identifier, so "Admin" and
+        // "@admin" name the same account here too.
+        let folded = username.trim_start_matches('@').to_ascii_lowercase();
+        let Some(account) = self.store.account_by_username(&folded).await? else {
+            return Err(fault::not_found("account"));
+        };
+        let already = self.store.is_global_admin(account.account_id).await?;
+        // The put keeps the original grant when the account is already an
+        // admin, so a repeated appointment is a read, not a rewrite.
+        let row = self
+            .store
+            .put_global_admin(GlobalAdmin {
+                account_id: account.account_id,
+                granted_by: identity.account_id(),
+                granted_at: context.now,
+            })
+            .await?;
+        if !already {
+            self.audit(
+                Some(identity.account_id()),
+                AuditActorKind::Operator,
+                "global_admin.grant",
+                AuditTargetKind::Account,
+                Some(row.account_id),
+                format!("global admin granted to {}", account.username),
+                context,
+            )
+            .await;
+        }
+        Ok(AdminView {
+            account_id: row.account_id,
+            username: account.username,
+            granted_by: row.granted_by,
+            granted_at: row.granted_at,
+        })
+    }
+
+    async fn revoke_global_admin(
+        &self,
+        identity: &Identity,
+        account_id: Id,
+        context: &RequestContext,
+    ) -> Result<()> {
+        self.require_owner(identity)?;
+        self.charge_account(identity, context, Opcode::Authenticate)
+            .await?;
+        // Revoking an account that is not an admin is quietly `Ok(())`, the
+        // same shape rule as `archive_wallet`: the list the owner reads from
+        // already reflects the outcome.
+        if self.store.remove_global_admin(account_id).await? {
+            self.audit(
+                Some(identity.account_id()),
+                AuditActorKind::Operator,
+                "global_admin.revoke",
+                AuditTargetKind::Account,
+                Some(account_id),
+                format!("global admin revoked from {account_id}"),
                 context,
             )
             .await;

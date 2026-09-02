@@ -95,6 +95,34 @@ impl Harness {
             .expect("registration succeeds")
     }
 
+    /// The same store behind a freshly configured authenticator, for tests
+    /// that need a config value naming an account that already exists — the
+    /// owner designation cannot be set before the owner has registered, so
+    /// the test registers first and rebuilds over the same rows.
+    fn reconfigured(&self, mut config: Config) -> Self {
+        if config.auth.token_key.is_none() {
+            config.auth.token_key = Some(Secret::new(TEST_KEY));
+        }
+        let cache = Arc::new(MemoryCache::new());
+        let registry = Registry::new();
+        let policies =
+            Policies::from_config(&config.rate_limit).expect("default policies are valid");
+        let limiter = Arc::new(CacheRateLimiter::new(cache, policies, &registry));
+        let auth = Auth::new(
+            Arc::clone(&self.store),
+            limiter,
+            &config,
+            &registry,
+            Box::new(SeededRandom::new(0x5eed_1234)) as Box<dyn Random>,
+        )
+        .expect("the reconfigured harness is buildable");
+        Self {
+            auth,
+            store: Arc::clone(&self.store),
+            registry,
+        }
+    }
+
     /// The metric line for `name`, if it has been touched.
     fn metric(&self, name: &str) -> Option<String> {
         self.registry
@@ -1790,4 +1818,222 @@ async fn wallets_register_idempotently_and_archive_quietly() {
     assert_eq!(list.len(), 1, "the archived wallet stays in the history");
     assert_eq!(list[0].status, "archived", "but it is marked as such");
     assert!(list[0].archived_at.is_some(), "with the time it happened");
+}
+
+// ---------------------------------------------------------------------------
+// Global admins
+// ---------------------------------------------------------------------------
+
+/// The owner's harness, with the owner designation naming an account that
+/// has already registered, and two other accounts to appoint and to be
+/// refused.
+async fn owner_harness() -> (Harness, Grant, Grant, Grant) {
+    let plain = Harness::new();
+    // One network per account: the limiter buckets by address class, so
+    // three registrations from one /24 inside two seconds is exactly the
+    // anonymous burst it exists to stop, and the test is about the admin
+    // surface, not about the bucket.
+    let owner = plain
+        .auth
+        .register(registration("chief"), &context_from(1_000, "203.0.113.1"))
+        .await
+        .expect("registration succeeds");
+    let first = plain
+        .auth
+        .register(registration("warden"), &context_from(2_000, "203.0.114.1"))
+        .await
+        .expect("registration succeeds");
+    let second = plain
+        .auth
+        .register(
+            registration("stranger"),
+            &context_from(3_000, "203.0.115.1"),
+        )
+        .await
+        .expect("registration succeeds");
+    let mut config = Config::default();
+    config.auth.owner_account_id = Some(owner.account_id);
+    let harness = plain.reconfigured(config);
+    (harness, owner, first, second)
+}
+
+#[tokio::test]
+async fn a_deployment_without_an_owner_has_a_closed_admin_surface() {
+    let harness = Harness::new();
+    let grant = harness.register_at("nobody", 1_000).await;
+    let identity = identify(&harness.auth, &grant, 2_000).await.unwrap();
+
+    let standing = harness
+        .auth
+        .admin_standing(&identity, &context(3_000))
+        .await
+        .expect("standing always answers");
+    assert!(!standing.owner, "no owner is named, so nobody is the owner");
+    assert!(!standing.admin, "and nobody has been appointed");
+
+    let error = harness
+        .auth
+        .grant_global_admin(&identity, "somebody", &context(4_000))
+        .await
+        .expect_err("a deployment that names no owner grants nobody");
+    assert_eq!(error.code(), codes::PERMISSION_DENIED);
+}
+
+#[tokio::test]
+async fn the_owner_grants_and_revokes_global_admins() {
+    let (harness, owner, first, second) = owner_harness().await;
+    let owner_identity = identify(&harness.auth, &owner, 4_000).await.unwrap();
+
+    let view = harness
+        .auth
+        .grant_global_admin(&owner_identity, "@Warden", &context(5_000))
+        .await
+        .expect("the owner appoints by username, @ and case and all");
+    assert_eq!(view.account_id, first.account_id);
+    assert_eq!(view.username, "warden");
+    assert_eq!(view.granted_by, owner.account_id);
+
+    let list = harness
+        .auth
+        .global_admins(&owner_identity, &context(6_000))
+        .await
+        .expect("the owner reads the list");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].account_id, first.account_id);
+
+    let warden_identity = identify(&harness.auth, &first, 7_000).await.unwrap();
+    let standing = harness
+        .auth
+        .admin_standing(&warden_identity, &context(8_000))
+        .await
+        .expect("standing always answers");
+    assert!(!standing.owner, "an appointee is not the owner");
+    assert!(standing.admin, "but the appointment shows");
+
+    let second_identity = identify(&harness.auth, &second, 9_000).await.unwrap();
+    let standing = harness
+        .auth
+        .admin_standing(&second_identity, &context(10_000))
+        .await
+        .expect("standing always answers");
+    assert!(
+        !standing.owner && !standing.admin,
+        "a stranger holds neither"
+    );
+
+    harness
+        .auth
+        .revoke_global_admin(&owner_identity, first.account_id, &context(11_000))
+        .await
+        .expect("the owner revokes");
+    harness
+        .auth
+        .revoke_global_admin(&owner_identity, first.account_id, &context(12_000))
+        .await
+        .expect("revoking twice is quiet");
+
+    let standing = harness
+        .auth
+        .admin_standing(&warden_identity, &context(13_000))
+        .await
+        .expect("standing always answers");
+    assert!(!standing.admin, "the revocation took");
+}
+
+#[tokio::test]
+async fn only_the_owner_may_touch_the_admin_surface() {
+    let (harness, _owner, first, second) = owner_harness().await;
+    let owner_identity = identify(&harness.auth, &_owner, 4_000).await.unwrap();
+    harness
+        .auth
+        .grant_global_admin(&owner_identity, "warden", &context(5_000))
+        .await
+        .expect("the owner appoints");
+
+    // The appointee, and a stranger, are both refused every write and the
+    // read alike: the surface is the owner's, not the admin's.
+    for identity in [
+        identify(&harness.auth, &first, 6_000).await.unwrap(),
+        identify(&harness.auth, &second, 7_000).await.unwrap(),
+    ] {
+        let error = harness
+            .auth
+            .global_admins(&identity, &context(8_000))
+            .await
+            .expect_err("only the owner reads the list");
+        assert_eq!(error.code(), codes::PERMISSION_DENIED);
+        let error = harness
+            .auth
+            .grant_global_admin(&identity, "stranger", &context(9_000))
+            .await
+            .expect_err("an admin cannot appoint admins");
+        assert_eq!(error.code(), codes::PERMISSION_DENIED);
+        let error = harness
+            .auth
+            .revoke_global_admin(&identity, second.account_id, &context(10_000))
+            .await
+            .expect_err("an admin cannot revoke admins");
+        assert_eq!(error.code(), codes::PERMISSION_DENIED);
+    }
+}
+
+#[tokio::test]
+async fn a_repeated_grant_keeps_the_original() {
+    let (harness, owner, _first, _second) = owner_harness().await;
+    let owner_identity = identify(&harness.auth, &owner, 4_000).await.unwrap();
+
+    let first_view = harness
+        .auth
+        .grant_global_admin(&owner_identity, "warden", &context(5_000))
+        .await
+        .expect("the first grant");
+    // A second appointment by a different hand — the owner again — must not
+    // rewrite history: the trail answers who put them there and when.
+    let again = harness
+        .auth
+        .grant_global_admin(&owner_identity, "warden", &context(50_000))
+        .await
+        .expect("a repeated grant is a read, not a rewrite");
+    assert_eq!(again.granted_at, first_view.granted_at);
+    assert_eq!(again.granted_by, first_view.granted_by);
+
+    let list = harness
+        .auth
+        .global_admins(&owner_identity, &context(60_000))
+        .await
+        .expect("the list reads");
+    assert_eq!(list.len(), 1, "one appointment, one row");
+}
+
+#[tokio::test]
+async fn a_grant_names_an_account_that_must_exist() {
+    let (harness, owner, _first, _second) = owner_harness().await;
+    let owner_identity = identify(&harness.auth, &owner, 4_000).await.unwrap();
+
+    let error = harness
+        .auth
+        .grant_global_admin(&owner_identity, "ghost", &context(5_000))
+        .await
+        .expect_err("there is no such account");
+    assert_eq!(error.code(), codes::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn the_grant_and_revoke_leave_an_audit_trail() {
+    let (harness, owner, first, _second) = owner_harness().await;
+    let owner_identity = identify(&harness.auth, &owner, 4_000).await.unwrap();
+    harness
+        .auth
+        .grant_global_admin(&owner_identity, "warden", &context(5_000))
+        .await
+        .expect("the grant");
+    harness
+        .auth
+        .revoke_global_admin(&owner_identity, first.account_id, &context(6_000))
+        .await
+        .expect("the revoke");
+
+    let actions = harness.store.audit_actions();
+    assert!(actions.contains(&"global_admin.grant".to_string()));
+    assert!(actions.contains(&"global_admin.revoke".to_string()));
 }

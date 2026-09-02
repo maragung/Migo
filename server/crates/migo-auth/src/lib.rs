@@ -97,9 +97,10 @@ pub use crate::endpoint::{
     WsScheme,
 };
 pub use crate::model::{
-    AddDeviceAnswer, ChallengeAnswer, ChallengeView, DeviceClaim, DeviceSummary, Grant,
-    IdentityChallengeRequest, IdentityChallengeScope, IdentityPublication, Refresh, Registration,
-    RequestContext, RotationAnswer, SessionSummary, SignIn, WalletRegistration, WalletSummary,
+    AddDeviceAnswer, AdminStanding, AdminView, ChallengeAnswer, ChallengeView, DeviceClaim,
+    DeviceSummary, Grant, IdentityChallengeRequest, IdentityChallengeScope, IdentityPublication,
+    Refresh, Registration, RequestContext, RotationAnswer, SessionSummary, SignIn,
+    WalletRegistration, WalletSummary,
 };
 pub use crate::service::{open, Auth, ConcreteAuth, SharedAuth};
 pub use crate::tier::{of_account as tier_of_account, PROBATION_MILLIS, TRUSTED_MILLIS};

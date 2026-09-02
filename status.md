@@ -1610,3 +1610,51 @@ yang tersisa, karena plafon adalah aturan produk yang sama di semua
 deployment. Tiga test baru: room orang asing kecil, kapasitas tumbuh
 10 kursi per teman (pending tidak dihitung), dan plafon jenis membatasi
 (publik 33, managed 50) pada pembuat berlima teman.
+
+## 49. Admin global untuk room publik: halaman CRUD khusus Owner/CEO (v0.14.6)
+
+Migo-update-1.md #48: admin global untuk room publik, dipilih oleh
+Owner/CEO Migo. Dua keputusan bentuknya. Pertama, **siapa Owner/CEO
+dinamai konfigurasi, bukan diturunkan dari data** —
+`MIGO_AUTH__OWNER_ACCOUNT_ID` (TOML bentuk teks 26 karakter Id;
+`serde(default)`, `None` = permukaan tertutup untuk semua orang,
+termasuk operator yang lupa mengisinya). Kedua, **tabel `global_admin`
+(migrasi 0005) berdiri sendiri**: PK adalah account itu sendiri —
+grant adalah kehadiran akun di tabel, revoke adalah hilangnya, tidak
+ada grant kedua yang perlu dibedakan dari yang pertama; `granted_by`
+mencatat siapa yang menunjuk, riwayat grant maupun revoke keduanya
+masuk `audit_entry` (actor Operator, action `global_admin.grant` /
+`global_admin.revoke`).
+
+Permukaannya di `Authenticator` (mengikuti preseden devices/wallets):
+`admin_standing` (jawaban "bolehkah saya buka?" — selalu sukses, owner
+salah/benar bukan error), `global_admins`, `grant_global_admin`
+(by username, idempoten — grant ulang mempertahankan grant pertama),
+`revoke_global_admin` (menghapus akun yang bukan admin = diam `Ok`,
+aturan bentuk yang sama dengan archive wallet). Semua tulisan dan
+daftar hanya lewat `require_owner` — admin global tidak bisa
+mengangkat admin lain. REST: `GET /v1/admins/whoami`, `GET /v1/admins`,
+`PUT /v1/admins` (body username), `DELETE /v1/admins/{account_id}`
+(204).
+
+Penegakan di room: admin global mensanksi anggota non-owner di room
+**publik** tanpa menjadi anggota — `require_public_over` menjaga dua
+pemeriksaan require_over (id wajib, tidak boleh menembak diri sendiri)
+dan dua perlindungan owner ("owner bukan pangkat": tidak tersentuh
+siapa pun, termasuk admin global). Yang gugur adalah keanggotaan, bit
+izin, dan perbandingan pangkat. Room **managed** tetap kebal —
+taman berdinding satu owner, deployment tidak memoderasikannya lewat
+proksi. Designasi juga bukan imunitas: admin global yang tergabung
+sebagai anggota biasa tetap bisa dimoderasi ownernya.
+
+Web: entri menu **Global Admins** (ikon shield) di menu avatar banner
+hanya muncul setelah `adminStanding()` menjawab owner — permukaan
+tersembunyi bagi semua orang lain, dan panel menolak dengan pesan jujur
+bila ditipu dibuka. Panelnya: formulir angkat per-username (tombol
+terkunci sampai ada nama), daftar admin saat ini, dan Revoke per baris
+dengan konfirmasi. SDK: `adminStanding` / `globalAdmins` /
+`grantGlobalAdmin` / `revokeGlobalAdmin`. Test: 6 di migo-auth
+(tanpa owner = tertutup, grant+revoke, hanya owner, idempoten,
+akun harus ada, jejak audit), 6 di migo-rooms (sanksi tanpa keanggotaan,
+owner terlindungi, managed kebal, bukan diri sendiri, stranger ditolak,
+designasi bukan imunitas), 4 penyajian panel web.

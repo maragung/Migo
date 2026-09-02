@@ -21,8 +21,8 @@ use migo_store::traits::RecoveryRow;
 
 use crate::capability::Capabilities;
 use crate::model::{
-    AddDeviceAnswer, ChallengeAnswer, ChallengeView, DeviceSummary, Grant,
-    IdentityChallengeRequest, IdentityPublication, Refresh, Registration, RequestContext,
+    AddDeviceAnswer, AdminStanding, AdminView, ChallengeAnswer, ChallengeView, DeviceSummary,
+    Grant, IdentityChallengeRequest, IdentityPublication, Refresh, Registration, RequestContext,
     RotationAnswer, SessionSummary, SignIn, WalletRegistration, WalletSummary,
 };
 use crate::token::Claims;
@@ -431,6 +431,42 @@ pub trait Authenticator: Send + Sync {
         &self,
         identity: &Identity,
         wallet_id: Id,
+        context: &RequestContext,
+    ) -> Result<()>;
+
+    // --- global admins ---------------------------------------------------------
+
+    /// What the caller may open: owner of the deployment, global admin, or
+    /// neither. The client asks this before it fetches anything, so the
+    /// management surface can stay hidden entirely.
+    async fn admin_standing(
+        &self,
+        identity: &Identity,
+        context: &RequestContext,
+    ) -> Result<AdminStanding>;
+
+    /// Every global admin, with usernames resolved for the owner's list.
+    async fn global_admins(
+        &self,
+        identity: &Identity,
+        context: &RequestContext,
+    ) -> Result<Vec<AdminView>>;
+
+    /// Appoints a global admin by username. Idempotent: re-granting an
+    /// existing admin keeps the original grant and returns it.
+    async fn grant_global_admin(
+        &self,
+        identity: &Identity,
+        username: &str,
+        context: &RequestContext,
+    ) -> Result<AdminView>;
+
+    /// Revokes a global admin. Revoking an account that is not one is quietly
+    /// `Ok(())`, matching how the archive call above behaves.
+    async fn revoke_global_admin(
+        &self,
+        identity: &Identity,
+        account_id: Id,
         context: &RequestContext,
     ) -> Result<()>;
 }

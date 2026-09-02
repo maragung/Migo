@@ -614,6 +614,40 @@ mod tests {
         ) -> migo_core::Result<()> {
             unimplemented!("the broadcast test never archives a wallet")
         }
+
+        async fn admin_standing(
+            &self,
+            _identity: &Identity,
+            _context: &migo_auth::RequestContext,
+        ) -> migo_core::Result<migo_auth::AdminStanding> {
+            unimplemented!("the broadcast test never asks for admin standing")
+        }
+
+        async fn global_admins(
+            &self,
+            _identity: &Identity,
+            _context: &migo_auth::RequestContext,
+        ) -> migo_core::Result<Vec<migo_auth::AdminView>> {
+            unimplemented!("the broadcast test never lists global admins")
+        }
+
+        async fn grant_global_admin(
+            &self,
+            _identity: &Identity,
+            _username: &str,
+            _context: &migo_auth::RequestContext,
+        ) -> migo_core::Result<migo_auth::AdminView> {
+            unimplemented!("the broadcast test never grants global admins")
+        }
+
+        async fn revoke_global_admin(
+            &self,
+            _identity: &Identity,
+            _account_id: Id,
+            _context: &migo_auth::RequestContext,
+        ) -> migo_core::Result<()> {
+            unimplemented!("the broadcast test never revokes global admins")
+        }
     }
 
     /// A gateway over the real limiter and registry and an authenticator nothing reaches, mirroring

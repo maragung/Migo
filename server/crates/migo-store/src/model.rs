@@ -2007,3 +2007,20 @@ pub struct NewOutboxEvent {
     /// The earliest time it may be attempted — usually `created_at`.
     pub next_attempt_at: Timestamp,
 }
+
+/// An account appointed to moderate every public room.
+///
+/// One row per appointment, held by the store as the *present* state: a grant is
+/// the account's presence in the registry and a revoke is its absence. The full
+/// history of who was appointed and unappointed by whom is the audit trail's to
+/// keep ([`AuditEntry`]); this row answers only "who may moderate today".
+#[derive(Clone, Debug)]
+pub struct GlobalAdmin {
+    /// The appointed account. The registry's primary key: there is no second
+    /// grant to tell apart from the first.
+    pub account_id: Id,
+    /// The account that made the appointment — the Owner/CEO in this version.
+    pub granted_by: Id,
+    /// When the appointment was made.
+    pub granted_at: Timestamp,
+}

@@ -608,6 +608,54 @@ pub(crate) fn truncate_chars(value: &mut String, max_chars: usize) {
     value.truncate(cut);
 }
 
+/// One global admin as the owner's management list renders it: the store row
+/// plus the username a human reads.
+#[derive(Clone, Debug)]
+pub struct AdminView {
+    /// Which account may moderate every public room.
+    pub account_id: Id,
+    /// The account's display name, resolved at read time.
+    pub username: String,
+    /// Who appointed them — always the Owner/CEO in this version.
+    pub granted_by: Id,
+    /// When the grant happened.
+    pub granted_at: Timestamp,
+}
+
+impl serde::Serialize for AdminView {
+    /// Timestamps as milliseconds, matching every other summary the API
+    /// returns.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("AdminView", 4)?;
+        s.serialize_field("account_id", &self.account_id)?;
+        s.serialize_field("username", &self.username)?;
+        s.serialize_field("granted_by", &self.granted_by)?;
+        s.serialize_field("granted_at_ms", &self.granted_at.as_unix_ms())?;
+        s.end()
+    }
+}
+
+/// What the signed-in account is allowed to open: the answer to "may I see
+/// the admin surface?" before a single row is fetched.
+#[derive(Clone, Copy, Debug)]
+pub struct AdminStanding {
+    /// True only for the account named by `owner_account_id` in config.
+    pub owner: bool,
+    /// True for any account with a `global_admin` row.
+    pub admin: bool,
+}
+
+impl serde::Serialize for AdminStanding {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("AdminStanding", 2)?;
+        s.serialize_field("owner", &self.owner)?;
+        s.serialize_field("admin", &self.admin)?;
+        s.end()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

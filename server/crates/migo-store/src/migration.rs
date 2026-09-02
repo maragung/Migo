@@ -69,6 +69,7 @@ impl MigratorTrait for Migrator {
             Box::new(CaptchaChallenges),
             Box::new(Recovery),
             Box::new(IdentityLogin),
+            Box::new(GlobalAdmins),
         ]
     }
 }
@@ -197,6 +198,36 @@ impl MigrationTrait for IdentityLogin {
         // Same posture as every migration before it.
         Err(DbErr::Migration(
             "0004_identity_login cannot be rolled back: create a new database instead".to_owned(),
+        ))
+    }
+}
+
+/// `0005_global_admins` -- the registry of global admins for public rooms,
+/// appointed by the Owner/CEO. See `server/migrations/0005_global_admins.sql`
+/// for the shape, and `crates/migo-auth` for the service that gates every
+/// write behind the owner check.
+struct GlobalAdmins;
+
+impl MigrationName for GlobalAdmins {
+    fn name(&self) -> &str {
+        "0005_global_admins"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for GlobalAdmins {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!("../../../migrations/0005_global_admins.sql"))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Same posture as every migration before it.
+        Err(DbErr::Migration(
+            "0005_global_admins cannot be rolled back: create a new database instead".to_owned(),
         ))
     }
 }

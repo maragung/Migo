@@ -215,6 +215,29 @@ export interface WalletSummary {
   archivedAtMs?: number;
 }
 
+/**
+ * One global admin, for the Owner/CEO's management list.
+ *
+ * The account that may moderate every public room, who appointed them, and when. The
+ * owner's own management page is the only reader; a global admin holds no list of
+ * themselves. Timestamps are Unix milliseconds.
+ */
+export interface AdminView {
+  accountId: Id;
+  username: string;
+  grantedBy: Id;
+  grantedAtMs: number;
+}
+
+/**
+ * What the signed-in account may open: the answer to "may I see the admin surface?"
+ * before a single row is fetched.
+ */
+export interface AdminStanding {
+  owner: boolean;
+  admin: boolean;
+}
+
 /** The node's identity, as a client needs to display and route to it. */
 export interface NodeConfig {
   id: string;
@@ -390,6 +413,21 @@ function parseIdentityChallenge(body: unknown): IdentityChallenge {
     deviceId: parseId(String(b['device_id'])),
     expiresAtMs: Number(b['expires_at_ms']),
   };
+}
+
+/** Maps an `AdminView` JSON row into the SDK's typed view. */
+function parseAdminView(row: Record<string, unknown>): AdminView {
+  return {
+    accountId: parseId(String(row['account_id'])),
+    username: String(row['username']),
+    grantedBy: parseId(String(row['granted_by'])),
+    grantedAtMs: Number(row['granted_at_ms']),
+  };
+}
+
+/** Maps an `AdminStanding` JSON row into the SDK's typed view. */
+function parseAdminStanding(row: Record<string, unknown>): AdminStanding {
+  return { owner: Boolean(row['owner']), admin: Boolean(row['admin']) };
 }
 
 /** Maps a `DeviceSummary` JSON row into the SDK's typed view. */
@@ -822,6 +860,51 @@ export class BootstrapClient {
     await this.#post(`/v1/wallets/${walletId}`, {}, accessToken);
   }
 
+  // --- the global-admin management surface -----------------------------------
+  //
+  // The Owner/CEO's CRUD over who may moderate every public room. The standing read is the
+  // one call every client makes; the rest are the owner's page alone, and the server
+  // refuses them for anybody else.
+
+  /**
+   * `GET /v1/admins/whoami` — what the caller may open. Never fails on standing: an account
+   * that is neither owner nor admin gets `{ owner: false, admin: false }`, which is the
+   * answer, not an error, so a client can hide the surface without a round trip that
+   * discloses anything.
+   */
+  async adminStanding(accessToken: string): Promise<AdminStanding> {
+    const body = (await this.#get('/v1/admins/whoami', accessToken)) as Record<string, unknown>;
+    return parseAdminStanding(body);
+  }
+
+  /** `GET /v1/admins` — every global admin, with usernames resolved. Owner-only. */
+  async globalAdmins(accessToken: string): Promise<AdminView[]> {
+    const body = (await this.#get('/v1/admins', accessToken)) as {
+      admins?: Record<string, unknown>[];
+    };
+    return (body.admins ?? []).map(parseAdminView);
+  }
+
+  /**
+   * `PUT /v1/admins` — appoint a global admin by username. Idempotent: a repeated
+   * appointment keeps the original grant. Owner-only.
+   */
+  async grantGlobalAdmin(accessToken: string, username: string): Promise<AdminView> {
+    const body = (await this.#put('/v1/admins', { username }, accessToken)) as Record<
+      string,
+      unknown
+    >;
+    return parseAdminView(body);
+  }
+
+  /**
+   * `DELETE /v1/admins/{account_id}` — revoke a global admin. Answers 204; revoking an
+   * account that is not one is a quiet 204 too. Owner-only.
+   */
+  async revokeGlobalAdmin(accessToken: string, accountId: Id): Promise<void> {
+    await this.#delete(`/v1/admins/${accountId}`, accessToken);
+  }
+
   /** `GET /v1/config` — the node identity, feature bits, and policy limits, unauthenticated. */
   async config(): Promise<ServerConfig> {
     const body = (await this.#get('/v1/config')) as Record<string, unknown>;
@@ -865,6 +948,17 @@ export class BootstrapClient {
       method: 'PUT',
       headers,
       body: JSON.stringify(body),
+    });
+    return this.#unwrap(res);
+  }
+
+  /** Issues a DELETE, throwing a {@link RemoteError} on any non-2xx answer. */
+  async #delete(path: string, bearer?: string): Promise<unknown> {
+    const headers: Record<string, string> = {};
+    if (bearer !== undefined) headers['authorization'] = `Bearer ${bearer}`;
+    const res = await this.#fetch(`${this.#baseUrl}${path}`, {
+      method: 'DELETE',
+      headers,
     });
     return this.#unwrap(res);
   }

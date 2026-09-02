@@ -29,11 +29,11 @@ use migo_protocol::{fault, MlDsaPurpose, RelationshipKind};
 use crate::model::{
     Account, AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, Conversation, ConversationMember,
     ConversationPosition, ConversationSummary, Cursor, Device, Entitlement, GameSession, GiftSent,
-    KeyBundle, LedgerAccount, LedgerAccountKind, LedgerTransaction, MediaObject, NewAccount,
-    NewBot, NewDevice, NewGame, NewMessage, NewOutboxEvent, NewPeer, NewRoom, NewSession,
-    NewTransaction, NewXpAward, Notification, OutboxRecord, PeerRecord, Posted, Profile,
-    ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Relationship, Report,
-    Room, RoomMember, Scope, Session, Standing, StoredMessage, XpChange,
+    GlobalAdmin, KeyBundle, LedgerAccount, LedgerAccountKind, LedgerTransaction, MediaObject,
+    NewAccount, NewBot, NewDevice, NewGame, NewMessage, NewOutboxEvent, NewPeer, NewRoom,
+    NewSession, NewTransaction, NewXpAward, Notification, OutboxRecord, PeerRecord, Posted,
+    Profile, ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Relationship,
+    Report, Room, RoomMember, Scope, Session, Standing, StoredMessage, XpChange,
 };
 
 /// Largest page any read will return, whatever the caller asks for.
@@ -587,6 +587,39 @@ pub trait SocialStore: Send + Sync {
     /// asking the question one way round is how "blocked users can still reply in
     /// threads" bugs happen.
     async fn is_blocked_either_way(&self, a: Id, b: Id) -> Result<bool>;
+}
+
+/// The global-admin registry: who may moderate every public room.
+///
+/// A trait of its own rather than a corner of [`AccountStore`] because two
+/// domains read it with different needs — the auth service owns the whole
+/// registry (the Owner/CEO's management screen), while the rooms service asks
+/// only the one-point question "is this caller a global admin" on the path of a
+/// sanction. A bound each of them can name separately keeps a mock store honest
+/// about which half it has implemented.
+#[async_trait]
+pub trait GlobalAdminStore: Send + Sync {
+    /// Inserts or refreshes an appointment. Refreshing an existing admin keeps
+    /// the original `granted_at`: re-appointing somebody who is already
+    /// appointed is a no-op in state, and rewriting the timestamp would make
+    /// the list look newer than the authority it records.
+    async fn put_global_admin(&self, admin: GlobalAdmin) -> Result<GlobalAdmin>;
+
+    /// Removes an appointment. Returns whether a row was removed, so a revoke of
+    /// a non-admin can be answered by name rather than as a silent success.
+    async fn remove_global_admin(&self, account_id: Id) -> Result<bool>;
+
+    /// Every current appointment. Meant to be small — a handful of people, not
+    /// a staff roster — so one read serves the management screen without paging.
+    async fn global_admins(&self) -> Result<Vec<GlobalAdmin>>;
+
+    /// Whether one account may moderate every public room.
+    ///
+    /// The hot path: called once per sanction a global admin issues, and once
+    /// per sanction anybody else issues into a public room only when the
+    /// ordinary permission check has already refused — the lookup is the
+    /// exception, never the rule.
+    async fn is_global_admin(&self, account_id: Id) -> Result<bool>;
 }
 
 /// The economy ledger.
@@ -1410,6 +1443,7 @@ pub trait Store:
     + IdentityStore
     + ChallengeStore
     + WalletStore
+    + GlobalAdminStore
     + Send
     + Sync
     + 'static
