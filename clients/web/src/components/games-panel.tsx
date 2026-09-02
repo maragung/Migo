@@ -11,10 +11,15 @@
  * answers "play" by opening the new-conversation dialog, whose completion opens the thread as
  * a chat tab where a game can actually begin. Nothing here invents an opponent or a stake the
  * server does not carry.
+ *
+ * `onActivate` is the left panel's ask: a list that carries it turns its cards into doors that
+ * open the arcade as the right pane's Games tab — the click on the left is what the right pane
+ * shows. The pane's own instance passes nothing; its cards state the catalogue, the button
+ * below them starts the flow.
  */
 
 import { useEffect, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { KeyboardEvent, ReactNode } from 'react';
 
 import type { GameCatalogueEntry } from '@migo/sdk';
 
@@ -26,8 +31,18 @@ import { NewConversationDialog } from './new-conversation-dialog.js';
 import { EmptyState } from './states.js';
 import { Skeleton } from './states.js';
 
+/** Keyboard support for the clickable cards: Enter or Space activates, matching a button. */
+function activateOnEnter(onActivate: () => void): (event: KeyboardEvent<HTMLDivElement>) => void {
+  return (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      onActivate();
+    }
+  };
+}
+
 /** The catalogue panel. */
-export function GamesPanel(): ReactNode {
+export function GamesPanel({ onActivate }: { onActivate?: () => void }): ReactNode {
   const { client } = useMigo();
   const [catalogue, setCatalogue] = useState<GameCatalogueEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -80,7 +95,18 @@ export function GamesPanel(): ReactNode {
       {catalogue !== null && catalogue.length > 0 ? (
         <div className="games-grid">
           {catalogue.map((entry) => (
-            <div key={entry.slug} className="game-card">
+            <div
+              key={entry.slug}
+              className="game-card"
+              {...(onActivate !== undefined
+                ? {
+                    role: 'button',
+                    tabIndex: 0,
+                    onClick: onActivate,
+                    onKeyDown: activateOnEnter(onActivate),
+                  }
+                : {})}
+            >
               <span className="game-card-icon" aria-hidden="true">
                 🎮
               </span>

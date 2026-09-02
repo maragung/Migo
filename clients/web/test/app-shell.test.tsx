@@ -1,13 +1,12 @@
 /**
  * What the messenger shell offers as the app's navigation.
  *
- * The new-ui-02 shell is two independent panels: a left panel with its own tab strip (Main,
- * Rooms, Games, Feed — the lists and streams the reference draws) over the orange profile
- * banner, and a right panel that runs on its own state — its menu tab bar (Feed, Games, TopUp,
- * Profile, Settings) when no conversation is active, or the chat tab bar with one closable chip
- * per open conversation and the "‹ Menu Panel" way back when one is. The shell is the app's
- * whole navigation, so its offer is its contract: a surface that vanished would strand its
- * panel behind no control at all — which is why Alerts and Search live in the banner menu.
+ * The right pane has one mode now, not two: a single tab bar whose first chip is the Feed —
+ * the pane's resting content, always present, never closable — followed by one closable chip
+ * per open thing: a conversation, the games arcade, or a secondary panel the banner menu or a
+ * deep link reached. There is no "menu panel" to switch back to: closing a chip falls through
+ * to the next one, and closing the last one leaves the Feed, which is exactly the fallback an
+ * empty pane owes. The shell is the app's whole navigation, so its offer is its contract.
  *
  * The shell reads the signed-in account from the Migo context, so the renderer is fed a minimal
  * context double the way `calls.test.tsx` feeds its manager; `renderToStaticMarkup` runs no
@@ -25,7 +24,7 @@ import type { ReactNode } from 'react';
 import type { Id } from '@migo/sdk';
 
 import { AppShell } from '../src/components/app-shell.js';
-import type { ChatTabChip, PanelTab, RightTab, SystemTab } from '../src/components/app-shell.js';
+import type { PanelTab, RightTabChip, SystemTab } from '../src/components/app-shell.js';
 import { MigoContext } from '../src/lib/migo/provider.js';
 
 /** The shell under a ready-session context double with a known account. */
@@ -54,24 +53,31 @@ function render(shell: ReactNode): string {
 /** The shell's no-op callbacks: the tests assert on structure, never on navigation. */
 const NOOP = {
   onSelectSystem: (_: SystemTab) => {},
-  onSelectRightTab: (_: RightTab) => {},
-  onSelectChat: (_: Id) => {},
-  onCloseChat: (_: Id) => {},
-  onBackToMenu: () => {},
+  onSelectRight: (_: string) => {},
+  onCloseRight: (_: string) => {},
+  onBackToLists: () => {},
   onOpenPanel: (_: PanelTab) => {},
 };
 
-/** The shell with one conversation open, the right pane's chat mode. */
-function chatShell(tabs: ChatTabChip[], active: Id | null): ReactNode {
+/**
+ * The shell with the given right-pane tabs. `active` is the pane's active chip (`'feed'` or a
+ * tab id); `activeChat` names the conversation whose thread the pane is showing, when the
+ * active tab is a chat.
+ */
+function shell(
+  tabs: readonly RightTabChip[],
+  active: string,
+  activeChat: Id | null = null,
+): ReactNode {
   return (
     <AppShell
       leftTab="friends"
       leftContent={<p>left</p>}
-      rightTab="feed"
+      rightTabs={tabs}
+      activeRight={active}
+      activeChat={activeChat}
       rightContent={<p>right</p>}
-      activeChat={active}
-      chatTabs={tabs}
-      showRight={active !== null}
+      showRight={activeChat !== null}
       {...NOOP}
     >
       <p>thread</p>
@@ -80,7 +86,7 @@ function chatShell(tabs: ChatTabChip[], active: Id | null): ReactNode {
 }
 
 test('the left strip offers the four system tabs in the reference order', () => {
-  const markup = render(chatShell([], null));
+  const markup = render(shell([], 'feed'));
 
   // The pattern anchors on the whole class attribute so the icon/label spans inside a chip
   // (tab-chip-icon, tab-chip-label) never count — only the chip buttons do.
@@ -95,28 +101,27 @@ test('the left strip offers the four system tabs in the reference order', () => 
   }
 });
 
-test('the right pane in menu mode offers its own panel tabs', () => {
-  const markup = render(chatShell([], null));
+test('an empty right pane still offers the Feed, and never a menu panel', () => {
+  const markup = render(shell([], 'feed'));
 
-  assert.ok(markup.includes('Panel: Feed'), 'the menu bar must name the pane it is showing');
-  for (const label of ['Feed', 'Games', 'TopUp', 'Profile', 'Settings']) {
-    assert.ok(
-      markup.includes(`>${label}</button>`),
-      `the "${label}" panel tab is missing from the menu bar`,
-    );
-  }
-  // The single-column story: the menu pane carries its own way back to the left panel.
-  assert.ok(markup.includes('class="chat-back pane-back"'), 'the menu pane back control');
-});
-
-test('an open conversation is a closable chip on the chat bar', () => {
-  const chatTabs: ChatTabChip[] = [{ conversationId: 'c1' as Id, title: 'reason008' }];
-  const markup = render(chatShell(chatTabs, 'c1' as Id));
-
+  // The resting chip is the bar's own — an empty pane still owes the Feed.
   assert.ok(
     markup.includes('class="chat-tab active"'),
-    'the active conversation chip must mark itself',
+    'the Feed chip must be present and active when nothing is open',
   );
+  assert.ok(markup.includes('aria-label="Open panels"'), 'the right pane must carry its tab bar');
+  assert.ok(!markup.includes('Menu Panel'), 'the menu panel is gone: the pane is tabs only');
+  assert.ok(!markup.includes('Panel: '), 'the pane no longer names a two-mode "panel" it shows');
+});
+
+test('every open thing is a closable chip beside the Feed', () => {
+  const tabs: RightTabChip[] = [
+    { id: 'chat:c1', kind: 'chat', conversationId: 'c1' as Id, title: 'reason008' },
+    { id: 'games', kind: 'games', title: 'Games' },
+    { id: 'wallet', kind: 'wallet', title: 'TopUp' },
+  ];
+  const markup = render(shell(tabs, 'chat:c1', 'c1' as Id));
+
   assert.ok(
     markup.includes('tab-chip-label">reason008</span>'),
     'the conversation chip must carry its title',
@@ -125,29 +130,47 @@ test('an open conversation is a closable chip on the chat bar', () => {
     markup.includes('aria-label="Close reason008"'),
     'the conversation chip must be closable',
   );
-  // The chat mode's way back: the mockup's cyan "‹ Menu Panel" control, always on the bar.
-  assert.ok(markup.includes('Menu Panel</span>'), 'the chat bar must offer the menu panel');
+  assert.ok(markup.includes('aria-label="Close TopUp"'), 'the panel chips must be closable too');
+  // The resting chip is never closable — closing everything must leave the Feed.
+  assert.ok(
+    !markup.includes('Close Feed'),
+    "the Feed chip has no close control; it is the pane's fallback",
+  );
+  // The chat tab is the active one, so the pane shows the thread, not the right content.
+  assert.ok(markup.includes('class="thread-area"'), 'the active chat tab shows the thread');
+  assert.ok(!markup.includes('<p>right</p>'), 'the pane does not also render its fallback');
 });
 
 test('exactly one chip is active per pane, never more', () => {
-  const chatTabs: ChatTabChip[] = [
-    { conversationId: 'c1' as Id, title: 'a' },
-    { conversationId: 'c2' as Id, title: 'b' },
+  const tabs: RightTabChip[] = [
+    { id: 'chat:c1', kind: 'chat', conversationId: 'c1' as Id, title: 'a' },
+    { id: 'chat:c2', kind: 'chat', conversationId: 'c2' as Id, title: 'b' },
   ];
-  const markup = render(chatShell(chatTabs, 'c2' as Id));
+  const markup = render(shell(tabs, 'chat:c2', 'c2' as Id));
 
+  // Two open conversations plus the bar's own Feed chip.
   const chatChips = markup.match(/class="chat-tab( active)?"/g) ?? [];
-  assert.equal(chatChips.length, 2, 'one chip per open conversation');
-  assert.equal(markup.match(/class="chat-tab active"/g)?.length ?? 0, 1, 'one active chat chip');
+  assert.equal(chatChips.length, 3, 'one chip per open thing, plus the Feed');
+  assert.equal(markup.match(/class="chat-tab active"/g)?.length ?? 0, 1, 'one active chip');
   assert.equal(
     (markup.match(/aria-current="page"/g) ?? []).length,
     2,
-    'exactly one current page per pane: the left strip tab and the active chat chip',
+    'exactly one current page per pane: the left strip tab and the active right chip',
   );
 });
 
+test('the back control is icon-only and never says menu', () => {
+  const markup = render(shell([], 'feed'));
+
+  assert.ok(
+    markup.includes('aria-label="Back to the lists"'),
+    'the single-column way home to the lists is on the bar',
+  );
+  assert.ok(!markup.includes('class="chat-back pane-back"'), 'the old two-mode back is gone');
+});
+
 test('the banner carries the account menu and the theme control', () => {
-  const markup = render(chatShell([], null));
+  const markup = render(shell([], 'feed'));
 
   const menuButtons = markup.match(/aria-label="Open the account menu"/g) ?? [];
   assert.equal(menuButtons.length, 1, 'the banner must own exactly one account menu control');
@@ -162,10 +185,10 @@ test('the theme control follows the theme it is handed', () => {
     <AppShell
       leftTab="friends"
       leftContent={<p>left</p>}
-      rightTab="feed"
-      rightContent={<p>right</p>}
+      rightTabs={[]}
+      activeRight="feed"
       activeChat={null}
-      chatTabs={[]}
+      rightContent={<p>right</p>}
       showRight={false}
       theme="dark"
       {...NOOP}
@@ -177,10 +200,10 @@ test('the theme control follows the theme it is handed', () => {
     <AppShell
       leftTab="friends"
       leftContent={<p>left</p>}
-      rightTab="feed"
-      rightContent={<p>right</p>}
+      rightTabs={[]}
+      activeRight="feed"
       activeChat={null}
-      chatTabs={[]}
+      rightContent={<p>right</p>}
       showRight={false}
       theme="light"
       {...NOOP}

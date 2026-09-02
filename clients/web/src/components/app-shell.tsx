@@ -3,19 +3,17 @@
 /**
  * The messenger shell: two independent panels on a PC, one column on a phone.
  *
- * The new-ui-02 model (docs/design mockup `new-ui-02.tsx`) replaces the v0.9.0 single strip
- * over one body with a split: a LEFT panel (~32% on a PC, the whole screen on a phone) that
- * owns the account's lists — its own teal tab strip (Main, Rooms, Games, Feed) over
- * the orange profile banner — and a RIGHT panel that runs on its own state: its menu tabs
- * (Feed, Games, TopUp, Profile, Settings — Alerts and Search open from the banner menu) when no
- * conversation is active, or
- * the chat tab bar with its closable conversation chips and "‹ Menu Panel" control when one
- * is. Clicking around the left panel never disturbs the right, and that independence is the
- * model's whole offer.
+ * The new-ui-02 model (docs/design mockup `new-ui-02.tsx`) splits the app: a LEFT panel (~32% on
+ * a PC, the whole screen on a phone) that owns the account's lists — its own teal tab strip
+ * (Main, Rooms, Games, Feed) over the orange profile banner — and a RIGHT panel that shows what
+ * the left panel's clicks open, as tabs: one closable chip per open conversation, the games
+ * arcade, and the secondary panels the banner menu reaches, over a persistent Feed chip that is
+ * the pane's resting content — what it shows when nothing is open. Clicking around the left
+ * panel never disturbs the right, and that independence is the model's whole offer.
  *
- * Below the PC breakpoint the two panes take turns: the left panel is the app, and opening a
- * conversation or a menu panel slides the right pane over it. The `showRight` flag is the
- * layout's say in that — on a PC the CSS shows both panes whatever it reads.
+ * Below the PC breakpoint the two panes take turns: the left panel is the app, and the right
+ * pane covers it while it has something to show. The `showRight` flag is the layout's say in
+ * that — on a PC the CSS shows both panes whatever it reads.
  *
  * The shell stays a *presentational* component: which tabs exist, which is active, and what
  * happens on select/close are the layout's answers (see app/chat/layout.tsx), because the tab
@@ -28,52 +26,47 @@ import type { Id } from '@migo/sdk';
 
 import type { Theme } from '@/lib/theme.js';
 
-import { ChatTabBar } from './chat-tab-bar.js';
-import type { ChatTabChip } from './chat-tab-bar.js';
-import { PanelTabBar } from './panel-tab-bar.js';
-import type { RightTab } from './panel-tab-bar.js';
 import { ProfileBanner } from './profile-banner.js';
+import { RightTabBar } from './right-tab-bar.js';
+import type { RightTabChip, RightPaneTab } from './right-tab-bar.js';
 import { TabStrip } from './tab-strip.js';
 import type { PanelTab, SystemTab } from './tab-strip.js';
 
 export type { PanelTab, SystemTab } from './tab-strip.js';
-export type { ChatTabChip } from './chat-tab-bar.js';
-export type { RightTab } from './panel-tab-bar.js';
+export type { RightTabChip, RightPaneTab, RightTabKind } from './right-tab-bar.js';
 
 /** Every section the shell can land on, for surfaces that ask the shell to navigate. */
-export type AppTab = SystemTab | 'notifications' | 'search' | 'wallet' | 'profile' | 'settings';
+export type AppTab = SystemTab | PanelTab;
 
 /**
  * The shell around every authenticated screen.
  *
  * @param leftTab The left panel's active system tab.
  * @param leftContent The left panel's content, already chosen by the owner.
- * @param rightTab The right pane's active menu tab, shown when no conversation is active.
- * @param rightContent The right pane's menu content, already chosen by the owner.
- * @param activeChat The conversation the right pane is showing, or null for menu mode.
- * @param chatTabs One chip per open conversation, in open order.
+ * @param rightTabs The right pane's open closable tabs, in open order.
+ * @param activeRight The right pane's active chip: `'feed'` or a tab id.
+ * @param activeChat The conversation the right pane is showing, when the active tab is a chat.
+ * @param rightContent The right pane's content for its active non-chat tab (Feed included).
  * @param showRight Whether the right pane covers the screen (the mobile story; a PC shows both).
  * @param onSelectSystem Switches the left panel's tab.
- * @param onSelectRightTab Switches the right pane's menu tab.
- * @param onSelectChat Activates an open conversation's chip.
- * @param onCloseChat Closes a conversation's chip.
- * @param onBackToMenu Hands the right pane back to its menu tabs (and the screen to the left panel).
- * @param onOpenPanel Opens a secondary panel in the right pane — the banner menu's action.
+ * @param onSelectRight Activates a right-pane chip, the Feed chip included.
+ * @param onCloseRight Closes a right-pane chip.
+ * @param onBackToLists Hands the screen back to the left lists (the single-column story only).
+ * @param onOpenPanel Opens a secondary panel as a right-pane tab — the banner menu's action.
  * @param children The active conversation's thread, already chosen by the owner.
  */
 export function AppShell({
   leftTab,
   leftContent,
-  rightTab,
-  rightContent,
+  rightTabs,
+  activeRight,
   activeChat,
-  chatTabs,
+  rightContent,
   showRight,
   onSelectSystem,
-  onSelectRightTab,
-  onSelectChat,
-  onCloseChat,
-  onBackToMenu,
+  onSelectRight,
+  onCloseRight,
+  onBackToLists,
   onOpenPanel,
   children,
   theme,
@@ -81,16 +74,15 @@ export function AppShell({
 }: {
   leftTab: SystemTab;
   leftContent: ReactNode;
-  rightTab: RightTab;
-  rightContent: ReactNode;
+  rightTabs: readonly RightTabChip[];
+  activeRight: RightPaneTab;
   activeChat: Id | null;
-  chatTabs: readonly ChatTabChip[];
+  rightContent: ReactNode;
   showRight: boolean;
   onSelectSystem: (tab: SystemTab) => void;
-  onSelectRightTab: (tab: RightTab) => void;
-  onSelectChat: (conversationId: Id) => void;
-  onCloseChat: (conversationId: Id) => void;
-  onBackToMenu: () => void;
+  onSelectRight: (id: RightPaneTab) => void;
+  onCloseRight: (id: string) => void;
+  onBackToLists: () => void;
   onOpenPanel: (panel: PanelTab) => void;
   children: ReactNode;
   /** Pins the theme control's appearance; defaults to the persisted theme. */
@@ -106,29 +98,16 @@ export function AppShell({
         <div className="app-body">{leftContent}</div>
       </div>
       <div className="app-right">
-        {activeChat !== null ? (
-          <>
-            <ChatTabBar
-              tabs={chatTabs}
-              active={activeChat}
-              onSelect={onSelectChat}
-              onClose={onCloseChat}
-              onBackToMenu={onBackToMenu}
-            />
-            <div className="app-body">
-              <main className="thread-area">{children}</main>
-            </div>
-          </>
-        ) : (
-          <>
-            <PanelTabBar
-              active={rightTab}
-              onSelect={onSelectRightTab}
-              onBackToMenu={onBackToMenu}
-            />
-            <div className="app-body">{rightContent}</div>
-          </>
-        )}
+        <RightTabBar
+          tabs={rightTabs}
+          active={activeRight}
+          onSelect={onSelectRight}
+          onClose={onCloseRight}
+          onBackToLists={onBackToLists}
+        />
+        <div className="app-body">
+          {activeChat !== null ? <main className="thread-area">{children}</main> : rightContent}
+        </div>
       </div>
     </div>
   );

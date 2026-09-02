@@ -781,10 +781,9 @@ main {
 }
 
 /*
- * The right pane's two bars. The chat bar is the reference's slate-800 strip: the cyan
- * "‹ Menu Panel" control, the chevrons that scroll the tab row, and one closable chip per open
- * conversation. The menu bar is the pane's own teal header naming what it shows, with the
- * mockup's small tab buttons — the same surface, worn in the two modes the right pane has.
+ * The right pane's tab bar. The slate-800 strip: the compact back chevron (the single-column
+ * story only — on a PC the left lists are always on screen beside the pane), the chevrons that
+ * scroll the tab row, the persistent Feed chip, and one closable chip per open thing.
  */
 .chat-tab-bar {
   display: flex;
@@ -795,18 +794,16 @@ main {
   border-bottom: 1px solid #0f172a;
   flex-shrink: 0;
 }
+/* Icon-only, and gone at the PC split: closing tabs is the PC's way to the Feed. */
 .chat-back {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 5px 8px;
+  justify-content: center;
+  padding: 4px;
   border: none;
   border-radius: 8px;
   background: #0e7490;
   color: #ffffff;
-  font-size: var(--fs-meta);
-  font-weight: 700;
-  white-space: nowrap;
   flex-shrink: 0;
 }
 .chat-back:hover {
@@ -815,6 +812,11 @@ main {
 .chat-back:focus-visible {
   outline: 1px solid var(--accent-bright);
   outline-offset: 1px;
+}
+@media (min-width: 1024px) {
+  .chat-back {
+    display: none;
+  }
 }
 .chat-scroll {
   display: inline-flex;
@@ -872,87 +874,6 @@ main {
   background: var(--accent-bright);
   color: #ffffff;
   font-weight: 700;
-}
-
-/* The menu bar: the teal header with the pane's own small tab buttons. */
-.panel-tab-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  background: var(--nav-bg);
-  border-bottom: 1px solid color-mix(in srgb, var(--bg) 35%, var(--nav-bg));
-  overflow-x: auto;
-  scrollbar-width: none;
-  flex-shrink: 0;
-}
-.panel-tab-bar::-webkit-scrollbar {
-  display: none;
-}
-.panel-tab-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: #ffffff;
-  font-size: var(--fs-body-sm);
-  font-weight: 700;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-.panel-tab-title svg {
-  color: var(--gold);
-}
-.panel-tabs {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-left: auto;
-}
-.panel-tab {
-  padding: 4px 10px;
-  border: none;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--bg) 20%, transparent);
-  color: color-mix(in srgb, #ffffff 82%, transparent);
-  font-size: var(--fs-meta);
-  font-weight: 600;
-  white-space: nowrap;
-  flex-shrink: 0;
-  transition:
-    background var(--motion-fast) var(--ease-standard),
-    color var(--motion-fast) var(--ease-standard);
-}
-.panel-tab:hover {
-  background: color-mix(in srgb, var(--bg) 32%, transparent);
-  color: #ffffff;
-}
-.panel-tab:focus-visible {
-  outline: 1px solid var(--accent-bright);
-  outline-offset: 1px;
-}
-.panel-tab.active {
-  background: var(--accent-bright);
-  color: #ffffff;
-  font-weight: 700;
-}
-
-/*
- * The single-column story (below the 1024px PC split, the right pane is the whole screen):
- * the back control and the title plus five tabs do not fit one 360–412px line, and the
- * shrunken remainder made "TopUp Profile Settings" read as cut-off — the tabs scrolled, but
- * nothing on screen said so. Below the split the tabs take their own full-width row and keep
- * their horizontal scroll for the day there are more of them; on a PC nothing changes.
- */
-@media (max-width: 1023px) {
-  .panel-tab-bar {
-    flex-wrap: wrap;
-    row-gap: 4px;
-  }
-  .panel-tabs {
-    margin-left: 0;
-    width: 100%;
-    overflow-x: auto;
-  }
 }
 
 /*
@@ -1147,6 +1068,14 @@ main {
 }
 .game-card:hover {
   border-color: var(--accent-border);
+}
+/* The left list's cards are doors to the right pane's Games tab; the pane's own are not. */
+.game-card[role='button'] {
+  cursor: pointer;
+}
+.game-card[role='button']:focus-visible {
+  outline: 1px solid var(--accent-bright);
+  outline-offset: 1px;
 }
 .game-card-icon {
   display: inline-flex;
