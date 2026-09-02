@@ -3040,13 +3040,13 @@ main {
 .sidebar-footer {
   flex-wrap: wrap;
 }
+/* Leads the friends panel (directly under the profile banner), so no extra top margin. */
 .presence-picker {
   flex-basis: 100%;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   align-items: center;
-  margin-top: 8px;
 }
 .presence-select {
   width: auto;

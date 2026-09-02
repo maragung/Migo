@@ -232,12 +232,10 @@ export function FriendsPanel({
 
   return (
     <div className="panel">
-      <h1 className="panel-title">Friends</h1>
-
-      {/* The connection line and the presence picker moved in with the friends list when the
-          Chats tab left the strip: they are the account's ambient state, and Main is where the
-          mockup keeps them. The New-conversation control rides along so a direct chat is still
-          one click from the people it starts from. */}
+      {/* The account's ambient controls lead the panel, directly under the profile banner and
+          above the lists: the connection line, the presence/status picker (the account's own
+          state, published not read), and the people-search + New-conversation affordances that
+          every section below them starts from. The headings then name what follows. */}
       <ConnectionBadge />
       <PresencePicker state={myPresence} status={myStatus} onChange={onPresenceChange} />
 
@@ -264,6 +262,8 @@ export function FriendsPanel({
           <span>New chat</span>
         </button>
       </form>
+
+      <h1 className="panel-title">Friends</h1>
 
       {error ? <p className="form-error">{error}</p> : null}
 
