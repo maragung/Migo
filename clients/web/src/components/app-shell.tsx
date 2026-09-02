@@ -53,6 +53,7 @@ export type AppTab = SystemTab | PanelTab;
  * @param onCloseRight Closes a right-pane chip.
  * @param onBackToLists Hands the screen back to the left lists (the single-column story only).
  * @param onOpenPanel Opens a secondary panel as a right-pane tab — the banner menu's action.
+ * @param chatsUnread Whether any conversation has an unread message — the Chats chip's dot.
  * @param children The active conversation's thread, already chosen by the owner.
  */
 export function AppShell({
@@ -71,6 +72,7 @@ export function AppShell({
   children,
   theme,
   onToggleTheme,
+  chatsUnread,
 }: {
   leftTab: SystemTab;
   leftContent: ReactNode;
@@ -89,11 +91,13 @@ export function AppShell({
   theme?: Theme;
   /** Called when the theme control is clicked; defaults to flipping the persisted theme. */
   onToggleTheme?: () => void;
+  /** Whether any conversation has an unread message — the Chats chip's dot. */
+  chatsUnread?: boolean;
 }): ReactNode {
   return (
     <div className={`app${showRight ? ' show-right' : ''}`}>
       <div className="app-left">
-        <TabStrip active={leftTab} onSelectSystem={onSelectSystem} />
+        <TabStrip active={leftTab} onSelectSystem={onSelectSystem} chatsUnread={chatsUnread} />
         <ProfileBanner onOpenPanel={onOpenPanel} theme={theme} onToggleTheme={onToggleTheme} />
         <div className="app-body">{leftContent}</div>
       </div>

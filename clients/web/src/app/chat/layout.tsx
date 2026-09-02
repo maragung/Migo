@@ -4,9 +4,11 @@
  * The authenticated shell: a left panel of lists, a right panel of tabs.
  *
  * The new-ui-02 IA (docs/design mockup `new-ui-02.tsx`) is a split: the LEFT panel holds the
- * account's lists behind its own tab state (`leftTab`), and the RIGHT panel shows what the left
- * panel's clicks open, as closable tabs (`right`): a conversation (private, group, or room), the
- * games arcade, or a secondary panel the banner menu or a deep link reached. The Feed is not a
+ * account's lists behind its own tab state (`leftTab`) — Main (friends), Chats (the
+ * conversations, the one list that answers "did somebody write me?", with its unread dot on
+ * the strip), Rooms, Games, Feed — and the RIGHT panel shows what the left panel's clicks
+ * open, as closable tabs (`right`): a conversation (private, group, or room), the games
+ * arcade, or a secondary panel the banner menu or a deep link reached. The Feed is not a
  * tab but the pane's resting chip — always first, never closed — so a pane with nothing open
  * shows the Feed, exactly the fallback an empty state owes. The two panels' states are
  * independent on purpose: reading Games on the left never disturbs the thread open on the right,
@@ -39,6 +41,7 @@ import type { ConversationSummary, Id } from '@migo/sdk';
 import { AppShell } from '@/components/app-shell.js';
 import type { PanelTab, SystemTab } from '@/components/app-shell.js';
 import type { RightTabChip, RightTabKind } from '@/components/app-shell.js';
+import { ConversationList } from '@/components/conversation-list.js';
 import { FriendsPanel } from '@/components/friends-panel.js';
 import { GamesPanel } from '@/components/games-panel.js';
 import { NotificationsPanel } from '@/components/notifications-panel.js';
@@ -122,7 +125,7 @@ function chatIdOf(conversationId: Id): string {
 function TabbedShell({ children }: { children: ReactNode }): ReactNode {
   const { accountId } = useMigo();
   const openId = useOpenConversation();
-  const { items } = useConversations();
+  const { items, unread } = useConversations();
   const rooms = useRooms();
 
   // A session opens on its people: the mockup's first tab is Main (the friends list).
@@ -213,7 +216,13 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
   // panel, the secondary panels arrive as the right pane's tabs.
   const navigate = useCallback(
     (tab: SystemTab | PanelTab): void => {
-      if (tab === 'friends' || tab === 'rooms' || tab === 'games' || tab === 'feed') {
+      if (
+        tab === 'friends' ||
+        tab === 'chats' ||
+        tab === 'rooms' ||
+        tab === 'games' ||
+        tab === 'feed'
+      ) {
         setLeftTab(tab);
         return;
       }
@@ -281,6 +290,13 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
     switch (leftTab) {
       case 'friends':
         return <FriendsPanel onOpenConversation={openInTab} />;
+      case 'chats':
+        return (
+          <div className="panel">
+            <h1 className="panel-title">Chats</h1>
+            <ConversationList />
+          </div>
+        );
       case 'rooms':
         return <RoomsPanel onOpenConversation={openInTab} />;
       case 'games':
@@ -289,6 +305,11 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
         return <SpacePanel onOpenConversation={openInTab} />;
     }
   })();
+
+  // The Chats chip's dot: a live unread mark or a summary whose persisted read mark lags its
+  // last message. Without it, a message that arrives while another tab is showing has no mark
+  // anywhere — which is the messenger whose postman never rings.
+  const chatsUnread = unread.size > 0 || items.some((item) => item.lastSeq > item.readSeq);
 
   return (
     <SectionNavProvider navigate={navigate}>
@@ -305,6 +326,7 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
         onCloseRight={closeRight}
         onBackToLists={() => setDismissed(true)}
         onOpenPanel={openRightTab}
+        chatsUnread={chatsUnread}
       >
         {children}
       </AppShell>

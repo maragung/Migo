@@ -5,11 +5,16 @@
  *
  * The new-ui-02 model (docs/design mockup `new-ui-02.tsx`) splits the app into two independent
  * panels on a PC: the LEFT panel owns the account's lists — its tab bar carries Main (the
- * friends list), Rooms, Games, Feed — and the chat tabs that this strip used to carry have
- * moved to the right panel's own bar (see chat-tab-bar.tsx), where a conversation actually
+ * friends list), Chats (the conversations), Rooms, Games, Feed — and the chat tabs that this
+ * strip used to carry have moved to the right panel's own bar, where a conversation actually
  * opens. The strip keeps the teal `#00838F`; the active chip is the brighter `#00ACC1` over
  * the orange underline, exactly the pairing the mockup draws. It scrolls horizontally when it
  * overflows rather than hiding anything: a tab that is off-screen is still a tab.
+ *
+ * The Chats chip carries the unread dot because it is the messenger's one list that exists to
+ * answer "did somebody write me?" — without it, a message that arrives while another tab is
+ * showing has no mark anywhere until its reader goes looking, which is a messenger whose
+ * postman never rings.
  */
 
 import type { ReactNode } from 'react';
@@ -18,7 +23,7 @@ import { Icon } from './icons.js';
 import type { IconName } from './icons.js';
 
 /** The system tabs — the lists and streams a messenger lives in, in the reference's order. */
-export type SystemTab = 'friends' | 'rooms' | 'games' | 'feed';
+export type SystemTab = 'friends' | 'chats' | 'rooms' | 'games' | 'feed';
 
 /** The secondary panels the right pane can show, shared with the banner menu that opens them. */
 export type PanelTab = 'notifications' | 'search' | 'wallet' | 'profile' | 'settings';
@@ -36,6 +41,7 @@ function chipClass(...parts: Array<string | false>): string {
 
 const SYSTEM_TABS: ReadonlyArray<SystemSection> = [
   { id: 'friends', label: 'Main', icon: 'friends' },
+  { id: 'chats', label: 'Chats', icon: 'chats' },
   { id: 'rooms', label: 'Rooms', icon: 'rooms' },
   { id: 'games', label: 'Games', icon: 'game' },
   { id: 'feed', label: 'Feed', icon: 'space' },
@@ -55,13 +61,16 @@ export const PANEL_LABELS: Readonly<Record<PanelTab, string>> = {
  *
  * @param active The left panel's tab id.
  * @param onSelectSystem Switches the left panel to a system tab.
+ * @param chatsUnread Whether any conversation has an unread message — the Chats chip's dot.
  */
 export function TabStrip({
   active,
   onSelectSystem,
+  chatsUnread = false,
 }: {
   active: SystemTab;
   onSelectSystem: (tab: SystemTab) => void;
+  chatsUnread?: boolean;
 }): ReactNode {
   return (
     <nav className="tab-strip" aria-label="Sections">
@@ -77,6 +86,9 @@ export function TabStrip({
             <Icon name={section.icon} size={16} />
           </span>
           <span className="tab-chip-label">{section.label}</span>
+          {section.id === 'chats' && chatsUnread ? (
+            <span className="tab-chip-dot" aria-label="Unread messages" />
+          ) : null}
         </button>
       ))}
     </nav>

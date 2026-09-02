@@ -85,20 +85,43 @@ function shell(
   );
 }
 
-test('the left strip offers the four system tabs in the reference order', () => {
+test('the left strip offers the five system tabs in the reference order', () => {
   const markup = render(shell([], 'feed'));
 
   // The pattern anchors on the whole class attribute so the icon/label spans inside a chip
   // (tab-chip-icon, tab-chip-label) never count — only the chip buttons do.
   const chips = markup.match(/class="tab-chip( active)?"/g) ?? [];
-  assert.equal(chips.length, 4, 'four system tabs on the left strip, nothing else');
+  assert.equal(chips.length, 5, 'five system tabs on the left strip, nothing else');
   let at = -1;
-  for (const label of ['Main', 'Rooms', 'Games', 'Feed']) {
+  for (const label of ['Main', 'Chats', 'Rooms', 'Games', 'Feed']) {
     const found = markup.indexOf(`tab-chip-label">${label}</span>`);
     assert.ok(found !== -1, `the "${label}" tab is missing from the strip`);
     assert.ok(found > at, `the "${label}" tab is out of the reference order`);
     at = found;
   }
+});
+
+test('the Chats chip carries the unread dot only when something is unread', () => {
+  const quiet = render(shell([], 'feed'));
+  assert.ok(!quiet.includes('tab-chip-dot'), 'no dot when every conversation is read');
+
+  const unread = render(
+    <AppShell
+      leftTab="friends"
+      leftContent={<p>left</p>}
+      rightTabs={[]}
+      activeRight="feed"
+      activeChat={null}
+      rightContent={<p>right</p>}
+      showRight={false}
+      chatsUnread
+      {...NOOP}
+    >
+      <p>thread</p>
+    </AppShell>,
+  );
+  assert.ok(unread.includes('class="tab-chip-dot"'), 'the dot marks unread messages');
+  assert.ok(unread.includes('aria-label="Unread messages"'), 'the dot says what it means');
 });
 
 test('an empty right pane still offers the Feed, and never a menu panel', () => {

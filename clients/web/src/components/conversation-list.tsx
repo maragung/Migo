@@ -152,7 +152,7 @@ export function ConversationList(): ReactNode {
           <div className="emoji">
             <Icon name="chats" size={24} />
           </div>
-          {error ?? 'No conversations yet. Start one with the + button.'}
+          {error ?? 'No conversations yet. Start one from the Main tab’s New chat button.'}
         </div>
       </div>
     );

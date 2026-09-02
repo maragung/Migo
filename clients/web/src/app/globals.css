@@ -763,6 +763,16 @@ main {
   display: inline-flex;
   flex-shrink: 0;
 }
+/* The Chats chip's unread dot: the strip's one "somebody wrote you" mark, glowing whatever
+ * tab is showing. Orange, to stand off the teal chips the way the banner stands off the nav. */
+.tab-chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--banner-b);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--banner-b) 70%, transparent);
+  flex-shrink: 0;
+}
 /* The chip's close control: a quiet glyph inside the chip's own hit area. */
 .tab-close {
   display: inline-flex;
