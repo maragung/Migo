@@ -1184,6 +1184,11 @@ main {
 .panel-wide {
   max-width: 760px;
 }
+/* A panel whose leading controls belong to the banner card above (the account's presence,
+   status, and people search): it opens flush against that card instead of a padded gap. */
+.panel-flush {
+  padding-top: 0;
+}
 .panel-title {
   margin: 0;
   font-size: 18px;
@@ -3040,9 +3045,10 @@ main {
 .sidebar-footer {
   flex-wrap: wrap;
 }
-/* Leads the friends panel (directly under the profile banner), so no extra top margin. */
+/* Leads the friends panel (directly under the profile banner), so no extra top margin. Its
+   height is its content: no flex-basis, which in the panel's column would claim a full panel
+   of height and float the controls mid-panel whenever the lists below are short. */
 .presence-picker {
-  flex-basis: 100%;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;

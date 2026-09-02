@@ -231,11 +231,11 @@ export function FriendsPanel({
   );
 
   return (
-    <div className="panel">
-      {/* The account's ambient controls lead the panel, directly under the profile banner and
-          above the lists: the connection line, the presence/status picker (the account's own
-          state, published not read), and the people-search + New-conversation affordances that
-          every section below them starts from. The headings then name what follows. */}
+    <div className="panel panel-flush">
+      {/* The account's ambient controls lead the panel, glued to the profile banner above: the
+          connection line, the presence/status picker (the account's own state, published not
+          read), and the people-search + New-conversation affordances that every section below
+          them starts from. The headings then name what follows. */}
       <ConnectionBadge />
       <PresencePicker state={myPresence} status={myStatus} onChange={onPresenceChange} />
 
