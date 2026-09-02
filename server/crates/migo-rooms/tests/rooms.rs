@@ -41,15 +41,16 @@ use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 use migo_rooms::fanout::{Broadcast, Fanout};
 use migo_rooms::model::{
     slug_is_valid, Caller, NewRoomRequest, RoomsConfig, Sanction, Settings, TopicChange,
-    MAX_LIST_LIMIT, MAX_MUTE_MS, MAX_NAME_LEN, MAX_QUERY_LEN, MAX_REASON_LEN, MAX_ROSTER_PAGE,
-    MAX_SLOW_MODE_SECONDS, MAX_TOPIC_LEN, PERMANENT_BAN_MS,
+    BASE_ROOM_CAPACITY, MANAGED_ROOM_MAX_MEMBERS, MAX_LIST_LIMIT, MAX_MUTE_MS, MAX_NAME_LEN,
+    MAX_QUERY_LEN, MAX_REASON_LEN, MAX_ROSTER_PAGE, MAX_SLOW_MODE_SECONDS, MAX_TOPIC_LEN,
+    PERMANENT_BAN_MS, PUBLIC_ROOM_MAX_MEMBERS,
 };
 use migo_rooms::permission;
 use migo_rooms::service::Rooms;
 use migo_rooms::traits::Roomkeeper;
 use migo_rooms::view::ONLINE_COUNT_UNSET;
-use migo_store::model::{join_policy, Room, RoomMember};
-use migo_store::traits::RoomStore;
+use migo_store::model::{join_policy, Relationship, RelationshipKind, Room, RoomMember};
+use migo_store::traits::{RoomStore, SocialStore};
 use migo_store::MemoryStore;
 
 /// One second in milliseconds.
@@ -203,6 +204,26 @@ impl Harness {
             .join(&caller(account, device, millis), join_request(room))
             .await
             .expect("an open room admits a stranger");
+    }
+
+    /// Writes an accepted friendship, both directions, the way `accept_friend` does.
+    ///
+    /// The pending rows are skipped because the service reads `Friend` rows only —
+    /// `count_relationships` never sees a pending edge, and neither does the capacity
+    /// rule built on it.
+    async fn befriend(&self, left: u128, right: u128, millis: i64) {
+        for (owner, other) in [(left, right), (right, left)] {
+            self.store
+                .put_relationship(Relationship {
+                    account_id: id(owner),
+                    other_id: id(other),
+                    kind: RelationshipKind::Friend,
+                    created_at: ts(millis),
+                    accepted_at: Some(ts(millis)),
+                })
+                .await
+                .expect("the edge is written");
+        }
     }
 
     /// Sets a role as Alice, who owns the room.
@@ -692,34 +713,138 @@ async fn creation_runs_out_of_budget_eventually() {
 }
 
 #[tokio::test]
-async fn a_deployment_ceiling_bounds_the_requested_capacity() {
-    let harness = Harness::configured(RoomsConfig {
-        home_region: "id-jkt-1".to_string(),
-        default_max_members: 50,
-        max_members_ceiling: 100,
-    });
+async fn a_strangers_room_is_small() {
+    let harness = Harness::new();
     let alice = caller(ALICE, ALICE_PHONE, NOW);
+    // Nobody vouches for Alice: the base capacity, and not a seat more.
+    let summary = harness
+        .rooms
+        .create(&alice, request(LOBBY, "Lobby"))
+        .await
+        .expect("a stranger may still found a room");
+    let room = harness.room_row(summary.room_id).await;
+    assert_eq!(room.max_members, BASE_ROOM_CAPACITY);
+    assert_eq!(room.home_region, "local");
     expect_code(
         harness
             .rooms
             .create(
                 &alice,
                 NewRoomRequest {
-                    max_members: Some(101),
+                    max_members: Some(BASE_ROOM_CAPACITY + 1),
+                    slug: "second-room".to_string(),
                     ..request(LOBBY, "Lobby")
                 },
             )
             .await,
         codes::VALIDATION_FAILED,
     );
+    assert_eq!(harness.creations("invalid"), 1);
+}
+
+#[tokio::test]
+async fn capacity_grows_ten_seats_per_friend() {
+    let harness = Harness::new();
+    let alice = caller(ALICE, ALICE_PHONE, NOW);
+    harness.befriend(ALICE, BOB, NOW).await;
+    harness.befriend(ALICE, CAROL, NOW).await;
+    // 5 + 10 × 2 = 25 seats, and an explicit ask may claim all of them.
     let summary = harness
+        .rooms
+        .create(
+            &alice,
+            NewRoomRequest {
+                max_members: Some(25),
+                ..request(LOBBY, "Lobby")
+            },
+        )
+        .await
+        .expect("two friendships earn twenty-five seats");
+    assert_eq!(
+        harness.room_row(summary.room_id).await.max_members,
+        25,
+        "an explicit capacity within the allowance is honoured"
+    );
+    expect_code(
+        harness
+            .rooms
+            .create(
+                &alice,
+                NewRoomRequest {
+                    max_members: Some(26),
+                    slug: "greedy-room".to_string(),
+                    ..request(LOBBY, "Lobby")
+                },
+            )
+            .await,
+        codes::VALIDATION_FAILED,
+    );
+    // A pending request is not a friendship: it earns nothing. Dave's outgoing request
+    // adds a row Alice's friend count never reads.
+    harness
+        .store
+        .put_relationship(Relationship {
+            account_id: id(DAVE),
+            other_id: id(ALICE),
+            kind: RelationshipKind::PendingOutgoing,
+            created_at: ts(NOW),
+            accepted_at: None,
+        })
+        .await
+        .expect("the request is written");
+    let summary = harness
+        .rooms
+        .create(
+            &alice,
+            NewRoomRequest {
+                slug: "third-room".to_string(),
+                ..request(LOBBY, "Lobby")
+            },
+        )
+        .await
+        .expect("the request changes nothing about the allowance");
+    assert_eq!(
+        harness.room_row(summary.room_id).await.max_members,
+        25,
+        "a pending request earns no seats"
+    );
+}
+
+#[tokio::test]
+async fn the_kind_bounds_the_ceiling() {
+    let harness = Harness::new();
+    let alice = caller(ALICE, ALICE_PHONE, NOW);
+    // Five friendships would earn 55 seats; the kinds stop earlier.
+    for other in [BOB, CAROL, DAVE, STRANGER, 12] {
+        harness.befriend(ALICE, other, NOW).await;
+    }
+    let public = harness
         .rooms
         .create(&alice, request(LOBBY, "Lobby"))
         .await
-        .expect("the default is under the ceiling");
-    let room = harness.room_row(summary.room_id).await;
-    assert_eq!(room.max_members, 50, "the deployment default is applied");
-    assert_eq!(room.home_region, "id-jkt-1");
+        .expect("the public room is created");
+    assert_eq!(
+        harness.room_row(public.room_id).await.max_members,
+        PUBLIC_ROOM_MAX_MEMBERS,
+        "a public room stops at its own ceiling"
+    );
+    let managed = harness
+        .rooms
+        .create(
+            &alice,
+            NewRoomRequest {
+                kind: RoomKind::Managed,
+                slug: "managed-hall".to_string(),
+                ..request(LOBBY, "Lobby")
+            },
+        )
+        .await
+        .expect("the managed room is created");
+    assert_eq!(
+        harness.room_row(managed.room_id).await.max_members,
+        MANAGED_ROOM_MAX_MEMBERS,
+        "a managed room stops at its own, larger ceiling"
+    );
 }
 
 // --- joining ---------------------------------------------------------------------

@@ -1543,3 +1543,70 @@ token ketiga mati dan statusnya "revoked".
   lewat penggunaannya) bahwa origin loopback `http://` berarti kebijakan
   split-port dev (gateway = port+1): server VPS satu-port harus
   dituju lewat URL publiknya.
+
+## 45. Registrasi idempoten: percobaan ulang melipat ke akun yang sama (v0.14.0)
+
+Migo-update-1.md §12 menuntut register yang aman dicoba ulang: jaringan
+putus setelah server menulis akun, klien mencoba lagi, dan upaya kedua
+harus menemukan akun pertama alih-alih membuatkannya duplikat. Server
+(migo-auth) menandai percobaan register dengan idempotency key; percobaan
+ulang dengan key yang sama mengembalikan akun yang sudah dibuat beserta
+token barunya, bukan error "username taken" — register hanya gagal
+bila key-nya berbeda. Klien (web/desktop/Android) menyimpan _founding
+root_ akun sebelum percobaan pertama selesai, sehingga percakapan
+idempoten lintas percobaan; key akar bertahan melewati kegagalan jaringan
+sekalipun. Juga pada rilis ini: tab Chats keluar dari strip kiri di
+semua client (f495fff — keputusan yang dibalik di v0.14.4, lihat #47).
+
+## 46. Tata letak web dirapikan: sudut ponsel, kontrol akun, banner (v0.14.1–v0.14.3)
+
+Tiga perbaikan kecil-kecil rapat setelah IA dua-panel. v0.14.1: kartu
+login dan bar tab panel tidak lagi terpotong di sudut layar ponsel —
+viewport fit. v0.14.2: kontrol akun (sandi, ganti nama, perangkat)
+memimpin panel friends, tepat di bawah banner, sebelum daftar — bukan
+terkubur di bawah. v0.14.3: kontrol banner memeluk kartunya; flex-basis
+dan padded gap dihapus sehingga menu akun dan toggle tema duduk rapat di
+kartu oranye, bukan melayang di lajur kosong.
+
+## 47. Panel kanan: satu bar tab, Feed dulu, semua sisanya bisa ditutup (v0.14.4)
+
+Model "menu panel" resmi pensiun. Panel kanan kini punya satu bar tab
+saja: chip pertama adalah **Feed** — isi istirahat pane, selalu ada,
+tidak pernah bisa ditutup — disusul satu chip yang bisa ditutup per
+hal terbuka: percakapan, arcade games, atau panel (satu chip per jenis).
+`RightPaneState { tabs, active }` satu objek; menutup chip jatuh ke
+berikutnya, menutup yang terakhir menyisakan Feed — itulah fallback
+yang dipertimbangkan pane kosong. Fragment `#c=<id>` tetap satu sumber
+kebenaran percakapan terbuka. Di bawah 1024px tombol kembali menjadi
+ikon-saja yang tersembunyi di PC. Tab Chats juga pulang ke strip kiri
+(membalik f495fff) bersama titik oranye saat ada yang belum dibaca —
+inilah yang membuat pesan masuk terlihat lagi: daftar percakapan
+(`ConversationList`) sempat tidak punya rumah di IA baru, sehingga pesan
+yang tiba di penerima tidak punya permukaan sama sekali; protokolnya
+sendiri terbukti baik lewat uji round-trip dua akun. Test shell kini
+255 dan meng-assert lima tab sistem, titik belum-dibaca, dan tidak ada
+lagi "Menu Panel".
+
+## 48. Kapasitas room dari pertemanan: 5 kursi dasar, +10 per teman, plafon 33/50 (v0.14.5)
+
+Kapasitas room bukan lagi knob deployment melainkan aturan produk:
+`capacity_for(kind, friends) = min(plafon, 5 + 10 × teman)`. Akun yang
+tidak dikenal siapa pun membuka room maksimal 5 kursi — ruang
+pertemuan orang asing adalah bentuk spam, dan akun yang belum
+divouch siapa pun tidak diberi aula besar di hari pertama. Setiap
+pertemanan yang diterima menambah 10 kursi, karena teman adalah orang
+nyata yang menjawab permintaan nyata — sinyal termurah yang sudah
+dibawa store untuk "akun ini dikenal orang yang bisa
+dimintai tanggung jawab". Permintaan pertemanan yang masih pending
+tidak menghasilkan apa-apa. Plafon per jenis: **33 untuk room publik,
+50 untuk managed** (managed bisa dibaca server — postur moderasi yang
+menjustifikasi plafon lebih besar). `max_members` eksplisit di atas
+jatah ditolak VALIDATION_FAILED dengan pesan yang menyebut jatahnya;
+tanpa `max_members`, room lahir tepat sebesar jatah pembuatnya. Mates
+jenuh dihapus (`i64` saturating) dan hitungan teman via
+`count_relationships(Friend)`. `RoomsConfig` kehilangan
+`default_max_members`/`max_members_ceiling` — hanya `home_region`
+yang tersisa, karena plafon adalah aturan produk yang sama di semua
+deployment. Tiga test baru: room orang asing kecil, kapasitas tumbuh
+10 kursi per teman (pending tidak dihitung), dan plafon jenis membatasi
+(publik 33, managed 50) pada pembuat berlima teman.

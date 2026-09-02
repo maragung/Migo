@@ -73,17 +73,53 @@ pub const PERMANENT_BAN_MS: i64 = 253_402_300_799_000;
 /// so an operator who typed `1` finds out instead of wondering why the number moved.
 pub const MIN_ROOM_CAPACITY: i32 = 2;
 
-/// Members a room holds unless an operator says otherwise.
-pub const DEFAULT_MAX_MEMBERS: i32 = 5_000;
-
-/// The largest capacity this build will accept for a room.
+/// Capacity a creator with no friends at all may claim.
 ///
-/// Brief section 55 is about rooms with millions of members and it answers them with
-/// shards, regional relays, and a fanout service — none of which exist yet. Until
-/// they do, the honest ceiling is the one a single sequencer and a single roster query
-/// can serve, and accepting `max_members = 5_000_000` today would be promising a
-/// capacity the delivery path cannot reach.
-pub const MAX_MEMBERS_CEILING: i32 = 100_000;
+/// A stranger's room is capped at a handful of seats because a room is a gathering and a
+/// gathering of strangers is the shape spam takes: an account that knows nobody on the
+/// service has vouched for nothing, and handing it a five-hundred-seat hall on day one is
+/// how a raid gets its venue.
+pub const BASE_ROOM_CAPACITY: i32 = 5;
+
+/// Capacity each accepted friendship adds, up to the kind's ceiling.
+///
+/// Ten seats per friend. A friend is a real person who answered a real request, which makes
+/// it the cheapest signal the store already carries for "this account is known to people
+/// who can be held responsible for it" — the capacity grows with the creator's standing
+/// instead of with anything the creator can type.
+pub const CAPACITY_PER_FRIEND: i32 = 10;
+
+/// Largest capacity a public room may be created with.
+///
+/// Public rooms are the open front of the service, and the delivery path behind one
+/// sequencer is honest about what it can serve.
+pub const PUBLIC_ROOM_MAX_MEMBERS: i32 = 33;
+
+/// Largest capacity a managed room may be created with.
+///
+/// Managed rooms can be read by the server (see `view::encryption_for`), which is the
+/// moderation posture that justifies the larger ceiling.
+pub const MANAGED_ROOM_MAX_MEMBERS: i32 = 50;
+
+/// The capacity a creator may claim for a room of `kind`, given how many accepted
+/// friendships they have.
+///
+/// `BASE_ROOM_CAPACITY + CAPACITY_PER_FRIEND × friends`, never above the kind's ceiling.
+/// An unknown kind has no ceiling of its own, so it takes the public one — callers refuse
+/// `Unknown` long before this, and a default that silently granted the *larger* ceiling
+/// would be the wrong mistake to make.
+#[must_use]
+pub fn capacity_for(kind: RoomKind, friends: u64) -> i32 {
+    let ceiling = match kind {
+        RoomKind::Managed => MANAGED_ROOM_MAX_MEMBERS,
+        _ => PUBLIC_ROOM_MAX_MEMBERS,
+    };
+    // Saturating: a friend count no i32 could hold must not wrap to a tiny allowance.
+    let earned = i64::from(BASE_ROOM_CAPACITY).saturating_add(
+        i64::from(CAPACITY_PER_FRIEND).saturating_mul(i64::try_from(friends).unwrap_or(i64::MAX)),
+    );
+    i32::try_from(earned.min(i64::from(ceiling))).unwrap_or(ceiling)
+}
 
 /// Who is asking.
 ///
@@ -158,19 +194,18 @@ pub struct RoomsConfig {
     /// room whose home region is recomputed from whichever node happens to answer
     /// would acquire a second sequencer during a partition — which section 54
     /// forbids outright, since two orders cannot be merged back into one.
+    ///
+    /// Capacity is deliberately not here. A room's ceiling is set by its kind and by
+    /// its creator's friendships ([`capacity_for`]), which are product rules the same
+    /// in every deployment — a per-node knob would let one node promise a hall the
+    /// shared store then has to seat.
     pub home_region: String,
-    /// Capacity for a room whose creator did not name one.
-    pub default_max_members: i32,
-    /// Largest capacity this deployment will accept.
-    pub max_members_ceiling: i32,
 }
 
 impl Default for RoomsConfig {
     fn default() -> Self {
         Self {
             home_region: "local".to_string(),
-            default_max_members: DEFAULT_MAX_MEMBERS,
-            max_members_ceiling: MAX_MEMBERS_CEILING,
         }
     }
 }

@@ -80,11 +80,11 @@ pub mod view;
 
 pub use crate::fanout::{Broadcast, Fanout};
 pub use crate::model::{
-    slug_is_valid, Authorized, Caller, NewRoomRequest, RoomsConfig, Sanction, Settings,
-    TopicChange, DEFAULT_LIST_LIMIT, DEFAULT_MAX_MEMBERS, MAX_LIST_LIMIT, MAX_MEMBERS_CEILING,
-    MAX_MUTE_MS, MAX_NAME_LEN, MAX_QUERY_LEN, MAX_REASON_LEN, MAX_ROSTER_PAGE,
-    MAX_SLOW_MODE_SECONDS, MAX_SLUG_LEN, MAX_TOPIC_LEN, MIN_ROOM_CAPACITY, MIN_SLUG_LEN,
-    PERMANENT_BAN_MS,
+    capacity_for, slug_is_valid, Authorized, Caller, NewRoomRequest, RoomsConfig, Sanction,
+    Settings, TopicChange, BASE_ROOM_CAPACITY, CAPACITY_PER_FRIEND, DEFAULT_LIST_LIMIT,
+    MANAGED_ROOM_MAX_MEMBERS, MAX_LIST_LIMIT, MAX_MUTE_MS, MAX_NAME_LEN, MAX_QUERY_LEN,
+    MAX_REASON_LEN, MAX_ROSTER_PAGE, MAX_SLOW_MODE_SECONDS, MAX_SLUG_LEN, MAX_TOPIC_LEN,
+    MIN_ROOM_CAPACITY, MIN_SLUG_LEN, PERMANENT_BAN_MS, PUBLIC_ROOM_MAX_MEMBERS,
 };
 pub use crate::service::{open, Rooms, SharedRooms};
 pub use crate::traits::Roomkeeper;

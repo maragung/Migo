@@ -60,8 +60,8 @@ use migo_protocol::{
     RoomListRequest, RoomListResponse, RoomMemberEvent, RoomRole, RoomSummary,
 };
 use migo_ratelimit::{BucketKey, RateLimiter, SharedRateLimiter};
-use migo_store::model::{join_policy, NewRoom, Patch, Room, RoomMember};
-use migo_store::traits::{MessagingStore, RoomStore};
+use migo_store::model::{join_policy, NewRoom, Patch, RelationshipKind, Room, RoomMember};
+use migo_store::traits::{MessagingStore, RoomStore, SocialStore};
 use migo_store::{SharedStore, Store};
 use parking_lot::Mutex;
 
@@ -70,10 +70,10 @@ use crate::metrics::{
     AuthorizeOutcome, ChangeOutcome, CreateOutcome, JoinOutcome, Meters, SanctionKind,
 };
 use crate::model::{
-    slug_is_valid, Authorized, Caller, NewRoomRequest, RoomsConfig, Sanction, Settings,
-    TopicChange, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, MAX_MUTE_MS, MAX_NAME_LEN, MAX_QUERY_LEN,
-    MAX_REASON_LEN, MAX_ROSTER_PAGE, MAX_SLOW_MODE_SECONDS, MAX_TOPIC_LEN, MIN_ROOM_CAPACITY,
-    PERMANENT_BAN_MS,
+    capacity_for, slug_is_valid, Authorized, Caller, NewRoomRequest, RoomsConfig, Sanction,
+    Settings, TopicChange, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, MAX_MUTE_MS, MAX_NAME_LEN,
+    MAX_QUERY_LEN, MAX_REASON_LEN, MAX_ROSTER_PAGE, MAX_SLOW_MODE_SECONDS, MAX_TOPIC_LEN,
+    MIN_ROOM_CAPACITY, PERMANENT_BAN_MS,
 };
 use crate::permission;
 use crate::traits::Roomkeeper;
@@ -159,7 +159,7 @@ pub fn open(
 
 impl<S, L> Rooms<S, L>
 where
-    S: RoomStore + MessagingStore + ?Sized,
+    S: RoomStore + MessagingStore + SocialStore + ?Sized,
     L: RateLimiter + ?Sized,
 {
     /// Assembles the service and registers every series at zero.
@@ -434,8 +434,10 @@ where
     ///
     /// Ahead of the rate limiter in every caller, because a malformed request is a
     /// client bug and charging for it would let one broken build exhaust its user's
-    /// allowance and take their working devices down with it.
-    fn validate_new(request: &NewRoomRequest, config: &RoomsConfig) -> Result<()> {
+    /// allowance and take their working devices down with it. The capacity ceiling is
+    /// *not* checked here: it depends on the creator's friendships, which is a store
+    /// read, and a refusal that costs a read is charged for by [`Self::create`].
+    fn validate_new(request: &NewRoomRequest) -> Result<()> {
         if !slug_is_valid(&request.slug) {
             return Err(fault::validation(
                 "slug",
@@ -468,12 +470,6 @@ where
                 return Err(fault::validation(
                     "max_members",
                     "a room holds at least two people",
-                ));
-            }
-            if max > config.max_members_ceiling {
-                return Err(fault::validation(
-                    "max_members",
-                    "above this deployment's ceiling",
                 ));
             }
         }
@@ -587,18 +583,39 @@ fn member_event(
 #[async_trait]
 impl<S, L> Roomkeeper for Rooms<S, L>
 where
-    S: RoomStore + MessagingStore + ?Sized + Send + Sync,
+    S: RoomStore + MessagingStore + SocialStore + ?Sized + Send + Sync,
     L: RateLimiter + ?Sized + Send + Sync,
 {
     async fn create(&self, caller: &Caller, request: NewRoomRequest) -> Result<RoomSummary> {
         Self::require_identity(caller)?;
-        if let Err(err) = Self::validate_new(&request, &self.config) {
+        if let Err(err) = Self::validate_new(&request) {
             self.meters.create(CreateOutcome::Invalid);
             return Err(err);
         }
         if let Err(err) = self.charge_flat(caller, CREATE_COST).await {
             self.meters.create(CreateOutcome::RateLimited);
             return Err(err);
+        }
+        // The capacity a creator may claim grows with their friendships: a room of this
+        // kind, sized for how many people on this service know the creator. Read here
+        // and not in `validate_new` because it is a store read, and a store read is a
+        // thing the rate limiter has had its say about first.
+        let friends = self
+            .store
+            .count_relationships(caller.account_id, RelationshipKind::Friend)
+            .await?;
+        let allowed = capacity_for(request.kind, friends);
+        if let Some(max) = request.max_members {
+            if max > allowed {
+                self.meters.create(CreateOutcome::Invalid);
+                return Err(fault::validation(
+                    "max_members",
+                    &format!(
+                        "above the capacity your friendships allow: {} for this kind",
+                        allowed
+                    ),
+                ));
+            }
         }
         // Advisory, not authoritative. The store owns slug uniqueness and will refuse
         // a collision on its own; this read exists so the ordinary case — the name is
@@ -622,9 +639,10 @@ where
             kind: request.kind,
             owner_id: caller.account_id,
             home_region: self.config.home_region.clone(),
-            max_members: request
-                .max_members
-                .unwrap_or(self.config.default_max_members),
+            // A creator who named no capacity gets everything their friendships allow.
+            // The ceiling is the creator's, not a deployment default: a room is sized
+            // by who vouches for the person who made it.
+            max_members: request.max_members.unwrap_or(allowed),
             encryption: view::encryption_for(request.kind),
             created_at: caller.now,
         };
