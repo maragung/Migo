@@ -39,7 +39,12 @@ fn cors(config: &Config) -> CorsLayer {
         .filter_map(|origin| origin.parse::<HeaderValue>().ok())
         .collect();
     CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST])
+        // The surface's verbs, all four of them: the admin page appoints with
+        // PUT and revokes with DELETE, and the contact edit is a PUT. A method
+        // missing here does not fail loudly — the browser's preflight just
+        // never grants it, so the client sees an opaque network error on an
+        // otherwise correct route.
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
         .allow_headers([
             header::AUTHORIZATION,
             header::CONTENT_TYPE,

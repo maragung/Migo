@@ -22,7 +22,7 @@ import { parseId } from '@migo/wire';
 import type { Id } from '@migo/wire';
 import { Platform } from '@migo/protocol';
 
-import { RemoteError } from './errors.js';
+import { RemoteError, TransportError } from './errors.js';
 import { restBaseUrl } from './server-endpoint.js';
 import type { ServerEndpoint } from './server-endpoint.js';
 
@@ -928,11 +928,30 @@ export class BootstrapClient {
     };
   }
 
+  /**
+   * Performs the fetch, folding a link failure into a {@link TransportError}.
+   *
+   * A fetch that never completes rejects with the platform's own error — in a
+   * browser a bare `TypeError`, for a refused connection, a network drop, or a
+   * CORS preflight the server did not grant. Left as-is that shape escapes the
+   * SDK's error vocabulary and every caller's handling degrades to "unknown
+   * failure"; wrapped here it reads as the reachability problem it is.
+   */
+  async #exchange(input: string, init?: RequestInit): Promise<Response> {
+    try {
+      return await this.#fetch(input, init);
+    } catch (cause) {
+      throw new TransportError(
+        cause instanceof Error && cause.message ? cause.message : 'the request could not be sent',
+      );
+    }
+  }
+
   /** Issues a JSON POST, throwing a {@link RemoteError} on any non-2xx answer. */
   async #post(path: string, body: unknown, bearer?: string): Promise<unknown> {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (bearer !== undefined) headers['authorization'] = `Bearer ${bearer}`;
-    const res = await this.#fetch(`${this.#baseUrl}${path}`, {
+    const res = await this.#exchange(`${this.#baseUrl}${path}`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
@@ -944,7 +963,7 @@ export class BootstrapClient {
   async #put(path: string, body: unknown, bearer?: string): Promise<unknown> {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (bearer !== undefined) headers['authorization'] = `Bearer ${bearer}`;
-    const res = await this.#fetch(`${this.#baseUrl}${path}`, {
+    const res = await this.#exchange(`${this.#baseUrl}${path}`, {
       method: 'PUT',
       headers,
       body: JSON.stringify(body),
@@ -956,7 +975,7 @@ export class BootstrapClient {
   async #delete(path: string, bearer?: string): Promise<unknown> {
     const headers: Record<string, string> = {};
     if (bearer !== undefined) headers['authorization'] = `Bearer ${bearer}`;
-    const res = await this.#fetch(`${this.#baseUrl}${path}`, {
+    const res = await this.#exchange(`${this.#baseUrl}${path}`, {
       method: 'DELETE',
       headers,
     });
@@ -967,7 +986,7 @@ export class BootstrapClient {
   async #get(path: string, bearer?: string): Promise<unknown> {
     const headers: Record<string, string> = {};
     if (bearer !== undefined) headers['authorization'] = `Bearer ${bearer}`;
-    const res = await this.#fetch(`${this.#baseUrl}${path}`, { method: 'GET', headers });
+    const res = await this.#exchange(`${this.#baseUrl}${path}`, { method: 'GET', headers });
     return this.#unwrap(res);
   }
 

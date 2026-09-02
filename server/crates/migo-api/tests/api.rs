@@ -1449,6 +1449,38 @@ async fn cors_never_answers_with_a_wildcard() {
     }
 }
 
+#[tokio::test]
+async fn a_preflight_for_every_surface_verb_is_granted() {
+    // A browser refuses to send a cross-origin PUT or DELETE until the
+    // preflight grants that verb, so a method missing from the layer reads as
+    // an opaque network failure on an otherwise correct route — exactly what
+    // the admin page's appoint and revoke would be without PUT and DELETE.
+    let h = Harness::new();
+    for method in [Method::GET, Method::POST, Method::PUT, Method::DELETE] {
+        let request = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/v1/admins")
+            .header(header::ORIGIN, "http://localhost:19991")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, method.as_str())
+            .header(
+                header::ACCESS_CONTROL_REQUEST_HEADERS,
+                "authorization,content-type",
+            )
+            .body(Body::empty())
+            .unwrap();
+        let resp = h.send(request).await;
+        let granted = resp
+            .headers
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            granted.split(',').any(|m| m.trim() == method.as_str()),
+            "a preflight for {method} must be granted, allow-methods was {granted:?}"
+        );
+    }
+}
+
 // --- idempotency: declared as an extractor, honoured by no route (invariant 9) ------------
 
 #[tokio::test]

@@ -1658,3 +1658,29 @@ dengan konfirmasi. SDK: `adminStanding` / `globalAdmins` /
 akun harus ada, jejak audit), 6 di migo-rooms (sanksi tanpa keanggotaan,
 owner terlindungi, managed kebal, bukan diri sendiri, stranger ditolak,
 designasi bukan imunitas), 4 penyajian panel web.
+
+## 50. CORS membuka PUT dan DELETE — perbaikan appoint admin global (v0.14.7)
+
+Laporan produksi: Owner (love) membuka halaman Global Admins, mengangkat
+jono, dan mendapat "Something went wrong" — tanpa jejak apa pun di server
+(tabel `global_admin` kosong, tanpa audit, tanpa request). Diagnosisnya
+bukan di jalur domain: **preflight CORS**. Web di origin `:19992` memanggil
+REST di `:8080` lintas origin, dan `PUT /v1/admins` adalah request
+non-sederhana — browser mengirim OPTIONS dulu, lapisan CORS jawab
+`Access-Control-Allow-Methods: GET, POST` saja, dan browser **memblokir
+request sebelum sempat dikirim**. Fetch menolak dengan `TypeError` polos
+yang berada di luar kosakata error SDK, jatuh ke fallback generik web.
+`DELETE /v1/admins/{id}` (revoke) dan `PUT /v1/auth/contact` mengidap
+penyakit yang sama.
+
+Perbaikannya dua sisi. Server: `allow_methods` diperluas ke
+GET/POST/PUT/DELETE dengan komentar yang menjelaskan gejala
+"method hilang = kegagalan jaringan opak di route yang benar". Test
+`a_preflight_for_every_surface_verb_is_granted` mengunci keempat kata
+dari OPTIONS preflight asal origin terdaftar. SDK: semua helper REST
+(`#post`/`#put`/`#delete`/`#get`) kini lewat `#exchange` yang melipat
+reject fetch (TypeError browser untuk koneksi ditolak, putus jaringan,
+preflight CORS yang tidak diberi) menjadi `TransportError` — sehingga
+web menyampaikan "Could not reach the Migo server", bukan pesan kosong.
+Test `rest-transport.test.ts`: TypeError → TransportError, reject tanpa
+pesan tetap bernama, verdict server tetap `RemoteError` murni.
