@@ -39,6 +39,7 @@ import com.migo.app.model.AppState
 import com.migo.app.model.ConversationRow
 import com.migo.core.protocol.RoomKind
 import com.migo.core.protocol.RoomSummary
+import com.migo.core.wire.Id
 import kotlinx.coroutines.delay
 
 /**
@@ -146,7 +147,7 @@ fun RoomsScreen(
 }
 
 /** Maps each joined room to the conversation that opens it, keyed by room id. */
-private fun List<ConversationRow>.byRoomId(): Map<com.migo.core.protocol.Id, ConversationRow> =
+private fun List<ConversationRow>.byRoomId(): Map<Id, ConversationRow> =
     mapNotNull { row -> row.roomId?.let { it to row } }.toMap()
 
 /** One of this account's own rooms: the name, the last line, and the way back in. */
