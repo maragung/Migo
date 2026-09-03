@@ -75,9 +75,12 @@ export function FriendsPanel({
   const [busy, setBusy] = useState<ReadonlySet<Id>>(new Set());
   // The person whose profile modal is open, if any.
   const [selected, setSelected] = useState<Id | null>(null);
-  // Which list the panel is showing: the friends themselves, or one of the three the header's
-  // right-aligned icons switch to. The counts on those icons come from the same reads.
-  const [view, setView] = useState<'friends' | 'requests' | 'blocked' | 'suggestions'>('friends');
+  // Which list the panel is showing: the friends themselves, the username search, or one of
+  // the three the header's right-aligned icons switch to. The counts on those icons come
+  // from the same reads.
+  const [view, setView] = useState<'friends' | 'search' | 'requests' | 'blocked' | 'suggestions'>(
+    'friends',
+  );
   // The New-conversation dialog, formerly the sidebar header's plus button.
   const [dialogOpen, setDialogOpen] = useState(false);
 
@@ -236,41 +239,27 @@ export function FriendsPanel({
 
   return (
     <div className="panel panel-flush">
-      {/* The account's ambient line, then the people-search + New-conversation affordances
-          every list below starts from. The presence and status controls moved up to the
-          profile banner, where the account's own identity lives. */}
+      {/* The account's ambient line. The presence and status controls live in the profile
+          banner, where the account's own identity lives; the people search and the
+          New-conversation affordance are header icons below, not a form above the list. */}
       <ConnectionBadge />
 
-      <form className="panel-search" role="search" onSubmit={(event) => void onSearch(event)}>
-        <input
-          type="search"
-          className="input"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search by username"
-          aria-label="Search people by username"
-        />
-        <button type="submit" className="btn">
-          Search
-        </button>
-        <button
-          type="button"
-          className="btn btn-ghost"
-          onClick={() => setDialogOpen(true)}
-          aria-label="New conversation"
-          title="New conversation"
-        >
-          <Icon name="plus" size={16} />
-          <span>New chat</span>
-        </button>
-      </form>
-
       {/* One title, not two: the panel is "Friends" and the lists beneath it are its views —
-          the right-aligned icons switch between them, and each carries its count when there is
-          something to count, so a pending request is visible without visiting it. */}
+          the right-aligned icons switch between them (the search sits left of Requests, and
+          New chat rides at the group's edge), and each view icon carries its count when there
+          is something to count, so a pending request is visible without visiting it. */}
       <div className="panel-head">
         <h1 className="panel-title">Friends</h1>
         <div className="panel-head-icons" role="group" aria-label="Friend lists">
+          <button
+            type="button"
+            className={`panel-head-icon${view === 'search' ? ' chosen' : ''}`}
+            aria-pressed={view === 'search'}
+            title="Search"
+            onClick={() => setView(view === 'search' ? 'friends' : 'search')}
+          >
+            <Icon name="search" size={16} />
+          </button>
           <button
             type="button"
             className={`panel-head-icon${view === 'requests' ? ' chosen' : ''}`}
@@ -304,6 +293,17 @@ export function FriendsPanel({
             {suggestions.length > 0 ? (
               <span className="panel-head-count">{suggestions.length}</span>
             ) : null}
+          </button>
+          {/* New chat is an action, not a view, so it takes no chosen state — it opens the
+              dialog and leaves whichever list is on screen alone. */}
+          <button
+            type="button"
+            className="panel-head-icon"
+            onClick={() => setDialogOpen(true)}
+            aria-label="New conversation"
+            title="New conversation"
+          >
+            <Icon name="plus" size={16} />
           </button>
         </div>
       </div>
@@ -341,6 +341,33 @@ export function FriendsPanel({
             )}
           </section>
 
+          <MutedSection
+            entries={mutedEntries}
+            profiles={profiles}
+            busy={busy}
+            onSelect={(userId) => setSelected(userId)}
+            onUnmute={(userId) => void unmute(userId)}
+          />
+        </>
+      ) : view === 'search' ? (
+        <>
+          {/* The search the header's search icon opens: the field and its button live here,
+              one view among the panel's lists, not a permanent fixture above them. */}
+          <form className="panel-search" role="search" onSubmit={(event) => void onSearch(event)}>
+            <input
+              type="search"
+              className="input"
+              value={query}
+              // The icon was just tapped to get here, so the field is where the hands already are.
+              autoFocus
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search by username"
+              aria-label="Search people by username"
+            />
+            <button type="submit" className="btn">
+              Search
+            </button>
+          </form>
           {results !== null ? (
             <section className="panel-section" aria-label="Search results">
               <h2 className="panel-heading">Search results</h2>
@@ -368,15 +395,9 @@ export function FriendsPanel({
                 ))
               )}
             </section>
-          ) : null}
-
-          <MutedSection
-            entries={mutedEntries}
-            profiles={profiles}
-            busy={busy}
-            onSelect={(userId) => setSelected(userId)}
-            onUnmute={(userId) => void unmute(userId)}
-          />
+          ) : (
+            <p className="muted">Find people by username to add them as friends.</p>
+          )}
         </>
       ) : view === 'requests' ? (
         <section className="panel-section" aria-label="Friend requests">
