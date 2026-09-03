@@ -323,6 +323,7 @@ impl Harness {
                     created_at: ts(SECOND),
                     last_message_at: None,
                     archived_at: None,
+                    title: None,
                 },
                 vec![id(sender)],
             )

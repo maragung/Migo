@@ -73,11 +73,13 @@ use migo_notify::SharedNotifier;
 use migo_presence::{Caller as PresenceCaller, SharedPresence};
 use migo_protocol::{
     fault, from_frame, Acknowledged, BandwidthMode, ConversationCreateRequest,
-    ConversationListRequest, Frame, GameAction, GameEvent, KeyBundle as WireBundle,
-    KeyBundleRequest, KeyBundleResponse, KeyPublish, KeyPublishResult, MessageDelete, MessageEdit,
-    MessageKind, MessageReceipt, MessageSend, Opcode, PresenceUpdate, ProfileRequest,
-    ProfileResponse, ReactionSet, RoomJoinRequest, RoomLeaveRequest, RoomListRequest, SyncRequest,
-    Topic, TopicKind, TypingEvent, UserProfile,
+    ConversationInviteRequest, ConversationKickRequest, ConversationLeaveRequest,
+    ConversationListRequest, ConversationMuteRequest, ConversationRosterRequest,
+    ConversationUpdateRequest, ConversationVoteKickRequest, Encode, Frame, GameAction, GameEvent,
+    KeyBundle as WireBundle, KeyBundleRequest, KeyBundleResponse, KeyPublish, KeyPublishResult,
+    MessageDelete, MessageEdit, MessageKind, MessageReceipt, MessageSend, Opcode, PresenceUpdate,
+    ProfileRequest, ProfileResponse, ReactionSet, RoomJoinRequest, RoomLeaveRequest,
+    RoomListRequest, SyncRequest, Topic, TopicKind, TypingEvent, UserProfile,
 };
 use migo_rooms::{
     Broadcast as RoomBroadcast, Caller as RoomCaller, Fanout as RoomFanout, SharedRooms,
@@ -378,6 +380,117 @@ impl Dispatcher for AppDispatcher {
                 );
                 let request: TypingEvent = from_frame(frame).map_err(fault::from_wire)?;
                 if let Some(fanout) = self.messaging.typing(&caller, request).await? {
+                    publish_messaging(context, caller.account_id, fanout)?;
+                }
+                Ok(())
+            }
+            Opcode::ConversationInvite => {
+                let caller = MessageCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
+                let request: ConversationInviteRequest =
+                    from_frame(frame).map_err(fault::from_wire)?;
+                // The reply carries the summary the inviter's list needs; the fanouts carry
+                // one arrival each for everyone else, because a client rotates sender keys
+                // per person, not per batch.
+                let (summary, fanouts) = self.messaging.invite(&caller, request).await?;
+                context.reply(&summary)?;
+                for fanout in fanouts {
+                    publish_messaging(context, caller.account_id, fanout)?;
+                }
+                Ok(())
+            }
+            Opcode::ConversationLeave => {
+                let caller = MessageCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
+                let request: ConversationLeaveRequest =
+                    from_frame(frame).map_err(fault::from_wire)?;
+                let fanouts = self.messaging.leave(&caller, request).await?;
+                context.reply(&Acknowledged { ok: true })?;
+                for fanout in fanouts {
+                    publish_messaging(context, caller.account_id, fanout)?;
+                }
+                Ok(())
+            }
+            Opcode::ConversationRoster => {
+                let caller = MessageCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
+                let request: ConversationRosterRequest =
+                    from_frame(frame).map_err(fault::from_wire)?;
+                let response = self.messaging.roster(&caller, request).await?;
+                context.reply(&response)
+            }
+            Opcode::ConversationMute => {
+                let caller = MessageCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
+                let request: ConversationMuteRequest =
+                    from_frame(frame).map_err(fault::from_wire)?;
+                // No fanout: a mute is between a founder and one member, and the member
+                // learns of it from the send that refuses them.
+                self.messaging.mute(&caller, request).await?;
+                context.reply(&Acknowledged { ok: true })
+            }
+            Opcode::ConversationKick => {
+                let caller = MessageCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
+                let request: ConversationKickRequest =
+                    from_frame(frame).map_err(fault::from_wire)?;
+                let fanouts = self.messaging.kick(&caller, request).await?;
+                context.reply(&Acknowledged { ok: true })?;
+                for fanout in fanouts {
+                    publish_messaging(context, caller.account_id, fanout)?;
+                }
+                Ok(())
+            }
+            Opcode::ConversationVoteKick => {
+                let caller = MessageCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
+                let request: ConversationVoteKickRequest =
+                    from_frame(frame).map_err(fault::from_wire)?;
+                // The reply is this voice's tally; the fanout is the same tally for
+                // everyone else, and — when the vote carried — the removal itself.
+                let (response, fanouts) = self.messaging.vote_kick(&caller, request).await?;
+                context.reply(&response)?;
+                for fanout in fanouts {
+                    publish_messaging(context, caller.account_id, fanout)?;
+                }
+                Ok(())
+            }
+            Opcode::ConversationUpdate => {
+                let caller = MessageCaller::new(
+                    identity.account_id(),
+                    identity.device_id(),
+                    identity.tier,
+                    now,
+                );
+                let request: ConversationUpdateRequest =
+                    from_frame(frame).map_err(fault::from_wire)?;
+                let (summary, fanout) = self.messaging.update(&caller, request).await?;
+                context.reply(&summary)?;
+                if let Some(fanout) = fanout {
                     publish_messaging(context, caller.account_id, fanout)?;
                 }
                 Ok(())
@@ -864,19 +977,81 @@ fn publish_messaging(
         id: fanout.conversation_id,
     };
     let opcode = fanout.event.opcode();
+    // A member event is never coalesced: *who* joined is the fact, and two joins collapsed
+    // into one count is one arrival lost. A vote tally and a state change are Coalescable,
+    // keyed by conversation, so a backed-up consumer sees the latest tally and the latest
+    // title rather than every intermediate one.
     match &fanout.event {
-        MessageBroadcast::Message(event) => {
-            context.publish_excluding_self(&topic, opcode, event, None)
-        }
-        MessageBroadcast::Receipt(event) => {
-            context.publish_excluding_self(&topic, opcode, event, None)
-        }
-        MessageBroadcast::Typing(event) => context.publish_excluding_self(
+        MessageBroadcast::Message(event) => publish_event(
+            context,
+            &topic,
+            opcode,
+            event,
+            None,
+            fanout.exclude_device.is_some(),
+        ),
+        MessageBroadcast::Receipt(event) => publish_event(
+            context,
+            &topic,
+            opcode,
+            event,
+            None,
+            fanout.exclude_device.is_some(),
+        ),
+        MessageBroadcast::Typing(event) => publish_event(
+            context,
             &topic,
             opcode,
             event,
             Some(stream_key(&(fanout.conversation_id, user))),
+            fanout.exclude_device.is_some(),
         ),
+        MessageBroadcast::Member(event) => publish_event(
+            context,
+            &topic,
+            opcode,
+            event,
+            None,
+            fanout.exclude_device.is_some(),
+        ),
+        MessageBroadcast::Vote(event) => publish_event(
+            context,
+            &topic,
+            opcode,
+            event,
+            Some(stream_key(&fanout.conversation_id)),
+            fanout.exclude_device.is_some(),
+        ),
+        MessageBroadcast::State(event) => publish_event(
+            context,
+            &topic,
+            opcode,
+            event,
+            Some(stream_key(&fanout.conversation_id)),
+            fanout.exclude_device.is_some(),
+        ),
+    }
+}
+
+/// Publishes one event, skipping the actor's connection only when an actor caused it.
+///
+/// The service says which: a fanout with an `exclude_device` was caused by that device, whose
+/// connection was answered by the reply and should not also render the echo. A fanout without one
+/// — a kick vote that expired under the next caller's request — reaches every subscriber, the
+/// caller included: they are a member too, and this is the only frame that will tell them the old
+/// tally closed.
+fn publish_event<T: Encode>(
+    context: &ClientContext<'_>,
+    topic: &Topic,
+    opcode: Opcode,
+    event: &T,
+    coalesce_key: Option<u64>,
+    exclude_actor: bool,
+) -> Result<(), Error> {
+    if exclude_actor {
+        context.publish_excluding_self(topic, opcode, event, coalesce_key)
+    } else {
+        context.publish(topic, opcode, event, coalesce_key)
     }
 }
 

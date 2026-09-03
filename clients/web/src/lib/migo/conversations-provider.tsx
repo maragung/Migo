@@ -9,6 +9,11 @@
  * any extra step. Live inbound messages reorder the list and set an unread mark; opening a conversation
  * clears it. Nothing polls — reordering is driven by the SDK's message stream.
  *
+ * The group lifecycle lands here too: a group's member events patch the summary's member list (and
+ * rotate the sender-key chain, the crypto cost of membership churn), and its state deltas carry a
+ * rename onto the row's title — see {@link applyMemberEvent} and {@link applyStateEvent}, the pure
+ * projections the tests pin.
+ *
  * The provider also owns the sidebar's last-message previews. A summary's `lastMessage` is a sealed
  * `MessageEvent`; the only way to read it is the SDK's decrypt-and-deliver path, so each page's
  * lastMessages are replayed through {@link MessagingDomain.ingest} and whatever opens is captured from
@@ -21,11 +26,66 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import type { ConversationSummary, Id, IncomingMessage } from '@migo/sdk';
+import { MemberChange } from '@migo/sdk';
+import type {
+  ConversationMemberEvent,
+  ConversationStateEvent,
+  ConversationSummary,
+  Id,
+  IncomingMessage,
+} from '@migo/sdk';
 
 import { useMigo } from './use-migo.js';
 
 const PAGE_SIZE = 30;
+
+/**
+ * Applies one group member event onto the summary the list holds.
+ *
+ * Pure, so a test can pin it. The summary's `members` is the roster this device knows; a join adds
+ * the account (a no-op when already listed, since the server also counts re-joins), and a departure
+ * — a leave, a kick, or a ban — removes it. A group's own mute has nothing to do with the
+ * summary-level `mutedUntil` (the caller's own row), so it is not touched here.
+ */
+export function applyMemberEvent(
+  summary: ConversationSummary,
+  event: ConversationMemberEvent,
+): ConversationSummary {
+  const held = summary.members;
+  if (held === undefined) {
+    return summary;
+  }
+  if (event.change === MemberChange.Joined) {
+    return held.includes(event.userId)
+      ? summary
+      : { ...summary, members: [...held, event.userId] };
+  }
+  const departing =
+    event.change === MemberChange.Left ||
+    event.change === MemberChange.Kicked ||
+    event.change === MemberChange.Banned;
+  if (!departing || !held.includes(event.userId)) {
+    return summary;
+  }
+  return { ...summary, members: held.filter((id) => id !== event.userId) };
+}
+
+/**
+ * Applies one coalesced group-state delta onto the summary the list holds.
+ *
+ * Pure, so a test can pin it. The event is a delta by protocol: each field it carries replaces the
+ * held value, and each field it omits leaves the held value alone — a rename writes the title, and
+ * anything else changes nothing.
+ */
+export function applyStateEvent(
+  summary: ConversationSummary,
+  event: ConversationStateEvent,
+): ConversationSummary {
+  if (event.title === undefined || summary.title === event.title) {
+    return summary;
+  }
+  return { ...summary, title: event.title };
+}
 
 export interface ConversationsContextValue {
   items: ConversationSummary[];
@@ -218,6 +278,40 @@ export function ConversationsProvider({ children }: { children: ReactNode }): Re
       offDeletion();
     };
   }, [client, load]);
+
+  // The live group streams: membership movement and coalesced metadata. A member event also rotates
+  // the conversation's outbound sender-key chain — membership churn is a crypto event before it is a
+  // UI one, and the next send re-distributes the fresh chain to whoever belongs now, so a removed
+  // member cannot read what is sealed after their departure.
+  useEffect(() => {
+    if (!client) {
+      return;
+    }
+    const offMember = client.conversations.onMember((event) => {
+      if (!itemsRef.current.some((item) => item.conversationId === event.conversationId)) {
+        return;
+      }
+      client.messaging.rotateSenderKey(event.conversationId);
+      setItems((prev) =>
+        prev.map((item) =>
+          item.conversationId === event.conversationId
+            ? applyMemberEvent(item, event)
+            : item,
+        ),
+      );
+    });
+    const offState = client.conversations.onState((event) => {
+      setItems((prev) =>
+        prev.map((item) =>
+          item.conversationId === event.conversationId ? applyStateEvent(item, event) : item,
+        ),
+      );
+    });
+    return () => {
+      offMember();
+      offState();
+    };
+  }, [client, resetNonce]);
 
   const value: ConversationsContextValue = {
     items,

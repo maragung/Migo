@@ -83,6 +83,20 @@ pub const TYPING_TTL_MS: u32 = 10_000;
 /// sequencer, and a member count column for exactly this reason.
 pub const MAX_GROUP_MEMBERS: usize = 256;
 
+/// The longest group title the wire accepts, in characters a person typed — the
+/// same rule and the same number as a room's name, so a group and a room show
+/// the same discipline in a list they share.
+pub const MAX_TITLE_LEN: usize = 64;
+
+/// How long a group kick vote stays open with no new voice, in milliseconds.
+///
+/// The same sixty seconds a room's vote gets: long enough for people who are
+/// present to weigh in, short enough that a vote nobody finishes is not still
+/// blocking the next one when they come back an hour later. Expired votes are
+/// dropped lazily — the next vote in the same conversation closes the old one —
+/// so no timer exists and no vote ever costs a wakeup.
+pub const VOTE_TTL_MS: i64 = 60_000;
+
 /// Conversations returned when the caller does not say how many.
 ///
 /// Brief section 157 fixes the server's *maximum* page at 200 and requires a

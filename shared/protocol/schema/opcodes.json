@@ -283,6 +283,105 @@
    "coalesce_key": "target_message_id"
   },
   {
+   "name": "CONVERSATION_INVITE",
+   "code": 43,
+   "direction": "client_to_server",
+   "payload": "ConversationInviteRequest",
+   "response": "ConversationSummary",
+   "auth": "User",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "Adds members to a group. Any current member may invite, within the group size cap."
+  },
+  {
+   "name": "CONVERSATION_LEAVE",
+   "code": 44,
+   "direction": "client_to_server",
+   "payload": "ConversationLeaveRequest",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 2,
+   "class": "Critical",
+   "doc": "Leaves a group conversation. The last founder out promotes the earliest remaining member."
+  },
+  {
+   "name": "CONVERSATION_ROSTER",
+   "code": 45,
+   "direction": "client_to_server",
+   "payload": "ConversationRosterRequest",
+   "response": "ConversationRosterResponse",
+   "auth": "User",
+   "cost": 1,
+   "class": "Critical",
+   "doc": "Reads a conversation's member list with roles and mutes."
+  },
+  {
+   "name": "CONVERSATION_MUTE",
+   "code": 46,
+   "direction": "client_to_server",
+   "payload": "ConversationMuteRequest",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "A founder mutes or unmutes one member of a group. A muted member's sends are refused."
+  },
+  {
+   "name": "CONVERSATION_KICK",
+   "code": 47,
+   "direction": "client_to_server",
+   "payload": "ConversationKickRequest",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "A founder removes a member outright, no vote."
+  },
+  {
+   "name": "CONVERSATION_VOTE_KICK",
+   "code": 48,
+   "direction": "client_to_server",
+   "payload": "ConversationVoteKickRequest",
+   "response": "ConversationVoteKickResponse",
+   "auth": "User",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "Starts or joins a kick vote in a group. A strict majority of the members carries it."
+  },
+  {
+   "name": "CONVERSATION_VOTE_EVENT",
+   "code": 49,
+   "direction": "server_to_client",
+   "payload": "ConversationVoteEvent",
+   "auth": "User",
+   "cost": 0,
+   "class": "Coalescable",
+   "coalesce_key": "conversation_id",
+   "doc": "A group kick vote's running tally; the newest tally per conversation is the one that matters."
+  },
+  {
+   "name": "CONVERSATION_MEMBER_EVENT",
+   "code": 50,
+   "direction": "server_to_client",
+   "payload": "ConversationMemberEvent",
+   "auth": "User",
+   "cost": 0,
+   "class": "Coalescable",
+   "coalesce_key": "conversation_id",
+   "doc": "A group's membership moved. Clients rotate sender keys on every change."
+  },
+  {
+   "name": "CONVERSATION_UPDATE",
+   "code": 51,
+   "direction": "client_to_server",
+   "payload": "ConversationUpdateRequest",
+   "response": "ConversationSummary",
+   "auth": "User",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "A founder renames a group."
+  },
+  {
    "name": "PRESENCE_SET",
    "code": 64,
    "direction": "client_to_server",
@@ -1143,6 +1242,17 @@
    "class": "Coalescable",
    "doc": "SFU group call state.",
    "coalesce_key": "call_id"
+  },
+  {
+   "name": "CONVERSATION_STATE_EVENT",
+   "code": 52,
+   "direction": "server_to_client",
+   "payload": "ConversationStateEvent",
+   "auth": "User",
+   "cost": 0,
+   "class": "Coalescable",
+   "coalesce_key": "conversation_id",
+   "doc": "Group metadata moved: a rename. Deltas only, coalesced per conversation."
   }
  ]
 }

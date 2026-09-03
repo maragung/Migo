@@ -14,7 +14,8 @@ use std::cmp::Ordering;
 
 use migo_core::{Id, Secret, Timestamp};
 use migo_protocol::{
-    ConversationKind, EncryptionMode, MessageKind, Platform, RelationshipKind, RoomKind, RoomRole,
+    ConversationKind, ConversationRole, EncryptionMode, MessageKind, Platform, RelationshipKind,
+    RoomKind, RoomRole,
 };
 
 /// A field update that distinguishes "leave alone" from "set to null".
@@ -744,6 +745,10 @@ pub struct Conversation {
     pub encryption: EncryptionMode,
     /// The room this conversation belongs to, when it is a room.
     pub room_id: Option<Id>,
+    /// The name a group's founders chose for it. Direct conversations and
+    /// rooms never carry one — their names are the other person and the room's
+    /// own name respectively.
+    pub title: Option<String>,
     /// Highest assigned sequence number.
     pub last_seq: i64,
     /// Who created it.
@@ -763,8 +768,10 @@ pub struct ConversationMember {
     pub conversation_id: Id,
     /// Member.
     pub account_id: Id,
-    /// Role within the conversation, distinct from room roles.
-    pub role: i16,
+    /// Role within the conversation, distinct from room roles. Every member of
+    /// a direct conversation is a `Member`; a group's creator and the first
+    /// person they added are its `Founder`s.
+    pub role: ConversationRole,
     /// When they joined.
     pub joined_at: Timestamp,
     /// When they left, if they did. Membership is tombstoned so that history

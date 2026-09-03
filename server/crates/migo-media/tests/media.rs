@@ -32,7 +32,7 @@ use migo_media::model::{
 };
 use migo_media::service::Media;
 use migo_media::traits::{storage_key, Head, Library, ScanQueue, Storage};
-use migo_protocol::{codes, ConversationKind, EncryptionMode};
+use migo_protocol::{codes, ConversationKind, ConversationRole, EncryptionMode};
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 use migo_store::model::{Conversation, ConversationMember, NewAccount, Profile, Visibility};
 use migo_store::traits::{AccountStore, MediaStore, MessagingStore};
@@ -299,6 +299,7 @@ impl Harness {
                     created_at: ts(SECOND),
                     last_message_at: None,
                     archived_at: None,
+                    title: None,
                 },
                 members.iter().copied().map(id).collect(),
             )
@@ -779,7 +780,7 @@ async fn a_member_who_left_may_no_longer_upload() {
         .add_member(ConversationMember {
             conversation_id: id(CHAT),
             account_id: id(BOB),
-            role: 0,
+            role: ConversationRole::Member,
             joined_at: ts(NOW),
             left_at: None,
             muted_until: None,

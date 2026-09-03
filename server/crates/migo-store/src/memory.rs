@@ -32,7 +32,9 @@ use std::collections::{HashMap, VecDeque};
 
 use async_trait::async_trait;
 use migo_core::{Id, Result, Timestamp};
-use migo_protocol::{fault, ConversationKind, EncryptionMode, RelationshipKind, RoomRole};
+use migo_protocol::{
+    fault, ConversationKind, ConversationRole, EncryptionMode, RelationshipKind, RoomRole,
+};
 use parking_lot::RwLock;
 
 use crate::model::{
@@ -997,7 +999,9 @@ impl MessagingStore for MemoryStore {
             .map(|account_id| ConversationMember {
                 conversation_id: conversation.conversation_id,
                 account_id,
-                role: 0,
+                // Everyone the creator named at creation starts equal; the service
+                // promotes the founders (creator and first member) right after.
+                role: ConversationRole::Member,
                 joined_at: conversation.created_at,
                 left_at: None,
                 muted_until: None,
@@ -1047,13 +1051,14 @@ impl MessagingStore for MemoryStore {
             created_at: at,
             last_message_at: None,
             archived_at: None,
+            title: None,
         };
         let rows = [a, b]
             .into_iter()
             .map(|account_id| ConversationMember {
                 conversation_id,
                 account_id,
-                role: 0,
+                role: ConversationRole::Member,
                 joined_at: at,
                 left_at: None,
                 muted_until: None,
@@ -1126,6 +1131,63 @@ impl MessagingStore for MemoryStore {
             }
         }
         Ok(())
+    }
+
+    async fn set_conversation_title(
+        &self,
+        conversation_id: Id,
+        title: Option<&str>,
+    ) -> Result<bool> {
+        let mut s = self.state.write();
+        match s.conversations.get_mut(&conversation_id) {
+            Some(conversation) => {
+                conversation.title = title.map(str::to_owned);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn set_conversation_role(
+        &self,
+        conversation_id: Id,
+        account_id: Id,
+        role: ConversationRole,
+    ) -> Result<bool> {
+        let mut s = self.state.write();
+        let Some(rows) = s.conversation_members.get_mut(&conversation_id) else {
+            return Ok(false);
+        };
+        // Departed rows keep their role: "member since" survives a leave, and so
+        // should the role they held when they walked out.
+        let Some(member) = rows
+            .iter_mut()
+            .find(|m| m.account_id == account_id && m.left_at.is_none())
+        else {
+            return Ok(false);
+        };
+        member.role = role;
+        Ok(true)
+    }
+
+    async fn set_conversation_mute(
+        &self,
+        conversation_id: Id,
+        account_id: Id,
+        muted_until: Option<Timestamp>,
+    ) -> Result<bool> {
+        let mut s = self.state.write();
+        let Some(rows) = s.conversation_members.get_mut(&conversation_id) else {
+            return Ok(false);
+        };
+        let Some(member) = rows
+            .iter_mut()
+            .find(|m| m.account_id == account_id && m.left_at.is_none())
+        else {
+            return Ok(false);
+        };
+        member.muted_until = muted_until;
+        Ok(true)
     }
 
     async fn append_message(&self, new: NewMessage) -> Result<Appended> {
@@ -1374,10 +1436,10 @@ impl MessagingStore for MemoryStore {
                 let member = rows
                     .and_then(|rows| rows.iter().find(|m| m.account_id == account_id))
                     .cloned()
-                    .unwrap_or_else(|| ConversationMember {
+                    .unwrap_or(ConversationMember {
                         conversation_id: conversation.conversation_id,
                         account_id,
-                        role: RoomRole::Member.to_wire() as i16,
+                        role: ConversationRole::Member,
                         joined_at: conversation.created_at,
                         left_at: None,
                         muted_until: None,
@@ -1517,13 +1579,18 @@ impl RoomStore for MemoryStore {
             created_at: room.created_at,
             last_message_at: None,
             archived_at: None,
+            // A room's conversation carries no title of its own: the room's name
+            // is the name, and `conversation.title` is the groups' field.
+            title: None,
         };
         s.conversation_members.insert(
             conversation.conversation_id,
             vec![ConversationMember {
                 conversation_id: conversation.conversation_id,
                 account_id: room.owner_id,
-                role: RoomRole::Owner.to_wire() as i16,
+                // The room's owner is the conversation's founder: they are the one
+                // who cannot be removed from it and the one its title answers to.
+                role: ConversationRole::Founder,
                 joined_at: room.created_at,
                 left_at: None,
                 muted_until: None,
@@ -1691,7 +1758,13 @@ impl RoomStore for MemoryStore {
                 members.push(ConversationMember {
                     conversation_id,
                     account_id,
-                    role: stored.role.to_wire() as i16,
+                    // The room's owner stands to the conversation as a group's
+                    // founder does; everyone else who walks in is a member.
+                    role: if stored.role == RoomRole::Owner {
+                        ConversationRole::Founder
+                    } else {
+                        ConversationRole::Member
+                    },
                     joined_at: stored.joined_at,
                     left_at: None,
                     muted_until: None,

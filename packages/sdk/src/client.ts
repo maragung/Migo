@@ -401,6 +401,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     ctx.typing.stop();
     ctx.presence.stop();
     ctx.rooms.stop();
+    ctx.conversations.stop();
     ctx.calls.stop();
     ctx.notifications.stop();
     ctx.social.stop();
@@ -857,7 +858,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
         this,
         this.#options.onEventError,
       ),
-      conversations: new ConversationsDomain(rpc),
+      conversations: new ConversationsDomain(rpc, this.#options.onEventError),
       sync: new SyncDomain(rpc),
       typing: new TypingDomain(rpc, this.#options.onEventError),
       presence: new PresenceDomain(rpc, this.#options.onEventError),
@@ -877,6 +878,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     ctx.typing.start();
     ctx.presence.start();
     ctx.rooms.start();
+    ctx.conversations.start();
     ctx.calls.start();
     ctx.notifications.start();
     ctx.social.start();

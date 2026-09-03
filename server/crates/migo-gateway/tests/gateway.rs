@@ -1696,6 +1696,13 @@ fn the_wire_is_push_only_and_has_no_request_or_response_opcode() {
         Opcode::CallInviteEvent,
         Opcode::CallStateEvent,
         Opcode::CallSfuEvent,
+        // Group pushes. A member event is a join/leave/removal arriving without a
+        // request (including to the members who did not act); a vote tally moves
+        // when *other* members vote, like a room's; a state event carries a rename
+        // the founder's own reply already told them about.
+        Opcode::ConversationMemberEvent,
+        Opcode::ConversationVoteEvent,
+        Opcode::ConversationStateEvent,
     ];
     for opcode in server_only {
         assert!(

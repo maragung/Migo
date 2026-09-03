@@ -23,7 +23,14 @@ import { useProfiles } from '@/lib/migo/use-profiles.js';
 import { memberNotice } from '@/lib/migo/use-room-notices.js';
 import type { RoomNotice } from '@/lib/migo/use-room-notices.js';
 
-export function RoomNoticeList({ notices }: { notices: RoomNotice[] }): ReactNode {
+export function RoomNoticeList({
+  notices,
+  place = 'room',
+}: {
+  notices: RoomNotice[];
+  /** Where the changes happened — "room" or "group" — so the line says the right one. */
+  place?: string;
+}): ReactNode {
   // The distinct members named across the current tail — one profile lookup each, not one per pill.
   const ids = useMemo(() => {
     const seen = new Set<Id>();
@@ -49,6 +56,7 @@ export function RoomNoticeList({ notices }: { notices: RoomNotice[] }): ReactNod
             notice.change,
             profiles.get(notice.userId)?.displayName ?? '',
             notice.joined,
+            place,
           )}
         </li>
       ))}

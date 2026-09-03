@@ -72,6 +72,7 @@ impl MigratorTrait for Migrator {
             Box::new(GlobalAdmins),
             Box::new(ProfileGender),
             Box::new(RoomNetworkBan),
+            Box::new(ConversationGroups),
         ]
     }
 }
@@ -291,6 +292,39 @@ impl MigrationTrait for RoomNetworkBan {
         // Same posture as every migration before it.
         Err(DbErr::Migration(
             "0007_room_network_ban cannot be rolled back: create a new database instead".to_owned(),
+        ))
+    }
+}
+
+/// `0008_conversation_groups` -- the group title on the conversation row, and
+/// the `conversation_member.role` renumber that gives the column its meaning:
+/// Member 1, Founder 2, with the pre-group rows moved from the default 0 to
+/// Member. See `server/migrations/0008_conversation_groups.sql`.
+struct ConversationGroups;
+
+impl MigrationName for ConversationGroups {
+    fn name(&self) -> &str {
+        "0008_conversation_groups"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for ConversationGroups {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!(
+                "../../../migrations/0008_conversation_groups.sql"
+            ))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Same posture as every migration before it.
+        Err(DbErr::Migration(
+            "0008_conversation_groups cannot be rolled back: create a new database instead"
+                .to_owned(),
         ))
     }
 }

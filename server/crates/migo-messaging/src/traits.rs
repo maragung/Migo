@@ -25,9 +25,12 @@
 use async_trait::async_trait;
 use migo_core::{Id, Result, Timestamp};
 use migo_protocol::{
-    ConversationCreateRequest, ConversationListRequest, ConversationListResponse,
-    ConversationSummary, MessageAccepted, MessageDelete, MessageReceipt, MessageSend, SyncRequest,
-    SyncResponse, TypingEvent,
+    ConversationCreateRequest, ConversationInviteRequest, ConversationKickRequest,
+    ConversationLeaveRequest, ConversationListRequest, ConversationListResponse,
+    ConversationMuteRequest, ConversationRosterRequest, ConversationRosterResponse,
+    ConversationSummary, ConversationUpdateRequest, ConversationVoteKickRequest,
+    ConversationVoteKickResponse, MessageAccepted, MessageDelete, MessageReceipt, MessageSend,
+    SyncRequest, SyncResponse, TypingEvent,
 };
 
 use crate::fanout::Fanout;
@@ -157,6 +160,110 @@ pub trait Messaging: Send + Sync {
         caller: &Caller,
         request: ConversationCreateRequest,
     ) -> Result<ConversationSummary>;
+
+    /// Seats new members in a group.
+    ///
+    /// Any member may invite — a group nobody could grow except its founders
+    /// would be a group that could only shrink. The checks are the create call's:
+    /// each invitee is refused if either side has blocked the other, and the
+    /// roster may not pass the group ceiling (`GROUP_FULL`).
+    ///
+    /// One `ConversationMemberEvent(Joined)` per person actually seated, so
+    /// clients can rotate sender keys member by member rather than diffing the
+    /// roster. A name that is already in the group is skipped, not an error: two
+    /// members inviting the same friend in the same second is a race both won,
+    /// not a conflict either needs to see.
+    async fn invite(
+        &self,
+        caller: &Caller,
+        request: ConversationInviteRequest,
+    ) -> Result<(ConversationSummary, Vec<Fanout>)>;
+
+    /// The caller's own departure from a group.
+    ///
+    /// Leaving is a right, not a permission: no founder gates it, because a
+    /// group somebody could not leave would be a detention. Direct conversations
+    /// are refused — a two-party conversation is not left, it is deleted or
+    /// blocked, and a room's membership belongs to the room service.
+    ///
+    /// When the last founder walks out, the longest-standing member inherits the
+    /// role, so the group never reaches a state where nobody can rename it or
+    /// answer a report. The succession is a write, not an announcement: roles
+    /// travel in the roster, and the member event that says "they left" does not
+    /// also get to say who was promoted.
+    ///
+    /// A kick vote aimed at the leaver closes as they go — the question it asked
+    /// has answered itself — and every remaining tally is recounted against the
+    /// smaller roster on its next voice.
+    async fn leave(
+        &self,
+        caller: &Caller,
+        request: ConversationLeaveRequest,
+    ) -> Result<Vec<Fanout>>;
+
+    /// The full membership of one conversation, as the caller's roster sees it.
+    ///
+    /// Active members first, by join time, then the departed: a member row is
+    /// tombstoned rather than deleted so history stays attributable, and the
+    /// roster is where "who used to be here" is legible. The caller must be in
+    /// the conversation — a roster is the membership list, and a membership list
+    /// is not a public fact.
+    async fn roster(
+        &self,
+        caller: &Caller,
+        request: ConversationRosterRequest,
+    ) -> Result<ConversationRosterResponse>;
+
+    /// A founder gags one member, or lifts the gag.
+    ///
+    /// `until` is an absolute moment; `None` clears a mute early. A mute silences
+    /// what a member says, not who they are: they stay in the roster, they keep
+    /// their vote, and the moment passes they may speak again without anybody
+    /// readmitting them.
+    ///
+    /// No frame. A mute is between a founder and one member, and announcing it
+    /// to the group turns a correction into a spectacle — the same call the room
+    /// service makes, for the same reason.
+    async fn mute(&self, caller: &Caller, request: ConversationMuteRequest) -> Result<()>;
+
+    /// A founder removes one member outright, no vote.
+    ///
+    /// The vote exists for members who must act together; the founders are the
+    /// group's memory of who built it, and the memory does not need permission
+    /// to protect itself. The other founder is beyond this reach — the pair
+    /// exists so that neither alone is the group.
+    async fn kick(&self, caller: &Caller, request: ConversationKickRequest) -> Result<Vec<Fanout>>;
+
+    /// Starts a group kick vote, or adds the caller's voice to one running.
+    ///
+    /// A strict majority of the roster — half rounded up, floor of two, the same
+    /// arithmetic a room's vote uses — carries the kick, and the member event
+    /// that follows *is* the closing: no separate frame says the vote ended,
+    /// because the removal says it in the words every client already renders.
+    ///
+    /// One question at a time per group (`VOTE_ALREADY_OPEN`). The founders are
+    /// beyond a vote (`VOTE_TARGET_IMMUNE`), and a muted member keeps their
+    /// voice — a mute silences speech, not citizenship.
+    async fn vote_kick(
+        &self,
+        caller: &Caller,
+        request: ConversationVoteKickRequest,
+    ) -> Result<(ConversationVoteKickResponse, Vec<Fanout>)>;
+
+    /// A founder renames a group.
+    ///
+    /// The title is the group's name in every member's list, and this is the one
+    /// write that changes it — the create call is the other. Same limit as a
+    /// room's name, in characters a person typed.
+    ///
+    /// Returns the renamed summary for the founder, and a state event carrying
+    /// the new title for everyone else — deltas only, coalesced per
+    /// conversation, exactly the way a room's rename travels.
+    async fn update(
+        &self,
+        caller: &Caller,
+        request: ConversationUpdateRequest,
+    ) -> Result<(ConversationSummary, Option<Fanout>)>;
 
     /// Records that the caller started or stopped typing.
     ///

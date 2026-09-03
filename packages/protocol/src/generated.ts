@@ -198,6 +198,8 @@ export const CODE = {
   ROOM_READ_ONLY_PARTITION: 1702,
   MESH_AUTH_FAILED: 1703,
   ROUTING_EPOCH_STALE: 1704,
+  /** The group conversation is at its member cap */
+  GROUP_FULL: 1512,
 } as const;
 export type ErrorCode = (typeof CODE)[keyof typeof CODE];
 
@@ -278,6 +280,7 @@ export const ERROR_SYMBOLS: Record<number, string> = {
   1702: 'ROOM_READ_ONLY_PARTITION',
   1703: 'MESH_AUTH_FAILED',
   1704: 'ROUTING_EPOCH_STALE',
+  1512: 'GROUP_FULL',
 };
 
 export type ErrorClassName = 'Protocol' | 'Auth' | 'Permission' | 'Validation' | 'RateLimit' | 'State' | 'Server' | 'Federation' | 'Unknown';
@@ -476,6 +479,13 @@ export enum MlDsaPurpose {
   Login = 1,
   AddDevice = 2,
   Rotate = 3,
+}
+
+/** Role within a conversation. Groups have founders — the creator and the first member at creation — and everyone else is a member. The store's `role` smallint carries the same numbering, so a row written before groups existed (0) is renumbered to Member by migration 0008. */
+export enum ConversationRole {
+  Unknown = 0,
+  Member = 1,
+  Founder = 2,
 }
 
 /** Who is connecting. Used for feature gating and abuse triage, never for tracking. */
@@ -6103,6 +6113,411 @@ export function decodeMlDsaChallenge(r: Reader): MlDsaChallenge {
   return out;
 }
 
+/** Adds members to a group conversation. Any current member may invite; the new seats arrive as plain members. */
+export interface ConversationInviteRequest {
+  conversationId: Id;
+  members: Id[];
+}
+
+export function encodeConversationInviteRequest(w: Writer, v: ConversationInviteRequest): void {
+  w.enter();
+  w.id(v.conversationId);
+  { w.listLen(v.members.length); for (const item of v.members) { w.id(item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeConversationInviteRequest(r: Reader): ConversationInviteRequest {
+  r.enter();
+  const conversationId = r.id();
+  const members = ((): Id[] => { const n = r.listLen(); const v: Id[] = []; for (let i = 0; i < n; i++) v.push(r.id()); return v; })();
+  const out: ConversationInviteRequest = { conversationId, members } as ConversationInviteRequest;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** The caller leaves a group conversation. Membership is tombstoned, not deleted, so history stays attributable. */
+export interface ConversationLeaveRequest {
+  conversationId: Id;
+}
+
+export function encodeConversationLeaveRequest(w: Writer, v: ConversationLeaveRequest): void {
+  w.enter();
+  w.id(v.conversationId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeConversationLeaveRequest(r: Reader): ConversationLeaveRequest {
+  r.enter();
+  const conversationId = r.id();
+  const out: ConversationLeaveRequest = { conversationId } as ConversationLeaveRequest;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+export interface ConversationRosterRequest {
+  conversationId: Id;
+}
+
+export function encodeConversationRosterRequest(w: Writer, v: ConversationRosterRequest): void {
+  w.enter();
+  w.id(v.conversationId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeConversationRosterRequest(r: Reader): ConversationRosterRequest {
+  r.enter();
+  const conversationId = r.id();
+  const out: ConversationRosterRequest = { conversationId } as ConversationRosterRequest;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** One membership row as the group's roster sees it: the role, when they joined, and any group mute still running. */
+export interface ConversationRosterEntry {
+  accountId: Id;
+  role: ConversationRole;
+  joinedAt: number;
+  /** Set by a founder: while it runs, the member cannot send to this group. */
+  mutedUntil?: number;
+  leftAt?: number;
+}
+
+export function encodeConversationRosterEntry(w: Writer, v: ConversationRosterEntry): void {
+  w.enter();
+  w.id(v.accountId);
+  w.u32(v.role);
+  w.timestamp(v.joinedAt);
+  let present = 0;
+  if (v.mutedUntil !== undefined) present++;
+  if (v.leftAt !== undefined) present++;
+  w.u32(present);
+  if (v.mutedUntil !== undefined) { const value = v.mutedUntil; w.optional(1, (w) => { w.timestamp(value); }); }
+  if (v.leftAt !== undefined) { const value = v.leftAt; w.optional(2, (w) => { w.timestamp(value); }); }
+  w.leave();
+}
+
+export function decodeConversationRosterEntry(r: Reader): ConversationRosterEntry {
+  r.enter();
+  const accountId = r.id();
+  const role = r.u32() as ConversationRole;
+  const joinedAt = r.timestamp();
+  const out: ConversationRosterEntry = { accountId, role, joinedAt } as ConversationRosterEntry;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.mutedUntil = sub.timestamp(); break;
+      case 2: out.leftAt = sub.timestamp(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+export interface ConversationRosterResponse {
+  entries: ConversationRosterEntry[];
+}
+
+export function encodeConversationRosterResponse(w: Writer, v: ConversationRosterResponse): void {
+  w.enter();
+  { w.listLen(v.entries.length); for (const item of v.entries) { encodeConversationRosterEntry(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeConversationRosterResponse(r: Reader): ConversationRosterResponse {
+  r.enter();
+  const entries = ((): ConversationRosterEntry[] => { const n = r.listLen(); const v: ConversationRosterEntry[] = []; for (let i = 0; i < n; i++) v.push(decodeConversationRosterEntry(r)); return v; })();
+  const out: ConversationRosterResponse = { entries } as ConversationRosterResponse;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** A founder mutes or unmutes one member of a group. `until` absent lifts the mute. */
+export interface ConversationMuteRequest {
+  conversationId: Id;
+  targetId: Id;
+  until?: number;
+}
+
+export function encodeConversationMuteRequest(w: Writer, v: ConversationMuteRequest): void {
+  w.enter();
+  w.id(v.conversationId);
+  w.id(v.targetId);
+  let present = 0;
+  if (v.until !== undefined) present++;
+  w.u32(present);
+  if (v.until !== undefined) { const value = v.until; w.optional(1, (w) => { w.timestamp(value); }); }
+  w.leave();
+}
+
+export function decodeConversationMuteRequest(r: Reader): ConversationMuteRequest {
+  r.enter();
+  const conversationId = r.id();
+  const targetId = r.id();
+  const out: ConversationMuteRequest = { conversationId, targetId } as ConversationMuteRequest;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.until = sub.timestamp(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** A founder removes a member outright, no vote. The other founder is beyond this reach. */
+export interface ConversationKickRequest {
+  conversationId: Id;
+  targetId: Id;
+}
+
+export function encodeConversationKickRequest(w: Writer, v: ConversationKickRequest): void {
+  w.enter();
+  w.id(v.conversationId);
+  w.id(v.targetId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeConversationKickRequest(r: Reader): ConversationKickRequest {
+  r.enter();
+  const conversationId = r.id();
+  const targetId = r.id();
+  const out: ConversationKickRequest = { conversationId, targetId } as ConversationKickRequest;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Starts a kick vote in a group, or adds the caller's voice to one already running. */
+export interface ConversationVoteKickRequest {
+  conversationId: Id;
+  targetId: Id;
+}
+
+export function encodeConversationVoteKickRequest(w: Writer, v: ConversationVoteKickRequest): void {
+  w.enter();
+  w.id(v.conversationId);
+  w.id(v.targetId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeConversationVoteKickRequest(r: Reader): ConversationVoteKickRequest {
+  r.enter();
+  const conversationId = r.id();
+  const targetId = r.id();
+  const out: ConversationVoteKickRequest = { conversationId, targetId } as ConversationVoteKickRequest;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** The tally after this voice landed: `open` is false the moment the vote carries. */
+export interface ConversationVoteKickResponse {
+  votes: number;
+  needed: number;
+  memberCount: number;
+  open: boolean;
+}
+
+export function encodeConversationVoteKickResponse(w: Writer, v: ConversationVoteKickResponse): void {
+  w.enter();
+  w.u32(v.votes);
+  w.u32(v.needed);
+  w.u32(v.memberCount);
+  w.bool(v.open);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeConversationVoteKickResponse(r: Reader): ConversationVoteKickResponse {
+  r.enter();
+  const votes = r.u32();
+  const needed = r.u32();
+  const memberCount = r.u32();
+  const open = r.bool();
+  const out: ConversationVoteKickResponse = { votes, needed, memberCount, open } as ConversationVoteKickResponse;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** A running group kick vote's tally, coalesced per conversation. */
+export interface ConversationVoteEvent {
+  conversationId: Id;
+  targetId: Id;
+  votes: number;
+  needed: number;
+  memberCount: number;
+  /** True when the vote ended without passing (expired, or the target left). */
+  closed?: boolean;
+}
+
+export function encodeConversationVoteEvent(w: Writer, v: ConversationVoteEvent): void {
+  w.enter();
+  w.id(v.conversationId);
+  w.id(v.targetId);
+  w.u32(v.votes);
+  w.u32(v.needed);
+  w.u32(v.memberCount);
+  let present = 0;
+  if (v.closed !== undefined) present++;
+  w.u32(present);
+  if (v.closed !== undefined) { const value = v.closed; w.optional(1, (w) => { w.bool(value); }); }
+  w.leave();
+}
+
+export function decodeConversationVoteEvent(r: Reader): ConversationVoteEvent {
+  r.enter();
+  const conversationId = r.id();
+  const targetId = r.id();
+  const votes = r.u32();
+  const needed = r.u32();
+  const memberCount = r.u32();
+  const out: ConversationVoteEvent = { conversationId, targetId, votes, needed, memberCount } as ConversationVoteEvent;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.closed = sub.bool(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** A group's membership moved: somebody joined, left, or was removed. Clients rotate sender keys on every one of these. */
+export interface ConversationMemberEvent {
+  conversationId: Id;
+  userId: Id;
+  change: MemberChange;
+  memberCount: number;
+}
+
+export function encodeConversationMemberEvent(w: Writer, v: ConversationMemberEvent): void {
+  w.enter();
+  w.id(v.conversationId);
+  w.id(v.userId);
+  w.u32(v.change);
+  w.u32(v.memberCount);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeConversationMemberEvent(r: Reader): ConversationMemberEvent {
+  r.enter();
+  const conversationId = r.id();
+  const userId = r.id();
+  const change = r.u32() as MemberChange;
+  const memberCount = r.u32();
+  const out: ConversationMemberEvent = { conversationId, userId, change, memberCount } as ConversationMemberEvent;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** A founder renames a group. Direct conversations carry no title to change. */
+export interface ConversationUpdateRequest {
+  conversationId: Id;
+  title?: string;
+}
+
+export function encodeConversationUpdateRequest(w: Writer, v: ConversationUpdateRequest): void {
+  w.enter();
+  w.id(v.conversationId);
+  let present = 0;
+  if (v.title !== undefined) present++;
+  w.u32(present);
+  if (v.title !== undefined) { const value = v.title; w.optional(1, (w) => { w.str(value); }); }
+  w.leave();
+}
+
+export function decodeConversationUpdateRequest(r: Reader): ConversationUpdateRequest {
+  r.enter();
+  const conversationId = r.id();
+  const out: ConversationUpdateRequest = { conversationId } as ConversationUpdateRequest;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.title = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** Coalesced group metadata, deltas only: a field is present when it changed. Membership counts ride the member events instead, which cannot be coalesced away. */
+export interface ConversationStateEvent {
+  conversationId: Id;
+  /** The group's title, sent when a founder renames it. */
+  title?: string;
+}
+
+export function encodeConversationStateEvent(w: Writer, v: ConversationStateEvent): void {
+  w.enter();
+  w.id(v.conversationId);
+  let present = 0;
+  if (v.title !== undefined) present++;
+  w.u32(present);
+  if (v.title !== undefined) { const value = v.title; w.optional(1, (w) => { w.str(value); }); }
+  w.leave();
+}
+
+export function decodeConversationStateEvent(r: Reader): ConversationStateEvent {
+  r.enter();
+  const conversationId = r.id();
+  const out: ConversationStateEvent = { conversationId } as ConversationStateEvent;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.title = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
 export type DeliveryClass = 'Critical' | 'Coalescable' | 'Droppable';
 export type AuthLevel = 'None' | 'User' | 'Bot' | 'Server';
 export type Direction = 'client_to_server' | 'server_to_client' | 'both';
@@ -6136,6 +6551,24 @@ export const OP = {
   REACTION_SET: 41,
   /** A reaction was added or removed. */
   REACTION_EVENT: 42,
+  /** Adds members to a group. Any current member may invite, within the group size cap. */
+  CONVERSATION_INVITE: 43,
+  /** Leaves a group conversation. The last founder out promotes the earliest remaining member. */
+  CONVERSATION_LEAVE: 44,
+  /** Reads a conversation's member list with roles and mutes. */
+  CONVERSATION_ROSTER: 45,
+  /** A founder mutes or unmutes one member of a group. A muted member's sends are refused. */
+  CONVERSATION_MUTE: 46,
+  /** A founder removes a member outright, no vote. */
+  CONVERSATION_KICK: 47,
+  /** Starts or joins a kick vote in a group. A strict majority of the members carries it. */
+  CONVERSATION_VOTE_KICK: 48,
+  /** A group kick vote's running tally; the newest tally per conversation is the one that matters. */
+  CONVERSATION_VOTE_EVENT: 49,
+  /** A group's membership moved. Clients rotate sender keys on every change. */
+  CONVERSATION_MEMBER_EVENT: 50,
+  /** A founder renames a group. */
+  CONVERSATION_UPDATE: 51,
   PRESENCE_SET: 64,
   PRESENCE_EVENT: 65,
   ROOM_JOIN: 80,
@@ -6255,6 +6688,8 @@ export const OP = {
   CALL_SFU_JOIN: 237,
   /** SFU group call state. */
   CALL_SFU_EVENT: 238,
+  /** Group metadata moved: a rename. Deltas only, coalesced per conversation. */
+  CONVERSATION_STATE_EVENT: 52,
 } as const;
 export type OpcodeValue = (typeof OP)[keyof typeof OP];
 
@@ -6293,6 +6728,15 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   40: { code: 40, name: 'MESSAGE_EDIT', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MessageEdit', response: 'Acknowledged' },
   41: { code: 41, name: 'REACTION_SET', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ReactionSet', response: 'Acknowledged' },
   42: { code: 42, name: 'REACTION_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ReactionEvent', coalesceKey: 'target_message_id' },
+  43: { code: 43, name: 'CONVERSATION_INVITE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationInviteRequest', response: 'ConversationSummary' },
+  44: { code: 44, name: 'CONVERSATION_LEAVE', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationLeaveRequest', response: 'Acknowledged' },
+  45: { code: 45, name: 'CONVERSATION_ROSTER', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationRosterRequest', response: 'ConversationRosterResponse' },
+  46: { code: 46, name: 'CONVERSATION_MUTE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationMuteRequest', response: 'Acknowledged' },
+  47: { code: 47, name: 'CONVERSATION_KICK', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationKickRequest', response: 'Acknowledged' },
+  48: { code: 48, name: 'CONVERSATION_VOTE_KICK', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationVoteKickRequest', response: 'ConversationVoteKickResponse' },
+  49: { code: 49, name: 'CONVERSATION_VOTE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ConversationVoteEvent', coalesceKey: 'conversation_id' },
+  50: { code: 50, name: 'CONVERSATION_MEMBER_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ConversationMemberEvent', coalesceKey: 'conversation_id' },
+  51: { code: 51, name: 'CONVERSATION_UPDATE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationUpdateRequest', response: 'ConversationSummary' },
   64: { code: 64, name: 'PRESENCE_SET', cost: 1, cls: 'Coalescable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'PresenceUpdate', response: 'Acknowledged' },
   65: { code: 65, name: 'PRESENCE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'PresenceEvent', coalesceKey: 'user_id' },
   80: { code: 80, name: 'ROOM_JOIN', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomJoinRequest', response: 'RoomJoinResponse' },
@@ -6376,6 +6820,7 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   236: { code: 236, name: 'CALL_TURN_FETCH', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallTurnFetch', response: 'CallTurnResponse' },
   237: { code: 237, name: 'CALL_SFU_JOIN', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallInvite', response: 'CallTurnResponse' },
   238: { code: 238, name: 'CALL_SFU_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallStateEvent', coalesceKey: 'call_id' },
+  52: { code: 52, name: 'CONVERSATION_STATE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ConversationStateEvent', coalesceKey: 'conversation_id' },
 };
 
 export function opcodeName(code: number): string {

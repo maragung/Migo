@@ -71,8 +71,8 @@ use async_trait::async_trait;
 use migo_core::config::StoreConfig;
 use migo_core::{Error, Id, Result, Secret, Timestamp};
 use migo_protocol::{
-    fault, ConversationKind, EncryptionMode, MessageKind, MlDsaPurpose, Platform, RelationshipKind,
-    RoomKind, RoomRole,
+    fault, ConversationKind, ConversationRole, EncryptionMode, MessageKind, MlDsaPurpose, Platform,
+    RelationshipKind, RoomKind, RoomRole,
 };
 use sea_orm::sea_query::{
     Alias, Expr, ExprTrait, Func, IntoCondition, LikeExpr, LockBehavior, LockType, NullOrdering,
@@ -461,6 +461,7 @@ impl From<entity::conversation::Model> for Conversation {
             kind: ConversationKind::from_wire(wire_u32(row.kind)),
             encryption: EncryptionMode::from_wire(wire_u32(row.encryption)),
             room_id: row.room_id.map(id_of),
+            title: row.title,
             last_seq: row.last_seq,
             created_by: id_of(row.created_by),
             created_at: instant_of(row.created_at),
@@ -475,7 +476,9 @@ impl From<entity::conversation_member::Model> for ConversationMember {
         Self {
             conversation_id: id_of(row.conversation_id),
             account_id: id_of(row.account_id),
-            role: row.role,
+            // Fail-closed like every enum column: a role a newer deployment wrote
+            // reads as Unknown, never as a privilege this build does not know.
+            role: ConversationRole::from_wire(wire_u32(row.role)),
             joined_at: instant_of(row.joined_at),
             left_at: row.left_at.map(instant_of),
             muted_until: row.muted_until.map(instant_of),
@@ -1893,6 +1896,7 @@ impl MessagingStore for PostgresStore {
                 kind: Set(wire_i16(conversation.kind.to_wire())),
                 encryption: Set(wire_i16(conversation.encryption.to_wire())),
                 room_id: Set(conversation.room_id.map(uuid_of)),
+                title: Set(conversation.title),
                 last_seq: Set(conversation.last_seq),
                 created_by: Set(uuid_of(conversation.created_by)),
                 created_at: Set(stamp_of(conversation.created_at)),
@@ -2078,7 +2082,7 @@ impl MessagingStore for PostgresStore {
         entity::conversation_member::Entity::insert(entity::conversation_member::ActiveModel {
             conversation_id: Set(uuid_of(member.conversation_id)),
             account_id: Set(uuid_of(member.account_id)),
-            role: Set(member.role),
+            role: Set(member.role as i16),
             joined_at: Set(stamp_of(member.joined_at)),
             left_at: Set(None),
             muted_until: Set(member.muted_until.map(stamp_of)),
@@ -2130,6 +2134,67 @@ impl MessagingStore for PostgresStore {
             .await
             .context("remove_member")?;
         Ok(())
+    }
+
+    async fn set_conversation_title(
+        &self,
+        conversation_id: Id,
+        title: Option<&str>,
+    ) -> Result<bool> {
+        let result = entity::conversation::Entity::update_many()
+            .filter(entity::conversation::Column::ConversationId.eq(uuid_of(conversation_id)))
+            .set(entity::conversation::ActiveModel {
+                title: Set(title.map(str::to_owned)),
+                ..Default::default()
+            })
+            .exec(&self.db)
+            .await
+            .context("set_conversation_title")?;
+        Ok(result.rows_affected > 0)
+    }
+
+    async fn set_conversation_role(
+        &self,
+        conversation_id: Id,
+        account_id: Id,
+        role: ConversationRole,
+    ) -> Result<bool> {
+        let result = entity::conversation_member::Entity::update_many()
+            .filter(
+                entity::conversation_member::Column::ConversationId.eq(uuid_of(conversation_id)),
+            )
+            .filter(entity::conversation_member::Column::AccountId.eq(uuid_of(account_id)))
+            .filter(entity::conversation_member::Column::LeftAt.is_null())
+            .set(entity::conversation_member::ActiveModel {
+                role: Set(role as i16),
+                ..Default::default()
+            })
+            .exec(&self.db)
+            .await
+            .context("set_conversation_role")?;
+        Ok(result.rows_affected > 0)
+    }
+
+    async fn set_conversation_mute(
+        &self,
+        conversation_id: Id,
+        account_id: Id,
+        muted_until: Option<Timestamp>,
+    ) -> Result<bool> {
+        let result = entity::conversation_member::Entity::update_many()
+            .filter(
+                entity::conversation_member::Column::ConversationId.eq(uuid_of(conversation_id)),
+            )
+            .filter(entity::conversation_member::Column::AccountId.eq(uuid_of(account_id)))
+            .filter(entity::conversation_member::Column::LeftAt.is_null())
+            .set(entity::conversation_member::ActiveModel {
+                muted_until: Set(muted_until.map(stamp_of)),
+                ..Default::default()
+            })
+            .exec(&self.db)
+            .await
+            .context("set_conversation_mute")?;
+        Ok(result.rows_affected > 0)
     }
 
     async fn append_message(&self, new: NewMessage) -> Result<Appended> {
@@ -2623,10 +2688,10 @@ impl MessagingStore for PostgresStore {
                 // able to fail on a row that vanished between two queries.
                 let member = member_by_conversation
                     .remove(&conversation.conversation_id)
-                    .unwrap_or_else(|| ConversationMember {
+                    .unwrap_or(ConversationMember {
                         conversation_id: conversation.conversation_id,
                         account_id,
-                        role: RoomRole::Member.to_wire() as i16,
+                        role: ConversationRole::Member,
                         joined_at: conversation.created_at,
                         left_at: None,
                         muted_until: None,
@@ -2757,7 +2822,10 @@ async fn insert_members<C: ConnectionTrait>(
         entity::conversation_member::ActiveModel {
             conversation_id: Set(uuid_of(conversation_id)),
             account_id: Set(uuid_of(*account_id)),
-            role: Set(0),
+            // `Member` and not the column default of 0: zero is `Unknown` in the
+            // wire numbering, and a fail-closed read of a zero row is a member the
+            // roster cannot name. The service promotes founders after the insert.
+            role: Set(ConversationRole::Member as i16),
             joined_at: Set(stamp_of(at)),
             ..Default::default()
         }

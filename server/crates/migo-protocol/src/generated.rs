@@ -208,6 +208,8 @@ pub mod codes {
     pub const ROOM_READ_ONLY_PARTITION: u32 = 1702;
     pub const MESH_AUTH_FAILED: u32 = 1703;
     pub const ROUTING_EPOCH_STALE: u32 = 1704;
+    /// The group conversation is at its member cap
+    pub const GROUP_FULL: u32 = 1512;
 
     /// Every code in this build, for exhaustive tests and registry dumps.
     ///
@@ -291,6 +293,7 @@ pub mod codes {
         ROOM_READ_ONLY_PARTITION,
         MESH_AUTH_FAILED,
         ROUTING_EPOCH_STALE,
+        GROUP_FULL,
     ];
 }
 
@@ -421,6 +424,7 @@ pub fn error_symbol(code: u32) -> Option<&'static str> {
         codes::ROOM_READ_ONLY_PARTITION => "ROOM_READ_ONLY_PARTITION",
         codes::MESH_AUTH_FAILED => "MESH_AUTH_FAILED",
         codes::ROUTING_EPOCH_STALE => "ROUTING_EPOCH_STALE",
+        codes::GROUP_FULL => "GROUP_FULL",
         _ => return None,
     })
 }
@@ -505,6 +509,7 @@ pub fn error_http_status(code: u32) -> u16 {
         codes::ROOM_READ_ONLY_PARTITION => 503,
         codes::MESH_AUTH_FAILED => 401,
         codes::ROUTING_EPOCH_STALE => 409,
+        codes::GROUP_FULL => 400,
         _ => 500,
     }
 }
@@ -1307,6 +1312,42 @@ impl MlDsaPurpose {
             Self::Login => "Login",
             Self::AddDevice => "AddDevice",
             Self::Rotate => "Rotate",
+        }
+    }
+}
+
+/// Role within a conversation. Groups have founders — the creator and the first member at creation — and everyone else is a member. The store's `role` smallint carries the same numbering, so a row written before groups existed (0) is renumbered to Member by migration 0008.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u32)]
+pub enum ConversationRole {
+    #[default]
+    Unknown = 0,
+    Member = 1,
+    Founder = 2,
+}
+
+impl ConversationRole {
+    #[must_use]
+    pub const fn to_wire(self) -> u32 {
+        self as u32
+    }
+
+    /// Unknown discriminants decode to `Unknown` so a new variant never breaks an old peer.
+    #[must_use]
+    pub const fn from_wire(v: u32) -> Self {
+        match v {
+            1 => Self::Member,
+            2 => Self::Founder,
+            _ => Self::Unknown,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::Member => "Member",
+            Self::Founder => "Founder",
         }
     }
 }
@@ -9291,6 +9332,558 @@ impl Decode for MlDsaChallenge {
     }
 }
 
+/// Adds members to a group conversation. Any current member may invite; the new seats arrive as plain members.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConversationInviteRequest {
+    pub conversation_id: Id,
+    pub members: Vec<Id>,
+}
+
+impl Encode for ConversationInviteRequest {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.conversation_id);
+        {
+            w.list_len(self.members.len())?;
+            for item in self.members.iter() {
+                w.write_id(item);
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ConversationInviteRequest {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.conversation_id = r.read_id()?;
+        out.members = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(r.read_id()?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// The caller leaves a group conversation. Membership is tombstoned, not deleted, so history stays attributable.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConversationLeaveRequest {
+    pub conversation_id: Id,
+}
+
+impl Encode for ConversationLeaveRequest {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.conversation_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ConversationLeaveRequest {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.conversation_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConversationRosterRequest {
+    pub conversation_id: Id,
+}
+
+impl Encode for ConversationRosterRequest {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.conversation_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ConversationRosterRequest {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.conversation_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// One membership row as the group's roster sees it: the role, when they joined, and any group mute still running.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConversationRosterEntry {
+    pub account_id: Id,
+    pub role: ConversationRole,
+    pub joined_at: Timestamp,
+    /// Set by a founder: while it runs, the member cannot send to this group.
+    pub muted_until: Option<Timestamp>,
+    pub left_at: Option<Timestamp>,
+}
+
+impl Encode for ConversationRosterEntry {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.account_id);
+        w.write_u32(self.role.to_wire());
+        w.write_timestamp(self.joined_at);
+        let present = usize::from(self.muted_until.is_some()) + usize::from(self.left_at.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.muted_until {
+            w.optional(1, |w| {
+                w.write_timestamp(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.left_at {
+            w.optional(2, |w| {
+                w.write_timestamp(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ConversationRosterEntry {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.account_id = r.read_id()?;
+        out.role = ConversationRole::from_wire(r.read_u32()?);
+        out.joined_at = r.read_timestamp()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.muted_until = Some(sub.read_timestamp()?),
+                2 => out.left_at = Some(sub.read_timestamp()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConversationRosterResponse {
+    pub entries: Vec<ConversationRosterEntry>,
+}
+
+impl Encode for ConversationRosterResponse {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.entries.len())?;
+            for item in self.entries.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ConversationRosterResponse {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.entries = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(ConversationRosterEntry::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// A founder mutes or unmutes one member of a group. `until` absent lifts the mute.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConversationMuteRequest {
+    pub conversation_id: Id,
+    pub target_id: Id,
+    pub until: Option<Timestamp>,
+}
+
+impl Encode for ConversationMuteRequest {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.conversation_id);
+        w.write_id(&self.target_id);
+        let present = usize::from(self.until.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.until {
+            w.optional(1, |w| {
+                w.write_timestamp(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ConversationMuteRequest {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.conversation_id = r.read_id()?;
+        out.target_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.until = Some(sub.read_timestamp()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// A founder removes a member outright, no vote. The other founder is beyond this reach.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConversationKickRequest {
+    pub conversation_id: Id,
+    pub target_id: Id,
+}
+
+impl Encode for ConversationKickRequest {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.conversation_id);
+        w.write_id(&self.target_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ConversationKickRequest {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.conversation_id = r.read_id()?;
+        out.target_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Starts a kick vote in a group, or adds the caller's voice to one already running.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConversationVoteKickRequest {
+    pub conversation_id: Id,
+    pub target_id: Id,
+}
+
+impl Encode for ConversationVoteKickRequest {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.conversation_id);
+        w.write_id(&self.target_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ConversationVoteKickRequest {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.conversation_id = r.read_id()?;
+        out.target_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// The tally after this voice landed: `open` is false the moment the vote carries.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConversationVoteKickResponse {
+    pub votes: u32,
+    pub needed: u32,
+    pub member_count: u32,
+    pub open: bool,
+}
+
+impl Encode for ConversationVoteKickResponse {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u32(self.votes);
+        w.write_u32(self.needed);
+        w.write_u32(self.member_count);
+        w.write_bool(self.open);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ConversationVoteKickResponse {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.votes = r.read_u32()?;
+        out.needed = r.read_u32()?;
+        out.member_count = r.read_u32()?;
+        out.open = r.read_bool()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// A running group kick vote's tally, coalesced per conversation.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConversationVoteEvent {
+    pub conversation_id: Id,
+    pub target_id: Id,
+    pub votes: u32,
+    pub needed: u32,
+    pub member_count: u32,
+    /// True when the vote ended without passing (expired, or the target left).
+    pub closed: Option<bool>,
+}
+
+impl Encode for ConversationVoteEvent {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.conversation_id);
+        w.write_id(&self.target_id);
+        w.write_u32(self.votes);
+        w.write_u32(self.needed);
+        w.write_u32(self.member_count);
+        let present = usize::from(self.closed.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.closed {
+            w.optional(1, |w| {
+                w.write_bool(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ConversationVoteEvent {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.conversation_id = r.read_id()?;
+        out.target_id = r.read_id()?;
+        out.votes = r.read_u32()?;
+        out.needed = r.read_u32()?;
+        out.member_count = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.closed = Some(sub.read_bool()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// A group's membership moved: somebody joined, left, or was removed. Clients rotate sender keys on every one of these.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConversationMemberEvent {
+    pub conversation_id: Id,
+    pub user_id: Id,
+    pub change: MemberChange,
+    pub member_count: u32,
+}
+
+impl Encode for ConversationMemberEvent {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.conversation_id);
+        w.write_id(&self.user_id);
+        w.write_u32(self.change.to_wire());
+        w.write_u32(self.member_count);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ConversationMemberEvent {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.conversation_id = r.read_id()?;
+        out.user_id = r.read_id()?;
+        out.change = MemberChange::from_wire(r.read_u32()?);
+        out.member_count = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// A founder renames a group. Direct conversations carry no title to change.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConversationUpdateRequest {
+    pub conversation_id: Id,
+    pub title: Option<String>,
+}
+
+impl Encode for ConversationUpdateRequest {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.conversation_id);
+        let present = usize::from(self.title.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.title {
+            w.optional(1, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ConversationUpdateRequest {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.conversation_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.title = Some(sub.read_string()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Coalesced group metadata, deltas only: a field is present when it changed. Membership counts ride the member events instead, which cannot be coalesced away.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ConversationStateEvent {
+    pub conversation_id: Id,
+    /// The group's title, sent when a founder renames it.
+    pub title: Option<String>,
+}
+
+impl Encode for ConversationStateEvent {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.conversation_id);
+        let present = usize::from(self.title.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.title {
+            w.optional(1, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for ConversationStateEvent {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.conversation_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.title = Some(sub.read_string()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
 /// Delivery class, deciding what happens when a session queue is full (ADR-0008).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeliveryClass {
@@ -9355,6 +9948,24 @@ pub enum Opcode {
     ReactionSet = 41,
     /// A reaction was added or removed.
     ReactionEvent = 42,
+    /// Adds members to a group. Any current member may invite, within the group size cap.
+    ConversationInvite = 43,
+    /// Leaves a group conversation. The last founder out promotes the earliest remaining member.
+    ConversationLeave = 44,
+    /// Reads a conversation's member list with roles and mutes.
+    ConversationRoster = 45,
+    /// A founder mutes or unmutes one member of a group. A muted member's sends are refused.
+    ConversationMute = 46,
+    /// A founder removes a member outright, no vote.
+    ConversationKick = 47,
+    /// Starts or joins a kick vote in a group. A strict majority of the members carries it.
+    ConversationVoteKick = 48,
+    /// A group kick vote's running tally; the newest tally per conversation is the one that matters.
+    ConversationVoteEvent = 49,
+    /// A group's membership moved. Clients rotate sender keys on every change.
+    ConversationMemberEvent = 50,
+    /// A founder renames a group.
+    ConversationUpdate = 51,
     PresenceSet = 64,
     PresenceEvent = 65,
     RoomJoin = 80,
@@ -9474,6 +10085,8 @@ pub enum Opcode {
     CallSfuJoin = 237,
     /// SFU group call state.
     CallSfuEvent = 238,
+    /// Group metadata moved: a rename. Deltas only, coalesced per conversation.
+    ConversationStateEvent = 52,
 }
 
 impl Opcode {
@@ -9507,6 +10120,15 @@ impl Opcode {
             40 => Self::MessageEdit,
             41 => Self::ReactionSet,
             42 => Self::ReactionEvent,
+            43 => Self::ConversationInvite,
+            44 => Self::ConversationLeave,
+            45 => Self::ConversationRoster,
+            46 => Self::ConversationMute,
+            47 => Self::ConversationKick,
+            48 => Self::ConversationVoteKick,
+            49 => Self::ConversationVoteEvent,
+            50 => Self::ConversationMemberEvent,
+            51 => Self::ConversationUpdate,
             64 => Self::PresenceSet,
             65 => Self::PresenceEvent,
             80 => Self::RoomJoin,
@@ -9590,6 +10212,7 @@ impl Opcode {
             236 => Self::CallTurnFetch,
             237 => Self::CallSfuJoin,
             238 => Self::CallSfuEvent,
+            52 => Self::ConversationStateEvent,
             _ => return None,
         })
     }
@@ -9618,6 +10241,15 @@ impl Opcode {
             Self::MessageEdit => "MESSAGE_EDIT",
             Self::ReactionSet => "REACTION_SET",
             Self::ReactionEvent => "REACTION_EVENT",
+            Self::ConversationInvite => "CONVERSATION_INVITE",
+            Self::ConversationLeave => "CONVERSATION_LEAVE",
+            Self::ConversationRoster => "CONVERSATION_ROSTER",
+            Self::ConversationMute => "CONVERSATION_MUTE",
+            Self::ConversationKick => "CONVERSATION_KICK",
+            Self::ConversationVoteKick => "CONVERSATION_VOTE_KICK",
+            Self::ConversationVoteEvent => "CONVERSATION_VOTE_EVENT",
+            Self::ConversationMemberEvent => "CONVERSATION_MEMBER_EVENT",
+            Self::ConversationUpdate => "CONVERSATION_UPDATE",
             Self::PresenceSet => "PRESENCE_SET",
             Self::PresenceEvent => "PRESENCE_EVENT",
             Self::RoomJoin => "ROOM_JOIN",
@@ -9701,6 +10333,7 @@ impl Opcode {
             Self::CallTurnFetch => "CALL_TURN_FETCH",
             Self::CallSfuJoin => "CALL_SFU_JOIN",
             Self::CallSfuEvent => "CALL_SFU_EVENT",
+            Self::ConversationStateEvent => "CONVERSATION_STATE_EVENT",
         }
     }
 
@@ -9729,6 +10362,15 @@ impl Opcode {
             Self::MessageEdit => 2,
             Self::ReactionSet => 1,
             Self::ReactionEvent => 0,
+            Self::ConversationInvite => 5,
+            Self::ConversationLeave => 2,
+            Self::ConversationRoster => 1,
+            Self::ConversationMute => 5,
+            Self::ConversationKick => 5,
+            Self::ConversationVoteKick => 5,
+            Self::ConversationVoteEvent => 0,
+            Self::ConversationMemberEvent => 0,
+            Self::ConversationUpdate => 5,
             Self::PresenceSet => 1,
             Self::PresenceEvent => 0,
             Self::RoomJoin => 20,
@@ -9812,6 +10454,7 @@ impl Opcode {
             Self::CallTurnFetch => 10,
             Self::CallSfuJoin => 20,
             Self::CallSfuEvent => 0,
+            Self::ConversationStateEvent => 0,
         }
     }
 
@@ -9839,6 +10482,15 @@ impl Opcode {
             Self::MessageEdit => DeliveryClass::Critical,
             Self::ReactionSet => DeliveryClass::Critical,
             Self::ReactionEvent => DeliveryClass::Coalescable,
+            Self::ConversationInvite => DeliveryClass::Critical,
+            Self::ConversationLeave => DeliveryClass::Critical,
+            Self::ConversationRoster => DeliveryClass::Critical,
+            Self::ConversationMute => DeliveryClass::Critical,
+            Self::ConversationKick => DeliveryClass::Critical,
+            Self::ConversationVoteKick => DeliveryClass::Critical,
+            Self::ConversationVoteEvent => DeliveryClass::Coalescable,
+            Self::ConversationMemberEvent => DeliveryClass::Coalescable,
+            Self::ConversationUpdate => DeliveryClass::Critical,
             Self::PresenceSet => DeliveryClass::Coalescable,
             Self::PresenceEvent => DeliveryClass::Coalescable,
             Self::RoomJoin => DeliveryClass::Critical,
@@ -9922,6 +10574,7 @@ impl Opcode {
             Self::CallTurnFetch => DeliveryClass::Critical,
             Self::CallSfuJoin => DeliveryClass::Critical,
             Self::CallSfuEvent => DeliveryClass::Coalescable,
+            Self::ConversationStateEvent => DeliveryClass::Coalescable,
         }
     }
 
@@ -9949,6 +10602,15 @@ impl Opcode {
             Self::MessageEdit => AuthLevel::User,
             Self::ReactionSet => AuthLevel::User,
             Self::ReactionEvent => AuthLevel::User,
+            Self::ConversationInvite => AuthLevel::User,
+            Self::ConversationLeave => AuthLevel::User,
+            Self::ConversationRoster => AuthLevel::User,
+            Self::ConversationMute => AuthLevel::User,
+            Self::ConversationKick => AuthLevel::User,
+            Self::ConversationVoteKick => AuthLevel::User,
+            Self::ConversationVoteEvent => AuthLevel::User,
+            Self::ConversationMemberEvent => AuthLevel::User,
+            Self::ConversationUpdate => AuthLevel::User,
             Self::PresenceSet => AuthLevel::User,
             Self::PresenceEvent => AuthLevel::User,
             Self::RoomJoin => AuthLevel::User,
@@ -10032,6 +10694,7 @@ impl Opcode {
             Self::CallTurnFetch => AuthLevel::User,
             Self::CallSfuJoin => AuthLevel::User,
             Self::CallSfuEvent => AuthLevel::User,
+            Self::ConversationStateEvent => AuthLevel::User,
         }
     }
 
@@ -10059,6 +10722,15 @@ impl Opcode {
             Self::MessageEdit => Direction::ClientToServer,
             Self::ReactionSet => Direction::ClientToServer,
             Self::ReactionEvent => Direction::ServerToClient,
+            Self::ConversationInvite => Direction::ClientToServer,
+            Self::ConversationLeave => Direction::ClientToServer,
+            Self::ConversationRoster => Direction::ClientToServer,
+            Self::ConversationMute => Direction::ClientToServer,
+            Self::ConversationKick => Direction::ClientToServer,
+            Self::ConversationVoteKick => Direction::ClientToServer,
+            Self::ConversationVoteEvent => Direction::ServerToClient,
+            Self::ConversationMemberEvent => Direction::ServerToClient,
+            Self::ConversationUpdate => Direction::ClientToServer,
             Self::PresenceSet => Direction::ClientToServer,
             Self::PresenceEvent => Direction::ServerToClient,
             Self::RoomJoin => Direction::ClientToServer,
@@ -10142,6 +10814,7 @@ impl Opcode {
             Self::CallTurnFetch => Direction::ClientToServer,
             Self::CallSfuJoin => Direction::ClientToServer,
             Self::CallSfuEvent => Direction::ServerToClient,
+            Self::ConversationStateEvent => Direction::ServerToClient,
         }
     }
 
@@ -10170,6 +10843,15 @@ impl Opcode {
             Self::MessageEdit => false,
             Self::ReactionSet => false,
             Self::ReactionEvent => false,
+            Self::ConversationInvite => false,
+            Self::ConversationLeave => false,
+            Self::ConversationRoster => false,
+            Self::ConversationMute => false,
+            Self::ConversationKick => false,
+            Self::ConversationVoteKick => false,
+            Self::ConversationVoteEvent => false,
+            Self::ConversationMemberEvent => false,
+            Self::ConversationUpdate => false,
             Self::PresenceSet => false,
             Self::PresenceEvent => false,
             Self::RoomJoin => false,
@@ -10253,6 +10935,7 @@ impl Opcode {
             Self::CallTurnFetch => false,
             Self::CallSfuJoin => false,
             Self::CallSfuEvent => false,
+            Self::ConversationStateEvent => false,
         }
     }
 
@@ -10288,6 +10971,15 @@ impl Opcode {
         Self::MessageEdit,
         Self::ReactionSet,
         Self::ReactionEvent,
+        Self::ConversationInvite,
+        Self::ConversationLeave,
+        Self::ConversationRoster,
+        Self::ConversationMute,
+        Self::ConversationKick,
+        Self::ConversationVoteKick,
+        Self::ConversationVoteEvent,
+        Self::ConversationMemberEvent,
+        Self::ConversationUpdate,
         Self::PresenceSet,
         Self::PresenceEvent,
         Self::RoomJoin,
@@ -10371,5 +11063,6 @@ impl Opcode {
         Self::CallTurnFetch,
         Self::CallSfuJoin,
         Self::CallSfuEvent,
+        Self::ConversationStateEvent,
     ];
 }

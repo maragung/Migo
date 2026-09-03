@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { ConversationKind, ContentType, EncryptionMode } from '@migo/sdk';
+import { ConversationKind, ContentType, EncryptionMode, MemberChange } from '@migo/sdk';
 import type { ConversationSummary, GiftListing, Id } from '@migo/sdk';
 
 import { messagePreview } from '@/lib/message-preview.js';
@@ -14,6 +14,7 @@ import { useRoomNotices } from '@/lib/migo/use-room-notices.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { useSectionNav } from '@/lib/migo/section-nav.js';
+import { useGroupNotices } from '@/lib/migo/use-group-notices.js';
 import { useRooms, capacityLabel } from '@/lib/migo/rooms-provider.js';
 import { useMuted, muteFilter } from '@/lib/migo/muted-provider.js';
 import { resolveMediaUrl } from '@/lib/migo/media.js';
@@ -26,6 +27,7 @@ import { CallButtons } from './call-buttons.js';
 import { GameEventList } from './game-events.js';
 import { GameLauncher } from './game-launcher.js';
 import { GiftPicker } from './gift-picker.js';
+import { GroupInfoPanel } from './group-info-panel.js';
 import { MessageComposer } from './message-composer.js';
 import { MessageList, senderNameOf } from './message-list.js';
 import { RoomInfoPanel } from './room-info-panel.js';
@@ -82,7 +84,7 @@ export function callPeerFor(
 export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNode {
   const { client, accountId } = useMigo();
   const navigate = useSectionNav();
-  const { items, markRead } = useConversations();
+  const { items, markRead, forgetConversation } = useConversations();
   const rooms = useRooms();
   const {
     messages,
@@ -112,6 +114,9 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   // the composer's gift picker. Each is plain open/closed state over the same conversation.
   const [profileOpen, setProfileOpen] = useState(false);
   const [roomInfoOpen, setRoomInfoOpen] = useState(false);
+  // The group's details — roster, invite, mute, kick, vote, rename, leave — behind the same ⓘ the
+  // room uses, so a multi-party conversation always has one obvious way "into" its membership.
+  const [groupInfoOpen, setGroupInfoOpen] = useState(false);
   // The in-thread search: a filter over the transcript this session already holds. The spec's
   // room header carries a search control; a client-side filter over loaded messages is the
   // honest version of it, and it labels itself when it is only searching what is loaded.
@@ -145,6 +150,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   const summary = items.find((item) => item.conversationId === conversationId);
   const isDirect = summary?.kind === ConversationKind.Direct;
   const isRoom = summary?.kind === ConversationKind.Room;
+  const isGroup = summary?.kind === ConversationKind.Group;
   // Games are offered where a game has an audience: groups and rooms. A 1:1 has exactly the two
   // people the wire's GAME_START cannot name as opponents, and a solo game in a private chat is
   // a notification generator, not a pastime.
@@ -169,6 +175,8 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   // The open room's live membership pills — who joined, left, dropped, or was removed — kept only
   // for the room on screen and rendered in the transcript's live region below.
   const roomNotices = useRoomNotices(roomInfo?.roomId ?? null);
+  // The open group's own membership pills, from the same-shaped stream a room uses.
+  const groupNotices = useGroupNotices(isGroup ? conversationId : null);
 
   // Every sender in the thread resolves to a profile (names, avatars, reply quotes), plus the
   // direct peer so the header shows a name even before they have spoken, plus the players of any
@@ -214,6 +222,29 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   useEffect(() => {
     markRead(conversationId);
   }, [conversationId, messages.length, markRead]);
+
+  // A removal from this group closes the thread: this account can no longer read the group, and a
+  // thread it cannot read must not stay on screen. Joined and Reconnected keep the account seated;
+  // every other change — a leave of our own (belt to the panel's braces), a kick, a ban, a drop —
+  // takes the conversation off the list and the window out of the way. The details panel handles
+  // its own closing for the buttons it owns; this is the path for everything else.
+  useEffect(() => {
+    if (!client || !accountId || !isGroup) {
+      return;
+    }
+    return client.conversations.onMember((event) => {
+      if (
+        event.conversationId !== conversationId ||
+        event.userId !== accountId ||
+        event.change === MemberChange.Joined ||
+        event.change === MemberChange.Reconnected
+      ) {
+        return;
+      }
+      forgetConversation(conversationId);
+      closeConversation();
+    });
+  }, [client, accountId, isGroup, conversationId, forgetConversation]);
 
   const peerProfile = peerId ? (profiles.get(peerId) ?? null) : null;
   const presence = peerId ? (presenceMap.get(peerId) ?? peerProfile?.presence) : undefined;
@@ -390,6 +421,18 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
             ⓘ
           </button>
         ) : null}
+        {isGroup ? (
+          <button
+            type="button"
+            className={`icon-btn ${groupInfoOpen ? 'active' : ''}`}
+            onClick={() => setGroupInfoOpen((open) => !open)}
+            aria-label={groupInfoOpen ? 'Hide group details' : 'Show group details'}
+            aria-expanded={groupInfoOpen}
+            title="Group details — members, invites, mute, kick"
+          >
+            ⓘ
+          </button>
+        ) : null}
         {/* A 1:1 is the one conversation this build can call: the wire's invite names a single
             callee, and a group call needs the SFU this build does not have. */}
         <CallButtons conversationId={conversationId} peerId={peerId} onStartCall={startCall} />
@@ -412,6 +455,13 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
 
       {isRoom && roomInfoOpen && roomInfo !== null ? (
         <RoomInfoPanel roomId={roomInfo.roomId} conversationId={conversationId} />
+      ) : null}
+
+      {isGroup && groupInfoOpen ? (
+        <GroupInfoPanel
+          conversationId={conversationId}
+          title={summary?.title ?? 'Group'}
+        />
       ) : null}
 
       {loading && messages.length === 0 ? (
@@ -456,6 +506,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
           liveSlot={
             <>
               {isRoom ? <RoomNoticeList notices={roomNotices} /> : null}
+              {isGroup ? <RoomNoticeList notices={groupNotices} place="group" /> : null}
               <GameEventList
                 rows={game.rows}
                 views={game.views}
@@ -470,6 +521,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
           }
           liveRowCount={
             (isRoom ? roomNotices.length : 0) +
+            (isGroup ? groupNotices.length : 0) +
             game.rows.length +
             (game.activeGuess !== null ? 1 : 0)
           }

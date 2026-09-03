@@ -1933,3 +1933,48 @@ StatusInput) untuk dua kedudukan itu; keduanya tetap publish
 terkontrol penuh, dan di ponsel banner tetap satu baris ambient —
 input ikut baris @username yang menyembunyikan diri. Glyph baru:
 user-plus dan block.
+
+## 56. Group chat penuh: undang, mute, kick 51%, founder, ganti nama (v0.15.1)
+
+Group pernah berhenti di pembuatan: sekali dua orang lebih masuk,
+tidak ada jalan menambah, mengeluarkan, atau mengganti nama. Sekarang
+satu siklus hidup utuh berdiri di atas sepuluh opcode baru (43 sampai
+52), dengan tiga aliran acara langsung — member, vote, state — yang
+semuanya Coalescable per percakapan kecuali member event yang tidak
+boleh digabung.
+
+Semantiknya meniru room sampai ke tempat kedua sistem itu memang
+berbeda. Dua founder — pembuat dan orang pertama yang dinamainya —
+adalah ingatan grup siapa yang membangunnya: mengundang adalah hak
+tiap anggota, sedangkan mute, kick tanpa voting, dan ganti nama
+adalah milik founder, dan founder tak tersentuh satu sama lain maupun
+oleh voting (VOTE_TARGET_IMMUNE) — grup yang dibangun dua orang tidak
+bisa dipotong separuh oleh salah satunya. Vote kick butuh mayoritas
+ketat setengah anggota dibulatkan ke atas, satu voting terbuka per
+grup, TTL 60 detik yang ditutup secara malas, dan anggota yang
+dimute tetap memilih. Keluar adalah hak tanpa pintu gerbang: founder
+terakhir yang pergi diam-diam menyerahkan peran pada anggota
+terlama, jadi grup tak pernah kehabisan orang yang boleh mengganti
+namanya. Mute ditegakkan di send (codes MUTED) tanpa fanout — roster
+adalah catatannya — dan rename menaiki State event yang digabung.
+
+Panel grup (ⓘ di header) menyatukan semuanya: undang lewat daftar
+teman maupun pencarian username (dua sumber yang sama dengan dialog
+percakapan baru, "In group" bagi yang sudah masuk), roster dengan
+badge Founder/Member dan catatan mute yang sedang jalan, tombol
+Mute 1 jam / 1 hari / 7 hari plus Unmute, Vote kick dengan tally
+langsung, Kick founder dengan konfirmasi, ganti nama, dan Leave
+Group. Keluar atau dikeluarkan menutup thread dan menghapus barisnya;
+pergerakan anggota muncul sebagai baris ambient di transkrip
+("Ana joined the group") lewat proyeksi place yang sama dengan room,
+dan setiap member event memutar sender key — churn keanggotaan adalah
+peristiwa kripto sebelum menjadi peristiwa UI.
+
+Server: 46 test messaging, 55 contract postgres (plus satu bug nyata
+yang ditemukannya: postgres menyemai role 0 = Unknown pada
+insert_members, kini fail-closed ke Member), dan gerbang push-only
+gateway menerima tiga opcode s2c baru. SDK: ConversationsDomain
+memanjang dari 2 menjadi 9 metode plus tiga stream listener dengan
+start/stop. Web: 313 test termasuk gerbang founder/vote/mute yang
+dipinkan murni dan proyeksi member/state pada daftar percakapan.
+Registri section 145 dan enum ConversationRole masuk migo.md.

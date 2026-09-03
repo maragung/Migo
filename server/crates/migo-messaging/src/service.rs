@@ -54,6 +54,7 @@
 //! *No presence.* Whether a recipient is online changes what the gateway does with
 //! a [`Fanout`], not whether one is produced.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -62,13 +63,19 @@ use migo_cache::{Cache, SharedCache, Ttl};
 use migo_core::metrics::Registry;
 use migo_core::{Id, OsRandom, Random, Result, Timestamp};
 use migo_protocol::{
-    codes, fault, ConversationCreateRequest, ConversationKind, ConversationListRequest,
-    ConversationListResponse, ConversationSummary, EncryptionMode, MessageAccepted, MessageDelete,
-    MessageEvent, MessageKind, MessageReceipt, MessageSend, Opcode, ReceiptKind, SyncRequest,
-    SyncResponse, SyncStatus, TypingEvent, TypingState,
+    codes, fault, ConversationCreateRequest, ConversationInviteRequest, ConversationKickRequest,
+    ConversationKind, ConversationLeaveRequest, ConversationListRequest, ConversationListResponse,
+    ConversationMemberEvent, ConversationMuteRequest, ConversationRole, ConversationRosterEntry,
+    ConversationRosterRequest, ConversationRosterResponse, ConversationStateEvent,
+    ConversationSummary, ConversationUpdateRequest, ConversationVoteEvent,
+    ConversationVoteKickRequest, ConversationVoteKickResponse, EncryptionMode, MemberChange,
+    MessageAccepted, MessageDelete, MessageEvent, MessageKind, MessageReceipt, MessageSend, Opcode,
+    ReceiptKind, SyncRequest, SyncResponse, SyncStatus, TypingEvent, TypingState,
 };
 use migo_ratelimit::{BucketKey, RateLimiter, SharedRateLimiter};
-use migo_store::model::{Appended, Conversation, Cursor, NewMessage, StoredMessage};
+use migo_store::model::{
+    Appended, Conversation, ConversationMember, Cursor, NewMessage, StoredMessage,
+};
 use migo_store::traits::{clamp_limit, MessagingStore, SocialStore};
 use migo_store::{SharedStore, Store};
 use migo_wire::limits::MAX_BYTES_LEN;
@@ -78,8 +85,8 @@ use crate::cursor;
 use crate::fanout::{Broadcast, Fanout};
 use crate::metrics::{Meters, SendOutcome, SyncOutcome};
 use crate::model::{
-    Caller, DEFAULT_CONVERSATION_PAGE, MAX_EXPIRY_MS, MAX_GROUP_MEMBERS, MEMBER_PREVIEW,
-    TYPING_TTL_MS,
+    Caller, DEFAULT_CONVERSATION_PAGE, MAX_EXPIRY_MS, MAX_GROUP_MEMBERS, MAX_TITLE_LEN,
+    MEMBER_PREVIEW, TYPING_TTL_MS, VOTE_TTL_MS,
 };
 use crate::traits::Messaging;
 
@@ -103,6 +110,32 @@ pub struct Messages<S: ?Sized = dyn Store, C: ?Sized = dyn Cache, L: ?Sized = dy
     /// which is what keeps a mutex off the critical path of a scheduler.
     random: Mutex<Box<dyn Random>>,
     meters: Meters,
+    /// The group kick votes currently open, keyed by conversation. One question
+    /// at a time per group; see [`OpenVote`] for the lazy expiry that keeps this
+    /// map from holding a vote nobody is answering.
+    votes: Mutex<HashMap<Id, OpenVote>>,
+}
+
+/// A group kick vote in flight.
+struct OpenVote {
+    /// Who the vote would remove.
+    target: Id,
+    /// Who has voted, deduplicated by account: the same voice twice is the same
+    /// voice once, and the tally must not move for a retry.
+    voters: HashSet<Id>,
+    /// When the vote opened, for the lazy expiry.
+    opened_at: Timestamp,
+}
+
+impl OpenVote {
+    /// Whether this vote has outlived [`VOTE_TTL_MS`] with no new voice.
+    ///
+    /// Strictly greater, so a vote is alive for its whole sixtieth second — the
+    /// same edge a room's vote takes, and the one a client counting along at
+    /// home expects.
+    fn expired(&self, now: Timestamp) -> bool {
+        now.as_millis().saturating_sub(self.opened_at.as_millis()) > VOTE_TTL_MS
+    }
 }
 
 /// Builds the messaging service over the shared backends.
@@ -153,6 +186,7 @@ where
             limiter,
             random: Mutex::new(random),
             meters: Meters::new(registry),
+            votes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -256,6 +290,86 @@ where
         Ok(())
     }
 
+    /// The gateway never produces one. It is checked anyway because a nil account
+    /// id would be a membership row shared by every unauthenticated request, and a
+    /// nil device id would make the fanout exclusion match somebody else's socket.
+    /// Every group operation needs the pair for the same reason a room's does.
+    fn require_identity(caller: &Caller) -> Result<()> {
+        if caller.account_id.is_nil() || caller.device_id.is_nil() {
+            return Err(fault::unauthenticated(
+                "groups need an identified account and device",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refuses a group operation on anything that is not a group.
+    ///
+    /// A direct conversation has exactly its two members and no way to grow; a
+    /// room's membership belongs to the room service, which owns the join policy
+    /// and the moderation surface that admit people. Letting either through here
+    /// would write a membership row no other surface can explain.
+    fn require_group(conversation: &Conversation) -> Result<()> {
+        if conversation.kind == ConversationKind::Group {
+            return Ok(());
+        }
+        Err(fault::validation(
+            "kind",
+            "this is a group operation; a direct conversation has no third member, and a room's membership belongs to the room service",
+        ))
+    }
+
+    /// One member's active row, if they hold one.
+    ///
+    /// Membership is tombstoned rather than deleted, so "is in the group" and
+    /// "has a row" are different questions and every permission check here must
+    /// ask the first one.
+    fn active_row(members: &[ConversationMember], account_id: Id) -> Option<&ConversationMember> {
+        members
+            .iter()
+            .find(|m| m.account_id == account_id && m.left_at.is_none())
+    }
+
+    /// The conversation as the caller's list row will show it, read back from the
+    /// store rather than assembled from the request.
+    ///
+    /// The store is the one truth for a summary: a response that could disagree
+    /// with the next list read is a flicker in the UI and a bug that reproduces
+    /// once. The two reads this costs are on operations a human performs one at a
+    /// time — invite, rename — and never on the send path.
+    async fn summary_for(
+        &self,
+        caller: &Caller,
+        conversation: &Conversation,
+    ) -> Result<ConversationSummary> {
+        let cursor = self
+            .store
+            .cursor(conversation.conversation_id, caller.account_id)
+            .await?;
+        let members = self.store.members(conversation.conversation_id).await?;
+        let me = Self::active_row(&members, caller.account_id);
+        let mut ids: Vec<Id> = members
+            .iter()
+            .filter(|m| m.left_at.is_none())
+            .map(|m| m.account_id)
+            .collect();
+        ids.sort_unstable();
+        Ok(ConversationSummary {
+            conversation_id: conversation.conversation_id,
+            kind: conversation.kind,
+            encryption: conversation.encryption,
+            last_seq: conversation.last_seq.max(0) as u64,
+            read_seq: cursor.read_seq.max(0) as u64,
+            title: conversation.title.clone(),
+            avatar_url: None,
+            members: Some(ids),
+            last_message: None,
+            muted_until: me.and_then(|m| m.muted_until),
+            pinned: me.map(|m| m.pinned).unwrap_or(false).then_some(true),
+            archived: conversation.archived_at.is_some().then_some(true),
+        })
+    }
+
     /// Refuses anything that writes into an archived conversation.
     ///
     /// A room gets `ROOM_ARCHIVED`, which the client already knows how to render
@@ -352,6 +466,31 @@ where
         {
             self.meters.send(SendOutcome::Blocked);
             return Err(error);
+        }
+        // A group's mute, enforced at the one moment it can be: the send. The
+        // founder's write landed on the membership row and this is that row's
+        // say. Only groups carry a mute, so the read never touches the send path
+        // of a direct conversation — and the group path already reads membership
+        // to answer the block question, so this is the same order of cost as a
+        // room checking sanctions on speak.
+        if conversation.kind == ConversationKind::Group {
+            let muted = self
+                .store
+                .members(request.conversation_id)
+                .await?
+                .iter()
+                .find(|m| m.account_id == caller.account_id)
+                .is_some_and(|m| {
+                    m.muted_until
+                        .is_some_and(|until| until.as_millis() > caller.now.as_millis())
+                });
+            if muted {
+                self.meters.send(SendOutcome::Muted);
+                return Err(fault::error(
+                    codes::MUTED,
+                    "the caller is muted in this group",
+                ));
+            }
         }
 
         // Taken before the envelope is moved into the store, because the duplicate
@@ -819,15 +958,31 @@ where
                 "a conversation needs somebody other than its creator",
             ));
         }
-        if let Some(title) = request.title.as_deref() {
-            if !title.trim().is_empty() {
-                // Refused rather than accepted and dropped. There is no column for
-                // it, so accepting would show the creator a title that vanishes on
-                // the next reload, and every other member would never see it at
-                // all. Rooms are what carry a name today.
-                return Err(fault::feature_disabled("conversation_title"));
-            }
-        }
+        // The title is a group's alone. A direct conversation's name is the other
+        // person — accepting a title there would store something no client would
+        // ever render — and a room's is the room's own, carried by the room.
+        let title = match request.title.as_deref() {
+            Some(raw) if !raw.trim().is_empty() => match request.kind {
+                ConversationKind::Group => {
+                    let trimmed = raw.trim();
+                    // `chars().count()` and not `len()`: the limit is what a person
+                    // typed, and a byte limit would give an Indonesian or Arabic
+                    // title half the room of an English one for no reason a user
+                    // could discover.
+                    if trimmed.chars().count() > MAX_TITLE_LEN {
+                        return Err(fault::field_too_long("title", MAX_TITLE_LEN));
+                    }
+                    Some(trimmed.to_owned())
+                }
+                _ => {
+                    return Err(fault::validation(
+                        "title",
+                        "only a group conversation carries a title",
+                    ));
+                }
+            },
+            _ => None,
+        };
 
         match request.kind {
             ConversationKind::Direct if others.len() != 1 => {
@@ -901,7 +1056,8 @@ where
             let mut members = Vec::with_capacity(others.len() + 1);
             members.push(caller.account_id);
             members.extend_from_slice(&others);
-            self.store
+            let conversation = self
+                .store
                 .create_conversation(
                     Conversation {
                         conversation_id,
@@ -916,10 +1072,29 @@ where
                         created_at: caller.now,
                         last_message_at: None,
                         archived_at: None,
+                        title: title.clone(),
                     },
                     members,
                 )
-                .await?
+                .await?;
+            // The creator and the first person they named are the group's two
+            // founders: the pair who may mute, kick, and rename without a vote.
+            // Everyone else the create call seated is a member, and `create`
+            // seats nobody as a founder, so the promotions are additions and not
+            // corrections. The store wrote the rows a moment ago; a missing row
+            // here is an internal state fault and not a client error.
+            for founder in [caller.account_id, others[0]] {
+                if !self
+                    .store
+                    .set_conversation_role(conversation_id, founder, ConversationRole::Founder)
+                    .await?
+                {
+                    return Err(fault::internal(
+                        "a founder row is missing right after creation",
+                    ));
+                }
+            }
+            conversation
         };
 
         // Read rather than assumed zero. A direct conversation that already
@@ -942,7 +1117,10 @@ where
             encryption: conversation.encryption,
             last_seq: conversation.last_seq.max(0) as u64,
             read_seq: cursor.read_seq.max(0) as u64,
-            title: None,
+            // The stored title, not the request's: a direct conversation ignores
+            // the field above, and this summary is also what the store reads back
+            // for every later list — one truth, read from the row.
+            title: conversation.title.clone(),
             avatar_url: None,
             members: Some(members),
             last_message: None,
@@ -950,6 +1128,623 @@ where
             pinned: None,
             archived: conversation.archived_at.is_some().then_some(true),
         })
+    }
+
+    async fn invite(
+        &self,
+        caller: &Caller,
+        request: ConversationInviteRequest,
+    ) -> Result<(ConversationSummary, Vec<Fanout>)> {
+        Self::require_identity(caller)?;
+        if request.conversation_id.is_nil() {
+            return Err(fault::field_required("conversation_id"));
+        }
+        if request.members.is_empty() {
+            return Err(fault::field_required("members"));
+        }
+        for member in &request.members {
+            if member.is_nil() {
+                return Err(fault::validation("members", "contains an empty identifier"));
+            }
+        }
+        self.charge(caller, Opcode::ConversationInvite).await?;
+        let conversation = self
+            .conversation_for(caller, request.conversation_id)
+            .await?;
+        Self::require_group(&conversation)?;
+        let members = self.store.members(request.conversation_id).await?;
+
+        // Already-seated names are dropped, not refused: two members inviting the
+        // same friend in the same second is a race both won, and neither needs an
+        // error for the other's timing. The caller's own id goes the same way —
+        // inviting yourself to a group you are in is a tautology.
+        let mut fresh: Vec<Id> = Vec::with_capacity(request.members.len());
+        for member in &request.members {
+            let seated = members
+                .iter()
+                .any(|m| m.account_id == *member && m.left_at.is_none());
+            if *member != caller.account_id && !seated && !fresh.contains(member) {
+                fresh.push(*member);
+            }
+        }
+        let active = members
+            .iter()
+            .filter(|m| m.left_at.is_none())
+            .count()
+            .max(1); // the caller is in it, so this is never zero in practice
+        if active + fresh.len() > MAX_GROUP_MEMBERS {
+            return Err(fault::error(
+                codes::GROUP_FULL,
+                "more members than a group may have",
+            ));
+        }
+
+        // Sequentially, and every name: same reason as the create call — stopping
+        // at the first block would leak which invitee blocked the caller through
+        // the ordering of the refusals.
+        for member in &fresh {
+            if self
+                .store
+                .is_blocked_either_way(caller.account_id, *member)
+                .await?
+            {
+                return Err(fault::error(
+                    codes::BLOCKED_BY_USER,
+                    "one of the proposed members has blocked the caller, or is blocked by them",
+                ));
+            }
+        }
+
+        // One frame per person actually seated, so clients rotate sender keys
+        // member by member. The count is the count after all the seats, because a
+        // client coalescing these still has to end on the truth.
+        let count = (active + fresh.len()) as u32;
+        let mut fanouts = Vec::with_capacity(fresh.len());
+        for member in &fresh {
+            self.store
+                .add_member(ConversationMember {
+                    conversation_id: request.conversation_id,
+                    account_id: *member,
+                    // Seated by invitation, never by inheritance: founders come
+                    // from the create call and the succession in `leave`, and an
+                    // invited member who could arrive a founder would make the
+                    // founder check a function of who happened to invite.
+                    role: ConversationRole::Member,
+                    joined_at: caller.now,
+                    left_at: None,
+                    muted_until: None,
+                    pinned: false,
+                })
+                .await?;
+            fanouts.push(Fanout::to_conversation(
+                request.conversation_id,
+                caller.device_id,
+                Broadcast::Member(ConversationMemberEvent {
+                    conversation_id: request.conversation_id,
+                    user_id: *member,
+                    change: MemberChange::Joined,
+                    member_count: count,
+                }),
+            ));
+        }
+
+        let summary = self.summary_for(caller, &conversation).await?;
+        Ok((summary, fanouts))
+    }
+
+    async fn leave(
+        &self,
+        caller: &Caller,
+        request: ConversationLeaveRequest,
+    ) -> Result<Vec<Fanout>> {
+        Self::require_identity(caller)?;
+        if request.conversation_id.is_nil() {
+            return Err(fault::field_required("conversation_id"));
+        }
+        self.charge(caller, Opcode::ConversationLeave).await?;
+        let conversation = self
+            .conversation_for(caller, request.conversation_id)
+            .await?;
+        Self::require_group(&conversation)?;
+        let members = self.store.members(request.conversation_id).await?;
+        let me = Self::active_row(&members, caller.account_id)
+            .ok_or_else(|| fault::not_found("conversation member"))?;
+
+        self.store
+            .remove_member(request.conversation_id, caller.account_id, caller.now)
+            .await?;
+
+        let remaining: Vec<&ConversationMember> = members
+            .iter()
+            .filter(|m| m.left_at.is_none() && m.account_id != caller.account_id)
+            .collect();
+        let count = remaining.len() as u32;
+
+        // The last founder out names a successor. Leaving is a right and founders
+        // are people, so a group can absolutely reach a state where its founders
+        // have all walked — but not a state where nobody can rename it or answer
+        // a report, which is what an unpromoted remainder would be. The heir is
+        // the longest-standing member, which is the closest thing a roster has to
+        // a memory of the group's own founding. No announcement: roles travel in
+        // the roster, and the next roster read is the truth.
+        if me.role == ConversationRole::Founder
+            && !remaining.is_empty()
+            && !remaining
+                .iter()
+                .any(|m| m.role == ConversationRole::Founder)
+        {
+            let heir = remaining
+                .iter()
+                .min_by_key(|m| m.joined_at)
+                .expect("non-empty by the check above");
+            if !self
+                .store
+                .set_conversation_role(
+                    request.conversation_id,
+                    heir.account_id,
+                    ConversationRole::Founder,
+                )
+                .await?
+            {
+                return Err(fault::internal(
+                    "the heir's membership row vanished between the read and the promotion",
+                ));
+            }
+        }
+
+        let mut fanouts = Vec::new();
+        // A vote aimed at the leaver closes as they go: the question it asked has
+        // answered itself, and a tally still running against an empty seat is a
+        // tally that could "pass" and remove nobody. The voters keep their record
+        // of it; the registry does not.
+        {
+            let mut votes = self.votes.lock();
+            if let Some(open) = votes.get(&request.conversation_id) {
+                if open.target == caller.account_id {
+                    let closed = votes
+                        .remove(&request.conversation_id)
+                        .expect("just checked present");
+                    fanouts.push(Fanout::unattributed(
+                        request.conversation_id,
+                        Broadcast::Vote(ConversationVoteEvent {
+                            conversation_id: request.conversation_id,
+                            target_id: closed.target,
+                            votes: closed.voters.len() as u32,
+                            needed: votes_needed(count),
+                            member_count: count,
+                            closed: Some(true),
+                        }),
+                    ));
+                }
+            }
+        }
+        fanouts.push(Fanout::to_conversation(
+            request.conversation_id,
+            caller.device_id,
+            Broadcast::Member(ConversationMemberEvent {
+                conversation_id: request.conversation_id,
+                user_id: caller.account_id,
+                change: MemberChange::Left,
+                member_count: count,
+            }),
+        ));
+        Ok(fanouts)
+    }
+
+    async fn roster(
+        &self,
+        caller: &Caller,
+        request: ConversationRosterRequest,
+    ) -> Result<ConversationRosterResponse> {
+        Self::require_identity(caller)?;
+        if request.conversation_id.is_nil() {
+            return Err(fault::field_required("conversation_id"));
+        }
+        self.charge(caller, Opcode::ConversationRoster).await?;
+        // `conversation_for` is the whole authorization: a roster is the
+        // membership list, and a membership list is not a public fact.
+        self.conversation_for(caller, request.conversation_id)
+            .await?;
+        let mut members = self.store.members(request.conversation_id).await?;
+        // Active first, by join time, then the departed in the order they left.
+        // The member a person reads a roster for is "who is here"; "who used to
+        // be" stays attributable underneath it, because history is.
+        members.sort_by(|a, b| {
+            (a.left_at.is_some(), a.joined_at).cmp(&(b.left_at.is_some(), b.joined_at))
+        });
+        Ok(ConversationRosterResponse {
+            entries: members
+                .into_iter()
+                .map(|m| ConversationRosterEntry {
+                    account_id: m.account_id,
+                    role: m.role,
+                    joined_at: m.joined_at,
+                    muted_until: m.muted_until,
+                    left_at: m.left_at,
+                })
+                .collect(),
+        })
+    }
+
+    async fn mute(&self, caller: &Caller, request: ConversationMuteRequest) -> Result<()> {
+        Self::require_identity(caller)?;
+        if request.conversation_id.is_nil() {
+            return Err(fault::field_required("conversation_id"));
+        }
+        if request.target_id.is_nil() {
+            return Err(fault::field_required("target_id"));
+        }
+        if request.target_id == caller.account_id {
+            return Err(fault::validation(
+                "target_id",
+                "a founder cannot mute themselves",
+            ));
+        }
+        if request
+            .until
+            .is_some_and(|until| until.as_millis() <= caller.now.as_millis())
+        {
+            return Err(fault::validation("until", "a mute must end in the future"));
+        }
+        self.charge(caller, Opcode::ConversationMute).await?;
+        let conversation = self
+            .conversation_for(caller, request.conversation_id)
+            .await?;
+        Self::require_group(&conversation)?;
+        let members = self.store.members(request.conversation_id).await?;
+        let me = Self::active_row(&members, caller.account_id)
+            .ok_or_else(|| fault::not_found("conversation member"))?;
+        if me.role != ConversationRole::Founder {
+            return Err(fault::permission_denied("only a founder may mute a member"));
+        }
+        let target = Self::active_row(&members, request.target_id)
+            .ok_or_else(|| fault::not_found("conversation member"))?;
+        if target.role == ConversationRole::Founder {
+            return Err(fault::permission_denied(
+                "the other founder is beyond a mute",
+            ));
+        }
+        if !self
+            .store
+            .set_conversation_mute(request.conversation_id, request.target_id, request.until)
+            .await?
+        {
+            return Err(fault::not_found("conversation member"));
+        }
+        // No frame. A mute is between a founder and one member, and announcing
+        // it to the group turns a correction into a spectacle — the same call the
+        // room service makes about its mutes, for the same reason. The member
+        // learns of it from the send that refuses them and the roster that shows
+        // the expiry.
+        Ok(())
+    }
+
+    async fn kick(&self, caller: &Caller, request: ConversationKickRequest) -> Result<Vec<Fanout>> {
+        Self::require_identity(caller)?;
+        if request.conversation_id.is_nil() {
+            return Err(fault::field_required("conversation_id"));
+        }
+        if request.target_id.is_nil() {
+            return Err(fault::field_required("target_id"));
+        }
+        if request.target_id == caller.account_id {
+            return Err(fault::conflict(
+                "a founder cannot be kicked by their own hand",
+            ));
+        }
+        self.charge(caller, Opcode::ConversationKick).await?;
+        let conversation = self
+            .conversation_for(caller, request.conversation_id)
+            .await?;
+        Self::require_group(&conversation)?;
+        let members = self.store.members(request.conversation_id).await?;
+        let me = Self::active_row(&members, caller.account_id)
+            .ok_or_else(|| fault::not_found("conversation member"))?;
+        if me.role != ConversationRole::Founder {
+            return Err(fault::permission_denied(
+                "only a founder may remove a member outright",
+            ));
+        }
+        let target = Self::active_row(&members, request.target_id)
+            .ok_or_else(|| fault::not_found("conversation member"))?;
+        // The pair exists so that neither founder alone is the group. A founder
+        // the other founder could remove would be a member with extra chores.
+        if target.role == ConversationRole::Founder {
+            return Err(fault::permission_denied(
+                "the other founder is beyond a founder's kick",
+            ));
+        }
+
+        self.store
+            .remove_member(request.conversation_id, request.target_id, caller.now)
+            .await?;
+        let count = members
+            .iter()
+            .filter(|m| m.left_at.is_none() && m.account_id != request.target_id)
+            .count() as u32;
+
+        let mut fanouts = Vec::new();
+        // A vote running against the target is moot now, and it closes with the
+        // same frame an expiry gets: a `closed` tally, not a silent drop, so a
+        // client still rendering the running count stops.
+        {
+            let mut votes = self.votes.lock();
+            if let Some(open) = votes.get(&request.conversation_id) {
+                if open.target == request.target_id {
+                    let closed = votes
+                        .remove(&request.conversation_id)
+                        .expect("just checked present");
+                    fanouts.push(Fanout::unattributed(
+                        request.conversation_id,
+                        Broadcast::Vote(ConversationVoteEvent {
+                            conversation_id: request.conversation_id,
+                            target_id: closed.target,
+                            votes: closed.voters.len() as u32,
+                            needed: votes_needed(count),
+                            member_count: count,
+                            closed: Some(true),
+                        }),
+                    ));
+                }
+            }
+        }
+        // `Kicked` and not `Left`: a client that could not tell a removal from a
+        // departure could not colour the two differently in its roster.
+        fanouts.push(Fanout::to_conversation(
+            request.conversation_id,
+            caller.device_id,
+            Broadcast::Member(ConversationMemberEvent {
+                conversation_id: request.conversation_id,
+                user_id: request.target_id,
+                change: MemberChange::Kicked,
+                member_count: count,
+            }),
+        ));
+        Ok(fanouts)
+    }
+
+    async fn vote_kick(
+        &self,
+        caller: &Caller,
+        request: ConversationVoteKickRequest,
+    ) -> Result<(ConversationVoteKickResponse, Vec<Fanout>)> {
+        Self::require_identity(caller)?;
+        if request.conversation_id.is_nil() {
+            return Err(fault::field_required("conversation_id"));
+        }
+        if request.target_id.is_nil() {
+            return Err(fault::field_required("target_id"));
+        }
+        if request.target_id == caller.account_id {
+            return Err(fault::conflict("a vote cannot be aimed at its own voter"));
+        }
+        self.charge(caller, Opcode::ConversationVoteKick).await?;
+        let conversation = self
+            .conversation_for(caller, request.conversation_id)
+            .await?;
+        Self::require_group(&conversation)?;
+        let members = self.store.members(request.conversation_id).await?;
+
+        // No role check on the caller: the vote is the one lever ordinary members
+        // hold, and gating it on the founder's role would reduce it to a button
+        // the founders could have pressed on their own. A muted member keeps
+        // their voice for the same reason — a mute silences what they say, not
+        // how they may vote about the group they are in.
+        let target = Self::active_row(&members, request.target_id)
+            .ok_or_else(|| fault::not_found("conversation member"))?;
+        if target.role == ConversationRole::Founder {
+            return Err(fault::error(
+                codes::VOTE_TARGET_IMMUNE,
+                "a group's founders cannot be voted out",
+            ));
+        }
+        let member_count = members.iter().filter(|m| m.left_at.is_none()).count() as u32;
+        let needed = votes_needed(member_count);
+
+        let mut fanouts = Vec::new();
+        let response;
+        let mut passed = false;
+        {
+            let mut votes = self.votes.lock();
+            // The lazy expiry. A vote nobody finished is dropped the moment the
+            // group sees another one, and the group is told it closed — a client
+            // still rendering the old tally would otherwise show a question the
+            // server has stopped asking. No timer exists and none is needed.
+            if let Some(open) = votes.get(&request.conversation_id) {
+                if open.expired(caller.now) {
+                    let closed = votes
+                        .remove(&request.conversation_id)
+                        .expect("just checked present");
+                    fanouts.push(Fanout::unattributed(
+                        request.conversation_id,
+                        Broadcast::Vote(ConversationVoteEvent {
+                            conversation_id: request.conversation_id,
+                            target_id: closed.target,
+                            votes: closed.voters.len() as u32,
+                            needed,
+                            member_count,
+                            closed: Some(true),
+                        }),
+                    ));
+                }
+            }
+            match votes.get_mut(&request.conversation_id) {
+                Some(open) if open.target == request.target_id => {
+                    if !open.voters.insert(caller.account_id) {
+                        // The same voice twice. The tally did not move, so nothing
+                        // is published — the retry gets the same answer the first
+                        // call got, and no other member's screen moves.
+                        return Ok((
+                            ConversationVoteKickResponse {
+                                votes: open.voters.len() as u32,
+                                needed,
+                                member_count,
+                                open: true,
+                            },
+                            fanouts,
+                        ));
+                    }
+                    let count = open.voters.len() as u32;
+                    if count >= needed {
+                        // Passed. The registry entry is dropped here, inside the
+                        // lock, so a second vote starting while the kick's writes
+                        // run cannot see a tally that has already decided; the
+                        // writes themselves happen outside it.
+                        votes.remove(&request.conversation_id);
+                        passed = true;
+                        response = ConversationVoteKickResponse {
+                            votes: count,
+                            needed,
+                            member_count,
+                            open: false,
+                        };
+                    } else {
+                        response = ConversationVoteKickResponse {
+                            votes: count,
+                            needed,
+                            member_count,
+                            open: true,
+                        };
+                        fanouts.push(Fanout::to_conversation(
+                            request.conversation_id,
+                            caller.device_id,
+                            Broadcast::Vote(ConversationVoteEvent {
+                                conversation_id: request.conversation_id,
+                                target_id: request.target_id,
+                                votes: count,
+                                needed,
+                                member_count,
+                                closed: None,
+                            }),
+                        ));
+                    }
+                }
+                Some(_) => {
+                    // One question at a time per group: two interleaved tallies
+                    // would let a faction split the group's attention and pass
+                    // the one nobody was counting.
+                    return Err(fault::error(
+                        codes::VOTE_ALREADY_OPEN,
+                        "another kick vote is already open in this group",
+                    ));
+                }
+                None => {
+                    let mut voters = HashSet::new();
+                    voters.insert(caller.account_id);
+                    votes.insert(
+                        request.conversation_id,
+                        OpenVote {
+                            target: request.target_id,
+                            voters,
+                            opened_at: caller.now,
+                        },
+                    );
+                    response = ConversationVoteKickResponse {
+                        votes: 1,
+                        needed,
+                        member_count,
+                        open: true,
+                    };
+                    fanouts.push(Fanout::to_conversation(
+                        request.conversation_id,
+                        caller.device_id,
+                        Broadcast::Vote(ConversationVoteEvent {
+                            conversation_id: request.conversation_id,
+                            target_id: request.target_id,
+                            votes: 1,
+                            needed,
+                            member_count,
+                            closed: None,
+                        }),
+                    ));
+                }
+            }
+        }
+        if passed {
+            // Outside the lock: this is a store write, and holding a mutex across
+            // an await would put the registry on a scheduler's critical path.
+            self.store
+                .remove_member(request.conversation_id, request.target_id, caller.now)
+                .await?;
+            let count = member_count.saturating_sub(1);
+            // The member event is the tally's closing: a `ConversationVoteEvent`
+            // with `closed: false` would tell the group a vote ended, and the
+            // removal it caused says that already, in the frame every client
+            // renders. A client watching the tally sees it stop at `open: true`
+            // and the member go in the same breath.
+            fanouts.push(Fanout::to_conversation(
+                request.conversation_id,
+                caller.device_id,
+                Broadcast::Member(ConversationMemberEvent {
+                    conversation_id: request.conversation_id,
+                    user_id: request.target_id,
+                    change: MemberChange::Kicked,
+                    member_count: count,
+                }),
+            ));
+        }
+        Ok((response, fanouts))
+    }
+
+    async fn update(
+        &self,
+        caller: &Caller,
+        request: ConversationUpdateRequest,
+    ) -> Result<(ConversationSummary, Option<Fanout>)> {
+        Self::require_identity(caller)?;
+        if request.conversation_id.is_nil() {
+            return Err(fault::field_required("conversation_id"));
+        }
+        let Some(raw) = request.title.as_deref() else {
+            return Err(fault::field_required("title"));
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(fault::validation(
+                "title",
+                "a group's title cannot be empty",
+            ));
+        }
+        if trimmed.chars().count() > MAX_TITLE_LEN {
+            return Err(fault::field_too_long("title", MAX_TITLE_LEN));
+        }
+        self.charge(caller, Opcode::ConversationUpdate).await?;
+        let conversation = self
+            .conversation_for(caller, request.conversation_id)
+            .await?;
+        Self::require_group(&conversation)?;
+        let members = self.store.members(request.conversation_id).await?;
+        let me = Self::active_row(&members, caller.account_id)
+            .ok_or_else(|| fault::not_found("conversation member"))?;
+        if me.role != ConversationRole::Founder {
+            return Err(fault::permission_denied(
+                "only a founder may rename a group",
+            ));
+        }
+        if !self
+            .store
+            .set_conversation_title(request.conversation_id, Some(trimmed))
+            .await?
+        {
+            return Err(fault::not_found("conversation"));
+        }
+
+        let mut renamed = conversation.clone();
+        renamed.title = Some(trimmed.to_owned());
+        let summary = self.summary_for(caller, &renamed).await?;
+        // The state event is the rename's delivery: deltas only, coalesced per
+        // conversation, exactly the way a room's rename travels. A member who was
+        // offline for it reads the title from their next list, so the event has
+        // to be right for the members who are present and no more.
+        let fanout = Fanout::to_conversation(
+            request.conversation_id,
+            caller.device_id,
+            Broadcast::State(ConversationStateEvent {
+                conversation_id: request.conversation_id,
+                title: Some(trimmed.to_owned()),
+            }),
+        );
+        Ok((summary, Some(fanout)))
     }
 
     async fn typing(&self, caller: &Caller, request: TypingEvent) -> Result<Option<Fanout>> {
@@ -1173,6 +1968,23 @@ impl SendFingerprint {
 /// needs a signed URL, which `migo-media` mints and which brief section 174
 /// forbids from reaching a log — so it is minted at the edge, close to the
 /// response, and not carried through a domain layer that logs.
+/// Voices a group kick needs, from a roster of `member_count`.
+///
+/// Half the group rounded up, with a floor of two — the same arithmetic a room's
+/// vote uses, because the user's rule is "like in room" and a group deserves the
+/// same discipline. The floor keeps a group of one from voting, for the same
+/// reason it keeps a room of one from voting: the only person a sole member
+/// could name is themselves, and self-removal is what
+/// [`Messaging::leave`] is for.
+#[must_use]
+pub const fn votes_needed(member_count: u32) -> u32 {
+    if member_count < 2 {
+        2
+    } else {
+        member_count.div_ceil(2)
+    }
+}
+
 fn summary_of(row: &migo_store::model::ConversationSummary) -> ConversationSummary {
     ConversationSummary {
         conversation_id: row.conversation.conversation_id,
@@ -1180,7 +1992,7 @@ fn summary_of(row: &migo_store::model::ConversationSummary) -> ConversationSumma
         encryption: row.conversation.encryption,
         last_seq: row.conversation.last_seq.max(0) as u64,
         read_seq: row.cursor.read_seq.max(0) as u64,
-        title: None,
+        title: row.conversation.title.clone(),
         avatar_url: None,
         members: Some(row.members.clone()),
         last_message: row.last_message.as_ref().map(event_of),

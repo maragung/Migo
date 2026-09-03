@@ -41,3 +41,8 @@ test('an unresolved name becomes "Someone", never a blank or an id', () => {
   assert.equal(memberNotice(MemberChange.Kicked, '   '), 'Someone was kicked');
   assert.equal(memberNotice(undefined, '', false), 'Someone left');
 });
+
+test('the place names where it happened, so the same projection serves groups', () => {
+  assert.equal(memberNotice(MemberChange.Joined, 'Ana', true, 'group'), 'Ana joined the group');
+  assert.equal(memberNotice(undefined, 'Ana', false, 'group'), 'Ana left');
+});

@@ -4128,6 +4128,16 @@ Opcode yang sudah ada di schema. STATUS: SCHEMA. Format setiap baris: nomor, nam
 37 CONVERSATION_LIST, client ke server, User, 3, Critical
 38 CONVERSATION_CREATE, client ke server, User, 10, Critical
 39 TYPING, dua arah, User, 1, Coalescable
+43 CONVERSATION_INVITE, client ke server, User, 5, Critical
+44 CONVERSATION_LEAVE, client ke server, User, 2, Critical
+45 CONVERSATION_ROSTER, client ke server, User, 1, Critical
+46 CONVERSATION_MUTE, client ke server, User, 5, Critical
+47 CONVERSATION_KICK, client ke server, User, 5, Critical
+48 CONVERSATION_VOTE_KICK, client ke server, User, 5, Critical
+49 CONVERSATION_VOTE_EVENT, server ke client, User, 0, Coalescable
+50 CONVERSATION_MEMBER_EVENT, server ke client, User, 0, Coalescable
+51 CONVERSATION_UPDATE, client ke server, User, 5, Critical
+52 CONVERSATION_STATE_EVENT, server ke client, User, 0, Coalescable
 64 PRESENCE_SET, client ke server, User, 1, Coalescable
 65 PRESENCE_EVENT, server ke client, User, 0, Coalescable
 80 ROOM_JOIN, client ke server, User, 20, Critical
@@ -4260,6 +4270,7 @@ SyncStatus: Unknown, Ok, Truncated
 TopicKind: Unknown, Conversation, Room, User, Game
 RoomKind: Unknown, Public, Managed
 RoomRole: Unknown, Member, Helper, Moderator, Admin, Manager, Owner
+ConversationRole: Unknown, Member, Founder
 MemberChange: Unknown, Joined, Left, Disconnected, Reconnected, Kicked, Banned
 SanctionAction: Unknown, Mute, Unmute, Kick, Ban, Unban
 NotificationKind: Unknown, Message, Mention, Reply, FriendRequest, Gift, LevelUp, Achievement, RoomInvite, RoomAnnouncement, Event, GameChallenge

@@ -21,13 +21,16 @@
 //! [`bytes::Bytes`]: https://docs.rs/bytes/latest/bytes/struct.Bytes.html
 
 use migo_core::Id;
-use migo_protocol::{MessageEvent, MessageReceipt, Opcode, TypingEvent};
+use migo_protocol::{
+    ConversationMemberEvent, ConversationStateEvent, ConversationVoteEvent, MessageEvent,
+    MessageReceipt, Opcode, TypingEvent,
+};
 
 /// One thing to broadcast to a conversation.
 ///
-/// An enum rather than three methods returning three types, because the caller's
-/// job — encode once, publish to a topic, honour the opcode's delivery class — is
-/// identical for all three, and the only thing that varies is the payload.
+/// An enum rather than a method per payload, because the caller's job — encode
+/// once, publish to a topic, honour the opcode's delivery class — is identical
+/// for all of them, and the only thing that varies is the payload.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Broadcast {
     /// A new message, or a tombstone for one that was deleted.
@@ -36,6 +39,14 @@ pub enum Broadcast {
     Receipt(MessageReceipt),
     /// Somebody started or stopped typing.
     Typing(TypingEvent),
+    /// A group's membership moved. Clients rotate sender keys on every one of
+    /// these, so it is never coalesced away into a count: *who* joined or left
+    /// is the fact, not just that the roster changed size.
+    Member(ConversationMemberEvent),
+    /// A running group kick vote's tally.
+    Vote(ConversationVoteEvent),
+    /// Group metadata moved: a rename. Deltas only, coalesced per conversation.
+    State(ConversationStateEvent),
 }
 
 impl Broadcast {
@@ -52,6 +63,9 @@ impl Broadcast {
             Self::Message(_) => Opcode::MessageEvent,
             Self::Receipt(_) => Opcode::MessageReceipt,
             Self::Typing(_) => Opcode::Typing,
+            Self::Member(_) => Opcode::ConversationMemberEvent,
+            Self::Vote(_) => Opcode::ConversationVoteEvent,
+            Self::State(_) => Opcode::ConversationStateEvent,
         }
     }
 }
@@ -89,6 +103,18 @@ impl Fanout {
         Self {
             conversation_id,
             exclude_device: Some(device_id),
+            event,
+        }
+    }
+
+    /// A broadcast nobody's socket caused, so nobody is excluded: a vote that
+    /// expired unanswered, or a grace timer that fired. Every subscriber hears
+    /// it, including the device whose action opened the vote in the first place.
+    #[must_use]
+    pub fn unattributed(conversation_id: Id, event: Broadcast) -> Self {
+        Self {
+            conversation_id,
+            exclude_device: None,
             event,
         }
     }

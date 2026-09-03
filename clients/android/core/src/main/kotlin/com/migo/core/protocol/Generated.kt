@@ -165,6 +165,8 @@ object Code {
     const val ROOM_READ_ONLY_PARTITION: Long = 1702L
     const val MESH_AUTH_FAILED: Long = 1703L
     const val ROUTING_EPOCH_STALE: Long = 1704L
+    /** The group conversation is at its member cap */
+    const val GROUP_FULL: Long = 1512L
 
     /** Every code in this build, for exhaustive tests and registry dumps. */
     val ALL: LongArray = longArrayOf(
@@ -244,6 +246,7 @@ object Code {
         ROOM_READ_ONLY_PARTITION,
         MESH_AUTH_FAILED,
         ROUTING_EPOCH_STALE,
+        GROUP_FULL,
     )
 }
 
@@ -325,6 +328,7 @@ val ERROR_SYMBOLS: Map<Long, String> = mapOf(
     1702L to "ROOM_READ_ONLY_PARTITION",
     1703L to "MESH_AUTH_FAILED",
     1704L to "ROUTING_EPOCH_STALE",
+    1512L to "GROUP_FULL",
 )
 
 /** Suggested HTTP status for a code, for gateways that bridge to REST. */
@@ -405,6 +409,7 @@ val ERROR_HTTP_STATUS: Map<Long, Int> = mapOf(
     1702L to 503,
     1703L to 401,
     1704L to 409,
+    1512L to 400,
 )
 
 fun errorSymbol(code: Long): String? = ERROR_SYMBOLS[code]
@@ -867,6 +872,24 @@ enum class MlDsaPurpose(val wire: Int) {
             1L -> Login
             2L -> AddDevice
             3L -> Rotate
+            else -> Unknown
+        }
+    }
+}
+
+/** Role within a conversation. Groups have founders — the creator and the first member at creation — and everyone else is a member. The store's `role` smallint carries the same numbering, so a row written before groups existed (0) is renumbered to Member by migration 0008. */
+enum class ConversationRole(val wire: Int) {
+    Unknown(0),
+    Member(1),
+    Founder(2);
+
+    fun toWire(): Int = wire
+
+    companion object {
+        /** Unknown discriminants decode to [Unknown] so a new variant never breaks an old peer. */
+        fun fromWire(value: Long): ConversationRole = when (value) {
+            1L -> Member
+            2L -> Founder
             else -> Unknown
         }
     }
@@ -7520,6 +7543,462 @@ data class MlDsaChallenge(
     }
 }
 
+/** Adds members to a group conversation. Any current member may invite; the new seats arrive as plain members. */
+data class ConversationInviteRequest(
+    val conversationId: Id,
+    val members: List<Id>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(conversationId)
+        w.listLen(members.size)
+        for (item in members) { w.id(item) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ConversationInviteRequest {
+            r.enter()
+            val conversationId = r.id()
+            val members = run { val n = r.listLen(); val acc = ArrayList<Id>(n); for (i in 0 until n) acc.add(r.id()); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return ConversationInviteRequest(conversationId, members)
+        }
+    }
+}
+
+/** The caller leaves a group conversation. Membership is tombstoned, not deleted, so history stays attributable. */
+data class ConversationLeaveRequest(
+    val conversationId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(conversationId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ConversationLeaveRequest {
+            r.enter()
+            val conversationId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return ConversationLeaveRequest(conversationId)
+        }
+    }
+}
+
+data class ConversationRosterRequest(
+    val conversationId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(conversationId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ConversationRosterRequest {
+            r.enter()
+            val conversationId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return ConversationRosterRequest(conversationId)
+        }
+    }
+}
+
+/** One membership row as the group's roster sees it: the role, when they joined, and any group mute still running. */
+data class ConversationRosterEntry(
+    val accountId: Id,
+    val role: ConversationRole,
+    val joinedAt: Long,
+    /** Set by a founder: while it runs, the member cannot send to this group. */
+    val mutedUntil: Long? = null,
+    val leftAt: Long? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(accountId)
+        w.u32(role.toWire())
+        w.timestamp(joinedAt)
+        var present = 0
+        if (mutedUntil != null) present++
+        if (leftAt != null) present++
+        w.u32(present)
+        if (mutedUntil != null) {
+            val value = mutedUntil
+            w.optional(1) { w ->
+                w.timestamp(value)
+            }
+        }
+        if (leftAt != null) {
+            val value = leftAt
+            w.optional(2) { w ->
+                w.timestamp(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ConversationRosterEntry {
+            r.enter()
+            val accountId = r.id()
+            val role = ConversationRole.fromWire(r.u32())
+            val joinedAt = r.timestamp()
+            var mutedUntil: Long? = null
+            var leftAt: Long? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> mutedUntil = sub.timestamp()
+                    2L -> leftAt = sub.timestamp()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return ConversationRosterEntry(accountId, role, joinedAt, mutedUntil, leftAt)
+        }
+    }
+}
+
+data class ConversationRosterResponse(
+    val entries: List<ConversationRosterEntry>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(entries.size)
+        for (item in entries) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ConversationRosterResponse {
+            r.enter()
+            val entries = run { val n = r.listLen(); val acc = ArrayList<ConversationRosterEntry>(n); for (i in 0 until n) acc.add(ConversationRosterEntry.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return ConversationRosterResponse(entries)
+        }
+    }
+}
+
+/** A founder mutes or unmutes one member of a group. `until` absent lifts the mute. */
+data class ConversationMuteRequest(
+    val conversationId: Id,
+    val targetId: Id,
+    val until: Long? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(conversationId)
+        w.id(targetId)
+        var present = 0
+        if (until != null) present++
+        w.u32(present)
+        if (until != null) {
+            val value = until
+            w.optional(1) { w ->
+                w.timestamp(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ConversationMuteRequest {
+            r.enter()
+            val conversationId = r.id()
+            val targetId = r.id()
+            var until: Long? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> until = sub.timestamp()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return ConversationMuteRequest(conversationId, targetId, until)
+        }
+    }
+}
+
+/** A founder removes a member outright, no vote. The other founder is beyond this reach. */
+data class ConversationKickRequest(
+    val conversationId: Id,
+    val targetId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(conversationId)
+        w.id(targetId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ConversationKickRequest {
+            r.enter()
+            val conversationId = r.id()
+            val targetId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return ConversationKickRequest(conversationId, targetId)
+        }
+    }
+}
+
+/** Starts a kick vote in a group, or adds the caller's voice to one already running. */
+data class ConversationVoteKickRequest(
+    val conversationId: Id,
+    val targetId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(conversationId)
+        w.id(targetId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ConversationVoteKickRequest {
+            r.enter()
+            val conversationId = r.id()
+            val targetId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return ConversationVoteKickRequest(conversationId, targetId)
+        }
+    }
+}
+
+/** The tally after this voice landed: `open` is false the moment the vote carries. */
+data class ConversationVoteKickResponse(
+    val votes: Long,
+    val needed: Long,
+    val memberCount: Long,
+    val open: Boolean,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u32(votes)
+        w.u32(needed)
+        w.u32(memberCount)
+        w.bool(open)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ConversationVoteKickResponse {
+            r.enter()
+            val votes = r.u32()
+            val needed = r.u32()
+            val memberCount = r.u32()
+            val open = r.bool()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return ConversationVoteKickResponse(votes, needed, memberCount, open)
+        }
+    }
+}
+
+/** A running group kick vote's tally, coalesced per conversation. */
+data class ConversationVoteEvent(
+    val conversationId: Id,
+    val targetId: Id,
+    val votes: Long,
+    val needed: Long,
+    val memberCount: Long,
+    /** True when the vote ended without passing (expired, or the target left). */
+    val closed: Boolean? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(conversationId)
+        w.id(targetId)
+        w.u32(votes)
+        w.u32(needed)
+        w.u32(memberCount)
+        var present = 0
+        if (closed != null) present++
+        w.u32(present)
+        if (closed != null) {
+            val value = closed
+            w.optional(1) { w ->
+                w.bool(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ConversationVoteEvent {
+            r.enter()
+            val conversationId = r.id()
+            val targetId = r.id()
+            val votes = r.u32()
+            val needed = r.u32()
+            val memberCount = r.u32()
+            var closed: Boolean? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> closed = sub.bool()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return ConversationVoteEvent(conversationId, targetId, votes, needed, memberCount, closed)
+        }
+    }
+}
+
+/** A group's membership moved: somebody joined, left, or was removed. Clients rotate sender keys on every one of these. */
+data class ConversationMemberEvent(
+    val conversationId: Id,
+    val userId: Id,
+    val change: MemberChange,
+    val memberCount: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(conversationId)
+        w.id(userId)
+        w.u32(change.toWire())
+        w.u32(memberCount)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ConversationMemberEvent {
+            r.enter()
+            val conversationId = r.id()
+            val userId = r.id()
+            val change = MemberChange.fromWire(r.u32())
+            val memberCount = r.u32()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return ConversationMemberEvent(conversationId, userId, change, memberCount)
+        }
+    }
+}
+
+/** A founder renames a group. Direct conversations carry no title to change. */
+data class ConversationUpdateRequest(
+    val conversationId: Id,
+    val title: String? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(conversationId)
+        var present = 0
+        if (title != null) present++
+        w.u32(present)
+        if (title != null) {
+            val value = title
+            w.optional(1) { w ->
+                w.str(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ConversationUpdateRequest {
+            r.enter()
+            val conversationId = r.id()
+            var title: String? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> title = sub.str()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return ConversationUpdateRequest(conversationId, title)
+        }
+    }
+}
+
+/** Coalesced group metadata, deltas only: a field is present when it changed. Membership counts ride the member events instead, which cannot be coalesced away. */
+data class ConversationStateEvent(
+    val conversationId: Id,
+    /** The group's title, sent when a founder renames it. */
+    val title: String? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(conversationId)
+        var present = 0
+        if (title != null) present++
+        w.u32(present)
+        if (title != null) {
+            val value = title
+            w.optional(1) { w ->
+                w.str(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): ConversationStateEvent {
+            r.enter()
+            val conversationId = r.id()
+            var title: String? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> title = sub.str()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return ConversationStateEvent(conversationId, title)
+        }
+    }
+}
+
 /** Delivery class, deciding what happens when a session queue is full. */
 enum class DeliveryClass { Critical, Coalescable, Droppable }
 /** Minimum session state an opcode requires. */
@@ -7557,6 +8036,24 @@ object Op {
     const val REACTION_SET: Long = 41L
     /** A reaction was added or removed. */
     const val REACTION_EVENT: Long = 42L
+    /** Adds members to a group. Any current member may invite, within the group size cap. */
+    const val CONVERSATION_INVITE: Long = 43L
+    /** Leaves a group conversation. The last founder out promotes the earliest remaining member. */
+    const val CONVERSATION_LEAVE: Long = 44L
+    /** Reads a conversation's member list with roles and mutes. */
+    const val CONVERSATION_ROSTER: Long = 45L
+    /** A founder mutes or unmutes one member of a group. A muted member's sends are refused. */
+    const val CONVERSATION_MUTE: Long = 46L
+    /** A founder removes a member outright, no vote. */
+    const val CONVERSATION_KICK: Long = 47L
+    /** Starts or joins a kick vote in a group. A strict majority of the members carries it. */
+    const val CONVERSATION_VOTE_KICK: Long = 48L
+    /** A group kick vote's running tally; the newest tally per conversation is the one that matters. */
+    const val CONVERSATION_VOTE_EVENT: Long = 49L
+    /** A group's membership moved. Clients rotate sender keys on every change. */
+    const val CONVERSATION_MEMBER_EVENT: Long = 50L
+    /** A founder renames a group. */
+    const val CONVERSATION_UPDATE: Long = 51L
     const val PRESENCE_SET: Long = 64L
     const val PRESENCE_EVENT: Long = 65L
     const val ROOM_JOIN: Long = 80L
@@ -7676,6 +8173,8 @@ object Op {
     const val CALL_SFU_JOIN: Long = 237L
     /** SFU group call state. */
     const val CALL_SFU_EVENT: Long = 238L
+    /** Group metadata moved: a rename. Deltas only, coalesced per conversation. */
+    const val CONVERSATION_STATE_EVENT: Long = 52L
 }
 
 /** Static metadata for one opcode: its rate-limit cost, delivery class, required auth, and shape. */
@@ -7714,6 +8213,15 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     40L to OpcodeMeta(40L, "MESSAGE_EDIT", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MessageEdit", "Acknowledged", null),
     41L to OpcodeMeta(41L, "REACTION_SET", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ReactionSet", "Acknowledged", null),
     42L to OpcodeMeta(42L, "REACTION_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ReactionEvent", null, "target_message_id"),
+    43L to OpcodeMeta(43L, "CONVERSATION_INVITE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationInviteRequest", "ConversationSummary", null),
+    44L to OpcodeMeta(44L, "CONVERSATION_LEAVE", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationLeaveRequest", "Acknowledged", null),
+    45L to OpcodeMeta(45L, "CONVERSATION_ROSTER", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationRosterRequest", "ConversationRosterResponse", null),
+    46L to OpcodeMeta(46L, "CONVERSATION_MUTE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationMuteRequest", "Acknowledged", null),
+    47L to OpcodeMeta(47L, "CONVERSATION_KICK", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationKickRequest", "Acknowledged", null),
+    48L to OpcodeMeta(48L, "CONVERSATION_VOTE_KICK", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationVoteKickRequest", "ConversationVoteKickResponse", null),
+    49L to OpcodeMeta(49L, "CONVERSATION_VOTE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ConversationVoteEvent", null, "conversation_id"),
+    50L to OpcodeMeta(50L, "CONVERSATION_MEMBER_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ConversationMemberEvent", null, "conversation_id"),
+    51L to OpcodeMeta(51L, "CONVERSATION_UPDATE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationUpdateRequest", "ConversationSummary", null),
     64L to OpcodeMeta(64L, "PRESENCE_SET", 1, DeliveryClass.Coalescable, AuthLevel.User, Direction.ClientToServer, false, "PresenceUpdate", "Acknowledged", null),
     65L to OpcodeMeta(65L, "PRESENCE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "PresenceEvent", null, "user_id"),
     80L to OpcodeMeta(80L, "ROOM_JOIN", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomJoinRequest", "RoomJoinResponse", null),
@@ -7797,6 +8305,7 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     236L to OpcodeMeta(236L, "CALL_TURN_FETCH", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallTurnFetch", "CallTurnResponse", null),
     237L to OpcodeMeta(237L, "CALL_SFU_JOIN", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallInvite", "CallTurnResponse", null),
     238L to OpcodeMeta(238L, "CALL_SFU_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "CallStateEvent", null, "call_id"),
+    52L to OpcodeMeta(52L, "CONVERSATION_STATE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ConversationStateEvent", null, "conversation_id"),
 )
 
 /** Human name for an opcode, for logs and errors. Never used on the wire. */

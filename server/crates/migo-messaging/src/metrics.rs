@@ -48,6 +48,9 @@ pub(crate) enum SendOutcome {
     Blocked,
     /// The conversation is archived and takes no more messages.
     Archived,
+    /// The caller is muted in this group. Speech, not citizenship: they keep
+    /// their vote, and the moment the mute expires passes on its own.
+    Muted,
     /// Refused on shape before anything was read.
     Invalid,
     /// Refused by the rate limiter.
@@ -55,13 +58,14 @@ pub(crate) enum SendOutcome {
 }
 
 impl SendOutcome {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Accepted,
         Self::Duplicate,
         Self::Mismatch,
         Self::Unknown,
         Self::Blocked,
         Self::Archived,
+        Self::Muted,
         Self::Invalid,
         Self::RateLimited,
     ];
@@ -74,6 +78,7 @@ impl SendOutcome {
             Self::Unknown => "unknown_conversation",
             Self::Blocked => "blocked",
             Self::Archived => "archived",
+            Self::Muted => "muted",
             Self::Invalid => "invalid",
             Self::RateLimited => "rate_limited",
         }
@@ -87,8 +92,9 @@ impl SendOutcome {
             Self::Unknown => 3,
             Self::Blocked => 4,
             Self::Archived => 5,
-            Self::Invalid => 6,
-            Self::RateLimited => 7,
+            Self::Muted => 6,
+            Self::Invalid => 7,
+            Self::RateLimited => 8,
         }
     }
 }

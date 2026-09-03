@@ -25,10 +25,12 @@ use migo_messaging::model::{Caller, MAX_GROUP_MEMBERS};
 use migo_messaging::service::Messages;
 use migo_messaging::traits::Messaging;
 use migo_protocol::{
-    codes, ConversationCreateRequest, ConversationKind, ConversationListRequest,
-    ConversationSummary, MessageAccepted, MessageDelete, MessageKind, MessageReceipt, MessageSend,
-    Opcode, ReceiptKind, RelationshipKind, SyncRequest, SyncResponse, SyncStatus, TypingEvent,
-    TypingState,
+    codes, ConversationCreateRequest, ConversationInviteRequest, ConversationKickRequest,
+    ConversationKind, ConversationLeaveRequest, ConversationListRequest, ConversationMuteRequest,
+    ConversationRosterRequest, ConversationSummary, ConversationUpdateRequest,
+    ConversationVoteKickRequest, MemberChange, MessageAccepted, MessageDelete, MessageKind,
+    MessageReceipt, MessageSend, Opcode, ReceiptKind, RelationshipKind, SyncRequest, SyncResponse,
+    SyncStatus, TypingEvent, TypingState,
 };
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 use migo_store::model::Relationship;
@@ -46,6 +48,8 @@ const ALICE: u128 = 1;
 const BOB: u128 = 2;
 /// Carol, who is in the group but not the direct conversation.
 const CAROL: u128 = 3;
+/// Dave, the fourth seat, so a group has two distinct vote targets.
+const DAVE: u128 = 4;
 /// Someone with no membership anywhere, for the authorisation tests.
 const STRANGER: u128 = 9;
 
@@ -1463,12 +1467,15 @@ async fn the_shapes_a_create_refuses() {
             codes::VALIDATION_FAILED,
         ),
         (
+            // A title is a group's alone: a direct conversation's name is the
+            // other person, and accepting one here would store something no
+            // client would ever render.
             ConversationCreateRequest {
-                kind: ConversationKind::Group,
+                kind: ConversationKind::Direct,
                 members: vec![id(BOB)],
-                title: Some("Book club".to_string()),
+                title: Some("not yours to name".to_string()),
             },
-            codes::FEATURE_DISABLED,
+            codes::VALIDATION_FAILED,
         ),
     ];
 
@@ -1678,4 +1685,884 @@ async fn every_series_is_registered_before_anything_happens() {
         harness.metric("migo_messaging_conversations_created_total"),
         Some(1.0)
     );
+}
+
+// --- groups: founders, invites, roster ----------------------------------------------
+
+/// The member event inside a fanout.
+#[track_caller]
+fn member_of(fanout: &migo_messaging::fanout::Fanout) -> &migo_protocol::ConversationMemberEvent {
+    match &fanout.event {
+        Broadcast::Member(event) => event,
+        other => panic!("expected a member broadcast, got {other:?}"),
+    }
+}
+
+/// The vote event inside a fanout.
+#[track_caller]
+fn vote_of(fanout: &migo_messaging::fanout::Fanout) -> &migo_protocol::ConversationVoteEvent {
+    match &fanout.event {
+        Broadcast::Vote(event) => event,
+        other => panic!("expected a vote broadcast, got {other:?}"),
+    }
+}
+
+/// The state event inside a fanout.
+#[track_caller]
+fn state_of(fanout: &migo_messaging::fanout::Fanout) -> &migo_protocol::ConversationStateEvent {
+    match &fanout.event {
+        Broadcast::State(event) => event,
+        other => panic!("expected a state broadcast, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_founders_are_the_creator_and_the_first_member_and_the_roster_says_so() {
+    let harness = Harness::new();
+    let conversation = harness.group(MINUTE).await;
+
+    let roster = harness
+        .messaging
+        .roster(
+            &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+            ConversationRosterRequest {
+                conversation_id: conversation,
+            },
+        )
+        .await
+        .expect("a member may read the roster");
+
+    let roles: Vec<(Id, migo_protocol::ConversationRole, bool)> = roster
+        .entries
+        .iter()
+        .map(|e| (e.account_id, e.role, e.left_at.is_some()))
+        .collect();
+    assert_eq!(
+        roles,
+        vec![
+            (id(ALICE), migo_protocol::ConversationRole::Founder, false),
+            (id(BOB), migo_protocol::ConversationRole::Founder, false),
+            (id(CAROL), migo_protocol::ConversationRole::Member, false),
+        ],
+        "the creator and the first person they named are the founders; everyone else is a member"
+    );
+
+    // A stranger gets the one answer that does not say whether the group exists.
+    expect_code(
+        harness
+            .messaging
+            .roster(
+                &caller(STRANGER, 901, 2 * MINUTE),
+                ConversationRosterRequest {
+                    conversation_id: conversation,
+                },
+            )
+            .await,
+        codes::NOT_FOUND,
+    );
+}
+
+#[tokio::test]
+async fn any_member_may_invite_and_each_arrival_is_its_own_event() {
+    let harness = Harness::new();
+    let conversation = harness.group(MINUTE).await;
+
+    // Carol is an ordinary member, and the invite still carries.
+    let (summary, fanouts) = harness
+        .messaging
+        .invite(
+            &caller(CAROL, 103, 2 * MINUTE),
+            ConversationInviteRequest {
+                conversation_id: conversation,
+                members: vec![id(DAVE)],
+            },
+        )
+        .await
+        .expect("any member may invite");
+    assert_eq!(fanouts.len(), 1, "one arrival, one event");
+    let event = member_of(&fanouts[0]);
+    assert_eq!(event.user_id, id(DAVE));
+    assert_eq!(event.change, MemberChange::Joined);
+    assert_eq!(event.member_count, 4);
+    assert_eq!(
+        fanouts[0].exclude_device,
+        Some(id(103)),
+        "the inviting connection was answered by the reply and skips the echo"
+    );
+    assert_eq!(
+        summary.members,
+        Some(vec![id(ALICE), id(BOB), id(CAROL), id(DAVE)]),
+        "the summary the inviter's list will show"
+    );
+
+    // Inviting somebody already seated is a no-op success, not an error.
+    let (summary, fanouts) = harness
+        .messaging
+        .invite(
+            &caller(ALICE, ALICE_PHONE, 3 * MINUTE),
+            ConversationInviteRequest {
+                conversation_id: conversation,
+                members: vec![id(DAVE), id(BOB), id(ALICE)],
+            },
+        )
+        .await
+        .expect("inviting the seated is allowed");
+    assert!(fanouts.is_empty(), "nobody arrived, so nothing is said");
+    assert_eq!(
+        summary.members,
+        Some(vec![id(ALICE), id(BOB), id(CAROL), id(DAVE)])
+    );
+
+    // Dave, who arrived by invitation, is a member and not a founder.
+    let roster = harness
+        .messaging
+        .roster(
+            &caller(ALICE, ALICE_PHONE, 4 * MINUTE),
+            ConversationRosterRequest {
+                conversation_id: conversation,
+            },
+        )
+        .await
+        .expect("roster read");
+    assert_eq!(
+        roster.entries[3].role,
+        migo_protocol::ConversationRole::Member
+    );
+    // The departed stay attributable: order is active-first, then the leavers.
+    harness
+        .messaging
+        .leave(
+            &caller(DAVE, 104, 5 * MINUTE),
+            ConversationLeaveRequest {
+                conversation_id: conversation,
+            },
+        )
+        .await
+        .expect("leaving is a right");
+    let roster = harness
+        .messaging
+        .roster(
+            &caller(ALICE, ALICE_PHONE, 6 * MINUTE),
+            ConversationRosterRequest {
+                conversation_id: conversation,
+            },
+        )
+        .await
+        .expect("roster read");
+    assert!(
+        roster.entries[3].left_at.is_some(),
+        "Dave's row is tombstoned, not gone"
+    );
+}
+
+#[tokio::test]
+async fn an_invite_refuses_blocks_and_a_full_group() {
+    let harness = Harness::new();
+    let conversation = harness.group(MINUTE).await;
+    harness.block(CAROL, DAVE, 2 * MINUTE).await;
+
+    expect_code(
+        harness
+            .messaging
+            .invite(
+                &caller(CAROL, 103, 3 * MINUTE),
+                ConversationInviteRequest {
+                    conversation_id: conversation,
+                    members: vec![id(DAVE)],
+                },
+            )
+            .await,
+        codes::BLOCKED_BY_USER,
+    );
+
+    // A full group: the create call seats all 256, and one more is over.
+    let many: Vec<Id> = (0..255).map(|i| Id::from(1_000 + i as u128)).collect();
+    let full = harness
+        .messaging
+        .create(
+            &caller(ALICE, ALICE_PHONE, 4 * MINUTE),
+            ConversationCreateRequest {
+                kind: ConversationKind::Group,
+                members: many,
+                title: None,
+            },
+        )
+        .await
+        .expect("a group of 256 is allowed")
+        .conversation_id;
+    expect_code(
+        harness
+            .messaging
+            .invite(
+                &caller(ALICE, ALICE_PHONE, 5 * MINUTE),
+                ConversationInviteRequest {
+                    conversation_id: full,
+                    members: vec![id(CAROL)],
+                },
+            )
+            .await,
+        codes::GROUP_FULL,
+    );
+}
+
+#[tokio::test]
+async fn the_last_founder_out_names_an_heir() {
+    let harness = Harness::new();
+    let conversation = harness
+        .messaging
+        .create(
+            &caller(ALICE, ALICE_PHONE, MINUTE),
+            ConversationCreateRequest {
+                kind: ConversationKind::Group,
+                members: vec![id(BOB), id(CAROL), id(DAVE)],
+                title: None,
+            },
+        )
+        .await
+        .expect("a group of four")
+        .conversation_id;
+
+    // Alice leaves first. Bob is still a founder, so nothing is promoted.
+    harness
+        .messaging
+        .leave(
+            &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+            ConversationLeaveRequest {
+                conversation_id: conversation,
+            },
+        )
+        .await
+        .expect("Alice may leave");
+    let roster = harness
+        .messaging
+        .roster(
+            &caller(BOB, BOB_LAPTOP, 3 * MINUTE),
+            ConversationRosterRequest {
+                conversation_id: conversation,
+            },
+        )
+        .await
+        .expect("roster read");
+    assert_eq!(
+        roster.entries[0].role,
+        migo_protocol::ConversationRole::Founder
+    );
+
+    // Bob leaves. No founder remains, and Carol — the longest-standing member
+    // left — inherits.
+    harness
+        .messaging
+        .leave(
+            &caller(BOB, BOB_LAPTOP, 4 * MINUTE),
+            ConversationLeaveRequest {
+                conversation_id: conversation,
+            },
+        )
+        .await
+        .expect("Bob may leave");
+    let roster = harness
+        .messaging
+        .roster(
+            &caller(CAROL, 103, 5 * MINUTE),
+            ConversationRosterRequest {
+                conversation_id: conversation,
+            },
+        )
+        .await
+        .expect("roster read");
+    assert_eq!(roster.entries[0].account_id, id(CAROL));
+    assert_eq!(
+        roster.entries[0].role,
+        migo_protocol::ConversationRole::Founder
+    );
+
+    // The heir can do what a founder does, and the departed cannot even ask:
+    // one answer — NOT_FOUND — for the gone and the stranger alike, so that a
+    // rename cannot be used to discover a group that has removed you.
+    let (renamed, _) = harness
+        .messaging
+        .update(
+            &caller(CAROL, 103, 6 * MINUTE),
+            ConversationUpdateRequest {
+                conversation_id: conversation,
+                title: Some("Carol's group now".to_owned()),
+            },
+        )
+        .await
+        .expect("the heir may rename");
+    assert_eq!(renamed.title.as_deref(), Some("Carol's group now"));
+    expect_code(
+        harness
+            .messaging
+            .update(
+                &caller(ALICE, ALICE_PHONE, 7 * MINUTE),
+                ConversationUpdateRequest {
+                    conversation_id: conversation,
+                    title: Some("Alice is gone".to_owned()),
+                },
+            )
+            .await
+            .map(|(summary, fanout)| (summary, fanout.is_some())),
+        codes::NOT_FOUND,
+    );
+}
+
+#[tokio::test]
+async fn a_founder_mutes_a_member_and_the_mute_is_enforced_at_the_send() {
+    let harness = Harness::new();
+    let conversation = harness.group(MINUTE).await;
+
+    // Only a founder, and never the other founder.
+    expect_code(
+        harness
+            .messaging
+            .mute(
+                &caller(CAROL, 103, 2 * MINUTE),
+                ConversationMuteRequest {
+                    conversation_id: conversation,
+                    target_id: id(DAVE),
+                    until: Some(ts(10 * MINUTE)),
+                },
+            )
+            .await,
+        codes::PERMISSION_DENIED,
+    );
+    expect_code(
+        harness
+            .messaging
+            .mute(
+                &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+                ConversationMuteRequest {
+                    conversation_id: conversation,
+                    target_id: id(BOB),
+                    until: Some(ts(10 * MINUTE)),
+                },
+            )
+            .await,
+        codes::PERMISSION_DENIED,
+    );
+
+    harness
+        .messaging
+        .mute(
+            &caller(ALICE, ALICE_PHONE, 3 * MINUTE),
+            ConversationMuteRequest {
+                conversation_id: conversation,
+                target_id: id(CAROL),
+                until: Some(ts(10 * MINUTE)),
+            },
+        )
+        .await
+        .expect("a founder mutes a member");
+
+    expect_code(
+        harness
+            .messaging
+            .send(
+                &caller(CAROL, 103, 4 * MINUTE),
+                MessageSend {
+                    message_id: id(30_001),
+                    conversation_id: conversation,
+                    kind: MessageKind::Text,
+                    envelope: b"can anyone hear me".to_vec(),
+                    ..MessageSend::default()
+                },
+            )
+            .await
+            .map(|(accepted, fanout)| (accepted, fanout.is_some())),
+        codes::MUTED,
+    );
+
+    // The moment passes on its own: no readmission, no frame, just the clock.
+    harness
+        .messaging
+        .send(
+            &caller(CAROL, 103, 11 * MINUTE),
+            MessageSend {
+                message_id: id(30_002),
+                conversation_id: conversation,
+                kind: MessageKind::Text,
+                envelope: b"back".to_vec(),
+                ..MessageSend::default()
+            },
+        )
+        .await
+        .expect("an expired mute does not outstay its welcome");
+
+    // And a founder can lift one early, with `None` and not a past timestamp.
+    harness
+        .messaging
+        .mute(
+            &caller(ALICE, ALICE_PHONE, 12 * MINUTE),
+            ConversationMuteRequest {
+                conversation_id: conversation,
+                target_id: id(CAROL),
+                until: Some(ts(20 * MINUTE)),
+            },
+        )
+        .await
+        .expect("muted again");
+    harness
+        .messaging
+        .mute(
+            &caller(ALICE, ALICE_PHONE, 13 * MINUTE),
+            ConversationMuteRequest {
+                conversation_id: conversation,
+                target_id: id(CAROL),
+                until: None,
+            },
+        )
+        .await
+        .expect("unmuted early");
+    harness
+        .messaging
+        .send(
+            &caller(CAROL, 103, 14 * MINUTE),
+            MessageSend {
+                message_id: id(30_003),
+                conversation_id: conversation,
+                kind: MessageKind::Text,
+                envelope: b"thanks".to_vec(),
+                ..MessageSend::default()
+            },
+        )
+        .await
+        .expect("a lifted mute is lifted");
+
+    // A mute that already ended is a validation error, not a silent clear.
+    expect_code(
+        harness
+            .messaging
+            .mute(
+                &caller(ALICE, ALICE_PHONE, 15 * MINUTE),
+                ConversationMuteRequest {
+                    conversation_id: conversation,
+                    target_id: id(CAROL),
+                    until: Some(ts(MINUTE)),
+                },
+            )
+            .await,
+        codes::VALIDATION_FAILED,
+    );
+}
+
+#[tokio::test]
+async fn a_founder_kicks_without_a_vote_and_the_other_founder_is_beyond_it() {
+    let harness = Harness::new();
+    let conversation = harness.group(MINUTE).await;
+
+    expect_code(
+        harness
+            .messaging
+            .kick(
+                &caller(CAROL, 103, 2 * MINUTE),
+                ConversationKickRequest {
+                    conversation_id: conversation,
+                    target_id: id(BOB),
+                },
+            )
+            .await,
+        codes::PERMISSION_DENIED,
+    );
+    expect_code(
+        harness
+            .messaging
+            .kick(
+                &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+                ConversationKickRequest {
+                    conversation_id: conversation,
+                    target_id: id(BOB),
+                },
+            )
+            .await,
+        codes::PERMISSION_DENIED,
+    );
+
+    let fanouts = harness
+        .messaging
+        .kick(
+            &caller(ALICE, ALICE_PHONE, 3 * MINUTE),
+            ConversationKickRequest {
+                conversation_id: conversation,
+                target_id: id(CAROL),
+            },
+        )
+        .await
+        .expect("a founder removes a member outright");
+    assert_eq!(fanouts.len(), 1);
+    let event = member_of(&fanouts[0]);
+    assert_eq!(event.user_id, id(CAROL));
+    assert_eq!(event.change, MemberChange::Kicked);
+    assert_eq!(event.member_count, 2);
+
+    // The kicked member cannot come back through the send they still remember.
+    expect_code(
+        harness
+            .messaging
+            .send(
+                &caller(CAROL, 103, 4 * MINUTE),
+                MessageSend {
+                    message_id: id(31_001),
+                    conversation_id: conversation,
+                    kind: MessageKind::Text,
+                    envelope: b"let me in".to_vec(),
+                    ..MessageSend::default()
+                },
+            )
+            .await,
+        codes::NOT_FOUND,
+    );
+
+    // And a group operation on a direct conversation is refused at the shape.
+    let direct = harness.direct(5 * MINUTE).await;
+    expect_code(
+        harness
+            .messaging
+            .leave(
+                &caller(ALICE, ALICE_PHONE, 6 * MINUTE),
+                ConversationLeaveRequest {
+                    conversation_id: direct,
+                },
+            )
+            .await,
+        codes::VALIDATION_FAILED,
+    );
+}
+
+#[tokio::test]
+async fn a_vote_carries_at_a_majority_and_the_removal_is_its_closing() {
+    let harness = Harness::new();
+    let conversation = harness
+        .messaging
+        .create(
+            &caller(ALICE, ALICE_PHONE, MINUTE),
+            ConversationCreateRequest {
+                kind: ConversationKind::Group,
+                members: vec![id(BOB), id(CAROL), id(DAVE)],
+                title: None,
+            },
+        )
+        .await
+        .expect("a group of four")
+        .conversation_id;
+
+    // Founders are beyond a vote.
+    expect_code(
+        harness
+            .messaging
+            .vote_kick(
+                &caller(CAROL, 103, 2 * MINUTE),
+                ConversationVoteKickRequest {
+                    conversation_id: conversation,
+                    target_id: id(BOB),
+                },
+            )
+            .await
+            .map(|(response, fanouts)| (response, fanouts.len())),
+        codes::VOTE_TARGET_IMMUNE,
+    );
+
+    // First voice: 1 of 2, open, and the tally is published.
+    let (response, fanouts) = harness
+        .messaging
+        .vote_kick(
+            &caller(BOB, BOB_LAPTOP, 3 * MINUTE),
+            ConversationVoteKickRequest {
+                conversation_id: conversation,
+                target_id: id(CAROL),
+            },
+        )
+        .await
+        .expect("a member opens a vote");
+    assert_eq!(
+        (
+            response.votes,
+            response.needed,
+            response.member_count,
+            response.open
+        ),
+        (1, 2, 4, true)
+    );
+    assert_eq!(fanouts.len(), 1);
+    assert_eq!(vote_of(&fanouts[0]).target_id, id(CAROL));
+
+    // One question at a time.
+    expect_code(
+        harness
+            .messaging
+            .vote_kick(
+                &caller(ALICE, ALICE_PHONE, 4 * MINUTE),
+                ConversationVoteKickRequest {
+                    conversation_id: conversation,
+                    target_id: id(DAVE),
+                },
+            )
+            .await
+            .map(|(response, fanouts)| (response, fanouts.len())),
+        codes::VOTE_ALREADY_OPEN,
+    );
+
+    // The second voice carries it: the tally closes and the removal is the
+    // closing, in the frame every client already renders.
+    let (response, fanouts) = harness
+        .messaging
+        .vote_kick(
+            &caller(ALICE, ALICE_PHONE, 3 * MINUTE + 30_000),
+            ConversationVoteKickRequest {
+                conversation_id: conversation,
+                target_id: id(CAROL),
+            },
+        )
+        .await
+        .expect("the second voice carries");
+    assert_eq!(
+        (response.votes, response.needed, response.open),
+        (2, 2, false)
+    );
+    assert_eq!(
+        fanouts.len(),
+        1,
+        "no closed vote frame — the removal says it"
+    );
+    let event = member_of(&fanouts[0]);
+    assert_eq!(event.user_id, id(CAROL));
+    assert_eq!(event.change, MemberChange::Kicked);
+    assert_eq!(event.member_count, 3);
+
+    let roster = harness
+        .messaging
+        .roster(
+            &caller(ALICE, ALICE_PHONE, 6 * MINUTE),
+            ConversationRosterRequest {
+                conversation_id: conversation,
+            },
+        )
+        .await
+        .expect("roster read");
+    assert!(roster
+        .entries
+        .iter()
+        .any(|e| e.account_id == id(CAROL) && e.left_at.is_some()));
+}
+
+#[tokio::test]
+async fn the_same_voice_twice_moves_nothing() {
+    let harness = Harness::new();
+    let conversation = harness.group(MINUTE).await;
+
+    let first = harness
+        .messaging
+        .vote_kick(
+            &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+            ConversationVoteKickRequest {
+                conversation_id: conversation,
+                target_id: id(CAROL),
+            },
+        )
+        .await
+        .expect("opens");
+    let second = harness
+        .messaging
+        .vote_kick(
+            &caller(ALICE, ALICE_PHONE, 3 * MINUTE),
+            ConversationVoteKickRequest {
+                conversation_id: conversation,
+                target_id: id(CAROL),
+            },
+        )
+        .await
+        .expect("the retry is a success");
+    assert_eq!(first.0.votes, 1);
+    assert_eq!(second.0.votes, 1, "the tally did not move for a retry");
+    assert!(second.1.is_empty(), "and nothing was published for it");
+}
+
+#[tokio::test]
+async fn a_vote_nobody_finishes_closes_lazily_when_the_group_moves_on() {
+    let harness = Harness::new();
+    let conversation = harness
+        .messaging
+        .create(
+            &caller(ALICE, ALICE_PHONE, MINUTE),
+            ConversationCreateRequest {
+                kind: ConversationKind::Group,
+                members: vec![id(BOB), id(CAROL), id(DAVE)],
+                title: None,
+            },
+        )
+        .await
+        .expect("a group of four")
+        .conversation_id;
+
+    harness
+        .messaging
+        .vote_kick(
+            &caller(BOB, BOB_LAPTOP, 2 * MINUTE),
+            ConversationVoteKickRequest {
+                conversation_id: conversation,
+                target_id: id(DAVE),
+            },
+        )
+        .await
+        .expect("opens");
+
+    // Sixty-one seconds later — past the TTL — a vote for a different target
+    // both closes the old one and opens the new one.
+    let (response, fanouts) = harness
+        .messaging
+        .vote_kick(
+            &caller(ALICE, ALICE_PHONE, 2 * MINUTE + 61_000),
+            ConversationVoteKickRequest {
+                conversation_id: conversation,
+                target_id: id(CAROL),
+            },
+        )
+        .await
+        .expect("the new vote is allowed");
+    assert_eq!((response.votes, response.open), (1, true));
+    assert_eq!(fanouts.len(), 2, "the closing, then the opening");
+    let closed = vote_of(&fanouts[0]);
+    assert_eq!(closed.target_id, id(DAVE));
+    assert_eq!(
+        closed.closed,
+        Some(true),
+        "the group is told the old question stopped"
+    );
+    assert!(
+        fanouts[0].exclude_device.is_none(),
+        "a vote nobody's socket closed reaches everyone, the caller included"
+    );
+    assert_eq!(vote_of(&fanouts[1]).target_id, id(CAROL));
+}
+
+#[tokio::test]
+async fn a_vote_loses_its_question_when_the_target_walks_out() {
+    let harness = Harness::new();
+    let conversation = harness
+        .messaging
+        .create(
+            &caller(ALICE, ALICE_PHONE, MINUTE),
+            ConversationCreateRequest {
+                kind: ConversationKind::Group,
+                members: vec![id(BOB), id(CAROL), id(DAVE)],
+                title: None,
+            },
+        )
+        .await
+        .expect("a group of four")
+        .conversation_id;
+
+    harness
+        .messaging
+        .vote_kick(
+            &caller(BOB, BOB_LAPTOP, 2 * MINUTE),
+            ConversationVoteKickRequest {
+                conversation_id: conversation,
+                target_id: id(DAVE),
+            },
+        )
+        .await
+        .expect("opens");
+
+    let fanouts = harness
+        .messaging
+        .leave(
+            &caller(DAVE, 104, 3 * MINUTE),
+            ConversationLeaveRequest {
+                conversation_id: conversation,
+            },
+        )
+        .await
+        .expect("leaving is a right, even mid-vote");
+    assert_eq!(fanouts.len(), 2);
+    let closed = vote_of(&fanouts[0]);
+    assert_eq!(closed.target_id, id(DAVE));
+    assert_eq!(closed.closed, Some(true));
+    assert_eq!(member_of(&fanouts[1]).change, MemberChange::Left);
+}
+
+#[tokio::test]
+async fn a_founder_renames_the_group_and_the_title_travels() {
+    let harness = Harness::new();
+    let conversation = harness.group(MINUTE).await;
+
+    expect_code(
+        harness
+            .messaging
+            .update(
+                &caller(CAROL, 103, 2 * MINUTE),
+                ConversationUpdateRequest {
+                    conversation_id: conversation,
+                    title: Some("Carol says".to_owned()),
+                },
+            )
+            .await
+            .map(|(summary, fanout)| (summary, fanout.is_some())),
+        codes::PERMISSION_DENIED,
+    );
+    expect_code(
+        harness
+            .messaging
+            .update(
+                &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+                ConversationUpdateRequest {
+                    conversation_id: conversation,
+                    title: Some("   ".to_owned()),
+                },
+            )
+            .await
+            .map(|(summary, fanout)| (summary, fanout.is_some())),
+        codes::VALIDATION_FAILED,
+    );
+    expect_code(
+        harness
+            .messaging
+            .update(
+                &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+                ConversationUpdateRequest {
+                    conversation_id: conversation,
+                    title: Some("x".repeat(65)),
+                },
+            )
+            .await
+            .map(|(summary, fanout)| (summary, fanout.is_some())),
+        codes::FIELD_TOO_LONG,
+    );
+
+    let (summary, fanout) = harness
+        .messaging
+        .update(
+            &caller(ALICE, ALICE_PHONE, 3 * MINUTE),
+            ConversationUpdateRequest {
+                conversation_id: conversation,
+                title: Some("  Weekend Plans  ".to_owned()),
+            },
+        )
+        .await
+        .expect("a founder renames");
+    assert_eq!(
+        summary.title.as_deref(),
+        Some("Weekend Plans"),
+        "trimmed on the way in"
+    );
+    let fanout = fanout.expect("a rename is a state event");
+    let event = state_of(&fanout);
+    assert_eq!(event.conversation_id, conversation);
+    assert_eq!(event.title.as_deref(), Some("Weekend Plans"));
+
+    // The store is the one truth: the next list read agrees with the reply.
+    let page = harness
+        .messaging
+        .conversations(
+            &caller(BOB, BOB_LAPTOP, 4 * MINUTE),
+            ConversationListRequest::default(),
+        )
+        .await
+        .expect("list read");
+    let row = page
+        .conversations
+        .iter()
+        .find(|row| row.conversation_id == conversation)
+        .expect("the group is in Bob's list");
+    assert_eq!(row.title.as_deref(), Some("Weekend Plans"));
 }

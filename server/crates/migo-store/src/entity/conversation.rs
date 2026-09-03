@@ -29,6 +29,9 @@ pub struct Model {
     pub last_message_at: Option<TimeDateTimeWithTimeZone>,
     /// The `archived_at` column.
     pub archived_at: Option<TimeDateTimeWithTimeZone>,
+    /// The `title` column.
+    #[sea_orm(column_type = "Text")]
+    pub title: Option<String>,
 }
 
 /// Foreign keys leaving `conversation`.

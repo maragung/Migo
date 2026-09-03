@@ -89,6 +89,7 @@ async fn seed_group(store: &MemoryStore, conversation_id: Id, members: Vec<Id>) 
                 created_at: ts(3_000),
                 last_message_at: None,
                 archived_at: None,
+                title: None,
             },
             members,
         )

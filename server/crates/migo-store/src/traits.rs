@@ -328,6 +328,34 @@ pub trait MessagingStore: Send + Sync {
     async fn remove_member(&self, conversation_id: Id, account_id: Id, at: Timestamp)
         -> Result<()>;
 
+    /// Sets or clears a conversation's title. `false` when the conversation
+    /// does not exist, so a rename of a missing row is a not-found and not a
+    /// silent no-op.
+    async fn set_conversation_title(
+        &self,
+        conversation_id: Id,
+        title: Option<&str>,
+    ) -> Result<bool>;
+
+    /// Sets one member's role. `false` when the membership row does not exist,
+    /// so promoting a departed member is a not-found.
+    async fn set_conversation_role(
+        &self,
+        conversation_id: Id,
+        account_id: Id,
+        role: migo_protocol::ConversationRole,
+    ) -> Result<bool>;
+
+    /// Sets or clears one member's group mute. `false` when the membership row
+    /// does not exist. The same column a member's own list row reads, so the
+    /// mute the founder imposed is the mute the member sees.
+    async fn set_conversation_mute(
+        &self,
+        conversation_id: Id,
+        account_id: Id,
+        muted_until: Option<Timestamp>,
+    ) -> Result<bool>;
+
     /// Appends a message, assigning the next sequence number.
     ///
     /// Sequence assignment and insert are one operation, serialised per

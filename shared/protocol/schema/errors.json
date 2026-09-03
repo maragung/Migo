@@ -475,6 +475,12 @@
       "code": 1704,
       "symbol": "ROUTING_EPOCH_STALE",
       "http": 409
+    },
+    {
+      "code": 1512,
+      "symbol": "GROUP_FULL",
+      "http": 400,
+      "doc": "The group conversation is at its member cap"
     }
   ]
 }

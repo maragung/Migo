@@ -239,6 +239,7 @@ impl Harness {
                     created_at: ts(NOW),
                     last_message_at: None,
                     archived_at: None,
+                    title: None,
                 },
                 members.iter().copied().map(id).collect(),
             )
@@ -1797,6 +1798,7 @@ async fn a_deployment_with_no_economy_plays_exactly_the_same_games() {
                 created_at: ts(NOW),
                 last_message_at: None,
                 archived_at: None,
+                title: None,
             },
             vec![id(1), id(2)],
         )

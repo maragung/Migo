@@ -15,8 +15,8 @@
 
 use migo_core::{Id, Result, Secret, Timestamp};
 use migo_protocol::{
-    codes, ConversationKind, EncryptionMode, MessageKind, MlDsaPurpose, Platform, RelationshipKind,
-    RoomKind, RoomRole, SanctionAction,
+    codes, ConversationKind, ConversationRole, EncryptionMode, MessageKind, MlDsaPurpose, Platform,
+    RelationshipKind, RoomKind, RoomRole, SanctionAction,
 };
 use migo_store::model::*;
 use migo_store::traits::*;
@@ -158,6 +158,7 @@ async fn seed_group(store: &SharedStore, conversation_id: Id, members: Vec<Id>) 
                 created_at: ts(3_000),
                 last_message_at: None,
                 archived_at: None,
+                title: None,
             },
             members,
         )
@@ -1444,7 +1445,7 @@ pub async fn leaving_a_conversation_keeps_the_membership_row(store: &SharedStore
         .add_member(ConversationMember {
             conversation_id,
             account_id: bob,
-            role: 0,
+            role: ConversationRole::Member,
             joined_at: ts(5_000),
             left_at: None,
             muted_until: None,
@@ -1463,7 +1464,7 @@ pub async fn leaving_a_conversation_keeps_the_membership_row(store: &SharedStore
             .add_member(ConversationMember {
                 conversation_id: id(999),
                 account_id: bob,
-                role: 0,
+                role: ConversationRole::Member,
                 joined_at: ts(5_000),
                 left_at: None,
                 muted_until: None,
@@ -1472,6 +1473,133 @@ pub async fn leaving_a_conversation_keeps_the_membership_row(store: &SharedStore
             .await,
         codes::NOT_FOUND,
     );
+}
+
+/// The three group setters: a title on the conversation, a role and a mute on the
+/// membership row. One case for the three because they share one property — the
+/// write is only visible through a read back, never through its return value
+/// beyond the boolean that says the row was there.
+pub async fn the_group_setters_touch_only_their_own_row(store: &SharedStore) {
+    let alice = seed_account(store, 1, "alice").await;
+    let bob = seed_account(store, 2, "bob").await;
+    let carol = seed_account(store, 3, "carol").await;
+    let conversation = seed_group(store, id(51), vec![alice, bob, carol]).await;
+    let conversation_id = conversation.conversation_id;
+
+    // The title: set, read back, cleared, read back again.
+    assert!(
+        store
+            .set_conversation_title(conversation_id, Some("Weekend Plans"))
+            .await
+            .unwrap(),
+        "the conversation exists, so the write lands"
+    );
+    assert_eq!(
+        store
+            .conversation(conversation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .title,
+        Some("Weekend Plans".to_owned())
+    );
+    assert!(
+        store
+            .set_conversation_title(conversation_id, None)
+            .await
+            .unwrap(),
+        "a clear is a write too"
+    );
+    assert_eq!(
+        store
+            .conversation(conversation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .title,
+        None
+    );
+
+    // The role: promote Bob, and only Bob's row moves.
+    assert!(store
+        .set_conversation_role(conversation_id, bob, ConversationRole::Founder)
+        .await
+        .unwrap());
+    let rows = store.members(conversation_id).await.unwrap();
+    let bob_row = rows.iter().find(|m| m.account_id == bob).unwrap();
+    let carol_row = rows.iter().find(|m| m.account_id == carol).unwrap();
+    assert_eq!(bob_row.role, ConversationRole::Founder);
+    assert_eq!(carol_row.role, ConversationRole::Member);
+
+    // The mute: set on Carol, lifted on Carol, and Bob's row never carried one.
+    assert!(store
+        .set_conversation_mute(conversation_id, carol, Some(ts(90_000)))
+        .await
+        .unwrap());
+    let rows = store.members(conversation_id).await.unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|m| m.account_id == carol)
+            .unwrap()
+            .muted_until,
+        Some(ts(90_000))
+    );
+    assert_eq!(
+        rows.iter()
+            .find(|m| m.account_id == bob)
+            .unwrap()
+            .muted_until,
+        None,
+        "a mute on one member is not a mute on the group"
+    );
+    assert!(store
+        .set_conversation_mute(conversation_id, carol, None)
+        .await
+        .unwrap());
+    assert_eq!(
+        store
+            .members(conversation_id)
+            .await
+            .unwrap()
+            .iter()
+            .find(|m| m.account_id == carol)
+            .unwrap()
+            .muted_until,
+        None
+    );
+
+    // A departed member's row exists but is not a seat: the role setter says so,
+    // and so does the mute setter.
+    store
+        .remove_member(conversation_id, carol, ts(10_000))
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .set_conversation_role(conversation_id, carol, ConversationRole::Founder)
+            .await
+            .unwrap(),
+        "promoting a departed member is a no-op, not a resurrection"
+    );
+    assert!(!store
+        .set_conversation_mute(conversation_id, carol, Some(ts(90_000)))
+        .await
+        .unwrap());
+
+    // And a conversation that never existed is a `false`, not an error, for the
+    // same reason everywhere else: the caller conflated it on purpose.
+    assert!(!store
+        .set_conversation_title(id(999), Some("nope"))
+        .await
+        .unwrap());
+    assert!(!store
+        .set_conversation_role(id(999), alice, ConversationRole::Founder)
+        .await
+        .unwrap());
+    assert!(!store
+        .set_conversation_mute(id(999), alice, Some(ts(90_000)))
+        .await
+        .unwrap());
 }
 
 pub async fn the_conversation_list_is_ordered_by_activity_and_counts_unread(store: &SharedStore) {
@@ -2992,6 +3120,7 @@ pub async fn a_game_token_moves_even_within_one_millisecond(store: &SharedStore)
                 created_at: ts(1_000),
                 last_message_at: None,
                 archived_at: None,
+                title: None,
             },
             vec![alice, bob],
         )
@@ -3138,6 +3267,7 @@ macro_rules! for_each_contract_case {
         $case!(a_cursor_only_moves_forward_and_never_past_the_end);
         $case!(deleting_a_message_takes_the_payload_with_it);
         $case!(leaving_a_conversation_keeps_the_membership_row);
+        $case!(the_group_setters_touch_only_their_own_row);
         $case!(the_conversation_list_is_ordered_by_activity_and_counts_unread);
         $case!(purging_expired_messages_respects_its_budget_and_never_reuses_a_sequence);
         $case!(creating_a_room_creates_its_conversation_and_its_owner);

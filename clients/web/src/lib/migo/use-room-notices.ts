@@ -46,17 +46,19 @@ export interface RoomNotice {
  * Pure, so a test can pin every branch. `name` is the resolved display name; an empty one (a member
  * whose profile has not resolved) falls back to `"Someone"` rather than printing a blank or an id.
  * `change` drives the verb; when it is absent — a legacy event, or the `Unknown` sentinel — the
- * `joined` flag is the only signal left, so the line falls back to join/leave from it.
+ * `joined` flag is the only signal left, so the line falls back to join/leave from it. `place` names
+ * where it happened — "room" or "group" — so the same projection serves both streams.
  */
 export function memberNotice(
   change: MemberChange | undefined,
   name: string,
   joined = true,
+  place = 'room',
 ): string {
   const who = name.trim().length > 0 ? name : 'Someone';
   switch (change) {
     case MemberChange.Joined:
-      return `${who} joined the room`;
+      return `${who} joined the ${place}`;
     case MemberChange.Left:
       return `${who} left`;
     case MemberChange.Disconnected:
@@ -70,7 +72,7 @@ export function memberNotice(
     default:
       // No change on the wire (a legacy event) or the Unknown sentinel: the joined flag is all
       // that is left to go on.
-      return joined ? `${who} joined the room` : `${who} left`;
+      return joined ? `${who} joined the ${place}` : `${who} left`;
   }
 }
 
