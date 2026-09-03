@@ -123,9 +123,23 @@ fun SearchScreen(
                 }
                 val rooms: List<RoomSummary> = state.search.rooms.orEmpty()
                 if (rooms.isNotEmpty()) {
+                    // A joined room opens rather than joins: the conversation is already there.
+                    val joined = state.conversations.mapNotNull { it.roomId }.toSet()
                     item { SectionLabel(text = "Rooms") }
                     items(rooms, key = { it.roomId.value }) { room ->
-                        RoomSummaryRow(room = room, onJoin = { onJoinRoom(room) })
+                        val row = state.conversations.find { it.roomId == room.roomId }
+                        RoomSummaryRow(
+                            room = room,
+                            joined = room.roomId in joined,
+                            onJoin = { onJoinRoom(room) },
+                            onOpen = {
+                                if (row != null) {
+                                    onOpenConversation(row)
+                                } else {
+                                    onJoinRoom(room)
+                                }
+                            },
+                        )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     }
                 }

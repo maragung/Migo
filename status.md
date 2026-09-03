@@ -2190,3 +2190,37 @@ tanpa gantian. `hold()` juga menghapus jawaban yang sedang diketik saat
 gambar berganti — bacaan terhadap gambar lama tidak boleh ikut ke
 percobaan berikutnya. Regresi memaku parsing envelope dengan dan tanpa
 `captcha`, dan adopsi pengganti yang mengosongkan jawaban.
+
+## 61. Rooms Android: room sendiri, tombol yang jujur (v0.15.5)
+
+Tab Rooms di Android selama ini hanya menampilkan direktori publik —
+sebuah room yang sudah diikuti tetap muncul di bawah sana dengan tombol
+**Join**, dan satu-satunya jalan kembali ke percakapannya lewat tab
+Chats atau Search. Versi ini meluruskan tab itu menjadi apa yang
+dijanjikan namanya: room milik akun di atas, direktori untuk sisanya.
+
+**Seksi "Your rooms".** Percakapan room yang sudah ada di sesi kini
+menjadi seksi pertama tab Rooms — nama, baris terakhir (atau hitungan
+unread), dan tombol **Open** yang masuk langsung ke percakapan, sama
+seperti membukanya dari daftar Chats. Direktori publik di bawahnya
+menyaring room yang sudah diikuti, jadi tidak ada lagi tawaran Join
+untuk pintu yang sudah terbuka; bila daftar percakapan masih disinkron,
+baris direktorinya tetap memakai Join karena server menerima anggota
+lama tanpa efek samping dan mengembalikan id percakapannya.
+
+**Join yang jujur di mana pun room muncul.** `RoomSummaryRow` kini tahu
+status keanggotaan: room yang sudah diikuti menawarkan **Open** di
+Search juga, bukan Join yang gagal sopan di server. Di direktori
+Rooms, room yang penuh menampilkan badge merah "N/M full" dan tombol
+yang menamai faktanya (**Full**, nonaktif) — lebih baik diakui di sini
+daripada ditolak server setelah diketuk, apalagi sekarang kursi publik
+memang tetap 33.
+
+**Dialog create yang mengatakannya duluan.** Kapasitas bukan field di
+dialog karena bukan pilihan: chip jenis room menyatakan aturannya
+("Public · 33 seats" / "Managed · 5–50") disertai satu baris
+penjelasan, sehingga tidak ada yang meminta 100 kursi lalu duduk di 33.
+Validasi slug kini mencerminkan aturan server (3–32 huruf kecil dan
+digit, hyphen tunggal di dalam) dengan teks bantuan di samping field —
+alamat yang buruk ditolak di tempat, bukan sebagai penolakan setelah
+tombol Create ditekan.

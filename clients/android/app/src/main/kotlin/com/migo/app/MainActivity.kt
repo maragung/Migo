@@ -198,6 +198,7 @@ private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifie
             state = state,
             onQuery = model::setRoomsQuery,
             onJoin = model::joinRoom,
+            onOpenConversation = { model.open(it.conversationId, it.title) },
             onCreate = model::createRoom,
             onRefresh = model::loadRooms,
             modifier = modifier,

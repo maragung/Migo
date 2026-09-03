@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -201,9 +202,13 @@ fun EndRow(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
     }
 }
 
-/** One room row in a digest: name, live online count, and the way in. */
+/**
+ * One room row in a digest: name, live online count, and the way in. A room the account is
+ * already in offers Open — the join has happened, and the honest next step is the conversation
+ * it made — so the digest needs to know which rooms those are.
+ */
 @Composable
-fun RoomSummaryRow(room: RoomSummary, onJoin: () -> Unit) {
+fun RoomSummaryRow(room: RoomSummary, joined: Boolean = false, onJoin: () -> Unit, onOpen: () -> Unit = onJoin) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -219,7 +224,11 @@ fun RoomSummaryRow(room: RoomSummary, onJoin: () -> Unit) {
             )
             OneLine(text = "${room.onlineCount} online" + (room.category?.let { " · $it" } ?: ""))
         }
-        TextButton(onClick = onJoin) { Text("Join") }
+        if (joined) {
+            Button(onClick = onOpen) { Text("Open") }
+        } else {
+            TextButton(onClick = onJoin) { Text("Join") }
+        }
     }
 }
 
