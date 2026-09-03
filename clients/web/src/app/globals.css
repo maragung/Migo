@@ -572,6 +572,155 @@ main {
   text-decoration-style: solid;
 }
 
+/* The key-file door on the sign-in card. Two shapes share one language: the lone tile a
+   first-time browser sees, and the remembered-accounts list that replaces it once a file has
+   signed in here. Both are tappable target sizes on a phone (44px), both lay out as rows that
+   wrap their text rather than the card, and the chosen row inverts to the card's input look
+   (solid white, dark ink) so "which account am I signing in as" reads at a glance. */
+.keyfile-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin: 4px 0 14px;
+  padding: 26px 16px;
+  border-radius: 12px;
+  border: 1px dashed rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+.keyfile-tile:hover,
+.keyfile-tile:focus-visible {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: #ffffff;
+}
+.keyfile-tile-title {
+  font-size: 15px;
+  font-weight: 700;
+}
+.keyfile-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0 14px;
+}
+.keyfile-row {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  border-radius: 10px;
+  /* The chosen row inverts, like the card's inputs: solid white with dark ink, so the choice is
+     seen rather than remembered. */
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+.keyfile-row.chosen {
+  background: #ffffff;
+  border-color: #00acc1;
+}
+.keyfile-pick {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 12px;
+  background: transparent;
+  border: none;
+  color: #ffffff;
+  cursor: pointer;
+  text-align: left;
+}
+.keyfile-row.chosen .keyfile-pick {
+  color: #1e2b2e;
+}
+.keyfile-pick .icon {
+  flex: none;
+}
+.keyfile-name {
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.keyfile-note {
+  display: block;
+  font-size: 11px;
+  font-weight: 400;
+  opacity: 0.75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.keyfile-clear {
+  flex: none;
+  align-self: center;
+  margin-right: 8px;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  border: none;
+  background: rgba(0, 0, 0, 0.12);
+  color: inherit;
+  cursor: pointer;
+}
+.keyfile-row.chosen .keyfile-clear {
+  background: rgba(0, 172, 193, 0.12);
+}
+.keyfile-clear:hover {
+  background: rgba(0, 0, 0, 0.22);
+}
+.keyfile-add {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px dashed rgba(255, 255, 255, 0.5);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 13px;
+  cursor: pointer;
+}
+.keyfile-add:hover {
+  color: #ffffff;
+  border-color: #ffffff;
+}
+.keyfile-imported {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 4px 0 14px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: #ffffff;
+  border: 1px solid #00acc1;
+  color: #1e2b2e;
+}
+.keyfile-imported-text {
+  flex: 1;
+  min-width: 0;
+}
+.keyfile-imported .keyfile-note {
+  color: #5b6b6e;
+  opacity: 1;
+}
+.keyfile-imported .keyfile-clear {
+  color: #1e2b2e;
+  background: rgba(0, 172, 193, 0.12);
+}
+
 /* --- app shell --- */
 
 .sidebar {
@@ -4008,15 +4157,49 @@ button.activity-row-btn:focus-visible {
   font-size: 13px;
 }
 
-/* The save sheet's body: one column, the crypto work is slow enough that the buttons
-   must stay where they were while it runs. */
+/* The save sheet's body: the register flow's one modal moment, in the same visual language as
+   the register card it follows — a badge, a lead line that says what declining means, and
+   buttons that stay where they were while the (slow) Argon2id seal runs. One column, centred
+   copy, comfortable on a phone in one hand and centred in a desktop sheet alike. */
 .save-account {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
 }
-.save-account .hint {
+.save-account-badge {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: var(--login-gradient);
+  color: #ffffff;
+  box-shadow: 0 6px 18px rgba(0, 131, 143, 0.35);
+}
+.save-account-lead {
   margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.save-account-sub {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.save-account-done {
+  margin: 0;
+  font-size: 13px;
+  color: var(--positive);
+}
+.save-account .form-actions {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
 }
 
 /* The confirm screen: every line the signature will cover, labelled and exact. */

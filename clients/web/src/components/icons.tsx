@@ -48,7 +48,9 @@ export type IconName =
   | 'refresh'
   | 'sparkle'
   | 'shield'
-  | 'pin';
+  | 'pin'
+  | 'file'
+  | 'download';
 
 /** The drawn body of each icon, as `<path>`/`<circle>` elements under one `<g>`. */
 const GLYPHS: Readonly<Record<IconName, ReactNode>> = {
@@ -238,6 +240,19 @@ const GLYPHS: Readonly<Record<IconName, ReactNode>> = {
     <>
       <path d="M14 3.5 20.5 10M17.2 6.8 11 13l-.7 3.4a1 1 0 0 1-1.7.5l-2.5-2.5a1 1 0 0 1 .5-1.7L10 12l6.2-6.2" />
       <path d="m6.5 17.5-3 3" />
+    </>
+  ),
+  file: (
+    <>
+      <path d="M13.5 3.5H7A1.5 1.5 0 0 0 5.5 5v14A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5V8.5l-5-5Z" />
+      <path d="M13.5 3.5v5h5" />
+    </>
+  ),
+  download: (
+    <>
+      <path d="M12 4v10" />
+      <path d="m8 10.5 4 4 4-4" />
+      <path d="M5 19.5h14" />
     </>
   ),
 };

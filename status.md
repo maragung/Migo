@@ -1804,7 +1804,7 @@ masih ter-row" yang bisa salah dibaca cek join). `RoomStore` bertambah:
 `record_moderation_action` (jejak audit per tindakan — memori menolak
 room/actor/target yang tak ada, jujur seperti FK Postgres),
 `count_global_admin_kicks` (join aktor terhadap registri admin global
-*saat ini* — admin yang diberhentikan berhenti dihitung detik itu juga,
+_saat ini_ — admin yang diberhentikan berhenti dihitung detik itu juga,
 dan barisnya tetap ada sehingga re-appoint memulihkan sejarah),
 `network_ban`/`set_network_ban` (upsert)/`clear_network_ban`. Tiga kasus
 kontrak baru dijalankan dua backend: jejak audit FK-jujur, hitungan kick
@@ -1867,3 +1867,47 @@ menghilangkannya).
 
 Test: migo-rooms 130, migo-social 115, kontrak store 52 kasus × dua
 backend, gateway dan migod end-to-end, web 292.
+
+## 54. File kunci tanpa textbox: ikon File, akun tersimpan terenkripsi, ganti akun (v0.15.0)
+
+Permintaan: pilih file jangan lewat textbox — pakai ikon File kalau browser
+belum pernah memuat file `.migo`; begitu pernah, simpan di db app **tetap
+terenkripsi sesuai passphrase**; tangani semua kemungkinannya (belum
+import, sudah import, mau ganti akun, dan lainnya), plus modal yang
+menjelaskan semuanya dengan UI serupa register/login yang responsif di
+PC/Android/iOS.
+
+Yang disimpan browser persis seperti yang diunduh: container tersegel
+utuh — header salt/nonce terbaca, root tersegel XChaCha20-Poly1305 di
+dalam body. Passphrase **tidak pernah** ditulis; baris baru di
+`key-file-store` (IndexedDB, satu array `key-files`) menghemat pemilih
+file, bukan pintu. Identitas baris adalah salt Argon2id dari header
+clear — file yang sama di-import dua kali meng-upsert (username yang
+baru dipelajari saat login sukses mendarat di barisnya), salinan
+re-seal dari akun sama adalah baris lain. Pendaftaran kini juga
+menyimpan: sheet penawaran file kunci menyegel begitu terbuka (root
+hanya di memori selama sesegar itu — menunggu tombol ditekan adalah
+versi di mana sheet yang ditutup berarti file yang tak pernah ada),
+menyimpannya ke store, dan tombol unduhan memakai byte yang sama tanpa
+Argon2id kedua.
+
+Layar login: input file browser disembunyikan total. Browser yang
+belum mengenal file mana pun menampilkan satu tile besar ikon File;
+yang sudah, menampilkan daftar akun tersimpan (terbaru dipilih otomatis,
+baris terpilih membalut putih-solid seperti input card — "sedang masuk
+sebagai siapa" terlihat, bukan dihafal), tombol "Use another key file"
+di ujungnya, dan tiap baris bisa dilupakan (X — lupa baris terpilih
+jatuh ke yang termuda sisanya). File yang baru dipilih tampil sebagai
+baris "signing in with this file for the first time" dengan X untuk
+membatalkan. Ganti akun = logout, dan daftar itu menunggu di layar
+login. Kegagalan store bukan kegagalan login — daftar kosong adalah
+tile import, upacara jalan seperti sebelum daftar ada. Sheet
+penawaran didandani selevel kartu register: badge gradient cyan, lead
+line yang sama jujurnya ("Your account is saved to this browser
+automatically..."), tombol unduh berikon, semua di kolom terpusat yang
+nyaman di satu tangan maupun sheet desktop. Ikon `file` dan `download`
+baru digambar di keluarga ikon — stroke yang sama di semua platform,
+bukan emoji yang berbeda wajah per OS.
+
+Test: store (identitas salt, upsert, byte round-trip verbatim, urutan
+terbaru-dulu, lupa satu baris tak menghapus tetangganya) + 296 web.

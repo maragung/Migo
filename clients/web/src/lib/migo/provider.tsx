@@ -33,11 +33,12 @@ import type {
 } from '@migo/sdk';
 
 import { defaultServerEndpoint } from '@/lib/config.js';
-import { RESTORE_FAILED } from '@/lib/account-file.js';
+import { RESTORE_FAILED, containerFileName } from '@/lib/account-file.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { deviceDisplayName, webHello } from '@/lib/migo/hello.js';
 import { saveAccountRecord } from '@/lib/storage/account-record-store.js';
 import { loadDeviceRecord, saveDeviceRecord } from '@/lib/storage/device-record-store.js';
+import { keyFileId, saveKeyFile } from '@/lib/storage/key-file-store.js';
 import {
   clearKeyStoreSnapshot,
   loadKeyStoreSnapshot,
@@ -100,7 +101,12 @@ export interface MigoContextValue {
    * credential and records it for next time. Either way the session runs as a founding-grade
    * device, because the root in the file reproduces the founding identity.
    */
-  loginWithFile: (bytes: Uint8Array, passphrase: string, server: ServerEndpoint) => Promise<void>;
+  loginWithFile: (
+    bytes: Uint8Array,
+    passphrase: string,
+    server: ServerEndpoint,
+    fileName?: string,
+  ) => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -339,7 +345,12 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
   );
 
   const loginWithFile = useCallback(
-    async (bytes: Uint8Array, passphrase: string, server: ServerEndpoint): Promise<void> => {
+    async (
+      bytes: Uint8Array,
+      passphrase: string,
+      server: ServerEndpoint,
+      fileName?: string,
+    ): Promise<void> => {
       setError(null);
       setStatus('connecting');
       try {
@@ -448,6 +459,23 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
             savedAt: Date.now(),
           }),
         ]);
+        // The sealed file itself is remembered too, ciphertext and nothing else: the next
+        // sign-in on this browser picks the account from a list instead of hunting for the
+        // file, and still pays the passphrase at the door. The salt is the row's identity, so
+        // a re-import upserts and the username this login just learned lands on the row.
+        // Best-effort: a storage failure costs the convenience, never the session.
+        try {
+          await saveKeyFile({
+            id: keyFileId(bytes),
+            bytes,
+            fileName: fileName ?? containerFileName(username),
+            username,
+            accountId: grant.accountId,
+            savedAt: Date.now(),
+          });
+        } catch {
+          // See above.
+        }
         wireInbound(created);
         void created.presence.setPresence(PresenceState.Online).catch(() => {});
         // A founding-grade device publishes the account material idempotently — see resume.
