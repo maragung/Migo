@@ -12,7 +12,10 @@
  * The group lifecycle lands here too: a group's member events patch the summary's member list (and
  * rotate the sender-key chain, the crypto cost of membership churn), and its state deltas carry a
  * rename onto the row's title — see {@link applyMemberEvent} and {@link applyStateEvent}, the pure
- * projections the tests pin.
+ * projections the tests pin. A `Joined` naming this account for a conversation the list does not
+ * hold is an invite the server publishes to our own user topic — the one topic a member who has
+ * never heard of the conversation can already be subscribed to — and it refetches the list so the
+ * group appears without a refresh.
  *
  * The provider also owns the sidebar's last-message previews. A summary's `lastMessage` is a sealed
  * `MessageEvent`; the only way to read it is the SDK's decrypt-and-deliver path, so each page's
@@ -287,6 +290,14 @@ export function ConversationsProvider({ children }: { children: ReactNode }): Re
     }
     const offMember = client.conversations.onMember((event) => {
       if (!itemsRef.current.some((item) => item.conversationId === event.conversationId)) {
+        // A `Joined` naming *this* account, for a conversation the list does not hold, is an
+        // invite arriving on our own user topic — the one frame the server sends a member who
+        // cannot be a subscriber of the conversation yet. Fetch the list and the group appears
+        // without a refresh; anything else (another user's join we simply have no row for) is
+        // not ours to invent.
+        if (event.userId === accountIdRef.current && event.change === MemberChange.Joined) {
+          reload();
+        }
         return;
       }
       client.messaging.rotateSenderKey(event.conversationId);
@@ -307,7 +318,7 @@ export function ConversationsProvider({ children }: { children: ReactNode }): Re
       offMember();
       offState();
     };
-  }, [client, resetNonce]);
+  }, [client, reload, resetNonce]);
 
   const value: ConversationsContextValue = {
     items,

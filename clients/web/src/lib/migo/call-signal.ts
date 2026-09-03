@@ -259,6 +259,23 @@ export function ringTimeoutMs(expiresAt: number, now: number): number {
 }
 
 /**
+ * Whether a state event says the ringing inbound call was answered on another device: a
+ * `Connecting` or `Connected` transition for the call this device is being rung for and has not
+ * answered itself.
+ *
+ * The server rings every device on the account and publishes the answer to both parties, so a
+ * sibling device hears the call move on without it. Without this check that device keeps ringing
+ * until the invite expires — for a call that is already being spoken on elsewhere.
+ */
+export function answersRingingCall(event: CallStateEvent, ringingCallId: Id | null): boolean {
+  if (ringingCallId === null || event.callId !== ringingCallId) {
+    return false;
+  }
+  const state = callStateOf(event.state);
+  return state === CallState.Connecting || state === CallState.Connected;
+}
+
+/**
  * Whether a state event retires the inbound ring it names: an `Ended` for the call this device
  * is being rung for and has not answered.
  *

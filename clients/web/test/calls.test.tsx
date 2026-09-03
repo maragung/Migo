@@ -36,7 +36,12 @@ import { CallErrorCard, CallScreen } from '../src/components/call-overlay.js';
 import type { CallScreenProps } from '../src/components/call-overlay.js';
 import { CallButtons } from '../src/components/call-buttons.js';
 import { callPeerFor } from '../src/components/chat-window.js';
-import { CallManagerProvider, iceServersForCall, useCall } from '../src/lib/migo/call-manager.js';
+import {
+  CallManagerProvider,
+  answerMediaWithFallback,
+  iceServersForCall,
+  useCall,
+} from '../src/lib/migo/call-manager.js';
 import type { TurnClient } from '../src/lib/migo/call-manager.js';
 import {
   CallSignalFormatError,
@@ -44,6 +49,7 @@ import {
   INVITE_DECLINED,
   INVITE_EXPIRED,
   INVITE_RINGING,
+  answersRingingCall,
   decodeIceBatch,
   decodeSdpDescription,
   displayStateOf,
@@ -512,6 +518,31 @@ test('an Ended for the ringing call retires the ring; any other state event does
   );
 });
 
+test('a Connecting or Connected for the ringing call was answered on a sibling device', () => {
+  // The server rings every device on the account and publishes the answer to both parties, so
+  // the device still ringing hears the call move on without it. That is a retirement of the
+  // ring \u2014 a "answered elsewhere" note \u2014 never a missed call and never a decline.
+  const connecting = { callId: CALL, state: 1 };
+  assert.ok(
+    answersRingingCall(connecting, CALL),
+    'the sibling that answered must stop this device\u2019s ring',
+  );
+  assert.ok(answersRingingCall({ ...connecting, state: 2 }, CALL));
+  assert.ok(!answersRingingCall({ ...connecting, callId: 'call_other' as Id }, CALL));
+  assert.ok(
+    !answersRingingCall(connecting, null),
+    'with no ring showing there is nothing to retire',
+  );
+  assert.ok(
+    !answersRingingCall({ ...connecting, state: 4 }, CALL),
+    'an Ended is the missed-call path, not the answered-elsewhere one',
+  );
+  assert.ok(
+    !answersRingingCall({ ...connecting, state: 0 }, CALL),
+    'a Ringing state names no answer',
+  );
+});
+
 test('the caller\u2019s local ring timeout mirrors the invite expiry, floored at zero', () => {
   assert.equal(ringTimeoutMs(NOW + 45_000, NOW), 45_000);
   assert.equal(
@@ -612,4 +643,58 @@ test('a TURN list that fails or comes back empty still leaves the STUN fallback'
   assert.deepEqual(await iceServersForCall(empty, CALL), [
     { urls: 'stun:stun.l.google.com:19302' },
   ]);
+});
+
+// --- answering without a camera ---
+
+/** A stream stand-in: the manager only stores and hands it around, never inspects it. */
+function fakeStream(label: string): MediaStream {
+  return label as unknown as MediaStream;
+}
+
+test('a video answer without a camera falls back to audio instead of declining', async () => {
+  const asked: CallMediaKind[] = [];
+  const audioOnly = fakeStream('audio-only');
+  const acquire = (kind: CallMediaKind): Promise<MediaStream> => {
+    asked.push(kind);
+    // A device with a microphone and no camera: the video ask is refused, the audio ask is not.
+    if (kind === CallMediaKind.Video) {
+      return Promise.reject(new DOMException('no camera', 'NotFoundError'));
+    }
+    return Promise.resolve(audioOnly);
+  };
+
+  const stream = await answerMediaWithFallback(CallMediaKind.Video, acquire);
+  assert.equal(stream, audioOnly, 'the answer proceeds on audio');
+  assert.deepEqual(
+    asked,
+    [CallMediaKind.Video, CallMediaKind.Audio],
+    'the video ask is tried first and the audio retry is the fallback, not the default',
+  );
+});
+
+test('a voice answer never retries, and a device with no microphone at all still fails', async () => {
+  const asked: CallMediaKind[] = [];
+  const acquire = (kind: CallMediaKind): Promise<MediaStream> => {
+    asked.push(kind);
+    return Promise.resolve(fakeStream('voice'));
+  };
+  const stream = await answerMediaWithFallback(CallMediaKind.Audio, acquire);
+  assert.deepEqual(
+    asked,
+    [CallMediaKind.Audio],
+    'a voice call has nothing to fall back from: one ask, no retry',
+  );
+  assert.ok(stream !== undefined);
+
+  const nothing: CallMediaKind[] = [];
+  const noMic = (kind: CallMediaKind): Promise<MediaStream> => {
+    nothing.push(kind);
+    return Promise.reject(new DOMException('no microphone either', 'NotFoundError'));
+  };
+  await assert.rejects(
+    answerMediaWithFallback(CallMediaKind.Video, noMic),
+    'with no microphone the audio retry fails too, and the original failure stands for the decline',
+  );
+  assert.deepEqual(nothing, [CallMediaKind.Video, CallMediaKind.Audio]);
 });

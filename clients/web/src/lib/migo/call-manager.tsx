@@ -32,10 +32,13 @@
  * Three facts keep a ring honest. Invites are Critical frames, delivered at least once, so a
  * redelivered invite names a call this device already knows — it is ignored, never declined, or
  * the decline would hang up the very ring it re-announces. An unanswered invite ends itself at
- * `expiresAt`; the caller arms a local mirror of that deadline so its "Calling…" screen never
- * outlives the invite even if the server's `Ended` event is late or lost. And an `Ended` for the
- * call still ringing inbound retires the ring with a missed-call note — the caller gave up, and a
- * screen that keeps ringing a dead call is teaching its user to distrust every ring after it.
+ * `expiresAt`; both sides arm a local mirror of that deadline — the caller's so its "Calling…"
+ * screen never outlives the invite, the callee's so a ring never outlives it either — even if
+ * the server's `Ended` event is late or lost. And an event for the call still ringing inbound
+ * retires the ring with a note: an `Ended` says the caller gave up (a missed call), while a
+ * `Connecting` or `Connected` says a sibling device answered — the call moved, it was not
+ * missed — because a screen that keeps ringing a dead call teaches its user to distrust every
+ * ring after it.
  *
  * # The placeholder seal
  *
@@ -64,6 +67,7 @@ import type {
 
 import {
   INVITE_RINGING,
+  answersRingingCall,
   callEndReasonOf,
   callMediaKindOf,
   callStateOf,
@@ -91,6 +95,13 @@ const RECONNECT_WINDOW_MS = 30_000;
 export const MISSED_CALL_MESSAGE = 'Missed call';
 
 /**
+ * What the note says when an inbound ring retires because a sibling device answered: the call
+ * was not missed, it moved — and a screen that says "missed" for a call being spoken on
+ * elsewhere sends its user to the phone that is already in the conversation.
+ */
+export const ANSWERED_ELSEWHERE_MESSAGE = 'Answered on another device';
+
+/**
  * The slice of the client the ICE-server resolution needs, so a caller (or a test) can supply
  * any object with this one method rather than a whole {@link MigoClient}.
  */
@@ -108,6 +119,25 @@ export interface TurnClient {
  * find its public reflexive address at all, so without it calls work only on the same LAN.
  */
 const STUN_FALLBACK: RTCIceServer = { urls: 'stun:stun.l.google.com:19302' };
+
+/**
+ * The media an answer falls back to when the invited kind is not there to take: a video answer
+ * whose camera cannot be acquired retries as audio, and only a microphone that fails too is a
+ * failure. Pure over the acquisition so a test can pin the decision without a device.
+ */
+export async function answerMediaWithFallback(
+  mediaKind: CallMediaKind,
+  acquire: (kind: CallMediaKind) => Promise<MediaStream>,
+): Promise<MediaStream> {
+  if (mediaKind !== CallMediaKind.Video) {
+    return acquire(mediaKind);
+  }
+  try {
+    return await acquire(mediaKind);
+  } catch {
+    return acquire(CallMediaKind.Audio);
+  }
+}
 
 /**
  * The ICE servers for one call's peer connection: the configured TURN relays, then the public
@@ -209,6 +239,12 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   /** The caller's local mirror of the invite's expiry, while its call still rings unanswered. */
   const ringTimerRef = useRef<number | null>(null);
   /**
+   * The callee's mirror of the same deadline. The incoming ring has no tracked call to land an
+   * `Ended` on — before the server ran its own sweep, a caller whose client died silently left
+   * this side ringing for as long as the screen cared to.
+   */
+  const incomingTimerRef = useRef<number | null>(null);
+  /**
    * Whether a placement is between its first synchronous step and its last: the guard a second
    * click must hit *before* any await, because `activeRef` only exists once the invite replies.
    */
@@ -228,10 +264,37 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     setActiveCall(call);
   }, []);
 
-  const setIncoming = useCallback((event: CallInviteEvent | null): void => {
-    incomingRef.current = event;
-    setIncomingCall(event);
-  }, []);
+  const setIncoming = useCallback(
+    (event: CallInviteEvent | null): void => {
+      if (incomingTimerRef.current !== null) {
+        clearTimeout(incomingTimerRef.current);
+        incomingTimerRef.current = null;
+      }
+      if (event !== null) {
+        // The callee's mirror of the invite's expiry: the server's sweep ends the call on its
+        // side, but its `Ended` can be late or lost, and a ring must never outlive the invite
+        // that backs it. Firing with a *different* invite showing (or none) does nothing — the
+        // timer belongs to the call it was armed for, not to whatever rings next.
+        const callId = event.callId;
+        incomingTimerRef.current = window.setTimeout(
+          () => {
+            incomingTimerRef.current = null;
+            const still = incomingRef.current;
+            if (still === null || still.callId !== callId) {
+              return;
+            }
+            incomingRef.current = null;
+            setIncomingCall(null);
+            setCallError(MISSED_CALL_MESSAGE);
+          },
+          ringTimeoutMs(event.expiresAt, Date.now()),
+        );
+      }
+      incomingRef.current = event;
+      setIncomingCall(event);
+    },
+    [setCallError],
+  );
 
   /** Whether a call occupies this device — an ended call still on screen does not block a new one. */
   const callInProgress = useCallback(
@@ -469,6 +532,24 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
       video: mediaKind === CallMediaKind.Video,
     });
 
+  // The answer acquires through the fallback below; placement does not — a user who
+  // pressed "video call" asked for video, and silently handing them a voice call would
+  // be the interface lying about what it did.
+  /**
+   * The media an *answer* needs, fallen back to what the device actually has.
+   *
+   * A video invite answered on a device with a microphone and no camera is still a call worth
+   * taking: the audio carries the conversation and the caller simply sees no video. Declining
+   * it as `Busy` would tell the caller a lie about a device that could have talked. Only the
+   * camera is fungible — if the microphone itself is missing or refused, the audio-only retry
+   * fails too and the original failure stands, because with no mic there is no call to answer.
+   */
+  const acquireAnswerMedia = useCallback(
+    async (mediaKind: CallMediaKind): Promise<MediaStream> =>
+      answerMediaWithFallback(mediaKind, acquireMedia),
+    [],
+  );
+
   // --- the flows the UI calls ---
 
   const answerCall = useCallback(async (sealedAnswer: Uint8Array): Promise<void> => {
@@ -570,7 +651,12 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     [armRingTimeout, callInProgress, createPeer, setActive, teardownMedia],
   );
 
-  /** Answers the ringing call: media, the peer's offer applied, our answer sealed and relayed. */
+  /**
+   * Answers the ringing call: media, the peer's offer applied, our answer sealed and relayed.
+   *
+   * A video invite answered without a camera falls back to audio rather than declining — see
+   * {@link answerMediaWithFallback}; the caller keeps the conversation and simply sees no video.
+   */
   const acceptCall = useCallback(async (): Promise<void> => {
     const current = clientRef.current;
     const incoming = incomingRef.current;
@@ -594,7 +680,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     // The invite already named the calling device, so this side's relays have a target at once.
     peerDeviceRef.current = incoming.callerDevice;
     try {
-      const stream = await acquireMedia(mediaKind);
+      const stream = await acquireAnswerMedia(mediaKind);
       localStreamRef.current = stream;
       setLocalStream(stream);
 
@@ -621,6 +707,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     }
   }, [
     answerCall,
+    acquireAnswerMedia,
     callInProgress,
     createPeer,
     drainHeldIce,
@@ -739,6 +826,15 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
         // tracked call is created; this device was never in the call.
         setIncoming(null);
         setCallError(MISSED_CALL_MESSAGE);
+        return;
+      }
+      if (answersRingingCall(event, incomingRef.current?.callId ?? null)) {
+        // Another device on this account answered. The server rings every device and publishes
+        // the answer to both parties, so this one hears the call move on without it — retire the
+        // ring and say where the call went, because "missed" would be a lie about a call that
+        // connected. This device never tracked the call; there is nothing else to tear down.
+        setIncoming(null);
+        setCallError(ANSWERED_ELSEWHERE_MESSAGE);
         return;
       }
       const call = activeRef.current;
