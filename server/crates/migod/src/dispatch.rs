@@ -48,6 +48,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
@@ -71,17 +72,19 @@ use migo_moderation::SharedWarden;
 use migo_notify::SharedNotifier;
 use migo_presence::{Caller as PresenceCaller, SharedPresence};
 use migo_protocol::{
-    fault, from_frame, Acknowledged, ConversationCreateRequest, ConversationListRequest, Frame,
-    GameAction, GameEvent, KeyBundle as WireBundle, KeyBundleRequest, KeyBundleResponse,
-    KeyPublish, KeyPublishResult, MessageDelete, MessageEdit, MessageKind, MessageReceipt,
-    MessageSend, Opcode, PresenceUpdate, ProfileRequest, ProfileResponse, ReactionSet,
-    RoomJoinRequest, RoomLeaveRequest, RoomListRequest, SyncRequest, Topic, TopicKind, TypingEvent,
-    UserProfile,
+    fault, from_frame, Acknowledged, BandwidthMode, ConversationCreateRequest,
+    ConversationListRequest, Frame, GameAction, GameEvent, KeyBundle as WireBundle,
+    KeyBundleRequest, KeyBundleResponse, KeyPublish, KeyPublishResult, MessageDelete, MessageEdit,
+    MessageKind, MessageReceipt, MessageSend, Opcode, PresenceUpdate, ProfileRequest,
+    ProfileResponse, ReactionSet, RoomJoinRequest, RoomLeaveRequest, RoomListRequest, SyncRequest,
+    Topic, TopicKind, TypingEvent, UserProfile,
 };
 use migo_rooms::{
     Broadcast as RoomBroadcast, Caller as RoomCaller, Fanout as RoomFanout, SharedRooms,
 };
 use migo_social::{Caller as SocialCaller, Interaction, ProfileCard, SharedSocial};
+
+use crate::room_presence::{GatewayHandle, GatewayPublisher, RoomPresence};
 
 /// The dispatcher that routes the client-facing application opcodes into the domain services.
 ///
@@ -131,6 +134,16 @@ pub struct AppDispatcher {
     federation: SharedMesh,
     bots: SharedBots,
     calls: SharedCallkeeper,
+    /// The per-account session tally behind room online counts and the reconnect grace. Built
+    /// here rather than passed in, because it is glue this dispatcher owns and nothing else
+    /// holds — it reads the same store and rooms handle the dispatcher already has, and it
+    /// publishes through the same late-bound gateway.
+    room_presence: Arc<RoomPresence>,
+    /// The late-bound gateway, filled by the composition root once the gateway is open. Used to
+    /// publish presence and room lifecycle events out of band — with no client request in hand —
+    /// on the connection edges the gateway reports through [`Dispatcher::session_started`] and
+    /// [`Dispatcher::session_ended`].
+    gateway: Arc<GatewayHandle>,
 }
 
 impl AppDispatcher {
@@ -156,7 +169,16 @@ impl AppDispatcher {
         federation: SharedMesh,
         bots: SharedBots,
         calls: SharedCallkeeper,
+        gateway: Arc<GatewayHandle>,
     ) -> Self {
+        // The room-presence component reads the same store and rooms handle and publishes through
+        // the same gateway handle, so it is assembled from what this call already holds rather
+        // than threaded through as one more argument.
+        let room_presence = Arc::new(RoomPresence::new(
+            migo_store::SharedStore::clone(&store),
+            SharedRooms::clone(&rooms),
+            Arc::new(GatewayPublisher::new(Arc::clone(&gateway))),
+        ));
         Self {
             store,
             messaging,
@@ -172,7 +194,39 @@ impl AppDispatcher {
             federation,
             bots,
             calls,
+            room_presence,
+            gateway,
         }
+    }
+
+    /// Publishes a presence [`Fanout`](migo_presence::Fanout) to the subject's user topic, out of
+    /// band through the late-bound gateway.
+    ///
+    /// The connection edge that triggers this carries no [`ClientContext`] — there is no request
+    /// in flight — so it cannot take the in-band publish path the request handlers use. It goes
+    /// through the gateway handle instead, exactly as the mesh publishes an ingested event, and is
+    /// a no-op in the startup window before the gateway is bound. Coalescable, keyed by the subject
+    /// (section 154): a fresh presence supersedes a stale one still queued for a slow consumer.
+    ///
+    /// The fanout's `exclude_device` is not honoured — an out-of-band broadcast has no per-device
+    /// exclusion — so the connecting device's *other* sessions also hear it. Harmless: it is a
+    /// Coalescable state they already agree with, and the device that caused it learns nothing it
+    /// did not already know.
+    fn publish_presence(&self, fanout: &migo_presence::Fanout, now: Timestamp) {
+        let Some(gateway) = self.gateway.get() else {
+            return;
+        };
+        let topic = Topic {
+            kind: TopicKind::User,
+            id: fanout.subject_id,
+        };
+        gateway.broadcast_to_topic_coalesced(
+            &topic,
+            fanout.opcode(),
+            &fanout.event,
+            coalesce_key_of(&fanout.subject_id),
+            now,
+        );
     }
 }
 
@@ -369,7 +423,12 @@ impl Dispatcher for AppDispatcher {
                     now,
                 );
                 let request: RoomJoinRequest = from_frame(frame).map_err(fault::from_wire)?;
-                let (response, fanout) = self.rooms.join(&caller, request).await?;
+                let (mut response, fanout) = self.rooms.join(&caller, request).await?;
+                // The rooms crate leaves `online_count` at `view::ONLINE_COUNT_UNSET`; fill it from
+                // the in-memory session tally — the joiner themselves is now online and a member, so
+                // the count they are handed already includes them.
+                response.room.online_count =
+                    self.room_presence.online_count(response.room.room_id).await;
                 context.reply(&response)?;
                 if let Some(fanout) = fanout {
                     publish_rooms(context, fanout)?;
@@ -397,7 +456,14 @@ impl Dispatcher for AppDispatcher {
                     now,
                 );
                 let request: RoomListRequest = from_frame(frame).map_err(fault::from_wire)?;
-                let response = self.rooms.list(&caller, request).await?;
+                let mut response = self.rooms.list(&caller, request).await?;
+                // Fill each summary's online count from the tally, as the join path does. Section
+                // 14's tension is real here — one tally read per listed room — but each is an
+                // in-memory roster intersection with no presence query, and a listing is bounded by
+                // `MAX_LIST_LIMIT`.
+                for summary in &mut response.rooms {
+                    summary.online_count = self.room_presence.online_count(summary.room_id).await;
+                }
                 context.reply(&response)
             }
             Opcode::RoomCreate => {
@@ -410,6 +476,10 @@ impl Dispatcher for AppDispatcher {
             }
             Opcode::RoomArchive => {
                 rooms_admin::handle_room_archive(context, frame, &self.rooms).await
+            }
+            Opcode::RoomSanction => rooms_admin::handle_sanction(context, frame, &self.rooms).await,
+            Opcode::RoomVoteKick => {
+                rooms_admin::handle_vote_kick(context, frame, &self.rooms).await
             }
 
             // --- key material ---
@@ -549,6 +619,7 @@ impl Dispatcher for AppDispatcher {
                 social::handle_friend_respond(context, frame, &self.social, &self.notify).await
             }
             Opcode::BlockSet => social::handle_block_set(context, frame, &self.social).await,
+            Opcode::MuteSet => social::handle_mute_set(context, frame, &self.social).await,
             Opcode::RelationshipList => {
                 social::handle_relationship_list(context, frame, &self.social).await
             }
@@ -652,6 +723,56 @@ impl Dispatcher for AppDispatcher {
             verdicts.push(self.authorize_topic(identity, now, topic).await);
         }
         verdicts
+    }
+
+    /// A session finished authenticating: mark the account online and tell its rooms.
+    ///
+    /// Two things follow the first socket of an account coming up. Presence records the device as
+    /// connected — the wiring brief section 183 asks for, and which was until now a component
+    /// nobody called — and any presence change that produces is published to the account's user
+    /// topic. And the room-presence tally learns of the session, which on a 0 → 1 edge raises each
+    /// of the account's rooms' online counts and pays back any `Reconnected` owed from an earlier
+    /// disconnect.
+    ///
+    /// Best-effort: a store error is dropped rather than failing a handshake that already
+    /// succeeded. The account is connected either way; the worst case is a contact who learns it a
+    /// moment late from the next edge.
+    async fn session_started(&self, identity: &Identity, mode: BandwidthMode, now: Timestamp) {
+        let caller = PresenceCaller::new(
+            identity.account_id(),
+            identity.device_id(),
+            identity.tier,
+            mode,
+            now,
+        );
+        if let Ok(Some(fanout)) = self.presence.connected(&caller).await {
+            self.publish_presence(&fanout, now);
+        }
+        self.room_presence
+            .on_session_started(identity.account_id(), now)
+            .await;
+    }
+
+    /// A session ended: mark the account's device offline and start its rooms' grace clock.
+    ///
+    /// The mirror of [`session_started`](Self::session_started). Presence drops the device, and on
+    /// the account's *last* device dropping, the room-presence tally tells each of its rooms the
+    /// member went dark and arms the two-minute reconnect grace (section 184). Membership is not
+    /// touched here; only the grace expiring with the account still gone removes it.
+    async fn session_ended(&self, identity: &Identity, mode: BandwidthMode, now: Timestamp) {
+        let caller = PresenceCaller::new(
+            identity.account_id(),
+            identity.device_id(),
+            identity.tier,
+            mode,
+            now,
+        );
+        if let Ok(Some(fanout)) = self.presence.disconnected(&caller).await {
+            self.publish_presence(&fanout, now);
+        }
+        self.room_presence
+            .on_session_ended(identity.account_id(), now)
+            .await;
     }
 }
 
@@ -776,6 +897,9 @@ pub(crate) fn publish_rooms(context: &ClientContext<'_>, fanout: RoomFanout) -> 
     match &fanout.event {
         RoomBroadcast::Member(event) => context.publish_excluding_self(&topic, opcode, event, None),
         RoomBroadcast::State(event) => {
+            context.publish_excluding_self(&topic, opcode, event, Some(stream_key(&fanout.room_id)))
+        }
+        RoomBroadcast::Vote(event) => {
             context.publish_excluding_self(&topic, opcode, event, Some(stream_key(&fanout.room_id)))
         }
     }

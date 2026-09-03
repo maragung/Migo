@@ -109,7 +109,7 @@ impl ResponseOutcome {
 
 /// Which edge moved.
 ///
-/// A four-value projection of `RelationshipKind` rather than the enum itself: the two
+/// A five-value projection of `RelationshipKind` rather than the enum itself: the two
 /// pending kinds are bookkeeping for a friendship in progress, not edges a user asked
 /// for, and `Unknown` is a value from a newer build that this crate never writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,18 +120,27 @@ pub(crate) enum EdgeKind {
     Follow,
     /// A block.
     Block,
+    /// A personal mute.
+    Mute,
     /// A favourite.
     Favorite,
 }
 
 impl EdgeKind {
-    pub(crate) const ALL: [Self; 4] = [Self::Friend, Self::Follow, Self::Block, Self::Favorite];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Friend,
+        Self::Follow,
+        Self::Block,
+        Self::Mute,
+        Self::Favorite,
+    ];
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Friend => "friend",
             Self::Follow => "follow",
             Self::Block => "block",
+            Self::Mute => "mute",
             Self::Favorite => "favorite",
         }
     }

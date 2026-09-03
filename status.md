@@ -1777,3 +1777,93 @@ panel + keadaan tanpa root). Catatan desain: klien desktop dan Android
 masih memakai login password (server tetap mendukung); pengguna web yang
 sudah ada tapi tidak menyimpan file .migo harus masuk dari perangkat
 yang masih bersesi atau membuat akun baru.
+
+## 53. Sistem room penuh: kapasitas, reconnect 2 menit, mute personal, vote kick 50%, admin global, dan eskalasi ban menyeluruh (v0.15.0)
+
+Permintaan: room menolak pendatang saat batas tercapai; member bebas
+keluar-masuk; yang putus koneksi diberi 2 menit untuk nyambung lagi
+sebelum dinyatakan pergi; mute bersifat personal — pesan yang di-mute
+hilang di **semua** room, tapi hanya di mata pemuternya; kick lewat vote
+50% dari penghuni; admin global bisa kick/ban tanpa vote; daftar room
+menampilkan okupansi hidup "Jambi 2/33"; dan tiap perubahan anggota
+diberitahukan ke room. Ditambah satu eskalasi: kena kick oleh admin
+global lebih dari 3x = ban dari seluruh chatroom.
+
+**Wire.** Empat opcode baru — `ROOM_VOTE_KICK` (90), `ROOM_VOTE_EVENT`
+(91, coalesce per room), `ROOM_SANCTION` (92), `MUTE_SET` (120) — dan
+`MemberChange` kini enumerasi (Joined/Left/Disconnected/Reconnected/
+Kicked/Banned), bukan lagi sekadar flag join. Kode fault baru:
+`VOTE_TARGET_IMMUNE` (1207), `NETWORK_ROOM_BANNED` (1208),
+`VOTE_ALREADY_OPEN` (1511). ROOM_VOTE_KICK ditarif 5 token; membuka
+vote, bersuara, dan lolosnya vote terbit di satu stream
+`ROOM_VOTE_EVENT` yang di-coalesce per room.
+
+**Store (migrasi 0007).** Tabel `room_network_ban` (satu baris per akun;
+keberadaan baris = ban, unban = delete, tanpa keadaan "diangkat tapi
+masih ter-row" yang bisa salah dibaca cek join). `RoomStore` bertambah:
+`record_moderation_action` (jejak audit per tindakan — memori menolak
+room/actor/target yang tak ada, jujur seperti FK Postgres),
+`count_global_admin_kicks` (join aktor terhadap registri admin global
+*saat ini* — admin yang diberhentikan berhenti dihitung detik itu juga,
+dan barisnya tetap ada sehingga re-appoint memulihkan sejarah),
+`network_ban`/`set_network_ban` (upsert)/`clear_network_ban`. Tiga kasus
+kontrak baru dijalankan dua backend: jejak audit FK-jujur, hitungan kick
+hanya admin global aktif, dan ban jaringan satu-baris-upsert-or-delete.
+
+**Layanan (migo-rooms).** `join` menolak saat penuh dan saat akun
+ter-ban jaringan (`until` dibandingkan dengan jam crate, bukan jam
+store — siapa bertindak, dia menghitung waktu). `sanction` kini
+mengembalikan `Vec<Fanout>`: satu kick bisa menyapu banyak room.
+Admin global berlaku di room mana pun, public maupun managed, tanpa
+perlu jadi member — tapi pemilik room mutlak kebal. **Eskalasi**: kick
+ke-4 oleh admin global (hitungan >3) menulis ban jaringan
+(`until: None` — hanya Unban yang membalikkan) dan menyapu akun itu dari
+semua room yang ia bukan pemiliknya, tiap room mendapat event Banned.
+Kick terhadap member yang sudah tak aktif tidak menulis baris audit —
+admin tidak bisa menggelembungkan hitungan dengan menendang kursi
+kosong. **Vote kick**: satu vote terbuka per room, registry
+in-memory dengan TTL 60 detik (malas: vote berikut di room itu yang
+menutup yang lama); suara yang dibutuhkan `max(2, ceil(n/2))`; pemilik
+room dan admin global kebal (dicek sebelum lookup target); member yang
+di-mute tetap boleh bersuara — dibungkam bukan berarti dicabut
+haknyanya; suara ulang idempoten; vote lolos menutup registry di dalam
+lock lalu menulis `leave_room` di luar lock.
+
+**Presence & reconnect (room_presence.rs, akar komposisi).** Online count
+room adalah perpotongan "siapa member" (migo-rooms) dan "siapa
+terhubung" (gateway) — dua fakta yang tidak bertemu di crate mana pun,
+maka talinya dipegang composition root sebagai tally in-memory. Socket
+pertama naik: tiap room kebagiani hitungan online segar, dan yang tadinya
+diberi tahu offline diberi tahu `Reconnected`. Socket terakhir turun:
+room diberi tahu `Disconnected`, kursi **dipertahankan**, dan timer masa
+tenggang 2 menit dipasang; bila melesat saat akun masih offline dan
+masih member, kepergiannya jadi nyata dengan `Left`. Pemilik room kebal
+timeout — pencipta room tidak kehilangan roomnya hanya karena menutup
+laptop. Pembatalan timer lewat counter generasi per akun: timer membawa
+generasi saat dipasang dan diam bila sudah bergeser — tanpa handle timer
+yang dilacak, tanpa lock lintas await.
+
+**Mute personal (migo-social).** Edge Mute satu arah — dan sengaja
+**tidak** membongkar apa pun: berbeda dari block yang merobohkan
+pertemanan dan follow, mute adalah tombol volume, bukan vonis. Yang
+di-mute tidak diberi tahu, tidak ada cara bertanya "siapa yang
+me-mute saya", dan plafon 1.000 edge. Di web, `MutedProvider` memegang
+set mute (server-owned, dibaca ulang tiap reset sesi) dan
+`muteFilter` diterapkan pada transkrip room saja — DM satu-satu tidak
+pernah difilter; membungkam kebisingan keramaian bukan memutus
+seseorang, memutus itu block.
+
+**Klien.** Daftar room web menampilkan `2/33` (online hidup / batas
+maksimum, tooltip lengkap) dan mengurutkan berdasarkan online count.
+Panel info room: tombol kick-vote untuk semua member dengan tally yang
+naik di stream, dan tombol Mute/Kick/Ban untuk staf — UI member dan
+staf, dua jalan yang wire sediakan. Notifikasi anggota ("Ana joined the
+room") dirender di live region transkrip, nama diresolve belakangan,
+"Someone" bila profil belum turun. Android menyamakan: RoomsScreen
+okupansi, ChatScreen notice + filter mute, SDK Kotlin baru. SDK TS
+menambah `voteKick`, `sanction`, `muteUser`. Captcha kembali di
+pendaftaran web — inline, tanpa card putih (v0.14.9 sempat
+menghilangkannya).
+
+Test: migo-rooms 130, migo-social 115, kontrak store 52 kasus × dua
+backend, gateway dan migod end-to-end, web 292.

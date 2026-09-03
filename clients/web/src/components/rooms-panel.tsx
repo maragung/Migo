@@ -24,7 +24,7 @@ import type { Id, RoomSummary } from '@migo/sdk';
 
 import { friendlyError } from '@/lib/migo/errors.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
-import { useRooms } from '@/lib/migo/rooms-provider.js';
+import { useRooms, capacityLabel } from '@/lib/migo/rooms-provider.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { useJoinRoom } from '@/lib/migo/use-join-room.js';
 
@@ -320,6 +320,14 @@ function RoomRow({
       <div className="person-main">
         <span className="person-name room-name">
           {room.name}
+          {room.maxMembers !== undefined && room.maxMembers > 0 ? (
+            <span
+              className="capacity-badge"
+              title={`${(room.onlineCount ?? 0).toLocaleString()} online of ${room.maxMembers.toLocaleString()} maximum`}
+            >
+              {capacityLabel(room.onlineCount, room.maxMembers)}
+            </span>
+          ) : null}
           {room.verified ? (
             <span className="verified-mark" title="Verified room" aria-label="Verified room">
               <Icon name="verified" size={16} />

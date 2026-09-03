@@ -10,6 +10,7 @@ import com.migo.core.protocol.LedgerEntryWire
 import com.migo.core.protocol.ProgressionWire
 import com.migo.core.protocol.RankWire
 import com.migo.core.protocol.RelationshipEntry
+import com.migo.core.protocol.RoomRole
 import com.migo.core.protocol.RoomSummary
 import com.migo.core.protocol.SuggestedUser
 import com.migo.core.store.ServerEndpoint
@@ -351,6 +352,73 @@ data class ChatState(
     val typing: Set<Id> = emptySet(),
     /** The text in the composer. Held here so a rotation does not lose a half-written message. */
     val draft: String = "",
+    /**
+     * The room's live shape, for a room chat's header and for gating its moderation controls. Null
+     * for a direct chat, and null for a room until a summary or a state event has named its counts.
+     */
+    val room: RoomLiveInfo? = null,
+    /**
+     * The room's non-message timeline — joins, leaves, kicks — oldest first, capped so it cannot
+     * grow without bound while a busy room is left open. Always empty for a direct chat.
+     */
+    val notices: List<RoomNotice> = emptyList(),
+    /** The room's members once the member sheet has read them; null before the first read. */
+    val roster: List<RosterMember>? = null,
+    /** True while the roster is being read. */
+    val rosterLoading: Boolean = false,
+    /** Open kick votes by target: the running tally a member row shows while its vote is live. */
+    val votes: Map<Id, VoteTally> = emptyMap(),
+    /** Accounts this device has personally muted, for the member sheet's own Muted list. */
+    val muted: Set<Id> = emptySet(),
+    /** Whether the member sheet is covering the thread. */
+    val membersOpen: Boolean = false,
+    /** Accounts with a moderation or a mute action in flight, so only the pressed row shows it. */
+    val acting: Set<Id> = emptySet(),
+)
+
+/**
+ * A room's live shape, as the open chat reads it.
+ *
+ * Seeded from the [RoomSummary] a join, a create or the directory handed back, then kept current by
+ * the room's event streams: a [com.migo.core.protocol.RoomStateEvent] ticks the counts, a member
+ * event carries the running total, and the ceiling stays put. [myRole] is the field no state event
+ * carries, so it is seeded from the summary and refined from the roster (which lists the caller among
+ * the members). It is what gates the staff actions — an action offered over someone the caller does
+ * not outrank is one the server can only reject.
+ */
+data class RoomLiveInfo(
+    val onlineCount: Long,
+    val memberCount: Long,
+    /** The room's ceiling when it declares one; the capacity badge reads it, and null hides the badge. */
+    val maxMembers: Long? = null,
+    val myRole: RoomRole = RoomRole.Unknown,
+)
+
+/**
+ * One line in a room's timeline that is not a message: a join, a leave, a disconnect, a kick, a ban.
+ *
+ * Built once from a [com.migo.core.protocol.RoomMemberEvent] for the open room — [text] is already the
+ * display sentence and [key] is unique, because a notice that resolved its name or minted its key at
+ * draw time would do both on every scroll frame.
+ */
+data class RoomNotice(
+    val key: String,
+    val text: String,
+    /** Unix milliseconds the event was observed; member events carry no server time of their own. */
+    val at: Long,
+)
+
+/** One member as the roster sheet draws it: a display name, the id behind it, and the room role. */
+data class RosterMember(
+    val userId: Id,
+    val name: String,
+    val role: RoomRole,
+)
+
+/** A running kick vote's tally, as a member row shows it while the vote is open. */
+data class VoteTally(
+    val votes: Long,
+    val needed: Long,
 )
 
 /**

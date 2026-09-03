@@ -13,6 +13,7 @@ import type {
 
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { friendlyError } from '@/lib/migo/errors.js';
+import { useMuted } from '@/lib/migo/muted-provider.js';
 import { presenceLabel, usePresenceOf } from '@/lib/migo/use-presence.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
@@ -41,6 +42,7 @@ const KIND_FRIEND: number = RelationshipKind.Friend;
 const KIND_PENDING_INCOMING: number = RelationshipKind.PendingIncoming;
 const KIND_PENDING_OUTGOING: number = RelationshipKind.PendingOutgoing;
 const KIND_BLOCK: number = RelationshipKind.Block;
+const KIND_MUTE: number = RelationshipKind.Mute;
 
 /**
  * The Friends tab: the relationship graph, pending requests, suggestions, people search, and the
@@ -66,6 +68,9 @@ export function FriendsPanel({
 }): ReactNode {
   const { client } = useMigo();
   const { noteConversation } = useConversations();
+  // The muted set is the provider's to own, so every surface that mutes (a roster, a profile
+  // modal, this panel) shares one source of truth; the panel renders it and offers Unmute.
+  const { muted: mutedSet, setMuted } = useMuted();
 
   const [entries, setEntries] = useState<RelationshipEntry[] | null>(null);
   const [blocked, setBlocked] = useState<RelationshipEntry[]>([]);
@@ -200,10 +205,20 @@ export function FriendsPanel({
     };
   }, [entries]);
 
+  // The Muted rows come from the provider's set, not the graph read, so a mute made anywhere else
+  // shows here at once and an unmute here clears it everywhere.
+  const mutedEntries = useMemo<RelationshipEntry[]>(
+    () => [...mutedSet].map((userId) => ({ userId, kind: KIND_MUTE })),
+    [mutedSet],
+  );
+
   // Resolve the relationship rows to names once, through the shared profile cache.
   const relatedIds = useMemo(
-    () => [...friends, ...incoming, ...outgoing, ...blocked].map((entry) => entry.userId),
-    [friends, incoming, outgoing, blocked],
+    () =>
+      [...friends, ...incoming, ...outgoing, ...blocked, ...mutedEntries].map(
+        (entry) => entry.userId,
+      ),
+    [friends, incoming, outgoing, blocked, mutedEntries],
   );
   const profiles = useProfiles(relatedIds);
 
@@ -228,6 +243,17 @@ export function FriendsPanel({
     // `act` is a stable-shape closure over state setters only; the client is the live dependency.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [client],
+  );
+
+  // Unmute from the Muted section: the provider performs the call and drops the id from its set,
+  // which is what re-renders this list; `act` only wraps it in the row's busy state.
+  const unmute = useCallback(
+    async (userId: Id): Promise<void> => {
+      await act(userId, () => setMuted(userId, false));
+    },
+    // `act` closes over state setters only; `setMuted` is the live dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [setMuted],
   );
 
   return (
@@ -354,6 +380,14 @@ export function FriendsPanel({
             onSelect={(userId) => setSelected(userId)}
           />
 
+          <MutedSection
+            entries={mutedEntries}
+            profiles={profiles}
+            busy={busy}
+            onSelect={(userId) => setSelected(userId)}
+            onUnmute={(userId) => void unmute(userId)}
+          />
+
           {results !== null ? (
             <section className="panel-section" aria-label="Search results">
               <h2 className="panel-heading">Search results</h2>
@@ -467,6 +501,68 @@ export function BlockedSection({
             avatarUrl={profiles.get(entry.userId)?.avatarUrl}
             note="blocked"
             onSelect={() => onSelect(entry.userId)}
+          />
+        ))
+      )}
+    </section>
+  );
+}
+
+/**
+ * The Muted section: the personal-mute set the provider owns, each row a door to the person's
+ * profile and an Unmute button beside it.
+ *
+ * Mirrors {@link BlockedSection} — exported presentational over plain data — but a mute, unlike a
+ * block, has a one-tap undo on the wire, so the row carries it. The note names what a mute does and
+ * does not do, since it is the gentler cousin of a block: room chatter hidden, direct messages left
+ * alone.
+ */
+export function MutedSection({
+  entries,
+  profiles,
+  busy,
+  onSelect,
+  onUnmute,
+}: {
+  entries: RelationshipEntry[];
+  /** Resolved profiles through the shared cache; an unresolved account keeps a stable fallback. */
+  profiles: ReadonlyMap<Id, { displayName: string; username?: string; avatarUrl?: string }>;
+  /** The ids with an unmute in flight, so a row's button can disable itself. */
+  busy?: ReadonlySet<Id>;
+  onSelect: (userId: Id) => void;
+  onUnmute: (userId: Id) => void;
+}): ReactNode {
+  return (
+    <section className="panel-section" aria-label="Muted accounts">
+      <h2 className="panel-heading">Muted</h2>
+      {entries.length === 0 ? (
+        <p className="muted">
+          No muted accounts. Mute someone to hide their room messages for you.
+        </p>
+      ) : (
+        entries.map((entry) => (
+          <PersonRow
+            key={entry.userId}
+            id={entry.userId}
+            name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
+            username={profiles.get(entry.userId)?.username}
+            avatarUrl={profiles.get(entry.userId)?.avatarUrl}
+            note="muted · room messages hidden"
+            onSelect={() => onSelect(entry.userId)}
+            actions={
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={busy?.has(entry.userId) ?? false}
+                onClick={(event) => {
+                  // The row is a door to the profile; the button is not — stop the row's open.
+                  event.stopPropagation();
+                  onUnmute(entry.userId);
+                }}
+              >
+                Unmute
+              </button>
+            }
           />
         ))
       )}

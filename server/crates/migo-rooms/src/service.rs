@@ -50,24 +50,29 @@
 //! It does not deliver frames, count who is online, assign sequence numbers, or
 //! enforce slow mode. [`crate::traits`] records why for each one.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use migo_core::metrics::Registry;
 use migo_core::{Id, OsRandom, Random, Result, Timestamp};
 use migo_protocol::{
-    codes, fault, Opcode, RelationshipKind, RoomJoinRequest, RoomJoinResponse, RoomKind,
-    RoomLeaveRequest, RoomListRequest, RoomListResponse, RoomMemberEvent, RoomRole, RoomSummary,
+    codes, fault, MemberChange, Opcode, RelationshipKind, RoomJoinRequest, RoomJoinResponse,
+    RoomKind, RoomLeaveRequest, RoomListRequest, RoomListResponse, RoomMemberEvent, RoomRole,
+    RoomSummary, RoomVoteEvent, RoomVoteKickResponse, SanctionAction,
 };
 use migo_ratelimit::{BucketKey, RateLimiter, SharedRateLimiter};
-use migo_store::model::{join_policy, NewRoom, Patch, Room, RoomMember};
+use migo_store::model::{
+    join_policy, NewModerationAction, NewRoom, Patch, Room, RoomMember, RoomNetworkBan,
+};
 use migo_store::traits::{GlobalAdminStore, MessagingStore, RoomStore, SocialStore};
 use migo_store::{SharedStore, Store};
 use parking_lot::Mutex;
 
-use crate::fanout::Fanout;
+use crate::fanout::{Broadcast, Fanout};
 use crate::metrics::{
     AuthorizeOutcome, ChangeOutcome, CreateOutcome, JoinOutcome, Meters, SanctionKind,
+    TimeoutOutcome, VoteOutcome,
 };
 use crate::model::{
     capacity_for, slug_is_valid, Authorized, Caller, NewRoomRequest, RoomsConfig, Sanction,
@@ -114,6 +119,66 @@ const MAX_SEARCH_SCAN: u16 = 200;
 /// The sequence reported for a conversation that has no messages yet.
 const NO_MESSAGES_YET: u64 = 0;
 
+/// How long a kick vote stays open without reaching its tally, in milliseconds.
+///
+/// One minute. Long enough for a room to weigh in, short enough that a vote
+/// nobody seconded is not still sitting on the roster an hour later being
+/// mistaken for a live question. There is no timer: the registry is swept
+/// lazily, on the next vote this room sees, because a background job that wakes
+/// to close an unremarkable vote is a scheduler entry per room for no
+/// observable benefit — the client that cares is told the moment it asks.
+const VOTE_TTL_MS: i64 = 60 * 1_000;
+
+/// How many times a global admin may kick one account before the next kick
+/// bars it from every room on the service.
+///
+/// The escalation is about the deployment's authority and not a room's: room
+/// staff can kick the same person from their own room every day and it never
+/// counts, because leaving a room you dislike is what rooms are for. Three
+/// kicks by *global* admins — people whose standing covers every room — is the
+/// pattern of an account that does not behave anywhere, and the fourth refusal
+/// is the whole network's.
+const GLOBAL_ADMIN_KICKS_BEFORE_BAN: u64 = 3;
+
+/// A kick vote in progress, in the registry keyed by room.
+///
+/// In memory and not in the store because a vote is not a fact about a room —
+/// it is a minute-long tally about the people currently in it, and persisting
+/// it would make a restart replay votes whose members have since left. The
+/// room's membership rows, the only thing a vote can change, are stored; the
+/// tally is not.
+#[derive(Clone, Debug)]
+struct OpenVote {
+    /// Who the vote would remove.
+    target: Id,
+    /// The accounts that have spoken, once each.
+    voters: HashSet<Id>,
+    /// When the first voice landed, for the lazy expiry.
+    opened_at: Timestamp,
+}
+
+impl OpenVote {
+    /// Whether this vote has outlived [`VOTE_TTL_MS`] as of `now`.
+    fn expired(&self, now: Timestamp) -> bool {
+        now.as_millis() - self.opened_at.as_millis() > VOTE_TTL_MS
+    }
+}
+
+/// Voices a kick needs, from a room of `member_count`.
+///
+/// Half the room rounded up — the user's rule is a majority of the members
+/// present — with a floor of two, so that a room of one cannot vote (the only
+/// person a sole member could name is themselves, and self-removal is what
+/// [`Roomkeeper::leave`](crate::traits::Roomkeeper::leave) is for).
+#[must_use]
+pub const fn votes_needed(member_count: u32) -> u32 {
+    if member_count < 2 {
+        2
+    } else {
+        member_count.div_ceil(2)
+    }
+}
+
 /// Rooms over a store and a rate limiter.
 ///
 /// No cache parameter, unlike presence and messaging. Nothing here is cached: a
@@ -133,6 +198,13 @@ pub struct Rooms<S: ?Sized = dyn Store, L: ?Sized = dyn RateLimiter> {
     random: Mutex<Box<dyn Random>>,
     config: RoomsConfig,
     meters: Meters,
+    /// Kick votes in progress, at most one per room, keyed by room id.
+    ///
+    /// Kept here and not in the store for the reason [`OpenVote`] records: a
+    /// tally is a minute-long question to whoever is present, and not a fact
+    /// about the room that survives them. The lock is never held across an
+    /// `await` — the pass path drops it before it writes.
+    votes: Mutex<HashMap<Id, OpenVote>>,
 }
 
 /// Builds the rooms service the composition root hands around.
@@ -179,6 +251,7 @@ where
             random: Mutex::new(random),
             config,
             meters: Meters::new(registry),
+            votes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -362,16 +435,18 @@ where
         Ok((actor, subject))
     }
 
-    /// The preamble a **global admin's** sanction uses in a public room.
+    /// The preamble a **global admin's** sanction uses, in any room.
     ///
-    /// A global admin moderates every public room without belonging to it: the
-    /// deployment appointed them, not the room. Two of [`Self::require_over`]'s
-    /// four checks still stand — an account id is required, and the actor cannot
-    /// aim at itself — and so do both owner protections: the owner is not a rank,
-    /// and no override reaches them. What falls away is membership, the permission
-    /// bit, and the rank comparison, because standing that comes from outside the
-    /// room is not below anything inside it.
-    async fn require_public_over(
+    /// A global admin moderates every room — public or managed — without
+    /// belonging to it: the deployment appointed them, not the room, and a
+    /// managed owner's wall stops the room's own staff, not the service's.
+    /// Three of [`Self::require_over`]'s four checks still stand — an account
+    /// id is required, the actor cannot aim at itself, and the subject must
+    /// have a membership row — and so do both owner protections: the owner is
+    /// not a rank, and no override reaches them. What falls away is membership,
+    /// the permission bit, and the rank comparison, because standing that comes
+    /// from outside the room is not below anything inside it.
+    async fn require_admin_over(
         &self,
         caller: &Caller,
         room: &Room,
@@ -600,6 +675,30 @@ const fn sanction_kind(sanction: &Sanction) -> SanctionKind {
     }
 }
 
+/// The wire's numbering for an action, for the audit row.
+///
+/// The store's `action` column and the client's `RoomSanction` frame must agree
+/// on one scale, and the wire enum is the one both ends already hold.
+const fn sanction_action(sanction: &Sanction) -> SanctionAction {
+    match sanction {
+        Sanction::Mute { .. } => SanctionAction::Mute,
+        Sanction::Unmute => SanctionAction::Unmute,
+        Sanction::Kick => SanctionAction::Kick,
+        Sanction::Ban { .. } => SanctionAction::Ban,
+        Sanction::Unban => SanctionAction::Unban,
+    }
+}
+
+/// The operator's note, for the audit row. Only the two actions a client can
+/// attach one to carry one; the rest are `None` and not an empty string,
+/// because an empty string is a note somebody appears to have written.
+fn sanction_reason(sanction: &Sanction) -> Option<String> {
+    match sanction {
+        Sanction::Mute { reason, .. } | Sanction::Ban { reason, .. } => reason.clone(),
+        Sanction::Unmute | Sanction::Kick | Sanction::Unban => None,
+    }
+}
+
 /// A membership event about `subject`, for the room's topic.
 fn member_event(
     room_id: Id,
@@ -614,6 +713,9 @@ fn member_event(
         joined,
         role,
         member_count,
+        // Callers that only have the boolean say it with the boolean; the events that
+        // know why the membership changed set `change` and leave this `None`.
+        change: None,
     }
 }
 
@@ -722,6 +824,21 @@ where
         if let Err(err) = self.charge(caller, Opcode::RoomJoin).await {
             self.meters.join(JoinOutcome::RateLimited);
             return Err(err);
+        }
+        // Ahead of the room, because the ban is not about the room. A network-wide
+        // ban bars every room the service has, and reading it after `load_room`
+        // would let a banned account distinguish rooms that exist from rooms that
+        // do not — a directory probe nobody under a network ban needs to make.
+        // `until` is compared against this crate's clock, not the store's, on the
+        // rule the whole codebase follows: whoever acts, times.
+        if let Some(ban) = self.store.network_ban(caller.account_id).await? {
+            if ban.until.is_none_or(|until| until > caller.now) {
+                self.meters.join(JoinOutcome::NetworkBanned);
+                return Err(fault::error(
+                    codes::NETWORK_ROOM_BANNED,
+                    "the account is banned from every room on this service",
+                ));
+            }
         }
         let room = match self.load_room(request.room_id).await {
             Ok(room) => room,
@@ -888,6 +1005,55 @@ where
                 None,
                 Some(self.current_count(room.room_id).await?),
             ),
+        )))
+    }
+
+    async fn timeout_member(
+        &self,
+        room_id: Id,
+        account_id: Id,
+        now: Timestamp,
+    ) -> Result<Option<Fanout>> {
+        // No `require_identity`, no `charge`, no permission check. The actor is the
+        // reconnect-grace timer, and a timer holds no capabilities to check; the only
+        // authority a caller-less removal needs is that it cannot be reached from a frame,
+        // which is what keeping it off the request-carrying `leave` path buys. The two
+        // invariants below are the whole of the rule.
+        let room = self.load_room(room_id).await?;
+        let Some(member) = self.store.room_member(room_id, account_id).await? else {
+            self.meters.timeout(TimeoutOutcome::Absent);
+            return Ok(None);
+        };
+        if !member.is_active() {
+            // Left under their own steam, or rejoined and left again, in the two minutes
+            // between the timer being armed and firing. Either way there is nothing to
+            // remove and nothing to say — the same `None` `leave` returns for the same reason.
+            self.meters.timeout(TimeoutOutcome::Absent);
+            return Ok(None);
+        }
+        if room.owner_id == account_id {
+            // The owner keeps the room by closing a laptop, exactly as `leave` refuses to let
+            // them walk out of it: a room with no owner has nobody who can transfer or archive
+            // it. Presence has already marked them offline; they simply stay seated.
+            self.meters.timeout(TimeoutOutcome::Owner);
+            return Ok(None);
+        }
+        self.store.leave_room(room_id, account_id, now).await?;
+        self.meters.timeout(TimeoutOutcome::Removed);
+        let mut event = member_event(
+            room_id,
+            account_id,
+            false,
+            None,
+            Some(self.current_count(room_id).await?),
+        );
+        // Said with `Left`, not just `joined: false`: a client that saw only the boolean could
+        // not tell a grace timeout from a kick, and a roster colours the two differently — one
+        // is "stepped away", the other is "was removed".
+        event.change = Some(MemberChange::Left);
+        Ok(Some(Fanout::unattributed(
+            room_id,
+            Broadcast::Member(event),
         )))
     }
 
@@ -1299,7 +1465,7 @@ where
         room_id: Id,
         subject_id: Id,
         sanction: Sanction,
-    ) -> Result<Option<Fanout>> {
+    ) -> Result<Vec<Fanout>> {
         Self::require_identity(caller)?;
         Self::validate_sanction(&sanction)?;
         self.charge_flat(caller, MODERATION_COST).await?;
@@ -1307,12 +1473,11 @@ where
         // A global admin's standing is checked before the room's own
         // authorization, because a designation that arrived from outside the
         // room is exactly the membership and permission bits it does not hold.
-        // Public rooms only: a managed room is a single owner's walled garden,
-        // and the deployment does not moderate it by proxy.
-        let subject = if room.kind == RoomKind::Public
-            && self.store.is_global_admin(caller.account_id).await?
-        {
-            self.require_public_over(caller, &room, subject_id).await?
+        // Every kind of room: a managed owner's wall stops the room's staff,
+        // not the deployment's.
+        let admin = self.store.is_global_admin(caller.account_id).await?;
+        let subject = if admin {
+            self.require_admin_over(caller, &room, subject_id).await?
         } else {
             self.require_over(caller, &room, subject_id, sanction.permission())
                 .await?
@@ -1323,13 +1488,16 @@ where
         // `set_room_sanction` writes both columns and a caller that sent `None` for
         // the one it was not changing would lift it. Muting somebody must not be a
         // way to clear their ban.
-        match sanction {
+        let mut fanouts = Vec::new();
+        // Borrowed, not consumed: the audit row below reads the sanction again
+        // after every arm has run.
+        match &sanction {
             Sanction::Mute {
                 duration_ms,
                 reason,
             } => {
                 let until =
-                    Timestamp::from_millis(caller.now.as_millis().saturating_add(duration_ms));
+                    Timestamp::from_millis(caller.now.as_millis().saturating_add(*duration_ms));
                 self.store
                     .set_room_sanction(
                         room_id,
@@ -1342,13 +1510,12 @@ where
                         // `docs/04-data-model.md` has one column, and writing a
                         // mute reason into a second one it does not have is not
                         // something this crate can do.
-                        reason,
+                        reason.clone(),
                         caller.now,
                     )
                     .await?;
                 // No frame. A mute is between a moderator and one member, and
                 // announcing it to the room turns a correction into a punishment.
-                Ok(None)
             }
             Sanction::Unmute => {
                 self.store
@@ -1361,27 +1528,31 @@ where
                         caller.now,
                     )
                     .await?;
-                Ok(None)
             }
             Sanction::Kick => {
                 if !subject.is_active() {
-                    // Already gone. Nothing to write and nothing to announce.
-                    return Ok(None);
+                    // Already gone. Nothing to write, nothing to announce — and no
+                    // audit row either, because the escalation count below reads
+                    // those rows, and a kick that removed nobody counting toward a
+                    // network ban would let an admin manufacture an escalation by
+                    // kicking an empty seat.
+                    return Ok(fanouts);
                 }
                 self.store
                     .leave_room(room_id, subject_id, caller.now)
                     .await?;
-                Ok(Some(Fanout::member(
+                let mut event = member_event(
                     room_id,
-                    caller.device_id,
-                    member_event(
-                        room_id,
-                        subject_id,
-                        false,
-                        None,
-                        Some(self.current_count(room_id).await?),
-                    ),
-                )))
+                    subject_id,
+                    false,
+                    None,
+                    Some(self.current_count(room_id).await?),
+                );
+                // Said with `Kicked` and not just `joined: false`: a client that
+                // saw only the boolean could not tell a removal from a departure,
+                // and a roster colours the two differently.
+                event.change = Some(MemberChange::Kicked);
+                fanouts.push(Fanout::member(room_id, caller.device_id, event));
             }
             Sanction::Ban {
                 duration_ms,
@@ -1402,24 +1573,22 @@ where
                         subject_id,
                         subject.muted_until,
                         Some(until),
-                        reason,
+                        reason.clone(),
                         caller.now,
                     )
                     .await?;
+                let mut event = member_event(
+                    room_id,
+                    subject_id,
+                    false,
+                    None,
+                    Some(self.current_count(room_id).await?),
+                );
                 // The room hears that somebody left, not why. The reason is for the
                 // banned account and the moderation log; broadcasting it would put
                 // free text an annoyed moderator typed onto every subscriber's screen.
-                Ok(Some(Fanout::member(
-                    room_id,
-                    caller.device_id,
-                    member_event(
-                        room_id,
-                        subject_id,
-                        false,
-                        None,
-                        Some(self.current_count(room_id).await?),
-                    ),
-                )))
+                event.change = Some(MemberChange::Banned);
+                fanouts.push(Fanout::member(room_id, caller.device_id, event));
             }
             Sanction::Unban => {
                 self.store
@@ -1435,10 +1604,293 @@ where
                         caller.now,
                     )
                     .await?;
-                // Lifting a ban does not put anybody back in the room; they rejoin.
-                Ok(None)
+                // A global admin's Unban lifts the network-wide ban as well. The
+                // escalation wrote one row and one row reverses it; a version where
+                // the network ban needed a second, different button would leave the
+                // account barred from every room but the one they were just unbanned
+                // from, which is the outcome nobody intended and nobody can see from
+                // either surface.
+                if admin {
+                    self.store.clear_network_ban(subject_id).await?;
+                }
             }
         }
+        // The audit row, after the write it describes and only for actions that
+        // did something. `action` is the wire's `SanctionAction` numbering so the
+        // log and the client that caused it agree on one scale.
+        self.store
+            .record_moderation_action(NewModerationAction {
+                action_id: self.new_id(caller.now),
+                room_id,
+                actor_id: caller.account_id,
+                target_id: Some(subject_id),
+                action: sanction_action(&sanction) as i16,
+                reason: sanction_reason(&sanction),
+                created_at: caller.now,
+            })
+            .await?;
+        // The escalation: a global admin's kicks of one account, counted across
+        // every room they were kicked from. Past the third, the next kick does not
+        // just empty the seat — it bars the account from every room there is, and
+        // sweeps them out of the rooms they are still in. Room staff's kicks never
+        // reach this branch at all: the count is taken from the audit rows with
+        // their actors joined against the *current* admin registry, so a kick
+        // recorded while its actor held the designation stops counting the day the
+        // designation is gone.
+        if admin && matches!(sanction, Sanction::Kick) {
+            let kicks = self.store.count_global_admin_kicks(subject_id).await?;
+            if kicks > GLOBAL_ADMIN_KICKS_BEFORE_BAN {
+                self.store
+                    .set_network_ban(RoomNetworkBan {
+                        account_id: subject_id,
+                        reason: Some(format!(
+                            "kicked by global admins {kicks} times; a network unban reverses this"
+                        )),
+                        // No expiry. The escalation is a verdict about a pattern,
+                        // not a cool-down; lifting it is a person's decision and
+                        // arrives as an Unban, which the arm above honours.
+                        until: None,
+                        by_actor: Some(caller.account_id),
+                        created_at: caller.now,
+                    })
+                    .await?;
+                // The sweep, over every room the account still holds. Rooms they
+                // own are skipped for the same reason the owner is beyond every
+                // other sanction here: a room whose owner vanished mid-sweep has
+                // nobody left who can transfer or archive it.
+                for other in self.store.rooms_for_account(subject_id).await? {
+                    if other.owner_id == subject_id {
+                        continue;
+                    }
+                    let Some(member) = self.store.room_member(other.room_id, subject_id).await?
+                    else {
+                        continue;
+                    };
+                    if !member.is_active() {
+                        continue;
+                    }
+                    self.store
+                        .leave_room(other.room_id, subject_id, caller.now)
+                        .await?;
+                    let mut event = member_event(
+                        other.room_id,
+                        subject_id,
+                        false,
+                        None,
+                        Some(self.current_count(other.room_id).await?),
+                    );
+                    event.change = Some(MemberChange::Banned);
+                    // Unattributed: the admin's socket is not in these rooms'
+                    // audiences, and pretending a device caused each departure
+                    // would exclude a socket that is not subscribed.
+                    fanouts.push(Fanout::unattributed(
+                        other.room_id,
+                        Broadcast::Member(event),
+                    ));
+                }
+            }
+        }
+        Ok(fanouts)
+    }
+
+    async fn vote_kick(
+        &self,
+        caller: &Caller,
+        room_id: Id,
+        target_id: Id,
+    ) -> Result<(RoomVoteKickResponse, Vec<Fanout>)> {
+        Self::require_identity(caller)?;
+        if room_id.is_nil() {
+            return Err(fault::validation("room_id", "a room id is required"));
+        }
+        if target_id.is_nil() {
+            return Err(fault::validation("target_id", "an account id is required"));
+        }
+        if target_id == caller.account_id {
+            return Err(fault::conflict("a vote cannot be aimed at its own voter"));
+        }
+        self.charge(caller, Opcode::RoomVoteKick).await?;
+        let room = self.load_room(room_id).await?;
+        // Membership only, and no permission bit: a kick vote is the one lever
+        // ordinary members hold, and gating it on `ROOM_KICK` would reduce it to
+        // a button the moderators could have pressed on their own. A muted
+        // member keeps their voice for the same reason — a mute silences what
+        // they say, not how they may vote about the room they are in.
+        self.require(caller, &room, 0).await?;
+        // The two targets a room cannot vote out. The owner is beyond every
+        // sanction in this crate; a global admin is beyond everything the room
+        // can decide, because the room's standing over them is nothing.
+        if target_id == room.owner_id || self.store.is_global_admin(target_id).await? {
+            self.meters.vote(VoteOutcome::Immune);
+            return Err(fault::error(
+                codes::VOTE_TARGET_IMMUNE,
+                "the owner and global admins cannot be voted out",
+            ));
+        }
+        let subject = self
+            .store
+            .room_member(room_id, target_id)
+            .await?
+            .ok_or_else(|| fault::not_found("room member"))?;
+        if subject.is_banned(caller.now) {
+            return Err(Self::banned());
+        }
+        if !subject.is_active() {
+            return Err(fault::not_found("room member"));
+        }
+        let member_count = self.current_count(room_id).await?;
+        let needed = votes_needed(member_count);
+        let mut fanouts = Vec::new();
+        let response;
+        let mut passed = false;
+        {
+            let mut votes = self.votes.lock();
+            // The lazy expiry. A vote nobody finished is dropped the moment this
+            // room sees another one, and the room is told it closed — a client
+            // still rendering the old tally would otherwise show a question the
+            // server has stopped asking.
+            if let Some(open) = votes.get(&room_id) {
+                if open.expired(caller.now) {
+                    let closed = votes.remove(&room_id).expect("just checked present");
+                    fanouts.push(Fanout::unattributed(
+                        room_id,
+                        Broadcast::Vote(RoomVoteEvent {
+                            room_id,
+                            target_id: closed.target,
+                            votes: closed.voters.len() as u32,
+                            needed,
+                            member_count,
+                            closed: Some(true),
+                        }),
+                    ));
+                }
+            }
+            match votes.get_mut(&room_id) {
+                Some(open) if open.target == target_id => {
+                    if !open.voters.insert(caller.account_id) {
+                        // The same voice twice. The tally did not move, so nothing
+                        // is published and nothing is re-counted — the retry gets
+                        // the same answer the first call got.
+                        self.meters.vote(VoteOutcome::Unchanged);
+                        return Ok((
+                            RoomVoteKickResponse {
+                                room_id,
+                                target_id,
+                                votes: open.voters.len() as u32,
+                                needed,
+                                member_count,
+                                open: true,
+                            },
+                            fanouts,
+                        ));
+                    }
+                    let count = open.voters.len() as u32;
+                    if count >= needed {
+                        // Passed. The registry entry is dropped here, inside the
+                        // lock, so a second vote starting while the kick's writes
+                        // run cannot see a tally that has already decided; the
+                        // writes themselves happen outside it.
+                        votes.remove(&room_id);
+                        passed = true;
+                        response = RoomVoteKickResponse {
+                            room_id,
+                            target_id,
+                            votes: count,
+                            needed,
+                            member_count,
+                            open: false,
+                        };
+                    } else {
+                        self.meters.vote(VoteOutcome::Voice);
+                        response = RoomVoteKickResponse {
+                            room_id,
+                            target_id,
+                            votes: count,
+                            needed,
+                            member_count,
+                            open: true,
+                        };
+                        fanouts.push(Fanout::vote(
+                            room_id,
+                            caller.device_id,
+                            RoomVoteEvent {
+                                room_id,
+                                target_id,
+                                votes: count,
+                                needed,
+                                member_count,
+                                closed: None,
+                            },
+                        ));
+                    }
+                }
+                Some(_) => {
+                    // A different target's vote is running. One question at a
+                    // time per room: two interleaved tallies would let a faction
+                    // split the room's attention and pass the one nobody was
+                    // counting.
+                    self.meters.vote(VoteOutcome::AlreadyOpen);
+                    return Err(fault::error(
+                        codes::VOTE_ALREADY_OPEN,
+                        "another kick vote is already open in this room",
+                    ));
+                }
+                None => {
+                    let mut voters = HashSet::new();
+                    voters.insert(caller.account_id);
+                    votes.insert(
+                        room_id,
+                        OpenVote {
+                            target: target_id,
+                            voters,
+                            opened_at: caller.now,
+                        },
+                    );
+                    self.meters.vote(VoteOutcome::Opened);
+                    response = RoomVoteKickResponse {
+                        room_id,
+                        target_id,
+                        votes: 1,
+                        needed,
+                        member_count,
+                        open: true,
+                    };
+                    fanouts.push(Fanout::vote(
+                        room_id,
+                        caller.device_id,
+                        RoomVoteEvent {
+                            room_id,
+                            target_id,
+                            votes: 1,
+                            needed,
+                            member_count,
+                            closed: None,
+                        },
+                    ));
+                }
+            }
+        }
+        if passed {
+            // Outside the lock: this is a store write, and holding a mutex across
+            // an await would put the registry on the scheduler's critical path.
+            self.store
+                .leave_room(room_id, target_id, caller.now)
+                .await?;
+            self.meters.vote(VoteOutcome::Passed);
+            let mut event = member_event(
+                room_id,
+                target_id,
+                false,
+                None,
+                Some(self.current_count(room_id).await?),
+            );
+            event.change = Some(MemberChange::Kicked);
+            // The member event is the tally's closing: a `RoomVoteEvent` with
+            // `closed: false` would tell the room a vote ended, and the removal
+            // it caused says that already, in the frame every client renders.
+            fanouts.push(Fanout::member(room_id, caller.device_id, event));
+        }
+        Ok((response, fanouts))
     }
 
     async fn transfer_ownership(

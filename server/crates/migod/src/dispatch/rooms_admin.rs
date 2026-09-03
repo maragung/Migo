@@ -1,7 +1,7 @@
 //! The ROOMS administration opcodes: creating a room, reading its roster, and the
 //! operator actions on an existing one.
 //!
-//! Five opcodes, each a thin translation from a wire frame onto one
+//! Seven opcodes, each a thin translation from a wire frame onto one
 //! [`Roomkeeper`](migo_rooms::traits::Roomkeeper) method. The service owns every rule —
 //! the slug namespace, the capacity ceiling, the role algebra, the "only the owner
 //! archives" check, the rate charge — so these handlers only build the
@@ -18,26 +18,33 @@
 //! | `ROOM_ROLE_SET` | `RoomRoleSet`  | `Roomkeeper::set_role` | `Acknowledged`     |
 //! | `ROOM_UPDATE`   | `RoomUpdate`   | `Roomkeeper::update`   | `Acknowledged`     |
 //! | `ROOM_ARCHIVE`  | `RoomArchive`  | `Roomkeeper::archive`  | `Acknowledged`     |
+//! | `ROOM_SANCTION` | `RoomSanction` | `Roomkeeper::sanction` | `Acknowledged`     |
+//! | `ROOM_VOTE_KICK`| `RoomVoteKick` | `Roomkeeper::vote_kick`| `RoomVoteKickResponse` |
 //!
 //! `ROOM_JOIN`, `ROOM_LEAVE` and `ROOM_LIST` stay inline in `dispatch.rs`, where they
-//! began; these five live here because each carries a projection (a `NewRoomRequest`
-//! mapping, a roster page, a settings patch) that would otherwise fatten the match.
+//! began; these seven live here because each carries a projection (a `NewRoomRequest`
+//! mapping, a roster page, a settings patch, a sanction mapping) that would otherwise
+//! fatten the match.
 //!
-//! `set_role` and `update` are the two that can move a room, so they are also the two
-//! that publish: the service hands back an [`Option<Fanout>`](migo_rooms::Fanout),
-//! `None` meaning nothing changed and nothing is sent (section 156), and the publishing
-//! itself is [`publish_rooms`](super::publish_rooms) — the same helper the inline room
-//! handlers use, so a member event and a state event keep their one encoder.
+//! `set_role` and `update` return one [`Option<Fanout>`](migo_rooms::Fanout);
+//! `sanction` and `vote_kick` return a `Vec` — one action can touch many rooms, because
+//! the kick that trips the network-ban escalation sweeps the account out of every room
+//! it still holds. An empty `Vec`, like a `None`, means nothing changed and nothing is
+//! sent (section 156). The publishing itself is
+//! [`publish_rooms`](super::publish_rooms) — the same helper the inline room handlers
+//! use, so a member event, a state event, and a vote tally keep their one encoder.
 
 use migo_core::Error;
 use migo_gateway::ClientContext;
 use migo_protocol::{
     fault, from_frame, Acknowledged, Frame, RoomArchive, RoomCreate, RoomJoinResponse, RoomKind,
-    RoomRole, RoomRoleSet, RoomUpdate, RosterEntry, RosterReq, RosterResponse,
+    RoomRole, RoomRoleSet, RoomSanction, RoomUpdate, RoomVoteKick, RosterEntry, RosterReq,
+    RosterResponse, SanctionAction,
 };
 use migo_rooms::view::encryption_for;
 use migo_rooms::{
-    Caller as RoomCaller, NewRoomRequest, Settings, SharedRooms, TopicChange, MAX_ROSTER_PAGE,
+    Caller as RoomCaller, NewRoomRequest, Sanction, Settings, SharedRooms, TopicChange,
+    MAX_MUTE_MS, MAX_ROSTER_PAGE,
 };
 
 /// The `last_seq` a room's conversation is born with.
@@ -236,4 +243,96 @@ pub(crate) async fn handle_room_archive(
     let request: RoomArchive = from_frame(frame).map_err(fault::from_wire)?;
     svc.archive(&caller, request.room_id).await?;
     ctx.reply(&Acknowledged { ok: true })
+}
+
+/// Applies a moderation action and acknowledges, publishing what the room hears.
+///
+/// The wire carries one `SanctionAction` number and an optional reason; the domain
+/// carries a five-way enum whose mute and ban take parameters the wire cannot name.
+/// The durations are supplied here, not read from the frame: a mute is the maximum the
+/// crate allows (thirty days — a longer silence is a ban and belongs on the audit
+/// trail a ban gets), and a ban is permanent, which matches the escalation posture of
+/// the network ban the service may impose on the same action.
+///
+/// A kick carries no reason on the domain side — the store has no column for one, and
+/// accepting text only to drop it would document a feature the schema cannot hold — so
+/// a `reason` sent with a kick is refused rather than ignored: a client that typed one
+/// should learn it went nowhere. `Unknown` action numbers are refused the same way, by
+/// name, before any store call.
+///
+/// One action can reach many rooms: a global admin's fourth kick of one account sweeps
+/// them out of every room they still hold, and each emptied room hears its own member
+/// event. All of it publishes through [`publish_rooms`](super::publish_rooms).
+pub(crate) async fn handle_sanction(
+    ctx: &ClientContext<'_>,
+    frame: &Frame,
+    svc: &SharedRooms,
+) -> Result<(), Error> {
+    let caller = RoomCaller::new(
+        ctx.identity().account_id(),
+        ctx.identity().device_id(),
+        ctx.identity().tier,
+        ctx.now(),
+    );
+    let request: RoomSanction = from_frame(frame).map_err(fault::from_wire)?;
+    let sanction = match request.action {
+        SanctionAction::Mute => Sanction::Mute {
+            duration_ms: MAX_MUTE_MS,
+            reason: request.reason,
+        },
+        SanctionAction::Unmute => Sanction::Unmute,
+        SanctionAction::Kick => {
+            if request.reason.is_some() {
+                return Err(fault::validation(
+                    "reason",
+                    "a kick stores no reason; ban instead if the account must be told why",
+                ));
+            }
+            Sanction::Kick
+        }
+        SanctionAction::Ban => Sanction::Ban {
+            duration_ms: None,
+            reason: request.reason,
+        },
+        SanctionAction::Unban => Sanction::Unban,
+        SanctionAction::Unknown => {
+            return Err(fault::validation("action", "a known action is required"))
+        }
+    };
+    let fanouts = svc
+        .sanction(&caller, request.room_id, request.target_id, sanction)
+        .await?;
+    ctx.reply(&Acknowledged { ok: true })?;
+    for fanout in fanouts {
+        super::publish_rooms(ctx, fanout)?;
+    }
+    Ok(())
+}
+
+/// Voices a kick vote and replies with the tally, publishing what the room hears.
+///
+/// The reply is the whole state of the vote as the voter's socket needs it — voices,
+/// needed, member count, open or landed — and every fanout the service returns is for
+/// everybody else: the running tally on a new voice, the closing of an expired vote,
+/// and the member event when the tally reaches its number and the kick lands.
+pub(crate) async fn handle_vote_kick(
+    ctx: &ClientContext<'_>,
+    frame: &Frame,
+    svc: &SharedRooms,
+) -> Result<(), Error> {
+    let caller = RoomCaller::new(
+        ctx.identity().account_id(),
+        ctx.identity().device_id(),
+        ctx.identity().tier,
+        ctx.now(),
+    );
+    let request: RoomVoteKick = from_frame(frame).map_err(fault::from_wire)?;
+    let (response, fanouts) = svc
+        .vote_kick(&caller, request.room_id, request.target_id)
+        .await?;
+    ctx.reply(&response)?;
+    for fanout in fanouts {
+        super::publish_rooms(ctx, fanout)?;
+    }
+    Ok(())
 }

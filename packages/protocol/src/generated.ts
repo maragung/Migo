@@ -134,6 +134,10 @@ export const CODE = {
   BLOCKED_BY_USER: 1204,
   PRIVACY_RESTRICTED: 1205,
   BOT_PERMISSION_MISSING: 1206,
+  /** The vote's target is beyond a kick vote (room owner or global admin) */
+  VOTE_TARGET_IMMUNE: 1207,
+  /** Kicked by global admins too many times; barred from every room until one of them unbans */
+  NETWORK_ROOM_BANNED: 1208,
   VALIDATION_FAILED: 1300,
   FIELD_REQUIRED: 1301,
   FIELD_TOO_LONG: 1302,
@@ -177,6 +181,8 @@ export const CODE = {
   IDEMPOTENCY_MISMATCH: 1509,
   /** Not enough currency; refetch the balance */
   INSUFFICIENT_BALANCE: 1510,
+  /** A kick vote is already running in this room; add a voice to it instead of starting another */
+  VOTE_ALREADY_OPEN: 1511,
   INTERNAL_ERROR: 1600,
   STORAGE_UNAVAILABLE: 1601,
   CACHE_UNAVAILABLE: 1602,
@@ -223,6 +229,8 @@ export const ERROR_SYMBOLS: Record<number, string> = {
   1204: 'BLOCKED_BY_USER',
   1205: 'PRIVACY_RESTRICTED',
   1206: 'BOT_PERMISSION_MISSING',
+  1207: 'VOTE_TARGET_IMMUNE',
+  1208: 'NETWORK_ROOM_BANNED',
   1300: 'VALIDATION_FAILED',
   1301: 'FIELD_REQUIRED',
   1302: 'FIELD_TOO_LONG',
@@ -256,6 +264,7 @@ export const ERROR_SYMBOLS: Record<number, string> = {
   1508: 'GAME_NOT_YOUR_TURN',
   1509: 'IDEMPOTENCY_MISMATCH',
   1510: 'INSUFFICIENT_BALANCE',
+  1511: 'VOTE_ALREADY_OPEN',
   1600: 'INTERNAL_ERROR',
   1601: 'STORAGE_UNAVAILABLE',
   1602: 'CACHE_UNAVAILABLE',
@@ -398,6 +407,27 @@ export enum RoomRole {
   Owner = 6,
 }
 
+/** What happened to a room member. Joined/Left are voluntary; Disconnected starts the reconnect grace and Reconnected ends it; Kicked and Banned are removals. `member_count` on the event carries the room's size after the change. */
+export enum MemberChange {
+  Unknown = 0,
+  Joined = 1,
+  Left = 2,
+  Disconnected = 3,
+  Reconnected = 4,
+  Kicked = 5,
+  Banned = 6,
+}
+
+/** A moderation action on a room member. Mute silences the member for the room; Kick is a leave with the door left open; Ban bars re-entry. A global admin's Unban also lifts a network-wide room ban. */
+export enum SanctionAction {
+  Unknown = 0,
+  Mute = 1,
+  Unmute = 2,
+  Kick = 3,
+  Ban = 4,
+  Unban = 5,
+}
+
 export enum NotificationKind {
   Unknown = 0,
   Message = 1,
@@ -424,6 +454,7 @@ export enum RelationshipKind {
   Follow = 4,
   Block = 5,
   Favorite = 6,
+  Mute = 7,
 }
 
 /** Sent in RECONNECT_HINT / close frames so the client can pick the right recovery path */
@@ -1914,6 +1945,8 @@ export interface RoomSummary {
   verified?: boolean;
   myRole?: RoomRole;
   slowModeMs?: number;
+  /** The room's capacity ceiling; join is refused once member_count reaches it. */
+  maxMembers?: number;
 }
 
 export function encodeRoomSummary(w: Writer, v: RoomSummary): void {
@@ -1934,6 +1967,7 @@ export function encodeRoomSummary(w: Writer, v: RoomSummary): void {
   if (v.verified !== undefined) present++;
   if (v.myRole !== undefined) present++;
   if (v.slowModeMs !== undefined) present++;
+  if (v.maxMembers !== undefined) present++;
   w.u32(present);
   if (v.topic !== undefined) { const value = v.topic; w.optional(1, (w) => { w.str(value); }); }
   if (v.description !== undefined) { const value = v.description; w.optional(2, (w) => { w.str(value); }); }
@@ -1944,6 +1978,7 @@ export function encodeRoomSummary(w: Writer, v: RoomSummary): void {
   if (v.verified !== undefined) { const value = v.verified; w.optional(7, (w) => { w.bool(value); }); }
   if (v.myRole !== undefined) { const value = v.myRole; w.optional(8, (w) => { w.u32(value); }); }
   if (v.slowModeMs !== undefined) { const value = v.slowModeMs; w.optional(9, (w) => { w.u32(value); }); }
+  if (v.maxMembers !== undefined) { const value = v.maxMembers; w.optional(10, (w) => { w.u32(value); }); }
   w.leave();
 }
 
@@ -1969,6 +2004,7 @@ export function decodeRoomSummary(r: Reader): RoomSummary {
       case 7: out.verified = sub.bool(); break;
       case 8: out.myRole = sub.u32() as RoomRole; break;
       case 9: out.slowModeMs = sub.u32(); break;
+      case 10: out.maxMembers = sub.u32(); break;
       default: break; // unknown optional field: skipped by length
     }
   }
@@ -2146,6 +2182,8 @@ export interface RoomMemberEvent {
   joined: boolean;
   role?: RoomRole;
   memberCount?: number;
+  /** Why the membership changed. Absent on legacy join/leave, where `joined` says it. */
+  change?: MemberChange;
 }
 
 export function encodeRoomMemberEvent(w: Writer, v: RoomMemberEvent): void {
@@ -2156,9 +2194,11 @@ export function encodeRoomMemberEvent(w: Writer, v: RoomMemberEvent): void {
   let present = 0;
   if (v.role !== undefined) present++;
   if (v.memberCount !== undefined) present++;
+  if (v.change !== undefined) present++;
   w.u32(present);
   if (v.role !== undefined) { const value = v.role; w.optional(1, (w) => { w.u32(value); }); }
   if (v.memberCount !== undefined) { const value = v.memberCount; w.optional(2, (w) => { w.u32(value); }); }
+  if (v.change !== undefined) { const value = v.change; w.optional(3, (w) => { w.u32(value); }); }
   w.leave();
 }
 
@@ -2174,6 +2214,7 @@ export function decodeRoomMemberEvent(r: Reader): RoomMemberEvent {
     switch (fieldId) {
       case 1: out.role = sub.u32() as RoomRole; break;
       case 2: out.memberCount = sub.u32(); break;
+      case 3: out.change = sub.u32() as MemberChange; break;
       default: break; // unknown optional field: skipped by length
     }
   }
@@ -2188,6 +2229,8 @@ export interface RoomStateEvent {
   memberCount?: number;
   topic?: string;
   slowModeMs?: number;
+  /** The room's capacity ceiling, sent when it changes. */
+  maxMembers?: number;
 }
 
 export function encodeRoomStateEvent(w: Writer, v: RoomStateEvent): void {
@@ -2198,11 +2241,13 @@ export function encodeRoomStateEvent(w: Writer, v: RoomStateEvent): void {
   if (v.memberCount !== undefined) present++;
   if (v.topic !== undefined) present++;
   if (v.slowModeMs !== undefined) present++;
+  if (v.maxMembers !== undefined) present++;
   w.u32(present);
   if (v.onlineCount !== undefined) { const value = v.onlineCount; w.optional(1, (w) => { w.u32(value); }); }
   if (v.memberCount !== undefined) { const value = v.memberCount; w.optional(2, (w) => { w.u32(value); }); }
   if (v.topic !== undefined) { const value = v.topic; w.optional(3, (w) => { w.str(value); }); }
   if (v.slowModeMs !== undefined) { const value = v.slowModeMs; w.optional(4, (w) => { w.u32(value); }); }
+  if (v.maxMembers !== undefined) { const value = v.maxMembers; w.optional(5, (w) => { w.u32(value); }); }
   w.leave();
 }
 
@@ -2218,6 +2263,7 @@ export function decodeRoomStateEvent(r: Reader): RoomStateEvent {
       case 2: out.memberCount = sub.u32(); break;
       case 3: out.topic = sub.str(); break;
       case 4: out.slowModeMs = sub.u32(); break;
+      case 5: out.maxMembers = sub.u32(); break;
       default: break; // unknown optional field: skipped by length
     }
   }
@@ -4738,6 +4784,185 @@ export function decodeRoomArchive(r: Reader): RoomArchive {
   return out;
 }
 
+/** Starts a kick vote, or adds the caller's voice to one already running. */
+export interface RoomVoteKick {
+  roomId: Id;
+  targetId: Id;
+}
+
+export function encodeRoomVoteKick(w: Writer, v: RoomVoteKick): void {
+  w.enter();
+  w.id(v.roomId);
+  w.id(v.targetId);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeRoomVoteKick(r: Reader): RoomVoteKick {
+  r.enter();
+  const roomId = r.id();
+  const targetId = r.id();
+  const out: RoomVoteKick = { roomId, targetId } as RoomVoteKick;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** The vote's state after the caller's voice landed. */
+export interface RoomVoteKickResponse {
+  roomId: Id;
+  targetId: Id;
+  /** Voices cast for the kick, the caller's included. */
+  votes: number;
+  /** Half the room's members, rounded up. */
+  needed: number;
+  memberCount: number;
+  /** False once the vote passed and the kick landed; the tally that follows is the room's MemberChange. */
+  open: boolean;
+}
+
+export function encodeRoomVoteKickResponse(w: Writer, v: RoomVoteKickResponse): void {
+  w.enter();
+  w.id(v.roomId);
+  w.id(v.targetId);
+  w.u32(v.votes);
+  w.u32(v.needed);
+  w.u32(v.memberCount);
+  w.bool(v.open);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeRoomVoteKickResponse(r: Reader): RoomVoteKickResponse {
+  r.enter();
+  const roomId = r.id();
+  const targetId = r.id();
+  const votes = r.u32();
+  const needed = r.u32();
+  const memberCount = r.u32();
+  const open = r.bool();
+  const out: RoomVoteKickResponse = { roomId, targetId, votes, needed, memberCount, open } as RoomVoteKickResponse;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** A running kick vote's tally, coalesced per room. */
+export interface RoomVoteEvent {
+  roomId: Id;
+  targetId: Id;
+  votes: number;
+  needed: number;
+  memberCount: number;
+  /** True when the vote ended without passing (expired, or the target left). */
+  closed?: boolean;
+}
+
+export function encodeRoomVoteEvent(w: Writer, v: RoomVoteEvent): void {
+  w.enter();
+  w.id(v.roomId);
+  w.id(v.targetId);
+  w.u32(v.votes);
+  w.u32(v.needed);
+  w.u32(v.memberCount);
+  let present = 0;
+  if (v.closed !== undefined) present++;
+  w.u32(present);
+  if (v.closed !== undefined) { const value = v.closed; w.optional(1, (w) => { w.bool(value); }); }
+  w.leave();
+}
+
+export function decodeRoomVoteEvent(r: Reader): RoomVoteEvent {
+  r.enter();
+  const roomId = r.id();
+  const targetId = r.id();
+  const votes = r.u32();
+  const needed = r.u32();
+  const memberCount = r.u32();
+  const out: RoomVoteEvent = { roomId, targetId, votes, needed, memberCount } as RoomVoteEvent;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.closed = sub.bool(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** One moderation action on one member: mute, kick, ban, or their undoing. */
+export interface RoomSanction {
+  roomId: Id;
+  targetId: Id;
+  action: SanctionAction;
+  reason?: string;
+}
+
+export function encodeRoomSanction(w: Writer, v: RoomSanction): void {
+  w.enter();
+  w.id(v.roomId);
+  w.id(v.targetId);
+  w.u32(v.action);
+  let present = 0;
+  if (v.reason !== undefined) present++;
+  w.u32(present);
+  if (v.reason !== undefined) { const value = v.reason; w.optional(1, (w) => { w.str(value); }); }
+  w.leave();
+}
+
+export function decodeRoomSanction(r: Reader): RoomSanction {
+  r.enter();
+  const roomId = r.id();
+  const targetId = r.id();
+  const action = r.u32() as SanctionAction;
+  const out: RoomSanction = { roomId, targetId, action } as RoomSanction;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.reason = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** Mutes or unmutes one account for the caller; a personal choice, not a room's. */
+export interface MuteSet {
+  userId: Id;
+  on: boolean;
+}
+
+export function encodeMuteSet(w: Writer, v: MuteSet): void {
+  w.enter();
+  w.id(v.userId);
+  w.bool(v.on);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeMuteSet(r: Reader): MuteSet {
+  r.enter();
+  const userId = r.id();
+  const on = r.bool();
+  const out: MuteSet = { userId, on } as MuteSet;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
 /** Starts a game in a conversation. */
 export interface GameStart {
   conversationId: Id;
@@ -5928,6 +6153,12 @@ export const OP = {
   ROOM_UPDATE: 88,
   /** Archives a room. */
   ROOM_ARCHIVE: 89,
+  /** Starts, or adds the caller's voice to, a vote to kick a member. The vote passes at half the room's members. */
+  ROOM_VOTE_KICK: 90,
+  /** A kick vote's running tally; the newest tally per room is the one that matters. */
+  ROOM_VOTE_EVENT: 91,
+  /** Mutes, kicks, or bans a member. Needs the room's own permission; a global admin needs neither membership nor rank. */
+  ROOM_SANCTION: 92,
   /** Updates the caller's own profile and privacy settings. */
   PROFILE_UPDATE: 111,
   PROFILE_FETCH: 112,
@@ -5940,6 +6171,8 @@ export const OP = {
   SUGGESTIONS: 118,
   /** Searches public profiles. */
   SEARCH: 119,
+  /** Mutes or unmutes one account for the caller. A muted account's room messages are not shown to the muter, in every room. */
+  MUTE_SET: 120,
   MEDIA_UPLOAD_BEGIN: 128,
   MEDIA_UPLOAD_STATUS: 129,
   MEDIA_UPLOAD_COMMIT: 130,
@@ -6072,6 +6305,9 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   87: { code: 87, name: 'ROOM_ROLE_SET', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomRoleSet', response: 'Acknowledged' },
   88: { code: 88, name: 'ROOM_UPDATE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomUpdate', response: 'Acknowledged' },
   89: { code: 89, name: 'ROOM_ARCHIVE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomArchive', response: 'Acknowledged' },
+  90: { code: 90, name: 'ROOM_VOTE_KICK', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomVoteKick', response: 'RoomVoteKickResponse' },
+  91: { code: 91, name: 'ROOM_VOTE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'RoomVoteEvent', coalesceKey: 'room_id' },
+  92: { code: 92, name: 'ROOM_SANCTION', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomSanction', response: 'Acknowledged' },
   111: { code: 111, name: 'PROFILE_UPDATE', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ProfileUpdate', response: 'UserProfile' },
   112: { code: 112, name: 'PROFILE_FETCH', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ProfileRequest', response: 'ProfileResponse' },
   113: { code: 113, name: 'FRIEND_REQUEST', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'FriendTarget', response: 'Acknowledged' },
@@ -6081,6 +6317,7 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   117: { code: 117, name: 'RELATIONSHIP_LIST', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RelationshipListReq', response: 'RelationshipList' },
   118: { code: 118, name: 'SUGGESTIONS', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'SuggestReq', response: 'SearchResponse' },
   119: { code: 119, name: 'SEARCH', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'SearchReq', response: 'SearchResponse' },
+  120: { code: 120, name: 'MUTE_SET', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MuteSet', response: 'Acknowledged' },
   128: { code: 128, name: 'MEDIA_UPLOAD_BEGIN', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaBegin', response: 'MediaTicket' },
   129: { code: 129, name: 'MEDIA_UPLOAD_STATUS', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaStatusReq', response: 'MediaProgress' },
   130: { code: 130, name: 'MEDIA_UPLOAD_COMMIT', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaCommit', response: 'Acknowledged' },

@@ -86,6 +86,13 @@ struct Established {
     handle: SessionHandle,
     phase: Phase,
     identity: Option<Identity>,
+    /// Whether the dispatcher's `session_started` has fired for this connection.
+    ///
+    /// A connection announces its lifecycle exactly once. A session can acquire an identity two
+    /// ways — a token in the `HELLO`, or a later `AUTHENTICATE` — and a `Ready` session may
+    /// re-`AUTHENTICATE` to refresh its token; this flag is what keeps the second of those from
+    /// announcing a start the first already did, and what tells teardown whether an end is owed.
+    lifecycle_started: bool,
 }
 
 /// Fresh-versus-resume, decided from the `HELLO` before a session slot is taken.
@@ -200,12 +207,27 @@ impl<T: Transport> Connection<'_, T> {
         self.gateway.hub.register(handle.clone());
         self.gateway.meters.session_opened();
 
+        // A session that arrived with a token is authenticated the instant it is established,
+        // before any AUTHENTICATE frame could run. Announce it now, once, so presence marks the
+        // device online and its rooms learn it is reachable; `lifecycle_started` records that we
+        // did, so a later token-refresh AUTHENTICATE on the same connection does not fire a second
+        // start.
+        let mut lifecycle_started = false;
+        if let Some(identity) = identity.as_ref() {
+            self.gateway
+                .dispatcher
+                .session_started(identity, hello.bandwidth_mode, now)
+                .await;
+            lifecycle_started = true;
+        }
+
         Some(Established {
             session_id,
             outbound,
             handle,
             phase,
             identity,
+            lifecycle_started,
         })
     }
 
@@ -758,6 +780,19 @@ impl<T: Transport> Connection<'_, T> {
                     now,
                     self.compression,
                 );
+                // The first identity this connection acquires is the one that announces it. A
+                // session that authenticated inline in its HELLO already fired the start and set
+                // this flag; a Ready session re-authenticating to refresh a token finds it set and
+                // stays quiet, so presence is not told a device came online that never went away.
+                if !established.lifecycle_started {
+                    if let Some(identity) = established.identity.as_ref() {
+                        self.gateway
+                            .dispatcher
+                            .session_started(identity, established.handle.bandwidth_mode(), now)
+                            .await;
+                    }
+                    established.lifecycle_started = true;
+                }
             }
             Err(error) => {
                 push_error(
@@ -1080,6 +1115,18 @@ impl<T: Transport> Connection<'_, T> {
         if established.identity.is_some() && retains_resume(reason) {
             let buffer = established.outbound.resume_buffer(gateway.now());
             gateway.store_resume(established.session_id, buffer);
+        }
+        // Balance the start: a connection that announced itself owes exactly one end, however it
+        // closed. The flag, not `identity.is_some()`, is the condition — a session can hold an
+        // identity it never announced with (none can, today, but the invariant is the flag's to
+        // keep), and presence must see starts and ends in equal number or its device counts drift.
+        if established.lifecycle_started {
+            if let Some(identity) = established.identity.as_ref() {
+                gateway
+                    .dispatcher
+                    .session_ended(identity, established.handle.bandwidth_mode(), gateway.now())
+                    .await;
+            }
         }
         established.outbound.close();
         gateway.release();

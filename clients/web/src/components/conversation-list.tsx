@@ -17,7 +17,7 @@ import { messagePreview, truncate } from '@/lib/message-preview.js';
 import { usePresenceOf } from '@/lib/migo/use-presence.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
-import { useRooms } from '@/lib/migo/rooms-provider.js';
+import { useRooms, capacityLabel } from '@/lib/migo/rooms-provider.js';
 import type { RoomInfo } from '@/lib/migo/rooms-provider.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
 import type { ResolvedProfile } from '@/lib/migo/use-profiles.js';
@@ -243,8 +243,12 @@ function Row({
  *
  * The preview falls back rather than blanks because a conversation with no `lastMessage` (a group
  * just created, or a room joined at its tip) still needs its subtitle to say what the row is. A
- * room's fallback prefers the room record's member count: the summary's member preview is capped
- * by the server and would call a thousand-member room a nine-member one.
+ * room's fallback prefers the room record: it carries the live capacity — online out of the
+ * room's ceiling, the "2/33" a reader scans for a busy room — from the join and the state stream.
+ * Only when the shell holds no record for the room (seen in the list but never joined this
+ * session) does it fall back to the summary's member count, itself preferred over the summary's
+ * member *preview*, which the server caps and which would call a thousand-member room a nine-member
+ * one.
  */
 function subtitleFor(
   summary: ConversationSummary,
@@ -266,7 +270,9 @@ function subtitleFor(
     (summary.kind === ConversationKind.Direct
       ? 'Direct message'
       : summary.kind === ConversationKind.Room
-        ? `${room?.memberCount ?? summary.members?.length ?? 0} members`
+        ? room !== null
+          ? `${capacityLabel(room.onlineCount, room.maxMembers)} online`
+          : `${summary.members?.length ?? 0} members`
         : `${summary.members?.length ?? 0} members`)
   );
 }

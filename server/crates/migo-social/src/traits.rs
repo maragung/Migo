@@ -140,6 +140,28 @@ pub trait Graph: Send + Sync {
     /// and made up want the same graph they had before.
     async fn unblock(&self, caller: &Caller, subject_id: Id) -> Result<()>;
 
+    /// Mutes or unmutes one account, for the caller alone.
+    ///
+    /// A volume control and not a sanction. The muted account is told nothing, keeps
+    /// every edge it has — a mute is not a falling-out, and tearing down the
+    /// friendship the way a block does would be this crate deciding the caller meant
+    /// something they did not say — and remains visible to everyone else in every
+    /// room. What the edge buys is the caller's own silence: their clients read the
+    /// list and render nothing the muted account says, in every room the two share.
+    ///
+    /// One direction only. Muting says who *the caller* listens to, so no edge is
+    /// written against the subject, and there is no way to ask who has muted you —
+    /// for the same reason there is no way to ask who has blocked you.
+    ///
+    /// Idempotent in both directions, like `unblock`.
+    async fn mute(&self, caller: &Caller, subject_id: Id, on: bool) -> Result<()>;
+
+    /// Accounts this one has muted, newest first.
+    ///
+    /// The caller's own list and nothing else, exactly like
+    /// [`blocked`](Social::blocked) and for the same reason.
+    async fn muted(&self, caller: &Caller, limit: Option<u16>) -> Result<Vec<Edge>>;
+
     /// Marks or unmarks a favourite.
     ///
     /// A favourite is private: it changes how the caller's own client sorts a list and

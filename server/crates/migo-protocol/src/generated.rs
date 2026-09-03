@@ -144,6 +144,10 @@ pub mod codes {
     pub const BLOCKED_BY_USER: u32 = 1204;
     pub const PRIVACY_RESTRICTED: u32 = 1205;
     pub const BOT_PERMISSION_MISSING: u32 = 1206;
+    /// The vote's target is beyond a kick vote (room owner or global admin)
+    pub const VOTE_TARGET_IMMUNE: u32 = 1207;
+    /// Kicked by global admins too many times; barred from every room until one of them unbans
+    pub const NETWORK_ROOM_BANNED: u32 = 1208;
     pub const VALIDATION_FAILED: u32 = 1300;
     pub const FIELD_REQUIRED: u32 = 1301;
     pub const FIELD_TOO_LONG: u32 = 1302;
@@ -187,6 +191,8 @@ pub mod codes {
     pub const IDEMPOTENCY_MISMATCH: u32 = 1509;
     /// Not enough currency; refetch the balance
     pub const INSUFFICIENT_BALANCE: u32 = 1510;
+    /// A kick vote is already running in this room; add a voice to it instead of starting another
+    pub const VOTE_ALREADY_OPEN: u32 = 1511;
     pub const INTERNAL_ERROR: u32 = 1600;
     pub const STORAGE_UNAVAILABLE: u32 = 1601;
     pub const CACHE_UNAVAILABLE: u32 = 1602;
@@ -236,6 +242,8 @@ pub mod codes {
         BLOCKED_BY_USER,
         PRIVACY_RESTRICTED,
         BOT_PERMISSION_MISSING,
+        VOTE_TARGET_IMMUNE,
+        NETWORK_ROOM_BANNED,
         VALIDATION_FAILED,
         FIELD_REQUIRED,
         FIELD_TOO_LONG,
@@ -269,6 +277,7 @@ pub mod codes {
         GAME_NOT_YOUR_TURN,
         IDEMPOTENCY_MISMATCH,
         INSUFFICIENT_BALANCE,
+        VOTE_ALREADY_OPEN,
         INTERNAL_ERROR,
         STORAGE_UNAVAILABLE,
         CACHE_UNAVAILABLE,
@@ -363,6 +372,8 @@ pub fn error_symbol(code: u32) -> Option<&'static str> {
         codes::BLOCKED_BY_USER => "BLOCKED_BY_USER",
         codes::PRIVACY_RESTRICTED => "PRIVACY_RESTRICTED",
         codes::BOT_PERMISSION_MISSING => "BOT_PERMISSION_MISSING",
+        codes::VOTE_TARGET_IMMUNE => "VOTE_TARGET_IMMUNE",
+        codes::NETWORK_ROOM_BANNED => "NETWORK_ROOM_BANNED",
         codes::VALIDATION_FAILED => "VALIDATION_FAILED",
         codes::FIELD_REQUIRED => "FIELD_REQUIRED",
         codes::FIELD_TOO_LONG => "FIELD_TOO_LONG",
@@ -396,6 +407,7 @@ pub fn error_symbol(code: u32) -> Option<&'static str> {
         codes::GAME_NOT_YOUR_TURN => "GAME_NOT_YOUR_TURN",
         codes::IDEMPOTENCY_MISMATCH => "IDEMPOTENCY_MISMATCH",
         codes::INSUFFICIENT_BALANCE => "INSUFFICIENT_BALANCE",
+        codes::VOTE_ALREADY_OPEN => "VOTE_ALREADY_OPEN",
         codes::INTERNAL_ERROR => "INTERNAL_ERROR",
         codes::STORAGE_UNAVAILABLE => "STORAGE_UNAVAILABLE",
         codes::CACHE_UNAVAILABLE => "CACHE_UNAVAILABLE",
@@ -444,6 +456,8 @@ pub fn error_http_status(code: u32) -> u16 {
         codes::BLOCKED_BY_USER => 403,
         codes::PRIVACY_RESTRICTED => 403,
         codes::BOT_PERMISSION_MISSING => 403,
+        codes::VOTE_TARGET_IMMUNE => 403,
+        codes::NETWORK_ROOM_BANNED => 403,
         codes::VALIDATION_FAILED => 400,
         codes::FIELD_REQUIRED => 400,
         codes::FIELD_TOO_LONG => 400,
@@ -477,6 +491,7 @@ pub fn error_http_status(code: u32) -> u16 {
         codes::GAME_NOT_YOUR_TURN => 409,
         codes::IDEMPOTENCY_MISMATCH => 409,
         codes::INSUFFICIENT_BALANCE => 409,
+        codes::VOTE_ALREADY_OPEN => 409,
         codes::INTERNAL_ERROR => 500,
         codes::STORAGE_UNAVAILABLE => 503,
         codes::CACHE_UNAVAILABLE => 503,
@@ -989,6 +1004,99 @@ impl RoomRole {
     }
 }
 
+/// What happened to a room member. Joined/Left are voluntary; Disconnected starts the reconnect grace and Reconnected ends it; Kicked and Banned are removals. `member_count` on the event carries the room's size after the change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u32)]
+pub enum MemberChange {
+    #[default]
+    Unknown = 0,
+    Joined = 1,
+    Left = 2,
+    Disconnected = 3,
+    Reconnected = 4,
+    Kicked = 5,
+    Banned = 6,
+}
+
+impl MemberChange {
+    #[must_use]
+    pub const fn to_wire(self) -> u32 {
+        self as u32
+    }
+
+    /// Unknown discriminants decode to `Unknown` so a new variant never breaks an old peer.
+    #[must_use]
+    pub const fn from_wire(v: u32) -> Self {
+        match v {
+            1 => Self::Joined,
+            2 => Self::Left,
+            3 => Self::Disconnected,
+            4 => Self::Reconnected,
+            5 => Self::Kicked,
+            6 => Self::Banned,
+            _ => Self::Unknown,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::Joined => "Joined",
+            Self::Left => "Left",
+            Self::Disconnected => "Disconnected",
+            Self::Reconnected => "Reconnected",
+            Self::Kicked => "Kicked",
+            Self::Banned => "Banned",
+        }
+    }
+}
+
+/// A moderation action on a room member. Mute silences the member for the room; Kick is a leave with the door left open; Ban bars re-entry. A global admin's Unban also lifts a network-wide room ban.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u32)]
+pub enum SanctionAction {
+    #[default]
+    Unknown = 0,
+    Mute = 1,
+    Unmute = 2,
+    Kick = 3,
+    Ban = 4,
+    Unban = 5,
+}
+
+impl SanctionAction {
+    #[must_use]
+    pub const fn to_wire(self) -> u32 {
+        self as u32
+    }
+
+    /// Unknown discriminants decode to `Unknown` so a new variant never breaks an old peer.
+    #[must_use]
+    pub const fn from_wire(v: u32) -> Self {
+        match v {
+            1 => Self::Mute,
+            2 => Self::Unmute,
+            3 => Self::Kick,
+            4 => Self::Ban,
+            5 => Self::Unban,
+            _ => Self::Unknown,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::Mute => "Mute",
+            Self::Unmute => "Unmute",
+            Self::Kick => "Kick",
+            Self::Ban => "Ban",
+            Self::Unban => "Unban",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u32)]
 pub enum NotificationKind {
@@ -1071,6 +1179,7 @@ pub enum RelationshipKind {
     Follow = 4,
     Block = 5,
     Favorite = 6,
+    Mute = 7,
 }
 
 impl RelationshipKind {
@@ -1089,6 +1198,7 @@ impl RelationshipKind {
             4 => Self::Follow,
             5 => Self::Block,
             6 => Self::Favorite,
+            7 => Self::Mute,
             _ => Self::Unknown,
         }
     }
@@ -1103,6 +1213,7 @@ impl RelationshipKind {
             Self::Follow => "Follow",
             Self::Block => "Block",
             Self::Favorite => "Favorite",
+            Self::Mute => "Mute",
         }
     }
 }
@@ -3357,6 +3468,8 @@ pub struct RoomSummary {
     pub verified: Option<bool>,
     pub my_role: Option<RoomRole>,
     pub slow_mode_ms: Option<u32>,
+    /// The room's capacity ceiling; join is refused once member_count reaches it.
+    pub max_members: Option<u32>,
 }
 
 impl Encode for RoomSummary {
@@ -3376,7 +3489,8 @@ impl Encode for RoomSummary {
             + usize::from(self.country.is_some())
             + usize::from(self.verified.is_some())
             + usize::from(self.my_role.is_some())
-            + usize::from(self.slow_mode_ms.is_some());
+            + usize::from(self.slow_mode_ms.is_some())
+            + usize::from(self.max_members.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.topic {
             w.optional(1, |w| {
@@ -3432,6 +3546,12 @@ impl Encode for RoomSummary {
                 Ok(())
             })?;
         }
+        if let Some(v) = &self.max_members {
+            w.optional(10, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -3461,6 +3581,7 @@ impl Decode for RoomSummary {
                 7 => out.verified = Some(sub.read_bool()?),
                 8 => out.my_role = Some(RoomRole::from_wire(sub.read_u32()?)),
                 9 => out.slow_mode_ms = Some(sub.read_u32()?),
+                10 => out.max_members = Some(sub.read_u32()?),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }
@@ -3721,6 +3842,8 @@ pub struct RoomMemberEvent {
     pub joined: bool,
     pub role: Option<RoomRole>,
     pub member_count: Option<u32>,
+    /// Why the membership changed. Absent on legacy join/leave, where `joined` says it.
+    pub change: Option<MemberChange>,
 }
 
 impl Encode for RoomMemberEvent {
@@ -3729,7 +3852,9 @@ impl Encode for RoomMemberEvent {
         w.write_id(&self.room_id);
         w.write_id(&self.user_id);
         w.write_bool(self.joined);
-        let present = usize::from(self.role.is_some()) + usize::from(self.member_count.is_some());
+        let present = usize::from(self.role.is_some())
+            + usize::from(self.member_count.is_some())
+            + usize::from(self.change.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.role {
             w.optional(1, |w| {
@@ -3740,6 +3865,12 @@ impl Encode for RoomMemberEvent {
         if let Some(v) = &self.member_count {
             w.optional(2, |w| {
                 w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.change {
+            w.optional(3, |w| {
+                w.write_u32(v.to_wire());
                 Ok(())
             })?;
         }
@@ -3762,6 +3893,7 @@ impl Decode for RoomMemberEvent {
             match field_id {
                 1 => out.role = Some(RoomRole::from_wire(sub.read_u32()?)),
                 2 => out.member_count = Some(sub.read_u32()?),
+                3 => out.change = Some(MemberChange::from_wire(sub.read_u32()?)),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }
@@ -3778,6 +3910,8 @@ pub struct RoomStateEvent {
     pub member_count: Option<u32>,
     pub topic: Option<String>,
     pub slow_mode_ms: Option<u32>,
+    /// The room's capacity ceiling, sent when it changes.
+    pub max_members: Option<u32>,
 }
 
 impl Encode for RoomStateEvent {
@@ -3787,7 +3921,8 @@ impl Encode for RoomStateEvent {
         let present = usize::from(self.online_count.is_some())
             + usize::from(self.member_count.is_some())
             + usize::from(self.topic.is_some())
-            + usize::from(self.slow_mode_ms.is_some());
+            + usize::from(self.slow_mode_ms.is_some())
+            + usize::from(self.max_members.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.online_count {
             w.optional(1, |w| {
@@ -3813,6 +3948,12 @@ impl Encode for RoomStateEvent {
                 Ok(())
             })?;
         }
+        if let Some(v) = &self.max_members {
+            w.optional(5, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -3832,6 +3973,7 @@ impl Decode for RoomStateEvent {
                 2 => out.member_count = Some(sub.read_u32()?),
                 3 => out.topic = Some(sub.read_string()?),
                 4 => out.slow_mode_ms = Some(sub.read_u32()?),
+                5 => out.max_members = Some(sub.read_u32()?),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }
@@ -7371,6 +7513,231 @@ impl Decode for RoomArchive {
     }
 }
 
+/// Starts a kick vote, or adds the caller's voice to one already running.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RoomVoteKick {
+    pub room_id: Id,
+    pub target_id: Id,
+}
+
+impl Encode for RoomVoteKick {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.room_id);
+        w.write_id(&self.target_id);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for RoomVoteKick {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.room_id = r.read_id()?;
+        out.target_id = r.read_id()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// The vote's state after the caller's voice landed.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RoomVoteKickResponse {
+    pub room_id: Id,
+    pub target_id: Id,
+    /// Voices cast for the kick, the caller's included.
+    pub votes: u32,
+    /// Half the room's members, rounded up.
+    pub needed: u32,
+    pub member_count: u32,
+    /// False once the vote passed and the kick landed; the tally that follows is the room's MemberChange.
+    pub open: bool,
+}
+
+impl Encode for RoomVoteKickResponse {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.room_id);
+        w.write_id(&self.target_id);
+        w.write_u32(self.votes);
+        w.write_u32(self.needed);
+        w.write_u32(self.member_count);
+        w.write_bool(self.open);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for RoomVoteKickResponse {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.room_id = r.read_id()?;
+        out.target_id = r.read_id()?;
+        out.votes = r.read_u32()?;
+        out.needed = r.read_u32()?;
+        out.member_count = r.read_u32()?;
+        out.open = r.read_bool()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// A running kick vote's tally, coalesced per room.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RoomVoteEvent {
+    pub room_id: Id,
+    pub target_id: Id,
+    pub votes: u32,
+    pub needed: u32,
+    pub member_count: u32,
+    /// True when the vote ended without passing (expired, or the target left).
+    pub closed: Option<bool>,
+}
+
+impl Encode for RoomVoteEvent {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.room_id);
+        w.write_id(&self.target_id);
+        w.write_u32(self.votes);
+        w.write_u32(self.needed);
+        w.write_u32(self.member_count);
+        let present = usize::from(self.closed.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.closed {
+            w.optional(1, |w| {
+                w.write_bool(*v);
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for RoomVoteEvent {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.room_id = r.read_id()?;
+        out.target_id = r.read_id()?;
+        out.votes = r.read_u32()?;
+        out.needed = r.read_u32()?;
+        out.member_count = r.read_u32()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.closed = Some(sub.read_bool()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// One moderation action on one member: mute, kick, ban, or their undoing.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RoomSanction {
+    pub room_id: Id,
+    pub target_id: Id,
+    pub action: SanctionAction,
+    pub reason: Option<String>,
+}
+
+impl Encode for RoomSanction {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.room_id);
+        w.write_id(&self.target_id);
+        w.write_u32(self.action.to_wire());
+        let present = usize::from(self.reason.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.reason {
+            w.optional(1, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for RoomSanction {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.room_id = r.read_id()?;
+        out.target_id = r.read_id()?;
+        out.action = SanctionAction::from_wire(r.read_u32()?);
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.reason = Some(sub.read_string()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Mutes or unmutes one account for the caller; a personal choice, not a room's.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MuteSet {
+    pub user_id: Id,
+    pub on: bool,
+}
+
+impl Encode for MuteSet {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_id(&self.user_id);
+        w.write_bool(self.on);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for MuteSet {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.user_id = r.read_id()?;
+        out.on = r.read_bool()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
 /// Starts a game in a conversation.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct GameStart {
@@ -9005,6 +9372,12 @@ pub enum Opcode {
     RoomUpdate = 88,
     /// Archives a room.
     RoomArchive = 89,
+    /// Starts, or adds the caller's voice to, a vote to kick a member. The vote passes at half the room's members.
+    RoomVoteKick = 90,
+    /// A kick vote's running tally; the newest tally per room is the one that matters.
+    RoomVoteEvent = 91,
+    /// Mutes, kicks, or bans a member. Needs the room's own permission; a global admin needs neither membership nor rank.
+    RoomSanction = 92,
     /// Updates the caller's own profile and privacy settings.
     ProfileUpdate = 111,
     ProfileFetch = 112,
@@ -9017,6 +9390,8 @@ pub enum Opcode {
     Suggestions = 118,
     /// Searches public profiles.
     Search = 119,
+    /// Mutes or unmutes one account for the caller. A muted account's room messages are not shown to the muter, in every room.
+    MuteSet = 120,
     MediaUploadBegin = 128,
     MediaUploadStatus = 129,
     MediaUploadCommit = 130,
@@ -9144,6 +9519,9 @@ impl Opcode {
             87 => Self::RoomRoleSet,
             88 => Self::RoomUpdate,
             89 => Self::RoomArchive,
+            90 => Self::RoomVoteKick,
+            91 => Self::RoomVoteEvent,
+            92 => Self::RoomSanction,
             111 => Self::ProfileUpdate,
             112 => Self::ProfileFetch,
             113 => Self::FriendRequest,
@@ -9153,6 +9531,7 @@ impl Opcode {
             117 => Self::RelationshipList,
             118 => Self::Suggestions,
             119 => Self::Search,
+            120 => Self::MuteSet,
             128 => Self::MediaUploadBegin,
             129 => Self::MediaUploadStatus,
             130 => Self::MediaUploadCommit,
@@ -9251,6 +9630,9 @@ impl Opcode {
             Self::RoomRoleSet => "ROOM_ROLE_SET",
             Self::RoomUpdate => "ROOM_UPDATE",
             Self::RoomArchive => "ROOM_ARCHIVE",
+            Self::RoomVoteKick => "ROOM_VOTE_KICK",
+            Self::RoomVoteEvent => "ROOM_VOTE_EVENT",
+            Self::RoomSanction => "ROOM_SANCTION",
             Self::ProfileUpdate => "PROFILE_UPDATE",
             Self::ProfileFetch => "PROFILE_FETCH",
             Self::FriendRequest => "FRIEND_REQUEST",
@@ -9260,6 +9642,7 @@ impl Opcode {
             Self::RelationshipList => "RELATIONSHIP_LIST",
             Self::Suggestions => "SUGGESTIONS",
             Self::Search => "SEARCH",
+            Self::MuteSet => "MUTE_SET",
             Self::MediaUploadBegin => "MEDIA_UPLOAD_BEGIN",
             Self::MediaUploadStatus => "MEDIA_UPLOAD_STATUS",
             Self::MediaUploadCommit => "MEDIA_UPLOAD_COMMIT",
@@ -9358,6 +9741,9 @@ impl Opcode {
             Self::RoomRoleSet => 5,
             Self::RoomUpdate => 5,
             Self::RoomArchive => 5,
+            Self::RoomVoteKick => 5,
+            Self::RoomVoteEvent => 0,
+            Self::RoomSanction => 10,
             Self::ProfileUpdate => 3,
             Self::ProfileFetch => 3,
             Self::FriendRequest => 10,
@@ -9367,6 +9753,7 @@ impl Opcode {
             Self::RelationshipList => 3,
             Self::Suggestions => 3,
             Self::Search => 3,
+            Self::MuteSet => 5,
             Self::MediaUploadBegin => 10,
             Self::MediaUploadStatus => 2,
             Self::MediaUploadCommit => 5,
@@ -9464,6 +9851,9 @@ impl Opcode {
             Self::RoomRoleSet => DeliveryClass::Critical,
             Self::RoomUpdate => DeliveryClass::Critical,
             Self::RoomArchive => DeliveryClass::Critical,
+            Self::RoomVoteKick => DeliveryClass::Critical,
+            Self::RoomVoteEvent => DeliveryClass::Coalescable,
+            Self::RoomSanction => DeliveryClass::Critical,
             Self::ProfileUpdate => DeliveryClass::Critical,
             Self::ProfileFetch => DeliveryClass::Critical,
             Self::FriendRequest => DeliveryClass::Critical,
@@ -9473,6 +9863,7 @@ impl Opcode {
             Self::RelationshipList => DeliveryClass::Critical,
             Self::Suggestions => DeliveryClass::Critical,
             Self::Search => DeliveryClass::Critical,
+            Self::MuteSet => DeliveryClass::Critical,
             Self::MediaUploadBegin => DeliveryClass::Critical,
             Self::MediaUploadStatus => DeliveryClass::Critical,
             Self::MediaUploadCommit => DeliveryClass::Critical,
@@ -9570,6 +9961,9 @@ impl Opcode {
             Self::RoomRoleSet => AuthLevel::User,
             Self::RoomUpdate => AuthLevel::User,
             Self::RoomArchive => AuthLevel::User,
+            Self::RoomVoteKick => AuthLevel::User,
+            Self::RoomVoteEvent => AuthLevel::User,
+            Self::RoomSanction => AuthLevel::User,
             Self::ProfileUpdate => AuthLevel::User,
             Self::ProfileFetch => AuthLevel::User,
             Self::FriendRequest => AuthLevel::User,
@@ -9579,6 +9973,7 @@ impl Opcode {
             Self::RelationshipList => AuthLevel::User,
             Self::Suggestions => AuthLevel::User,
             Self::Search => AuthLevel::User,
+            Self::MuteSet => AuthLevel::User,
             Self::MediaUploadBegin => AuthLevel::User,
             Self::MediaUploadStatus => AuthLevel::User,
             Self::MediaUploadCommit => AuthLevel::User,
@@ -9676,6 +10071,9 @@ impl Opcode {
             Self::RoomRoleSet => Direction::ClientToServer,
             Self::RoomUpdate => Direction::ClientToServer,
             Self::RoomArchive => Direction::ClientToServer,
+            Self::RoomVoteKick => Direction::ClientToServer,
+            Self::RoomVoteEvent => Direction::ServerToClient,
+            Self::RoomSanction => Direction::ClientToServer,
             Self::ProfileUpdate => Direction::ClientToServer,
             Self::ProfileFetch => Direction::ClientToServer,
             Self::FriendRequest => Direction::ClientToServer,
@@ -9685,6 +10083,7 @@ impl Opcode {
             Self::RelationshipList => Direction::ClientToServer,
             Self::Suggestions => Direction::ClientToServer,
             Self::Search => Direction::ClientToServer,
+            Self::MuteSet => Direction::ClientToServer,
             Self::MediaUploadBegin => Direction::ClientToServer,
             Self::MediaUploadStatus => Direction::ClientToServer,
             Self::MediaUploadCommit => Direction::ClientToServer,
@@ -9783,6 +10182,9 @@ impl Opcode {
             Self::RoomRoleSet => false,
             Self::RoomUpdate => false,
             Self::RoomArchive => false,
+            Self::RoomVoteKick => false,
+            Self::RoomVoteEvent => false,
+            Self::RoomSanction => false,
             Self::ProfileUpdate => false,
             Self::ProfileFetch => false,
             Self::FriendRequest => false,
@@ -9792,6 +10194,7 @@ impl Opcode {
             Self::RelationshipList => false,
             Self::Suggestions => false,
             Self::Search => false,
+            Self::MuteSet => false,
             Self::MediaUploadBegin => false,
             Self::MediaUploadStatus => false,
             Self::MediaUploadCommit => false,
@@ -9897,6 +10300,9 @@ impl Opcode {
         Self::RoomRoleSet,
         Self::RoomUpdate,
         Self::RoomArchive,
+        Self::RoomVoteKick,
+        Self::RoomVoteEvent,
+        Self::RoomSanction,
         Self::ProfileUpdate,
         Self::ProfileFetch,
         Self::FriendRequest,
@@ -9906,6 +10312,7 @@ impl Opcode {
         Self::RelationshipList,
         Self::Suggestions,
         Self::Search,
+        Self::MuteSet,
         Self::MediaUploadBegin,
         Self::MediaUploadStatus,
         Self::MediaUploadCommit,

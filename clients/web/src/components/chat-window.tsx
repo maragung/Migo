@@ -10,10 +10,12 @@ import { messagePreview } from '@/lib/message-preview.js';
 import { useCall } from '@/lib/migo/call-manager.js';
 import { useChat } from '@/lib/migo/use-chat.js';
 import { useGameEvents } from '@/lib/migo/use-game-events.js';
+import { useRoomNotices } from '@/lib/migo/use-room-notices.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { useSectionNav } from '@/lib/migo/section-nav.js';
-import { useRooms } from '@/lib/migo/rooms-provider.js';
+import { useRooms, capacityLabel } from '@/lib/migo/rooms-provider.js';
+import { useMuted, muteFilter } from '@/lib/migo/muted-provider.js';
 import { resolveMediaUrl } from '@/lib/migo/media.js';
 import { presenceLabel, usePresence } from '@/lib/migo/use-presence.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
@@ -27,6 +29,7 @@ import { GiftPicker } from './gift-picker.js';
 import { MessageComposer } from './message-composer.js';
 import { MessageList, senderNameOf } from './message-list.js';
 import { RoomInfoPanel } from './room-info-panel.js';
+import { RoomNoticeList } from './room-notice-list.js';
 import { Icon } from './icons.js';
 import { Spinner } from './spinner.js';
 import { TypingIndicator } from './typing-indicator.js';
@@ -103,6 +106,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   } = useChat(conversationId);
   const game = useGameEvents(conversationId);
   const { startCall } = useCall();
+  const { muted } = useMuted();
 
   // The thread's overlays: the peer's profile (a direct chat), the room's details (a room), and
   // the composer's gift picker. Each is plain open/closed state over the same conversation.
@@ -149,11 +153,22 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   // A memo, because the fallback's `?? []` would otherwise mint a fresh array per render and
   // make every hook that depends on the membership re-run forever.
   const members = useMemo(() => summary?.members ?? [], [summary]);
+  // Personal mute hides a muted account's chatter in *rooms* only — a direct thread is never
+  // filtered, however the peer is muted elsewhere. The filter runs over the whole loaded transcript
+  // (not just newly-arrived messages), so muting someone clears their backlog from view at once.
+  const visibleMessages = useMemo(
+    () => (isRoom ? muteFilter(messages, muted) : messages),
+    [isRoom, messages, muted],
+  );
   const peerId = callPeerFor(summary, accountId);
   // The room behind this conversation, when the shell knows one (from this session's joins, or
   // the account's remembered rooms): the header's live counters and topic come from it, because
   // the conversation summary carries neither.
   const roomInfo = rooms.infoFor(conversationId);
+
+  // The open room's live membership pills — who joined, left, dropped, or was removed — kept only
+  // for the room on screen and rendered in the transcript's live region below.
+  const roomNotices = useRoomNotices(roomInfo?.roomId ?? null);
 
   // Every sender in the thread resolves to a profile (names, avatars, reply quotes), plus the
   // direct peer so the header shows a name even before they have spoken, plus the players of any
@@ -215,7 +230,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   const subtitle = isDirect
     ? presenceLabel(presence)
     : isRoom
-      ? `${roomInfo?.onlineCount ?? 0} online · ${roomInfo?.memberCount ?? members.length} members`
+      ? `${capacityLabel(roomInfo?.onlineCount, roomInfo?.maxMembers)} online · ${roomInfo?.memberCount ?? members.length} members`
       : `${members.length || 0} members`;
   const encryptionLabel = encryptionLabelFor(summary?.encryption);
   const avatarId = (peerId ?? conversationId) as string;
@@ -416,14 +431,14 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
         <MessageList
           messages={
             searchQuery.trim().length > 0
-              ? messages.filter((message) => {
+              ? visibleMessages.filter((message) => {
                   const content = message.content;
                   return (
                     content.type === ContentType.Text &&
                     content.text.toLowerCase().includes(searchQuery.trim().toLowerCase())
                   );
                 })
-              : messages
+              : visibleMessages
           }
           selfId={accountId}
           showSenders={showSenders}
@@ -439,18 +454,25 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
           onLoadEarlier={loadEarlier}
           mediaUrlFor={mediaUrlFor}
           liveSlot={
-            <GameEventList
-              rows={game.rows}
-              views={game.views}
-              selfId={accountId}
-              profiles={profiles}
-              activeGuess={game.activeGuess}
-              onSubmitGuess={(value) => void game.submitGuess(value)}
-              guessBusy={game.guessBusy}
-              guessError={game.guessError}
-            />
+            <>
+              {isRoom ? <RoomNoticeList notices={roomNotices} /> : null}
+              <GameEventList
+                rows={game.rows}
+                views={game.views}
+                selfId={accountId}
+                profiles={profiles}
+                activeGuess={game.activeGuess}
+                onSubmitGuess={(value) => void game.submitGuess(value)}
+                guessBusy={game.guessBusy}
+                guessError={game.guessError}
+              />
+            </>
           }
-          liveRowCount={game.rows.length + (game.activeGuess !== null ? 1 : 0)}
+          liveRowCount={
+            (isRoom ? roomNotices.length : 0) +
+            game.rows.length +
+            (game.activeGuess !== null ? 1 : 0)
+          }
           onOpenWallet={() => navigate('wallet')}
         />
       ) : null}

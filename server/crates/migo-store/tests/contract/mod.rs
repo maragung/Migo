@@ -16,7 +16,7 @@
 use migo_core::{Id, Result, Secret, Timestamp};
 use migo_protocol::{
     codes, ConversationKind, EncryptionMode, MessageKind, MlDsaPurpose, Platform, RelationshipKind,
-    RoomKind, RoomRole,
+    RoomKind, RoomRole, SanctionAction,
 };
 use migo_store::model::*;
 use migo_store::traits::*;
@@ -1919,6 +1919,262 @@ pub async fn ownership_moves_in_one_step_or_not_at_all(store: &SharedStore) {
     );
 }
 
+pub async fn the_moderation_trail_is_appended_and_fk_honest(store: &SharedStore) {
+    let alice = seed_account(store, 1, "alice").await;
+    let bob = seed_account(store, 2, "bob").await;
+    store
+        .create_room(room_row(id(100), id(200), "lounge", alice, 50))
+        .await
+        .unwrap();
+
+    // The row the escalation rule will one day count, in the wire's own
+    // numbering so the audit and the client that triggered it agree on scale.
+    store
+        .record_moderation_action(NewModerationAction {
+            action_id: id(300),
+            room_id: id(100),
+            actor_id: alice,
+            target_id: Some(bob),
+            action: SanctionAction::Kick as i16,
+            reason: None,
+            created_at: ts(4_200),
+        })
+        .await
+        .unwrap();
+
+    // The three foreign keys, each refused on its own so a failure names its
+    // column: a row naming a room, an actor, or a subject that does not exist
+    // is a row the audit trail cannot ever join back to anything.
+    expect_code(
+        store
+            .record_moderation_action(NewModerationAction {
+                action_id: id(301),
+                room_id: id(999),
+                actor_id: alice,
+                target_id: Some(bob),
+                action: SanctionAction::Kick as i16,
+                reason: None,
+                created_at: ts(4_300),
+            })
+            .await,
+        codes::NOT_FOUND,
+    );
+    expect_code(
+        store
+            .record_moderation_action(NewModerationAction {
+                action_id: id(302),
+                room_id: id(100),
+                actor_id: id(9),
+                target_id: Some(bob),
+                action: SanctionAction::Kick as i16,
+                reason: None,
+                created_at: ts(4_300),
+            })
+            .await,
+        codes::NOT_FOUND,
+    );
+    expect_code(
+        store
+            .record_moderation_action(NewModerationAction {
+                action_id: id(303),
+                room_id: id(100),
+                actor_id: alice,
+                target_id: Some(id(9)),
+                action: SanctionAction::Kick as i16,
+                reason: None,
+                created_at: ts(4_300),
+            })
+            .await,
+        codes::NOT_FOUND,
+    );
+
+    // A null subject is a column the schema allows, and the store must not
+    // read it as an account that happens to be missing.
+    store
+        .record_moderation_action(NewModerationAction {
+            action_id: id(304),
+            room_id: id(100),
+            actor_id: alice,
+            target_id: None,
+            action: SanctionAction::Kick as i16,
+            reason: Some("seat cleared".to_string()),
+            created_at: ts(4_400),
+        })
+        .await
+        .unwrap();
+}
+
+pub async fn only_current_global_admins_kicks_escalate(store: &SharedStore) {
+    let alice = seed_account(store, 1, "alice").await;
+    let bob = seed_account(store, 2, "bob").await;
+    let dave = seed_account(store, 4, "dave").await;
+    store
+        .create_room(room_row(id(100), id(200), "lounge", alice, 50))
+        .await
+        .unwrap();
+    store
+        .put_global_admin(GlobalAdmin {
+            account_id: dave,
+            granted_by: alice,
+            granted_at: ts(4_000),
+        })
+        .await
+        .unwrap();
+
+    // Two kicks by the global admin, a kick by the room's own owner, and a
+    // mute by the global admin — of which only the first two count.
+    let row = |value: u128, actor: Id, action: i16, at: i64| NewModerationAction {
+        action_id: id(value),
+        room_id: id(100),
+        actor_id: actor,
+        target_id: Some(bob),
+        action,
+        reason: None,
+        created_at: ts(at),
+    };
+    store
+        .record_moderation_action(row(300, dave, SanctionAction::Kick as i16, 4_100))
+        .await
+        .unwrap();
+    store
+        .record_moderation_action(row(301, dave, SanctionAction::Kick as i16, 4_200))
+        .await
+        .unwrap();
+    store
+        .record_moderation_action(row(302, alice, SanctionAction::Kick as i16, 4_300))
+        .await
+        .unwrap();
+    store
+        .record_moderation_action(row(303, dave, SanctionAction::Mute as i16, 4_400))
+        .await
+        .unwrap();
+    // And a kick by the global admin aimed at somebody else entirely.
+    store
+        .record_moderation_action(NewModerationAction {
+            action_id: id(304),
+            room_id: id(100),
+            actor_id: dave,
+            target_id: Some(alice),
+            action: SanctionAction::Kick as i16,
+            reason: None,
+            created_at: ts(4_500),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.count_global_admin_kicks(bob).await.unwrap(),
+        2,
+        "the owner's kick and the admin's mute are not the deployment's business"
+    );
+
+    // Unappointing the admin retires their kicks from the count at once: the
+    // escalation rule asks who may moderate *today*, not who once could.
+    assert!(store.remove_global_admin(dave).await.unwrap());
+    assert_eq!(store.count_global_admin_kicks(bob).await.unwrap(), 0);
+
+    // The rows never left — re-appointing brings the same history back, which
+    // is what "derived, so it can be rebuilt from the rows" has to mean.
+    store
+        .put_global_admin(GlobalAdmin {
+            account_id: dave,
+            granted_by: alice,
+            granted_at: ts(5_000),
+        })
+        .await
+        .unwrap();
+    assert_eq!(store.count_global_admin_kicks(bob).await.unwrap(), 2);
+}
+
+pub async fn a_network_ban_is_one_row_upserted_or_deleted(store: &SharedStore) {
+    let alice = seed_account(store, 1, "alice").await;
+    let bob = seed_account(store, 2, "bob").await;
+    let dave = seed_account(store, 4, "dave").await;
+
+    // No row, no ban — the caller reads absence, never a "not banned" stub.
+    assert!(store.network_ban(bob).await.unwrap().is_none());
+
+    store
+        .set_network_ban(RoomNetworkBan {
+            account_id: bob,
+            reason: Some("kicked by global admins 4 times".to_string()),
+            until: None,
+            by_actor: Some(dave),
+            created_at: ts(4_000),
+        })
+        .await
+        .unwrap();
+    let ban = store.network_ban(bob).await.unwrap().unwrap();
+    assert_eq!(ban.account_id, bob);
+    assert_eq!(
+        ban.reason.as_deref(),
+        Some("kicked by global admins 4 times")
+    );
+    assert_eq!(ban.until, None, "no until means only an unban reverses it");
+    assert_eq!(ban.by_actor, Some(dave));
+
+    // The second write is a replacement, not an error: lifting and re-imposing
+    // is one write each, never a delete-then-insert dance.
+    store
+        .set_network_ban(RoomNetworkBan {
+            account_id: bob,
+            reason: Some("cooling off".to_string()),
+            until: Some(ts(9_000)),
+            by_actor: Some(dave),
+            created_at: ts(5_000),
+        })
+        .await
+        .unwrap();
+    let replaced = store.network_ban(bob).await.unwrap().unwrap();
+    assert_eq!(replaced.reason.as_deref(), Some("cooling off"));
+    assert_eq!(replaced.until, Some(ts(9_000)));
+    assert_eq!(replaced.created_at, ts(5_000));
+
+    // One row per account: another account's ban is not this account's.
+    assert!(store.network_ban(alice).await.unwrap().is_none());
+
+    // The `until` comparison is the caller's job; the store hands back the row
+    // it was given, timestamps and all, and takes no clock of its own.
+    assert_eq!(
+        store.network_ban(bob).await.unwrap().unwrap().until,
+        Some(ts(9_000))
+    );
+
+    // And a row naming an account or an actor that does not exist is refused,
+    // the way the foreign keys would insist.
+    expect_code(
+        store
+            .set_network_ban(RoomNetworkBan {
+                account_id: id(9),
+                reason: None,
+                until: None,
+                by_actor: None,
+                created_at: ts(4_000),
+            })
+            .await,
+        codes::NOT_FOUND,
+    );
+    expect_code(
+        store
+            .set_network_ban(RoomNetworkBan {
+                account_id: alice,
+                reason: None,
+                until: None,
+                by_actor: Some(id(9)),
+                created_at: ts(4_000),
+            })
+            .await,
+        codes::NOT_FOUND,
+    );
+
+    // The unban is a delete: there is no "lifted but still rowed" state for a
+    // join check to misread, and the second lift honestly says there was
+    // nothing to lift.
+    assert!(store.clear_network_ban(bob).await.unwrap());
+    assert!(store.network_ban(bob).await.unwrap().is_none());
+    assert!(!store.clear_network_ban(bob).await.unwrap());
+}
+
 pub async fn the_roster_pages_by_role_then_seniority(store: &SharedStore) {
     let alice = seed_account(store, 1, "alice").await;
     let bob = seed_account(store, 2, "bob").await;
@@ -2889,6 +3145,9 @@ macro_rules! for_each_contract_case {
         $case!(a_ban_is_not_shed_by_leaving_and_coming_back);
         $case!(the_roster_pages_by_role_then_seniority);
         $case!(ownership_moves_in_one_step_or_not_at_all);
+        $case!(the_moderation_trail_is_appended_and_fk_honest);
+        $case!(only_current_global_admins_kicks_escalate);
+        $case!(a_network_ban_is_one_row_upserted_or_deleted);
         $case!(archiving_a_room_closes_it_without_deleting_it);
         $case!(updating_a_room_can_clear_a_topic_without_clearing_a_name);
         $case!(a_block_stops_contact_in_both_directions);

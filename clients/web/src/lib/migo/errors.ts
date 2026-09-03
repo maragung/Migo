@@ -17,6 +17,13 @@ import { RemoteError, SdkError, TimeoutError, TransportError } from '@migo/sdk';
 
 export function friendlyError(error: unknown): string {
   if (error instanceof RemoteError) {
+    // A few conditions are safe to name in our own words regardless of whether the server chose to
+    // disclose its text: the symbol is the stable contract, and a friendlier line than the raw
+    // symbol (or a generic rejection) is worth writing for the ones a person actually hits. ROOM_FULL
+    // is the room that turned someone away at the door — an honest "no room right now", not a fault.
+    if (error.symbol === 'ROOM_FULL') {
+      return 'This room is full right now. Try again later, or find another room.';
+    }
     // The SDK's JS message composes `symbol: human text`, so the symbol is stripped here rather
     // than compared: "RATE_LIMITED: Too many requests. Retry in 5 s" reaches a person as "Too
     // many requests. Retry in 5 s". When the server disclosed no human text at all, the bare

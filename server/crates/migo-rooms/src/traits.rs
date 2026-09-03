@@ -28,10 +28,10 @@
 //!
 //! # What is deliberately not here
 //!
-//! **No online count.** `RoomSummary::online_count` is filled by the gateway from the
-//! size of its subscriber set. Computing it here means intersecting the roster with
-//! the presence cache on every listing, which is the query brief section 14 exists to
-//! prevent; `migo_presence` refuses the same request for the same reason.
+//! **No online count.** `RoomSummary::online_count` is filled by the dispatcher from a
+//! tally of live sessions it keeps in memory. Computing it here means intersecting the
+//! roster with the presence cache on every listing, which is the query brief section 14
+//! exists to prevent; `migo_presence` refuses the same request for the same reason.
 //!
 //! **No sequencing.** Brief section 54 gives every room exactly one sequencer in its
 //! home region. This crate records which region that is and never assigns a `seq`;
@@ -50,10 +50,10 @@
 //! that cannot be undone by shipping the table later.
 
 use async_trait::async_trait;
-use migo_core::{Id, Result};
+use migo_core::{Id, Result, Timestamp};
 use migo_protocol::{
     RoomJoinRequest, RoomJoinResponse, RoomLeaveRequest, RoomListRequest, RoomListResponse,
-    RoomRole, RoomSummary,
+    RoomRole, RoomSummary, RoomVoteKickResponse,
 };
 use migo_store::model::RoomMember;
 
@@ -95,6 +95,38 @@ pub trait Roomkeeper: Send + Sync {
     /// client that asked twice is usually a client that retried a request whose reply
     /// it never saw.
     async fn leave(&self, caller: &Caller, request: RoomLeaveRequest) -> Result<Option<Fanout>>;
+
+    /// Removes a member whose reconnect grace expired, on the server's own initiative.
+    ///
+    /// Not a request. Brief section 184 keeps a member in their rooms for two minutes after
+    /// their last session drops, so a dropped socket or a backgrounded tab does not read as
+    /// leaving; when that window closes with the account still offline, the composition root
+    /// calls this to make the departure real. There is no `caller`, because no account asked for
+    /// it — the actor is the timer — which is exactly why this is a separate method and not a
+    /// parameter on [`leave`](Roomkeeper::leave): a caller-less removal must never travel a path
+    /// that could be reached from a frame, or a client would have found a way to evict another
+    /// account by naming it.
+    ///
+    /// It enforces the two invariants a timer cannot be trusted to have re-checked. The member
+    /// must still be active — a `Left` already sent, or a rejoin in the meantime, makes this a
+    /// no-op returning `None`, so a late timer cannot remove somebody twice or remove somebody who
+    /// came back. And the owner is exempt: a room's creator does not lose the room by closing a
+    /// laptop, so a timeout against the owner returns `None` and changes nothing, leaving them
+    /// marked offline but still in place.
+    ///
+    /// Returns the fanout that tells the room the member is gone — a `Left`, the same shape
+    /// [`leave`](Roomkeeper::leave) produces — attributed to no device, because no device caused
+    /// it. `None` means nothing changed, on the section 156 rule the whole crate follows.
+    ///
+    /// `now` stamps the departure: this crate takes its time from whoever calls it and never
+    /// reads a clock of its own, and a timer is just another caller, so the moment the grace
+    /// expired arrives as an argument like every other `now` here.
+    async fn timeout_member(
+        &self,
+        room_id: Id,
+        account_id: Id,
+        now: Timestamp,
+    ) -> Result<Option<Fanout>>;
 
     /// Browses rooms.
     ///
@@ -196,13 +228,57 @@ pub trait Roomkeeper: Send + Sync {
     /// The owner cannot be sanctioned, by anybody, at any rank. There is no rank above
     /// the owner, so the only way to allow it would be a special case, and a special
     /// case here is how a room gets taken from the person who made it.
+    ///
+    /// Every action is written to the moderation audit log, with the actor and the
+    /// wire's action numbering. A **global admin** sanctions in any room — public or
+    /// managed — without membership, a permission bit, or a rank, because their
+    /// standing came from the deployment and not the room; the owner protection is
+    /// the one thing their override does not cross. A global admin's `Unban` also
+    /// lifts the network-wide ban the escalation below imposes.
+    ///
+    /// The escalation: a global admin's kicks of one account are counted across every
+    /// room, from the audit rows. Past the third, the next kick bars the account from
+    /// every room on the service and sweeps them out of the rooms they still hold —
+    /// rooms they own excepted, on the same owner rule above. Room staff's kicks
+    /// never count: the rule is about the deployment's authority, not a room's.
+    ///
+    /// A `Vec` and not an `Option` because one sanction can touch many rooms: the
+    /// kick that trips the escalation produces a fanout for the room it happened in
+    /// and one for every room the sweep emptied. Empty is brief section 156's
+    /// "nothing changed" — a mute nobody needed to hear about, an unban of a ban
+    /// that was not there.
     async fn sanction(
         &self,
         caller: &Caller,
         room_id: Id,
         subject_id: Id,
         sanction: Sanction,
-    ) -> Result<Option<Fanout>>;
+    ) -> Result<Vec<Fanout>>;
+
+    /// Starts a kick vote, or adds the caller's voice to one already running.
+    ///
+    /// The members' own lever: no permission bit, no rank — any member may open a
+    /// vote, and a voice per account. The vote passes when half the room's members
+    /// (rounded up, two at minimum) have spoken, and passing removes the target the
+    /// way a kick does: the membership is marked left, the door stays open, and the
+    /// room hears a `Kicked` member event.
+    ///
+    /// The owner and global admins are immune — `VOTE_TARGET_IMMUNE` — for the same
+    /// reason the owner is beyond every sanction. One vote runs per room; a voice
+    /// for a different target while one is open is `VOTE_ALREADY_OPEN`. The same
+    /// account speaking again changes nothing and returns the standing tally. A
+    /// vote nobody finishes expires after a minute, lazily: the next vote this room
+    /// sees closes the old one and carries its closing to the room.
+    ///
+    /// Returns the tally as the caller's socket needs it, plus the fanouts the room
+    /// does: the running tally on every new voice, and the member event on a pass.
+    /// The caller's own socket is excluded from both — the reply carries them.
+    async fn vote_kick(
+        &self,
+        caller: &Caller,
+        room_id: Id,
+        target_id: Id,
+    ) -> Result<(RoomVoteKickResponse, Vec<Fanout>)>;
 
     /// Hands the room to another member.
     ///

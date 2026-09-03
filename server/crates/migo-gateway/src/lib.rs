@@ -359,6 +359,36 @@ impl Gateway {
             .hub
             .broadcast(topic, &bytes, opcode.class(), None, now, None);
     }
+
+    /// Publishes a server-originated frame to one topic under a coalescing key.
+    ///
+    /// The same out-of-session path as [`broadcast_to_topic`](Gateway::broadcast_to_topic), for a
+    /// stream whose wire class is `Coalescable`: a room's online count moves once per connect and
+    /// once per disconnect, and a member reconnecting on a flaky network can move it several times
+    /// a second. The key lets a subscriber whose mailbox is backed up collapse that burst to the
+    /// latest value — the only one that was ever true for longer than an instant — instead of
+    /// replaying every intermediate count. Callers pass a key stable for the stream they are
+    /// coalescing (the room, here), so frames for different rooms never collapse into one another.
+    pub fn broadcast_to_topic_coalesced<E: migo_protocol::Encode>(
+        &self,
+        topic: &migo_protocol::Topic,
+        opcode: migo_protocol::Opcode,
+        event: &E,
+        coalesce_key: u64,
+        now: migo_core::Timestamp,
+    ) {
+        use migo_protocol::to_frame;
+        let bytes = match to_frame(opcode.to_wire(), 0, event) {
+            Ok(frame) => match frame.encode() {
+                Ok(bytes) => bytes,
+                Err(_) => return,
+            },
+            Err(_) => return,
+        };
+        self.inner
+            .hub
+            .broadcast(topic, &bytes, opcode.class(), Some(coalesce_key), now, None);
+    }
 }
 
 /// A stable per-process key that groups the frames of one Coalescable stream.

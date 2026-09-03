@@ -1,20 +1,26 @@
 /**
  * The register form must drive the SDK into the right body shape on the wire.
  *
- * The register page collects username, email, passphrase, and gender, and the captcha card is
- * gone from the web client: the production server runs with the gate disabled and the identity
- * ceremonies are never captcha-gated anyway. What has to stay true for the form to work end to
- * end:
+ * The register page collects username, email, passphrase, and gender, and mounts a captcha
+ * widget: the server runs the per-IP failure gate, so a network that has tripped it is asked
+ * for a challenge proof on the next registration. What has to stay true for the form to work
+ * end to end:
  *
- *   1. The provider's `register` puts every field the server validates into the wire body —
+ *   1. The captcha widget renders the challenge image, the answer input, and the refresh and
+ *      easier-challenge controls, and asks the same server the form will hand credentials to.
+ *   2. The provider's `register` puts every field the server validates into the wire body —
  *      including the disclosed gender, in the server's numbering — and omits the ones the form
  *      left blank rather than sending them empty.
- *   2. The identity key crosses as the standard base64 of exactly the bytes the root derives.
+ *   3. A solved captcha crosses as the proof verbatim; an unsolved one leaves the body without
+ *      a captcha block at all, rather than sending an empty one.
+ *   4. The identity key crosses as the standard base64 of exactly the bytes the root derives.
  *
- * These tests pin both invariants by driving `MigoClient.register` through a `fetch` double and
- * asserting the JSON body has the right fields. A regression that broke the wire shape (a renamed
- * field, a wrong id type, a gender sent as a string) would land in one of these assertions and
- * never in a less observable place.
+ * These tests pin the invariants by driving `MigoClient.register` and
+ * `BootstrapClient.requestCaptcha` through a `fetch` double and asserting the JSON body has
+ * the right fields, and by rendering the captcha and server widgets (the only pieces of the
+ * page that do not pull in `next/navigation`). A regression that broke the wire shape (a
+ * renamed field, a wrong id type, a gender sent as a string, a stripped captcha) would land
+ * in one of these assertions and never in a less observable place.
  */
 
 import assert from 'node:assert/strict';
@@ -22,8 +28,8 @@ import test from 'node:test';
 
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { MigoClient, Platform, BandwidthMode } from '@migo/sdk';
-import type { Grant, ServerEndpoint } from '@migo/sdk';
+import { BootstrapClient, MigoClient, Platform, BandwidthMode } from '@migo/sdk';
+import type { CaptchaProof, Grant, Id, ServerEndpoint } from '@migo/sdk';
 
 const HOST = 'migo.test';
 const ENDPOINT: ServerEndpoint = {
@@ -37,6 +43,12 @@ const ENDPOINT: ServerEndpoint = {
 
 const USERNAME = 'alice';
 const PASSWORD = 'correct-horse-battery-staple';
+// The answer a user would have read off the rendered challenge image: five to six
+// letters and digits, nothing else.
+const CAPTCHA: CaptchaProof = {
+  challenge_id: '01ARZ3NDEKTSV4RRFFQ69G5FAV' as Id,
+  answer: 'AB3D7',
+};
 
 type CapturedCall = { url: string; init: RequestInit };
 
@@ -44,20 +56,31 @@ function makeFetchDouble(calls: CapturedCall[]): typeof fetch {
   return (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     calls.push({ url, init: init ?? {} });
-    const body = {
-      account_id: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
-      device_id: '01ARZ3NDEKTSV4RRFFQ69G5FAW',
-      session_id: '01ARZ3NDEKTSV4RRFFQ69G5FAX',
-      access_token: 'access',
-      refresh_token: 'refresh',
-      access_expires_at_ms: 1,
-      refresh_expires_at_ms: 2,
-      capabilities: '1',
-      is_new_account: true,
-    };
+    // The double answers every endpoint the bootstrap surface hits. The challenge is an
+    // image — a base64 PNG plus the mode the server issued — while the grant keeps the
+    // shape register has always parsed.
+    const isCaptcha = url.endsWith('/v1/auth/captcha');
+    const body = isCaptcha
+      ? {
+          challenge_id: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+          image_png_base64: 'aGVsbG8=',
+          mode: 'image',
+          ttl_seconds: 120,
+        }
+      : {
+          account_id: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+          device_id: '01ARZ3NDEKTSV4RRFFQ69G5FAW',
+          session_id: '01ARZ3NDEKTSV4RRFFQ69G5FAX',
+          access_token: 'access',
+          refresh_token: 'refresh',
+          access_expires_at_ms: 1,
+          refresh_expires_at_ms: 2,
+          capabilities: '1',
+          is_new_account: true,
+        };
     return Promise.resolve(
       new Response(JSON.stringify(body), {
-        status: 201,
+        status: isCaptcha ? 200 : 201,
         headers: { 'content-type': 'application/json' },
       }),
     );
@@ -152,6 +175,84 @@ test('MigoClient.register sends the username, password, email, and device block'
   assert.deepEqual(device.platform, 'web', 'the platform is the snake_case wire name');
   assert.equal(body.captcha, undefined, 'no captcha key is sent when no proof is supplied');
   assert.equal(body.gender, undefined, 'an undisclosed gender is omitted, not sent empty');
+});
+
+test('the captcha widget renders the challenge image, the answer input, and the challenge controls', async () => {
+  const { CaptchaWidget } = await import('../src/components/captcha-widget.js');
+  const markup = renderToStaticMarkup(
+    <CaptchaWidget endpoint={ENDPOINT} onChange={() => undefined} />,
+  );
+  assert.ok(markup.includes('class="captcha-widget"'), 'captcha widget must render its shell');
+  assert.ok(markup.includes('<img'), 'the challenge must render as an image element');
+  assert.ok(
+    markup.includes('alt="'),
+    'the challenge image must carry an accessible description (never the answer)',
+  );
+  assert.ok(markup.includes('Captcha'), 'captcha label must be visible to the user');
+  assert.ok(markup.includes('Answer'), 'the captcha answer input must be visible');
+  assert.ok(
+    markup.includes('placeholder="5–6 characters"'),
+    'the answer field must take five to six letters and digits',
+  );
+  assert.ok(
+    markup.includes('aria-label="Request a new captcha"'),
+    'the refresh control must be present',
+  );
+  assert.ok(
+    markup.includes('aria-label="Request an easier-to-read captcha"'),
+    'the easier-challenge control must be present',
+  );
+  assert.ok(markup.includes('Easier challenge'), 'the easier-challenge control must be labelled');
+});
+
+test('requestCaptcha posts the chosen mode and parses the image challenge', async () => {
+  const calls: CapturedCall[] = [];
+  const bootstrap = new BootstrapClient(ENDPOINT, { fetch: makeFetchDouble(calls) });
+
+  const challenge = await bootstrap.requestCaptcha();
+  const altChallenge = await bootstrap.requestCaptcha('image_alt');
+
+  const captchaCalls = calls.filter((call) => call.url.endsWith('/v1/auth/captcha'));
+  assert.equal(captchaCalls.length, 2, 'one request per requestCaptcha call');
+  // The SDK always serializes the body as a JSON string, but the RequestInit type only says
+  // `body: BodyInit | null | undefined`, so the cast is the documented seam.
+  // eslint-disable-next-line @typescript-eslint/no-base-to-string, @typescript-eslint/no-unsafe-assignment
+  const defaultBody: Record<string, unknown> = JSON.parse(String(captchaCalls[0]?.init.body));
+  // eslint-disable-next-line @typescript-eslint/no-base-to-string, @typescript-eslint/no-unsafe-assignment
+  const altBody: Record<string, unknown> = JSON.parse(String(captchaCalls[1]?.init.body));
+  assert.deepEqual(defaultBody, {}, 'an omitted mode posts an empty object body');
+  assert.deepEqual(altBody, { mode: 'image_alt' }, 'a given mode rides in the body');
+  assert.equal(challenge.image_png_base64, 'aGVsbG8=', 'the image bytes cross as base64');
+  assert.equal(challenge.mode, 'image', 'the issued mode is echoed back');
+  assert.equal(challenge.ttl_seconds, 120, 'the ttl crosses as a number');
+  assert.equal(
+    altChallenge.challenge_id,
+    challenge.challenge_id,
+    'the challenge id parses into the SDK id type',
+  );
+});
+
+test('MigoClient.register sends a captcha proof in the body when one is supplied', async () => {
+  const calls: CapturedCall[] = [];
+  const client = makeClient(calls);
+
+  try {
+    const grant: Grant = await client.register({
+      username: USERNAME,
+      password: PASSWORD,
+      captcha: CAPTCHA,
+    });
+    assert.equal(grant.isNewAccount, true);
+  } catch {
+    // The post-grant handshake will fail because the socket factory refuses; that is fine —
+    // the bootstrap call is the one we are asserting on, and it has already run.
+  }
+  const body = registerBodyOf(calls);
+  assert.deepEqual(
+    body.captcha,
+    { challenge_id: CAPTCHA.challenge_id, answer: CAPTCHA.answer },
+    'the captcha proof is in the body verbatim',
+  );
 });
 
 test('MigoClient.register carries the disclosed gender in the server numbering', async () => {

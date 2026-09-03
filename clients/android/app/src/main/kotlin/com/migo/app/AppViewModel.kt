@@ -12,7 +12,11 @@ import com.migo.app.model.ChatMessage
 import com.migo.app.model.ChatState
 import com.migo.app.model.ConversationRow
 import com.migo.app.model.PreparedChainTx
+import com.migo.app.model.RoomLiveInfo
+import com.migo.app.model.RoomNotice
+import com.migo.app.model.RosterMember
 import com.migo.app.model.TrackingChainTx
+import com.migo.app.model.VoteTally
 import com.migo.app.model.parseAvaxAmount
 import com.migo.app.session.MigoSession
 import com.migo.app.session.SessionHooks
@@ -37,10 +41,16 @@ import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.ConversationSummary
 import com.migo.core.protocol.InboxItem
 import com.migo.core.protocol.LedgerEntryWire
+import com.migo.core.protocol.MemberChange
 import com.migo.core.protocol.NotificationEvent
 import com.migo.core.protocol.ReceiptKind
 import com.migo.core.protocol.RoomJoinResponse
+import com.migo.core.protocol.RoomMemberEvent
+import com.migo.core.protocol.RoomRole
+import com.migo.core.protocol.RoomStateEvent
 import com.migo.core.protocol.RoomSummary
+import com.migo.core.protocol.RoomVoteEvent
+import com.migo.core.protocol.SanctionAction
 import com.migo.core.protocol.TypingEvent
 import com.migo.core.protocol.TypingState
 import com.migo.core.store.ServerEndpoint
@@ -51,6 +61,7 @@ import com.migo.core.wire.WireError
 import com.migo.core.wire.parseId
 import java.math.BigInteger
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -104,6 +115,26 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * Nothing in it is secret: these are the names the profile endpoint hands to anyone who asks.
      */
     private val names = ConcurrentHashMap<Id, String>()
+
+    /**
+     * The last [RoomSummary] this shell saw for a room, by room id.
+     *
+     * A room chat's header wants live counts and the caller's role, but a conversation opened cold
+     * from the list carries neither -- only the directory, a join and a create hand back a summary.
+     * So every summary that passes through is kept here, and [open] seeds the chat's [RoomLiveInfo]
+     * from it; the room's event streams take over from there. Nothing in it is secret: a room summary
+     * is public directory data.
+     */
+    private val roomInfo = ConcurrentHashMap<Id, RoomSummary>()
+
+    /**
+     * A monotonic source of keys for room notices.
+     *
+     * A [RoomMemberEvent] carries no id or timestamp of its own, and two identical events (the same
+     * person reconnecting twice) must still be two distinct rows to a `LazyColumn`. A per-process
+     * counter is unique without depending on the event's contents, which is all a draw key needs.
+     */
+    private val noticeSeq = AtomicLong(0L)
 
     init {
         viewModelScope.launch { bootstrap() }
@@ -232,6 +263,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     conversationId = conversationId,
                     title = title,
                     roomId = row?.roomId,
+                    room = row?.roomId?.let { liveInfoFor(it) },
                     loading = true,
                 ),
                 conversations = current.conversations.map {
@@ -374,6 +406,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val response = live.client.rooms.list(30, query = query.ifEmpty { null })
+                rememberRooms(response.rooms)
                 signedIn { it.copy(rooms = it.rooms.copy(loading = false, rooms = response.rooms)) }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -431,6 +464,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Projects a join (or create) reply into the conversation list, keeping the room id for leave. */
     private fun noteRoom(joined: RoomJoinResponse) {
+        roomInfo[joined.room.roomId] = joined.room
         val fresh = ConversationRow(
             conversationId = joined.conversationId,
             title = joined.room.name,
@@ -496,7 +530,168 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** The Space stream's durable halves: the inbox and the statement, merged newest first. */
+    /**
+     * Opens the member sheet over a room chat and reads what it shows: the roster, and this device's
+     * own mute list. Both are reads rather than state the shell already holds -- a roster drifts as
+     * people come and go, and the mute list lives in the social graph, not in the room.
+     */
+    fun openMembers(conversationId: Id, roomId: Id) {
+        inChat(conversationId) { it.copy(membersOpen = true) }
+        loadRoster(conversationId, roomId)
+        loadMuted(conversationId)
+    }
+
+    /** Closes the member sheet, leaving what it read in place for the next open. */
+    fun closeMembers(conversationId: Id) {
+        inChat(conversationId) { it.copy(membersOpen = false) }
+    }
+
+    /**
+     * Reads a room's roster into the open chat.
+     *
+     * The names come first: a roster is account ids and roles, and a sheet of short ids helps nobody,
+     * so any id without a cached name is fetched from the profile endpoint before the rows are built.
+     * The caller's own role is then refined from its own roster entry -- the roster is the one place
+     * the server states it plainly -- and folded into the live info the moderation gates read, so a
+     * cold-opened room learns what the caller may do even before a state event names the counts.
+     */
+    private fun loadRoster(conversationId: Id, roomId: Id) {
+        val live = session ?: return
+        inChat(conversationId) { it.copy(rosterLoading = true) }
+        viewModelScope.launch {
+            try {
+                val response = live.client.rooms.getRoster(roomId)
+                val unknown = response.members.map { it.accountId }.filter { !names.containsKey(it) }
+                if (unknown.isNotEmpty()) {
+                    try {
+                        for (profile in live.client.profile.fetch(unknown.take(PROFILE_BATCH))) {
+                            names[profile.userId] = profile.displayName.ifBlank { profile.username }
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        // A short id is a worse label than a name, not a broken sheet.
+                    }
+                }
+                val self = signedInState?.accountId
+                val rows = response.members.map { entry ->
+                    RosterMember(
+                        userId = entry.accountId,
+                        name = names[entry.accountId] ?: shortId(entry.accountId),
+                        role = RoomRole.fromWire(entry.role),
+                    )
+                }
+                val myRole = self?.let { id -> rows.find { it.userId == id }?.role }
+                inChat(conversationId) { chat ->
+                    chat.copy(
+                        roster = rows,
+                        rosterLoading = false,
+                        room = if (myRole != null) {
+                            (chat.room ?: RoomLiveInfo(0L, 0L)).copy(myRole = myRole)
+                        } else {
+                            chat.room
+                        },
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                inChat(conversationId) { it.copy(rosterLoading = false) }
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /** Reads this device's muted accounts into the open chat's own Muted list. Best effort. */
+    private fun loadMuted(conversationId: Id) {
+        val live = session ?: return
+        viewModelScope.launch {
+            val muted = runCatching { live.client.social.listMuted().map { it.userId }.toSet() }
+                .getOrDefault(emptySet())
+            inChat(conversationId) { it.copy(muted = muted) }
+        }
+    }
+
+    /**
+     * Casts this account's voice in a kick vote against a member.
+     *
+     * The reply is the tally the instant the voice landed, so it is reflected at once rather than
+     * waiting for the vote event to echo back: an open vote shows the running tally against the target,
+     * and a vote that just passed clears it -- the kick itself follows as a member event. The target's
+     * [ChatState.acting] flag guards the row so a double tap is still one voice.
+     */
+    fun voteKick(conversationId: Id, roomId: Id, targetId: Id) {
+        val live = session ?: return
+        if (signedInState?.open?.acting?.contains(targetId) == true) return
+        inChat(conversationId) { it.copy(acting = it.acting + targetId) }
+        viewModelScope.launch {
+            try {
+                val result = live.client.rooms.voteKick(roomId, targetId)
+                inChat(conversationId) { chat ->
+                    val votes = if (result.open) {
+                        chat.votes + (targetId to VoteTally(result.votes, result.needed))
+                    } else {
+                        chat.votes - targetId
+                    }
+                    chat.copy(votes = votes, acting = chat.acting - targetId)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                inChat(conversationId) { it.copy(acting = it.acting - targetId) }
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Applies a staff action -- mute, unmute, kick, ban, unban -- to a member.
+     *
+     * Nothing is reflected optimistically: the roster row and the counts move when the resulting
+     * [RoomMemberEvent] arrives, which is the same path a sanction by another moderator takes. This
+     * fires the request and clears the row's [ChatState.acting] flag; the server enforces that the
+     * caller outranks the target, so a refusal surfaces as the banner, not as a wrongly-redrawn row.
+     */
+    fun sanction(conversationId: Id, roomId: Id, targetId: Id, action: SanctionAction) {
+        val live = session ?: return
+        if (signedInState?.open?.acting?.contains(targetId) == true) return
+        inChat(conversationId) { it.copy(acting = it.acting + targetId) }
+        viewModelScope.launch {
+            try {
+                live.client.rooms.sanction(roomId, targetId, action)
+                inChat(conversationId) { it.copy(acting = it.acting - targetId) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                inChat(conversationId) { it.copy(acting = it.acting - targetId) }
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Mutes or unmutes one account for this device -- a personal choice, not a room sanction.
+     *
+     * The social graph owns it, so the sheet's Muted list re-reads from there once it resolves rather
+     * than guessing the new state. `on = false` lifts the mute.
+     */
+    fun muteForMe(conversationId: Id, userId: Id, on: Boolean) {
+        val live = session ?: return
+        if (signedInState?.open?.acting?.contains(userId) == true) return
+        inChat(conversationId) { it.copy(acting = it.acting + userId) }
+        viewModelScope.launch {
+            try {
+                live.client.social.muteUser(userId, on)
+                loadMuted(conversationId)
+                inChat(conversationId) { it.copy(acting = it.acting - userId) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                inChat(conversationId) { it.copy(acting = it.acting - userId) }
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
     fun loadSpace() {
         val live = session ?: return
         signedIn { it.copy(space = it.space.copy(loading = true)) }
@@ -574,6 +769,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val rooms = runCatching {
             live.client.rooms.list(10, query = query).rooms
         }.getOrDefault(emptyList())
+        rememberRooms(rooms)
         // The query may have moved on while the wire answered; only the answer to the current text lands.
         if (signedInState?.search?.query?.trim() != query) return
         signedIn { it.copy(search = it.search.copy(loading = false, people = people, rooms = rooms)) }
@@ -1237,6 +1433,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         subscriptions.add(opened.client.onFriendEvent {
             if ((_state.value as? AppState.SignedIn)?.section == AppState.Section.FRIENDS) loadFriends()
         })
+        // The three room streams. They land in the cache and, when they name the open room, in its
+        // header, timeline and member sheet; a stream for any other room updates the cache and stops
+        // there. Added here with the rest so a reconnect re-bridges all of them together.
+        subscriptions.add(opened.client.onRoomMember { roomMember(it) })
+        subscriptions.add(opened.client.onRoomState { roomState(it) })
+        subscriptions.add(opened.client.onRoomVote { roomVote(it) })
         refreshConversations()
         // The wallet's combined read also fills the banner's $MIG balance, so the session starts
         // with it -- the desktop client issues its wallet command at sign-in for the same reason.
@@ -1363,6 +1565,149 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 else -> chat.typing - who
             }
             chat.copy(typing = next)
+        }
+    }
+
+    /** Remembers each summary against its room id, so a later [open] can seed the chat's live counts. */
+    private fun rememberRooms(rooms: List<RoomSummary>) {
+        for (summary in rooms) roomInfo[summary.roomId] = summary
+    }
+
+    /**
+     * The live shape a room chat should open with, from the last summary seen for the room.
+     *
+     * Null when no summary has passed through -- a room conversation restored cold from the list, its
+     * counts not yet named by a directory row or an event. The header shows its plain label until one
+     * arrives. [RoomSummary.myRole] rides along because the summary is the one place a join states it,
+     * and the moderation gates need it before the roster has been read.
+     */
+    private fun liveInfoFor(roomId: Id): RoomLiveInfo? {
+        val summary = roomInfo[roomId] ?: return null
+        return RoomLiveInfo(
+            onlineCount = summary.onlineCount,
+            memberCount = summary.memberCount,
+            maxMembers = summary.maxMembers,
+            myRole = summary.myRole ?: RoomRole.Unknown,
+        )
+    }
+
+    /**
+     * A member arrived, left, dropped, came back, or was removed.
+     *
+     * The event fans out two ways. The room's cached summary takes the new member count and, when the
+     * event is about this account, the new role -- so re-opening the chat reads current. And the open
+     * chat, if it is this room's, gains a timeline notice and tracks the same count and role; a removal
+     * (a kick, a ban, or a plain leave) also drops the target from any open vote and from the roster
+     * the sheet is showing.
+     *
+     * `change` is the coalesced reason. A legacy event that carries none is read through its `joined`
+     * flag exactly as [MemberChange] documents, and an [MemberChange.Unknown] from a newer server is
+     * read the same way rather than drawn as a blank line. The cache and notice are computed out here,
+     * not inside the state update: that lambda can re-run under contention, and a notice key or a cache
+     * write must happen once.
+     */
+    private fun roomMember(event: RoomMemberEvent) {
+        val self = (_state.value as? AppState.SignedIn)?.accountId
+        val change = event.change?.takeIf { it != MemberChange.Unknown }
+            ?: if (event.joined) MemberChange.Joined else MemberChange.Left
+        roomInfo[event.roomId]?.let { summary ->
+            roomInfo[event.roomId] = summary.copy(
+                memberCount = event.memberCount ?: summary.memberCount,
+                myRole = if (event.userId == self) event.role ?: summary.myRole else summary.myRole,
+            )
+        }
+        val who = names[event.userId] ?: "Someone"
+        val verb = when (change) {
+            MemberChange.Joined -> "joined"
+            MemberChange.Left -> "left"
+            MemberChange.Disconnected -> "disconnected"
+            MemberChange.Reconnected -> "reconnected"
+            MemberChange.Kicked -> "was kicked"
+            MemberChange.Banned -> "was banned"
+            MemberChange.Unknown -> "left" // unreachable: coalesced above, but the when must be total
+        }
+        val notice = RoomNotice(
+            key = "notice-" + noticeSeq.incrementAndGet(),
+            text = "$who $verb",
+            at = System.currentTimeMillis(),
+        )
+        val removed = change == MemberChange.Kicked ||
+            change == MemberChange.Banned ||
+            change == MemberChange.Left
+        signedIn { current ->
+            val chat = current.open
+            if (chat == null || chat.roomId != event.roomId) return@signedIn current
+            val info = chat.room
+            val room = info?.copy(
+                memberCount = event.memberCount ?: info.memberCount,
+                myRole = if (event.userId == self) event.role ?: info.myRole else info.myRole,
+            )
+            current.copy(
+                open = chat.copy(
+                    room = room,
+                    notices = (chat.notices + notice).takeLast(NOTICE_CAP),
+                    votes = if (removed) chat.votes - event.userId else chat.votes,
+                    roster = if (removed) chat.roster?.filterNot { it.userId == event.userId } else chat.roster,
+                ),
+            )
+        }
+    }
+
+    /**
+     * The room's own counters moved: the online tally, the member total, or the capacity ceiling.
+     *
+     * Every field is a delta -- absent means unchanged, never zero -- so each is folded onto what the
+     * cache and the open chat already hold. The cached summary is updated for the next open, and the
+     * open chat's [RoomLiveInfo] is updated in place, or minted from the event when the chat opened
+     * cold and had none.
+     */
+    private fun roomState(event: RoomStateEvent) {
+        roomInfo[event.roomId]?.let { summary ->
+            roomInfo[event.roomId] = summary.copy(
+                onlineCount = event.onlineCount ?: summary.onlineCount,
+                memberCount = event.memberCount ?: summary.memberCount,
+                maxMembers = event.maxMembers ?: summary.maxMembers,
+            )
+        }
+        signedIn { current ->
+            val chat = current.open
+            if (chat == null || chat.roomId != event.roomId) return@signedIn current
+            val info = chat.room
+            val room = if (info == null) {
+                RoomLiveInfo(
+                    onlineCount = event.onlineCount ?: 0L,
+                    memberCount = event.memberCount ?: 0L,
+                    maxMembers = event.maxMembers,
+                )
+            } else {
+                info.copy(
+                    onlineCount = event.onlineCount ?: info.onlineCount,
+                    memberCount = event.memberCount ?: info.memberCount,
+                    maxMembers = event.maxMembers ?: info.maxMembers,
+                )
+            }
+            current.copy(open = chat.copy(room = room))
+        }
+    }
+
+    /**
+     * A kick vote's tally moved, or the vote ended.
+     *
+     * Only the open chat cares, and only when it is this room's: while [RoomVoteEvent.closed] is absent
+     * the target's row shows the running tally, and any close -- an expiry, the target leaving, or the
+     * pass whose kick lands separately as a [RoomMemberEvent] -- takes the tally down. A vote is not
+     * cached the way counts are: it is live-only, and means nothing once the sheet is reopened.
+     */
+    private fun roomVote(event: RoomVoteEvent) {
+        signedIn { current ->
+            val chat = current.open
+            if (chat == null || chat.roomId != event.roomId) return@signedIn current
+            val votes = if (event.closed == true) {
+                chat.votes - event.targetId
+            } else {
+                chat.votes + (event.targetId to VoteTally(event.votes, event.needed))
+            }
+            current.copy(open = chat.copy(votes = votes))
         }
     }
 
@@ -1600,5 +1945,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
         /** The profile endpoint takes a batch; this keeps one list refresh to one request. */
         const val PROFILE_BATCH = 50
+
+        /**
+         * How many room notices an open chat keeps. A busy room could otherwise grow this list without
+         * bound while it is left open; fifty is enough to scroll back through a recent flurry.
+         */
+        const val NOTICE_CAP = 50
     }
 }

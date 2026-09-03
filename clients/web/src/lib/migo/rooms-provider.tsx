@@ -42,6 +42,8 @@ export interface RoomInfo {
   topic?: string;
   memberCount?: number;
   onlineCount?: number;
+  /** The room's capacity: the ceiling the online/member counts climb toward. */
+  maxMembers?: number;
 }
 
 export interface RoomsContextValue {
@@ -68,6 +70,7 @@ export function roomInfoOf(joined: RoomJoinResponse): RoomInfo {
     ...(joined.room.topic !== undefined ? { topic: joined.room.topic } : {}),
     memberCount: joined.room.memberCount,
     onlineCount: joined.room.onlineCount,
+    ...(joined.room.maxMembers !== undefined ? { maxMembers: joined.room.maxMembers } : {}),
   };
 }
 
@@ -84,7 +87,24 @@ export function applyRoomState(info: RoomInfo, delta: RoomStateEvent): RoomInfo 
     ...(delta.onlineCount !== undefined ? { onlineCount: delta.onlineCount } : {}),
     ...(delta.memberCount !== undefined ? { memberCount: delta.memberCount } : {}),
     ...(delta.topic !== undefined ? { topic: delta.topic } : {}),
+    ...(delta.maxMembers !== undefined ? { maxMembers: delta.maxMembers } : {}),
   };
+}
+
+/**
+ * The room capacity line: online out of the ceiling, as in "2/33".
+ *
+ * Pure, so a test can pin it. The ceiling is the honest part — a room with no `maxMembers` on the
+ * wire (an older server, or a room the field never rode on) has no known capacity, so the label
+ * falls back to the bare online count rather than inventing a denominator or printing "/0". The
+ * numerator is the online count, the count a reader cares about when deciding whether to enter.
+ */
+export function capacityLabel(online: number | undefined, max: number | undefined): string {
+  const here = online ?? 0;
+  if (max === undefined || max <= 0) {
+    return `${here}`;
+  }
+  return `${here}/${max}`;
 }
 
 export function RoomsProvider({ children }: { children: ReactNode }): ReactNode {

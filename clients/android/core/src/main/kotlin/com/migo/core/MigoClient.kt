@@ -53,6 +53,7 @@ import com.migo.core.protocol.PresenceEvent
 import com.migo.core.protocol.ResumeRequest
 import com.migo.core.protocol.RoomMemberEvent
 import com.migo.core.protocol.RoomStateEvent
+import com.migo.core.protocol.RoomVoteEvent
 import com.migo.core.protocol.SubscribeRequest
 import com.migo.core.protocol.SubscribeResponse
 import com.migo.core.protocol.SyncResponse
@@ -324,6 +325,8 @@ class MigoClient private constructor(
         ListenerSet<RoomMemberEvent>(Op.ROOM_MEMBER_EVENT, options.onEventError)
     private val roomStateListeners =
         ListenerSet<RoomStateEvent>(Op.ROOM_STATE_EVENT, options.onEventError)
+    private val roomVoteListeners =
+        ListenerSet<RoomVoteEvent>(Op.ROOM_VOTE_EVENT, options.onEventError)
     private val notificationListeners =
         ListenerSet<NotificationEvent>(Op.NOTIFICATION_EVENT, options.onEventError)
     private val gameListeners = ListenerSet<GameEvent>(Op.GAME_EVENT, options.onEventError)
@@ -439,6 +442,9 @@ class MigoClient private constructor(
 
     /** Registers a handler for a room's own state changes. */
     fun onRoomState(listener: Listener<RoomStateEvent>): Subscription = roomStateListeners.add(listener)
+
+    /** Registers a handler for the running tally of a room kick vote. */
+    fun onRoomVote(listener: Listener<RoomVoteEvent>): Subscription = roomVoteListeners.add(listener)
 
     /** Registers a handler for server-pushed notifications. */
     fun onNotification(listener: Listener<NotificationEvent>): Subscription =
@@ -1029,6 +1035,7 @@ class MigoClient private constructor(
         session.presence.onPresence { presenceListeners.deliver(it) }
         session.rooms.onMember { memberListeners.deliver(it) }
         session.rooms.onState { roomStateListeners.deliver(it) }
+        session.rooms.onVote { roomVoteListeners.deliver(it) }
         session.notifications.onNotification { notificationListeners.deliver(it) }
         session.games.onEvent { gameListeners.deliver(it) }
         session.social.onFriendEvent { friendListeners.deliver(it) }

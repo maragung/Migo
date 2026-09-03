@@ -408,6 +408,39 @@
    "doc": "Archives a room."
   },
   {
+   "name": "ROOM_VOTE_KICK",
+   "code": 90,
+   "direction": "client_to_server",
+   "payload": "RoomVoteKick",
+   "response": "RoomVoteKickResponse",
+   "auth": "User",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "Starts, or adds the caller's voice to, a vote to kick a member. The vote passes at half the room's members."
+  },
+  {
+   "name": "ROOM_VOTE_EVENT",
+   "code": 91,
+   "direction": "server_to_client",
+   "payload": "RoomVoteEvent",
+   "auth": "User",
+   "cost": 0,
+   "class": "Coalescable",
+   "coalesce_key": "room_id",
+   "doc": "A kick vote's running tally; the newest tally per room is the one that matters."
+  },
+  {
+   "name": "ROOM_SANCTION",
+   "code": 92,
+   "direction": "client_to_server",
+   "payload": "RoomSanction",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 10,
+   "class": "Critical",
+   "doc": "Mutes, kicks, or bans a member. Needs the room's own permission; a global admin needs neither membership nor rank."
+  },
+  {
    "name": "PROFILE_UPDATE",
    "code": 111,
    "direction": "client_to_server",
@@ -498,6 +531,17 @@
    "cost": 3,
    "class": "Critical",
    "doc": "Searches public profiles."
+  },
+  {
+   "name": "MUTE_SET",
+   "code": 120,
+   "direction": "client_to_server",
+   "payload": "MuteSet",
+   "response": "Acknowledged",
+   "auth": "User",
+   "cost": 5,
+   "class": "Critical",
+   "doc": "Mutes or unmutes one account for the caller. A muted account's room messages are not shown to the muter, in every room."
   },
   {
    "name": "MEDIA_UPLOAD_BEGIN",

@@ -877,6 +877,9 @@ async fn dispatcher() -> DispatcherHarness {
         app.federation.clone(),
         app.bots.clone(),
         app.calls.clone(),
+        // An unbound gateway handle: these tests exercise dispatch and topic authorization, not
+        // the out-of-band publish path, so its publishes are the correct no-ops.
+        std::sync::Arc::new(migod::room_presence::GatewayHandle::new()),
     );
     DispatcherHarness { app, dispatcher }
 }

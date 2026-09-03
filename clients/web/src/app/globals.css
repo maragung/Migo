@@ -2186,6 +2186,67 @@ main {
   font-size: 13px;
 }
 
+/* --- the captcha challenge the auth cards ask for once the network is over the gate --- */
+
+.captcha-widget {
+  margin: 0 0 11px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: var(--radius-sm);
+  /* Glass, never a white card. The widget lives inside the translucent auth card over the
+     cyan gradient, and an opaque white panel there was a slab of glare in the middle of a
+     screen that is otherwise one colour wash. The same translucent treatment the card
+     itself uses — a shade lighter, so the widget reads as a region without reading as a
+     different material — keeps the challenge anchored and the surface unbroken. */
+  background: rgba(255, 255, 255, 0.1);
+}
+.captcha-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.captcha-row .field-label {
+  flex: 1;
+  margin: 0;
+}
+.captcha-actions {
+  display: flex;
+  gap: 6px;
+}
+/* The server renders the challenge PNG on a near-white ground because the distorted
+   glyphs are dark and need the contrast to stay readable — that is the picture, not the
+   panel, and it cannot be translucified. Rounded corners and a max-width frame it as a
+   deliberate inset strip rather than letting its white bleed to the widget's edges. */
+.captcha-image {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+.captcha-status {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.captcha-refresh {
+  padding: 0 12px;
+  height: 44px;
+  font-size: 18px;
+  line-height: 1;
+}
+.captcha-alt {
+  padding: 0 12px;
+  height: 44px;
+  font-size: 13px;
+  line-height: 1;
+}
+/* The answer field is the widget's own row of the form, so it closes with the same
+   rhythm a field-label does — the widget's padding then hands the rest to the card. */
+.captcha-widget .field-label {
+  margin-top: 8px;
+}
+
 /* --- the server picker's body, inside the sheet the auth cards open --- */
 
 .server-form {
@@ -2511,6 +2572,28 @@ main {
   background: var(--accent-soft-strong);
   box-shadow: var(--glow);
   font-weight: 600;
+}
+
+/* The open room's live membership pills, in the transcript's live region: centered system lines,
+   the day-divider treatment applied to who is coming and going. */
+.room-notices {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.room-notice {
+  align-self: center;
+  max-width: 90%;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel-alt);
+  color: var(--text-faint);
+  font-size: 12px;
+  text-align: center;
 }
 .guess-card {
   align-self: stretch;
@@ -2868,6 +2951,23 @@ main {
   color: var(--accent);
   border-color: var(--accent-border);
   background: var(--accent-soft-strong);
+}
+/* The moderation controls on a roster row: compact, and free to wrap under the badge on a narrow
+   panel rather than shove the name out of view. */
+.roster-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+  max-width: 58%;
+}
+.roster-actions .btn {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+/* The live kick-vote count under a member's name: a quiet alarm, not a shout. */
+.vote-tally {
+  color: var(--danger);
+  font-weight: 600;
 }
 
 /* The presence picker in the sidebar footer (below the self row). */
@@ -3323,6 +3423,17 @@ button.digest-row:focus-visible {
 .verified-mark {
   display: inline-flex;
   color: var(--accent);
+}
+.capacity-badge {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+  border: 1px solid var(--border-strong);
 }
 
 /* --- the activity stream (Space) --- */

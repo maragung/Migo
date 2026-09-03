@@ -39,8 +39,8 @@ use migo_core::Error;
 use migo_gateway::ClientContext;
 use migo_notify::{Event, SharedNotifier};
 use migo_protocol::{
-    fault, from_frame, Acknowledged, Frame, FriendEvent, FriendRespond, FriendTarget, Opcode,
-    RelationshipEntry, RelationshipList, RelationshipListReq, Topic, TopicKind,
+    fault, from_frame, Acknowledged, Frame, FriendEvent, FriendRespond, FriendTarget, MuteSet,
+    Opcode, RelationshipEntry, RelationshipList, RelationshipListReq, Topic, TopicKind,
 };
 use migo_social::model::{Edge, MAX_PAGE};
 use migo_social::notice::Notice;
@@ -178,6 +178,29 @@ pub(crate) async fn handle_block_set(
     ctx.reply(&Acknowledged { ok: true })
 }
 
+/// Mutes or unmutes `user_id` for the caller, and acknowledges.
+///
+/// The personal mute: the caller's clients stop rendering what the muted account
+/// says, in every room the two share. Unlike a block it tears nothing down — no
+/// friendship, no follow — and the muted account is not told, because a volume
+/// control is not a verdict. The handler is the forward and the reply; the wire
+/// carries the switch and the service owns the edge.
+pub(crate) async fn handle_mute_set(
+    ctx: &ClientContext<'_>,
+    frame: &Frame,
+    svc: &SharedSocial,
+) -> Result<(), Error> {
+    let caller = SocialCaller::new(
+        ctx.identity().account_id(),
+        ctx.identity().device_id(),
+        ctx.identity().tier,
+        ctx.now(),
+    );
+    let request: MuteSet = from_frame(frame).map_err(fault::from_wire)?;
+    svc.mute(&caller, request.user_id, request.on).await?;
+    ctx.reply(&Acknowledged { ok: true })
+}
+
 /// Lists the caller's relationships and replies with them.
 ///
 /// There is no single `relationships` listing on the graph — friendships, pending
@@ -236,6 +259,9 @@ async fn collect_relationships(
         edges.extend(list);
     }
     if let Ok(list) = svc.blocked(caller, limit).await {
+        edges.extend(list);
+    }
+    if let Ok(list) = svc.muted(caller, limit).await {
         edges.extend(list);
     }
     if let Ok(list) = svc.favorites(caller, limit).await {

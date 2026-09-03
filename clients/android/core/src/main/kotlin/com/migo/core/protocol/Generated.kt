@@ -101,6 +101,10 @@ object Code {
     const val BLOCKED_BY_USER: Long = 1204L
     const val PRIVACY_RESTRICTED: Long = 1205L
     const val BOT_PERMISSION_MISSING: Long = 1206L
+    /** The vote's target is beyond a kick vote (room owner or global admin) */
+    const val VOTE_TARGET_IMMUNE: Long = 1207L
+    /** Kicked by global admins too many times; barred from every room until one of them unbans */
+    const val NETWORK_ROOM_BANNED: Long = 1208L
     const val VALIDATION_FAILED: Long = 1300L
     const val FIELD_REQUIRED: Long = 1301L
     const val FIELD_TOO_LONG: Long = 1302L
@@ -144,6 +148,8 @@ object Code {
     const val IDEMPOTENCY_MISMATCH: Long = 1509L
     /** Not enough currency; refetch the balance */
     const val INSUFFICIENT_BALANCE: Long = 1510L
+    /** A kick vote is already running in this room; add a voice to it instead of starting another */
+    const val VOTE_ALREADY_OPEN: Long = 1511L
     const val INTERNAL_ERROR: Long = 1600L
     const val STORAGE_UNAVAILABLE: Long = 1601L
     const val CACHE_UNAVAILABLE: Long = 1602L
@@ -189,6 +195,8 @@ object Code {
         BLOCKED_BY_USER,
         PRIVACY_RESTRICTED,
         BOT_PERMISSION_MISSING,
+        VOTE_TARGET_IMMUNE,
+        NETWORK_ROOM_BANNED,
         VALIDATION_FAILED,
         FIELD_REQUIRED,
         FIELD_TOO_LONG,
@@ -222,6 +230,7 @@ object Code {
         GAME_NOT_YOUR_TURN,
         IDEMPOTENCY_MISMATCH,
         INSUFFICIENT_BALANCE,
+        VOTE_ALREADY_OPEN,
         INTERNAL_ERROR,
         STORAGE_UNAVAILABLE,
         CACHE_UNAVAILABLE,
@@ -267,6 +276,8 @@ val ERROR_SYMBOLS: Map<Long, String> = mapOf(
     1204L to "BLOCKED_BY_USER",
     1205L to "PRIVACY_RESTRICTED",
     1206L to "BOT_PERMISSION_MISSING",
+    1207L to "VOTE_TARGET_IMMUNE",
+    1208L to "NETWORK_ROOM_BANNED",
     1300L to "VALIDATION_FAILED",
     1301L to "FIELD_REQUIRED",
     1302L to "FIELD_TOO_LONG",
@@ -300,6 +311,7 @@ val ERROR_SYMBOLS: Map<Long, String> = mapOf(
     1508L to "GAME_NOT_YOUR_TURN",
     1509L to "IDEMPOTENCY_MISMATCH",
     1510L to "INSUFFICIENT_BALANCE",
+    1511L to "VOTE_ALREADY_OPEN",
     1600L to "INTERNAL_ERROR",
     1601L to "STORAGE_UNAVAILABLE",
     1602L to "CACHE_UNAVAILABLE",
@@ -344,6 +356,8 @@ val ERROR_HTTP_STATUS: Map<Long, Int> = mapOf(
     1204L to 403,
     1205L to 403,
     1206L to 403,
+    1207L to 403,
+    1208L to 403,
     1300L to 400,
     1301L to 400,
     1302L to 400,
@@ -377,6 +391,7 @@ val ERROR_HTTP_STATUS: Map<Long, Int> = mapOf(
     1508L to 409,
     1509L to 409,
     1510L to 409,
+    1511L to 409,
     1600L to 500,
     1601L to 503,
     1602L to 503,
@@ -686,6 +701,56 @@ enum class RoomRole(val wire: Int) {
     }
 }
 
+/** What happened to a room member. Joined/Left are voluntary; Disconnected starts the reconnect grace and Reconnected ends it; Kicked and Banned are removals. `member_count` on the event carries the room's size after the change. */
+enum class MemberChange(val wire: Int) {
+    Unknown(0),
+    Joined(1),
+    Left(2),
+    Disconnected(3),
+    Reconnected(4),
+    Kicked(5),
+    Banned(6);
+
+    fun toWire(): Int = wire
+
+    companion object {
+        /** Unknown discriminants decode to [Unknown] so a new variant never breaks an old peer. */
+        fun fromWire(value: Long): MemberChange = when (value) {
+            1L -> Joined
+            2L -> Left
+            3L -> Disconnected
+            4L -> Reconnected
+            5L -> Kicked
+            6L -> Banned
+            else -> Unknown
+        }
+    }
+}
+
+/** A moderation action on a room member. Mute silences the member for the room; Kick is a leave with the door left open; Ban bars re-entry. A global admin's Unban also lifts a network-wide room ban. */
+enum class SanctionAction(val wire: Int) {
+    Unknown(0),
+    Mute(1),
+    Unmute(2),
+    Kick(3),
+    Ban(4),
+    Unban(5);
+
+    fun toWire(): Int = wire
+
+    companion object {
+        /** Unknown discriminants decode to [Unknown] so a new variant never breaks an old peer. */
+        fun fromWire(value: Long): SanctionAction = when (value) {
+            1L -> Mute
+            2L -> Unmute
+            3L -> Kick
+            4L -> Ban
+            5L -> Unban
+            else -> Unknown
+        }
+    }
+}
+
 enum class NotificationKind(val wire: Int) {
     Unknown(0),
     Message(1),
@@ -734,7 +799,8 @@ enum class RelationshipKind(val wire: Int) {
     PendingIncoming(3),
     Follow(4),
     Block(5),
-    Favorite(6);
+    Favorite(6),
+    Mute(7);
 
     fun toWire(): Int = wire
 
@@ -747,6 +813,7 @@ enum class RelationshipKind(val wire: Int) {
             4L -> Follow
             5L -> Block
             6L -> Favorite
+            7L -> Mute
             else -> Unknown
         }
     }
@@ -2642,6 +2709,8 @@ data class RoomSummary(
     val verified: Boolean? = null,
     val myRole: RoomRole? = null,
     val slowModeMs: Long? = null,
+    /** The room's capacity ceiling; join is refused once member_count reaches it. */
+    val maxMembers: Long? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -2661,6 +2730,7 @@ data class RoomSummary(
         if (verified != null) present++
         if (myRole != null) present++
         if (slowModeMs != null) present++
+        if (maxMembers != null) present++
         w.u32(present)
         if (topic != null) {
             val value = topic
@@ -2716,6 +2786,12 @@ data class RoomSummary(
                 w.u32(value)
             }
         }
+        if (maxMembers != null) {
+            val value = maxMembers
+            w.optional(10) { w ->
+                w.u32(value)
+            }
+        }
         w.leave()
     }
 
@@ -2737,6 +2813,7 @@ data class RoomSummary(
             var verified: Boolean? = null
             var myRole: RoomRole? = null
             var slowModeMs: Long? = null
+            var maxMembers: Long? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
@@ -2750,11 +2827,12 @@ data class RoomSummary(
                     7L -> verified = sub.bool()
                     8L -> myRole = RoomRole.fromWire(sub.u32())
                     9L -> slowModeMs = sub.u32()
+                    10L -> maxMembers = sub.u32()
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return RoomSummary(roomId, publicId, kind, name, memberCount, onlineCount, topic, description, avatarUrl, category, language, country, verified, myRole, slowModeMs)
+            return RoomSummary(roomId, publicId, kind, name, memberCount, onlineCount, topic, description, avatarUrl, category, language, country, verified, myRole, slowModeMs, maxMembers)
         }
     }
 }
@@ -2977,6 +3055,8 @@ data class RoomMemberEvent(
     val joined: Boolean,
     val role: RoomRole? = null,
     val memberCount: Long? = null,
+    /** Why the membership changed. Absent on legacy join/leave, where `joined` says it. */
+    val change: MemberChange? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -2986,6 +3066,7 @@ data class RoomMemberEvent(
         var present = 0
         if (role != null) present++
         if (memberCount != null) present++
+        if (change != null) present++
         w.u32(present)
         if (role != null) {
             val value = role
@@ -2999,6 +3080,12 @@ data class RoomMemberEvent(
                 w.u32(value)
             }
         }
+        if (change != null) {
+            val value = change
+            w.optional(3) { w ->
+                w.u32(value.toWire())
+            }
+        }
         w.leave()
     }
 
@@ -3010,17 +3097,19 @@ data class RoomMemberEvent(
             val joined = r.bool()
             var role: RoomRole? = null
             var memberCount: Long? = null
+            var change: MemberChange? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
                 when (fieldId) {
                     1L -> role = RoomRole.fromWire(sub.u32())
                     2L -> memberCount = sub.u32()
+                    3L -> change = MemberChange.fromWire(sub.u32())
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return RoomMemberEvent(roomId, userId, joined, role, memberCount)
+            return RoomMemberEvent(roomId, userId, joined, role, memberCount, change)
         }
     }
 }
@@ -3032,6 +3121,8 @@ data class RoomStateEvent(
     val memberCount: Long? = null,
     val topic: String? = null,
     val slowModeMs: Long? = null,
+    /** The room's capacity ceiling, sent when it changes. */
+    val maxMembers: Long? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -3041,6 +3132,7 @@ data class RoomStateEvent(
         if (memberCount != null) present++
         if (topic != null) present++
         if (slowModeMs != null) present++
+        if (maxMembers != null) present++
         w.u32(present)
         if (onlineCount != null) {
             val value = onlineCount
@@ -3066,6 +3158,12 @@ data class RoomStateEvent(
                 w.u32(value)
             }
         }
+        if (maxMembers != null) {
+            val value = maxMembers
+            w.optional(5) { w ->
+                w.u32(value)
+            }
+        }
         w.leave()
     }
 
@@ -3077,6 +3175,7 @@ data class RoomStateEvent(
             var memberCount: Long? = null
             var topic: String? = null
             var slowModeMs: Long? = null
+            var maxMembers: Long? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
@@ -3085,11 +3184,12 @@ data class RoomStateEvent(
                     2L -> memberCount = sub.u32()
                     3L -> topic = sub.str()
                     4L -> slowModeMs = sub.u32()
+                    5L -> maxMembers = sub.u32()
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return RoomStateEvent(roomId, onlineCount, memberCount, topic, slowModeMs)
+            return RoomStateEvent(roomId, onlineCount, memberCount, topic, slowModeMs, maxMembers)
         }
     }
 }
@@ -5975,6 +6075,202 @@ data class RoomArchive(
     }
 }
 
+/** Starts a kick vote, or adds the caller's voice to one already running. */
+data class RoomVoteKick(
+    val roomId: Id,
+    val targetId: Id,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(roomId)
+        w.id(targetId)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): RoomVoteKick {
+            r.enter()
+            val roomId = r.id()
+            val targetId = r.id()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return RoomVoteKick(roomId, targetId)
+        }
+    }
+}
+
+/** The vote's state after the caller's voice landed. */
+data class RoomVoteKickResponse(
+    val roomId: Id,
+    val targetId: Id,
+    /** Voices cast for the kick, the caller's included. */
+    val votes: Long,
+    /** Half the room's members, rounded up. */
+    val needed: Long,
+    val memberCount: Long,
+    /** False once the vote passed and the kick landed; the tally that follows is the room's MemberChange. */
+    val open: Boolean,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(roomId)
+        w.id(targetId)
+        w.u32(votes)
+        w.u32(needed)
+        w.u32(memberCount)
+        w.bool(open)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): RoomVoteKickResponse {
+            r.enter()
+            val roomId = r.id()
+            val targetId = r.id()
+            val votes = r.u32()
+            val needed = r.u32()
+            val memberCount = r.u32()
+            val open = r.bool()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return RoomVoteKickResponse(roomId, targetId, votes, needed, memberCount, open)
+        }
+    }
+}
+
+/** A running kick vote's tally, coalesced per room. */
+data class RoomVoteEvent(
+    val roomId: Id,
+    val targetId: Id,
+    val votes: Long,
+    val needed: Long,
+    val memberCount: Long,
+    /** True when the vote ended without passing (expired, or the target left). */
+    val closed: Boolean? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(roomId)
+        w.id(targetId)
+        w.u32(votes)
+        w.u32(needed)
+        w.u32(memberCount)
+        var present = 0
+        if (closed != null) present++
+        w.u32(present)
+        if (closed != null) {
+            val value = closed
+            w.optional(1) { w ->
+                w.bool(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): RoomVoteEvent {
+            r.enter()
+            val roomId = r.id()
+            val targetId = r.id()
+            val votes = r.u32()
+            val needed = r.u32()
+            val memberCount = r.u32()
+            var closed: Boolean? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> closed = sub.bool()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return RoomVoteEvent(roomId, targetId, votes, needed, memberCount, closed)
+        }
+    }
+}
+
+/** One moderation action on one member: mute, kick, ban, or their undoing. */
+data class RoomSanction(
+    val roomId: Id,
+    val targetId: Id,
+    val action: SanctionAction,
+    val reason: String? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(roomId)
+        w.id(targetId)
+        w.u32(action.toWire())
+        var present = 0
+        if (reason != null) present++
+        w.u32(present)
+        if (reason != null) {
+            val value = reason
+            w.optional(1) { w ->
+                w.str(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): RoomSanction {
+            r.enter()
+            val roomId = r.id()
+            val targetId = r.id()
+            val action = SanctionAction.fromWire(r.u32())
+            var reason: String? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> reason = sub.str()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return RoomSanction(roomId, targetId, action, reason)
+        }
+    }
+}
+
+/** Mutes or unmutes one account for the caller; a personal choice, not a room's. */
+data class MuteSet(
+    val userId: Id,
+    val on: Boolean,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.id(userId)
+        w.bool(on)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): MuteSet {
+            r.enter()
+            val userId = r.id()
+            val on = r.bool()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return MuteSet(userId, on)
+        }
+    }
+}
+
 /** Starts a game in a conversation. */
 data class GameStart(
     val conversationId: Id,
@@ -7278,6 +7574,12 @@ object Op {
     const val ROOM_UPDATE: Long = 88L
     /** Archives a room. */
     const val ROOM_ARCHIVE: Long = 89L
+    /** Starts, or adds the caller's voice to, a vote to kick a member. The vote passes at half the room's members. */
+    const val ROOM_VOTE_KICK: Long = 90L
+    /** A kick vote's running tally; the newest tally per room is the one that matters. */
+    const val ROOM_VOTE_EVENT: Long = 91L
+    /** Mutes, kicks, or bans a member. Needs the room's own permission; a global admin needs neither membership nor rank. */
+    const val ROOM_SANCTION: Long = 92L
     /** Updates the caller's own profile and privacy settings. */
     const val PROFILE_UPDATE: Long = 111L
     const val PROFILE_FETCH: Long = 112L
@@ -7290,6 +7592,8 @@ object Op {
     const val SUGGESTIONS: Long = 118L
     /** Searches public profiles. */
     const val SEARCH: Long = 119L
+    /** Mutes or unmutes one account for the caller. A muted account's room messages are not shown to the muter, in every room. */
+    const val MUTE_SET: Long = 120L
     const val MEDIA_UPLOAD_BEGIN: Long = 128L
     const val MEDIA_UPLOAD_STATUS: Long = 129L
     const val MEDIA_UPLOAD_COMMIT: Long = 130L
@@ -7422,6 +7726,9 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     87L to OpcodeMeta(87L, "ROOM_ROLE_SET", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomRoleSet", "Acknowledged", null),
     88L to OpcodeMeta(88L, "ROOM_UPDATE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomUpdate", "Acknowledged", null),
     89L to OpcodeMeta(89L, "ROOM_ARCHIVE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomArchive", "Acknowledged", null),
+    90L to OpcodeMeta(90L, "ROOM_VOTE_KICK", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomVoteKick", "RoomVoteKickResponse", null),
+    91L to OpcodeMeta(91L, "ROOM_VOTE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "RoomVoteEvent", null, "room_id"),
+    92L to OpcodeMeta(92L, "ROOM_SANCTION", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomSanction", "Acknowledged", null),
     111L to OpcodeMeta(111L, "PROFILE_UPDATE", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ProfileUpdate", "UserProfile", null),
     112L to OpcodeMeta(112L, "PROFILE_FETCH", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ProfileRequest", "ProfileResponse", null),
     113L to OpcodeMeta(113L, "FRIEND_REQUEST", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "FriendTarget", "Acknowledged", null),
@@ -7431,6 +7738,7 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     117L to OpcodeMeta(117L, "RELATIONSHIP_LIST", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RelationshipListReq", "RelationshipList", null),
     118L to OpcodeMeta(118L, "SUGGESTIONS", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "SuggestReq", "SearchResponse", null),
     119L to OpcodeMeta(119L, "SEARCH", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "SearchReq", "SearchResponse", null),
+    120L to OpcodeMeta(120L, "MUTE_SET", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MuteSet", "Acknowledged", null),
     128L to OpcodeMeta(128L, "MEDIA_UPLOAD_BEGIN", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaBegin", "MediaTicket", null),
     129L to OpcodeMeta(129L, "MEDIA_UPLOAD_STATUS", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaStatusReq", "MediaProgress", null),
     130L to OpcodeMeta(130L, "MEDIA_UPLOAD_COMMIT", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaCommit", "Acknowledged", null),

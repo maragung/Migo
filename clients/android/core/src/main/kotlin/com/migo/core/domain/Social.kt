@@ -4,8 +4,10 @@ import com.migo.core.protocol.Acknowledged
 import com.migo.core.protocol.FriendEvent
 import com.migo.core.protocol.FriendRespond
 import com.migo.core.protocol.FriendTarget
+import com.migo.core.protocol.MuteSet
 import com.migo.core.protocol.Op
 import com.migo.core.protocol.RelationshipEntry
+import com.migo.core.protocol.RelationshipKind
 import com.migo.core.protocol.RelationshipListReq
 import com.migo.core.protocol.SearchReq
 import com.migo.core.protocol.SearchResponse
@@ -109,6 +111,19 @@ class SocialDomain(
     }
 
     /**
+     * Mutes or unmutes one account for the caller.
+     *
+     * A personal choice, not a room's and not the other account's business. Like [blockUser] it is
+     * one-sided and unnotified, but softer: a muted account's messages still arrive and simply carry a
+     * mark the UI can honour, where a block severs the edge outright. `on = false` lifts the mute. The
+     * mute shows only in the caller's own graph, so refresh [listMuted] after this resolves.
+     */
+    suspend fun muteUser(userId: Id, on: Boolean) {
+        val request = MuteSet(userId, on)
+        rpc.call(Op.MUTE_SET, { w -> request.encode(w) }, { r -> Acknowledged.decode(r) })
+    }
+
+    /**
      * Reads the caller's relationship graph: friends, pending requests in both directions, follows,
      * and blocks, each as a [RelationshipEntry] whose `kind` is a
      * [com.migo.core.protocol.RelationshipKind] value.
@@ -136,6 +151,19 @@ class SocialDomain(
      * and favourites alongside the friends without naming a page size.
      */
     suspend fun listAllRelationships(): List<RelationshipEntry> = listRelationships(limit = 0L)
+
+    /**
+     * The accounts the caller has muted, drawn from the one relationship graph.
+     *
+     * There is no separate "list mutes" call: mutes ride the same graph as friends and blocks, tagged
+     * with [RelationshipKind.Mute], so this reads the whole graph through [listAllRelationships] and
+     * keeps only that kind. Each returned entry's `kind` is the mute discriminant and its `userId` is
+     * the muted account -- the field a caller drawing a Muted list actually wants.
+     */
+    suspend fun listMuted(): List<RelationshipEntry> {
+        val muted = RelationshipKind.Mute.wire.toLong()
+        return listAllRelationships().filter { it.kind == muted }
+    }
 
     /**
      * Friend suggestions: accounts the graph considers relevant, strongest first.

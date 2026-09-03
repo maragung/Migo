@@ -217,6 +217,18 @@
       "http": 403
     },
     {
+      "code": 1207,
+      "symbol": "VOTE_TARGET_IMMUNE",
+      "http": 403,
+      "doc": "The vote's target is beyond a kick vote (room owner or global admin)"
+    },
+    {
+      "code": 1208,
+      "symbol": "NETWORK_ROOM_BANNED",
+      "http": 403,
+      "doc": "Kicked by global admins too many times; barred from every room until one of them unbans"
+    },
+    {
       "code": 1300,
       "symbol": "VALIDATION_FAILED",
       "http": 400
@@ -390,6 +402,12 @@
       "symbol": "INSUFFICIENT_BALANCE",
       "http": 409,
       "doc": "Not enough currency; refetch the balance"
+    },
+    {
+      "code": 1511,
+      "symbol": "VOTE_ALREADY_OPEN",
+      "http": 409,
+      "doc": "A kick vote is already running in this room; add a voice to it instead of starting another"
     },
     {
       "code": 1600,

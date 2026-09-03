@@ -131,6 +131,18 @@ private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel) {
             onLeave = open.roomId?.let { roomId ->
                 { model.leaveRoom(open.conversationId, roomId) }
             },
+            onOpenMembers = open.roomId?.let { roomId ->
+                { model.openMembers(open.conversationId, roomId) }
+            },
+            onCloseMembers = { model.closeMembers(open.conversationId) },
+            onVoteKick = { target ->
+                open.roomId?.let { roomId -> model.voteKick(open.conversationId, roomId, target) }
+            },
+            onSanction = { target, action ->
+                open.roomId?.let { roomId -> model.sanction(open.conversationId, roomId, target, action) }
+            },
+            onMuteForMe = { userId, on -> model.muteForMe(open.conversationId, userId, on) },
+            selfId = state.accountId,
             modifier = Modifier.fillMaxSize(),
         )
 

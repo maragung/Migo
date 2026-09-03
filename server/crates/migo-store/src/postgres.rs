@@ -97,10 +97,11 @@ use crate::model::{
     ConversationSummary, Currency, Cursor, Device, DeviceStatus, Entitlement, GameSession, Gender,
     GiftSent, GlobalAdmin, IdentityKeyStatus, KeyBundle, LedgerAccount, LedgerAccountKind,
     LedgerLeg, LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice, NewGame, NewMessage,
-    NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward, Notification,
-    OutboxRecord, Patch, PeerRecord, Posted, Profile, ProfilePatch, Progression, PublishedKeys,
-    PushRegistration, PushTarget, Receipt, Relationship, Report, RevokeReason, Room, RoomMember,
-    Scope, Session, Standing, StoredMessage, Visibility, WalletStatus, XpChange,
+    NewModerationAction, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward,
+    Notification, OutboxRecord, Patch, PeerRecord, Posted, Profile, ProfilePatch, Progression,
+    PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship, Report, RevokeReason, Room,
+    RoomMember, RoomNetworkBan, Scope, Session, Standing, StoredMessage, Visibility, WalletStatus,
+    XpChange,
 };
 use crate::traits::{
     canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore,
@@ -116,6 +117,11 @@ use crate::traits::{
 const UNIQUE_VIOLATION: &str = "23505";
 /// A reference to a row that does not exist.
 const FOREIGN_KEY_VIOLATION: &str = "23503";
+
+/// The `action` column's value for a kick, in the wire's `SanctionAction`
+/// numbering — the one scale the audit rows and the client that caused them
+/// agree on. The only action the escalation rule counts.
+const KICK_ACTION: i16 = migo_protocol::SanctionAction::Kick as i16;
 
 /// The latest instant `timestamptz` and [`OffsetDateTime`] can both hold, in
 /// Unix milliseconds: 9999-12-31T23:59:59.999Z.
@@ -3491,6 +3497,112 @@ impl RoomStore for PostgresStore {
         let count = recount_room_in(&transaction, room).await?;
         transaction.commit().await.context("recount_room: commit")?;
         Ok(count)
+    }
+
+    async fn record_moderation_action(&self, action: NewModerationAction) -> Result<()> {
+        entity::room_moderation_action::Entity::insert(
+            entity::room_moderation_action::ActiveModel {
+                action_id: Set(uuid_of(action.action_id)),
+                room_id: Set(uuid_of(action.room_id)),
+                actor_id: Set(uuid_of(action.actor_id)),
+                target_id: Set(action.target_id.map(uuid_of)),
+                action: Set(action.action),
+                reason: Set(action.reason),
+                expires_at: Set(None),
+                created_at: Set(stamp_of(action.created_at)),
+            },
+        )
+        .exec(&self.db)
+        .await
+        .map_err(|error| {
+            on_conflict(error, "room_moderation_action", |name| match name {
+                "room_moderation_action_room_id_fkey" => Some(fault::not_found("room")),
+                "room_moderation_action_actor_id_fkey"
+                | "room_moderation_action_target_id_fkey" => Some(fault::not_found("account")),
+                _ => None,
+            })
+        })?;
+        Ok(())
+    }
+
+    async fn count_global_admin_kicks(&self, target_id: Id) -> Result<u64> {
+        // Two reads rather than a join the entity model does not know about:
+        // the global-admin registry is a handful of rows by design, and the
+        // actions table has an index on (room_id, created_at) rather than on
+        // the target — so the query is "fetch the admins, count the kicks by
+        // those actors", and either read alone is too small to notice.
+        let admins = GlobalAdminStore::global_admins(self).await?;
+        let actors: Vec<Uuid> = admins
+            .iter()
+            .map(|admin| uuid_of(admin.account_id))
+            .collect();
+        if actors.is_empty() {
+            return Ok(0);
+        }
+        entity::room_moderation_action::Entity::find()
+            .filter(entity::room_moderation_action::Column::TargetId.eq(uuid_of(target_id)))
+            .filter(entity::room_moderation_action::Column::ActorId.is_in(actors))
+            // The wire's `SanctionAction::Kick` numbering, which the row was
+            // written with.
+            .filter(entity::room_moderation_action::Column::Action.eq(KICK_ACTION))
+            .count(&self.db)
+            .await
+            .context("count_global_admin_kicks")
+    }
+
+    async fn network_ban(&self, account_id: Id) -> Result<Option<RoomNetworkBan>> {
+        let row = entity::room_network_ban::Entity::find_by_id(uuid_of(account_id))
+            .one(&self.db)
+            .await
+            .context("network_ban")?;
+        Ok(row.map(|row| RoomNetworkBan {
+            account_id: id_of(row.account_id),
+            reason: row.reason,
+            until: row.until.map(instant_of),
+            by_actor: row.by_actor.map(id_of),
+            created_at: instant_of(row.created_at),
+        }))
+    }
+
+    async fn set_network_ban(&self, ban: RoomNetworkBan) -> Result<()> {
+        entity::room_network_ban::Entity::insert(entity::room_network_ban::ActiveModel {
+            account_id: Set(uuid_of(ban.account_id)),
+            reason: Set(ban.reason),
+            until: Set(ban.until.map(stamp_of)),
+            by_actor: Set(ban.by_actor.map(uuid_of)),
+            created_at: Set(stamp_of(ban.created_at)),
+        })
+        // An upsert: re-imposing a ban replaces the row rather than failing,
+        // so lifting and re-imposing is one write each and never a dance.
+        .on_conflict(
+            OnConflict::column(entity::room_network_ban::Column::AccountId)
+                .update_columns([
+                    entity::room_network_ban::Column::Reason,
+                    entity::room_network_ban::Column::Until,
+                    entity::room_network_ban::Column::ByActor,
+                    entity::room_network_ban::Column::CreatedAt,
+                ])
+                .to_owned(),
+        )
+        .exec(&self.db)
+        .await
+        .map_err(|error| {
+            on_conflict(error, "room_network_ban", |name| match name {
+                "room_network_ban_account_id_fkey" | "room_network_ban_by_actor_fkey" => {
+                    Some(fault::not_found("account"))
+                }
+                _ => None,
+            })
+        })?;
+        Ok(())
+    }
+
+    async fn clear_network_ban(&self, account_id: Id) -> Result<bool> {
+        let outcome = entity::room_network_ban::Entity::delete_by_id(uuid_of(account_id))
+            .exec(&self.db)
+            .await
+            .context("clear_network_ban")?;
+        Ok(outcome.rows_affected > 0)
     }
 }
 

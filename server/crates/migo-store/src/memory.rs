@@ -41,10 +41,11 @@ use crate::model::{
     ConversationPosition, ConversationSummary, Currency, Cursor, Device, DeviceStatus, Entitlement,
     GameSession, GiftSent, GlobalAdmin, IdentityKeyStatus, KeyBundle, LedgerAccount,
     LedgerAccountKind, LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice, NewGame,
-    NewMessage, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward,
-    Notification, OutboxRecord, Patch, PeerRecord, Posted, Profile, ProfilePatch, Progression,
-    PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship, Report, RevokeReason, Room,
-    RoomMember, Scope, Session, Standing, StoredMessage, Visibility, WalletStatus, XpChange,
+    NewMessage, NewModerationAction, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction,
+    NewXpAward, Notification, OutboxRecord, Patch, PeerRecord, Posted, Profile, ProfilePatch,
+    Progression, PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship, Report,
+    RevokeReason, Room, RoomMember, RoomNetworkBan, Scope, Session, Standing, StoredMessage,
+    Visibility, WalletStatus, XpChange,
 };
 use crate::traits::{
     canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore,
@@ -62,6 +63,12 @@ use crate::traits::{
 fn fold(value: &str) -> String {
     value.trim().to_lowercase()
 }
+
+/// The audit row's `action` value for a kick, in the wire's `SanctionAction`
+/// numbering — the only action the escalation rule counts. The Postgres
+/// backend keeps its own copy next to its query; the two cannot drift, because
+/// both name the same enum constant.
+const KICK_ACTION: i16 = migo_protocol::SanctionAction::Kick as i16;
 
 /// Orders a pair of ids so that the direct-conversation key is the same whoever
 /// initiates. Postgres enforces the same thing with `check (low < high)`.
@@ -213,6 +220,13 @@ struct State {
     /// Global admins for public rooms, keyed by the appointed account. Mirrors
     /// the `global_admin` table.
     global_admins: HashMap<Id, GlobalAdmin>,
+    /// The room moderation audit trail, in insertion order. Mirrors the
+    /// `room_moderation_action` table; appended only, read by the escalation
+    /// rule's count.
+    moderation_actions: Vec<NewModerationAction>,
+    /// Network-wide room bans, keyed by the banned account. Mirrors the
+    /// `room_network_ban` table; the row's presence is the ban.
+    network_bans: HashMap<Id, RoomNetworkBan>,
 }
 
 impl State {
@@ -1905,6 +1919,67 @@ impl RoomStore for MemoryStore {
             room.member_count = count;
         }
         Ok(count)
+    }
+
+    async fn record_moderation_action(&self, action: NewModerationAction) -> Result<()> {
+        let mut s = self.state.write();
+        // The room and the accounts must exist, the way the foreign keys would
+        // insist: a memory store that accepted a row Postgres would refuse is
+        // a memory store whose tests pass for the wrong reason.
+        if !s.rooms.contains_key(&action.room_id) {
+            return Err(fault::not_found("room"));
+        }
+        if !s.accounts.contains_key(&action.actor_id) {
+            return Err(fault::not_found("account"));
+        }
+        if action
+            .target_id
+            .is_some_and(|target| !s.accounts.contains_key(&target))
+        {
+            return Err(fault::not_found("account"));
+        }
+        s.moderation_actions.push(action);
+        Ok(())
+    }
+
+    async fn count_global_admin_kicks(&self, target_id: Id) -> Result<u64> {
+        let s = self.state.read();
+        Ok(s.moderation_actions
+            .iter()
+            .filter(|action| {
+                action.target_id == Some(target_id)
+                    && action.action == KICK_ACTION
+                    // The actor must hold the appointment *now*: an admin who
+                    // was unappointed stops counting toward future
+                    // escalations, the same as the Postgres join reads it.
+                    && s.global_admins.contains_key(&action.actor_id)
+            })
+            .count() as u64)
+    }
+
+    async fn network_ban(&self, account_id: Id) -> Result<Option<RoomNetworkBan>> {
+        let s = self.state.read();
+        Ok(s.network_bans.get(&account_id).cloned())
+    }
+
+    async fn set_network_ban(&self, ban: RoomNetworkBan) -> Result<()> {
+        let mut s = self.state.write();
+        if !s.accounts.contains_key(&ban.account_id) {
+            return Err(fault::not_found("account"));
+        }
+        if ban
+            .by_actor
+            .is_some_and(|actor| !s.accounts.contains_key(&actor))
+        {
+            return Err(fault::not_found("account"));
+        }
+        s.network_bans.insert(ban.account_id, ban);
+        Ok(())
+    }
+
+    async fn clear_network_ban(&self, account_id: Id) -> Result<bool> {
+        let mut s = self.state.write();
+        Ok(s.network_bans.remove(&account_id).is_some())
     }
 }
 

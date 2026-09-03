@@ -34,8 +34,8 @@ use migo_core::config::Config;
 use migo_core::metrics::Registry;
 use migo_core::{Id, PublicId, Random, Result, Secret, SeededRandom, Timestamp};
 use migo_protocol::{
-    codes, EncryptionMode, Opcode, RelationshipKind, RoomJoinRequest, RoomKind, RoomLeaveRequest,
-    RoomListRequest, RoomMemberEvent, RoomRole, RoomStateEvent,
+    codes, EncryptionMode, MemberChange, Opcode, RelationshipKind, RoomJoinRequest, RoomKind,
+    RoomLeaveRequest, RoomListRequest, RoomMemberEvent, RoomRole, RoomStateEvent,
 };
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 use migo_rooms::fanout::{Broadcast, Fanout};
@@ -180,6 +180,11 @@ impl Harness {
 
     /// A public room owned by Alice, with no members but her.
     async fn empty_room(&self) -> Id {
+        // The room's owner needs an account row before any sanction this test
+        // takes can be audited: the moderation log foreign-keys to `account`
+        // the way the store's own tables do, and a fixture without one would
+        // pass for the wrong reason.
+        self.account(ALICE, NOW).await;
         self.rooms
             .create(
                 &caller(ALICE, ALICE_PHONE, NOW),
@@ -200,6 +205,9 @@ impl Harness {
 
     /// Joins, discarding the fanout, for a fixture rather than an assertion.
     async fn join(&self, account: u128, device: u128, room: Id, millis: i64) {
+        // Same reason as `empty_room`: every member is a registered account in
+        // production, and the audit rows the sanctions write say so.
+        self.account(account, millis).await;
         self.rooms
             .join(&caller(account, device, millis), join_request(room))
             .await
@@ -229,7 +237,19 @@ impl Harness {
     /// Writes a bare account row, so a designation that foreign-keys to
     /// `account` has something to point at. The room fixtures never register
     /// anybody; the global-admin rows are the first thing here that cares.
+    ///
+    /// Idempotent, because a fixture seeds the same account both as a member
+    /// and as a designation's holder, and `create_account` refuses a duplicate.
     async fn account(&self, account: u128, millis: i64) {
+        if self
+            .store
+            .account_by_id(id(account))
+            .await
+            .expect("the store answers")
+            .is_some()
+        {
+            return;
+        }
         self.store
             .create_account(NewAccount {
                 account_id: id(account),
@@ -310,6 +330,10 @@ impl Harness {
         self.counter("migo_rooms_sanctions_total", &[("action", action)])
     }
 
+    fn votes(&self, outcome: &str) -> u64 {
+        self.counter("migo_rooms_vote_kicks_total", &[("outcome", outcome)])
+    }
+
     fn settings_changes(&self, outcome: &str) -> u64 {
         self.counter("migo_rooms_settings_total", &[("outcome", outcome)])
     }
@@ -354,7 +378,15 @@ fn expect_member(fanout: Option<Fanout>) -> (Fanout, RoomMemberEvent) {
     match &fanout.event {
         Broadcast::Member(event) => (fanout.clone(), event.clone()),
         Broadcast::State(event) => panic!("expected a member event, got {event:?}"),
+        Broadcast::Vote(event) => panic!("expected a member event, got {event:?}"),
     }
+}
+
+/// The first member event of a set — the sanction path returns one per room it
+/// touched, and most tests care about the room the action happened in.
+#[track_caller]
+fn expect_first_member(fanouts: Vec<Fanout>) -> (Fanout, RoomMemberEvent) {
+    expect_member(fanouts.into_iter().next())
 }
 
 /// The state event a fanout carries.
@@ -364,6 +396,7 @@ fn expect_state(fanout: Option<Fanout>) -> (Fanout, RoomStateEvent) {
     match &fanout.event {
         Broadcast::State(event) => (fanout.clone(), event.clone()),
         Broadcast::Member(event) => panic!("expected a state event, got {event:?}"),
+        Broadcast::Vote(event) => panic!("expected a state event, got {event:?}"),
     }
 }
 
@@ -1326,6 +1359,88 @@ async fn leaving_refuses_a_nil_or_missing_room() {
             )
             .await,
         codes::NOT_FOUND,
+    );
+}
+
+// --- reconnect-grace timeout ---------------------------------------------------
+//
+// `timeout_member` is the caller-less removal the presence layer's grace timer fires
+// when the last of an account's sockets stayed gone for two minutes. It carries no
+// `Caller`, charges nothing, and checks no permission, so these prove the only three
+// authorities it does answer to: an active non-owner is removed and the room told with
+// `Left` (not a bare `joined: false`, so a roster can tell a timeout from a kick); the
+// owner is seated no matter how long they are away, because a room with no owner has
+// nobody who can transfer or archive it; and a subject with no live membership is a
+// silent no-op, the same nothing `leave` returns for the same reason.
+
+#[tokio::test]
+async fn a_timeout_removes_an_active_member_and_tells_the_room() {
+    let harness = Harness::new();
+    let room = harness.founded().await;
+    let fanout = harness
+        .rooms
+        .timeout_member(room, id(BOB), ts(LATER))
+        .await
+        .expect("the store answers");
+    let (fanout, event) = expect_member(fanout);
+    assert_eq!(
+        fanout.exclude_device, None,
+        "a timeout is nobody's socket, so it excludes none"
+    );
+    assert_eq!(event.user_id, id(BOB));
+    assert!(!event.joined);
+    assert_eq!(
+        event.change,
+        Some(MemberChange::Left),
+        "said with Left, so a roster can tell a timeout from a kick"
+    );
+    assert_eq!(event.role, None, "a departure carries no role");
+    assert_eq!(event.member_count, Some(2));
+    assert_eq!(
+        harness.counter("migo_rooms_timeouts_total", &[("outcome", "removed")]),
+        1
+    );
+
+    let member = harness.member_row(room, BOB).await;
+    assert!(
+        !member.is_active(),
+        "the row is kept and marked, as leave keeps it"
+    );
+}
+
+#[tokio::test]
+async fn a_timeout_never_unseats_the_owner() {
+    let harness = Harness::new();
+    let room = harness.founded().await;
+    let fanout = harness
+        .rooms
+        .timeout_member(room, id(ALICE), ts(LATER))
+        .await
+        .expect("the store answers");
+    assert!(fanout.is_none(), "the owner is exempt, so nothing is said");
+    assert_eq!(
+        harness.counter("migo_rooms_timeouts_total", &[("outcome", "owner")]),
+        1
+    );
+    assert!(
+        harness.member_row(room, ALICE).await.is_active(),
+        "the owner stays seated by closing a laptop"
+    );
+}
+
+#[tokio::test]
+async fn a_timeout_for_a_non_member_says_nothing() {
+    let harness = Harness::new();
+    let room = harness.founded().await;
+    let fanout = harness
+        .rooms
+        .timeout_member(room, id(STRANGER), ts(LATER))
+        .await
+        .expect("the store answers");
+    assert!(fanout.is_none(), "there is no seat to vacate");
+    assert_eq!(
+        harness.counter("migo_rooms_timeouts_total", &[("outcome", "absent")]),
+        1
     );
 }
 
@@ -3279,7 +3394,7 @@ async fn an_override_needs_the_manage_bit_and_cannot_reach_the_owner() {
 async fn a_mute_is_between_a_moderator_and_one_member() {
     let harness = Harness::new();
     let room = harness.founded().await;
-    let fanout = harness
+    let fanouts = harness
         .rooms
         .sanction(
             &caller(ALICE, ALICE_PHONE, LATER),
@@ -3293,7 +3408,7 @@ async fn a_mute_is_between_a_moderator_and_one_member() {
         .await
         .expect("the owner may mute");
     assert!(
-        fanout.is_none(),
+        fanouts.is_empty(),
         "announcing it to the room turns a correction into a punishment"
     );
     let member = harness.member_row(room, BOB).await;
@@ -3342,12 +3457,12 @@ async fn an_unmute_clears_the_mute_and_nothing_else() {
         "the mute must not have lifted the ban"
     );
 
-    let fanout = harness
+    let fanouts = harness
         .rooms
         .sanction(&alice, room, id(BOB), Sanction::Unmute)
         .await
         .expect("the owner may unmute");
-    assert!(fanout.is_none());
+    assert!(fanouts.is_empty());
     let member = harness.member_row(room, BOB).await;
     assert_eq!(member.muted_until, None);
     assert_eq!(
@@ -3363,12 +3478,12 @@ async fn a_kick_removes_the_member_and_tells_the_room() {
     let harness = Harness::new();
     let room = harness.founded().await;
     let alice = caller(ALICE, ALICE_PHONE, LATER);
-    let fanout = harness
+    let fanouts = harness
         .rooms
         .sanction(&alice, room, id(BOB), Sanction::Kick)
         .await
         .expect("the owner may kick");
-    let (fanout, event) = expect_member(fanout);
+    let (fanout, event) = expect_first_member(fanouts);
     assert_eq!(
         fanout.exclude_device,
         Some(id(ALICE_PHONE)),
@@ -3376,6 +3491,11 @@ async fn a_kick_removes_the_member_and_tells_the_room() {
     );
     assert_eq!(event.user_id, id(BOB));
     assert!(!event.joined);
+    assert_eq!(
+        event.change,
+        Some(MemberChange::Kicked),
+        "a client that saw only the boolean could not tell a removal from a departure"
+    );
     assert_eq!(event.member_count, Some(2));
     assert!(!harness.member_row(room, BOB).await.is_active());
     assert_eq!(harness.sanctions("kick"), 1);
@@ -3386,7 +3506,7 @@ async fn a_kick_removes_the_member_and_tells_the_room() {
         .sanction(&alice, room, id(BOB), Sanction::Kick)
         .await
         .expect("kicking twice is not an error");
-    assert!(again.is_none());
+    assert!(again.is_empty());
     assert_eq!(harness.room_row(room).await.member_count, 2);
 
     // And a kick is not a ban: they may come back.
@@ -3401,7 +3521,7 @@ async fn a_kick_removes_the_member_and_tells_the_room() {
 async fn a_ban_excludes_the_acting_moderator_from_its_own_broadcast() {
     let harness = Harness::new();
     let room = harness.founded().await;
-    let fanout = harness
+    let fanouts = harness
         .rooms
         .sanction(
             &caller(ALICE, ALICE_PHONE, LATER),
@@ -3414,7 +3534,7 @@ async fn a_ban_excludes_the_acting_moderator_from_its_own_broadcast() {
         )
         .await
         .expect("the owner may ban");
-    let (fanout, event) = expect_member(fanout);
+    let (fanout, event) = expect_first_member(fanouts);
     assert_eq!(
         fanout.exclude_device,
         Some(id(ALICE_PHONE)),
@@ -3426,6 +3546,11 @@ async fn a_ban_excludes_the_acting_moderator_from_its_own_broadcast() {
         "the event is about the banned member"
     );
     assert!(!event.joined);
+    assert_eq!(
+        event.change,
+        Some(MemberChange::Banned),
+        "a ban and a voluntary departure render differently on a roster"
+    );
     assert_eq!(
         event.role, None,
         "the room hears that somebody left, not why"
@@ -3520,13 +3645,13 @@ async fn an_unban_clears_the_ban_and_its_reason_but_not_the_mute() {
         )
         .await
         .expect("the owner may ban");
-    let fanout = harness
+    let fanouts = harness
         .rooms
         .sanction(&alice, room, id(BOB), Sanction::Unban)
         .await
         .expect("the owner may lift a ban");
     assert!(
-        fanout.is_none(),
+        fanouts.is_empty(),
         "lifting a ban does not put anybody back in the room; they rejoin"
     );
     let member = harness.member_row(room, BOB).await;
@@ -3911,6 +4036,7 @@ async fn every_series_exists_before_anything_happens() {
         "full",
         "banned",
         "not_admitted",
+        "network_banned",
         "rate_limited",
     ] {
         assert_eq!(harness.joins(outcome), 0, "joins {outcome}");
@@ -3930,6 +4056,18 @@ async fn every_series_exists_before_anything_happens() {
     }
     for action in ["mute", "unmute", "kick", "ban", "unban"] {
         assert_eq!(harness.sanctions(action), 0, "sanctions {action}");
+    }
+    for outcome in [
+        "opened",
+        "voice",
+        "passed",
+        "unchanged",
+        "already_open",
+        "immune",
+        "denied",
+        "rate_limited",
+    ] {
+        assert_eq!(harness.votes(outcome), 0, "votes {outcome}");
     }
     assert_eq!(harness.archives(), 0);
     assert_eq!(harness.transfers(), 0);
@@ -4049,7 +4187,7 @@ async fn the_room_owner_is_beyond_a_global_admin() {
 }
 
 #[tokio::test]
-async fn a_global_admin_does_not_moderate_a_managed_room() {
+async fn a_global_admin_moderates_a_managed_room_without_belonging_to_it() {
     let harness = Harness::new();
     harness.appoint(ALICE, DAVE, NOW).await;
     let managed = harness
@@ -4067,7 +4205,7 @@ async fn a_global_admin_does_not_moderate_a_managed_room() {
         .room_id;
     harness.join(BOB, BOB_LAPTOP, managed, NOW + SECOND).await;
 
-    let error = harness
+    let fanouts = harness
         .rooms
         .sanction(
             &caller(DAVE, DAVE_TABLET, LATER),
@@ -4076,8 +4214,21 @@ async fn a_global_admin_does_not_moderate_a_managed_room() {
             Sanction::Kick,
         )
         .await
-        .expect_err("a managed room is a single owner\'s walled garden");
-    assert_eq!(error.code(), codes::NOT_A_MEMBER);
+        .expect("the deployment's authority reaches rooms it did not make");
+    let (_, event) = expect_first_member(fanouts);
+    assert_eq!(event.user_id, id(BOB), "the kick landed");
+    assert!(!harness.member_row(managed, BOB).await.is_active());
+    // And the designation is still not membership: Dave holds no row in a room
+    // he just moderated, and cannot ask for one by acting in it.
+    assert!(
+        harness
+            .store
+            .room_member(managed, id(DAVE))
+            .await
+            .expect("the store answers")
+            .is_none(),
+        "moderating a room does not seat the moderator"
+    );
 }
 
 #[tokio::test]
@@ -4119,4 +4270,502 @@ async fn a_stranger_without_the_designation_is_still_refused() {
         .await
         .expect_err("the designation is the whole of the override");
     assert_eq!(error.code(), codes::NOT_A_MEMBER);
+}
+
+// --- kick votes -----------------------------------------------------------------
+//
+// The members' lever. No permission bit, no rank, no moderator: any member may
+// open a vote, every account gets one voice, and half the room (rounded up, two
+// at minimum) is a removal. What a vote must not be able to do is also below:
+// reach the owner, reach a global admin, run two questions at once, or outlive
+// its minute.
+
+#[tokio::test]
+async fn a_vote_opens_with_one_voice_and_tells_the_room() {
+    let harness = Harness::new();
+    let room = harness.founded().await;
+    let (response, fanouts) = harness
+        .rooms
+        .vote_kick(&caller(BOB, BOB_LAPTOP, LATER), room, id(CAROL))
+        .await
+        .expect("any member may open a vote");
+    assert_eq!(response.votes, 1, "the opener's voice is the first");
+    assert_eq!(response.needed, 2, "half of three, rounded up");
+    assert_eq!(response.member_count, 3);
+    assert!(response.open, "one voice of two does not pass");
+    assert_eq!(fanouts.len(), 1, "the tally, and nothing else");
+    let fanout = &fanouts[0];
+    assert_eq!(fanout.room_id, room);
+    assert_eq!(
+        fanout.exclude_device,
+        Some(id(BOB_LAPTOP)),
+        "the voter's socket already has the tally in the reply"
+    );
+    let Broadcast::Vote(event) = &fanout.event else {
+        panic!("expected a vote event, got {:?}", fanout.event);
+    };
+    assert_eq!(event.target_id, id(CAROL));
+    assert_eq!(event.votes, 1);
+    assert_eq!(event.closed, None, "the vote is running");
+    assert!(harness.member_row(room, CAROL).await.is_active());
+    assert_eq!(harness.votes("opened"), 1);
+}
+
+#[tokio::test]
+async fn a_vote_passes_at_half_the_room_and_kicks() {
+    let harness = Harness::new();
+    let room = harness.founded().await;
+    let (first, _) = harness
+        .rooms
+        .vote_kick(&caller(BOB, BOB_LAPTOP, LATER), room, id(CAROL))
+        .await
+        .expect("Bob opens the vote");
+    assert_eq!(first.needed, 2);
+    let (second, fanouts) = harness
+        .rooms
+        .vote_kick(&caller(ALICE, ALICE_PHONE, LATER), room, id(CAROL))
+        .await
+        .expect("the owner may vote like any member");
+    assert_eq!(second.votes, 2);
+    assert!(!second.open, "two of two is the tally");
+    assert!(
+        !harness.member_row(room, CAROL).await.is_active(),
+        "the vote's kick landed"
+    );
+    assert_eq!(
+        harness.room_row(room).await.member_count,
+        2,
+        "the seat emptied"
+    );
+    let member_event = fanouts
+        .iter()
+        .find_map(|fanout| match &fanout.event {
+            Broadcast::Member(event) => Some(event.clone()),
+            _ => None,
+        })
+        .expect("the pass is announced as the removal it caused");
+    assert_eq!(member_event.user_id, id(CAROL));
+    assert_eq!(member_event.change, Some(MemberChange::Kicked));
+    assert_eq!(harness.votes("passed"), 1);
+    // And a kick is not a ban: Carol may come back.
+    harness
+        .rooms
+        .join(&caller(CAROL, CAROL_PHONE, LATER), join_request(room))
+        .await
+        .expect("a vote's kick leaves the door open");
+}
+
+#[tokio::test]
+async fn the_owner_and_global_admins_are_immune_to_a_vote() {
+    let harness = Harness::new();
+    let room = harness.founded().await;
+    harness
+        .join(DAVE, DAVE_TABLET, room, NOW + 3 * SECOND)
+        .await;
+    harness.appoint(ALICE, DAVE, NOW).await;
+
+    expect_code(
+        harness
+            .rooms
+            .vote_kick(&caller(BOB, BOB_LAPTOP, LATER), room, id(ALICE))
+            .await,
+        codes::VOTE_TARGET_IMMUNE,
+    );
+    expect_code(
+        harness
+            .rooms
+            .vote_kick(&caller(BOB, BOB_LAPTOP, LATER), room, id(DAVE))
+            .await,
+        codes::VOTE_TARGET_IMMUNE,
+    );
+    assert_eq!(harness.votes("immune"), 2);
+    assert!(
+        harness.member_row(room, ALICE).await.is_active(),
+        "no vote touches the owner"
+    );
+}
+
+#[tokio::test]
+async fn one_vote_at_a_time_per_room() {
+    let harness = Harness::new();
+    let room = harness.founded().await;
+    harness
+        .join(DAVE, DAVE_TABLET, room, NOW + 3 * SECOND)
+        .await;
+    harness
+        .rooms
+        .vote_kick(&caller(BOB, BOB_LAPTOP, LATER), room, id(CAROL))
+        .await
+        .expect("the first vote opens");
+
+    expect_code(
+        harness
+            .rooms
+            .vote_kick(&caller(BOB, BOB_LAPTOP, LATER), room, id(DAVE))
+            .await,
+        codes::VOTE_ALREADY_OPEN,
+    );
+    assert_eq!(harness.votes("already_open"), 1);
+}
+
+#[tokio::test]
+async fn the_same_voice_twice_does_not_move_the_tally() {
+    let harness = Harness::new();
+    let room = harness.founded().await;
+    let (first, _) = harness
+        .rooms
+        .vote_kick(&caller(BOB, BOB_LAPTOP, LATER), room, id(CAROL))
+        .await
+        .expect("Bob opens the vote");
+    let (again, fanouts) = harness
+        .rooms
+        .vote_kick(&caller(BOB, BOB_LAPTOP, LATER), room, id(CAROL))
+        .await
+        .expect("a retried voice is not an error");
+    assert_eq!(again.votes, first.votes, "the tally did not move");
+    assert!(again.open);
+    assert!(
+        fanouts.is_empty(),
+        "a voice that changed nothing publishes nothing"
+    );
+    assert_eq!(harness.votes("unchanged"), 1);
+}
+
+#[tokio::test]
+async fn a_vote_nobody_finishes_expires_and_the_room_is_told() {
+    let harness = Harness::new();
+    let room = harness.founded().await;
+    harness
+        .join(DAVE, DAVE_TABLET, room, NOW + 3 * SECOND)
+        .await;
+    let (_, _) = harness
+        .rooms
+        .vote_kick(&caller(BOB, BOB_LAPTOP, LATER), room, id(CAROL))
+        .await
+        .expect("the vote opens at LATER");
+    // A minute and a second later, Carol opens her own: Bob's expired on the
+    // way in, and the room hears both the closing and the new tally.
+    let (response, fanouts) = harness
+        .rooms
+        .vote_kick(
+            &caller(CAROL, CAROL_PHONE, LATER + 61 * SECOND),
+            room,
+            id(DAVE),
+        )
+        .await
+        .expect("the expired vote is not in the way");
+    assert_eq!(response.votes, 1, "Carol's voice starts a new tally");
+    assert!(response.open);
+    let events: Vec<&migo_protocol::RoomVoteEvent> = fanouts
+        .iter()
+        .filter_map(|fanout| match &fanout.event {
+            Broadcast::Vote(event) => Some(event),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        events.len(),
+        2,
+        "the closing of the old vote and the opening of the new"
+    );
+    assert_eq!(events[0].target_id, id(CAROL), "the old vote, closed");
+    assert_eq!(events[0].closed, Some(true));
+    assert_eq!(events[1].target_id, id(DAVE), "the new vote, running");
+    assert_eq!(events[1].closed, None);
+    assert!(
+        harness.member_row(room, CAROL).await.is_active(),
+        "an expired vote removed nobody"
+    );
+}
+
+#[tokio::test]
+async fn a_vote_requires_a_member_voter_and_a_live_target() {
+    let harness = Harness::new();
+    let room = harness.founded().await;
+    harness.account(STRANGER, NOW).await;
+    expect_code(
+        harness
+            .rooms
+            .vote_kick(&caller(STRANGER, STRANGER_PHONE, LATER), room, id(CAROL))
+            .await,
+        codes::NOT_A_MEMBER,
+    );
+    // A voter cannot name themselves; that is what leaving is for.
+    expect_code(
+        harness
+            .rooms
+            .vote_kick(&caller(BOB, BOB_LAPTOP, LATER), room, id(BOB))
+            .await,
+        codes::CONFLICT,
+    );
+    // And a target who is not in the room is not a question the room can be
+    // asked, whether they never joined or have left.
+    expect_code(
+        harness
+            .rooms
+            .vote_kick(&caller(BOB, BOB_LAPTOP, LATER), room, id(STRANGER))
+            .await,
+        codes::NOT_FOUND,
+    );
+    harness
+        .rooms
+        .leave(
+            &caller(CAROL, CAROL_PHONE, LATER),
+            RoomLeaveRequest { room_id: room },
+        )
+        .await
+        .expect("Carol steps out");
+    expect_code(
+        harness
+            .rooms
+            .vote_kick(&caller(BOB, BOB_LAPTOP, LATER), room, id(CAROL))
+            .await,
+        codes::NOT_FOUND,
+    );
+}
+
+// --- the network ban ------------------------------------------------------------
+//
+// The escalation: a global admin's kicks of one account, counted across every
+// room. Past the third, the next kick bars the account from every room there is
+// and sweeps them out of the rooms they still hold. Room staff's kicks never
+// count — leaving a room you dislike is what rooms are for.
+
+#[tokio::test]
+async fn the_fourth_global_admin_kick_bars_every_room() {
+    let harness = Harness::new();
+    let first = harness.founded().await;
+    let second = harness
+        .rooms
+        .create(
+            &caller(ALICE, ALICE_PHONE, NOW),
+            request("second-hall", "Second Hall"),
+        )
+        .await
+        .expect("the second room is created")
+        .room_id;
+    harness
+        .join(BOB, BOB_LAPTOP, second, NOW + 3 * SECOND)
+        .await;
+    harness.appoint(ALICE, DAVE, NOW).await;
+
+    // Three kicks: each lands, each is survivable, each counts.
+    for i in 0..3 {
+        let millis = LATER + i * MINUTE;
+        harness
+            .rooms
+            .join(&caller(BOB, BOB_LAPTOP, millis), join_request(first))
+            .await
+            .expect("a kick is not a ban; Bob walks back in");
+        harness
+            .rooms
+            .sanction(
+                &caller(DAVE, DAVE_TABLET, millis + SECOND),
+                first,
+                id(BOB),
+                Sanction::Kick,
+            )
+            .await
+            .expect("the admin may kick");
+        assert!(
+            harness
+                .store
+                .network_ban(id(BOB))
+                .await
+                .expect("the store answers")
+                .is_none(),
+            "kick {} of 3 does not bar the network",
+            i + 1
+        );
+    }
+    assert!(
+        harness.member_row(second, BOB).await.is_active(),
+        "the first three kicks touch only the room they happened in"
+    );
+
+    // The fourth: the same action, and a different consequence.
+    harness
+        .rooms
+        .join(
+            &caller(BOB, BOB_LAPTOP, LATER + 4 * MINUTE),
+            join_request(first),
+        )
+        .await
+        .expect("still admitted; the ban has not happened yet");
+    let fanouts = harness
+        .rooms
+        .sanction(
+            &caller(DAVE, DAVE_TABLET, LATER + 4 * MINUTE + SECOND),
+            first,
+            id(BOB),
+            Sanction::Kick,
+        )
+        .await
+        .expect("the fourth kick lands too");
+    let ban = harness
+        .store
+        .network_ban(id(BOB))
+        .await
+        .expect("the store answers")
+        .expect("the fourth kick barred the network");
+    assert_eq!(ban.until, None, "only an unban reverses it");
+    assert_eq!(ban.by_actor, Some(id(DAVE)));
+    assert!(
+        !harness.member_row(second, BOB).await.is_active(),
+        "the sweep emptied the other room's seat"
+    );
+    assert_eq!(fanouts.len(), 2, "one fanout per room the sweep touched");
+    let swept = fanouts
+        .iter()
+        .find(|fanout| fanout.room_id == second)
+        .expect("the second room is told");
+    assert_eq!(swept.exclude_device, None, "no socket caused this one");
+    let Broadcast::Member(event) = &swept.event else {
+        panic!("expected a member event, got {:?}", swept.event);
+    };
+    assert_eq!(event.user_id, id(BOB));
+    assert_eq!(event.change, Some(MemberChange::Banned));
+
+    // And the door is barred everywhere, not just where the kick happened.
+    expect_code(
+        harness
+            .rooms
+            .join(
+                &caller(BOB, BOB_LAPTOP, LATER + 5 * MINUTE),
+                join_request(second),
+            )
+            .await,
+        codes::NETWORK_ROOM_BANNED,
+    );
+    assert_eq!(harness.joins("network_banned"), 1);
+}
+
+#[tokio::test]
+async fn room_staff_kicks_never_escalate() {
+    let harness = Harness::new();
+    let room = harness.founded().await;
+    // Alice owns the room and holds `ROOM_KICK` by rank, but no designation:
+    // her kicks are the room's business and never the network's.
+    for i in 0..5 {
+        let millis = LATER + i * MINUTE;
+        harness
+            .rooms
+            .join(&caller(BOB, BOB_LAPTOP, millis), join_request(room))
+            .await
+            .expect("Bob walks back in");
+        harness
+            .rooms
+            .sanction(
+                &caller(ALICE, ALICE_PHONE, millis + SECOND),
+                room,
+                id(BOB),
+                Sanction::Kick,
+            )
+            .await
+            .expect("the owner may kick all day");
+    }
+    assert!(
+        harness
+            .store
+            .network_ban(id(BOB))
+            .await
+            .expect("the store answers")
+            .is_none(),
+        "five kicks by room staff is a room's business"
+    );
+    harness
+        .rooms
+        .join(
+            &caller(BOB, BOB_LAPTOP, LATER + 6 * MINUTE),
+            join_request(room),
+        )
+        .await
+        .expect("no network ban was written");
+}
+
+#[tokio::test]
+async fn a_global_admins_unban_lifts_the_network_ban() {
+    let harness = Harness::new();
+    let room = harness.founded().await;
+    harness.appoint(ALICE, DAVE, NOW).await;
+    for i in 0..4 {
+        let millis = LATER + i * MINUTE;
+        harness
+            .rooms
+            .join(&caller(BOB, BOB_LAPTOP, millis), join_request(room))
+            .await
+            .expect("Bob walks back in");
+        harness
+            .rooms
+            .sanction(
+                &caller(DAVE, DAVE_TABLET, millis + SECOND),
+                room,
+                id(BOB),
+                Sanction::Kick,
+            )
+            .await
+            .expect("the kick lands");
+    }
+    assert!(
+        harness
+            .store
+            .network_ban(id(BOB))
+            .await
+            .expect("the store answers")
+            .is_some(),
+        "the escalation happened"
+    );
+
+    harness
+        .rooms
+        .sanction(
+            &caller(DAVE, DAVE_TABLET, LATER + 5 * MINUTE),
+            room,
+            id(BOB),
+            Sanction::Unban,
+        )
+        .await
+        .expect("the admin may lift what the escalation wrote");
+    assert!(
+        harness
+            .store
+            .network_ban(id(BOB))
+            .await
+            .expect("the store answers")
+            .is_none(),
+        "the network ban is gone"
+    );
+    harness
+        .rooms
+        .join(
+            &caller(BOB, BOB_LAPTOP, LATER + 6 * MINUTE),
+            join_request(room),
+        )
+        .await
+        .expect("the bar is lifted everywhere, not just in this room");
+}
+
+#[tokio::test]
+async fn an_expired_network_ban_does_not_bar_a_join() {
+    let harness = Harness::new();
+    let room = harness.empty_room().await;
+    harness.account(BOB, NOW).await;
+    // A ban whose `until` has passed is a row, not a verdict: the caller's
+    // clock decides, and yesterday's ban does not bar today's join.
+    harness
+        .store
+        .set_network_ban(migo_store::model::RoomNetworkBan {
+            account_id: id(BOB),
+            reason: Some("long cooled off".to_string()),
+            until: Some(ts(LATER - MINUTE)),
+            by_actor: None,
+            created_at: ts(NOW),
+        })
+        .await
+        .expect("the row is written");
+    harness
+        .rooms
+        .join(&caller(BOB, BOB_LAPTOP, LATER), join_request(room))
+        .await
+        .expect("an expired ban is not a ban");
 }

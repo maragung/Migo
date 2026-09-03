@@ -3930,3 +3930,132 @@ async fn no_metric_is_labelled_by_an_account() {
         "while the series themselves are still there"
     );
 }
+
+// --- mutes -----------------------------------------------------------------------
+//
+// A mute is a volume control and not a wall. What these tests pin is everything a
+// mute must NOT do: tear down the friendship or the follows the way a block does,
+// write an edge against the subject, or announce itself to anybody but the caller's
+// own list.
+
+/// A mute is one row, and the only row it touches is its own.
+///
+/// The contrast with a block is the whole point: a block is a falling-out and undoes
+/// the graph between two accounts; a mute is "this one account is loud" and leaves
+/// every edge exactly where it was. The version that quietly deleted a friendship
+/// because its owner wanted somebody quieter would be this crate making a decision
+/// the caller never made.
+#[tokio::test]
+async fn a_mute_tears_nothing_down() {
+    let harness = Harness::new();
+    harness.cast().await;
+    harness.friendship(ALICE, BOB, NOW).await;
+    harness
+        .edge(ALICE, BOB, RelationshipKind::Follow, NOW)
+        .await;
+    harness
+        .edge(BOB, ALICE, RelationshipKind::Follow, NOW)
+        .await;
+    harness
+        .edge(ALICE, BOB, RelationshipKind::Favorite, NOW)
+        .await;
+
+    harness
+        .social
+        .mute(&caller(ALICE, ALICE_PHONE), id(BOB), true)
+        .await
+        .expect("muting needs no consent and announces nothing");
+
+    assert!(harness.has(ALICE, BOB, RelationshipKind::Mute).await);
+    // One direction only: no edge is written against the subject.
+    assert!(!harness.has(BOB, ALICE, RelationshipKind::Mute).await);
+    // And everything else survives, in both directions.
+    for (owner, peer, kind) in [
+        (ALICE, BOB, RelationshipKind::Friend),
+        (BOB, ALICE, RelationshipKind::Friend),
+        (ALICE, BOB, RelationshipKind::Follow),
+        (BOB, ALICE, RelationshipKind::Follow),
+        (ALICE, BOB, RelationshipKind::Favorite),
+    ] {
+        assert!(
+            harness.has(owner, peer, kind).await,
+            "a mute must leave the {kind:?} edge from {owner} to {peer} alone"
+        );
+    }
+    assert_eq!(harness.added("mute"), 1);
+    assert_eq!(harness.removed("friend"), 0);
+    assert_eq!(harness.removed("follow"), 0);
+    assert_eq!(harness.removed("favorite"), 0);
+}
+
+/// Unmuting removes the mute and only the mute.
+#[tokio::test]
+async fn unmuting_removes_only_the_mute() {
+    let harness = Harness::new();
+    harness.cast().await;
+    harness.friendship(ALICE, BOB, NOW).await;
+    let alice = caller(ALICE, ALICE_PHONE);
+
+    harness
+        .social
+        .mute(&alice, id(BOB), true)
+        .await
+        .expect("the mute lands");
+    harness
+        .social
+        .mute(&alice, id(BOB), false)
+        .await
+        .expect("unmuting is idempotent");
+
+    assert!(!harness.has(ALICE, BOB, RelationshipKind::Mute).await);
+    assert!(
+        harness.has(ALICE, BOB, RelationshipKind::Friend).await,
+        "the friendship the mute never touched is still there"
+    );
+    assert_eq!(harness.added("mute"), 1);
+    assert_eq!(harness.removed("mute"), 1);
+}
+
+/// The mute list is the caller's own and carries the edge kind.
+#[tokio::test]
+async fn the_mute_list_names_its_kind() {
+    let harness = Harness::new();
+    harness.cast().await;
+    let alice = caller(ALICE, ALICE_PHONE);
+
+    harness
+        .social
+        .mute(&alice, id(BOB), true)
+        .await
+        .expect("the mute lands");
+
+    let muted = harness
+        .social
+        .muted(&alice, None)
+        .await
+        .expect("the caller's own list is readable");
+    assert_eq!(muted.len(), 1);
+    assert_eq!(muted[0].other_id, id(BOB));
+    assert_eq!(muted[0].kind, RelationshipKind::Mute);
+}
+
+/// The mute list has the same ceiling the blocklist has, for the same reason.
+#[tokio::test]
+async fn the_mute_list_ceiling_refuses_the_next_mute() {
+    let harness = Harness::configured(SocialConfig {
+        max_mutes: 1,
+        ..SocialConfig::default()
+    });
+    harness.cast().await;
+    let alice = caller(ALICE, ALICE_PHONE);
+
+    harness
+        .social
+        .mute(&alice, id(BOB), true)
+        .await
+        .expect("first");
+    expect_code(
+        harness.social.mute(&alice, id(CAROL), true).await,
+        codes::QUOTA_EXCEEDED,
+    );
+}

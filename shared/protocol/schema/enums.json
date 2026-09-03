@@ -304,6 +304,70 @@
       ]
     },
     {
+      "name": "MemberChange",
+      "doc": "What happened to a room member. Joined/Left are voluntary; Disconnected starts the reconnect grace and Reconnected ends it; Kicked and Banned are removals. `member_count` on the event carries the room's size after the change.",
+      "variants": [
+        {
+          "name": "Unknown",
+          "value": 0
+        },
+        {
+          "name": "Joined",
+          "value": 1
+        },
+        {
+          "name": "Left",
+          "value": 2
+        },
+        {
+          "name": "Disconnected",
+          "value": 3
+        },
+        {
+          "name": "Reconnected",
+          "value": 4
+        },
+        {
+          "name": "Kicked",
+          "value": 5
+        },
+        {
+          "name": "Banned",
+          "value": 6
+        }
+      ]
+    },
+    {
+      "name": "SanctionAction",
+      "doc": "A moderation action on a room member. Mute silences the member for the room; Kick is a leave with the door left open; Ban bars re-entry. A global admin's Unban also lifts a network-wide room ban.",
+      "variants": [
+        {
+          "name": "Unknown",
+          "value": 0
+        },
+        {
+          "name": "Mute",
+          "value": 1
+        },
+        {
+          "name": "Unmute",
+          "value": 2
+        },
+        {
+          "name": "Kick",
+          "value": 3
+        },
+        {
+          "name": "Ban",
+          "value": 4
+        },
+        {
+          "name": "Unban",
+          "value": 5
+        }
+      ]
+    },
+    {
       "name": "NotificationKind",
       "variants": [
         {
@@ -398,6 +462,10 @@
         {
           "name": "Favorite",
           "value": 6
+        },
+        {
+          "name": "Mute",
+          "value": 7
         }
       ]
     },

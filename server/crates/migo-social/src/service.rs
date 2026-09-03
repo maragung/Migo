@@ -925,6 +925,39 @@ where
         Ok(())
     }
 
+    async fn mute(&self, caller: &Caller, subject_id: Id, on: bool) -> Result<()> {
+        Self::require_identity(caller)?;
+        Self::require_other(caller, subject_id)?;
+        self.charge(caller, EDGE_COST).await?;
+        if !on {
+            self.store
+                .remove_relationship(caller.account_id, subject_id, RelationshipKind::Mute)
+                .await?;
+            self.meters.removed(EdgeKind::Mute);
+            return Ok(());
+        }
+        // And deliberately nothing else. A block tears down the friendship and the
+        // follows because it is a wall; a mute is a volume control, and the version
+        // that quietly deleted a friendship because its owner wanted one loud
+        // account quieter would be this crate making a decision the caller never
+        // made. The edges stay, and both parties keep them.
+        self.require_room_for(
+            caller.account_id,
+            RelationshipKind::Mute,
+            self.config.max_mutes,
+            "mute",
+        )
+        .await?;
+        self.put_edge(caller, subject_id, RelationshipKind::Mute)
+            .await?;
+        self.meters.added(EdgeKind::Mute);
+        Ok(())
+    }
+
+    async fn muted(&self, caller: &Caller, limit: Option<u16>) -> Result<Vec<Edge>> {
+        self.owned(caller, RelationshipKind::Mute, limit).await
+    }
+
     async fn set_favorite(&self, caller: &Caller, subject_id: Id, favorite: bool) -> Result<()> {
         Self::require_identity(caller)?;
         Self::require_other(caller, subject_id)?;

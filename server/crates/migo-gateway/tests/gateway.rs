@@ -42,9 +42,9 @@ use migo_core::config::{Config, GatewayConfig};
 use migo_core::metrics::Registry;
 use migo_core::{Clock, Error, Id, ManualClock, SeededRandom, Shutdown, Timestamp};
 use migo_protocol::{
-    codes, fault, from_frame, to_frame, CloseReason, Encode, Error as ErrorMessage, Frame,
-    FrameHeader, Hello, MessageEvent, MessageKind, NodeInfo, NotificationEvent, Opcode, Ping,
-    PresenceState, PresenceUpdate, ReconnectHint, SubscribeRequest, SubscribeResponse, Topic,
+    codes, fault, from_frame, to_frame, BandwidthMode, CloseReason, Encode, Error as ErrorMessage,
+    Frame, FrameHeader, Hello, MessageEvent, MessageKind, NodeInfo, NotificationEvent, Opcode,
+    Ping, PresenceState, PresenceUpdate, ReconnectHint, SubscribeRequest, SubscribeResponse, Topic,
     TopicKind, Welcome, PROTOCOL_VERSION,
 };
 use migo_ratelimit::{CacheRateLimiter, Policies, SharedRateLimiter, TrustTier};
@@ -781,6 +781,109 @@ async fn a_bad_inline_token_is_not_fatal_and_opens_an_unauthenticated_session() 
         h.sessions_opened(),
         1,
         "the session still opens after a bad inline token"
+    );
+}
+
+/// A dispatcher double that records the lifecycle hooks the gateway fires at it.
+///
+/// The gateway calls `session_started` once — the moment a connection first holds an
+/// identity — and `session_ended` once, when that connection tears down; a session that
+/// never authenticates fires neither. This remembers the account behind every call, in
+/// order, so a test can assert the pairing the trait promises rather than a bare count.
+#[derive(Default)]
+struct LifecycleSpy {
+    started: Mutex<Vec<Id>>,
+    ended: Mutex<Vec<Id>>,
+}
+
+impl LifecycleSpy {
+    /// The account behind every `session_started`, in the order they fired.
+    fn started(&self) -> Vec<Id> {
+        self.started
+            .lock()
+            .expect("the spy lock is never poisoned")
+            .clone()
+    }
+
+    /// The account behind every `session_ended`, in the order they fired.
+    fn ended(&self) -> Vec<Id> {
+        self.ended
+            .lock()
+            .expect("the spy lock is never poisoned")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl Dispatcher for LifecycleSpy {
+    async fn dispatch(&self, _context: &ClientContext<'_>, _frame: &Frame) -> Result<(), Error> {
+        Ok(())
+    }
+
+    async fn session_started(&self, identity: &Identity, _mode: BandwidthMode, _now: Timestamp) {
+        self.started
+            .lock()
+            .expect("the spy lock is never poisoned")
+            .push(identity.account_id());
+    }
+
+    async fn session_ended(&self, identity: &Identity, _mode: BandwidthMode, _now: Timestamp) {
+        self.ended
+            .lock()
+            .expect("the spy lock is never poisoned")
+            .push(identity.account_id());
+    }
+}
+
+#[tokio::test]
+async fn an_authenticated_session_starts_once_and_ends_once() {
+    let spy = Arc::new(LifecycleSpy::default());
+    let mut builder = HarnessBuilder::new();
+    builder.dispatcher = Arc::clone(&spy) as Arc<dyn Dispatcher>;
+    let h = builder.build();
+
+    let pipe = Pipe::new();
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+
+    h.serve(&pipe).await;
+
+    assert_eq!(
+        spy.started(),
+        vec![id(ACCOUNT)],
+        "an inline-token session fires the start exactly once, naming its account"
+    );
+    assert_eq!(
+        spy.ended(),
+        vec![id(ACCOUNT)],
+        "and its teardown fires the matching end exactly once when the socket closes"
+    );
+}
+
+#[tokio::test]
+async fn an_unauthenticated_session_fires_no_lifecycle() {
+    let spy = Arc::new(LifecycleSpy::default());
+    let mut builder = HarnessBuilder::new();
+    builder.dispatcher = Arc::clone(&spy) as Arc<dyn Dispatcher>;
+    let h = builder.build();
+
+    let pipe = Pipe::new();
+    // A plain greeting carries no token, so the session opens unauthenticated and never
+    // holds an identity for the hook to name.
+    pipe.client(Opcode::Hello, 1, &hello());
+
+    h.serve(&pipe).await;
+
+    assert!(
+        spy.started().is_empty(),
+        "a session that never authenticated fires no start"
+    );
+    assert!(
+        spy.ended().is_empty(),
+        "and with no start there is no end to pair — the two never fire alone"
     );
 }
 
@@ -1583,6 +1686,11 @@ fn the_wire_is_push_only_and_has_no_request_or_response_opcode() {
         Opcode::BotEvent,
         Opcode::ModerationEvent,
         Opcode::ReactionEvent,
+        // Room vote tallies: the ROOM_VOTE_KICK request carries its own reply, but the
+        // running tally (who has voted, how many more are needed) changes when *other*
+        // members vote — one-way server-initiated frames, coalesced per room so a burst
+        // of votes collapses into the newest state.
+        Opcode::RoomVoteEvent,
         // Call signaling pushes (section 165): invite events, state changes, and SFU
         // events are all one-way server-initiated frames.
         Opcode::CallInviteEvent,

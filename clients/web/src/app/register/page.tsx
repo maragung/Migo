@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
 import { BottomSheet } from '@/components/bottom-sheet.js';
+import { CaptchaWidget } from '@/components/captcha-widget.js';
 import { SaveAccountSheet } from '@/components/save-account-sheet.js';
 import { ServerForm, transportLabel } from '@/components/server-form.js';
 import { Spinner } from '@/components/spinner.js';
@@ -14,7 +15,7 @@ import { useMigo } from '@/lib/migo/use-migo.js';
 import { defaultServerEndpoint } from '@/lib/config.js';
 import { loadServerEndpoint, saveServerEndpoint } from '@/lib/storage/server-endpoint-store.js';
 
-import type { ServerEndpoint } from '@migo/sdk';
+import type { CaptchaProof, ServerEndpoint } from '@migo/sdk';
 
 /** The gender options the profile accepts, in the server's numbering (1 male, 2 female, 3 other). */
 const GENDERS = [
@@ -43,6 +44,7 @@ export default function RegisterPage(): ReactNode {
   const [endpointReady, setEndpointReady] = useState(false);
   const [serverSheetOpen, setServerSheetOpen] = useState(false);
   const [saveOfferOpen, setSaveOfferOpen] = useState(false);
+  const [captcha, setCaptcha] = useState<CaptchaProof | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const submitting = status === 'connecting';
 
@@ -89,7 +91,7 @@ export default function RegisterPage(): ReactNode {
           gender: gender === '' ? undefined : Number(gender),
         },
         endpoint,
-        null,
+        captcha,
       );
       // The account exists and this browser holds its founding root; offer the one-time key-file
       // download before the redirect carries the user away.
@@ -176,6 +178,12 @@ export default function RegisterPage(): ReactNode {
             ))}
           </select>
         </label>
+
+        {/* The captcha challenge, asked inline where the fields are. It renders as glass on
+            the card — no white panel — and only its proof (or a null while the user has not
+            answered) rides along to the register call. The widget fetches from the endpoint
+            the form is about to authenticate against, so it appears once the endpoint is. */}
+        {endpoint !== null ? <CaptchaWidget endpoint={endpoint} onChange={setCaptcha} /> : null}
 
         {validationError ? <p className="form-error">{validationError}</p> : null}
         {error ? <p className="form-error">{error}</p> : null}

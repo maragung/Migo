@@ -1057,6 +1057,13 @@
           "type": "u32",
           "optional": true,
           "id": 9
+        },
+        {
+          "name": "max_members",
+          "type": "u32",
+          "optional": true,
+          "id": 10,
+          "doc": "The room's capacity ceiling; join is refused once member_count reaches it."
         }
       ]
     },
@@ -1185,6 +1192,13 @@
           "type": "u32",
           "optional": true,
           "id": 2
+        },
+        {
+          "name": "change",
+          "type": "MemberChange",
+          "optional": true,
+          "id": 3,
+          "doc": "Why the membership changed. Absent on legacy join/leave, where `joined` says it."
         }
       ]
     },
@@ -1219,6 +1233,13 @@
           "type": "u32",
           "optional": true,
           "id": 4
+        },
+        {
+          "name": "max_members",
+          "type": "u32",
+          "optional": true,
+          "id": 5,
+          "doc": "The room's capacity ceiling, sent when it changes."
         }
       ]
     },
@@ -2626,6 +2647,124 @@
         {
           "name": "room_id",
           "type": "id"
+        }
+      ]
+    },
+    {
+      "name": "RoomVoteKick",
+      "doc": "Starts a kick vote, or adds the caller's voice to one already running.",
+      "fields": [
+        {
+          "name": "room_id",
+          "type": "id"
+        },
+        {
+          "name": "target_id",
+          "type": "id"
+        }
+      ]
+    },
+    {
+      "name": "RoomVoteKickResponse",
+      "doc": "The vote's state after the caller's voice landed.",
+      "fields": [
+        {
+          "name": "room_id",
+          "type": "id"
+        },
+        {
+          "name": "target_id",
+          "type": "id"
+        },
+        {
+          "name": "votes",
+          "type": "u32",
+          "doc": "Voices cast for the kick, the caller's included."
+        },
+        {
+          "name": "needed",
+          "type": "u32",
+          "doc": "Half the room's members, rounded up."
+        },
+        {
+          "name": "member_count",
+          "type": "u32"
+        },
+        {
+          "name": "open",
+          "type": "bool",
+          "doc": "False once the vote passed and the kick landed; the tally that follows is the room's MemberChange."
+        }
+      ]
+    },
+    {
+      "name": "RoomVoteEvent",
+      "doc": "A running kick vote's tally, coalesced per room.",
+      "fields": [
+        {
+          "name": "room_id",
+          "type": "id"
+        },
+        {
+          "name": "target_id",
+          "type": "id"
+        },
+        {
+          "name": "votes",
+          "type": "u32"
+        },
+        {
+          "name": "needed",
+          "type": "u32"
+        },
+        {
+          "name": "member_count",
+          "type": "u32"
+        },
+        {
+          "name": "closed",
+          "type": "bool",
+          "optional": true,
+          "id": 1,
+          "doc": "True when the vote ended without passing (expired, or the target left)."
+        }
+      ]
+    },
+    {
+      "name": "RoomSanction",
+      "doc": "One moderation action on one member: mute, kick, ban, or their undoing.",
+      "fields": [
+        {
+          "name": "room_id",
+          "type": "id"
+        },
+        {
+          "name": "target_id",
+          "type": "id"
+        },
+        {
+          "name": "action",
+          "type": "SanctionAction"
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "optional": true,
+          "id": 1
+        }
+      ]
+    },
+    {
+      "name": "MuteSet",
+      "doc": "Mutes or unmutes one account for the caller; a personal choice, not a room's.",
+      "fields": [
+        {
+          "name": "user_id",
+          "type": "id"
+        },
+        {
+          "name": "on",
+          "type": "bool"
         }
       ]
     },

@@ -68,6 +68,15 @@ test('a server refusal shows the curated public message the server chose', () =>
   assert.ok(!shown.includes('at '));
 });
 
+test('a full room turns a person away in plain words, never as a symbol or a fault', () => {
+  // ROOM_FULL is a condition worth naming in our own kinder words: the door is shut for now, not a
+  // fault the person caused. The symbol never reaches them, and the friendly line stands even when
+  // the server withheld its own text (the empty message here), so the symbol-fold never runs.
+  const shown = friendlyError(new RemoteError(1505, 'ROOM_FULL', ''));
+  assert.equal(shown, 'This room is full right now. Try again later, or find another room.');
+  assert.ok(!shown.includes('ROOM_FULL'), 'the machine symbol never reaches the person');
+});
+
 test('an account lockout reaches the person as a wait, never as a symbol', () => {
   const err = new RemoteError(
     1406,

@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -19,6 +20,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -219,9 +221,34 @@ private fun DirectoryRow(room: RoomSummary, joining: Boolean, onJoin: () -> Unit
             val topic = room.topic
             if (!topic.isNullOrBlank()) OneLine(text = topic)
         }
+        // The capacity badge: live online count over the room's ceiling, "2/33" — the product's own
+        // shorthand for how full a room is. Read once, for the same cross-module smart-cast reason as
+        // the topic; a room that declares no ceiling simply shows no badge, and the count line above
+        // still carries the raw numbers.
+        val max = room.maxMembers
+        if (max != null && max > 0L) {
+            CapacityBadge(online = room.onlineCount, max = max)
+            Spacer(modifier = Modifier.width(10.dp))
+        }
         Button(onClick = onJoin, enabled = !joining) {
             Text(if (joining) "…" else "Join")
         }
+    }
+}
+
+/** The "online/max" pill a directory row wears when its room declares a ceiling. */
+@Composable
+private fun CapacityBadge(online: Long, max: Long) {
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        shape = RoundedCornerShape(percent = 50),
+    ) {
+        Text(
+            text = "$online/$max",
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+        )
     }
 }
 

@@ -16,6 +16,7 @@
 pub mod cli;
 pub mod dispatch;
 pub mod ports;
+pub mod room_presence;
 
 mod compose;
 pub mod mesh;

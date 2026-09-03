@@ -104,12 +104,14 @@ pub(crate) enum JoinOutcome {
     Banned,
     /// The join policy does not admit this account.
     NotAdmitted,
+    /// The account is barred from every room on the service.
+    NetworkBanned,
     /// Refused by the rate limiter.
     RateLimited,
 }
 
 impl JoinOutcome {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Accepted,
         Self::Already,
         Self::Rejoined,
@@ -118,6 +120,7 @@ impl JoinOutcome {
         Self::Full,
         Self::Banned,
         Self::NotAdmitted,
+        Self::NetworkBanned,
         Self::RateLimited,
     ];
 
@@ -131,6 +134,7 @@ impl JoinOutcome {
             Self::Full => "full",
             Self::Banned => "banned",
             Self::NotAdmitted => "not_admitted",
+            Self::NetworkBanned => "network_banned",
             Self::RateLimited => "rate_limited",
         }
     }
@@ -145,7 +149,8 @@ impl JoinOutcome {
             Self::Full => 5,
             Self::Banned => 6,
             Self::NotAdmitted => 7,
-            Self::RateLimited => 8,
+            Self::NetworkBanned => 8,
+            Self::RateLimited => 9,
         }
     }
 }
@@ -277,13 +282,120 @@ impl ChangeOutcome {
     }
 }
 
+/// How a kick vote's voice landed.
+///
+/// A separate series from the sanctions because a vote is the members' lever and
+/// not a moderator's: `passed` is the room acting on itself, and its ratio to
+/// `opened` is the feature working — a deployment where most votes pass is one
+/// where the tally matches the room's actual mood, and a deployment where most
+/// expire unremarked is one where nobody understands the button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VoteOutcome {
+    /// First voice; the vote is now open.
+    Opened,
+    /// A later voice landed; the vote is still running.
+    Voice,
+    /// The tally reached `needed` and the kick landed.
+    Passed,
+    /// The same account spoke again; the tally did not move.
+    Unchanged,
+    /// Refused: a vote about a different target is running.
+    AlreadyOpen,
+    /// Refused: the target is the owner or a global admin.
+    Immune,
+    /// Refused: the voter is not a member, or the target is not one.
+    Denied,
+    /// Refused by the rate limiter.
+    RateLimited,
+}
+
+impl VoteOutcome {
+    const ALL: [Self; 8] = [
+        Self::Opened,
+        Self::Voice,
+        Self::Passed,
+        Self::Unchanged,
+        Self::AlreadyOpen,
+        Self::Immune,
+        Self::Denied,
+        Self::RateLimited,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Opened => "opened",
+            Self::Voice => "voice",
+            Self::Passed => "passed",
+            Self::Unchanged => "unchanged",
+            Self::AlreadyOpen => "already_open",
+            Self::Immune => "immune",
+            Self::Denied => "denied",
+            Self::RateLimited => "rate_limited",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Opened => 0,
+            Self::Voice => 1,
+            Self::Passed => 2,
+            Self::Unchanged => 3,
+            Self::AlreadyOpen => 4,
+            Self::Immune => 5,
+            Self::Denied => 6,
+            Self::RateLimited => 7,
+        }
+    }
+}
+
+/// How a reconnect-grace timeout ended.
+///
+/// A separate series from [`ChangeOutcome`] because a timeout is not a request and its
+/// outcomes are not a request's: nobody asked, so there is no `invalid` and no `denied`.
+/// The timer fires against every room a departed account was in, and most firings change
+/// nothing — the member already left, already came back, or owns the room and cannot be
+/// removed. `removed` is the one that emptied a seat, and its ratio to `absent` is the
+/// health of the grace window itself: mostly `absent` means clients reconnect inside two
+/// minutes as intended, a surge of `removed` means a wave of them dropped and did not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TimeoutOutcome {
+    /// Still offline and still a member: removed.
+    Removed,
+    /// The subject owns the room and is exempt; left in place, marked offline.
+    Owner,
+    /// Already gone when the timer fired — left, rejoined, or never a member.
+    Absent,
+}
+
+impl TimeoutOutcome {
+    const ALL: [Self; 3] = [Self::Removed, Self::Owner, Self::Absent];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Removed => "removed",
+            Self::Owner => "owner",
+            Self::Absent => "absent",
+        }
+    }
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Removed => 0,
+            Self::Owner => 1,
+            Self::Absent => 2,
+        }
+    }
+}
+
 /// The series, resolved once at construction.
 pub(crate) struct Meters {
     creations: Vec<Arc<Counter>>,
     joins: Vec<Arc<Counter>>,
     leaves: Vec<Arc<Counter>>,
+    timeouts: Vec<Arc<Counter>>,
     authorizations: Vec<Arc<Counter>>,
     sanctions: Vec<Arc<Counter>>,
+    votes: Vec<Arc<Counter>>,
     settings: Vec<Arc<Counter>>,
     roles: Vec<Arc<Counter>>,
     overrides: Vec<Arc<Counter>>,
@@ -334,6 +446,16 @@ impl Meters {
                     )
                 })
                 .collect(),
+            timeouts: TimeoutOutcome::ALL
+                .iter()
+                .map(|outcome| {
+                    registry.counter(
+                        "migo_rooms_timeouts_total",
+                        "Reconnect-grace timeouts fired against a member, by outcome.",
+                        &[("outcome", outcome.label())],
+                    )
+                })
+                .collect(),
             authorizations: AuthorizeOutcome::ALL
                 .iter()
                 .map(|outcome| {
@@ -351,6 +473,16 @@ impl Meters {
                         "migo_rooms_sanctions_total",
                         "Moderation actions applied to a member, by action.",
                         &[("action", kind.label())],
+                    )
+                })
+                .collect(),
+            votes: VoteOutcome::ALL
+                .iter()
+                .map(|outcome| {
+                    registry.counter(
+                        "migo_rooms_vote_kicks_total",
+                        "Kick votes voiced, by outcome.",
+                        &[("outcome", outcome.label())],
                     )
                 })
                 .collect(),
@@ -424,6 +556,16 @@ impl Meters {
         }
     }
 
+    /// One reconnect-grace timeout, by what it did.
+    ///
+    /// The composition root fires the timer; this records whether it removed the member,
+    /// found the owner and spared them, or found nothing left to do.
+    pub(crate) fn timeout(&self, outcome: TimeoutOutcome) {
+        if let Some(counter) = self.timeouts.get(outcome.index()) {
+            counter.inc();
+        }
+    }
+
     pub(crate) fn authorize(&self, outcome: AuthorizeOutcome) {
         if let Some(counter) = self.authorizations.get(outcome.index()) {
             counter.inc();
@@ -432,6 +574,12 @@ impl Meters {
 
     pub(crate) fn sanction(&self, kind: SanctionKind) {
         if let Some(counter) = self.sanctions.get(kind.index()) {
+            counter.inc();
+        }
+    }
+
+    pub(crate) fn vote(&self, outcome: VoteOutcome) {
+        if let Some(counter) = self.votes.get(outcome.index()) {
             counter.inc();
         }
     }

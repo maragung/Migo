@@ -12,14 +12,16 @@ use migo_store::model::Room;
 
 /// What `online_count` is set to by this crate.
 ///
-/// Zero, and not because nobody is online. The count is the size of the subscriber
-/// set on the room's topic, which the gateway holds and this crate does not; filling
-/// it here would mean intersecting the roster with the presence cache on every
-/// listing, which is the query brief section 14 exists to prevent, and which
-/// `migo_presence` refuses to do for the same reason.
+/// Zero, and not because nobody is online. The real count is how many of a room's
+/// members hold a live session right now, which means intersecting the roster with
+/// presence on every listing — the query brief section 14 exists to prevent, and the
+/// one `migo_presence` refuses for the same reason. So this crate does not compute it
+/// on the read path at all.
 ///
-/// The gateway overwrites it on the way out. A named constant rather than a bare `0`
-/// so that a reader who finds a zero in a response knows which of the two it is.
+/// The dispatcher overwrites it on the way out, from a tally it keeps in memory as
+/// sessions come and go rather than by querying anything per request. A named constant
+/// rather than a bare `0` so that a reader who finds a zero in a response knows which of
+/// the two it is.
 pub const ONLINE_COUNT_UNSET: u32 = 0;
 
 /// A room as one caller sees it.
@@ -57,6 +59,9 @@ pub fn summary(room: &Room, my_role: Option<RoomRole>) -> RoomSummary {
         verified: None,
         my_role,
         slow_mode_ms: slow_mode_ms(room),
+        // The ceiling the join path refuses at, so a client can draw "2/33" instead of
+        // learning the room is full only by being refused.
+        max_members: Some(count(room.max_members)),
     }
 }
 
@@ -103,6 +108,7 @@ pub fn delta(room_id: Id) -> RoomStateEvent {
         member_count: None,
         topic: None,
         slow_mode_ms: None,
+        max_members: None,
     }
 }
 
@@ -116,6 +122,7 @@ pub fn is_empty(event: &RoomStateEvent) -> bool {
         && event.member_count.is_none()
         && event.topic.is_none()
         && event.slow_mode_ms.is_none()
+        && event.max_members.is_none()
 }
 
 /// The encryption a room of this kind runs under.

@@ -57,6 +57,7 @@ import { WalletPanel } from '@/components/wallet-panel.js';
 import { CallOverlay } from '@/components/call-overlay.js';
 import { ConversationsProvider } from '@/lib/migo/conversations-provider.js';
 import { RoomsProvider } from '@/lib/migo/rooms-provider.js';
+import { MutedProvider } from '@/lib/migo/muted-provider.js';
 import { CallManagerProvider } from '@/lib/migo/call-manager.js';
 import {
   closeConversation,
@@ -76,9 +77,11 @@ export default function ChatLayout({ children }: { children: ReactNode }): React
     <RequireReady>
       <ConversationsProvider>
         <RoomsProvider>
-          <CallManagerProvider>
-            <TabbedShell>{children}</TabbedShell>
-          </CallManagerProvider>
+          <MutedProvider>
+            <CallManagerProvider>
+              <TabbedShell>{children}</TabbedShell>
+            </CallManagerProvider>
+          </MutedProvider>
         </RoomsProvider>
       </ConversationsProvider>
     </RequireReady>

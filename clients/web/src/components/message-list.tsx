@@ -196,7 +196,11 @@ function ReadTicks({ read }: { read: boolean }): ReactNode {
 }
 
 export interface MessageListProps {
-  messages: ThreadMessage[];
+  /**
+   * The transcript to render, read-only: the list maps over it and never mutates it, so a caller
+   * may pass a filtered view (e.g. a personal-mute filter, which hands back a `readonly` array).
+   */
+  messages: readonly ThreadMessage[];
   selfId: Id;
   /** Sender names and avatars are a group-conversation affordance; a 1:1 has only one peer. */
   showSenders: boolean;

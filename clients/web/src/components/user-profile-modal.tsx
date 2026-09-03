@@ -28,6 +28,7 @@ import { friendlyError } from '@/lib/migo/errors.js';
 import { refreshProfile } from '@/lib/migo/use-profiles.js';
 import type { ResolvedProfile } from '@/lib/migo/use-profiles.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
+import { useMuted } from '@/lib/migo/muted-provider.js';
 
 import { Avatar } from './avatar.js';
 import { Spinner } from './spinner.js';
@@ -38,10 +39,13 @@ export function UserProfileCard({
   progression,
   badges,
   blocked,
+  muted = false,
   canMessage,
   busy,
+  muteBusy = false,
   onMessage,
   onBlock,
+  onMute,
 }: {
   profile: ResolvedProfile;
   /** The person's XP standing, when it loaded; absent is a missing line, not a broken card. */
@@ -50,12 +54,18 @@ export function UserProfileCard({
   badges?: BadgeWire[];
   /** True when the viewer already blocks this person. */
   blocked: boolean;
+  /** True when the viewer has personally muted this person's room chatter. */
+  muted?: boolean;
   /** False when the Send Message action is not offered (e.g. the person is blocked). */
   canMessage: boolean;
   /** True while the block request is in flight. */
   busy: boolean;
+  /** True while a mute/unmute request is in flight. */
+  muteBusy?: boolean;
   onMessage?: (userId: Id) => void;
   onBlock?: (userId: Id) => void;
+  /** Toggles a personal mute; when omitted the control is not offered. */
+  onMute?: (userId: Id, on: boolean) => void;
 }): ReactNode {
   return (
     <div className="profile-card">
@@ -101,6 +111,18 @@ export function UserProfileCard({
             Send Message
           </button>
         ) : null}
+        {onMute ? (
+          <button
+            type="button"
+            className="btn btn-ghost"
+            disabled={muteBusy}
+            onClick={() => onMute(profile.userId, !muted)}
+            aria-label={muted ? `Unmute ${profile.displayName}` : `Mute ${profile.displayName}`}
+            title="Hides this person’s room messages for you. Direct messages are never muted."
+          >
+            {muteBusy ? <Spinner /> : muted ? 'Unmute' : 'Mute for me'}
+          </button>
+        ) : null}
         {onBlock ? (
           <button
             type="button"
@@ -143,6 +165,7 @@ export function UserProfileModal({
   onBlock?: (userId: Id) => Promise<void> | void;
 }): ReactNode {
   const { client } = useMigo();
+  const { isMuted, setMuted } = useMuted();
 
   const [profile, setProfile] = useState<ResolvedProfile | null>(null);
   const [progression, setProgression] = useState<ProgressionWire | null>(null);
@@ -150,6 +173,7 @@ export function UserProfileModal({
   const [error, setError] = useState<string | null>(null);
   const [isBlocked, setIsBlocked] = useState(blocked);
   const [blocking, setBlocking] = useState(false);
+  const [muting, setMuting] = useState(false);
 
   useEffect(() => {
     setIsBlocked(blocked);
@@ -224,6 +248,29 @@ export function UserProfileModal({
     [blocking, onBlock, client],
   );
 
+  /**
+   * Toggles a personal mute through the muted provider (the one owner of the set), then lets the
+   * provider's state re-render the control. Sync wrapper over async work, like {@link runBlock}.
+   */
+  const runMute = useCallback(
+    (target: Id, on: boolean): void => {
+      if (muting) {
+        return;
+      }
+      setMuting(true);
+      void (async (): Promise<void> => {
+        try {
+          await setMuted(target, on);
+        } catch (cause) {
+          setError(friendlyError(cause));
+        } finally {
+          setMuting(false);
+        }
+      })();
+    },
+    [muting, setMuted],
+  );
+
   return (
     <div
       className="modal-backdrop"
@@ -251,10 +298,13 @@ export function UserProfileModal({
               progression={progression ?? undefined}
               badges={badges ?? undefined}
               blocked={isBlocked}
+              muted={isMuted(profile.userId)}
               canMessage={!isBlocked}
               busy={blocking}
+              muteBusy={muting}
               onMessage={onMessage ? () => onMessage(profile.userId) : undefined}
               onBlock={runBlock}
+              onMute={runMute}
             />
           ) : null}
         </div>

@@ -520,6 +520,46 @@ pub trait RoomStore: Send + Sync {
     /// denormalised counter that cannot be recomputed is a permanent source of
     /// numbers nobody trusts.
     async fn recount_room(&self, room_id: Id) -> Result<i32>;
+
+    /// Appends a row to the room's moderation trail.
+    ///
+    /// The trail is the escalation rule's memory and the banned account's
+    /// explanation. It is never read on the hot path: writing it costs one
+    /// insert, and the only reader — "how many times has a global admin
+    /// kicked this account" — runs once per global-admin kick, which is as
+    /// rare as the actions it counts.
+    async fn record_moderation_action(
+        &self,
+        action: crate::model::NewModerationAction,
+    ) -> Result<()>;
+
+    /// How many times global admins have kicked this account before now.
+    ///
+    /// Kicks by a chatroom's own staff do not count — the escalation rule is
+    /// about the deployment's authority, not a room owner's dislike. Counted
+    /// from the audit rows by joining actors against the global-admin
+    /// registry, so a global admin who is later unappointed stops counting
+    /// toward future escalations from the moment their appointment is gone.
+    async fn count_global_admin_kicks(&self, target_id: Id) -> Result<u64>;
+
+    /// The account's network-wide room ban row, if one exists.
+    ///
+    /// The row, not a verdict: a caller that wants "is this account banned
+    /// right now" must compare `until` against the clock it holds, because
+    /// this store takes its time from its callers the way every crate here
+    /// does. Returning the row lets the caller answer both "banned" and
+    /// "banned until when" from one read.
+    async fn network_ban(&self, account_id: Id) -> Result<Option<crate::model::RoomNetworkBan>>;
+
+    /// Writes or overwrites the network-wide ban for an account.
+    ///
+    /// An upsert on the account: the escalation rule writes once per
+    /// escalation, and a second write is a replacement rather than an error
+    /// so that lifting and re-imposing a ban is not a two-store-call dance.
+    async fn set_network_ban(&self, ban: crate::model::RoomNetworkBan) -> Result<()>;
+
+    /// Lifts the network-wide ban. Returns whether there was one to lift.
+    async fn clear_network_ban(&self, account_id: Id) -> Result<bool>;
 }
 
 /// Which rooms a browse request wants.

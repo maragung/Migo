@@ -18,6 +18,10 @@
  *   4. **A remembered room is stored only in IndexedDB.** The audit rule that governs keys and
  *      grants governs this record too, so the test watches the forbidden surfaces while the
  *      store writes.
+ *   5. **A room's capacity is a fact the shell carries and the label renders.** The join sets the
+ *      ceiling and a state delta can move it, each without disturbing the counters or the topic;
+ *      the label reads "here/max" only when a real maximum is known, and the bare head-count
+ *      otherwise.
  */
 
 import assert from 'node:assert/strict';
@@ -26,7 +30,7 @@ import { afterEach, beforeEach, test } from 'node:test';
 import { ConversationKind, EncryptionMode } from '@migo/sdk';
 import type { Id, RoomJoinResponse, RoomSummary } from '@migo/sdk';
 
-import { applyRoomState, roomInfoOf } from '../src/lib/migo/rooms-provider.js';
+import { applyRoomState, capacityLabel, roomInfoOf } from '../src/lib/migo/rooms-provider.js';
 import { roomRowTitle } from '../src/components/conversation-list.js';
 import { clearRoomInfo, loadRoomInfo, saveRoomInfo } from '../src/lib/storage/room-info-store.js';
 import { installFakeIndexedDb, installRecordingWebStorage } from './support/dom-stubs.js';
@@ -91,6 +95,30 @@ test('a room-state delta replaces only the fields it carries', () => {
   // the exact reading that makes the delta shape worth having.
   const untouched = applyRoomState(info, { roomId: ROOM.roomId });
   assert.deepEqual(untouched, info);
+});
+
+test('a join carries the room’s capacity, and a state delta moves it without touching the rest', () => {
+  const info = roomInfoOf(joined({ room: { ...ROOM, maxMembers: 33 } }));
+  assert.equal(info.maxMembers, 33);
+  // A capacity the room never stated stays absent, not an undefined-valued key.
+  const bare = roomInfoOf(joined());
+  assert.ok(!('maxMembers' in bare), 'an absent capacity must stay absent');
+  // A delta that raises the ceiling moves only it; the counters and topic it does not name hold.
+  const raised = applyRoomState(info, { roomId: ROOM.roomId, maxMembers: 50 });
+  assert.equal(raised.maxMembers, 50);
+  assert.equal(raised.onlineCount, 3, 'a capacity delta must not disturb the online count');
+  assert.equal(raised.topic, 'What is above us', 'a capacity delta must not blank the topic');
+});
+
+test('a capacity label reads "here/max", and degrades to the bare head-count when max is unknown', () => {
+  assert.equal(capacityLabel(2, 33), '2/33');
+  assert.equal(capacityLabel(0, 33), '0/33');
+  // An unknown or nonsensical maximum is never shown as a denominator: the count stands alone.
+  assert.equal(capacityLabel(2, undefined), '2');
+  assert.equal(capacityLabel(2, 0), '2');
+  // An unknown online count is zero people here, not a blank.
+  assert.equal(capacityLabel(undefined, 33), '0/33');
+  assert.equal(capacityLabel(undefined, undefined), '0');
 });
 
 test('a room row is titled by the glyph and the room record\u2019s name, with honest fallbacks', () => {

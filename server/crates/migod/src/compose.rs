@@ -62,6 +62,7 @@ use migo_social::SharedSocial;
 
 use crate::dispatch::AppDispatcher;
 use crate::ports::{EconomyRewards, FsStorage, StaffRoster, StoreCallGate};
+use crate::room_presence::GatewayHandle;
 
 /// The feature bits this node advertises to clients in the handshake and the `/v1/config`
 /// document. The CALLS bit: this build signals 1:1 calls end to end — the ring lifecycle
@@ -493,6 +494,13 @@ impl App {
         // The dispatcher is the one seam the gateway calls up through; it routes the client-facing
         // opcodes this node speaks into messaging, presence, rooms, key material, the social graph,
         // and games.
+        //
+        // It also needs to publish *out of band* — presence and room lifecycle on the connection
+        // edges the gateway reports — but it is built and moved into the gateway before the gateway
+        // exists. The handle below is the one-slot cell that resolves the cycle: the dispatcher holds
+        // it now, empty, and the composition root fills it the moment the gateway is open, exactly as
+        // it hands the same gateway to the mesh a few lines down.
+        let gateway_handle = Arc::new(GatewayHandle::new());
         let dispatcher: Arc<dyn Dispatcher> = Arc::new(AppDispatcher::new(
             store.clone(),
             messaging.clone(),
@@ -508,6 +516,7 @@ impl App {
             federation.clone(),
             bots.clone(),
             calls.clone(),
+            Arc::clone(&gateway_handle),
         ));
 
         // The advertised feature set must be settled before the gateway opens: the QUIC and
@@ -529,6 +538,11 @@ impl App {
                 features,
             },
         ));
+
+        // The gateway now exists: fill the dispatcher's late-bound handle so its out-of-band
+        // publishes (presence and room lifecycle on connection edges) reach the hub. Before this
+        // point they were no-ops, which is correct — no session can have connected yet.
+        gateway_handle.set(Arc::clone(&gateway));
 
         // The native clients' default transport: raw TCP, bound only when the operator gave it
         // an address (section 138). One connection, one session, length-prefixed binary frames —

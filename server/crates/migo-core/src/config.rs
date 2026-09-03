@@ -902,16 +902,12 @@ impl Config {
         if self.auth.max_devices_per_user == 0 {
             problems.push("auth.max_devices_per_user must be at least 1".to_string());
         }
-        if !self.captcha.enabled && self.auth.captcha_threshold.is_some() {
-            // Not fatal — the threshold is simply ignored while the subsystem is off —
-            // but an operator who set both deserves to hear about the contradiction
-            // rather than discover it from a route that never asks for a proof.
-            problems.push(
-                "auth.captcha_threshold is set but captcha.enabled is false: the gate will \
-                 not engage while the captcha subsystem is disabled"
-                    .to_string(),
-            );
-        }
+        // No contradiction check between `!captcha.enabled` and a set
+        // `auth.captcha_threshold`: the threshold's default is `Some(3)`, env has no
+        // way to spell `None`, so `captcha.enabled = false` is the *only* expressible
+        // opt-out. Rejecting that pairing would make the documented "same posture as
+        // `auth.captcha_threshold = None`" unreachable. The threshold is simply
+        // ignored while the subsystem is off.
         if self.captcha.length_min < 4
             || self.captcha.length_max > 8
             || self.captcha.length_min > self.captcha.length_max
@@ -1518,6 +1514,19 @@ mod tests {
         )
         .expect("builds");
         config.validate().expect("valid production configuration");
+    }
+
+    #[test]
+    fn disabling_the_captcha_subsystem_is_a_valid_posture() {
+        // The threshold defaults to Some(3) and env cannot spell None, so this is the
+        // one expressible opt-out of the gate. It must validate: rejecting it once
+        // took the whole deployment down at startup.
+        let config =
+            Config::from_sources(&[], &env(&[("MIGO_CAPTCHA__ENABLED", "false")])).expect("builds");
+        assert!(!config.captcha.enabled);
+        config
+            .validate()
+            .expect("captcha.enabled = false is the documented None posture");
     }
 
     #[test]

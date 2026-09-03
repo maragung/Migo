@@ -56,6 +56,14 @@ pub const MAX_FOLLOWING: usize = 10_000;
 /// filling a table on the server's disk.
 pub const MAX_BLOCKS: usize = 1_000;
 
+/// Accounts one account may mute.
+///
+/// The same number as blocks for the same reason: a mute list is people somebody
+/// has actually encountered, and a list far above this is a script. Mutes are
+/// cheaper to hold than blocks — they are one row and no cascades — so the bound
+/// exists for the table's sake, not the caller's.
+pub const MAX_MUTES: usize = 1_000;
+
 /// Accounts one account may mark as a favourite.
 pub const MAX_FAVORITES: usize = 200;
 
@@ -129,6 +137,8 @@ pub struct SocialConfig {
     pub max_following: usize,
     /// Accounts one account may block.
     pub max_blocks: usize,
+    /// Accounts one account may mute.
+    pub max_mutes: usize,
     /// The strictest default this deployment applies to calls.
     ///
     /// Brief section 180 says a call defaults to `Friends`, and there is no
@@ -146,6 +156,7 @@ impl Default for SocialConfig {
             max_friends: MAX_FRIENDS,
             max_following: MAX_FOLLOWING,
             max_blocks: MAX_BLOCKS,
+            max_mutes: MAX_MUTES,
             call_default: Visibility::Friends,
         }
     }

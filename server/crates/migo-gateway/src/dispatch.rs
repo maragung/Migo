@@ -36,7 +36,7 @@ use bytes::Bytes;
 
 use migo_auth::Identity;
 use migo_core::{Error as CoreError, Id, Timestamp};
-use migo_protocol::{fault, DeliveryClass, Encode, Frame, Opcode, Topic};
+use migo_protocol::{fault, BandwidthMode, DeliveryClass, Encode, Frame, Opcode, Topic};
 
 use crate::codec::{encode_error, encode_message};
 use crate::hub::Hub;
@@ -350,6 +350,50 @@ pub trait Dispatcher: Send + Sync {
     async fn authorize_topics(&self, request: &TopicRequest<'_>, topics: &[Topic]) -> Vec<bool> {
         let _ = request;
         vec![false; topics.len()]
+    }
+
+    /// Announces that an authenticated session has come up.
+    ///
+    /// Called once per connection, the moment a session first has an [`Identity`] — whether that
+    /// happened inline in the handshake or in a later `AUTHENTICATE` — and never again for the same
+    /// connection, so a `Ready` session that re-authenticates to refresh its token does not fire it
+    /// twice. A session that never authenticates never fires it at all. The pair to
+    /// [`session_ended`](Dispatcher::session_ended): every `session_started` is followed by exactly
+    /// one `session_ended` when the connection goes away.
+    ///
+    /// This is where the composition root turns a transport event into a presence one — marking the
+    /// device online and letting the rooms the account belongs to know it is reachable again. The
+    /// `mode` is the bandwidth tier the session negotiated in its greeting, which presence records
+    /// so it can size heartbeats; `now` is the driver's clock, passed rather than read so the
+    /// implementation shares the one the rest of the connection is stamped from.
+    ///
+    /// # Why the default does nothing
+    ///
+    /// The transport has no presence of its own, and a node with no domain wired in
+    /// ([`NoopDispatcher`]) has nothing to mark online. Doing nothing is the honest answer for both,
+    /// and it keeps every existing implementer compiling without a lifecycle it does not want.
+    async fn session_started(&self, identity: &Identity, mode: BandwidthMode, now: Timestamp) {
+        let _ = (identity, mode, now);
+    }
+
+    /// Announces that an authenticated session has gone away.
+    ///
+    /// Called once for every [`session_started`](Dispatcher::session_started), when the connection
+    /// tears down for any reason — a clean close, a dropped socket, or a protocol fault. A session
+    /// that never authenticated never reaches here, because it never fired the start. The `mode` and
+    /// `now` carry the same meaning as on the start; `now` is the moment the driver observed the
+    /// close, which presence uses to stamp the last-seen it may later publish.
+    ///
+    /// The composition root uses this to decrement the device's presence, and — because a browser
+    /// tab closing is not the same as a person leaving — to begin the reconnect grace that brief
+    /// section 184 describes rather than to remove the account from its rooms outright.
+    ///
+    /// # Why the default does nothing
+    ///
+    /// The same reason [`session_started`](Dispatcher::session_started) does: nothing came up, so
+    /// nothing has to come down.
+    async fn session_ended(&self, identity: &Identity, mode: BandwidthMode, now: Timestamp) {
+        let _ = (identity, mode, now);
     }
 }
 

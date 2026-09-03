@@ -22,17 +22,27 @@
  * {@link blockUser} sets a Block edge. Blocking is not a friendship teardown dialogue: the wire
  * carries no notification to the blocked party, and the block list is only ever visible to the
  * blocker through their own relationship list.
+ *
+ * # Mutes are quieter still
+ *
+ * {@link muteUser} sets a Mute edge — a personal, unnotified choice like a block, but lighter: it
+ * neither tears down a friendship nor bars a message, it only marks an account the caller would
+ * rather not hear from so the UI can hide that account's room chatter. The muted set is read back
+ * as a filtered view of the relationship list ({@link mutedAccounts}), the same server-owned graph
+ * a block lives in.
  */
 
 import type { Id } from '@migo/wire';
 import {
   OP,
+  RelationshipKind,
   encodeFriendTarget,
   encodeFriendRespond,
   encodeRelationshipListReq,
   decodeRelationshipList,
   encodeSuggestReq,
   encodeSearchReq,
+  encodeMuteSet,
   decodeSearchResponse,
   decodeFriendEvent,
   decodeAcknowledged,
@@ -41,6 +51,7 @@ import type {
   FriendEvent,
   FriendRespond,
   FriendTarget,
+  MuteSet,
   RelationshipEntry,
   RelationshipListReq,
   SearchReq,
@@ -138,6 +149,33 @@ export class SocialDomain {
   async blockUser(userId: Id): Promise<void> {
     const request: FriendTarget = { userId };
     await this.#rpc.call(OP.BLOCK_SET, encodeFriendTarget, decodeAcknowledged, request);
+  }
+
+  /**
+   * Mutes or unmutes an account for the caller.
+   *
+   * A personal, one-sided choice: `on: true` sets a Mute edge, `on: false` clears it, and neither
+   * touches friendship or delivery — a muted account's messages still arrive, the client simply
+   * hides that account's room chatter for the muter. Like a block it is unnotified and visible only
+   * to the caller. A caller that holds the muted set should refresh it after this resolves.
+   */
+  async muteUser(userId: Id, on: boolean): Promise<void> {
+    const request: MuteSet = { userId, on };
+    await this.#rpc.call(OP.MUTE_SET, encodeMuteSet, decodeAcknowledged, request);
+  }
+
+  /**
+   * Reads the accounts the caller has muted, as a plain list of ids.
+   *
+   * A thin projection over {@link listAllRelationships}: it reads the whole graph and keeps only the
+   * Mute edges, since the wire carries mutes mixed in with friends, blocks, and the rest rather than
+   * as a list of their own. The result is the set a client loads once at session start and consults
+   * to hide muted voices.
+   */
+  async mutedAccounts(): Promise<Id[]> {
+    const KIND_MUTE: number = RelationshipKind.Mute;
+    const entries = await this.listAllRelationships();
+    return entries.filter((entry) => entry.kind === KIND_MUTE).map((entry) => entry.userId);
   }
 
   /**

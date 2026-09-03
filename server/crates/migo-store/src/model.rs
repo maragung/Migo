@@ -2066,3 +2066,54 @@ pub struct GlobalAdmin {
     /// When the appointment was made.
     pub granted_at: Timestamp,
 }
+
+/// One row appended to a room's moderation trail (`room_moderation_action`).
+///
+/// Written for its reader, not its writer: the operator who issued a sanction
+/// already knows, and the account this row is about reads it back through the
+/// ban it produced. The one reader neither of them can see is the escalation
+/// rule — three of these rows with the same target and a *global-admin* actor
+/// are what turns the fourth kick into a network-wide ban.
+#[derive(Clone, Debug)]
+pub struct NewModerationAction {
+    /// Minted by the caller; the row's primary key.
+    pub action_id: Id,
+    /// The room the action was taken in.
+    pub room_id: Id,
+    /// The account that acted.
+    pub actor_id: Id,
+    /// The account acted on. `None` is a column the schema allows for actions
+    /// that name no subject (a settings change logged as moderation), though
+    /// every action this build records names one.
+    pub target_id: Option<Id>,
+    /// What was done, in the wire's `SanctionAction` numbering so the audit
+    /// and the client that triggered it agree on one scale.
+    pub action: i16,
+    /// The operator's note, if one was sent. Kept out of logs and fanouts on
+    /// the section 174 rule; this row is the one place it is allowed to live.
+    pub reason: Option<String>,
+    /// When the action was taken.
+    pub created_at: Timestamp,
+}
+
+/// An account's network-wide room ban (`room_network_ban`).
+///
+/// Written by the escalation rule — kicks by *global* admins only, never a
+/// chatroom's own staff — and lifted only by a global admin's unban. One row
+/// per account: the presence of the row *is* the ban, so an unban is a delete
+/// and there is no "lifted but still rowed" state for a join check to
+/// misread.
+#[derive(Clone, Debug)]
+pub struct RoomNetworkBan {
+    /// The banned account. The table's primary key.
+    pub account_id: Id,
+    /// Why, in the operator's words. Shown to the account; never broadcast.
+    pub reason: Option<String>,
+    /// When the ban lifts itself. `None` means it does not: only an unban
+    /// reverses it.
+    pub until: Option<Timestamp>,
+    /// The global admin whose kick wrote the row, if that is known.
+    pub by_actor: Option<Id>,
+    /// When the ban was imposed.
+    pub created_at: Timestamp,
+}

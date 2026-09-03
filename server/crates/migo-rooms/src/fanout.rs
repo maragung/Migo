@@ -29,7 +29,7 @@
 //! a caller with nothing to send cannot forget to check.
 
 use migo_core::Id;
-use migo_protocol::{Opcode, RoomMemberEvent, RoomStateEvent};
+use migo_protocol::{Opcode, RoomMemberEvent, RoomStateEvent, RoomVoteEvent};
 
 /// A room change, and whose topic it belongs to.
 #[derive(Clone, Debug, PartialEq)]
@@ -49,18 +49,22 @@ pub struct Fanout {
     pub event: Broadcast,
 }
 
-/// The two frames rooms publish.
+/// The three frames rooms publish.
 ///
-/// An enum rather than two fanout types because the gateway's dispatch is one match
-/// either way, and because a member event and a state event about the same room have
-/// to keep their order: a client that learned the new member count before it learned
-/// who joined would render a count nobody accounts for.
+/// An enum rather than three fanout types because the gateway's dispatch is one match
+/// either way, and because a member event, a state event, and a vote tally about the
+/// same room have to keep their order: a client that learned the new member count
+/// before it learned who joined would render a count nobody accounts for, and one
+/// that learned a vote closed before the removal it caused would show a kicked
+/// member as merely away.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Broadcast {
     /// Somebody joined, left, or had their role changed.
     Member(RoomMemberEvent),
     /// A counter or a setting moved.
     State(RoomStateEvent),
+    /// A kick vote's running tally, or its closing.
+    Vote(RoomVoteEvent),
 }
 
 impl Fanout {
@@ -81,6 +85,20 @@ impl Fanout {
             room_id,
             exclude_device: Some(device_id),
             event: Broadcast::State(event),
+        }
+    }
+
+    /// A kick-vote tally caused by `device_id`.
+    ///
+    /// Excluding the voter's socket for the same reason the member fanout excludes
+    /// the joiner's: the reply to `ROOM_VOTE_KICK` already carries this tally, and
+    /// delivering both would have a client count its own voice twice.
+    #[must_use]
+    pub fn vote(room_id: Id, device_id: Id, event: RoomVoteEvent) -> Self {
+        Self {
+            room_id,
+            exclude_device: Some(device_id),
+            event: Broadcast::Vote(event),
         }
     }
 
@@ -106,6 +124,7 @@ impl Fanout {
         match self.event {
             Broadcast::Member(_) => Opcode::RoomMemberEvent,
             Broadcast::State(_) => Opcode::RoomStateEvent,
+            Broadcast::Vote(_) => Opcode::RoomVoteEvent,
         }
     }
 }
