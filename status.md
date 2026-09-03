@@ -2224,3 +2224,50 @@ Validasi slug kini mencerminkan aturan server (3–32 huruf kecil dan
 digit, hyphen tunggal di dalam) dengan teks bantuan di samping field —
 alamat yang buruk ditolak di tempat, bukan sebagai penolakan setelah
 tombol Create ditekan.
+
+## 62. Satu pintu per tempat: UI/UX tanpa duplikat, sesuai perangkatnya (v0.16.0)
+
+Audit tiga klien menemukan satu dosa yang sama di mana-mana: tempat
+yang sama digambar dua kali. Feed dan Games tampil berdampingan di web
+dan desktop — panel kiri dan panel kanan sama-sama menggambar aliran
+aktivitas, dan pengguna tidak pernah yakin mana yang sedang dilihat.
+Versi ini memberi setiap tempat tepat satu pintu, lalu menyempurnakan
+masing-masing klien untuk perangkatnya.
+
+**Web: pane kanan hanya untuk percakapan dan panel.** Feed dan Games
+hilang dari tab pane kanan — keduanya milik panel kiri, jadi pane kanan
+tidak mungkin menggambar daftar yang sama dua kali. Chip resting-nya
+menjadi **Home** (keadaan kosong yang jujur, bukan salinan feed), dan
+menutup chip terakhir jatuh ke Home, bukan ke mode "menu panel" yang
+sudah tidak ada. Token `--touch: 44px` akhirnya diberlakukan sungguhan
+pada tombol ikon, target sentuh chip dinaikkan lewat overlay 44px di
+atas ikon close 20px, dan dead-zone tablet ditutup: blok penyesuaian
+ponsel bergeser dari 768px ke 1023px sehingga tidak ada lebar yang
+lolos dari keduanya. Panel melebar berjenjang di 1440px dan 1920px,
+label kunci thread memakai ellipsis, dan tombol back mati di
+chat-window dihapus.
+
+**Android: tab Chats, inset yang jujur, dan baris yang bisa digulir.**
+Tab strip kini lima tab sistem (Chats ditambahkan di depan) sehingga
+percakapan punya pintunya sendiri — ChatsScreen baru mendaftar
+percakapan berurutan terbaru dengan unread dan tombol Open. Perbaikan
+ukur Compose yang paling terasa: `LazyColumn` tanpa bobot di dalam
+Column memakan seluruh tinggi dan menyisakan saudaranya 0dp — form
+Wallet dan seksi lain kini memakai `weight(1f)`. Baris badge dan chip
+filter bergulir horizontal, dialog create room digulir dengan batas
+tinggi, banner error hadir di semua cabang shell, `navigationBarsPadding`
+membetulkan bar bawah, target sentuh banner diperbesar, dan indikator
+loading dideduplikasi menjadi satu `LoadingRow`.
+
+**Desktop: panel kanan dengan satu penghuni.** `right_place: Place`
+diganti `right_panel: Option<Place>` — pane kanan menampilkan satu
+panel (header tipis: nama dan close) atau keadaan resting, tidak pernah
+feed kedua. `panel_bar` dengan tab-tabnya dihapus; tombol "‹ Menu
+Panel" menjadi "‹ Panels". Rumus lebar panel kiri diperbaiki: 32% dengan
+lantai 300px terbalik di bawah 937px (lantai melebihi porsi, panel
+melebar justru ketika jendela menyempit) — kini 40% dengan lantai
+280px. Jawaban Rooms kini juga mendarat di hasil pencarian (seksi room
+Search sebelumnya tidak pernah terisi karena event-nya hanya menulis
+pane Rooms), elide baris percakapan mengikuti lebar nyata alih-alih
+hitungan karakter, dan salinan kosong ("Chats tab" yang tidak ada)
+diganti dengan arah yang benar.
