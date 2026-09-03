@@ -41,7 +41,7 @@ function chipClass(...parts: Array<string | false>): string {
 }
 
 const SYSTEM_TABS: ReadonlyArray<SystemSection> = [
-  { id: 'friends', label: 'Main', icon: 'friends' },
+  { id: 'friends', label: 'Friends', icon: 'friends' },
   { id: 'chats', label: 'Chats', icon: 'chats' },
   { id: 'rooms', label: 'Rooms', icon: 'rooms' },
   { id: 'games', label: 'Games', icon: 'game' },

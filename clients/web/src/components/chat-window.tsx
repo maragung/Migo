@@ -345,14 +345,6 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   return (
     <div className="thread-pane" style={{ height: '100%' }}>
       <header className="thread-header">
-        <button
-          type="button"
-          onClick={closeConversation}
-          className="icon-btn back"
-          aria-label="Back"
-        >
-          ‹
-        </button>
         {isDirect && peerId !== null ? (
           <button
             type="button"

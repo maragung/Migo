@@ -830,6 +830,8 @@ main {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  /* The strip's chips clear the touch token so a thumb lands one tab, not the gap between two. */
+  min-height: var(--touch);
   padding: 6px 10px;
   border: none;
   border-radius: 12px;
@@ -873,17 +875,28 @@ main {
   box-shadow: 0 0 6px color-mix(in srgb, var(--banner-b) 70%, transparent);
   flex-shrink: 0;
 }
-/* The chip's close control: a quiet glyph inside the chip's own hit area. */
+/* The chip's close control: a quiet ~20px glyph whose hit area reaches the 44px touch token
+   through an invisible overlay, so a thumb clears it on a phone without the visible dot growing. */
 .tab-close {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   margin-right: -4px;
   border-radius: 999px;
   color: inherit;
   opacity: 0.7;
+}
+.tab-close::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--touch);
+  height: var(--touch);
+  transform: translate(-50%, -50%);
 }
 .tab-close:hover {
   opacity: 1;
@@ -893,7 +906,7 @@ main {
 /*
  * The right pane's tab bar. The slate-800 strip: the compact back chevron (the single-column
  * story only — on a PC the left lists are always on screen beside the pane), the chevrons that
- * scroll the tab row, the persistent Feed chip, and one closable chip per open thing.
+ * scroll the tab row, the persistent Home chip, and one closable chip per open thing.
  */
 .chat-tab-bar {
   display: flex;
@@ -904,12 +917,16 @@ main {
   border-bottom: 1px solid #0f172a;
   flex-shrink: 0;
 }
-/* Icon-only, and gone at the PC split: closing tabs is the PC's way to the Feed. */
+/* Icon-only, and gone at the PC split: closing tabs is the PC's way home. The hit area is the
+   touch token even though the visual is a chevron — it is the single-column story's only way
+   back, so it clears the minimum a thumb can land. */
 .chat-back {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 4px;
+  width: var(--touch);
+  height: var(--touch);
+  padding: 0;
   border: none;
   border-radius: 8px;
   background: #0e7490;
@@ -932,7 +949,9 @@ main {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 4px;
+  width: var(--touch);
+  height: var(--touch);
+  padding: 0;
   border: none;
   border-radius: 8px;
   background: transparent;
@@ -1316,8 +1335,9 @@ main {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
+  /* The touch token again: these icons are the friends header's whole navigation on a phone. */
+  width: var(--touch);
+  height: var(--touch);
   padding: 0;
   border: 1px solid transparent;
   border-radius: 10px;
@@ -1565,8 +1585,10 @@ main {
   background: var(--accent-soft);
 }
 .icon-btn {
-  width: 32px;
-  height: 32px;
+  /* The touch token, finally kept: a thread-header control a thumb lands on a phone has to clear
+     it, and 32px was half a mis-tap away from the button beside it. */
+  width: var(--touch);
+  height: var(--touch);
   display: inline-grid;
   place-items: center;
   border-radius: 999px;
@@ -1693,9 +1715,6 @@ main {
   border-bottom: 1px solid var(--border);
   background: var(--panel);
 }
-.thread-header .back {
-  display: none;
-}
 .thread-heading {
   min-width: 0;
 }
@@ -1717,6 +1736,17 @@ main {
   align-items: center;
   gap: 5px;
   text-align: right;
+}
+/* In the single column the label is a guest of a crowded header: it ellipsises against the
+   space the title leaves (the full wording stays on the title/tooltip) instead of pushing the
+   controls off a 360px screen. */
+@media (max-width: 1023px) {
+  .thread-lock {
+    max-width: 34%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 }
 
 /* Screen-reader-only text: labels state (read/sent ticks) that the glyph alone cannot convey. */
@@ -2592,27 +2622,6 @@ main {
   margin: -4px 0 12px;
 }
 
-/* --- empty thread placeholder --- */
-
-.empty-thread {
-  flex: 1;
-  display: grid;
-  place-items: center;
-  padding: 18px;
-  text-align: center;
-  color: var(--text-dim);
-}
-.empty-thread-inner {
-  max-width: 340px;
-}
-.empty-thread .emoji {
-  font-size: 42px;
-  margin-bottom: 10px;
-}
-.empty-thread h2 {
-  margin: 0 0 6px;
-  color: var(--text);
-}
 .full-spinner .muted {
   margin-top: 12px;
 }
@@ -2914,13 +2923,18 @@ main {
 /* --- responsive: the shell at the widths it meets --- */
 
 /*
- * Mobile (<768px): the shell is the new-ui-02 single column — the left panel is the app, and a
- * conversation or a menu panel covers it whole (`show-right`). The covering pane carries its own
- * way back on its bar, so the thread's own back button stays hidden; on a phone the strip only
- * tightens its padding so the chips that matter stay visible, and the banner's status line is
- * the first thing to go when the width runs out.
+ * The single column (<1024px): the shell is the new-ui-02 single column — the left panel is the
+ * app, and a conversation or a menu panel covers it whole (`show-right`). The covering pane
+ * carries its own way back on its bar, so the thread's own back button stays hidden; the strip
+ * only tightens its padding so the chips that matter stay visible, and the banner's status line
+ * is the first thing to go when the width runs out.
+ *
+ * The bound is the PC split itself, not a rounder number near it: this block is the phone-and-
+ * tablet story, and the split decides who lives in it. A 900px tablet used to fall between a
+ * 768px "mobile" block and the 1024px split — one pane at a time, but with the desktop banner
+ * and paddings back, which was the dead zone this alignment closes.
  */
-@media (max-width: 768px) {
+@media (max-width: 1023px) {
   .tab-strip {
     gap: 4px;
     padding: 5px 6px;
@@ -2946,18 +2960,28 @@ main {
 }
 
 /*
- * Tablet (768–1023px): still the single column — the PC split begins at 1024px, so a tablet
- * wears the phone's one-pane-at-a-time model with the phone's room to spare. Nothing to do
- * here; the pane switch is the same `show-right` handshake at every sub-PC width.
+ * Wide desktop (≥1440px): the panels may spread. The split itself is set at 1024px above. The
+ * tiers step with the pane, not the window: a panel that stays at 640px on a 2560px display
+ * floats a narrow column in a two-thirds-empty pane, so each tier buys the reading width the
+ * pane actually has.
  */
-
-/* Wide desktop (≥1440px): the panels may spread. The split itself is set at 1024px above. */
 @media (min-width: 1440px) {
   .panel {
-    max-width: 760px;
+    max-width: 860px;
   }
   .panel-wide {
-    max-width: 860px;
+    max-width: 1060px;
+  }
+}
+
+/* Very wide (≥1920px): the last tier — the panel keeps a measure a line of chat can be read
+   back from, and the rest stays the pane's own air. */
+@media (min-width: 1920px) {
+  .panel {
+    max-width: 960px;
+  }
+  .panel-wide {
+    max-width: 1160px;
   }
 }
 

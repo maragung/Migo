@@ -1,12 +1,14 @@
 /**
  * What the messenger shell offers as the app's navigation.
  *
- * The right pane has one mode now, not two: a single tab bar whose first chip is the Feed —
+ * The right pane has one mode now, not two: a single tab bar whose first chip is the Home —
  * the pane's resting content, always present, never closable — followed by one closable chip
- * per open thing: a conversation, the games arcade, or a secondary panel the banner menu or a
- * deep link reached. There is no "menu panel" to switch back to: closing a chip falls through
- * to the next one, and closing the last one leaves the Feed, which is exactly the fallback an
- * empty pane owes. The shell is the app's whole navigation, so its offer is its contract.
+ * per open thing: a conversation, or a secondary panel the banner menu or a deep link reached.
+ * The system tabs' content (Friends, Rooms, Games, Feed) never opens here: those live in the
+ * left panel, so the pane cannot draw the same list twice. There is no "menu panel" to switch
+ * back to: closing a chip falls through to the next one, and closing the last one leaves Home,
+ * which is exactly the fallback an empty pane owes. The shell is the app's whole navigation, so
+ * its offer is its contract.
  *
  * The shell reads the signed-in account from the Migo context, so the renderer is fed a minimal
  * context double the way `calls.test.tsx` feeds its manager; `renderToStaticMarkup` runs no
@@ -94,7 +96,7 @@ test('the left strip offers the five system tabs in the reference order', () => 
   const chips = markup.match(/class="tab-chip( active)?"/g) ?? [];
   assert.equal(chips.length, 5, 'five system tabs on the left strip, nothing else');
   let at = -1;
-  for (const label of ['Main', 'Chats', 'Rooms', 'Games', 'Feed']) {
+  for (const label of ['Friends', 'Chats', 'Rooms', 'Games', 'Feed']) {
     const found = markup.indexOf(`tab-chip-label">${label}</span>`);
     assert.ok(found !== -1, `the "${label}" tab is missing from the strip`);
     assert.ok(found > at, `the "${label}" tab is out of the reference order`);
@@ -125,23 +127,23 @@ test('the Chats chip carries the unread dot only when something is unread', () =
   assert.ok(unread.includes('aria-label="Unread messages"'), 'the dot says what it means');
 });
 
-test('an empty right pane still offers the Feed, and never a menu panel', () => {
+test('an empty right pane still offers the Home chip, and never a menu panel', () => {
   const markup = render(shell([], 'feed'));
 
-  // The resting chip is the bar's own — an empty pane still owes the Feed.
+  // The resting chip is the bar's own — an empty pane still owes a home.
   assert.ok(
     markup.includes('class="chat-tab active"'),
-    'the Feed chip must be present and active when nothing is open',
+    'the Home chip must be present and active when nothing is open',
   );
   assert.ok(markup.includes('aria-label="Open panels"'), 'the right pane must carry its tab bar');
   assert.ok(!markup.includes('Menu Panel'), 'the menu panel is gone: the pane is tabs only');
   assert.ok(!markup.includes('Panel: '), 'the pane no longer names a two-mode "panel" it shows');
 });
 
-test('every open thing is a closable chip beside the Feed', () => {
+test('every open thing is a closable chip beside the Home', () => {
   const tabs: RightTabChip[] = [
     { id: 'chat:c1', kind: 'chat', conversationId: 'c1' as Id, title: 'reason008' },
-    { id: 'games', kind: 'games', title: 'Games' },
+    { id: 'search', kind: 'search', title: 'Search' },
     { id: 'wallet', kind: 'wallet', title: 'TopUp' },
   ];
   const markup = render(shell(tabs, 'chat:c1', 'c1' as Id));
@@ -155,10 +157,10 @@ test('every open thing is a closable chip beside the Feed', () => {
     'the conversation chip must be closable',
   );
   assert.ok(markup.includes('aria-label="Close TopUp"'), 'the panel chips must be closable too');
-  // The resting chip is never closable — closing everything must leave the Feed.
+  // The resting chip is never closable — closing everything must leave the Home.
   assert.ok(
-    !markup.includes('Close Feed'),
-    "the Feed chip has no close control; it is the pane's fallback",
+    !markup.includes('Close Home'),
+    "the Home chip has no close control; it is the pane's fallback",
   );
   // The chat tab is the active one, so the pane shows the thread, not the right content.
   assert.ok(markup.includes('class="thread-area"'), 'the active chat tab shows the thread');
@@ -172,9 +174,9 @@ test('exactly one chip is active per pane, never more', () => {
   ];
   const markup = render(shell(tabs, 'chat:c2', 'c2' as Id));
 
-  // Two open conversations plus the bar's own Feed chip.
+  // Two open conversations plus the bar's own Home chip.
   const chatChips = markup.match(/class="chat-tab( active)?"/g) ?? [];
-  assert.equal(chatChips.length, 3, 'one chip per open thing, plus the Feed');
+  assert.equal(chatChips.length, 3, 'one chip per open thing, plus the Home');
   assert.equal(markup.match(/class="chat-tab active"/g)?.length ?? 0, 1, 'one active chip');
   assert.equal(
     (markup.match(/aria-current="page"/g) ?? []).length,

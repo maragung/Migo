@@ -3,14 +3,15 @@
 /**
  * The right pane's tab bar: everything the pane can show, as tabs.
  *
- * The pane has one mode now, not two: a persistent Feed chip — the pane's resting content, the
+ * The pane has one mode now, not two: a persistent Home chip — the pane's resting content, the
  * thing it shows when nothing is open — followed by one closable chip per open thing
- * (a conversation, the games arcade, a secondary panel the banner menu or a deep link opened).
- * There is no "menu panel" to switch back to: closing a chip falls through to the next one, and
- * closing the last one leaves the Feed, which is exactly the fallback the pane owes an empty
- * state. The chevrons scroll the row without moving the page; a compact back chevron — the
- * single-column story only, where the pane covers the whole screen — hands the screen back to
- * the left lists without closing anything.
+ * (a conversation, a secondary panel the banner menu or a deep link opened). The system tabs'
+ * content (Friends, Rooms, Games, Feed) never appears here: those live in the left panel, so
+ * the pane cannot draw the same list twice. There is no "menu panel" to switch back to:
+ * closing a chip falls through to the next one, and closing the last one leaves Home, which is
+ * exactly the fallback the pane owes an empty state. The chevrons scroll the row without moving
+ * the page; a compact back chevron — the single-column story only, where the pane covers the
+ * whole screen — hands the screen back to the left lists without closing anything.
  */
 
 import { useRef } from 'react';
@@ -20,17 +21,9 @@ import type { Id } from '@migo/sdk';
 
 import { Icon } from './icons.js';
 
-/** The closable things the right pane can hold besides its resting Feed. */
+/** The closable things the right pane can hold besides its resting Home. */
 export type RightTabKind =
-  | 'chat'
-  | 'games'
-  | 'notifications'
-  | 'search'
-  | 'wallet'
-  | 'profile'
-  | 'account'
-  | 'settings'
-  | 'admins';
+  'chat' | 'notifications' | 'search' | 'wallet' | 'profile' | 'account' | 'settings' | 'admins';
 
 /**
  * The pane's active target: `'feed'` (the resting tab, which the bar renders itself) or the id
@@ -56,9 +49,9 @@ const SCROLL_STEP_PX = 240;
 /**
  * The bar itself.
  *
- * @param tabs The open closable tabs, in open order; the Feed chip the bar renders itself.
+ * @param tabs The open closable tabs, in open order; the Home chip the bar renders itself.
  * @param active The tab the pane is showing — `'feed'` or a tab id.
- * @param onSelect Activates a chip (the Feed chip included).
+ * @param onSelect Activates a chip (the Home chip included).
  * @param onClose Closes a chip; the owner decides what showing it next means.
  * @param onBackToLists Hands the screen back to the left lists (the single-column story only).
  */
@@ -87,7 +80,7 @@ export function RightTabBar({
   return (
     <nav className="chat-tab-bar" aria-label="Open panels">
       {/* The single-column way back: compact, icon-only, and gone on a PC — closing tabs is the
-          PC's way to the Feed, and the left lists are always on screen beside the pane. */}
+          PC's way home, and the left lists are always on screen beside the pane. */}
       <button
         type="button"
         className="chat-back"
@@ -106,14 +99,14 @@ export function RightTabBar({
         <Icon name="back" size={16} />
       </button>
       <div className="chat-tabs" ref={rowRef}>
-        {/* The resting chip: always first, never closable — an empty pane still owes the Feed. */}
+        {/* The resting chip: always first, never closable — an empty pane still owes a home. */}
         <button
           type="button"
           className={`chat-tab${active === 'feed' ? ' active' : ''}`}
           aria-current={active === 'feed' ? 'page' : undefined}
           onClick={() => onSelect('feed')}
         >
-          <span className="tab-chip-label">Feed</span>
+          <span className="tab-chip-label">Home</span>
         </button>
         {tabs.map((tab) => (
           <button
@@ -159,7 +152,7 @@ export function RightTabBar({
  * The display setting that drops the right-pane tabs still needs a way to say what the pane is
  * showing and to leave it — the bar carries the single open panel's name as a plain label (it is
  * not a control; there is nothing to switch it with), the mobile back chevron, and a close that
- * returns the pane to its resting Feed.
+ * returns the pane to its resting Home.
  */
 export function PaneBar({
   title,
@@ -168,7 +161,7 @@ export function PaneBar({
 }: {
   /** What the pane is showing, as the banner menu named it. */
   title: string;
-  /** Returns the pane to its resting Feed. */
+  /** Returns the pane to its resting Home. */
   onClose: () => void;
   /** Hands the screen back to the left lists (the single-column story only). */
   onBackToLists: () => void;

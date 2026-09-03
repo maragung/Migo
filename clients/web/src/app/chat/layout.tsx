@@ -54,6 +54,7 @@ import { ConversationList } from '@/components/conversation-list.js';
 import { FriendsPanel } from '@/components/friends-panel.js';
 import { GamesPanel } from '@/components/games-panel.js';
 import { NotificationsPanel } from '@/components/notifications-panel.js';
+import { PaneEmpty } from '@/components/pane-empty.js';
 import { ProfilePanel } from '@/components/profile-panel.js';
 import { RequireReady } from '@/components/require-ready.js';
 import { RoomsPanel } from '@/components/rooms-panel.js';
@@ -119,7 +120,6 @@ interface RightPaneState {
 
 /** The chip titles of the one-per-kind tabs; chat chips derive theirs from the live lists. */
 const KIND_TITLES: Readonly<Record<Exclude<RightTabKind, 'chat'>, string>> = {
-  games: 'Games',
   notifications: 'Alerts',
   search: 'Search',
   wallet: 'TopUp',
@@ -332,14 +332,14 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
         : KIND_TITLES[tab.kind as Exclude<RightTabKind, 'chat'>],
   }));
 
-  // What the pane shows for a non-chat target: the panel the kind names — the Feed included, as
-  // the pane's resting content, which both modes fall back to when nothing is open.
+  // What the pane shows for a non-chat target: the panel the kind names. The system tabs'
+  // content (Feed, Games) is deliberately absent — those live in the left panel, and a pane
+  // that could also draw them drew the same list twice, side by side. Both modes fall back to
+  // the resting Home state when nothing is open.
   const paneContent = (kind: Exclude<RightTabKind, 'chat'> | 'feed'): ReactNode => {
     switch (kind) {
       case 'feed':
-        return <SpacePanel onOpenConversation={openInTab} />;
-      case 'games':
-        return <GamesPanel />;
+        return <PaneEmpty />;
       case 'notifications':
         return <NotificationsPanel />;
       case 'search':
@@ -391,7 +391,10 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
       case 'rooms':
         return <RoomsPanel onOpenConversation={openInTab} />;
       case 'games':
-        return <GamesPanel onActivate={() => openPanel('games')} />;
+        // The catalogue without doors: the cards state the games, and the button below them
+        // opens the conversation a game is actually played in. Opening the arcade on the right
+        // used to be the cards' job, which is how the catalogue ended up in both panes at once.
+        return <GamesPanel />;
       case 'feed':
         return <SpacePanel onOpenConversation={openInTab} />;
     }
@@ -410,7 +413,7 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
       : !dismissed && !(right.tabs.length === 0 && right.active === 'feed');
 
   // The one-window mode's slim bar: the open thing's name as a plain label, and a close that
-  // takes the pane back to its resting Feed. The right-tabs mode keeps the chip bar.
+  // takes the pane back to its resting Home. The right-tabs mode keeps the chip bar.
   const paneBar =
     chatsMode === 'list' ? (
       openId !== null && panel === null ? (
