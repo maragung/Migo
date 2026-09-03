@@ -62,6 +62,9 @@ const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF];
 /// An Ogg page header, which is how an Opus voice note starts.
 const OGG: &[u8] = b"OggS";
+/// An EBML magic, which is how every recording `MediaRecorder` makes on Chrome and
+/// Firefox starts, whatever `audio/webm` label the wire carried.
+const EBML: &[u8] = &[0x1A, 0x45, 0xDF, 0xA3];
 
 fn ts(millis: i64) -> Timestamp {
     Timestamp::from_millis(millis)
@@ -449,9 +452,9 @@ async fn every_method_needs_an_identified_caller() {
         .media
         .commit(
             &alice,
-            &ticket.token,
+            ticket.media_id,
             Commit {
-                byte_size: 1_024,
+                byte_size: Some(1_024),
                 checksum: None,
             },
         )
@@ -467,18 +470,18 @@ async fn every_method_needs_an_identified_caller() {
     let nobody = Caller::new(Id::NIL, Id::NIL, TrustTier::Established, ts(NOW));
 
     expect_code(
-        harness.media.status(&nobody, &second.token).await,
+        harness.media.status(&nobody, second.media_id).await,
         codes::UNAUTHENTICATED,
     );
     expect_code(
         harness
             .media
-            .commit(&nobody, &second.token, Commit::default())
+            .commit(&nobody, second.media_id, Commit::default())
             .await,
         codes::UNAUTHENTICATED,
     );
     expect_code(
-        harness.media.abort(&nobody, &second.token).await,
+        harness.media.abort(&nobody, second.media_id).await,
         codes::UNAUTHENTICATED,
     );
     expect_code(
@@ -878,7 +881,7 @@ async fn a_ticket_is_bound_to_one_account_and_one_device() {
         .expect("alice begins an upload");
     harness.push_bytes(&payload(PNG, 4_096));
     let commit = Commit {
-        byte_size: 4_096,
+        byte_size: Some(4_096),
         checksum: None,
     };
 
@@ -887,7 +890,7 @@ async fn a_ticket_is_bound_to_one_account_and_one_device() {
     expect_code(
         harness
             .media
-            .commit(&caller(BOB, BOB_LAPTOP), &ticket.token, commit.clone())
+            .commit(&caller(BOB, BOB_LAPTOP), ticket.media_id, commit.clone())
             .await,
         codes::VALIDATION_FAILED,
     );
@@ -896,7 +899,11 @@ async fn a_ticket_is_bound_to_one_account_and_one_device() {
     expect_code(
         harness
             .media
-            .commit(&caller(ALICE, ALICE_LAPTOP), &ticket.token, commit.clone())
+            .commit(
+                &caller(ALICE, ALICE_LAPTOP),
+                ticket.media_id,
+                commit.clone(),
+            )
             .await,
         codes::VALIDATION_FAILED,
     );
@@ -920,49 +927,41 @@ async fn a_ticket_is_bound_to_one_account_and_one_device() {
     // The rightful device still finishes it.
     harness
         .media
-        .commit(&alice, &ticket.token, commit)
+        .commit(&alice, ticket.media_id, commit)
         .await
         .expect("the device the ticket was issued to may commit");
 }
 
 #[tokio::test]
-async fn a_tampered_ticket_is_indistinguishable_from_a_forged_one() {
+async fn an_upload_id_the_service_never_issued_is_refused_like_a_forged_ticket() {
     let harness = Harness::new();
     harness.cast().await;
     let alice = caller(ALICE, ALICE_PHONE);
+    let bob = caller(BOB, BOB_LAPTOP);
 
-    let ticket = harness
+    // The wire carries only the media id — the sealed token never crosses it, the
+    // service files it at `begin` — so the forgeries a caller can actually present are
+    // ids: one invented outright, and one lifted from another person's `begin`. Both
+    // must land as the same VALIDATION_FAILED, counted as a ticket refusal, telling the
+    // caller nothing about whether the id ever named an upload. (What the sealed token
+    // still buys: the account-and-device binding exercised by the test above, and the
+    // expiry checked below, both verified against the filed claim on every use.)
+    let invented = id(0xDEAD_BEEF);
+    let bobbed = harness
         .media
-        .begin(&alice, avatar())
+        .begin(&bob, avatar())
         .await
-        .expect("alice begins an upload");
+        .expect("bob begins his own upload");
 
-    // Raising the size the ticket was issued for, which is the whole reason the MAC
-    // exists: without it, a two-mebibyte avatar ticket commits a two-gigabyte object.
-    let mut inflated = ticket.token.clone();
-    inflated[67..75].copy_from_slice(&(4u64 * 1024 * 1024 * 1024).to_be_bytes());
-
-    // Changing the owner to somebody else's account.
-    let mut stolen = ticket.token.clone();
-    stolen[17..33].copy_from_slice(id(BOB).as_bytes());
-
-    // Flipping the end-to-end flag, which would skip the content sniff.
-    let mut unsniffed = ticket.token.clone();
-    unsniffed[83] |= 1;
-
-    // A token that is simply made up, and one truncated to nothing.
-    let invented = vec![0xAAu8; ticket.token.len()];
-    let truncated = ticket.token[..ticket.token.len() - 1].to_vec();
-
-    for token in [inflated, stolen, unsniffed, invented, truncated] {
+    for upload_id in [invented, bobbed.media_id] {
         expect_code(
             harness
                 .media
                 .commit(
                     &alice,
-                    &token,
+                    upload_id,
                     Commit {
-                        byte_size: 1_024,
+                        byte_size: Some(1_024),
                         checksum: None,
                     },
                 )
@@ -976,7 +975,7 @@ async fn a_tampered_ticket_is_indistinguishable_from_a_forged_one() {
             "reason",
             "ticket_invalid"
         ),
-        5
+        2
     );
     assert_eq!(
         harness.counter(
@@ -1015,7 +1014,7 @@ async fn an_expired_ticket_is_counted_apart_from_a_forged_one() {
     );
     harness
         .media
-        .status(&nearly, &ticket.token)
+        .status(&nearly, ticket.media_id)
         .await
         .expect("a ticket one millisecond from expiry is still usable");
 
@@ -1029,9 +1028,9 @@ async fn an_expired_ticket_is_counted_apart_from_a_forged_one() {
         .media
         .commit(
             &late,
-            &ticket.token,
+            ticket.media_id,
             Commit {
-                byte_size: 1_024,
+                byte_size: Some(1_024),
                 checksum: None,
             },
         )
@@ -1078,9 +1077,9 @@ async fn a_ticket_carries_the_numbers_the_client_declared() {
         .media
         .commit(
             &alice,
-            &ticket.token,
+            ticket.media_id,
             Commit {
-                byte_size: 4_096,
+                byte_size: Some(4_096),
                 checksum: None,
             },
         )
@@ -1135,9 +1134,9 @@ async fn a_voice_notes_duration_survives_to_the_row() {
         .media
         .commit(
             &alice,
-            &ticket.token,
+            ticket.media_id,
             Commit {
-                byte_size: 32 * 1024,
+                byte_size: Some(32 * 1024),
                 checksum: None,
             },
         )
@@ -1149,6 +1148,51 @@ async fn a_voice_notes_duration_survives_to_the_row() {
     // the waveform without downloading the audio first.
     assert_eq!(stored.duration_ms, Some(12_500));
     assert_eq!(stored.mime, "audio/ogg");
+}
+
+#[tokio::test]
+async fn a_webm_voice_note_commits_in_a_server_readable_conversation() {
+    let harness = Harness::new();
+    harness.cast().await;
+    let alice = caller(ALICE, ALICE_PHONE);
+
+    // Chrome and Firefox record `audio/webm`: an EBML container, whatever the wire's
+    // label says. This conversation is transport-encrypted, so the note's bytes are
+    // server-readable and sniffed at commit — and a webm the whitelist refused there is
+    // every note those browsers have ever recorded in a room, refused at the last step.
+    let ticket = harness
+        .media
+        .begin(
+            &alice,
+            UploadRequest {
+                kind: MediaKind::VoiceNote,
+                mime: "audio/webm".to_string(),
+                byte_size: 8_192,
+                destination: Destination::Conversation(id(CHAT)),
+                width: None,
+                height: None,
+                duration_ms: Some(4_000),
+            },
+        )
+        .await
+        .expect("a webm voice note may be begun");
+    harness.push_bytes(&payload(EBML, 8_192));
+    let stored = harness
+        .media
+        .commit(
+            &alice,
+            ticket.media_id,
+            Commit {
+                byte_size: Some(8_192),
+                checksum: None,
+            },
+        )
+        .await
+        .expect("a webm container commits as a voice note");
+
+    // The row records the identity the bytes proved, not the label the client sent —
+    // the container declares no family, so it is the webm identity's own mime.
+    assert_eq!(stored.mime, "video/webm");
 }
 
 // ---------------------------------------------------------------------------
@@ -1175,9 +1219,9 @@ async fn an_upload_nobody_pushed_bytes_for_is_not_a_row() {
         .media
         .commit(
             &alice,
-            &ticket.token,
+            ticket.media_id,
             Commit {
-                byte_size: 1_024,
+                byte_size: Some(1_024),
                 checksum: None,
             },
         )
@@ -1220,9 +1264,9 @@ async fn storage_is_the_authority_on_how_many_bytes_arrived() {
         .media
         .commit(
             &alice,
-            &ticket.token,
+            ticket.media_id,
             Commit {
-                byte_size: 4_096,
+                byte_size: Some(4_096),
                 checksum: None,
             },
         )
@@ -1236,9 +1280,9 @@ async fn storage_is_the_authority_on_how_many_bytes_arrived() {
             .media
             .commit(
                 &alice,
-                &ticket.token,
+                ticket.media_id,
                 Commit {
-                    byte_size: 2_000,
+                    byte_size: Some(2_000),
                     checksum: None,
                 },
             )
@@ -1259,9 +1303,9 @@ async fn storage_is_the_authority_on_how_many_bytes_arrived() {
         .media
         .commit(
             &alice,
-            &ticket.token,
+            ticket.media_id,
             Commit {
-                byte_size: 3_000,
+                byte_size: Some(3_000),
                 checksum: None,
             },
         )
@@ -1294,9 +1338,9 @@ async fn an_upload_cannot_grow_past_the_ticket_it_was_issued_for() {
         .media
         .commit(
             &alice,
-            &ticket.token,
+            ticket.media_id,
             Commit {
-                byte_size: 64 * 1024 * 1024,
+                byte_size: Some(64 * 1024 * 1024),
                 checksum: None,
             },
         )
@@ -1314,9 +1358,9 @@ async fn an_upload_cannot_grow_past_the_ticket_it_was_issued_for() {
             .media
             .commit(
                 &alice,
-                &ticket.token,
+                ticket.media_id,
                 Commit {
-                    byte_size: 64 * 1024,
+                    byte_size: Some(64 * 1024),
                     checksum: None,
                 },
             )
@@ -1353,9 +1397,9 @@ async fn a_checksum_is_recorded_and_never_recomputed() {
             .media
             .commit(
                 &alice,
-                &ticket.token,
+                ticket.media_id,
                 Commit {
-                    byte_size: 1_024,
+                    byte_size: Some(1_024),
                     checksum: Some(vec![0x11; MAX_CHECKSUM_LEN + 1]),
                 },
             )
@@ -1371,9 +1415,9 @@ async fn a_checksum_is_recorded_and_never_recomputed() {
         .media
         .commit(
             &alice,
-            &ticket.token,
+            ticket.media_id,
             Commit {
-                byte_size: 1_024,
+                byte_size: Some(1_024),
                 checksum: Some(claimed.clone()),
             },
         )
@@ -1400,9 +1444,9 @@ async fn the_type_comes_from_the_bytes() {
         .media
         .commit(
             &alice,
-            &ticket.token,
+            ticket.media_id,
             Commit {
-                byte_size: 4_096,
+                byte_size: Some(4_096),
                 checksum: None,
             },
         )
@@ -1447,9 +1491,9 @@ async fn a_page_dressed_as_a_picture_is_refused() {
             .media
             .commit(
                 &alice,
-                &ticket.token,
+                ticket.media_id,
                 Commit {
-                    byte_size: bytes.len() as u64,
+                    byte_size: Some(bytes.len() as u64),
                     checksum: None,
                 },
             )
@@ -1492,9 +1536,9 @@ async fn a_pdf_is_not_an_image_and_says_so_specifically() {
         .media
         .commit(
             &alice,
-            &ticket.token,
+            ticket.media_id,
             Commit {
-                byte_size: 18,
+                byte_size: Some(18),
                 checksum: None,
             },
         )
@@ -1533,9 +1577,9 @@ async fn a_pdf_is_not_an_image_and_says_so_specifically() {
         .media
         .commit(
             &alice,
-            &document.token,
+            document.media_id,
             Commit {
-                byte_size: 18,
+                byte_size: Some(18),
                 checksum: None,
             },
         )
@@ -1565,9 +1609,9 @@ async fn unrecognisable_bytes_are_refused_for_a_kind_that_should_be_recognisable
             .media
             .commit(
                 &alice,
-                &ticket.token,
+                ticket.media_id,
                 Commit {
-                    byte_size: 24,
+                    byte_size: Some(24),
                     checksum: None,
                 },
             )
@@ -1600,9 +1644,9 @@ async fn unrecognisable_bytes_are_refused_for_a_kind_that_should_be_recognisable
         .media
         .commit(
             &alice,
-            &document.token,
+            document.media_id,
             Commit {
-                byte_size: 24,
+                byte_size: Some(24),
                 checksum: None,
             },
         )
@@ -1631,9 +1675,9 @@ async fn end_to_end_bytes_are_not_sniffed_and_are_cleared_at_once() {
         .media
         .commit(
             &alice,
-            &sealed.token,
+            sealed.media_id,
             Commit {
-                byte_size: 4_096,
+                byte_size: Some(4_096),
                 checksum: None,
             },
         )
@@ -1666,9 +1710,9 @@ async fn end_to_end_bytes_are_not_sniffed_and_are_cleared_at_once() {
             .media
             .commit(
                 &alice,
-                &open.token,
+                open.media_id,
                 Commit {
-                    byte_size: 4_096,
+                    byte_size: Some(4_096),
                     checksum: None,
                 },
             )
@@ -1693,9 +1737,9 @@ async fn a_server_readable_object_is_scanned_at_commit() {
         .media
         .commit(
             &alice,
-            &ticket.token,
+            ticket.media_id,
             Commit {
-                byte_size: 4_096,
+                byte_size: Some(4_096),
                 checksum: None,
             },
         )
@@ -1732,9 +1776,9 @@ async fn a_server_readable_object_is_scanned_at_commit() {
         .media
         .commit(
             &alice,
-            &profile.token,
+            profile.media_id,
             Commit {
-                byte_size: 1_024,
+                byte_size: Some(1_024),
                 checksum: None,
             },
         )
@@ -1768,7 +1812,7 @@ async fn an_interrupted_upload_reports_where_it_stopped() {
     // and asks where it got to is asking a reasonable question.
     let fresh: Progress = harness
         .media
-        .status(&alice, &ticket.token)
+        .status(&alice, ticket.media_id)
         .await
         .expect("status answers for an untouched key");
     assert_eq!(fresh.uploaded_bytes, 0);
@@ -1781,7 +1825,7 @@ async fn an_interrupted_upload_reports_where_it_stopped() {
     harness.push_bytes(&payload(PNG, 8_000));
     let partial = harness
         .media
-        .status(&alice, &ticket.token)
+        .status(&alice, ticket.media_id)
         .await
         .expect("status answers");
     assert_eq!(partial.uploaded_bytes, 8_000);
@@ -1791,7 +1835,7 @@ async fn an_interrupted_upload_reports_where_it_stopped() {
     harness.push_bytes(&payload(PNG, 10_000));
     let done = harness
         .media
-        .status(&alice, &ticket.token)
+        .status(&alice, ticket.media_id)
         .await
         .expect("status answers");
     assert!(done.is_complete());
@@ -1814,7 +1858,7 @@ async fn an_abandoned_upload_takes_its_bytes_with_it() {
 
     harness
         .media
-        .abort(&alice, &ticket.token)
+        .abort(&alice, ticket.media_id)
         .await
         .expect("the uploader may abandon it");
 
@@ -1835,9 +1879,9 @@ async fn an_abandoned_upload_takes_its_bytes_with_it() {
             .media
             .commit(
                 &alice,
-                &ticket.token,
+                ticket.media_id,
                 Commit {
-                    byte_size: 512,
+                    byte_size: Some(512),
                     checksum: None,
                 },
             )
@@ -1861,7 +1905,7 @@ async fn aborting_somebody_elses_upload_is_not_possible() {
     expect_code(
         harness
             .media
-            .abort(&caller(BOB, BOB_LAPTOP), &ticket.token)
+            .abort(&caller(BOB, BOB_LAPTOP), ticket.media_id)
             .await,
         codes::VALIDATION_FAILED,
     );
@@ -1885,13 +1929,13 @@ async fn the_same_ticket_committed_twice_is_one_object() {
         .expect("alice begins an upload");
     harness.push_bytes(&payload(PNG, 1_024));
     let commit = Commit {
-        byte_size: 1_024,
+        byte_size: Some(1_024),
         checksum: None,
     };
 
     let first = harness
         .media
-        .commit(&alice, &ticket.token, commit.clone())
+        .commit(&alice, ticket.media_id, commit.clone())
         .await
         .expect("the upload commits");
     // A client that never saw the first answer retries. The id came from the ticket, so
@@ -1899,7 +1943,7 @@ async fn the_same_ticket_committed_twice_is_one_object() {
     // upload -- which is the reason the id is minted at begin and not at commit.
     let second = harness
         .media
-        .commit(&alice, &ticket.token, commit)
+        .commit(&alice, ticket.media_id, commit)
         .await
         .expect("a retry is idempotent");
     assert_eq!(first.media_id, second.media_id);
@@ -1933,9 +1977,9 @@ async fn upload(harness: &Harness, who: &Caller, request: UploadRequest, bytes: 
         .media
         .commit(
             who,
-            &ticket.token,
+            ticket.media_id,
             Commit {
-                byte_size: bytes.len() as u64,
+                byte_size: Some(bytes.len() as u64),
                 checksum: None,
             },
         )
@@ -2422,12 +2466,12 @@ async fn cheap_calls_cost_less_than_expensive_ones() {
     for _ in 0..95 {
         harness
             .media
-            .status(&alice, &ticket.token)
+            .status(&alice, ticket.media_id)
             .await
             .expect("status is cheap");
     }
     expect_code(
-        harness.media.status(&alice, &ticket.token).await,
+        harness.media.status(&alice, ticket.media_id).await,
         codes::RATE_LIMITED,
     );
 }
@@ -2624,7 +2668,7 @@ async fn no_metric_is_labelled_by_a_person_or_an_object() {
         .expect("an upload to abandon");
     harness
         .media
-        .abort(&alice, &doomed.token)
+        .abort(&alice, doomed.media_id)
         .await
         .expect("it may be abandoned");
     harness

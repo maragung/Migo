@@ -13,6 +13,7 @@
 //! composition root is the single place allowed to know the whole graph, which is precisely why
 //! every other crate can stay ignorant of it.
 
+pub mod call_sweep;
 pub mod cli;
 pub mod dispatch;
 pub mod ports;

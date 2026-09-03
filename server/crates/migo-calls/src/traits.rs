@@ -223,16 +223,17 @@ pub trait Callkeeper: Send + Sync {
     /// nothing from an empty list.
     async fn turn_servers(&self, call_id: Id) -> Result<Vec<TurnServerWire>>;
 
-    /// Ends every invite whose deadline has passed, returning a `NoAnswer`
-    /// state event for each.
+    /// Ends every invite whose deadline has passed, returning the retired
+    /// calls.
     ///
-    /// Whose topic those events belong to is the publisher's problem: the
-    /// wire event names the call, and the dispatcher (or the background task,
-    /// when one exists) maps call to caller. In this build the sweep also
-    /// runs inside [`Callkeeper::invite`], so a node without a background
-    /// task still retires its dead rings — the caller's client times the ring
-    /// itself from `expires_at`, so it needs no event to stop ringing.
-    async fn sweep(&self, now: Timestamp) -> Result<Vec<migo_protocol::CallStateEvent>>;
+    /// Whose topic each call's [`Call::ended_event`] belongs to is the
+    /// publisher's problem: the composition root runs this on a timer and
+    /// publishes the event to both parties, because a caller whose client
+    /// died cannot cancel and a callee left ringing has nothing to decline —
+    /// the sweep is the only participant that always knows the ring is dead.
+    /// The `invite` path also sweeps opportunistically (see the service
+    /// docs), which keeps a quiet node's rows honest between timer ticks.
+    async fn sweep(&self, now: Timestamp) -> Result<Vec<Call>>;
 
     /// One call, for a participant.
     ///

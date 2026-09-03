@@ -19,7 +19,7 @@
 //! is the device the call is credited to.
 
 use migo_core::{Id, Timestamp};
-use migo_protocol::TurnServer;
+use migo_protocol::{CallStateEvent, TurnServer};
 use migo_ratelimit::TrustTier;
 
 /// How long an unanswered invite rings before it becomes `NoAnswer`.
@@ -231,6 +231,22 @@ impl Call {
     #[must_use]
     pub const fn invite_is_live(&self, now: Timestamp) -> bool {
         matches!(self.state, CallState::Ringing) && !now.is_at_or_after(self.expires_at)
+    }
+
+    /// The `Ended` state event for this call, carrying its reason.
+    ///
+    /// Public because the node that runs the sweeper — the composition root,
+    /// not this crate — publishes one of these to both parties when a ring
+    /// dies of old age: the one call event neither participant's client can
+    /// be trusted to originate, because a caller whose browser died cannot
+    /// cancel and a callee left ringing has nothing to decline.
+    #[must_use]
+    pub fn ended_event(&self) -> CallStateEvent {
+        CallStateEvent {
+            call_id: self.call_id,
+            state: CallState::Ended.to_wire(),
+            reason: self.end_reason.map(|reason| reason.to_wire()),
+        }
     }
 
     /// The other party in the call, if `account_id` is one of the two.

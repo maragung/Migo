@@ -82,9 +82,9 @@ use migo_protocol::{
     ConversationListRequest, ConversationMuteRequest, ConversationRosterRequest,
     ConversationUpdateRequest, ConversationVoteKickRequest, Encode, Frame, GameAction, GameEvent,
     KeyBundle as WireBundle, KeyBundleRequest, KeyBundleResponse, KeyPublish, KeyPublishResult,
-    MessageDelete, MessageEdit, MessageKind, MessageReceipt, MessageSend, Opcode, PresenceUpdate,
-    ProfileRequest, ProfileResponse, ReactionSet, RoomJoinRequest, RoomLeaveRequest,
-    RoomListRequest, SyncRequest, Topic, TopicKind, TypingEvent, UserProfile,
+    MemberChange, MessageDelete, MessageEdit, MessageKind, MessageReceipt, MessageSend, Opcode,
+    PresenceUpdate, ProfileRequest, ProfileResponse, ReactionSet, RoomJoinRequest,
+    RoomLeaveRequest, RoomListRequest, SyncRequest, Topic, TopicKind, TypingEvent, UserProfile,
 };
 use migo_rooms::{
     Broadcast as RoomBroadcast, Caller as RoomCaller, Fanout as RoomFanout, SharedRooms,
@@ -1022,14 +1022,37 @@ fn publish_messaging(
             Some(stream_key(&(fanout.conversation_id, user))),
             fanout.exclude_device.is_some(),
         ),
-        MessageBroadcast::Member(event) => publish_event(
-            context,
-            &topic,
-            opcode,
-            event,
-            None,
-            fanout.exclude_device.is_some(),
-        ),
+        MessageBroadcast::Member(event) => {
+            publish_event(
+                context,
+                &topic,
+                opcode,
+                event,
+                None,
+                fanout.exclude_device.is_some(),
+            )?;
+            // The invite's other half. A member event's audience is the
+            // conversation's subscribers, and a member who has just been added
+            // is not one yet — their client cannot be subscribed to a topic it
+            // has never heard of. The same event, published to the joined
+            // account's user topic, is the one frame that reaches the invited:
+            // every session subscribed to its own topic hears it, and a client
+            // that does not know the conversation fetches its list, and the
+            // group appears without a refresh. Not coalesced, for the same
+            // reason the conversation copy is not: *who* joined is the fact.
+            if event.change == MemberChange::Joined {
+                context.publish(
+                    &Topic {
+                        kind: TopicKind::User,
+                        id: event.user_id,
+                    },
+                    opcode,
+                    event,
+                    None,
+                )?;
+            }
+            Ok(())
+        }
         MessageBroadcast::Vote(event) => publish_event(
             context,
             &topic,
@@ -1038,14 +1061,33 @@ fn publish_messaging(
             Some(stream_key(&fanout.conversation_id)),
             fanout.exclude_device.is_some(),
         ),
-        MessageBroadcast::State(event) => publish_event(
-            context,
-            &topic,
-            opcode,
-            event,
-            Some(stream_key(&fanout.conversation_id)),
-            fanout.exclude_device.is_some(),
-        ),
+        MessageBroadcast::State(event) => {
+            publish_event(
+                context,
+                &topic,
+                opcode,
+                event,
+                Some(stream_key(&fanout.conversation_id)),
+                fanout.exclude_device.is_some(),
+            )?;
+            // The renamer's own screen. The conversation copy excludes the
+            // device that asked for the change — its request was answered by
+            // the reply — so a client that applies nothing until the server
+            // says so is left rendering the title it renamed away. The actor's
+            // user-topic copy includes that device by design: the same delta,
+            // idempotent to apply twice, and the one that keeps the renamer's
+            // screen honest.
+            context.publish(
+                &Topic {
+                    kind: TopicKind::User,
+                    id: user,
+                },
+                opcode,
+                event,
+                Some(stream_key(&fanout.conversation_id)),
+            )?;
+            Ok(())
+        }
     }
 }
 

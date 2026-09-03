@@ -376,11 +376,15 @@ pub struct UploadRequest {
 /// What a client sends to finish an upload.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Commit {
-    /// How many bytes the client says it uploaded.
+    /// How many bytes the client says it uploaded, when the wire it came over carries a
+    /// size at all.
     ///
-    /// Checked against what storage reports. Brief section 168: *"server memverifikasi
-    /// ukuran serta content hash lalu membuat record media"*.
-    pub byte_size: u64,
+    /// Checked against what storage reports, because brief section 168: *"server
+    /// memverifikasi ukuran serta content hash lalu membuat record media"*. The MWP
+    /// commit carries only a digest — the size it agrees on is storage's own count
+    /// against the size the ticket was issued for — so `None` is the wire's honest "I
+    /// did not say", and not a claim of zero.
+    pub byte_size: Option<u64>,
     /// A hash of the plaintext, computed by the client.
     ///
     /// The server records it and never recomputes it: for end-to-end media it cannot,

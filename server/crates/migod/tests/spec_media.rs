@@ -146,13 +146,13 @@ async fn begin_mints_a_ticket_the_caller_can_ask_status_for() {
     );
     assert!(
         !ticket.token.is_empty(),
-        "the ticket's token is what status, commit, and abort present"
+        "the ticket still seals the claim the service files at begin"
     );
 
     let progress = library
-        .status(&caller(1, 101), &ticket.token)
+        .status(&caller(1, 101), ticket.media_id)
         .await
-        .expect("the minted token is accepted by status");
+        .expect("the id the wire carries is accepted by status");
     assert_eq!(
         progress.uploaded_bytes, 0,
         "nothing has been uploaded through the signed URL yet"
@@ -175,7 +175,7 @@ async fn a_ticket_is_bound_to_the_device_that_asked_for_it() {
         .expect("the ticket is minted");
 
     let stolen = library
-        .status(&caller(1, 202), &ticket.token)
+        .status(&caller(1, 202), ticket.media_id)
         .await
         .expect_err("another device of the same account cannot present the ticket");
     assert_eq!(

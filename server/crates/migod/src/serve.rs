@@ -68,6 +68,11 @@ impl App {
             .with_context(|| format!("cannot bind to {}", self.bind))?;
         tracing::info!(bind = %self.bind, gateway_path = GATEWAY_PATH, "listening");
 
+        // The call sweeper runs beside the transports for the whole serve: it is the
+        // only party that ends a ring whose caller died silently, so it must be alive
+        // exactly as long as the node accepts calls at all.
+        let sweeper = self.spawn_call_sweeper();
+
         let state = GatewayState {
             gateway: self.gateway,
             clock: self.clock,
@@ -87,6 +92,10 @@ impl App {
         .with_graceful_shutdown(async move { shutdown.cancelled().await })
         .await
         .context("server stopped abnormally")?;
+
+        // The sweeper heard the same shutdown signal; this await is so a fully
+        // stopped node leaves no task behind it.
+        let _ = sweeper.await;
 
         tracing::info!("server stopped");
         Ok(())

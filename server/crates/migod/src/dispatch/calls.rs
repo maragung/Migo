@@ -131,8 +131,11 @@ pub(crate) async fn handle_invite(
 ///
 /// The answering device is the connection's own, not the frame's claim: a
 /// client-supplied device id would let one device answer for another and
-/// misroute every sealed frame after it. The caller of the call hears the
-/// `Connecting` state event.
+/// misroute every sealed frame after it. The `Connecting` state event goes to
+/// *both* parties: the caller's screen leaves "ringing" for "connecting", and
+/// the callee's other devices — every one of them rang — learn the call was
+/// answered elsewhere and stop, which is the fan-out a multi-device ring needs
+/// and the one this path never sent.
 pub(crate) async fn handle_answer(
     ctx: &ClientContext<'_>,
     frame: &Frame,
@@ -145,7 +148,7 @@ pub(crate) async fn handle_answer(
         .await?;
     ctx.reply(&Acknowledged { ok: true })?;
     if let Some(event) = event {
-        publish_to_caller_of(ctx, svc, &caller, request.call_id, &event).await;
+        publish_to_both_parties(ctx, svc, &caller, request.call_id, &event).await;
     }
     Ok(())
 }
@@ -386,6 +389,30 @@ async fn publish_to_callee_of(
 ) {
     match svc.call(caller, call_id).await {
         Ok(call) => publish_state(ctx, call.callee_id, event),
+        Err(error) => {
+            tracing::warn!(%error, "call state event dropped: routing read failed")
+        }
+    }
+}
+
+/// Publishes a state event to both parties of a call.
+///
+/// The answer is the one event both sides are waiting on, and neither can be
+/// left to infer it: the caller's screen leaves "ringing" for "connecting",
+/// and the callee's other devices — every one of them rang — learn the call
+/// was answered elsewhere and stop on their own.
+async fn publish_to_both_parties(
+    ctx: &ClientContext<'_>,
+    svc: &SharedCallkeeper,
+    caller: &CallCaller,
+    call_id: migo_core::Id,
+    event: &migo_protocol::CallStateEvent,
+) {
+    match svc.call(caller, call_id).await {
+        Ok(call) => {
+            publish_state(ctx, call.caller_id, event);
+            publish_state(ctx, call.callee_id, event);
+        }
         Err(error) => {
             tracing::warn!(%error, "call state event dropped: routing read failed")
         }

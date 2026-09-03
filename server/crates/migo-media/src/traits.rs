@@ -142,6 +142,18 @@ pub type SharedStorage = std::sync::Arc<dyn Storage>;
 ///
 /// One erased trait for the whole domain, so `migo-gateway` and `migo-api` depend on a
 /// `dyn` and not on the generic service and its four type parameters.
+///
+/// # Where upload tickets live
+///
+/// `begin` seals the authorisation into a MAC'd token ([`crate::ticket`]) and returns it
+/// in [`Ticket`], but the wire's `MediaTicket` carries only the media id — the protocol
+/// has no field for the token bytes. So the service files each token at `begin`, and
+/// `status`/`commit`/`abort` resolve the wire's `upload_id` back to it. The token is
+/// still what authorises: the map is keyed by the id the service itself minted, and the
+/// claim's account, device, and expiry are verified on every use exactly as a presented
+/// token's would be. The trade is lifetime: a filed ticket lives in the process, so a
+/// restart forgets unfinished uploads — whose owners re-begin, which is what a ticket
+/// lifetime of minutes already asks of them.
 #[async_trait]
 pub trait Library: Send + Sync {
     /// Issues an upload ticket.
@@ -164,11 +176,15 @@ pub trait Library: Send + Sync {
     /// Brief section 168: *"Kegagalan pada 80 persen dilanjutkan dari sekitar 80 persen,
     /// bukan dari nol"*.
     ///
+    /// The upload is named by the id `begin` handed out; the service resolves it to the
+    /// filed ticket and verifies the caller against that ticket's claim.
+    ///
     /// # Errors
     ///
-    /// `VALIDATION_FAILED` if the ticket does not verify, is expired, or belongs to
-    /// another account or device; `RATE_LIMITED`; or `MEDIA_UNAVAILABLE`.
-    async fn status(&self, caller: &Caller, token: &[u8]) -> Result<Progress>;
+    /// `VALIDATION_FAILED` if no ticket is filed for the id, or the filed ticket is
+    /// expired or belongs to another account or device; `RATE_LIMITED`; or
+    /// `MEDIA_UNAVAILABLE`.
+    async fn status(&self, caller: &Caller, upload_id: Id) -> Result<Progress>;
 
     /// Turns an uploaded object into a row.
     ///
@@ -179,10 +195,11 @@ pub trait Library: Send + Sync {
     ///
     /// # Errors
     ///
-    /// `VALIDATION_FAILED` for a bad ticket or a size that disagrees with storage,
+    /// `VALIDATION_FAILED` for no filed ticket, an expired one, one belonging to another
+    /// account or device, or a size that disagrees with storage,
     /// `UNSUPPORTED_MEDIA_TYPE` if the leading bytes are not what the kind must hold,
     /// `RATE_LIMITED`, `MEDIA_UNAVAILABLE`, or `STORAGE_UNAVAILABLE`.
-    async fn commit(&self, caller: &Caller, token: &[u8], commit: Commit) -> Result<Stored>;
+    async fn commit(&self, caller: &Caller, upload_id: Id, commit: Commit) -> Result<Stored>;
 
     /// Abandons an upload and removes whatever arrived.
     ///
@@ -193,8 +210,9 @@ pub trait Library: Send + Sync {
     ///
     /// # Errors
     ///
-    /// `VALIDATION_FAILED` for a bad ticket, `RATE_LIMITED`, or `MEDIA_UNAVAILABLE`.
-    async fn abort(&self, caller: &Caller, token: &[u8]) -> Result<()>;
+    /// `VALIDATION_FAILED` for no filed ticket, an expired one, or one belonging to
+    /// another account or device; `RATE_LIMITED`; or `MEDIA_UNAVAILABLE`.
+    async fn abort(&self, caller: &Caller, upload_id: Id) -> Result<()>;
 
     /// Issues a short-lived download URL, after checking authorization.
     ///

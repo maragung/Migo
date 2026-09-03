@@ -7,14 +7,12 @@
 //!
 //! # The mapping from wire to domain
 //!
-//! The wire names uploads by an [`Id`] (`upload_id`/`object_id`), but the library authorises
-//! and resumes an upload by the *ticket token* it sealed at `begin` — a MAC over the media
-//! id, the account, the device, and the size. The token is the capability; the id is not
-//! (see `migo_core::id` — an `Id` is not a secret). So `begin` returns the id the wire wants
-//! in `MediaTicket.upload_id`, and `status`/`commit`/`abort` present the wire's `upload_id`
-//! straight back to the library as the token bytes it actually checks. The client, having
-//! received the ticket, carries the same `upload_id` it was given; this handler is the
-//! bridge between the wire's id-shaped field and the library's token-shaped argument.
+//! The wire names uploads by an [`Id`] (`upload_id`/`object_id`), and the library
+//! resolves that id to the sealed ticket it filed at `begin` — the token is the
+//! capability (see `migo_core::id`: an `Id` is not a secret), and it never crosses the
+//! wire: the protocol's `MediaTicket` carries only the id and the URL. So these
+//! handlers pass the wire's `upload_id` through unchanged, and the library checks the
+//! account-and-device binding the filed ticket's claim still carries.
 
 use migo_core::Error;
 use migo_gateway::ClientContext;
@@ -38,7 +36,7 @@ fn caller(ctx: &ClientContext<'_>) -> MediaCaller {
     )
 }
 
-/// `MEDIA_UPLOAD_BEGIN` (113) → a signed upload URL and the ticket that claims it later.
+/// `MEDIA_UPLOAD_BEGIN` (128) → a signed upload URL and the ticket that claims it later.
 pub(crate) async fn handle_upload_begin(
     ctx: &ClientContext<'_>,
     frame: &Frame,
@@ -83,7 +81,7 @@ pub(crate) async fn handle_upload_status(
 ) -> Result<(), Error> {
     let call = caller(ctx);
     let request: MediaStatusReq = from_frame(frame).map_err(fault::from_wire)?;
-    let progress = svc.status(&call, request.upload_id.as_bytes()).await?;
+    let progress = svc.status(&call, request.upload_id).await?;
     let response = MediaProgress {
         received: progress.uploaded_bytes,
         expected: progress.byte_size,
@@ -101,14 +99,12 @@ pub(crate) async fn handle_upload_commit(
     let call = caller(ctx);
     let request: MediaCommit = from_frame(frame).map_err(fault::from_wire)?;
     let commit = Commit {
-        // The wire carries only the digest; the authoritative byte count is read from
-        // storage at commit and checked there, so the request has none to send.
-        byte_size: 0,
+        // The wire carries only the digest; the size it agrees on is the one the ticket
+        // was issued for, checked against storage's own count of the bytes.
+        byte_size: None,
         checksum: Some(request.digest),
     };
-    let stored = svc
-        .commit(&call, request.upload_id.as_bytes(), commit)
-        .await?;
+    let stored = svc.commit(&call, request.upload_id, commit).await?;
     ctx.reply(&Acknowledged { ok: true })?;
 
     // The conversation the object landed in learns the object exists — everyone except
@@ -142,7 +138,7 @@ pub(crate) async fn handle_upload_abort(
 ) -> Result<(), Error> {
     let call = caller(ctx);
     let request: MediaAbort = from_frame(frame).map_err(fault::from_wire)?;
-    svc.abort(&call, request.upload_id.as_bytes()).await?;
+    svc.abort(&call, request.upload_id).await?;
     ctx.reply(&Acknowledged { ok: true })?;
     Ok(())
 }

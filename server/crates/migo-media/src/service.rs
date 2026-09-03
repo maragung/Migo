@@ -51,6 +51,7 @@
 //! Saying so here is better than a `TODO`, and better than a quota check that silently
 //! costs a full scan per upload.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -88,6 +89,22 @@ const DESCRIBE_COST: u32 = 3;
 /// Cost of `delete`: the other end of a commit's life, priced the same.
 const DELETE_COST: u32 = 5;
 
+/// How many filed-but-unfinished upload tickets the service will hold.
+///
+/// Not a limit on concurrent uploads — the rate limiter owns that — but a backstop for
+/// the pathological case: a client that begins uploads faster than they expire. Reaching
+/// the cap retires the ticket closest to expiry, whose owner's next `commit` is told the
+/// ticket is unknown and re-begins, which is what a ticket lifetime of minutes already
+/// asks of them.
+const FILED_TICKETS_CAP: usize = 8192;
+
+/// One sealed upload ticket the service is holding on the client's behalf, and the
+/// moment it stops being one.
+struct FiledTicket {
+    token: Vec<u8>,
+    expires_at: Timestamp,
+}
+
 /// Media uploads, signed URLs, and the authorization checked before one is issued.
 ///
 /// Generic over the store, the limiter, and object storage, all `?Sized` with `dyn`
@@ -107,6 +124,14 @@ pub struct Media<S: ?Sized = dyn Store, L: ?Sized = dyn RateLimiter, B: ?Sized =
     /// it is never held across an `await`, because a lock held across a yield point in an
     /// async runtime is a deadlock waiting for the right interleaving.
     random: Mutex<Box<dyn Random>>,
+    /// Upload tickets begun but not yet finished, keyed by the media id the wire names.
+    ///
+    /// The wire's `MediaTicket` carries an id and a URL — the protocol has no field for
+    /// the sealed token, and its generated files are frozen while the account-root work
+    /// is in flight — so the service files each token here at `begin` and resolves it
+    /// again for `status`, `commit`, and `abort`. See [`Library::commit`] for the trade
+    /// this makes and what it costs.
+    pending: Mutex<HashMap<Id, FiledTicket>>,
     meters: Meters,
 }
 
@@ -137,6 +162,7 @@ where
             tickets: MacKey::derive(root_secret, LABEL_MEDIA_URL),
             policy: Policy::from_config(config),
             random: Mutex::new(random),
+            pending: Mutex::new(HashMap::new()),
             meters: Meters::new(registry),
         }
     }
@@ -207,6 +233,46 @@ where
     fn mint(&self, at: Timestamp) -> Id {
         let mut random = self.random.lock();
         Id::generate_at(at, random.as_mut())
+    }
+
+    /// Files a sealed token under its media id, retiring what has expired.
+    ///
+    /// The sweep runs here rather than on a timer because a filed ticket's life is the
+    /// ticket's own short lifetime: anything older than the newest expiry is already
+    /// refused by `ticket::open`, so dropping it changes nothing for its owner and keeps
+    /// the map the size of the deployment's *unfinished* uploads rather than its
+    /// all-time ones. The lock is taken and dropped inside one statement, like every
+    /// other `Mutex` in this service, and never held across an `await`.
+    fn file(&self, media_id: Id, token: Vec<u8>, expires_at: Timestamp, now: Timestamp) {
+        let mut filed = self.pending.lock();
+        filed.retain(|_, ticket| ticket.expires_at > now);
+        if filed.len() >= FILED_TICKETS_CAP {
+            if let Some(soonest) = filed
+                .iter()
+                .min_by_key(|(_, ticket)| ticket.expires_at)
+                .map(|(id, _)| *id)
+            {
+                filed.remove(&soonest);
+            }
+        }
+        filed.insert(media_id, FiledTicket { token, expires_at });
+    }
+
+    /// The sealed token the wire's `upload_id` names.
+    ///
+    /// An id with no filed ticket — one that expired and was swept, or that a restart
+    /// forgot, or that a caller invented — is refused exactly the way a token that does
+    /// not verify is: same code, same field, same refusal counter. A caller learns
+    /// nothing about whether the id ever named an upload.
+    fn token_of(&self, upload_id: Id) -> Result<Vec<u8>> {
+        self.pending
+            .lock()
+            .get(&upload_id)
+            .map(|ticket| ticket.token.clone())
+            .ok_or_else(|| {
+                self.meters.refused(Refused::TicketInvalid);
+                fault::validation("upload_ticket", "unknown")
+            })
     }
 
     /// Checks that the caller may put an object at `destination`.
@@ -425,19 +491,21 @@ where
             duration_ms: request.duration_ms,
         };
         self.meters.begun(request.kind);
+        let token = ticket::seal(&self.tickets, &claim);
+        self.file(media_id, token.clone(), expires_at, caller.now);
         Ok(Ticket {
             media_id,
-            token: ticket::seal(&self.tickets, &claim),
+            token,
             upload,
             chunk_bytes: self.policy.chunk_bytes,
             expires_at,
         })
     }
 
-    async fn status(&self, caller: &Caller, token: &[u8]) -> Result<Progress> {
+    async fn status(&self, caller: &Caller, upload_id: Id) -> Result<Progress> {
         Self::require_identity(caller)?;
         self.charge_upload(caller, STATUS_COST).await?;
-        let claim = self.claim_of(caller, token)?;
+        let claim = self.claim_of(caller, &self.token_of(upload_id)?)?;
         let key = storage_key(
             claim.kind,
             claim.destination,
@@ -464,10 +532,10 @@ where
         })
     }
 
-    async fn commit(&self, caller: &Caller, token: &[u8], commit: Commit) -> Result<Stored> {
+    async fn commit(&self, caller: &Caller, upload_id: Id, commit: Commit) -> Result<Stored> {
         Self::require_identity(caller)?;
         self.charge_upload(caller, COMMIT_COST).await?;
-        let claim = self.claim_of(caller, token)?;
+        let claim = self.claim_of(caller, &self.token_of(upload_id)?)?;
 
         if let Some(checksum) = &commit.checksum {
             if checksum.len() > MAX_CHECKSUM_LEN {
@@ -475,7 +543,10 @@ where
                 return Err(fault::field_too_long("checksum", MAX_CHECKSUM_LEN));
             }
         }
-        if commit.byte_size > claim.byte_size {
+        if commit
+            .byte_size
+            .is_some_and(|declared| declared > claim.byte_size)
+        {
             // Over the size the ticket was issued for. The ticket's number was checked
             // against the ceiling at begin; this is the client trying to raise it after
             // the fact, which is exactly what the MAC is for.
@@ -500,11 +571,16 @@ where
             self.meters.refused(Refused::BytesMissing);
             return Err(fault::validation("upload", "no bytes were uploaded"));
         };
-        if head.byte_size != commit.byte_size {
+        if commit
+            .byte_size
+            .is_some_and(|declared| declared != head.byte_size)
+        {
             // The client and storage disagree. Storage is the authority — it is the one
             // holding the bytes — and the disagreement is reported rather than papered
             // over, because a client that miscounts its own upload is a client whose
-            // checksum this row is about to record.
+            // checksum this row is about to record. A commit from the MWP wire carries
+            // no size of its own, so this check only fires where a caller actually
+            // declared one.
             self.meters.refused(Refused::SizeMismatch);
             return Err(fault::validation(
                 "byte_size",
@@ -632,10 +708,10 @@ where
         Ok(project(&stored))
     }
 
-    async fn abort(&self, caller: &Caller, token: &[u8]) -> Result<()> {
+    async fn abort(&self, caller: &Caller, upload_id: Id) -> Result<()> {
         Self::require_identity(caller)?;
         self.charge_upload(caller, ABORT_COST).await?;
-        let claim = self.claim_of(caller, token)?;
+        let claim = self.claim_of(caller, &self.token_of(upload_id)?)?;
         let key = storage_key(
             claim.kind,
             claim.destination,

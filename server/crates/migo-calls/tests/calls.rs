@@ -852,14 +852,20 @@ async fn the_sweep_retires_expired_invites_as_no_answer() {
         .unwrap();
     assert!(none.is_empty());
 
-    // One millisecond after, both rings died as no-answers.
-    let events = harness
+    // One millisecond after, both rings died as no-answers. The sweep returns
+    // the retired calls themselves — the publisher decides which topics each
+    // `ended_event` goes to — so the wire shape is asserted through that.
+    let retired = harness
         .calls
         .sweep(ts(NOW + RING_TTL_MS + 1))
         .await
         .unwrap();
-    assert_eq!(events.len(), 2);
-    for event in &events {
+    assert_eq!(retired.len(), 2);
+    for call in &retired {
+        assert_eq!(call.state, CallState::Ended);
+        assert_eq!(call.end_reason, Some(EndReason::NoAnswer));
+        let event = call.ended_event();
+        assert_eq!(event.call_id, call.call_id);
         assert_eq!(event.state, CallState::Ended.to_wire());
         assert_eq!(event.reason, Some(EndReason::NoAnswer.to_wire()));
     }

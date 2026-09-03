@@ -280,7 +280,16 @@ pub const fn suits(identity: Identity, kind: MediaKind) -> bool {
         ),
         MediaKind::Audio | MediaKind::VoiceNote => matches!(
             identity,
-            Identity::OggAudio | Identity::MpegAudio | Identity::Mp4Audio | Identity::Wav
+            Identity::OggAudio
+                | Identity::MpegAudio
+                | Identity::Mp4Audio
+                | Identity::Wav
+                // A webm container is what `MediaRecorder` produces on Chrome and
+                // Firefox — `audio/webm` on the wire, an EBML container in the bytes,
+                // and identified here as `video/webm` because the container does not
+                // declare its family. Excluding it would refuse every note those
+                // browsers record in a server-readable conversation.
+                | Identity::Webm
         ),
         // Anything identified. A document is whatever somebody attached, and the only
         // formats refused here are the ones `sniff` refuses outright for everybody.

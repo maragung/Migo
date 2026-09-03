@@ -31,13 +31,14 @@
 //!
 //! # Why the sweep runs inside `invite`
 //!
-//! v1 has no background task, and an expired invite that nothing sweeps is a
-//! row that answers "ringing" forever. Rather than spawn a timer, every
-//! invite first retires whatever expired — the traffic that creates dead
-//! rings is the traffic that cleans them — and [`Callkeeper::sweep`] remains
-//! public for the day a task takes the job over. The callers' own clients
-//! time the ring from `expires_at`, so nobody waits on the sweep to stop
-//! ringing.
+//! An expired invite that nothing sweeps is a row that answers "ringing"
+//! forever. This crate deliberately owns no timer, so every invite first
+//! retires whatever expired — the traffic that creates dead rings is the
+//! traffic that cleans them — and [`Callkeeper::sweep`] stays public for the
+//! composition root, which runs it on a timer of its own. The two are not
+//! rivals: the timer publishes [`Call::ended_event`] to both parties so a
+//! callee nobody re-invites still hears the ring die, while this opportunistic
+//! pass keeps a quiet node's rows honest between ticks.
 //!
 //! # What is deliberately not here
 //!
@@ -170,7 +171,7 @@ where
         call.ended_at = Some(now);
         self.store.put(call).await?;
         self.meters.ended(reason);
-        Ok(ended_event(call))
+        Ok(call.ended_event())
     }
 
     /// The routing and standing checks every relay shares.
@@ -291,15 +292,6 @@ fn state_event(call: &Call) -> CallStateEvent {
         call_id: call.call_id,
         state: call.state.to_wire(),
         reason: None,
-    }
-}
-
-/// The `Ended` event for a call, carrying the reason.
-fn ended_event(call: &Call) -> CallStateEvent {
-    CallStateEvent {
-        call_id: call.call_id,
-        state: CallState::Ended.to_wire(),
-        reason: call.end_reason.map(|reason| reason.to_wire()),
     }
 }
 
@@ -702,12 +694,12 @@ where
         Ok(self.config.turn_servers.clone())
     }
 
-    async fn sweep(&self, now: Timestamp) -> Result<Vec<CallStateEvent>> {
+    async fn sweep(&self, now: Timestamp) -> Result<Vec<Call>> {
         let retired = self.store.sweep_expired(now).await?;
         if !retired.is_empty() {
             self.meters.expired(retired.len());
         }
-        Ok(retired.iter().map(ended_event).collect())
+        Ok(retired)
     }
 
     async fn call(&self, caller: &Caller, call_id: Id) -> Result<Call> {
