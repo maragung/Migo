@@ -7,8 +7,9 @@
 //! send the cancel — and the callee left ringing has nothing to decline, because
 //! the service only hears a decline from a client that chose to send one. The
 //! one party that always knows the ring is dead is the node holding the row, so
-//! the node tells both of them: every tick, [`Callkeeper::sweep`] retires the
-//! rings past `expires_at`, and each retired call's
+//! the node tells both of them: every tick,
+//! [`sweep`](migo_calls::Callkeeper::sweep) retires the rings past
+//! `expires_at`, and each retired call's
 //! [`ended_event`](migo_calls::Call::ended_event) is published to *both* user
 //! topics — the caller's screen gives up, and the callee's ring stops without
 //! anyone having to decline a call that was never going to connect.
