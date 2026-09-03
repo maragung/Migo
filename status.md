@@ -1743,9 +1743,9 @@ tersimpan, maupun sheet restore. Penyedianya (`provider.tsx`) kini
 memegang `loginWithFile`: buka container (salah passphrase = satu kalimat
 jujur §182, tidak bisa dibedakan dari file rusak), lalu upacara ML-DSA
 dua tingkat — device record tersimpan (IndexedDB baru
-`device-record-store`, seed kredensial per akun) menjawab *login
-challenge* sebagai device yang sama, dan bila belum ada / device sudah
-dihapus server, jatuh ke *add-device* yang mencetak kredensial baru dan
+`device-record-store`, seed kredensial per akun) menjawab _login
+challenge_ sebagai device yang sama, dan bila belum ada / device sudah
+dihapus server, jatuh ke _add-device_ yang mencetak kredensial baru dan
 menyimpannya untuk login berikutnya; tanpa record, setiap login akan
 melahirkan device baru dan batasnya cuma delapan. Sesi berjalan sebagai
 device founding (root dari file mereproduksi identitas founding), grant
