@@ -14,12 +14,16 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
+import { PresenceState } from '@migo/sdk';
+import type { PresenceState as PresenceStateValue } from '@migo/sdk';
+
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { useProfile } from '@/lib/migo/use-profiles.js';
 import type { Theme } from '@/lib/theme.js';
 
 import { Avatar } from './avatar.js';
 import { CoinMark, Icon } from './icons.js';
+import { PresenceSelect, StatusInput } from './presence-picker.js';
 import { ThemeToggle } from './theme-toggle.js';
 import type { PanelTab } from './tab-strip.js';
 
@@ -51,6 +55,19 @@ const OWNER_ENTRY: {
 } = { panel: 'admins', label: 'Global Admins', icon: 'shield' };
 
 /**
+ * The presence dot's colour class per state: the numeric enum does not stringify into a name,
+ * so the mapping is explicit — one glance at the banner says the state the dropdown will show.
+ */
+const DOT_CLASS: Readonly<Record<PresenceStateValue, string>> = {
+  [PresenceState.Unknown]: 'offline',
+  [PresenceState.Offline]: 'offline',
+  [PresenceState.Online]: 'online',
+  [PresenceState.Away]: 'away',
+  [PresenceState.Busy]: 'busy',
+  [PresenceState.Invisible]: 'invisible',
+};
+
+/**
  * @param onOpenPanel Opens a secondary panel as a tab — what every menu entry does.
  * @param theme Pins the theme control's appearance; defaults to the persisted theme.
  * @param onToggleTheme Called when the theme control is clicked.
@@ -70,6 +87,35 @@ export function ProfileBanner({
   const [coins, setCoins] = useState<number | null>(null);
   const [owner, setOwner] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  // The account's own presence, published from this banner: the state rides beside the coin
+  // chip, the status line under the @username, and both are publishes, not reads — the banner
+  // holds the state and performs the call, never optimistically keeping a change the server
+  // refused.
+  const [myPresence, setMyPresence] = useState<PresenceStateValue>(PresenceState.Online);
+  const [myStatus, setMyStatus] = useState('');
+  const seededStatus = useRef(false);
+
+  // The status the profile already carries seeds the input once: a returning session says what
+  // it said yesterday rather than offering an empty box next to a profile that plainly has one.
+  useEffect(() => {
+    if (seededStatus.current || !self) {
+      return;
+    }
+    seededStatus.current = true;
+    setMyStatus(self.customStatus ?? '');
+  }, [self]);
+
+  /** Publishes the presence and status together — the wire carries them as one call. */
+  function publish(state: PresenceStateValue, status: string): void {
+    setMyPresence(state);
+    setMyStatus(status);
+    if (!client) {
+      return;
+    }
+    void client.presence
+      .setPresence(state, status.trim().length > 0 ? { customStatus: status } : {})
+      .catch(() => {});
+  }
 
   // The admin entry appears only for the account the deployment names as its
   // Owner/CEO. One read per session, absent on failure rather than wrong — a
@@ -202,15 +248,20 @@ export function ProfileBanner({
 
       <div className="banner-id">
         <span className="banner-name">
-          <span className="banner-presence" aria-hidden="true" />
+          <span
+            className={`banner-presence banner-presence-${DOT_CLASS[myPresence]}`}
+            aria-hidden="true"
+          />
           {self?.displayName ?? 'You'}
         </span>
         <span className="banner-status">
           {self?.username ? `@${self.username}` : 'End-to-end encrypted'}
         </span>
+        <StatusInput state={myPresence} status={myStatus} onChange={publish} />
       </div>
 
       <div className="banner-actions">
+        <PresenceSelect state={myPresence} onStateChange={(next) => publish(next, myStatus)} />
         {coins !== null ? (
           <span className="banner-chip" title="Coin balance" aria-label={`Coin balance: ${coins}`}>
             <CoinMark size={14} />

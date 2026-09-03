@@ -1101,6 +1101,15 @@ main {
   background: var(--positive);
   flex-shrink: 0;
 }
+.banner-presence-away {
+  background: var(--warning);
+}
+.banner-presence-busy {
+  background: var(--danger);
+}
+.banner-presence-invisible {
+  background: color-mix(in srgb, #ffffff 55%, transparent);
+}
 .banner-status {
   font-size: var(--fs-meta);
   color: color-mix(in srgb, #ffffff 78%, var(--banner-a));
@@ -1108,6 +1117,50 @@ main {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+/* The status line under the @username: an input, because the banner is where the account's
+   own words live now. Translucent on the orange, readable in both themes, and never wider
+   than the identity block above it. */
+.banner-status-input {
+  width: 100%;
+  max-width: 220px;
+  margin-top: 2px;
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+  font-size: var(--fs-meta);
+  font-style: normal;
+}
+.banner-status-input::placeholder {
+  color: rgba(255, 255, 255, 0.65);
+  font-style: italic;
+}
+.banner-status-input:focus {
+  outline: none;
+  border-color: #ffffff;
+  background: rgba(255, 255, 255, 0.24);
+}
+/* The presence dropdown sits beside the coin chip: same glass as the chip, sized to the
+   banner's tight rows rather than a form's input. */
+.banner-presence-select {
+  padding: 3px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.18);
+  color: #ffffff;
+  font-size: var(--fs-meta);
+  font-weight: 700;
+  cursor: pointer;
+}
+.banner-presence-select:focus {
+  outline: 1px solid #ffffff;
+  outline-offset: 1px;
+}
+.banner-presence-select option {
+  color: var(--text);
+  background: var(--panel);
 }
 .banner-actions {
   display: flex;
@@ -1236,6 +1289,53 @@ main {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+/* The list-switching icons on the friends header: quiet by default, chosen when the list they
+   name is the one showing, and each may carry a count of what it holds. */
+.panel-head-icons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.panel-head-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+.panel-head-icon:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.panel-head-icon.chosen {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.panel-head-count {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  padding: 1px 4px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-align: center;
 }
 .panel-search {
   display: flex;
@@ -2821,6 +2921,11 @@ main {
     padding: 5px 8px;
   }
   .banner-status {
+    display: none;
+  }
+  /* The status input rides under the @username line, so it goes where the line goes: a phone's
+      banner is one ambient row, and the input stays available the moment there is room. */
+  .banner-status-input {
     display: none;
   }
   /* The header is crowded on a phone: the games control keeps its glyph and drops its word. */

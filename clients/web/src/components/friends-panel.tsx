@@ -4,12 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent, ReactNode } from 'react';
 
 import { ConversationKind, PresenceState, RelationshipKind } from '@migo/sdk';
-import type {
-  Id,
-  PresenceState as PresenceStateValue,
-  RelationshipEntry,
-  SuggestedUser,
-} from '@migo/sdk';
+import type { Id, RelationshipEntry, SuggestedUser } from '@migo/sdk';
 
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { friendlyError } from '@/lib/migo/errors.js';
@@ -25,7 +20,6 @@ import { useContextMenu } from './context-menu.js';
 import type { ContextAction } from './context-menu.js';
 import { Icon } from './icons.js';
 import { NewConversationDialog } from './new-conversation-dialog.js';
-import { PresencePicker } from './presence-picker.js';
 import { Spinner } from './spinner.js';
 import { UserProfileModal } from './user-profile-modal.js';
 
@@ -81,27 +75,11 @@ export function FriendsPanel({
   const [busy, setBusy] = useState<ReadonlySet<Id>>(new Set());
   // The person whose profile modal is open, if any.
   const [selected, setSelected] = useState<Id | null>(null);
-  // The account's own presence and mood, published from the picker the sidebar used to own.
-  const [myPresence, setMyPresence] = useState<PresenceStateValue>(PresenceState.Online);
-  const [myStatus, setMyStatus] = useState('');
+  // Which list the panel is showing: the friends themselves, or one of the three the header's
+  // right-aligned icons switch to. The counts on those icons come from the same reads.
+  const [view, setView] = useState<'friends' | 'requests' | 'blocked' | 'suggestions'>('friends');
   // The New-conversation dialog, formerly the sidebar header's plus button.
   const [dialogOpen, setDialogOpen] = useState(false);
-
-  // The account's own presence is a publish, not a read: the picker holds the state and the
-  // panel performs the call, exactly the posture the sidebar kept.
-  const onPresenceChange = useCallback(
-    (state: PresenceStateValue, nextStatus: string): void => {
-      if (!client) {
-        return;
-      }
-      setMyPresence(state);
-      setMyStatus(nextStatus);
-      void client.presence
-        .setPresence(state, nextStatus.trim().length > 0 ? { customStatus: nextStatus } : {})
-        .catch(() => {});
-    },
-    [client],
-  );
 
   const reload = useCallback(async (): Promise<void> => {
     if (!client) {
@@ -258,12 +236,10 @@ export function FriendsPanel({
 
   return (
     <div className="panel panel-flush">
-      {/* The account's ambient controls lead the panel, glued to the profile banner above: the
-          connection line, the presence/status picker (the account's own state, published not
-          read), and the people-search + New-conversation affordances that every section below
-          them starts from. The headings then name what follows. */}
+      {/* The account's ambient line, then the people-search + New-conversation affordances
+          every list below starts from. The presence and status controls moved up to the
+          profile banner, where the account's own identity lives. */}
       <ConnectionBadge />
-      <PresencePicker state={myPresence} status={myStatus} onChange={onPresenceChange} />
 
       <form className="panel-search" role="search" onSubmit={(event) => void onSearch(event)}>
         <input
@@ -289,7 +265,48 @@ export function FriendsPanel({
         </button>
       </form>
 
-      <h1 className="panel-title">Friends</h1>
+      {/* One title, not two: the panel is "Friends" and the lists beneath it are its views —
+          the right-aligned icons switch between them, and each carries its count when there is
+          something to count, so a pending request is visible without visiting it. */}
+      <div className="panel-head">
+        <h1 className="panel-title">Friends</h1>
+        <div className="panel-head-icons" role="group" aria-label="Friend lists">
+          <button
+            type="button"
+            className={`panel-head-icon${view === 'requests' ? ' chosen' : ''}`}
+            aria-pressed={view === 'requests'}
+            title="Requests"
+            onClick={() => setView('requests')}
+          >
+            <Icon name="user-plus" size={16} />
+            {incoming.length > 0 ? (
+              <span className="panel-head-count">{incoming.length}</span>
+            ) : null}
+          </button>
+          <button
+            type="button"
+            className={`panel-head-icon${view === 'blocked' ? ' chosen' : ''}`}
+            aria-pressed={view === 'blocked'}
+            title="Blocked"
+            onClick={() => setView('blocked')}
+          >
+            <Icon name="block" size={16} />
+            {blocked.length > 0 ? <span className="panel-head-count">{blocked.length}</span> : null}
+          </button>
+          <button
+            type="button"
+            className={`panel-head-icon${view === 'suggestions' ? ' chosen' : ''}`}
+            aria-pressed={view === 'suggestions'}
+            title="Suggestions"
+            onClick={() => setView('suggestions')}
+          >
+            <Icon name="sparkle" size={16} />
+            {suggestions.length > 0 ? (
+              <span className="panel-head-count">{suggestions.length}</span>
+            ) : null}
+          </button>
+        </div>
+      </div>
 
       {error ? <p className="form-error">{error}</p> : null}
 
@@ -297,11 +314,11 @@ export function FriendsPanel({
         <div className="center-fill">
           <Spinner />
         </div>
-      ) : (
+      ) : view === 'friends' ? (
         <>
-          {/* The contact list leads: friends, presence-first, before anything administrative. */}
+          {/* The contact list leads: friends, presence-first, before anything administrative.
+              No heading of its own — the panel title is the list's name. */}
           <section className="panel-section" aria-label="Your friends">
-            <h2 className="panel-heading">Friends</h2>
             {friends.length === 0 ? (
               <p className="muted">No friends yet. Add someone from the suggestions below.</p>
             ) : (
@@ -323,70 +340,6 @@ export function FriendsPanel({
               ))
             )}
           </section>
-
-          <section className="panel-section" aria-label="Friend requests">
-            <h2 className="panel-heading">Requests</h2>
-            {incoming.length === 0 && outgoing.length === 0 ? (
-              <p className="muted">No pending requests.</p>
-            ) : (
-              <>
-                {incoming.map((entry) => (
-                  <PersonRow
-                    key={entry.userId}
-                    id={entry.userId}
-                    name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
-                    username={profiles.get(entry.userId)?.username}
-                    avatarUrl={profiles.get(entry.userId)?.avatarUrl}
-                    note="wants to be friends"
-                    actions={
-                      <>
-                        <button
-                          type="button"
-                          className="btn btn-primary"
-                          disabled={busy.has(entry.userId)}
-                          onClick={() => void act(entry.userId, () => respond(entry.userId, true))}
-                        >
-                          Accept
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-ghost"
-                          disabled={busy.has(entry.userId)}
-                          onClick={() => void act(entry.userId, () => respond(entry.userId, false))}
-                        >
-                          Decline
-                        </button>
-                      </>
-                    }
-                  />
-                ))}
-                {outgoing.map((entry) => (
-                  <PersonRow
-                    key={entry.userId}
-                    id={entry.userId}
-                    name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
-                    username={profiles.get(entry.userId)?.username}
-                    avatarUrl={profiles.get(entry.userId)?.avatarUrl}
-                    note="request sent"
-                  />
-                ))}
-              </>
-            )}
-          </section>
-
-          <BlockedSection
-            entries={blocked}
-            profiles={profiles}
-            onSelect={(userId) => setSelected(userId)}
-          />
-
-          <MutedSection
-            entries={mutedEntries}
-            profiles={profiles}
-            busy={busy}
-            onSelect={(userId) => setSelected(userId)}
-            onUnmute={(userId) => void unmute(userId)}
-          />
 
           {results !== null ? (
             <section className="panel-section" aria-label="Search results">
@@ -417,33 +370,97 @@ export function FriendsPanel({
             </section>
           ) : null}
 
-          <section className="panel-section" aria-label="Suggested friends">
-            <h2 className="panel-heading">Suggestions</h2>
-            {suggestions.length === 0 ? (
-              <p className="muted">No suggestions right now.</p>
-            ) : (
-              suggestions.map((person) => (
+          <MutedSection
+            entries={mutedEntries}
+            profiles={profiles}
+            busy={busy}
+            onSelect={(userId) => setSelected(userId)}
+            onUnmute={(userId) => void unmute(userId)}
+          />
+        </>
+      ) : view === 'requests' ? (
+        <section className="panel-section" aria-label="Friend requests">
+          <h2 className="panel-heading">Requests</h2>
+          {incoming.length === 0 && outgoing.length === 0 ? (
+            <p className="muted">No pending requests.</p>
+          ) : (
+            <>
+              {incoming.map((entry) => (
                 <PersonRow
-                  key={person.accountId}
-                  id={person.accountId}
-                  name={person.displayName}
-                  username={person.username}
-                  note={mutualNote(person)}
+                  key={entry.userId}
+                  id={entry.userId}
+                  name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
+                  username={profiles.get(entry.userId)?.username}
+                  avatarUrl={profiles.get(entry.userId)?.avatarUrl}
+                  note="wants to be friends"
                   actions={
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      disabled={busy.has(person.accountId)}
-                      onClick={() => void act(person.accountId, () => request(person.accountId))}
-                    >
-                      Add friend
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        disabled={busy.has(entry.userId)}
+                        onClick={() => void act(entry.userId, () => respond(entry.userId, true))}
+                      >
+                        Accept
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        disabled={busy.has(entry.userId)}
+                        onClick={() => void act(entry.userId, () => respond(entry.userId, false))}
+                      >
+                        Decline
+                      </button>
+                    </>
                   }
                 />
-              ))
-            )}
-          </section>
-        </>
+              ))}
+              {outgoing.map((entry) => (
+                <PersonRow
+                  key={entry.userId}
+                  id={entry.userId}
+                  name={profiles.get(entry.userId)?.displayName ?? 'Someone'}
+                  username={profiles.get(entry.userId)?.username}
+                  avatarUrl={profiles.get(entry.userId)?.avatarUrl}
+                  note="request sent"
+                />
+              ))}
+            </>
+          )}
+        </section>
+      ) : view === 'blocked' ? (
+        <BlockedSection
+          entries={blocked}
+          profiles={profiles}
+          onSelect={(userId) => setSelected(userId)}
+        />
+      ) : (
+        <section className="panel-section" aria-label="Suggested friends">
+          <h2 className="panel-heading">Suggestions</h2>
+          {suggestions.length === 0 ? (
+            <p className="muted">No suggestions right now.</p>
+          ) : (
+            suggestions.map((person) => (
+              <PersonRow
+                key={person.accountId}
+                id={person.accountId}
+                name={person.displayName}
+                username={person.username}
+                note={mutualNote(person)}
+                actions={
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={busy.has(person.accountId)}
+                    onClick={() => void act(person.accountId, () => request(person.accountId))}
+                  >
+                    Add friend
+                  </button>
+                }
+              />
+            ))
+          )}
+        </section>
       )}
 
       {selected !== null ? (

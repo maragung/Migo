@@ -50,7 +50,9 @@ export type IconName =
   | 'shield'
   | 'pin'
   | 'file'
-  | 'download';
+  | 'download'
+  | 'user-plus'
+  | 'block';
 
 /** The drawn body of each icon, as `<path>`/`<circle>` elements under one `<g>`. */
 const GLYPHS: Readonly<Record<IconName, ReactNode>> = {
@@ -111,6 +113,19 @@ const GLYPHS: Readonly<Record<IconName, ReactNode>> = {
     <>
       <circle cx="12" cy="8" r="4" />
       <path d="M4.5 20c.8-3.4 3.7-5.5 7.5-5.5s6.7 2.1 7.5 5.5" />
+    </>
+  ),
+  'user-plus': (
+    <>
+      <circle cx="9.5" cy="8" r="3.5" />
+      <path d="M3.5 19.5c.7-3 2.6-4.5 6-4.5 1 0 1.9.15 2.7.45" />
+      <path d="M17.5 13.5v6M14.5 16.5h6" />
+    </>
+  ),
+  block: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="m6 6 12 12" />
     </>
   ),
   settings: (
