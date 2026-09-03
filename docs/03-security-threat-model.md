@@ -43,14 +43,14 @@ The UI must state the actual guarantee, plainly. Overstating it is worse than no
 
 ### Primitives — audited libraries only
 
-| Purpose          | Rust                                    | TypeScript                       |
-| ---------------- | --------------------------------------- | -------------------------------- |
-| Signing          | `ed25519-dalek`                         | `@noble/curves/ed25519`          |
-| Key agreement    | `x25519-dalek`                          | `@noble/curves/ed25519` (X25519) |
-| AEAD             | `chacha20poly1305` (XChaCha20-Poly1305) | `@noble/ciphers/chacha`          |
-| KDF              | `hkdf` + `sha2`                         | `@noble/hashes/hkdf`             |
+| Purpose            | Rust                                    | TypeScript                       |
+| ------------------ | --------------------------------------- | -------------------------------- |
+| Signing            | `ed25519-dalek`                         | `@noble/curves/ed25519`          |
+| Key agreement      | `x25519-dalek`                          | `@noble/curves/ed25519` (X25519) |
+| AEAD               | `chacha20poly1305` (XChaCha20-Poly1305) | `@noble/ciphers/chacha`          |
+| KDF                | `hkdf` + `sha2`                         | `@noble/hashes/hkdf`             |
 | Passphrase hashing | `argon2` (Argon2id)                     | server-side only                 |
-| CSPRNG           | `getrandom` / OS                        | `crypto.getRandomValues`         |
+| CSPRNG             | `getrandom` / OS                        | `crypto.getRandomValues`         |
 
 Rules, without exception:
 

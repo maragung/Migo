@@ -602,7 +602,11 @@ export default function App() {
                       onClick={() => setShowPassphrase(!showPassphrase)}
                       className="absolute right-3 top-3 text-slate-400 hover:text-cyan-700 transition"
                     >
-                      {showPassphrase ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      {showPassphrase ? (
+                        <EyeOff className="w-4 h-4" />
+                      ) : (
+                        <Eye className="w-4 h-4" />
+                      )}
                     </button>
                   </div>
                   <button

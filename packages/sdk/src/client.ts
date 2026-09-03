@@ -747,7 +747,10 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
    * the realtime transport is re-authenticated with the new credential so live events keep
    * flowing without a reconnect.
    */
-  async changePassphrase(params: { current_passphrase: string; new_passphrase: string }): Promise<Grant> {
+  async changePassphrase(params: {
+    current_passphrase: string;
+    new_passphrase: string;
+  }): Promise<Grant> {
     const ctx = this.#requireConnected();
     const refreshed = await this.#bootstrap.changePassphrase(ctx.grant.accessToken, params);
     await ctx.transport.reauthenticate(refreshed.accessToken, refreshed.deviceId);

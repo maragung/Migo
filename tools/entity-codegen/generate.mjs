@@ -389,7 +389,10 @@ for (const file of readdirSync(MIGRATIONS)
       const [, name, from, to] = renameColumn;
       const target = tables.find((t) => t.name === name);
       if (!target) {
-        fail(where, `alter table renames a column of "${name}", which no earlier migration creates`);
+        fail(
+          where,
+          `alter table renames a column of "${name}", which no earlier migration creates`,
+        );
         continue;
       }
       const column = target.columns.find((c) => c.name === from);
