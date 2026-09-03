@@ -23,6 +23,7 @@ import com.migo.app.model.AppState
 import com.migo.app.ui.AlertsScreen
 import com.migo.app.ui.BannerAction
 import com.migo.app.ui.ChatScreen
+import com.migo.app.ui.ChatsScreen
 import com.migo.app.ui.ErrorBanner
 import com.migo.app.ui.FriendsScreen
 import com.migo.app.ui.GamesScreen
