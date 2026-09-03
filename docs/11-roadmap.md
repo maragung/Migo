@@ -14,7 +14,7 @@ store and connection manager, docs and ADRs, dev tooling.
 
 ## Phase 1 — Identity & private chat _(current)_
 
-Registration and login (password + passkey scaffolding), device sessions with rotating
+Registration and login (passphrase + passkey scaffolding), device sessions with rotating
 refresh tokens, profile basics, prekey publication and bundle fetch, 1:1 chat with X3DH +
 Double Ratchet, cursor sync, receipts, offline queue, reconnect/resume, web client chat UI,
 Android client skeleton, single-region gateway.

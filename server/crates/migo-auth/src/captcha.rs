@@ -3,7 +3,7 @@
 //! Authentication against the public internet is gated by three layers in
 //! order: a per-network rate limit (the one [`migo_ratelimit`] charges
 //! before any work), a captcha on the bootstrap surface after enough
-//! failures from the same network, and the password check itself. The
+//! failures from the same network, and the passphrase check itself. The
 //! captcha is the layer this module owns.
 //!
 //! The route layer issues challenges (one ticket per `POST
@@ -62,7 +62,7 @@ pub struct CaptchaGate {
     /// Persists the challenges between issue and verify.
     store: Arc<dyn CaptchaStore + Send + Sync>,
     /// Consecutive failure count per network. Cleared on success and
-    /// ticked up on a sign-in that hit a wrong password past the
+    /// ticked up on a sign-in that hit a wrong passphrase past the
     /// threshold. See the module docs for the model.
     attempts: Mutex<HashMap<IpAddr, u32>>,
     /// How many failures in a row from the same network force the next

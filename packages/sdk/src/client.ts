@@ -740,16 +740,16 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   }
 
   /**
-   * Changes the authenticated account's password.
+   * Changes the authenticated account's passphrase.
    *
    * The server returns a fresh grant with a new access token and refresh token; the new grant
    * replaces the in-memory one (so the access token used to call this is no longer valid), and
    * the realtime transport is re-authenticated with the new credential so live events keep
    * flowing without a reconnect.
    */
-  async changePassword(params: { current_password: string; new_password: string }): Promise<Grant> {
+  async changePassphrase(params: { current_passphrase: string; new_passphrase: string }): Promise<Grant> {
     const ctx = this.#requireConnected();
-    const refreshed = await this.#bootstrap.changePassword(ctx.grant.accessToken, params);
+    const refreshed = await this.#bootstrap.changePassphrase(ctx.grant.accessToken, params);
     await ctx.transport.reauthenticate(refreshed.accessToken, refreshed.deviceId);
     this.#ctx = { ...ctx, grant: refreshed };
     return refreshed;
@@ -791,15 +791,15 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   }
 
   /**
-   * Applies a recovery token (out-of-band) to set a new password.
+   * Applies a recovery token (out-of-band) to set a new passphrase.
    *
-   * The caller is responsible for routing the new password to the user through whatever channel
-   * the operator chose; this method only validates the token server-side and sets the password.
+   * The caller is responsible for routing the new passphrase to the user through whatever channel
+   * the operator chose; this method only validates the token server-side and sets the passphrase.
    */
   async confirmRecovery(params: {
     token_id: Id;
     token: string;
-    new_password: string;
+    new_passphrase: string;
   }): Promise<{ ok: true }> {
     return this.#bootstrap.confirmRecovery(params);
   }

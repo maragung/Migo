@@ -8,15 +8,15 @@
 //! The tests are written against the properties that would be expensive to get wrong in
 //! production, not against the shape of the code: that a stolen refresh token is worth
 //! minutes, that a revoked session stops working on the next request, that an unknown
-//! account and a wrong password are indistinguishable, and that a network address never
+//! account and a wrong passphrase are indistinguishable, and that a network address never
 //! reaches storage in full.
 
 use std::net::IpAddr;
 use std::sync::Arc;
 
 use migo_auth::{
-    Auth, Authenticator, DeviceClaim, Grant, PasswordChange, Refresh, Registration, RequestContext,
-    SignIn,
+    Auth, Authenticator, DeviceClaim, Grant, PassphraseChange, Refresh, Registration,
+    RequestContext, SignIn,
 };
 use migo_cache::MemoryCache;
 use migo_core::config::Config;
@@ -36,8 +36,8 @@ const HOUR: i64 = 60 * MINUTE;
 /// One day.
 const DAY: i64 = 24 * HOUR;
 
-/// A password long enough to pass the length rule and absent from the common list.
-const GOOD_PASSWORD: &str = "sunflower gravel bicycle";
+/// A passphrase long enough to pass the length rule and absent from the common list.
+const GOOD_PASSPHRASE: &str = "sunflower gravel bicycle";
 
 /// Base64 for thirty-two bytes, which is exactly the minimum key length.
 ///
@@ -145,13 +145,13 @@ fn context_from(millis: i64, ip: &str) -> RequestContext {
     RequestContext::at(Timestamp::from_millis(millis)).from_ip(ip.parse::<IpAddr>().unwrap())
 }
 
-/// A registration for `username`, with a good password and a web device.
+/// A registration for `username`, with a good passphrase and a web device.
 fn registration(username: &str) -> Registration {
     Registration {
         username: username.to_string(),
         email: None,
         phone: None,
-        password: Secret::new(GOOD_PASSWORD),
+        passphrase: Secret::new(GOOD_PASSPHRASE),
         locale: "en".to_string(),
         country: Some("ID".to_string()),
         gender: None,
@@ -162,11 +162,11 @@ fn registration(username: &str) -> Registration {
     }
 }
 
-/// A sign-in for `identifier` with the good password on a new device.
+/// A sign-in for `identifier` with the good passphrase on a new device.
 fn sign_in(identifier: &str) -> SignIn {
     SignIn {
         identifier: identifier.to_string(),
-        password: Secret::new(GOOD_PASSWORD),
+        passphrase: Secret::new(GOOD_PASSPHRASE),
         device: DeviceClaim::new(Platform::Web, "Firefox on Linux"),
         captcha: None,
         server: None,
@@ -218,12 +218,12 @@ async fn registration_returns_a_usable_session() {
         .expect("the account is stored under its folded name");
     assert_eq!(account.account_id, grant.account_id);
     assert_ne!(
-        account.password_hash.expose(),
-        GOOD_PASSWORD,
-        "the password is never stored as itself"
+        account.passphrase_hash.expose(),
+        GOOD_PASSPHRASE,
+        "the passphrase is never stored as itself"
     );
     assert!(
-        account.password_hash.expose().starts_with("$argon2id$"),
+        account.passphrase_hash.expose().starts_with("$argon2id$"),
         "the stored hash is Argon2id and says so"
     );
 }
@@ -319,16 +319,16 @@ async fn a_reserved_username_never_reaches_the_store() {
 }
 
 #[tokio::test]
-async fn a_weak_password_is_refused_before_any_hashing() {
+async fn a_weak_passphrase_is_refused_before_any_hashing() {
     let harness = Harness::new();
     let mut request = registration("ada");
-    request.password = Secret::new("short");
+    request.passphrase = Secret::new("short");
     let error = harness
         .auth
         .register(request, &context(1_000))
         .await
-        .expect_err("a short password is refused");
-    assert_eq!(error.code(), codes::WEAK_PASSWORD);
+        .expect_err("a short passphrase is refused");
+    assert_eq!(error.code(), codes::WEAK_PASSPHRASE);
 }
 
 #[tokio::test]
@@ -385,7 +385,7 @@ async fn sign_in_works_by_email() {
 }
 
 #[tokio::test]
-async fn an_unknown_account_and_a_wrong_password_are_indistinguishable() {
+async fn an_unknown_account_and_a_wrong_passphrase_are_indistinguishable() {
     let harness = Harness::new();
     harness.register_at("ada", 1_000).await;
 
@@ -396,12 +396,12 @@ async fn an_unknown_account_and_a_wrong_password_are_indistinguishable() {
         .expect_err("there is no such account");
 
     let mut wrong = sign_in("ada");
-    wrong.password = Secret::new("not the right passphrase");
+    wrong.passphrase = Secret::new("not the right passphrase");
     let bad = harness
         .auth
         .sign_in(wrong, &context_from(3_000, "198.51.100.9"))
         .await
-        .expect_err("the password is wrong");
+        .expect_err("the passphrase is wrong");
 
     assert_eq!(unknown.code(), codes::INVALID_CREDENTIALS);
     assert_eq!(bad.code(), codes::INVALID_CREDENTIALS);
@@ -413,7 +413,7 @@ async fn an_unknown_account_and_a_wrong_password_are_indistinguishable() {
 }
 
 #[tokio::test]
-async fn a_suspended_account_is_only_told_so_after_its_password_verifies() {
+async fn a_suspended_account_is_only_told_so_after_its_passphrase_verifies() {
     let harness = Harness::new();
     let grant = harness.register_at("ada", 1_000).await;
     harness
@@ -428,20 +428,20 @@ async fn a_suspended_account_is_only_told_so_after_its_password_verifies() {
         .unwrap();
 
     let mut wrong = sign_in("ada");
-    wrong.password = Secret::new("not the right passphrase");
-    let with_wrong_password = harness
+    wrong.passphrase = Secret::new("not the right passphrase");
+    let with_wrong_passphrase = harness
         .auth
         .sign_in(wrong, &context_from(2_000, "198.51.100.4"))
         .await
-        .expect_err("a wrong password does not get to learn about the suspension");
-    assert_eq!(with_wrong_password.code(), codes::INVALID_CREDENTIALS);
+        .expect_err("a wrong passphrase does not get to learn about the suspension");
+    assert_eq!(with_wrong_passphrase.code(), codes::INVALID_CREDENTIALS);
 
-    let with_right_password = harness
+    let with_right_passphrase = harness
         .auth
         .sign_in(sign_in("ada"), &context_from(3_000, "198.51.100.9"))
         .await
         .expect_err("the account cannot sign in");
-    assert_eq!(with_right_password.code(), codes::ACCOUNT_SUSPENDED);
+    assert_eq!(with_right_passphrase.code(), codes::ACCOUNT_SUSPENDED);
 }
 
 #[tokio::test]
@@ -863,7 +863,7 @@ async fn signing_out_others_spares_the_caller() {
 }
 
 #[tokio::test]
-async fn signing_out_others_requires_a_recent_password() {
+async fn signing_out_others_requires_a_recent_passphrase() {
     let harness = Harness::new();
     let grant = harness.register_at("ada", 1_000).await;
     let identity = identify(&harness.auth, &grant, 2_000).await.unwrap();
@@ -872,7 +872,7 @@ async fn signing_out_others_requires_a_recent_password() {
         .auth
         .sign_out_others(&identity, &context(HOUR))
         .await
-        .expect_err("the password was typed an hour ago");
+        .expect_err("the passphrase was typed an hour ago");
     assert_eq!(error.code(), codes::REAUTHENTICATION_REQUIRED);
 }
 
@@ -933,11 +933,11 @@ async fn revoking_another_accounts_device_reads_as_not_found() {
 }
 
 // ---------------------------------------------------------------------------
-// Password change
+// Passphrase change
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn changing_a_password_ends_every_session_and_returns_a_replacement() {
+async fn changing_a_passphrase_ends_every_session_and_returns_a_replacement() {
     let harness = Harness::new();
     let first = harness.register_at("ada", 1_000).await;
     let second = harness
@@ -949,10 +949,10 @@ async fn changing_a_password_ends_every_session_and_returns_a_replacement() {
     let identity = identify(&harness.auth, &first, 3_000).await.unwrap();
     let replacement = harness
         .auth
-        .change_password(
+        .change_passphrase(
             &identity,
-            PasswordChange {
-                current: Secret::new(GOOD_PASSWORD),
+            PassphraseChange {
+                current: Secret::new(GOOD_PASSPHRASE),
                 next: Secret::new("pelican trombone lantern"),
             },
             &context(3_000),
@@ -970,13 +970,13 @@ async fn changing_a_password_ends_every_session_and_returns_a_replacement() {
         .await
         .expect("the replacement grant keeps the caller signed in");
 
-    // The new password is the one that works.
+    // The new passphrase is the one that works.
     harness
         .auth
         .sign_in(
             SignIn {
                 identifier: "ada".to_string(),
-                password: Secret::new("pelican trombone lantern"),
+                passphrase: Secret::new("pelican trombone lantern"),
                 device: DeviceClaim::new(Platform::Web, "Firefox on Linux"),
                 captcha: None,
                 server: None,
@@ -984,7 +984,7 @@ async fn changing_a_password_ends_every_session_and_returns_a_replacement() {
             &context_from(5_000, "198.51.100.20"),
         )
         .await
-        .expect("the new password works");
+        .expect("the new passphrase works");
     harness
         .auth
         .sign_in(sign_in("ada"), &context_from(6_000, "198.51.100.30"))
@@ -993,23 +993,23 @@ async fn changing_a_password_ends_every_session_and_returns_a_replacement() {
 }
 
 #[tokio::test]
-async fn changing_a_password_requires_the_current_one() {
+async fn changing_a_passphrase_requires_the_current_one() {
     let harness = Harness::new();
     let grant = harness.register_at("ada", 1_000).await;
     let identity = identify(&harness.auth, &grant, 2_000).await.unwrap();
 
     let error = harness
         .auth
-        .change_password(
+        .change_passphrase(
             &identity,
-            PasswordChange {
-                current: Secret::new("not the current password"),
+            PassphraseChange {
+                current: Secret::new("not the current passphrase"),
                 next: Secret::new("pelican trombone lantern"),
             },
             &context(2_000),
         )
         .await
-        .expect_err("the current password is wrong");
+        .expect_err("the current passphrase is wrong");
     assert_eq!(error.code(), codes::INVALID_CREDENTIALS);
 
     identify(&harness.auth, &grant, 3_000)
@@ -1018,30 +1018,30 @@ async fn changing_a_password_requires_the_current_one() {
 }
 
 #[tokio::test]
-async fn a_weak_replacement_password_is_refused() {
+async fn a_weak_replacement_passphrase_is_refused() {
     let harness = Harness::new();
     let grant = harness.register_at("ada", 1_000).await;
     let identity = identify(&harness.auth, &grant, 2_000).await.unwrap();
 
     let error = harness
         .auth
-        .change_password(
+        .change_passphrase(
             &identity,
-            PasswordChange {
-                current: Secret::new(GOOD_PASSWORD),
+            PassphraseChange {
+                current: Secret::new(GOOD_PASSPHRASE),
                 next: Secret::new("ada"),
             },
             &context(2_000),
         )
         .await
         .expect_err("the replacement is too short and contains the username");
-    assert_eq!(error.code(), codes::WEAK_PASSWORD);
+    assert_eq!(error.code(), codes::WEAK_PASSPHRASE);
 
     harness
         .auth
         .sign_in(sign_in("ada"), &context_from(3_000, "198.51.100.4"))
         .await
-        .expect("the old password still works");
+        .expect("the old passphrase still works");
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,12 +1103,12 @@ async fn a_session_records_a_network_class_and_never_a_full_address() {
 }
 
 #[tokio::test]
-async fn a_grant_does_not_carry_the_password_anywhere() {
+async fn a_grant_does_not_carry_the_passphrase_anywhere() {
     let harness = Harness::new();
     let grant = harness.register_at("ada", 1_000).await;
 
-    assert!(!grant.access_token.contains(GOOD_PASSWORD));
-    assert!(!grant.refresh_token.expose().contains(GOOD_PASSWORD));
+    assert!(!grant.access_token.contains(GOOD_PASSPHRASE));
+    assert!(!grant.refresh_token.expose().contains(GOOD_PASSPHRASE));
     let debugged = format!("{:?}", grant.refresh_token);
     assert!(
         !debugged.contains(grant.refresh_token.expose()),
@@ -1121,7 +1121,7 @@ async fn metrics_carry_no_account_or_address() {
     let harness = Harness::new();
     harness.register_at("ada", 1_000).await;
     let mut wrong = sign_in("ada");
-    wrong.password = Secret::new("not the right passphrase");
+    wrong.passphrase = Secret::new("not the right passphrase");
     let _ = harness
         .auth
         .sign_in(wrong, &context_from(2_000, "198.51.100.4"))
@@ -1144,17 +1144,17 @@ async fn metrics_carry_no_account_or_address() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn a_wrong_password_costs_the_whole_anonymous_budget() {
+async fn a_wrong_passphrase_costs_the_whole_anonymous_budget() {
     let harness = Harness::new();
     harness.register_at("ada", 1_000).await;
 
     let mut wrong = sign_in("ada");
-    wrong.password = Secret::new("not the right passphrase");
+    wrong.passphrase = Secret::new("not the right passphrase");
     let first = harness
         .auth
         .sign_in(wrong, &context_from(2_000, "198.51.100.4"))
         .await
-        .expect_err("the password is wrong");
+        .expect_err("the passphrase is wrong");
     assert_eq!(first.code(), codes::INVALID_CREDENTIALS);
 
     // The attempt plus the surcharge is the whole bucket, so the next request from the
@@ -1172,7 +1172,7 @@ async fn a_wrong_password_costs_the_whole_anonymous_budget() {
 }
 
 #[tokio::test]
-async fn a_correct_password_leaves_room_for_more() {
+async fn a_correct_passphrase_leaves_room_for_more() {
     let harness = Harness::new();
     harness.register_at("ada", 1_000).await;
 
@@ -1193,7 +1193,7 @@ async fn pressure_is_per_network_and_not_per_account() {
     harness.register_at("ada", 1_000).await;
 
     let mut wrong = sign_in("ada");
-    wrong.password = Secret::new("not the right passphrase");
+    wrong.passphrase = Secret::new("not the right passphrase");
     harness
         .auth
         .sign_in(wrong, &context_from(2_000, "198.51.100.4"))
@@ -1395,7 +1395,7 @@ async fn a_registration_retry_folds_into_the_account_it_already_made() {
         .await;
     assert!(
         dup.is_err(),
-        "a password-only registration of the taken name is still refused"
+        "a passphrase-only registration of the taken name is still refused"
     );
 }
 
@@ -1426,22 +1426,22 @@ async fn a_retry_with_someone_elses_keys_is_refused() {
 }
 
 #[tokio::test]
-async fn a_retry_with_the_right_key_but_a_wrong_password_is_refused() {
+async fn a_retry_with_the_right_key_but_a_wrong_passphrase_is_refused() {
     let harness = Harness::new();
     let set = RootSet::new(0xbb, 0xcc);
     register_with_root(&harness, "robin", &set).await;
 
-    // The key matches but the password does not: reconcile never becomes a
-    // password oracle, and the answer is the generic invalid-credentials
+    // The key matches but the passphrase does not: reconcile never becomes a
+    // passphrase oracle, and the answer is the generic invalid-credentials
     // fault rather than anything name-specific.
     let mut request = registration("robin");
-    request.password = Secret::new("wrong horse wrong staple");
+    request.passphrase = Secret::new("wrong horse wrong staple");
     request.identity_public_key = Some(set.identity.public_key().to_vec());
     let refused = harness
         .auth
         .register(request, &ceremony_context(2_000, 9))
         .await
-        .expect_err("a wrong password never reconciles");
+        .expect_err("a wrong passphrase never reconciles");
     assert_eq!(
         refused.code(),
         migo_protocol::codes::INVALID_CREDENTIALS,
@@ -1725,7 +1725,7 @@ async fn an_add_device_challenge_restores_the_account_onto_a_new_device() {
 }
 
 #[tokio::test]
-async fn a_password_account_can_adopt_its_root_secret_once() {
+async fn a_passphrase_account_can_adopt_its_root_secret_once() {
     let harness = Harness::new();
     let set = RootSet::new(0x05, 0x06);
     let grant = harness.register_at("vera", 1_000).await;

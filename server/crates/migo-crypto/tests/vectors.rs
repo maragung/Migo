@@ -120,7 +120,7 @@ fn kind(error: &CryptoError) -> &'static str {
         CryptoError::ChainGapTooLarge => "ChainGapTooLarge",
         CryptoError::KeyAlreadyUsed => "KeyAlreadyUsed",
         CryptoError::MalformedHeader => "MalformedHeader",
-        CryptoError::PasswordHash => "PasswordHash",
+        CryptoError::PassphraseHash => "PassphraseHash",
         CryptoError::InvalidPrekeyBundle => "InvalidPrekeyBundle",
     }
 }

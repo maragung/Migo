@@ -23,7 +23,7 @@ export interface Config {
   readonly locale: string;
   readonly country: string;
   readonly usernamePrefix: string;
-  readonly password: string | undefined;
+  readonly passphrase: string | undefined;
   readonly requestTimeoutMs: number;
   readonly maxErrorRate: number;
   readonly output: 'text' | 'json';
@@ -98,7 +98,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv): Pars
     locale: values.get('locale') ?? 'en-US',
     country: values.get('country') ?? 'ID',
     usernamePrefix: values.get('prefix') ?? 'loadgen',
-    password: values.get('password'),
+    passphrase: values.get('passphrase'),
     requestTimeoutMs: parsePositiveInt(
       'request-timeout-ms',
       values.get('request-timeout-ms'),
@@ -204,7 +204,7 @@ OPTIONS
   --locale <l>               account locale (default: en-US)
   --country <c>              account country (default: ID)
   --prefix <s>               username prefix for generated accounts (default: loadgen)
-  --password <s>             password for generated accounts (default: generated per run)
+  --passphrase <s>             passphrase for generated accounts (default: generated per run)
   --request-timeout-ms <n>   per-request timeout in milliseconds (default: 15000)
   --max-error-rate <f>       fail (exit 3) if the error fraction exceeds this 0..1 (default: 1)
   --output <text|json>       report format on stdout (default: text)

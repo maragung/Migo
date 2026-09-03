@@ -57,7 +57,7 @@ import java.time.temporal.ChronoUnit
  *
  * Dismissable rather than timed. A message that disappears on its own is a message somebody misses
  * while they are looking at the keyboard, and every failure this app reports is one a person may want
- * to read twice -- a wrong password, a server that cannot be reached, a send that did not go.
+ * to read twice -- a wrong passphrase, a server that cannot be reached, a send that did not go.
  */
 @Composable
 fun ErrorBanner(message: String?, onDismiss: () -> Unit, modifier: Modifier = Modifier) {

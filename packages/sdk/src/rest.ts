@@ -5,11 +5,11 @@
  * A client cannot open the realtime transport without an access token, and it cannot get an access
  * token over a transport it has not opened yet. Section 118 permits exactly this bootstrap over
  * REST and nothing more — once a session is minted, everything else happens on the socket. Beyond
- * the password bootstrap ({@link BootstrapClient.register}, {@link BootstrapClient.login},
+ * the passphrase bootstrap ({@link BootstrapClient.register}, {@link BootstrapClient.login},
  * {@link BootstrapClient.refresh}, {@link BootstrapClient.logout}, {@link BootstrapClient.config})
- * it also carries the account-management calls that sit beside a session — sessions, password,
+ * it also carries the account-management calls that sit beside a session — sessions, passphrase,
  * recovery, contact — and the ML-DSA identity ceremonies with the device and wallet registry they
- * unlock, which a client holding a `.migo` account root uses instead of a password (§182).
+ * unlock, which a client holding a `.migo` account root uses instead of a passphrase (§182).
  *
  * The wire format here is REST-native JSON in snake_case, which is not the camelCase the protocol
  * structs use on the socket — so this module maps between the two by hand rather than sharing the
@@ -87,7 +87,7 @@ export interface CaptchaProof {
 /** A new-account request. `locale` defaults to the server's own default when omitted. */
 export interface RegisterParams {
   username: string;
-  password: string;
+  passphrase: string;
   email?: string;
   phone?: string;
   locale?: string;
@@ -115,7 +115,7 @@ export interface RegisterParams {
 /** A sign-in request. One identifier field because a user does not separate username from email. */
 export interface LoginParams {
   identifier: string;
-  password: string;
+  passphrase: string;
   device: DeviceDescriptor;
   /**
    * When the server returns `CAPTCHA_REQUIRED` for a state it gates, the client supplies the
@@ -254,7 +254,7 @@ export interface NodeConfig {
 /** The policy limits a client validates its own forms against before sending a doomed request. */
 export interface ConfigLimits {
   allowRegistration: boolean;
-  passwordMinLength: number;
+  passphraseMinLength: number;
   maxDevicesPerUser: number;
   maxBodyBytes: number;
   maxPageSize: number;
@@ -496,7 +496,7 @@ export class BootstrapClient {
   async register(params: RegisterParams): Promise<Grant> {
     const body = {
       username: params.username,
-      password: params.password,
+      passphrase: params.passphrase,
       device: deviceBody(params.device),
       ...(params.email !== undefined ? { email: params.email } : {}),
       ...(params.phone !== undefined ? { phone: params.phone } : {}),
@@ -515,7 +515,7 @@ export class BootstrapClient {
   async login(params: LoginParams): Promise<Grant> {
     const body = {
       identifier: params.identifier,
-      password: params.password,
+      passphrase: params.passphrase,
       device: deviceBody(params.device),
       ...(params.captcha !== undefined ? { captcha: captchaBody(params.captcha) } : {}),
     };
@@ -550,7 +550,7 @@ export class BootstrapClient {
   }
 
   /**
-   * `POST /v1/auth/recovery/request` — start a password-recovery flow.
+   * `POST /v1/auth/recovery/request` — start a passphrase-recovery flow.
    *
    * The server is deliberately enumeration-safe: a real account and a not-found one both answer
    * `{ ok: true }`. The captcha gate is the rate-limiter's defence; the page is generic.
@@ -568,20 +568,20 @@ export class BootstrapClient {
   }
 
   /**
-   * `POST /v1/auth/recovery/confirm` — apply a recovery token to set a new password.
+   * `POST /v1/auth/recovery/confirm` — apply a recovery token to set a new passphrase.
    *
    * `token_id` is the public id of the recovery grant; `token` is the proof (its hash), supplied
-   * out-of-band. On success the new password is set and the caller signs the user in normally.
+   * out-of-band. On success the new passphrase is set and the caller signs the user in normally.
    */
   async confirmRecovery(params: {
     token_id: Id;
     token: string;
-    new_password: string;
+    new_passphrase: string;
   }): Promise<{ ok: true }> {
     const body = {
       token_id: params.token_id,
       token: params.token,
-      new_password: params.new_password,
+      new_passphrase: params.new_passphrase,
     };
     await this.#post('/v1/auth/recovery/confirm', body);
     return { ok: true };
@@ -623,21 +623,21 @@ export class BootstrapClient {
   }
 
   /**
-   * `POST /v1/auth/password` — change the authenticated account's password.
+   * `POST /v1/auth/passphrase` — change the authenticated account's passphrase.
    *
    * On success the server returns a fresh grant; the caller's existing session and refresh token
    * are replaced with new ones.
    */
-  async changePassword(
+  async changePassphrase(
     accessToken: string,
-    params: { current_password: string; new_password: string },
+    params: { current_passphrase: string; new_passphrase: string },
   ): Promise<Grant> {
     return parseGrant(
       await this.#post(
-        '/v1/auth/password',
+        '/v1/auth/passphrase',
         {
-          current_password: params.current_password,
-          new_password: params.new_password,
+          current_passphrase: params.current_passphrase,
+          new_passphrase: params.new_passphrase,
         },
         accessToken,
       ),
@@ -787,7 +787,7 @@ export class BootstrapClient {
 
   /**
    * `POST /v1/auth/identity/key` — publish the caller's identity (and optionally device) public
-   * keys on a password-era account: the legacy upgrade door, idempotent by design. Answers 204.
+   * keys on a passphrase-era account: the legacy upgrade door, idempotent by design. Answers 204.
    */
   async publishIdentityKey(
     accessToken: string,
@@ -926,7 +926,7 @@ export class BootstrapClient {
       features: asBigInt(body['features']),
       limits: {
         allowRegistration: Boolean(limits['allow_registration']),
-        passwordMinLength: Number(limits['password_min_length']),
+        passphraseMinLength: Number(limits['passphrase_min_length']),
         maxDevicesPerUser: Number(limits['max_devices_per_user']),
         maxBodyBytes: Number(limits['max_body_bytes']),
         maxPageSize: Number(limits['max_page_size']),

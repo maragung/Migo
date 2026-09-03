@@ -3,7 +3,7 @@
 /**
  * The server picker's body, mounted inside a sheet from the sign-in and registration cards.
  *
- * The card itself stays sparse — identifier and password, nothing else — and the server choice
+ * The card itself stays sparse — identifier and passphrase, nothing else — and the server choice
  * lives behind one small link in the card's bottom corner. The sheet that opens is where the
  * host, port, and scheme are picked; on "Use this server" the caller's endpoint becomes the new
  * form input and the sheet closes.

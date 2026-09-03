@@ -379,6 +379,57 @@ for (const file of readdirSync(MIGRATIONS)
       continue;
     }
 
+    // `alter table X rename column old to new` and `alter table X rename to Y` move
+    // a name, not a row or a shape. The entities must describe each table as it
+    // exists after every migration has run, so the rename is applied to the entry
+    // the earlier migration left — and, because a foreign key names its target, a
+    // rename also rewrites the references that point at the old name.
+    const renameColumn = /^alter table (\w+) rename column (\w+) to (\w+);\s*$/i.exec(head);
+    if (renameColumn) {
+      const [, name, from, to] = renameColumn;
+      const target = tables.find((t) => t.name === name);
+      if (!target) {
+        fail(where, `alter table renames a column of "${name}", which no earlier migration creates`);
+        continue;
+      }
+      const column = target.columns.find((c) => c.name === from);
+      if (!column) {
+        fail(where, `alter table renames "${from}", which "${name}" does not have`);
+        continue;
+      }
+      if (target.columns.some((c) => c.name === to)) {
+        fail(where, `alter table renames "${from}" to "${to}", which "${name}" already has`);
+        continue;
+      }
+      column.name = to;
+      for (const other of tables) {
+        for (const fk of other.foreignKeys) {
+          if (fk.table === name) fk.references = fk.references.map((c) => (c === from ? to : c));
+        }
+      }
+      continue;
+    }
+    const renameTable = /^alter table (\w+) rename to (\w+);\s*$/i.exec(head);
+    if (renameTable) {
+      const [, from, to] = renameTable;
+      const target = tables.find((t) => t.name === from);
+      if (!target) {
+        fail(where, `alter table renames "${from}", which no earlier migration creates`);
+        continue;
+      }
+      if (tables.some((t) => t.name === to)) {
+        fail(where, `alter table renames "${from}" to "${to}", which another table already uses`);
+        continue;
+      }
+      target.name = to;
+      for (const other of tables) {
+        for (const fk of other.foreignKeys) if (fk.table === from) fk.table = to;
+      }
+      continue;
+    }
+    // `alter index X rename to Y` moves a performance name; the entity never held it.
+    if (/^alter index \w+ rename to \w+;\s*$/i.test(head)) continue;
+
     const open = /^create table (\w+) \(/i.exec(head);
     if (!open) {
       fail(where, `unrecognised statement: ${head.slice(0, 72)}…`);

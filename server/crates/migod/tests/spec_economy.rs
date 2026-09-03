@@ -52,7 +52,7 @@ async fn seed_account(store: &Arc<MemoryStore>, account: u128, username: &str) {
             username: username.to_string(),
             email: None,
             phone: None,
-            password_hash: Secret::new("unused"),
+            passphrase_hash: Secret::new("unused"),
             locale: "id-ID".to_string(),
             country: Some("ID".to_string()),
             created_at: Timestamp::from_millis(NOW),

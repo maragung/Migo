@@ -206,8 +206,8 @@ struct State {
     /// `captcha_challenge` table; expired rows are dropped lazily on read.
     captcha: HashMap<Id, CaptchaRow>,
 
-    /// Password-recovery tokens, keyed by `token_id`. Mirrors the
-    /// `password_recovery` table; consumed or expired rows are dropped by
+    /// Passphrase-recovery tokens, keyed by `token_id`. Mirrors the
+    /// `passphrase_recovery` table; consumed or expired rows are dropped by
     /// the background sweeper.
     recovery: HashMap<Id, RecoveryRow>,
     /// ML-DSA identity keys, keyed by `key_id`. Mirrors the `identity_keys`
@@ -327,7 +327,7 @@ impl AccountStore for MemoryStore {
             username: new.username,
             email: new.email,
             phone: new.phone,
-            password_hash: new.password_hash,
+            passphrase_hash: new.passphrase_hash,
             status: AccountStatus::Active,
             country: canonical_country(new.country.as_deref())?,
             locale: new.locale,
@@ -376,13 +376,13 @@ impl AccountStore for MemoryStore {
             .cloned())
     }
 
-    async fn set_password_hash(&self, account_id: Id, hash: &str, at: Timestamp) -> Result<()> {
+    async fn set_passphrase_hash(&self, account_id: Id, hash: &str, at: Timestamp) -> Result<()> {
         let mut s = self.state.write();
         let account = s
             .accounts
             .get_mut(&account_id)
             .ok_or_else(|| fault::not_found("account"))?;
-        account.password_hash = migo_core::Secret::new(hash);
+        account.passphrase_hash = migo_core::Secret::new(hash);
         account.updated_at = at;
         Ok(())
     }
@@ -2848,14 +2848,14 @@ impl BotStore for MemoryStore {
             return Err(fault::already_exists("bot token"));
         }
 
-        // The account the bot posts under. Its password is the caller's locked hash;
+        // The account the bot posts under. Its passphrase is the caller's locked hash;
         // it has no email or phone, and it starts active like any other.
         let account = Account {
             account_id: new.account_id,
             username: new.username,
             email: None,
             phone: None,
-            password_hash: new.password_hash,
+            passphrase_hash: new.passphrase_hash,
             status: AccountStatus::Active,
             country: None,
             locale: new.locale,

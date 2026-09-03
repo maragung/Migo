@@ -5,7 +5,7 @@
 ## Context
 
 A Migo account today is three unrelated credential stories the user has to
-experience as one: a password the server verifies (§46), an E2EE identity key
+experience as one: a passphrase the server verifies (§46), an E2EE identity key
 pair generated per device with no recovery story at all (§8–11), and no wallet
 domain. Lose the device and the E2EE history is gone by design — the anti-escrow
 principle is correct, but it leaves the honest answer to "how do I move to a new
@@ -64,7 +64,7 @@ Login is a challenge–response over the existing REST surface: the server issue
 a single-use, expiring, purpose-bound challenge in canonical MSE encoding; the
 client signs those exact bytes with context `migo-auth-login-v1`; the server
 verifies against the account's ACTIVE `identity_keys` row and opens an ordinary
-session (ADR-0011 tokens, §46 lockout and rate limits apply unchanged). Password
+session (ADR-0011 tokens, §46 lockout and rate limits apply unchanged). Passphrase
 login remains as a legacy path, and legacy accounts upgrade in place.
 
 The `.migo` container is versioned (format + crypto versions in a fixed header),

@@ -85,7 +85,7 @@ async fn registered_grant(app: &App, username: &str) -> Grant {
                 username: username.to_string(),
                 email: None,
                 phone: None,
-                password: Secret::new("correct-horse-battery-staple"),
+                passphrase: Secret::new("correct-horse-battery-staple"),
                 locale: "en-US".to_string(),
                 country: None,
                 gender: None,

@@ -12,9 +12,9 @@
  *   MIGOD_API_URL        REST origin (e.g. http://localhost:18080)
  *   MIGOD_GATEWAY_URL    WebSocket origin (e.g. ws://localhost:18080/ws)
  *   BOT_ALICE_USERNAME   username for the first account (default: alice-<ts>)
- *   BOT_ALICE_PASSWORD   password for the first account
+ *   BOT_ALICE_PASSPHRASE   passphrase for the first account
  *   BOT_BOB_USERNAME     username for the second account
- *   BOT_BOB_PASSWORD     password for the second account
+ *   BOT_BOB_PASSPHRASE     passphrase for the second account
  *   BOT_ROUNDS           how many round-trip messages (default: 10)
  */
 
@@ -46,7 +46,7 @@ function log(scope: string, message: string) {
 
 interface AccountSpec {
   username: string;
-  password: string;
+  passphrase: string;
   displayName: string;
 }
 
@@ -59,10 +59,10 @@ function envAccount(label: 'alice' | 'bob'): AccountSpec {
   const username =
     (label === 'alice' ? process.env.BOT_ALICE_USERNAME : process.env.BOT_BOB_USERNAME) ??
     `${label}_${stamp}_${suffix}`;
-  const password =
-    (label === 'alice' ? process.env.BOT_ALICE_PASSWORD : process.env.BOT_BOB_PASSWORD) ??
+  const passphrase =
+    (label === 'alice' ? process.env.BOT_ALICE_PASSPHRASE : process.env.BOT_BOB_PASSPHRASE) ??
     `correct-horse-battery-staple-${randomBytes(4).toString('hex')}`;
-  return { username, password, displayName: `${label}_bot` };
+  return { username, passphrase, displayName: `${label}_bot` };
 }
 
 interface InboundCollector {
@@ -150,12 +150,12 @@ async function main(): Promise<void> {
   log('boot', `registering ${alice.username} and ${bob.username}`);
   await aliceClient.register({
     username: alice.username,
-    password: alice.password,
+    passphrase: alice.passphrase,
     locale: LOCALE,
   });
   await bobClient.register({
     username: bob.username,
-    password: bob.password,
+    passphrase: bob.passphrase,
     locale: LOCALE,
   });
   log('boot', `accounts ready: alice=${aliceClient.accountId} bob=${bobClient.accountId}`);

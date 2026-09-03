@@ -22,7 +22,7 @@ export type CryptoErrorKind =
   | 'ChainGapTooLarge'
   | 'KeyAlreadyUsed'
   | 'MalformedHeader'
-  | 'PasswordHash'
+  | 'PassphraseHash'
   | 'InvalidPrekeyBundle';
 
 /** Numbers and static strings only. */
@@ -95,9 +95,9 @@ export class CryptoError extends Error {
     return new CryptoError('MalformedHeader', 'ratchet header is malformed');
   }
 
-  /** Password hashing failed. */
-  static passwordHash(): CryptoError {
-    return new CryptoError('PasswordHash', 'password hashing failed');
+  /** Passphrase hashing failed. */
+  static passphraseHash(): CryptoError {
+    return new CryptoError('PassphraseHash', 'passphrase hashing failed');
   }
 
   /** A prekey bundle that is incomplete or badly signed. */

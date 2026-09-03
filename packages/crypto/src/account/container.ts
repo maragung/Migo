@@ -5,7 +5,7 @@
  *
  * One root secret is the entire account, so one sealed blob is the entire backup: the root, a
  * format version, and a creation timestamp, encrypted under a key derived from a *recovery
- * credential* the user chose — not their password, not their e-mail, not their Google account
+ * credential* the user chose — not their passphrase, not their e-mail, not their Google account
  * (§182). The file is named `.migo`, copied to a cloud drive or a USB stick by the user, and holds
  * only ciphertext: a container in a cloud bucket is Argon2id work for whoever steals the bucket,
  * and nothing else.
@@ -437,6 +437,8 @@ async function containerKey(
 ): Promise<SymmetricKey> {
   let stretched: Uint8Array;
   try {
+    // hash-wasm names its input option `password` — the field belongs to the
+    // library's API, not to our terminology.
     stretched = await argon2id({
       password: ENCODER.encode(credential),
       salt,

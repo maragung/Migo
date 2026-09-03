@@ -77,7 +77,7 @@ export default function App() {
   // Authentication State
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [username, setUsername] = useState('reason007007');
-  const [password, setPassword] = useState('••••••••');
+  const [passphrase, setPassphrase] = useState('••••••••');
   const [rememberMe, setRememberMe] = useState(true);
   const [loginInvisible, setLoginInvisible] = useState(false);
   const [autoLogin, setAutoLogin] = useState(false);
@@ -485,10 +485,10 @@ export default function App() {
                 </div>
                 <div className="relative">
                   <input
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Password"
+                    type="passphrase"
+                    value={passphrase}
+                    onChange={(e) => setPassphrase(e.target.value)}
+                    placeholder="Passphrase"
                     className="w-full px-3 py-2 text-slate-800 bg-white border border-cyan-200 rounded shadow-inner focus:outline-none text-xs"
                     required
                   />

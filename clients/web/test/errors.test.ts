@@ -4,7 +4,7 @@
  * Two brief rules meet in this one small function. Section 161: an internal failure must surface only a
  * public message — never a stack trace, a file path, or an underlying cause. And the auth rule the
  * login screen depends on: a failed sign-in must look identical whether the account does not exist or
- * the password was wrong, because any difference is an account-enumeration oracle. `friendlyError` is
+ * the passphrase was wrong, because any difference is an account-enumeration oracle. `friendlyError` is
  * the only thing standing between a raw thrown value and the string a user reads, so its regressions
  * are silent and serious: a change that returned `String(error)` for the fall-through case would leak
  * the contents of every unexpected exception into the UI, and every functional test would still pass.
@@ -89,12 +89,12 @@ test('an account lockout reaches the person as a wait, never as a symbol', () =>
   assert.ok(!shown.includes('AUTH_LOCKED'), 'the machine symbol never reaches the person');
 });
 
-test('a wrong password and a missing account are indistinguishable to the user', () => {
+test('a wrong passphrase and a missing account are indistinguishable to the user', () => {
   // The server collapses both to one public answer; the client must not re-introduce a difference,
   // e.g. by branching on the numeric code. Two different codes, one identical public message:
-  const wrongPassword = new RemoteError(1001, 'UNAUTHENTICATED', 'Invalid credentials.');
+  const wrongPassphrase = new RemoteError(1001, 'UNAUTHENTICATED', 'Invalid credentials.');
   const noSuchAccount = new RemoteError(1002, 'UNAUTHENTICATED', 'Invalid credentials.');
-  assert.equal(friendlyError(wrongPassword), friendlyError(noSuchAccount));
+  assert.equal(friendlyError(wrongPassphrase), friendlyError(noSuchAccount));
 });
 
 test('a withheld error the client knows by symbol is named in plain words, never as the symbol', () => {
@@ -103,7 +103,7 @@ test('a withheld error the client knows by symbol is named in plain words, never
   // refusal. Each gets its own words, and the machine symbol never reaches the person.
   const cases: Array<[symbol: string, expected: string]> = [
     ['USERNAME_TAKEN', 'That username is already taken. Try another one.'],
-    ['WEAK_PASSWORD', 'That passphrase is too easy to guess. Make it longer and more varied.'],
+    ['WEAK_PASSPHRASE', 'That passphrase is too easy to guess. Make it longer and more varied.'],
     [
       'INVALID_CAPTCHA',
       'That captcha answer did not match. Ask for a new challenge and try again.',

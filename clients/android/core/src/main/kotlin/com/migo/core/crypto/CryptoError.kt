@@ -19,7 +19,7 @@ enum class CryptoErrorKind {
     ChainGapTooLarge,
     KeyAlreadyUsed,
     MalformedHeader,
-    PasswordHash,
+    PassphraseHash,
     InvalidPrekeyBundle,
 }
 
@@ -80,9 +80,9 @@ class CryptoError private constructor(
         fun malformedHeader(): CryptoError =
             CryptoError(CryptoErrorKind.MalformedHeader, "header is malformed", emptyMap())
 
-        /** Password hashing failed. */
-        fun passwordHash(): CryptoError =
-            CryptoError(CryptoErrorKind.PasswordHash, "password hashing failed", emptyMap())
+        /** Passphrase hashing failed. */
+        fun passphraseHash(): CryptoError =
+            CryptoError(CryptoErrorKind.PassphraseHash, "passphrase hashing failed", emptyMap())
 
         /** A prekey bundle that is incomplete or badly signed. */
         fun invalidPrekeyBundle(): CryptoError =

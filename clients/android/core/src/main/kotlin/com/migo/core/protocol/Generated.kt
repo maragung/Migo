@@ -113,7 +113,7 @@ object Code {
     const val INVALID_KEY_MATERIAL: Long = 1305L
     const val USERNAME_TAKEN: Long = 1306L
     const val USERNAME_RESERVED: Long = 1307L
-    const val WEAK_PASSWORD: Long = 1308L
+    const val WEAK_PASSPHRASE: Long = 1308L
     /** Captcha proof did not verify */
     const val INVALID_CAPTCHA: Long = 1309L
     /** Captcha proof was consumed or expired */
@@ -207,7 +207,7 @@ object Code {
         INVALID_KEY_MATERIAL,
         USERNAME_TAKEN,
         USERNAME_RESERVED,
-        WEAK_PASSWORD,
+        WEAK_PASSPHRASE,
         INVALID_CAPTCHA,
         CAPTCHA_EXPIRED,
         CAPTCHA_REQUIRED,
@@ -289,7 +289,7 @@ val ERROR_SYMBOLS: Map<Long, String> = mapOf(
     1305L to "INVALID_KEY_MATERIAL",
     1306L to "USERNAME_TAKEN",
     1307L to "USERNAME_RESERVED",
-    1308L to "WEAK_PASSWORD",
+    1308L to "WEAK_PASSPHRASE",
     1309L to "INVALID_CAPTCHA",
     1310L to "CAPTCHA_EXPIRED",
     1311L to "CAPTCHA_REQUIRED",
@@ -1212,7 +1212,7 @@ data class Authenticate(
 
 data class UserProfile(
     val userId: Id,
-    /** MGO-XXXXXXXX, immutable, shareable */
+    /** MGO-XXXXXXXXXXXX, immutable, shareable */
     val publicId: String,
     val username: String,
     val displayName: String,

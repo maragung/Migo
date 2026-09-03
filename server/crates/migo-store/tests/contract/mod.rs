@@ -61,7 +61,7 @@ async fn seed_account(store: &SharedStore, value: u128, username: &str) -> Id {
             username: username.to_string(),
             email: Some(format!("{username}@example.test")),
             phone: None,
-            password_hash: Secret::new("$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA"),
+            passphrase_hash: Secret::new("$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA"),
             locale: "id-ID".to_string(),
             country: Some("ID".to_string()),
             created_at: ts(1_000),
@@ -301,7 +301,7 @@ pub async fn usernames_collide_case_insensitively(store: &SharedStore) {
             username: "alice".to_string(),
             email: Some("other@example.test".to_string()),
             phone: None,
-            password_hash: Secret::new("$argon2id$stub"),
+            passphrase_hash: Secret::new("$argon2id$stub"),
             locale: "en-US".to_string(),
             country: None,
             created_at: ts(1_100),
@@ -329,7 +329,7 @@ pub async fn email_and_phone_are_unique_too(store: &SharedStore) {
             username: "bob".to_string(),
             email: Some("ALICE@example.test".to_string()),
             phone: None,
-            password_hash: Secret::new("$argon2id$stub"),
+            passphrase_hash: Secret::new("$argon2id$stub"),
             locale: "id-ID".to_string(),
             country: None,
             created_at: ts(1_100),
@@ -343,7 +343,7 @@ pub async fn email_and_phone_are_unique_too(store: &SharedStore) {
             username: "carol".to_string(),
             email: None,
             phone: Some("+6281100000000".to_string()),
-            password_hash: Secret::new("$argon2id$stub"),
+            passphrase_hash: Secret::new("$argon2id$stub"),
             locale: "id-ID".to_string(),
             country: None,
             created_at: ts(1_200),
@@ -356,7 +356,7 @@ pub async fn email_and_phone_are_unique_too(store: &SharedStore) {
             username: "dave".to_string(),
             email: None,
             phone: Some("+6281100000000".to_string()),
-            password_hash: Secret::new("$argon2id$stub"),
+            passphrase_hash: Secret::new("$argon2id$stub"),
             locale: "id-ID".to_string(),
             country: None,
             created_at: ts(1_300),
@@ -838,7 +838,7 @@ pub async fn a_session_carries_its_own_authentication_time(store: &SharedStore) 
     // Presence was proved at 10_000. The generation that carries it forward was created
     // at 40_000, half a day later. The two must not be conflated: a rotation that reset
     // the authentication stamp would let a stolen refresh token keep itself permanently
-    // eligible for password changes and account deletion, which is exactly the operation
+    // eligible for passphrase changes and account deletion, which is exactly the operation
     // set that stamp is there to guard.
     let mut first = session_row(21, account_id, device_id, family, 1, 10_000);
     first.authenticated_at = ts(10_000);
@@ -935,7 +935,7 @@ pub async fn logging_out_other_devices_spares_the_current_one(store: &SharedStor
         .revoke_account_sessions(
             account_id,
             Some(keep.session_id),
-            RevokeReason::PasswordChanged,
+            RevokeReason::PassphraseChanged,
             ts(11_000),
         )
         .await

@@ -4,7 +4,7 @@
  * The key-store snapshot is the device's private identity and lives in its own store; this record
  * is the display side of the same fact — the username the account answers to, the server-side
  * account id, whether this device holds the root, and when the record was written. The login page
- * reads it to offer "Continue as {username}" with only a password to type, and to know whether a
+ * reads it to offer "Continue as {username}" with only a passphrase to type, and to know whether a
  * `.migo` account file has never been restored here.
  *
  * The record outlives sign-out on purpose: signing out ends a session, not the browser's

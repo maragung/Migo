@@ -264,7 +264,7 @@ pub struct TcpConfig {
 pub struct StoreConfig {
     /// Which implementation to use.
     pub backend: StoreBackend,
-    /// PostgreSQL connection URL. Contains a password, so it is a secret.
+    /// PostgreSQL connection URL. Contains a passphrase, so it is a secret.
     pub url: Option<Secret>,
     /// Connection pool ceiling. Sized against the database, not the process.
     pub max_connections: u32,
@@ -359,8 +359,8 @@ pub struct AuthConfig {
     pub allow_registration: bool,
     /// Devices one account may keep signed in.
     pub max_devices_per_user: u32,
-    /// Minimum password length. Length beats composition rules.
-    pub password_min_length: usize,
+    /// Minimum passphrase length. Length beats composition rules.
+    pub passphrase_min_length: usize,
     /// Override the rate-limit price of one new-account registration, in tokens.
     /// Defaults to the full anonymous endpoint bucket, which is the safe and tight
     /// choice for the public internet. Lower it for local two-node smokes where
@@ -372,7 +372,7 @@ pub struct AuthConfig {
     /// requires a proof. Defaults to a small value so the gate is on by default and
     /// the deployment has to opt out by setting `None`.
     pub captcha_threshold: Option<u32>,
-    /// The progressive sign-in lockout: repeated wrong passwords for one account
+    /// The progressive sign-in lockout: repeated wrong passphrases for one account
     /// (across every identifier and network) buy increasingly long time-outs.
     pub lockout: LockoutConfig,
     /// The Migo Owner/CEO's account, if this deployment names one.
@@ -396,7 +396,7 @@ impl Default for AuthConfig {
             refresh_ttl_seconds: 2_592_000,
             allow_registration: true,
             max_devices_per_user: 8,
-            password_min_length: 10,
+            passphrase_min_length: 10,
             registration_cost: None,
             captcha_threshold: Some(3),
             lockout: LockoutConfig::default(),
@@ -406,7 +406,7 @@ impl Default for AuthConfig {
 }
 
 /// The progressive sign-in lockout's knobs (`auth.lockout`). The ladder: the first
-/// `initial_failures` wrong passwords buy `base_seconds` of lockout, and every further
+/// `initial_failures` wrong passphrases buy `base_seconds` of lockout, and every further
 /// `step_failures` buy `step_seconds` more, up to `max_seconds`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -896,8 +896,8 @@ impl Config {
                     .to_string(),
             );
         }
-        if self.auth.password_min_length < 8 {
-            problems.push("auth.password_min_length must be at least 8".to_string());
+        if self.auth.passphrase_min_length < 8 {
+            problems.push("auth.passphrase_min_length must be at least 8".to_string());
         }
         if self.auth.max_devices_per_user == 0 {
             problems.push("auth.max_devices_per_user must be at least 1".to_string());

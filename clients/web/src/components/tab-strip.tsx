@@ -5,11 +5,13 @@
  *
  * The new-ui-02 model (docs/design mockup `new-ui-02.tsx`) splits the app into two independent
  * panels on a PC: the LEFT panel owns the account's lists — its tab bar carries Main (the
- * friends list), Chats (the conversations), Rooms, Games, Feed — and the chat tabs that this
+ * friends list), Chats (the conversations), Rooms, Feed — and the chat tabs that this
  * strip used to carry have moved to the right panel's own bar, where a conversation actually
- * opens. The strip keeps the teal `#00838F`; the active chip is the brighter `#00ACC1` over
- * the orange underline, exactly the pairing the mockup draws. It scrolls horizontally when it
- * overflows rather than hiding anything: a tab that is off-screen is still a tab.
+ * opens. Games is not a list but a place: it lives as the right pane's resting tab, so the
+ * arcade sits one chip away from every thread instead of competing with the lists for the
+ * left panel. The strip keeps the teal `#00838F`; the active chip is the brighter `#00ACC1`
+ * over the orange underline, exactly the pairing the mockup draws. It scrolls horizontally
+ * when it overflows rather than hiding anything: a tab that is off-screen is still a tab.
  *
  * The Chats chip carries the unread dot because it is the messenger's one list that exists to
  * answer "did somebody write me?" — without it, a message that arrives while another tab is
@@ -23,7 +25,7 @@ import { Icon } from './icons.js';
 import type { IconName } from './icons.js';
 
 /** The system tabs — the lists and streams a messenger lives in, in the reference's order. */
-export type SystemTab = 'friends' | 'chats' | 'rooms' | 'games' | 'feed';
+export type SystemTab = 'friends' | 'chats' | 'rooms' | 'feed';
 
 /** The secondary panels the right pane can show, shared with the banner menu that opens them. */
 export type PanelTab =
@@ -44,7 +46,6 @@ const SYSTEM_TABS: ReadonlyArray<SystemSection> = [
   { id: 'friends', label: 'Friends', icon: 'friends' },
   { id: 'chats', label: 'Chats', icon: 'chats' },
   { id: 'rooms', label: 'Rooms', icon: 'rooms' },
-  { id: 'games', label: 'Games', icon: 'game' },
   { id: 'feed', label: 'Feed', icon: 'space' },
 ];
 

@@ -209,7 +209,7 @@ impl std::fmt::Debug for RedisCache {
     /// Deliberately hand-written and deliberately terse.
     ///
     /// A derived `Debug` would reach into `redis::Client`, whose connection info
-    /// carries the password. Anything printed here can end up in a panic message, a
+    /// carries the passphrase. Anything printed here can end up in a panic message, a
     /// log line, or a crash report, so it prints the backend name and nothing else.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("RedisCache")
@@ -228,7 +228,7 @@ impl RedisCache {
             .filter(|url| !Secret::is_empty(url))
             .ok_or_else(|| fault::validation("cache.url", "is required for the redis backend"))?;
         let client = Client::open(url.expose()).map_err(|error| {
-            // The URL is not repeated in the message: it carries the password.
+            // The URL is not repeated in the message: it carries the passphrase.
             fault::validation("cache.url", &format!("is not a usable Redis URL: {error}"))
         })?;
         Ok(Self {

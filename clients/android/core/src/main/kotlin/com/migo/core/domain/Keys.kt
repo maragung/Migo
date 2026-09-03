@@ -1,5 +1,6 @@
 package com.migo.core.domain
 
+import com.migo.core.account.DeviceCredential
 import com.migo.core.account.MigoRoot
 import com.migo.core.account.foundingDeviceE2eeSeeds
 import com.migo.core.crypto.IdentityPublic
@@ -116,6 +117,12 @@ class KeyStore private constructor(
     private var nextOneTimePrekeyId: Long,
     /** The account root, when this device founded the account or restored a container onto it. */
     private val heldRoot: MigoRoot?,
+    /**
+     * The device credential, when this device signed in through one of the ML-DSA ceremonies.
+     * The vault seals it so a later identity login can re-present the same device half; null on
+     * a passphrase sign-in, which registers no credential.
+     */
+    private val heldDeviceCredential: DeviceCredential?,
 ) : LocalKeyStore, IdentityProvider {
 
     private val lock = ReentrantLock()
@@ -125,10 +132,19 @@ class KeyStore private constructor(
      * The account root this device holds, or null on an additional device.
      *
      * The same object the vault sealed, so a snapshot taken now and saved later writes the same
-     * root back. Additional devices never hold one: they sign in with a password and get fresh
+     * root back. Additional devices never hold one: they sign in with a passphrase and get fresh
      * random material, which is what keeps the account's E2EE history out of every later device.
      */
     val root: MigoRoot? get() = heldRoot
+
+    /**
+     * The device credential this device signed in with, or null on a passphrase sign-in.
+     *
+     * Held for the same reason the root is: a snapshot writes it back, so a device that restores
+     * a container stays an identity-loginable device across restarts rather than one that can
+     * only refresh until the day it cannot.
+     */
+    val deviceCredential: DeviceCredential? get() = heldDeviceCredential
 
     /**
      * This device's long-term identity secret. Backs both crypto layers.
@@ -257,6 +273,7 @@ class KeyStore private constructor(
             nextOneTimePrekeyId = nextOneTimePrekeyId,
             session = session,
             root = heldRoot,
+            deviceCredential = heldDeviceCredential,
             txs = txs,
         )
     }
@@ -286,7 +303,7 @@ class KeyStore private constructor(
          */
         fun create(oneTimePrekeyCount: Int = DEFAULT_ONE_TIME_PREKEYS): KeyStore {
             val identity = IdentitySecret.generate()
-            val store = KeyStore(identity, buildSignedPrekey(identity, 1L), 2L, 1L, null)
+            val store = KeyStore(identity, buildSignedPrekey(identity, 1L), 2L, 1L, null, null)
             store.replenishOneTimePrekeys(oneTimePrekeyCount)
             return store
         }
@@ -303,7 +320,29 @@ class KeyStore private constructor(
             val identity = IdentitySecret.fromSeeds(signing, exchange)
             signing.fill(0)
             exchange.fill(0)
-            val store = KeyStore(identity, buildSignedPrekey(identity, 1L), 2L, 1L, root)
+            val store = KeyStore(identity, buildSignedPrekey(identity, 1L), 2L, 1L, root, null)
+            store.replenishOneTimePrekeys(oneTimePrekeyCount)
+            return store
+        }
+
+        /**
+         * A device restored from a `.migo` container: the root and the fresh device credential
+         * are the ceremony's two halves, and the E2EE identity is fresh and random — [create]'s
+         * shape with the root held.
+         *
+         * A restore is a new device, and new devices never inherit another device's ratchets;
+         * only the founding device's E2EE history is a function of the root, and only its own
+         * backup restores onto it as itself. Holding the root is what makes this device able to
+         * sign a *future* add-device ceremony and derive the wallets, not what makes it the
+         * founding device again.
+         */
+        fun restored(
+            root: MigoRoot,
+            deviceCredential: DeviceCredential,
+            oneTimePrekeyCount: Int = DEFAULT_ONE_TIME_PREKEYS,
+        ): KeyStore {
+            val identity = IdentitySecret.generate()
+            val store = KeyStore(identity, buildSignedPrekey(identity, 1L), 2L, 1L, root, deviceCredential)
             store.replenishOneTimePrekeys(oneTimePrekeyCount)
             return store
         }
@@ -328,6 +367,7 @@ class KeyStore private constructor(
                 keys.nextSignedPrekeyId,
                 keys.nextOneTimePrekeyId,
                 keys.root,
+                keys.deviceCredential,
             )
             store.oneTimePrekeys.putAll(keys.oneTime)
             return store

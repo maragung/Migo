@@ -3,7 +3,7 @@
  * matter beyond "it renders": it is a pure function of its input (no clock, no randomness, no
  * map-order surprise), and it discloses no credential or full IP. Determinism is proved by rendering
  * two independently-built but identical outcomes and comparing bytes; disclosure is proved by
- * feeding a deliberately hostile server URL — userinfo plus an IP host — and a password, then
+ * feeding a deliberately hostile server URL — userinfo plus an IP host — and a passphrase, then
  * asserting none of them survive into either the text or the JSON.
  */
 
@@ -27,7 +27,7 @@ const BASE_CONFIG: Config = {
   locale: 'en-US',
   country: 'ID',
   usernamePrefix: 'loadgen',
-  password: undefined,
+  passphrase: undefined,
   requestTimeoutMs: 15_000,
   maxErrorRate: 1,
   output: 'text',
@@ -148,7 +148,7 @@ test('the report never prints a credential, a token, or a full IP address', () =
   const config = makeConfig({
     apiUrl: 'http://admin:s3cr3tPw@198.51.100.7:8080',
     gatewayUrl: 'wss://t0k3nValue@198.51.100.7:8080/ws',
-    password: 'topSecretPw',
+    passphrase: 'topSecretPw',
   });
   const text = renderText(makeOutcome(config, fixedMetrics()));
   const json = renderJson(makeOutcome(config, fixedMetrics()));

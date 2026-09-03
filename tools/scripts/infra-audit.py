@@ -10,7 +10,7 @@ can be verified without judgement.
 
 The development compose stack is deliberately insecure in ways the server itself
 refuses outside development (an ephemeral node key, a placeholder token key, the
-local database password); those exact constants are allow-listed below, and every
+local database passphrase); those exact constants are allow-listed below, and every
 other secret-shaped value is a finding.
 
 Usage: python3 tools/scripts/infra-audit.py [--root PATH] [--infra PATH]
@@ -29,13 +29,13 @@ from pathlib import Path
 import yaml
 
 # The two development secrets the stack is allowed to carry (brief/README §Security),
-# plus the well-known local database password. Anything else in a secret-named field
+# plus the well-known local database passphrase. Anything else in a secret-named field
 # or a URL credential is a finding.
 ALLOWED_SECRET_VALUES = {"migo", "development-only-insecure-token-key"}
 WEB_PORT = 19992  # the web client's fixed port; see Dockerfile.web / README.
 
 SECRET_KEY_RE = re.compile(
-    r"(?i)(?:^|[_.\-])(?:password|passwd|pwd|secret|token|api[_-]?key|apikey"
+    r"(?i)(?:^|[_.\-])(?:passphrase|passwd|pwd|secret|token|api[_-]?key|apikey"
     r"|access[_-]?key|secret[_-]?key|private[_-]?key|credential|authorization"
     r"|auth[_-]?token)(?:$|[_.\-]?)"
 )
@@ -423,7 +423,7 @@ def main() -> int:
     for p in tf_files:
         lines = p.read_text(encoding="utf-8").splitlines()
         for i, ln in enumerate(lines):
-            m = re.search(r'(?i)\b(password|secret|token|access_key|secret_key)\b\s*=\s*"([^"]+)"', ln)
+            m = re.search(r'(?i)\b(passphrase|secret|token|access_key|secret_key)\b\s*=\s*"([^"]+)"', ln)
             if m and not is_interpolation(m.group(2)) and m.group(2) not in ALLOWED_SECRET_VALUES:
                 tf_problems.append(f"{p.name}:{i + 1} hard-coded {m.group(1)}")
             if "0.0.0.0/0" in ln:

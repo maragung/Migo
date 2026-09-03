@@ -16,14 +16,14 @@
 //!
 //! # The backing account can never be signed into
 //!
-//! A bot authenticates with a bearer token, never a password — but `account.password_hash`
+//! A bot authenticates with a bearer token, never a passphrase — but `account.passphrase_hash`
 //! is `NOT NULL`, and leaving it blank or filling it with a known sentinel would be a
-//! password anyone who read the schema could supply. So the account is given a *valid*
+//! passphrase anyone who read the schema could supply. So the account is given a *valid*
 //! Argon2id hash of thirty-two random bytes that are computed once, used, and thrown away
-//! ([`service::open`]). Nothing was kept that hashes to it, so no password verifies against
+//! ([`service::open`]). Nothing was kept that hashes to it, so no passphrase verifies against
 //! it — not a blank, not a guess, not the sentinel a reader of this code might try. This is
 //! the same move `migo-auth` makes for an absent account, for the same reason: an
-//! unusable-but-valid hash is safer than a nullable column, because there is no "no password
+//! unusable-but-valid hash is safer than a nullable column, because there is no "no passphrase
 //! set" branch for a caller to reach.
 //!
 //! # The token is a lookup key, stored only as a keyed tag

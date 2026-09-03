@@ -156,7 +156,7 @@ pub mod codes {
     pub const INVALID_KEY_MATERIAL: u32 = 1305;
     pub const USERNAME_TAKEN: u32 = 1306;
     pub const USERNAME_RESERVED: u32 = 1307;
-    pub const WEAK_PASSWORD: u32 = 1308;
+    pub const WEAK_PASSPHRASE: u32 = 1308;
     /// Captcha proof did not verify
     pub const INVALID_CAPTCHA: u32 = 1309;
     /// Captcha proof was consumed or expired
@@ -254,7 +254,7 @@ pub mod codes {
         INVALID_KEY_MATERIAL,
         USERNAME_TAKEN,
         USERNAME_RESERVED,
-        WEAK_PASSWORD,
+        WEAK_PASSPHRASE,
         INVALID_CAPTCHA,
         CAPTCHA_EXPIRED,
         CAPTCHA_REQUIRED,
@@ -385,7 +385,7 @@ pub fn error_symbol(code: u32) -> Option<&'static str> {
         codes::INVALID_KEY_MATERIAL => "INVALID_KEY_MATERIAL",
         codes::USERNAME_TAKEN => "USERNAME_TAKEN",
         codes::USERNAME_RESERVED => "USERNAME_RESERVED",
-        codes::WEAK_PASSWORD => "WEAK_PASSWORD",
+        codes::WEAK_PASSPHRASE => "WEAK_PASSPHRASE",
         codes::INVALID_CAPTCHA => "INVALID_CAPTCHA",
         codes::CAPTCHA_EXPIRED => "CAPTCHA_EXPIRED",
         codes::CAPTCHA_REQUIRED => "CAPTCHA_REQUIRED",
@@ -470,7 +470,7 @@ pub fn error_http_status(code: u32) -> u16 {
         codes::INVALID_KEY_MATERIAL => 400,
         codes::USERNAME_TAKEN => 409,
         codes::USERNAME_RESERVED => 400,
-        codes::WEAK_PASSWORD => 400,
+        codes::WEAK_PASSPHRASE => 400,
         codes::INVALID_CAPTCHA => 400,
         codes::CAPTCHA_EXPIRED => 400,
         codes::CAPTCHA_REQUIRED => 400,
@@ -1705,7 +1705,7 @@ impl Decode for Authenticate {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct UserProfile {
     pub user_id: Id,
-    /// MGO-XXXXXXXX, immutable, shareable
+    /// MGO-XXXXXXXXXXXX, immutable, shareable
     pub public_id: String,
     pub username: String,
     pub display_name: String,

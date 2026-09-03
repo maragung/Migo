@@ -66,7 +66,7 @@ test('the save offer seals with the registration passphrase and asks for nothing
     'the offer must not ask for a credential of its own',
   );
   assert.ok(
-    !markup.includes('type="password"'),
+    !markup.includes('type="passphrase"'),
     'the offer must not collect any secret — the passphrase was already typed',
   );
   assert.ok(

@@ -255,7 +255,7 @@ impl Harness {
                 username: username.to_string(),
                 email: Some(format!("{username}@example.test")),
                 phone: None,
-                password_hash: Secret::new("$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA"),
+                passphrase_hash: Secret::new("$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA"),
                 locale: "id-ID".to_string(),
                 country: Some("ID".to_string()),
                 created_at: ts(SECOND),
@@ -643,7 +643,7 @@ async fn a_wake_up_carries_the_badge_so_the_client_need_not_ask() {
 // A push token is a credential
 //
 // Brief sections 77 and 145: a push token is stored hashed and is never logged. It is
-// also the only thing that can reach a device, so unlike a password it has to be
+// also the only thing that can reach a device, so unlike a passphrase it has to be
 // recoverable -- you cannot send a push without it. Both facts are true at once here: the
 // row keeps a sealed copy, which the server can open, and a hash, which is the handle
 // everything else uses. Retiring a token the provider rejected, matching a registration

@@ -29,7 +29,7 @@ pub enum AccountError {
 
     /// The container's format or crypto version is newer than this build
     /// understands. Named precisely because the honest remedy is "update the
-    /// app", not "try another password".
+    /// app", not "try another passphrase".
     #[error("container version {found} is not supported (this build reads {supported})")]
     UnsupportedVersion {
         /// The version the file carries.

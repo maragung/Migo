@@ -24,7 +24,7 @@ const HOLD_POLL_MS = 200;
 
 interface ServerConfig {
   readonly allowRegistration: boolean | undefined;
-  readonly passwordMinLength: number | undefined;
+  readonly passphraseMinLength: number | undefined;
 }
 
 export async function run(config: Config, log: Logger): Promise<RunOutcome> {
@@ -43,14 +43,14 @@ export async function run(config: Config, log: Logger): Promise<RunOutcome> {
   }
 
   const metrics = new Metrics();
-  const password = buildPassword(config, server.passwordMinLength);
+  const passphrase = buildPassphrase(config, server.passphraseMinLength);
   const runTag = makeRunTag();
   const onEventError = (error: unknown): void => metrics.recordError('event', classifyError(error));
 
   log.info(`building ${config.vus} virtual users for scenario "${scenario.name}"`);
   const vus = Array.from(
     { length: config.vus },
-    (_unused, index) => new VirtualUser(index, { config, password, runTag, onEventError }),
+    (_unused, index) => new VirtualUser(index, { config, passphrase, runTag, onEventError }),
   );
 
   // Open-ended deadline for the connect phase; the real one is set just before steady state.
@@ -112,23 +112,23 @@ export async function run(config: Config, log: Logger): Promise<RunOutcome> {
   }
 }
 
-/** Read the server's public config so we can fail fast and size the password. Never fatal on its own. */
+/** Read the server's public config so we can fail fast and size the passphrase. Never fatal on its own. */
 async function preflight(config: Config, log: Logger): Promise<ServerConfig> {
   const url = `${trimTrailingSlash(config.apiUrl)}/v1/config`;
   try {
     const response = await fetch(url, { signal: AbortSignal.timeout(config.requestTimeoutMs) });
     if (!response.ok) {
       log.warn(`GET /v1/config returned HTTP ${response.status}; proceeding with defaults`);
-      return { allowRegistration: undefined, passwordMinLength: undefined };
+      return { allowRegistration: undefined, passphraseMinLength: undefined };
     }
     const body: unknown = await response.json();
     return {
       allowRegistration: readBoolean(body, 'allow_registration'),
-      passwordMinLength: readNumber(body, 'password_min_length'),
+      passphraseMinLength: readNumber(body, 'passphrase_min_length'),
     };
   } catch (error) {
     log.warn(`could not read ${url}: ${describe(error)}; proceeding with defaults`);
-    return { allowRegistration: undefined, passwordMinLength: undefined };
+    return { allowRegistration: undefined, passphraseMinLength: undefined };
   }
 }
 
@@ -162,14 +162,14 @@ function installSignalHandlers(ctx: RunContext, log: Logger): () => void {
   };
 }
 
-/** A dev-only throwaway password long enough for typical policy, with all four character classes. */
-function buildPassword(config: Config, minLength: number | undefined): string {
-  if (config.password !== undefined) return config.password;
+/** A dev-only throwaway passphrase long enough for typical policy, with all four character classes. */
+function buildPassphrase(config: Config, minLength: number | undefined): string {
+  if (config.passphrase !== undefined) return config.passphrase;
   const target = Math.max(minLength ?? 8, 16);
   const seed = 'Loadgen!aA1';
-  let password = seed;
-  while (password.length < target) password += seed;
-  return password.slice(0, target);
+  let passphrase = seed;
+  while (passphrase.length < target) passphrase += seed;
+  return passphrase.slice(0, target);
 }
 
 /** A short per-run tag so usernames from repeated runs never collide on a taken name. */

@@ -43,7 +43,7 @@ async fn person(store: &Arc<MemoryStore>, account: u128, username: &str) {
             username: username.to_string(),
             email: Some(format!("{username}@example.test")),
             phone: None,
-            password_hash: Secret::new("$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA"),
+            passphrase_hash: Secret::new("$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA"),
             locale: "id-ID".to_string(),
             country: Some("ID".to_string()),
             created_at: Timestamp::from_millis(NOW),

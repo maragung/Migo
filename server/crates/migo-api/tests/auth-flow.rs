@@ -41,7 +41,7 @@
 //!    identifier that does not exist returns the same `{ ok: true }`
 //!    body and code as one for a real account.
 //! 6. **The captcha gate engages on a sign-in failure.** With a threshold
-//!    of one, a wrong-password sign-in from a network trips the gate; the
+//!    of one, a wrong-passphrase sign-in from a network trips the gate; the
 //!    next attempt (a register, in this test) without a captcha proof is
 //!    refused with `CAPTCHA_REQUIRED`.
 //! 7. **A wrong captcha answer is refused with a curated message.** When
@@ -63,7 +63,7 @@
 //!
 //! The test catches the failure mode the user is fixing on the web
 //! client: a form that drops the `captcha` field, sends the wrong
-//! `device` shape, or omits the `password`/`username` fields will
+//! `device` shape, or omits the `passphrase`/`username` fields will
 //! fail the body validation in the route layer and not reach the
 //! service; the wire shape this file exercises is exactly the one
 //! the working client sends.
@@ -101,9 +101,9 @@ const NOW_MS: i64 = 1_800_000_000_000;
 /// A stable seed so ids and challenge codes are reproducible run to run.
 const SEED: u64 = 0xc0de_c4fc_0001;
 
-/// A password that clears the floor: long enough, not on the common list, and
+/// A passphrase that clears the floor: long enough, not on the common list, and
 /// not derived from any username these tests register.
-const GOOD_PASSWORD: &str = "sunflower gravel bicycle";
+const GOOD_PASSPHRASE: &str = "sunflower gravel bicycle";
 
 /// The captcha threshold the harness installs: small enough that the next
 /// attempt from a network that has just failed a sign-in has to carry a
@@ -459,7 +459,7 @@ async fn the_full_flow_captcha_register_login_and_recovery() {
     //    user-visible success shape.
     let register_body = json!({
         "username": "alice",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Integration Flow Device" },
         "captcha": {
             "challenge_id": register_captcha.challenge_id,
@@ -517,7 +517,7 @@ async fn the_full_flow_captcha_register_login_and_recovery() {
     let login_captcha = h.issue_captcha().await;
     let login_body = json!({
         "identifier": "alice",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Integration Flow Device" },
         "captcha": {
             "challenge_id": login_captcha.challenge_id,
@@ -615,9 +615,9 @@ async fn the_full_flow_captcha_register_login_and_recovery() {
 /// Sign-in is never captcha-gated, whatever the gate's state.
 ///
 /// The product decision: a returning member is the person the product exists for, and standing
-/// between them and their account because a stranger from their network mistyped passwords is
-/// punishing the wrong party. So the same wrong-password failure that engages the gate for
-/// `register` leaves `sign-in` open — a correct-password login from the same IP, with no
+/// between them and their account because a stranger from their network mistyped passphrases is
+/// punishing the wrong party. So the same wrong-passphrase failure that engages the gate for
+/// `register` leaves `sign-in` open — a correct-passphrase login from the same IP, with no
 /// captcha proof attached, succeeds.
 #[tokio::test]
 async fn a_sign_in_never_requires_a_captcha_even_once_the_gate_is_engaged() {
@@ -629,7 +629,7 @@ async fn a_sign_in_never_requires_a_captcha_even_once_the_gate_is_engaged() {
     let setup_captcha = h.issue_captcha().await;
     let setup_body = json!({
         "username": "gale",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Setup Device" },
         "captcha": {
             "challenge_id": setup_captcha.challenge_id,
@@ -646,11 +646,11 @@ async fn a_sign_in_never_requires_a_captcha_even_once_the_gate_is_engaged() {
         setup_resp.text()
     );
 
-    // Trip the gate with a wrong-password sign-in.
+    // Trip the gate with a wrong-passphrase sign-in.
     let trip_captcha = h.issue_captcha().await;
     let trip_body = json!({
         "identifier": "gale",
-        "password": "deliberately-wrong",
+        "passphrase": "deliberately-wrong",
         "device": { "display_name": "Trip Device" },
         "captcha": {
             "challenge_id": trip_captcha.challenge_id,
@@ -663,7 +663,7 @@ async fn a_sign_in_never_requires_a_captcha_even_once_the_gate_is_engaged() {
     assert_eq!(
         trip_resp.status,
         StatusCode::UNAUTHORIZED,
-        "a wrong-password sign-in fails; body={}",
+        "a wrong-passphrase sign-in fails; body={}",
         trip_resp.text()
     );
 
@@ -671,7 +671,7 @@ async fn a_sign_in_never_requires_a_captcha_even_once_the_gate_is_engaged() {
     // the test above pins that). Sign-in, though, carries no captcha and succeeds anyway.
     let login_body = json!({
         "identifier": "gale",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "No Captcha Login" },
     });
     let login_resp = h
@@ -689,9 +689,9 @@ async fn a_sign_in_never_requires_a_captcha_even_once_the_gate_is_engaged() {
     );
 }
 
-/// The progressive sign-in lockout: five wrong passwords lock the account for a
+/// The progressive sign-in lockout: five wrong passphrases lock the account for a
 /// minute, the next three for three, the next three for five — and a correct
-/// password clears the whole ladder. The lock follows the account across every
+/// passphrase clears the whole ladder. The lock follows the account across every
 /// identifier and network (v0.8.4).
 #[tokio::test]
 async fn repeated_sign_in_failures_lock_the_account_on_a_climbing_ladder() {
@@ -702,7 +702,7 @@ async fn repeated_sign_in_failures_lock_the_account_on_a_climbing_ladder() {
     let setup_captcha = h.issue_captcha().await;
     let setup_body = json!({
         "username": "laddered",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Setup Device" },
         "captcha": {
             "challenge_id": setup_captcha.challenge_id,
@@ -719,7 +719,7 @@ async fn repeated_sign_in_failures_lock_the_account_on_a_climbing_ladder() {
         setup_resp.text()
     );
 
-    // Five wrong passwords. None of them is captcha-gated (sign-in never is) and
+    // Five wrong passphrases. None of them is captcha-gated (sign-in never is) and
     // none of them trips the lockout yet. The clock advances between attempts so the
     // anonymous rate-limit bucket refills — the ladder under test is the lockout, not
     // the bucket.
@@ -727,14 +727,14 @@ async fn repeated_sign_in_failures_lock_the_account_on_a_climbing_ladder() {
         h.advance(2_000);
         let body = json!({
             "identifier": "laddered",
-            "password": "deliberately-wrong",
+            "passphrase": "deliberately-wrong",
             "device": { "display_name": "Ladder Device" },
         });
         let resp = h.send(post_json("/v1/auth/login", Some(ip), &body)).await;
         assert_eq!(
             resp.status,
             StatusCode::UNAUTHORIZED,
-            "wrong password {attempt} is a plain refusal; body={}",
+            "wrong passphrase {attempt} is a plain refusal; body={}",
             resp.text()
         );
     }
@@ -743,7 +743,7 @@ async fn repeated_sign_in_failures_lock_the_account_on_a_climbing_ladder() {
     // how long to wait.
     let body = json!({
         "identifier": "laddered",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Locked Device" },
     });
     let locked = h.send(post_json("/v1/auth/login", Some(ip), &body)).await;
@@ -764,11 +764,11 @@ async fn repeated_sign_in_failures_lock_the_account_on_a_climbing_ladder() {
     );
 
     // Waiting it out (the clock advances past the minute) and signing in with the
-    // right password succeeds — and clears the ladder.
+    // right passphrase succeeds — and clears the ladder.
     h.advance(retry_ms as i64 + 1_000);
     let clear_body = json!({
         "identifier": "laddered",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "After Lockout Device" },
     });
     let clear_resp = h
@@ -781,13 +781,13 @@ async fn repeated_sign_in_failures_lock_the_account_on_a_climbing_ladder() {
         clear_resp.text()
     );
 
-    // A fresh wrong-password run starts the ladder from its first rung again —
+    // A fresh wrong-passphrase run starts the ladder from its first rung again —
     // the success reset it, so four more failures are plain refusals.
     for attempt in 1..=4 {
         h.advance(2_000);
         let body = json!({
             "identifier": "laddered",
-            "password": "deliberately-wrong",
+            "passphrase": "deliberately-wrong",
             "device": { "display_name": "Ladder Device" },
         });
         let resp = h.send(post_json("/v1/auth/login", Some(ip), &body)).await;
@@ -802,24 +802,24 @@ async fn repeated_sign_in_failures_lock_the_account_on_a_climbing_ladder() {
 
 /// A register without a captcha is refused once the gate is engaged.
 ///
-/// The captcha gate is tripped by a sign-in failure: a wrong password on
+/// The captcha gate is tripped by a sign-in failure: a wrong passphrase on
 /// a known identifier from a network records one failure past the
 /// threshold of one, and the next attempt from the same network has to
 /// carry a captcha proof. The next attempt in this test is a register,
 /// not a sign-in, and the assertion is that the gate fires before the
-/// password check.
+/// passphrase check.
 #[tokio::test]
 async fn a_register_without_a_captcha_is_refused_once_the_gate_is_engaged() {
     let h = Harness::new();
     let ip = "198.51.100.10";
 
     // First, register an account we can later mis-sign-in to. The captcha
-    // is sent with the register so the password is what the route checks,
+    // is sent with the register so the passphrase is what the route checks,
     // not the captcha.
     let setup_captcha = h.issue_captcha().await;
     let setup_body = json!({
         "username": "carol",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Setup Device" },
         "captcha": {
             "challenge_id": setup_captcha.challenge_id,
@@ -837,13 +837,13 @@ async fn a_register_without_a_captcha_is_refused_once_the_gate_is_engaged() {
     );
 
     // Trip the gate: a sign-in with the right identifier and a wrong
-    // password. The auth's `note_captcha_failure` records one strike
+    // passphrase. The auth's `note_captcha_failure` records one strike
     // against the network, and the threshold is one, so the gate is now
     // engaged for the next attempt from the same IP.
     let trip_captcha = h.issue_captcha().await;
     let trip_body = json!({
         "identifier": "carol",
-        "password": "deliberately-wrong",
+        "passphrase": "deliberately-wrong",
         "device": { "display_name": "Trip Device" },
         "captcha": {
             "challenge_id": trip_captcha.challenge_id,
@@ -856,17 +856,17 @@ async fn a_register_without_a_captcha_is_refused_once_the_gate_is_engaged() {
     assert_eq!(
         trip_resp.status,
         StatusCode::UNAUTHORIZED,
-        "a wrong-password sign-in fails; body={}",
+        "a wrong-passphrase sign-in fails; body={}",
         trip_resp.text()
     );
 
     // The next attempt from the same network — a register, with no
-    // captcha — is refused at the captcha gate, not at the password
-    // check. The body is well-formed and the password clears the floor;
+    // captcha — is refused at the captcha gate, not at the passphrase
+    // check. The body is well-formed and the passphrase clears the floor;
     // the refusal is purely because the captcha proof is missing.
     let no_captcha_body = json!({
         "username": "dave",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "No Captcha Device" },
     });
     let no_captcha_resp = h
@@ -895,12 +895,12 @@ async fn a_captcha_with_a_wrong_answer_is_refused_with_a_curated_message() {
 
     // Engage the gate with a sign-in against an identifier that does not
     // exist. The failure path records a strike; the user-facing response
-    // is the same as a wrong password on a real account, so an attacker
+    // is the same as a wrong passphrase on a real account, so an attacker
     // cannot tell the two apart.
     let trip_captcha = h.issue_captcha().await;
     let trip_body = json!({
         "identifier": "no-such-account",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Trip Device" },
         "captcha": {
             "challenge_id": trip_captcha.challenge_id,
@@ -928,7 +928,7 @@ async fn a_captcha_with_a_wrong_answer_is_refused_with_a_curated_message() {
     };
     let body = json!({
         "username": "erin",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Wrong Answer Device" },
         "captcha": {
             "challenge_id": challenge.challenge_id,
@@ -950,7 +950,7 @@ async fn a_captcha_with_a_wrong_answer_is_refused_with_a_curated_message() {
 /// the picture on the spot. Pinned here for the three refusals that meet a captcha on screen:
 /// a spent-proof failure about something else (a taken username), the gate's own
 /// `CAPTCHA_REQUIRED`, and the wrong-answer `INVALID_CAPTCHA`. The negative case matters as
-/// much: a wrong-password login from a network that never showed a captcha carries nothing,
+/// much: a wrong-passphrase login from a network that never showed a captcha carries nothing,
 /// because there is no widget to reload.
 #[tokio::test]
 async fn a_refused_bootstrap_carries_the_replacement_captcha() {
@@ -961,7 +961,7 @@ async fn a_refused_bootstrap_carries_the_replacement_captcha() {
     let first = h.issue_captcha().await;
     let first_body = json!({
         "username": "grace",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Setup Device" },
         "captcha": {
             "challenge_id": first.challenge_id,
@@ -984,7 +984,7 @@ async fn a_refused_bootstrap_carries_the_replacement_captcha() {
     let second = h.issue_captcha().await;
     let retry_body = json!({
         "username": "grace",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Retry Device" },
         "captcha": {
             "challenge_id": second.challenge_id,
@@ -1031,10 +1031,10 @@ async fn a_refused_bootstrap_carries_the_replacement_captcha() {
 
     // The gate's own refusal carries one too: a register without a proof once the gate
     // is engaged is told CAPTCHA_REQUIRED *and* handed the challenge it must answer.
-    // (A wrong-password login is what trips the gate, and sign-in is never gated.)
+    // (A wrong-passphrase login is what trips the gate, and sign-in is never gated.)
     let trip_body = json!({
         "identifier": "grace",
-        "password": "deliberately-wrong",
+        "passphrase": "deliberately-wrong",
         "device": { "display_name": "Trip Device" },
     });
     let trip_resp = h
@@ -1054,7 +1054,7 @@ async fn a_refused_bootstrap_carries_the_replacement_captcha() {
     );
     let gated_body = json!({
         "username": "heidi",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Gated Device" },
     });
     let gated_resp = h
@@ -1081,7 +1081,7 @@ async fn a_refused_bootstrap_carries_the_replacement_captcha() {
     };
     let wrong_body = json!({
         "username": "ivan",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Wrong Answer Device" },
         "captcha": {
             "challenge_id": challenge.challenge_id,
@@ -1147,12 +1147,12 @@ async fn a_recovery_confirm_with_an_unknown_token_id_is_not_an_oracle() {
     let body1 = json!({
         "token_id": id1,
         "tag": "00112233445566778899aabbccddeeff",
-        "new_password": "a-new-passphrase-here",
+        "new_passphrase": "a-new-passphrase-here",
     });
     let body2 = json!({
         "token_id": id2,
         "tag": "00112233445566778899aabbccddeeff",
-        "new_password": "a-new-passphrase-here",
+        "new_passphrase": "a-new-passphrase-here",
     });
     let resp1 = h
         .send(post_json(
@@ -1205,7 +1205,7 @@ async fn revoking_one_session_and_then_its_device_over_the_routes() {
     let captcha = h.issue_captcha().await;
     let register_body = json!({
         "username": "ada",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Ada's laptop" },
         "captcha": {
             "challenge_id": captcha.challenge_id,
@@ -1242,7 +1242,7 @@ async fn revoking_one_session_and_then_its_device_over_the_routes() {
     let captcha = h.issue_captcha().await;
     let login_body = json!({
         "identifier": "ada",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Ada's phone" },
         "captcha": {
             "challenge_id": captcha.challenge_id,
@@ -1357,7 +1357,7 @@ async fn revoking_one_session_and_then_its_device_over_the_routes() {
     let captcha = h.issue_captcha().await;
     let resume_body = json!({
         "identifier": "ada",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": {
             "display_name": "Ada's laptop",
             "device_id": first_device,

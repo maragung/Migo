@@ -62,7 +62,7 @@ pub struct DeviceKeys {
     pub session: Option<crate::vault::SavedSession>,
     /// The unified account root, when this device holds one.
     ///
-    /// `None` on a device that signed in with a password before the account had a root and never
+    /// `None` on a device that signed in with a passphrase before the account had a root and never
     /// restored a container — such a device is a passenger, not a founder: it cannot sign the
     /// identity half of a challenge, and only a `.migo` container or the founding device can change
     /// that. Stored as the raw 32 bytes so the vault format never depends on the reference crate's
@@ -112,7 +112,7 @@ impl DeviceKeys {
     }
 
     /// Generates an additional device of an existing account: fresh random E2EE identity, fresh
-    /// device credential, and no root. This is the password sign-in shape — the device can take
+    /// device credential, and no root. This is the passphrase sign-in shape — the device can take
     /// part in future ML-DSA logins as *itself*, but it is not the account.
     pub fn additional() -> Self {
         let mut random = OsRandom;
@@ -444,7 +444,7 @@ mod tests {
         );
     }
 
-    /// An additional device has no root and a fresh identity: two password sign-ins on the same
+    /// An additional device has no root and a fresh identity: two passphrase sign-ins on the same
     /// account are two devices, and neither inherits the founding device's ratchets.
     #[test]
     fn an_additional_device_is_its_own_device() {

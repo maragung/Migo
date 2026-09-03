@@ -14,12 +14,12 @@
 //!
 //! # Why failures are labelled by outcome
 //!
-//! `migo_auth_signin_total{outcome="..."}` distinguishes a wrong password from an
+//! `migo_auth_signin_total{outcome="..."}` distinguishes a wrong passphrase from an
 //! unknown user, even though the *response* to the client is identical for both
 //! (see the `service` module, and `fault::invalid_credentials`). That is not a
 //! contradiction. The client must not learn which one happened, because that answer
 //! enumerates accounts. The operator must, because "unknown user" climbing while "bad
-//! password" stays flat is credential stuffing against a leaked email list, and the two
+//! passphrase" stays flat is credential stuffing against a leaked email list, and the two
 //! incidents call for different responses.
 //!
 //! The distinction is safe here because the label is on an aggregate count with no
@@ -36,8 +36,8 @@ pub(crate) enum SignInOutcome {
     Success,
     /// No account for the identifier presented.
     UnknownUser,
-    /// Account exists, password did not match.
-    BadPassword,
+    /// Account exists, passphrase did not match.
+    BadPassphrase,
     /// Account exists and is not permitted to sign in.
     Suspended,
     /// Refused by the rate limiter before credentials were checked.
@@ -50,7 +50,7 @@ impl SignInOutcome {
     const ALL: [Self; 6] = [
         Self::Success,
         Self::UnknownUser,
-        Self::BadPassword,
+        Self::BadPassphrase,
         Self::Suspended,
         Self::RateLimited,
         Self::DeviceLimit,
@@ -60,7 +60,7 @@ impl SignInOutcome {
         match self {
             Self::Success => "success",
             Self::UnknownUser => "unknown_user",
-            Self::BadPassword => "bad_password",
+            Self::BadPassphrase => "bad_passphrase",
             Self::Suspended => "suspended",
             Self::RateLimited => "rate_limited",
             Self::DeviceLimit => "device_limit",
@@ -71,7 +71,7 @@ impl SignInOutcome {
         match self {
             Self::Success => 0,
             Self::UnknownUser => 1,
-            Self::BadPassword => 2,
+            Self::BadPassphrase => 2,
             Self::Suspended => 3,
             Self::RateLimited => 4,
             Self::DeviceLimit => 5,
@@ -210,8 +210,8 @@ impl Meters {
                 &[],
             ),
             rehashes: registry.counter(
-                "migo_auth_password_rehash_total",
-                "Passwords transparently rehashed to current parameters on sign-in.",
+                "migo_auth_passphrase_rehash_total",
+                "Passphrases transparently rehashed to current parameters on sign-in.",
                 &[],
             ),
             verify_failures: registry.counter(
@@ -220,8 +220,8 @@ impl Meters {
                 &[],
             ),
             hash_latency: registry.histogram(
-                "migo_auth_password_hash_ms",
-                "Time spent hashing or verifying a password.",
+                "migo_auth_passphrase_hash_ms",
+                "Time spent hashing or verifying a passphrase.",
                 &[],
                 LATENCY_BUCKETS_MS,
             ),

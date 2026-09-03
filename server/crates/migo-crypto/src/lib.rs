@@ -25,7 +25,7 @@
 //! Per ADR-0003 this crate composes audited implementations and writes none of
 //! its own: [`ed25519_dalek`] for signatures, [`x25519_dalek`] for Diffie-
 //! Hellman, [`chacha20poly1305`] for AEAD, [`hkdf`] over [`sha2`] for key
-//! derivation, and [`argon2`] for password hashing. What *is* written here is
+//! derivation, and [`argon2`] for passphrase hashing. What *is* written here is
 //! the part that is Migo's to get right: which secret feeds which KDF, under
 //! which label, in which order, and what happens when a peer lies.
 //!
@@ -47,7 +47,7 @@
 //! | [`x3dh`] | Asynchronous session establishment against a published bundle |
 //! | [`ratchet`] | Double Ratchet for 1:1 conversations |
 //! | [`sender_key`] | Sender-key ratchet for groups: encrypt once, fan out |
-//! | [`password`] | Argon2id hashing and verification |
+//! | [`passphrase`] | Argon2id hashing and verification |
 //! | [`mac`] | HMAC-SHA256 for session tokens, cursors, and signed URLs |
 //! | [`node`] | Server node identity and the mesh handshake |
 //!
@@ -60,7 +60,7 @@
 //!    consumption, and skipped-key storage all happen after decryption
 //!    succeeds, so an injected frame cannot destroy a working session.
 //! 3. **Bound everything a peer controls.** Chain gaps, retained skipped keys,
-//!    messages per chain, and password length all have hard ceilings. Each
+//!    messages per chain, and passphrase length all have hard ceilings. Each
 //!    bound in this crate is documented as the attack it prevents, not as a
 //!    tuning knob.
 //! 4. **Errors say little.** No error distinguishes "wrong key" from "damaged
@@ -75,7 +75,7 @@ pub mod identity;
 pub mod kdf;
 pub mod mac;
 pub mod node;
-pub mod password;
+pub mod passphrase;
 pub mod ratchet;
 pub mod sender_key;
 pub mod x3dh;
@@ -88,7 +88,7 @@ pub use crate::identity::{
 };
 pub use crate::mac::{MacKey, LABEL_RECOVERY};
 pub use crate::node::{NodeHello, NodeProof, NodePublic, NodeSecret};
-pub use crate::password::Verification;
+pub use crate::passphrase::Verification;
 pub use crate::ratchet::{RatchetHeader, RatchetSession};
 pub use crate::sender_key::{
     ReceiverKeyState, SenderKeyDistribution, SenderKeyHeader, SenderKeyMessage, SenderKeyState,

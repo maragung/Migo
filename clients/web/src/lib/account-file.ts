@@ -36,7 +36,7 @@ export const MAX_CREDENTIAL_BYTES = 1024;
  * Judges a typed recovery credential pair before any Argon2id work is spent on it.
  *
  * Returns `null` when the pair is sealable, or the one-line problem to show otherwise. Length is
- * the only composition rule — the credential is not an account password, and pattern rules push
+ * the only composition rule — the credential is not an account passphrase, and pattern rules push
  * people towards dictionary words rather than away from them.
  */
 export function credentialProblem(credential: string, confirm: string): string | null {

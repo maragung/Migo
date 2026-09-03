@@ -33,7 +33,7 @@ test('defaults are applied when nothing is supplied', () => {
   assert.equal(c.locale, 'en-US');
   assert.equal(c.country, 'ID');
   assert.equal(c.usernamePrefix, 'loadgen');
-  assert.equal(c.password, undefined);
+  assert.equal(c.passphrase, undefined);
   assert.equal(c.requestTimeoutMs, 15_000);
   assert.equal(c.maxErrorRate, 1);
   assert.equal(c.output, 'text');
@@ -56,7 +56,7 @@ test('both --flag value and --flag=value forms are accepted', () => {
   assert.equal(cfg(['--vus', '25']).vus, 25);
   assert.equal(cfg(['--vus=25']).vus, 25);
   assert.equal(cfg(['--scenario=presence']).scenario, 'presence');
-  assert.equal(cfg(['--password', 'pw']).password, 'pw');
+  assert.equal(cfg(['--passphrase', 'pw']).passphrase, 'pw');
 });
 
 test('the gateway URL is derived from the API URL: scheme mapped, /ws added when absent', () => {

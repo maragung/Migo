@@ -27,12 +27,12 @@ pub const USERNAME_MIN_CHARS: usize = 3;
 /// Longest username. Fits in a mention without wrapping a message bubble.
 pub const USERNAME_MAX_CHARS: usize = 32;
 
-/// Longest password accepted.
+/// Longest passphrase accepted.
 ///
 /// Argon2id will happily hash a megabyte, at a cost paid by the server rather than by
 /// whoever submitted it. That is an unauthenticated CPU amplifier, so there is a bound.
 /// It is generous enough that a passphrase manager's output fits several times over.
-pub const PASSWORD_MAX_BYTES: usize = 256;
+pub const PASSPHRASE_MAX_BYTES: usize = 256;
 
 /// Longest email address accepted. The practical limit in the mail RFCs.
 pub const EMAIL_MAX_CHARS: usize = 254;
@@ -49,7 +49,7 @@ pub const PHONE_MIN_DIGITS: usize = 8;
 /// different reasons.
 ///
 /// Some are impersonation risks: an account called `support` or `security` can ask for
-/// a password and be believed. Those are the expensive ones, because the damage is done
+/// a passphrase and be believed. Those are the expensive ones, because the damage is done
 /// by the account's *name* and no amount of moderation undoes a message that has
 /// already been read.
 ///
@@ -165,17 +165,17 @@ const RESERVED: &[&str] = &[
     "www",
 ];
 
-/// The most-guessed passwords, folded.
+/// The most-guessed passphrases, folded.
 ///
 /// A deliberately tiny list. It is not a security control — a real one checks against a
 /// corpus of breached credentials, which is tens of millions of hashes, belongs behind
 /// a k-anonymity range query, and is a service rather than a constant. This list exists
 /// to catch the specific case of a user who types the first thing that comes to mind
-/// and would otherwise be told their password is fine.
+/// and would otherwise be told their passphrase is fine.
 ///
 /// The length rule does most of the work: everything here is short, and most common
-/// passwords are.
-const COMMON_PASSWORDS: &[&str] = &[
+/// passphrases are.
+const COMMON_PASSPHRASES: &[&str] = &[
     "0123456789",
     "1234567890",
     "12345678901",
@@ -184,7 +184,12 @@ const COMMON_PASSWORDS: &[&str] = &[
     "abcdefghij",
     "iloveyou12",
     "letmein123",
+    // And the one the new terminology invites: people will literally type it.
+    "passphrase123",
     "passw0rd12",
+    // The three below are attacker guesses, kept in their historical spelling: a
+    // blocklist exists to refuse what people actually type, and "password123" is
+    // still typed far more often than any spelling of "passphrase".
     "password01",
     "password12",
     "password123",
@@ -323,48 +328,48 @@ fn skeleton(folded: &str) -> String {
         .collect()
 }
 
-/// Checks a password against the configured floor.
+/// Checks a passphrase against the configured floor.
 ///
 /// # What is and is not checked
 ///
 /// Length, a byte ceiling, and a small list of guesses. No composition rules — no
 /// required digit, no required symbol, no required capital. Those rules are known to
-/// make passwords *worse*: they push people from a long passphrase they remember to
-/// `Password1!`, which satisfies every rule and appears in every breach corpus. NIST
+/// make passphrases *worse*: they push people from a long passphrase they remember to
+/// `Passphrase1!`, which satisfies every rule and appears in every breach corpus. NIST
 /// dropped the recommendation in 2017 and the industry has been slow to notice.
 ///
 /// The username comparison is on the folded forms and covers the substring case, since
 /// `satoshi-satoshi` is not meaningfully stronger than `satoshi`.
-pub fn password(raw: &Secret, min_length: usize, username: Option<&str>) -> Result<()> {
+pub fn passphrase(raw: &Secret, min_length: usize, username: Option<&str>) -> Result<()> {
     let value = raw.expose();
-    if value.len() > PASSWORD_MAX_BYTES {
+    if value.len() > PASSPHRASE_MAX_BYTES {
         // Byte length, not character count: the bound exists to cap hashing work, and
         // hashing work is measured in bytes.
-        return Err(weak("password is longer than 256 bytes"));
+        return Err(weak("passphrase is longer than 256 bytes"));
     }
     if value.chars().count() < min_length {
-        return Err(weak("password is shorter than the configured minimum"));
+        return Err(weak("passphrase is shorter than the configured minimum"));
     }
     let folded = value.to_lowercase();
-    if COMMON_PASSWORDS.binary_search(&folded.as_str()).is_ok() {
-        return Err(weak("password is one of the most commonly guessed"));
+    if COMMON_PASSPHRASES.binary_search(&folded.as_str()).is_ok() {
+        return Err(weak("passphrase is one of the most commonly guessed"));
     }
     if let Some(name) = username {
         let name = name.to_lowercase();
         if name.len() >= USERNAME_MIN_CHARS && folded.contains(&name) {
-            return Err(weak("password contains the username"));
+            return Err(weak("passphrase contains the username"));
         }
     }
     Ok(())
 }
 
-/// A weak-password refusal.
+/// A weak-passphrase refusal.
 ///
 /// The reason is in the internal message and deliberately not in the public one: a
-/// public "that is a common password" is a hint to whoever is standing behind the user,
+/// public "that is a common passphrase" is a hint to whoever is standing behind the user,
 /// and the client already knows how to say "please pick something stronger".
 fn weak(why: &'static str) -> Error {
-    fault::error(codes::WEAK_PASSWORD, why)
+    fault::error(codes::WEAK_PASSPHRASE, why)
 }
 
 /// Validates and normalises an email address.
@@ -488,11 +493,11 @@ mod tests {
     }
 
     #[test]
-    fn the_common_password_list_is_sorted_and_unique() {
-        for pair in COMMON_PASSWORDS.windows(2) {
+    fn the_common_passphrase_list_is_sorted_and_unique() {
+        for pair in COMMON_PASSPHRASES.windows(2) {
             assert!(
                 pair[0] < pair[1],
-                "password list out of order at {}",
+                "passphrase list out of order at {}",
                 pair[0]
             );
         }
@@ -559,32 +564,34 @@ mod tests {
     }
 
     #[test]
-    fn a_short_password_is_refused_with_the_weak_code() {
-        let error = password(&Secret::new("short"), 10, None).expect_err("too short");
-        assert_eq!(error.code(), codes::WEAK_PASSWORD);
+    fn a_short_passphrase_is_refused_with_the_weak_code() {
+        let error = passphrase(&Secret::new("short"), 10, None).expect_err("too short");
+        assert_eq!(error.code(), codes::WEAK_PASSPHRASE);
     }
 
     #[test]
     fn a_long_passphrase_passes_without_composition_rules() {
-        assert!(password(&Secret::new("correct horse battery staple"), 10, None).is_ok());
+        assert!(passphrase(&Secret::new("correct horse battery staple"), 10, None).is_ok());
     }
 
     #[test]
-    fn an_enormous_password_is_refused_before_hashing() {
-        let error = password(&Secret::new("x".repeat(1_000)), 10, None).expect_err("too long");
-        assert_eq!(error.code(), codes::WEAK_PASSWORD);
+    fn an_enormous_passphrase_is_refused_before_hashing() {
+        let error = passphrase(&Secret::new("x".repeat(1_000)), 10, None).expect_err("too long");
+        assert_eq!(error.code(), codes::WEAK_PASSPHRASE);
     }
 
     #[test]
-    fn a_common_password_is_refused_even_when_long_enough() {
-        assert!(password(&Secret::new("password123"), 10, None).is_err());
-        assert!(password(&Secret::new("QWERTYUIOP"), 10, None).is_err());
+    fn a_common_passphrase_is_refused_even_when_long_enough() {
+        // Both spellings: the historical guess and the one the new term invites.
+        assert!(passphrase(&Secret::new("password123"), 10, None).is_err());
+        assert!(passphrase(&Secret::new("passphrase123"), 10, None).is_err());
+        assert!(passphrase(&Secret::new("QWERTYUIOP"), 10, None).is_err());
     }
 
     #[test]
-    fn a_password_containing_the_username_is_refused() {
-        assert!(password(&Secret::new("satoshi-satoshi"), 10, Some("Satoshi")).is_err());
-        assert!(password(&Secret::new("unrelated passphrase"), 10, Some("satoshi")).is_ok());
+    fn a_passphrase_containing_the_username_is_refused() {
+        assert!(passphrase(&Secret::new("satoshi-satoshi"), 10, Some("Satoshi")).is_err());
+        assert!(passphrase(&Secret::new("unrelated passphrase"), 10, Some("satoshi")).is_ok());
     }
 
     #[test]

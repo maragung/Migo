@@ -74,6 +74,7 @@ impl MigratorTrait for Migrator {
             Box::new(RoomNetworkBan),
             Box::new(ConversationGroups),
             Box::new(PublicRoomCapacity),
+            Box::new(PassphraseRename),
         ]
     }
 }
@@ -143,13 +144,16 @@ impl MigrationTrait for CaptchaChallenges {
     }
 }
 
-/// `0003_password_recovery` -- the password-recovery token table behind
+/// `0003_password_recovery` -- the passphrase-recovery token table behind
 /// `/v1/auth/recovery/*`. See `server/migrations/0003_password_recovery.sql` for
 /// the shape, and the recovery store in this crate for the read and write paths.
 struct Recovery;
 
 impl MigrationName for Recovery {
     fn name(&self) -> &str {
+        // The ledger name is what production recorded when this file first ran,
+        // and it keeps the on-disk file's name; the table it creates was renamed
+        // to `passphrase_recovery` by 0010, but the *migration* name is history.
         "0003_password_recovery"
     }
 }
@@ -361,6 +365,42 @@ impl MigrationTrait for PublicRoomCapacity {
         // choices the migration does not keep. There is no honest down.
         Err(DbErr::Migration(
             "0009_public_room_capacity cannot be rolled back: the prior capacities are not recorded"
+                .to_owned(),
+        ))
+    }
+}
+
+/// `0010_passphrase_rename` -- the terminology repair: the account credential is a
+/// passphrase, so the column and table that carry its hash carry the name too.
+/// Pure renames inside the migration transaction; the hashed values are untouched.
+/// See `server/migrations/0010_passphrase_rename.sql`.
+struct PassphraseRename;
+
+impl MigrationName for PassphraseRename {
+    fn name(&self) -> &str {
+        "0010_passphrase_rename"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for PassphraseRename {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!(
+                "../../../migrations/0010_passphrase_rename.sql"
+            ))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // The names run in both directions, but a down that exists invites a
+        // half-reverted deployment: a binary older than this migration talking
+        // to a schema rolled back to `password_hash`. Refuse, like the rest.
+        Err(DbErr::Migration(
+            "0010_passphrase_rename cannot be rolled back: deploy a build that
+            matches the schema instead"
                 .to_owned(),
         ))
     }

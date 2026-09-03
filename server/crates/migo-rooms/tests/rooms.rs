@@ -256,7 +256,7 @@ impl Harness {
                 username: format!("account-{account}"),
                 email: None,
                 phone: None,
-                password_hash: Secret::new("not-a-hash"),
+                passphrase_hash: Secret::new("not-a-hash"),
                 locale: "en".to_string(),
                 country: None,
                 created_at: ts(millis),
@@ -1909,7 +1909,7 @@ async fn resolve_answers_not_found_rather_than_naming_the_shape_of_the_input() {
 
 #[tokio::test]
 async fn the_shareable_alias_is_not_a_lookup_key() {
-    // `MGO-ROOM-XXXXXX` is six hex digits of the id and cannot be reversed, so it is
+    // `MGO-ROOM-XXXXXXXXXX` is ten hex digits of the id and cannot be reversed, so it is
     // for display and support tickets, not for resolution.
     let harness = Harness::new();
     let room = harness.founded().await;

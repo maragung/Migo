@@ -84,13 +84,13 @@ pub fn unauthenticated(why: &str) -> Error {
 
 /// Credentials were supplied and were wrong.
 ///
-/// Deliberately the same error for "no such user" and "wrong password". Any
+/// Deliberately the same error for "no such user" and "wrong passphrase". Any
 /// difference between the two is a free account-existence oracle, and rate
 /// limiting does not close it — an attacker only needs one request per guess.
 #[must_use]
 pub fn invalid_credentials() -> Error {
     error(codes::INVALID_CREDENTIALS, "invalid credentials")
-        .public("Username or password is incorrect")
+        .public("Username or passphrase is incorrect")
 }
 
 /// The request is malformed at the semantic level. `field` is disclosed, because
@@ -339,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn wrong_password_and_no_such_user_are_indistinguishable() {
+    fn wrong_passphrase_and_no_such_user_are_indistinguishable() {
         // Same code, same symbol, same public text. The oracle stays closed.
         let a = invalid_credentials();
         let b = invalid_credentials();

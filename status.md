@@ -2301,3 +2301,72 @@ Proporsi bar hidup di sini; ukuran absolut perangkat hidup di zoom.
 dengan web, satu kontrol per aksi, selalu terlihat. Salinan kedua di
 panel Settings dihapus; seksi Appearance kini menjelaskan tema aktif
 dan menunjuk ke kontrolnya di banner.
+
+## 64. Passphrase di mana-mana, tab yang jujur ditutup, alias MGO- lebih panjang (v0.16.2)
+
+Versi ini menyatukan perbaikan istilah, tab, dan alias publik di seluruh
+klien dan server, plus tiga fitur akun yang paling lama ditunda.
+
+**Istilah "password" pensiun, "passphrase" ke mana-mana.** Migrasi 0010
+mengganti nama kolom `password_hash` menjadi `passphrase_hash` dan tabel
+`password_recovery` menjadi `passphrase_recovery` — rename, bukan
+salin-lalu-hapus, jadi tidak ada satu pun saat akun tanpa kredensial dan
+tidak ada jendela rollback yang menggantungkannya; nilai yang di-hash
+dan parameter Argon2id-nya sama persis. Kode mengikuti: `migo-crypto`
+memindahkan `password.rs` ke `passphrase.rs`, entitas SeaORM dan seluruh
+penamaan di migo-auth/api ikut berganti, dan rute baru ikut lahir di
+sini — `POST /v1/auth/passphrase` (ganti passphrase akun; jawabannya
+grant pengganti) dan `PUT /v1/auth/contact` (satu kontak pemulihan,
+email atau telepon, dinormalisasi server). SDK mendapat
+`changePassphrase` dan `updateContact`; salinan web, desktop, dan
+Android semuanya kini berkata passphrase.
+
+**Web: tab kanan setara kiri, dan menutup berarti keluar.** Chip tab
+kanan kini memakai metrik chip strip kiri yang sama — satu bahasa bar,
+bukan dua. Menutup chip percakapan room atau group kini juga
+meninggalkan obrolannya: chip itu pintu terakhir ke percakapan, dan room
+yang sudah ditinggalkan tidak seharusnya menganggur sebagai tab yang
+harus ditutup dua kali (best-effort — kegagalan leave tidak membangkitkan
+kembali chip yang sudah ditutup). Tab Home di kanan diganti Games, dan
+tab Games di kiri dihapus: Games adalah tempat, bukan daftar, jadi ia
+menjadi chip resting pane kanan — selalu pertama, tak pernah ditutup —
+dan katalognya tidak lagi berebut tempat dengan daftar-daftar di kiri.
+
+**Alias publik MGO- empat karakter lebih panjang.** Kode `MGO-` itu
+bukan id akun: id akun adalah ULID 128-bit yang teksnya 26 karakter
+Crockford base32. Alias `MGO-` hanyalah proyeksi tampilan — mix SplitMix64
+atas setengah acak id — yang dihitung saat digambar, tidak pernah
+disimpan server, dan tidak pernah dipakai sebagai kunci pencarian
+(shareable untuk suara dukungan/voice chat, itu semua). Karena murni
+turunan, memanjangkannya bebas migrasi: kode kini 12 hex untuk pengguna
+(`MGO-AA5128F0BBAD`, 16 karakter) dan 10 hex untuk room/group/bot
+(`MGO-ROOM-82F91AB402`). Dokumen di structs.json diajarkan bentuk baru
+dan `make protocol` menurunkannya ke TS, Rust, dan Kotlin.
+
+**Android: tiga pintu akun.** Layar sign-in punya pintu ketiga:
+restore dari kontainer `.migo`. Kontainer kini menyimpan `account_id`
+(bidang terakhir, opsional — byte payload tetap identik lintas port),
+vault menyimpan seed device credential (FIELD_DEVICE_CREDENTIAL), dan
+restore menjalankan upacara add-device penuh: kontainer dibuka SEBELUM
+reset — passphrase cadangan yang salah salah ketik, bukan alasan
+menghapus perangkat — lalu perangkat ini masuk sebagai perangkat baru
+dengan identitas E2EE segala tapi memegang root. Dari Profile, perangkat
+pemegang root bisa menyegel kontainer `.migo` sendiri lewat SAF
+CreateDocument, dengan recovery credential pilihannya sendiri (bukan
+passphrase akun — cadangan yang disegel di bawah passphrase adalah
+cadangan yang satu pembobolan membuka semuanya). Dan di Wallet: daftar
+alamat terdaftar milik akun dibaca dari server — null berarti "belum
+dicek", bukan "tidak ada" — lengkap dengan arsip di balik konfirmasi §70,
+baris arsip tetap tampil redup karena tersembunyi bukan hilang.
+
+**Desktop: Settings punya seksi Sign-in.** Kontak pemulihan (satu
+string; server juri bentuknya, email mengandung @ atau telepon diawali
++) dan ganti passphrase — formulir tiga bidang dengan konfirmasi, dan
+biayanya dinyatakan sebelum tombol aktif: server mengakhiri semua sesi
+akun dan menjawab dengan grant pengganti yang diadopsi worker agar
+jendela ini tetap masuk, sementara perangkat lain masuk lagi dengan
+passphrase baru. Vault tidak bisa disegel ulang dari sesi (ia terbuka di
+bawah passphrase perangkat, yang memang tak pernah dipegang sesi), jadi
+refresh token tersimpan resmi pensiun: unlock berikutnya jatuh ke
+upacara ML-DSA bila perangkat mampu, atau minta passphrase baru — dan
+formulirnya jujur soal itu.

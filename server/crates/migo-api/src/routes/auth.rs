@@ -46,7 +46,7 @@ pub(crate) fn routes() -> Router<ApiState> {
             .route("/login", post(login))
             .route("/refresh", post(refresh))
             .route("/logout", post(logout))
-            .route("/password", post(change_password))
+            .route("/passphrase", post(change_passphrase))
             .route("/contact", put(set_contact))
             .route("/sessions", get(list_sessions))
             .route("/sessions/revoke-others", post(revoke_other_sessions))
@@ -139,7 +139,7 @@ struct RegisterRequest {
     email: Option<String>,
     #[serde(default)]
     phone: Option<String>,
-    password: String,
+    passphrase: String,
     #[serde(default = "default_locale")]
     locale: String,
     #[serde(default)]
@@ -176,7 +176,7 @@ struct RegisterRequest {
 #[derive(Deserialize)]
 struct LoginRequest {
     identifier: String,
-    password: String,
+    passphrase: String,
     device: DeviceRequest,
     captcha: Option<CaptchaProofBody>,
     /// The server the client believes it is talking to. Same
@@ -377,7 +377,7 @@ async fn register(
         username: body.username,
         email: body.email,
         phone: body.phone,
-        password: Secret::new(body.password),
+        passphrase: Secret::new(body.passphrase),
         locale: body.locale,
         country: body.country,
         gender,
@@ -413,7 +413,7 @@ async fn login(
     let had_captcha = body.captcha.is_some();
     let sign_in = SignIn {
         identifier: body.identifier,
-        password: Secret::new(body.password),
+        passphrase: Secret::new(body.passphrase),
         device: body.device.into_claim()?,
         captcha: body.captcha.map(migo_auth::CaptchaProof::from),
         server,
@@ -473,12 +473,12 @@ async fn logout(
 ///
 /// - The attempt carried a proof. The proof is spent whatever the refusal says, so the widget's
 ///   challenge is dead even when the refusal is about something else (a taken username, a weak
-///   password) — the common case, and the one the refresh click existed for.
+///   passphrase) — the common case, and the one the refresh click existed for.
 /// - The refusal is the gate's own (`CAPTCHA_REQUIRED`, `INVALID_CAPTCHA`, `CAPTCHA_EXPIRED`):
 ///   the client is being told to go get a challenge, and the challenge arrives in the same
 ///   response.
 ///
-/// Everything else — a wrong-password login from a network that never tripped the gate, a
+/// Everything else — a wrong-passphrase login from a network that never tripped the gate, a
 /// malformed body — never showed the user a captcha, so there is nothing to reload. A disabled
 /// captcha service mints nothing and the refusal crosses as it always did.
 async fn with_fresh_captcha(
@@ -562,7 +562,7 @@ async fn captcha(
     Ok(Json(challenge))
 }
 
-/// `POST /v1/auth/recovery/request` — start a password-recovery flow.
+/// `POST /v1/auth/recovery/request` — start a passphrase-recovery flow.
 /// Returns 200 `{ ok: true }` regardless of whether the identifier
 /// resolved, so an attacker cannot enumerate accounts.
 #[derive(Deserialize)]
@@ -606,7 +606,7 @@ struct RecoveryConfirmBody {
     token_id: migo_core::Id,
     /// The hex-encoded HMAC tag the request route issued.
     tag: String,
-    new_password: String,
+    new_passphrase: String,
 }
 async fn recovery_confirm(
     State(state): State<ApiState>,
@@ -626,34 +626,34 @@ async fn recovery_confirm(
         .confirm_recovery(
             body.token_id,
             &tag,
-            &migo_core::Secret::new(body.new_password),
+            &migo_core::Secret::new(body.new_passphrase),
             &context,
         )
         .await?;
     Ok(Json(RecoveryRequestResponse { ok: true }))
 }
 
-// --- password, sessions, contact ------------------------------------------
+// --- passphrase, sessions, contact ------------------------------------------
 
 #[derive(Deserialize)]
-struct ChangePasswordBody {
-    current_password: String,
-    new_password: String,
+struct ChangePassphraseBody {
+    current_passphrase: String,
+    new_passphrase: String,
 }
-async fn change_password(
+async fn change_passphrase(
     State(state): State<ApiState>,
     auth: Authenticated,
-    Json(body): Json<ChangePasswordBody>,
+    Json(body): Json<ChangePassphraseBody>,
 ) -> Result<Json<GrantResponse>, crate::ApiError> {
     let now = state.now();
     let context = auth.facts.context(now);
-    let change = migo_auth::PasswordChange {
-        current: migo_core::Secret::new(body.current_password),
-        next: migo_core::Secret::new(body.new_password),
+    let change = migo_auth::PassphraseChange {
+        current: migo_core::Secret::new(body.current_passphrase),
+        next: migo_core::Secret::new(body.new_passphrase),
     };
     let grant = state
         .authenticator()
-        .change_password(&auth.identity, change, &context)
+        .change_passphrase(&auth.identity, change, &context)
         .await?;
     Ok(Json(grant.into()))
 }

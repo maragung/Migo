@@ -43,7 +43,7 @@ function capture(fn: () => void): Captured {
 
 test('a secret handed to the logger is redacted before it is written', () => {
   const log = new Logger('normal');
-  const { stderr } = capture(() => log.warn('registered with password=hunter2 for the run'));
+  const { stderr } = capture(() => log.warn('registered with passphrase=hunter2 for the run'));
   assert.ok(!stderr.includes('hunter2'), 'the secret must not reach stderr');
   assert.ok(stderr.includes('[redacted]'));
   assert.ok(stderr.startsWith('warning: '));

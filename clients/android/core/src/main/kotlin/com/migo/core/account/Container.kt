@@ -102,12 +102,29 @@ data class AccountFile(
     @SerialName("created_at") val createdAt: Long,
     /** The root secret, hex-encoded: 64 characters. The only secret in the file. */
     val root: String,
+    /**
+     * The public id of the account this container restores, when the sealing device knew it.
+     *
+     * Last, optional, and omitted when null — the codec's `encodeDefaults` is off, which is the
+     * same shape as the Rust reference's `skip_serializing_if` — so a container sealed for the
+     * same root by either port carries byte-identical payload bytes, and a build that does not
+     * know the field still opens one that carries it. A container from before accounts were
+     * named in the file decodes it as null, and a restore from it is refused with a remedy
+     * rather than guessed at.
+     */
+    @SerialName("account_id") val accountId: String? = null,
 ) {
     companion object {
         /** Builds a payload for `root`, stamped `now` (Unix seconds). */
         fun new(root: MigoRoot, now: Long): AccountFile =
             AccountFile(version = FORMAT_VERSION, createdAt = now, root = hexOf(root.asBytes()))
     }
+
+    /**
+     * Names the account this container restores, from the grant the sealing device signed in
+     * with — the builder the desktop reference calls `for_account`.
+     */
+    fun forAccount(accountId: String): AccountFile = copy(accountId = accountId)
 
     /** The root secret. */
     fun root(): MigoRoot {

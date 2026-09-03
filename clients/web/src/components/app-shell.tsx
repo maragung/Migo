@@ -5,10 +5,10 @@
  *
  * The new-ui-02 model (docs/design mockup `new-ui-02.tsx`) splits the app: a LEFT panel (~32% on
  * a PC, the whole screen on a phone) that owns the account's lists — its own teal tab strip
- * (Main, Rooms, Games, Feed) over the orange profile banner — and a RIGHT panel that shows what
- * the left panel's clicks open, as tabs: one closable chip per open conversation, the games
- * arcade, and the secondary panels the banner menu reaches, over a persistent Feed chip that is
- * the pane's resting content — what it shows when nothing is open. Clicking around the left
+ * (Main, Chats, Rooms, Feed) over the orange profile banner — and a RIGHT panel that shows what
+ * the left panel's clicks open, as tabs: one closable chip per open conversation and the
+ * secondary panels the banner menu reaches, over a persistent Games chip that is the pane's
+ * resting content — the arcade, what it shows when nothing is open. Clicking around the left
  * panel never disturbs the right, and that independence is the model's whole offer.
  *
  * Below the PC breakpoint the two panes take turns: the left panel is the app, and the right

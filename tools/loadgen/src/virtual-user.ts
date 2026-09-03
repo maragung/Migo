@@ -15,7 +15,7 @@ import type { Config } from './config.js';
 
 export interface VirtualUserDeps {
   readonly config: Config;
-  readonly password: string;
+  readonly passphrase: string;
   /** Per-run tag mixed into usernames so repeated runs never collide on a taken username. */
   readonly runTag: string;
   /** Sink for inbound event-handling errors, surfaced by the client off the request path. */
@@ -35,13 +35,13 @@ export class VirtualUser {
   conversationId: Id | undefined = undefined;
 
   readonly #config: Config;
-  readonly #password: string;
+  readonly #passphrase: string;
 
   constructor(index: number, deps: VirtualUserDeps) {
     this.index = index;
     this.username = `${deps.config.usernamePrefix}-${deps.runTag}-${index}`;
     this.#config = deps.config;
-    this.#password = deps.password;
+    this.#passphrase = deps.passphrase;
     this.client = MigoClient.create({
       server: serverEndpointFromUrl(deps.config.apiUrl),
       deviceDisplayName: `loadgen/${deps.runTag}/${index}`,
@@ -60,7 +60,7 @@ export class VirtualUser {
   async start(): Promise<void> {
     await this.client.register({
       username: this.username,
-      password: this.#password,
+      passphrase: this.#passphrase,
       locale: this.#config.locale,
       country: this.#config.country,
     });

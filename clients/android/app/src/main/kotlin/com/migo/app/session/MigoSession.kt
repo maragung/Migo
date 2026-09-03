@@ -5,10 +5,13 @@ import android.os.Build
 import com.migo.core.ConnectionState
 import com.migo.core.MigoClient
 import com.migo.core.MigoClientOptions
+import com.migo.core.account.DeviceCredential
 import com.migo.core.account.EvmWallet
 import com.migo.core.account.IdentityKey
 import com.migo.core.account.MigoRoot
+import com.migo.core.account.openContainer
 import com.migo.core.domain.KeyStore
+import com.migo.core.domain.SdkError
 import com.migo.core.store.GatewayScheme
 import com.migo.core.store.ServerEndpoint
 import com.migo.core.store.SessionStore
@@ -17,6 +20,7 @@ import com.migo.core.store.TxRecord
 import com.migo.core.store.Vault
 import com.migo.core.store.VaultError
 import com.migo.core.wire.Id
+import com.migo.core.wire.parseId
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -133,7 +137,7 @@ class MigoSession private constructor(
      * Publishes the root's account material: the ML-DSA identity key, and any of the root's first
      * wallets the server does not know yet.
      *
-     * Best-effort by design — a failure here is not a failed sign-in, because the password already
+     * Best-effort by design — a failure here is not a failed sign-in, because the passphrase already
      * worked and the calls are idempotent: the next sign-in tries again. The address is a pure
      * function of the root, so "which wallets exist" is server state, not a matter of opinion, and
      * every address the root derives that is not registered gets registered.
@@ -195,7 +199,7 @@ class MigoSession private constructor(
             session.trackedTxs.addAll(keys.txs)
             // Refresh before connecting: the stored access token is minutes old at best and hours old
             // in practice, and a handshake with an expired one fails in a way that looks like a bad
-            // password. The refresh rotates the token, so the persist below is not optional.
+            // passphrase. The refresh rotates the token, so the persist below is not optional.
             val grant = client.refreshWith(saved.refreshToken, saved.deviceId)
             client.resume(grant)
             session.enrolAccountMaterial()
@@ -228,14 +232,14 @@ class MigoSession private constructor(
             appVersion: String,
             endpoint: ServerEndpoint,
             username: String,
-            password: String,
+            passphrase: String,
             hooks: SessionHooks = SessionHooks(),
         ): MigoSession {
             val (vault, store) = reset(context)
             val root = pendingRegistrationRoot ?: MigoRoot.generate().also { pendingRegistrationRoot = it }
             val client = build(endpoint, appVersion, null, KeyStore.founding(root), store, hooks)
             val session = MigoSession(client, username, vault, store)
-            client.register(username, password, IdentityKey.fromRoot(root).publicKey())
+            client.register(username, passphrase, IdentityKey.fromRoot(root).publicKey())
             session.enrolAccountMaterial()
             session.persist()
             pendingRegistrationRoot = null
@@ -255,7 +259,7 @@ class MigoSession private constructor(
             appVersion: String,
             endpoint: ServerEndpoint,
             identifier: String,
-            password: String,
+            passphrase: String,
             hooks: SessionHooks = SessionHooks(),
         ): MigoSession {
             val stored = withContext(Dispatchers.IO) {
@@ -280,7 +284,7 @@ class MigoSession private constructor(
                     build(endpoint, appVersion, deviceId, KeyStore.restore(keys), store, hooks)
                 val session = MigoSession(client, identifier, vault, store)
                 session.trackedTxs.addAll(keys.txs)
-                client.login(identifier, password)
+                client.login(identifier, passphrase)
                 // A device that holds the root re-publishes its material on every sign-in: the
                 // call is idempotent, and it is the legacy upgrade door that makes an account
                 // created before the root existed ML-DSA-loginable the day its founding device
@@ -293,7 +297,58 @@ class MigoSession private constructor(
             val (vault, store) = reset(context)
             val client = build(endpoint, appVersion, null, KeyStore.create(), store, hooks)
             val session = MigoSession(client, identifier, vault, store)
-            client.login(identifier, password)
+            client.login(identifier, passphrase)
+            session.persist()
+            return session
+        }
+
+        /**
+         * Restores the account onto this device from a `.migo` container: the add-device
+         * ceremony, a new vault, and the session that follows.
+         *
+         * The restored device holds the root — it can sign future add-device ceremonies and
+         * derive the wallets — but its E2EE identity is fresh and random, not the founding
+         * device's: a restore is a new device, and new devices never inherit another device's
+         * ratchets. Only the founding device's E2EE history is a function of the root, and only
+         * its own backup restores onto it as itself.
+         *
+         * The container opens *before* anything local is destroyed: a wrong recovery credential
+         * is a typo, and a typo must not wipe whatever device state was here. Only once the root
+         * is out and the account named does [reset] replace it — the same replacement a sign-in
+         * as a different account performs, and the explicit thing the person pressing "restore"
+         * asked for.
+         *
+         * [username] is the greeting and nothing more: the grant identifies the account by id,
+         * and a blank field falls back to the account's public id text.
+         */
+        suspend fun restore(
+            context: Context,
+            appVersion: String,
+            endpoint: ServerEndpoint,
+            containerBytes: ByteArray,
+            credential: String,
+            username: String,
+            hooks: SessionHooks = SessionHooks(),
+        ): MigoSession {
+            // Argon2 at the container's own cost: CPU work, not file work, so the default
+            // dispatcher rather than the IO one the store paths use.
+            val file = withContext(Dispatchers.Default) { openContainer(credential, containerBytes) }
+            val accountIdText = file.accountId
+                ?: throw SdkError(
+                    "this container does not name its account (it was sealed by an older build); " +
+                        "sign in with your passphrase instead",
+                )
+            val accountId = parseId(accountIdText)
+            val root = file.root()
+            val name = username.trim().ifEmpty { accountIdText }
+
+            val (vault, store) = reset(context)
+            val deviceCredential = DeviceCredential.generate()
+            val client =
+                build(endpoint, appVersion, null, KeyStore.restored(root, deviceCredential), store, hooks)
+            val session = MigoSession(client, name, vault, store)
+            client.addDevice(accountId, IdentityKey.fromRoot(root), deviceCredential)
+            session.enrolAccountMaterial()
             session.persist()
             return session
         }

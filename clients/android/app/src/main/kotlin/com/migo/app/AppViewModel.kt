@@ -1,6 +1,7 @@
 package com.migo.app
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.migo.app.model.ActivityCategory
@@ -22,12 +23,14 @@ import com.migo.app.session.MigoSession
 import com.migo.app.session.SessionHooks
 import com.migo.core.ConnectionState
 import com.migo.core.account.AVALANCHE_MAINNET
+import com.migo.core.account.AccountFile
 import com.migo.core.account.Eip1559Tx
 import com.migo.core.account.EvmWallet
 import com.migo.core.account.FUJI_TESTNET
 import com.migo.core.account.Network
 import com.migo.core.account.eip55
 import com.migo.core.account.parseAddress
+import com.migo.core.account.sealContainer
 import com.migo.core.crypto.Content
 import com.migo.core.domain.IncomingMessage
 import com.migo.core.domain.MessageDeletion
@@ -59,10 +62,12 @@ import com.migo.core.store.TxRecord
 import com.migo.core.wire.Id
 import com.migo.core.wire.WireError
 import com.migo.core.wire.parseId
+import java.io.IOException
 import java.math.BigInteger
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -70,6 +75,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Everything the screens are allowed to know, and every action they are allowed to take.
@@ -81,11 +87,11 @@ import kotlinx.coroutines.launch
  * that only this class writes gives every screen a consistent snapshot, and gives Compose a single
  * thing to recompose on.
  *
- * # Where the password is not
+ * # Where the passphrase is not
  *
- * No action here stores a password, and [AppState] has no field for one. The sign-in form holds it in
+ * No action here stores a passphrase, and [AppState] has no field for one. The sign-in form holds it in
  * a local `remember` for as long as the form is on screen and passes it to [signIn] as an argument.
- * A password on the state object would be a password in every recomposition, in the saved-state bundle
+ * A passphrase on the state object would be a passphrase in every recomposition, in the saved-state bundle
  * if anyone added one, and in whatever a future `toString()` prints.
  *
  * # Where the plaintext is
@@ -159,12 +165,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun setIdentifier(text: String) = signedOut { it.copy(identifier = text, failure = null) }
 
     /** Signs in an existing account, or creates one when [create] is set. */
-    fun signIn(password: String, create: Boolean) {
+    fun signIn(passphrase: String, create: Boolean) {
         val form = _state.value as? AppState.SignedOut ?: return
         if (form.busy) return
         val endpoint = form.serverEndpoint
         val identifier = form.identifier.trim()
-        if (identifier.isEmpty() || password.isEmpty()) {
+        if (identifier.isEmpty() || passphrase.isEmpty()) {
             signedOut { it.copy(failure = "Fill in both fields first.") }
             return
         }
@@ -178,7 +184,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         BuildConfig.VERSION_NAME,
                         endpoint,
                         identifier,
-                        password,
+                        passphrase,
                         hooks(),
                     )
                 } else {
@@ -187,7 +193,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         BuildConfig.VERSION_NAME,
                         endpoint,
                         identifier,
-                        password,
+                        passphrase,
                         hooks(),
                     )
                 }
@@ -197,6 +203,112 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 throw cancelled
             } catch (failure: Exception) {
                 signedOut { it.copy(busy = false, failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Restores the account onto this device from a `.migo` container the file picker chose.
+     *
+     * The recovery credential is held the way a passphrase is: passed as an argument, never a
+     * field on [AppState]. The container bytes are read once, handed to the session layer, and
+     * zeroed the moment the ceremony is done with them.
+     */
+    fun restoreFromBackup(container: Uri, credential: String) {
+        val form = _state.value as? AppState.SignedOut ?: return
+        if (form.busy) return
+        if (credential.isEmpty()) {
+            signedOut { it.copy(failure = "Enter the backup's recovery credential first.") }
+            return
+        }
+        val endpoint = form.serverEndpoint
+        val identifier = form.identifier.trim()
+
+        signedOut { it.copy(busy = true, failure = null) }
+        viewModelScope.launch {
+            try {
+                val bytes = withContext(Dispatchers.IO) {
+                    getApplication<Application>().contentResolver.openInputStream(container)?.use { it.readBytes() }
+                        ?: throw IOException("the chosen backup could not be read")
+                }
+                try {
+                    val opened = MigoSession.restore(
+                        getApplication(),
+                        BuildConfig.VERSION_NAME,
+                        endpoint,
+                        bytes,
+                        credential,
+                        identifier,
+                        hooks(),
+                    )
+                    settings.update { it.copy(serverEndpoint = endpoint, onboardingComplete = true) }
+                    attach(opened)
+                } finally {
+                    bytes.fill(0)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedOut { it.copy(busy = false, failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Seals a `.migo` container to the file the picker named: the account root, encrypted under a
+     * recovery credential the person chose for the backup.
+     *
+     * The credential follows the passphrase rule — an argument, never a field on [AppState] — and is
+     * for the backup, not the account: a container sealed under the passphrase is a backup one
+     * passphrase breach opens. The honest limit is stated rather than papered over: only a device
+     * that holds the root (the founder, or one that restored a container) can seal one; an
+     * additional device signs in with its passphrase and never sees the root.
+     */
+    fun exportBackup(container: Uri, credential: String) {
+        val live = session ?: return
+        val form = _state.value as? AppState.SignedIn ?: return
+        if (form.backup.sealing) return
+        if (credential.isEmpty()) {
+            signedIn { it.copy(backup = it.backup.copy(failure = "Enter a recovery credential for the backup first.")) }
+            return
+        }
+        val root = live.client.keyStore.root
+        if (root == null) {
+            signedIn {
+                it.copy(
+                    backup = it.backup.copy(
+                        failure = "This device does not hold the account root, so it cannot seal a " +
+                            "backup. Make it on the device that created the account, or on one that " +
+                            "restored a backup.",
+                    ),
+                )
+            }
+            return
+        }
+
+        signedIn { it.copy(backup = it.backup.copy(sealing = true, failure = null, notice = null)) }
+        viewModelScope.launch {
+            try {
+                val file = AccountFile
+                    .new(root, System.currentTimeMillis() / 1000)
+                    .forAccount(live.client.accountId.value)
+                // Argon2 at the container's own cost is CPU work, so the seal runs on the default
+                // dispatcher; only the stream to the chosen file is IO.
+                val bytes = withContext(Dispatchers.Default) { sealContainer(credential, file) }
+                try {
+                    withContext(Dispatchers.IO) {
+                        getApplication<Application>().contentResolver.openOutputStream(container)
+                            ?.use { it.write(bytes) }
+                            ?: throw IOException("the chosen backup file could not be opened")
+                    }
+                    signedIn { it.copy(backup = it.backup.copy(sealing = false, notice = "Backup written.")) }
+                } finally {
+                    bytes.fill(0)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(backup = it.backup.copy(sealing = false, failure = readable(failure))) }
             }
         }
     }
@@ -804,7 +916,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** The Wallet's combined read: balance, statement, progression, badges, leaders, catalogue. */
+    /**
+     * The Wallet's combined read: balance, statement, progression, badges, leaders, catalogue, and
+     * the account's registered addresses.
+     */
     fun loadWallet() {
         val live = session ?: return
         signedIn { it.copy(wallet = it.wallet.copy(loading = true)) }
@@ -815,6 +930,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val badges = runCatching { live.client.economy.getBadges(live.client.accountId) }.getOrDefault(emptyList())
             val leaders = runCatching { live.client.economy.getLeaderboard("xp", 10) }.getOrDefault(emptyList())
             val catalogue = runCatching { live.client.economy.getGiftCatalogue() }.getOrDefault(emptyList())
+            val registrations = runCatching { live.client.registeredWallets() }.getOrNull()
             signedIn {
                 it.copy(
                     wallet = it.wallet.copy(
@@ -826,8 +942,55 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         badges = badges,
                         leaders = leaders,
                         catalogue = catalogue,
+                        registrations = registrations,
                     ),
                 )
+            }
+        }
+    }
+
+    /**
+     * Archives one of the account's registered wallets.
+     *
+     * The registration is hidden, not destroyed — the address is a function of the root, so the
+     * root can register it again — and the list re-reads after, because the row staying, marked
+     * archived, is part of the answer. Confirmation is the caller's business (§70); this is the
+     * call that acts.
+     */
+    fun archiveWallet(walletId: String) {
+        val live = session ?: return
+        val id = try {
+            parseId(walletId.trim())
+        } catch (_: WireError) {
+            signedIn { it.copy(wallet = it.wallet.copy(registrationFailure = "That is not a valid wallet id.")) }
+            return
+        }
+        signedIn {
+            it.copy(wallet = it.wallet.copy(archiving = it.wallet.archiving + walletId, registrationFailure = null))
+        }
+        viewModelScope.launch {
+            try {
+                live.client.archiveWallet(id)
+                val registrations = runCatching { live.client.registeredWallets() }.getOrNull()
+                signedIn {
+                    it.copy(
+                        wallet = it.wallet.copy(
+                            archiving = it.wallet.archiving - walletId,
+                            registrations = registrations ?: it.wallet.registrations,
+                        ),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn {
+                    it.copy(
+                        wallet = it.wallet.copy(
+                            archiving = it.wallet.archiving - walletId,
+                            registrationFailure = readable(failure),
+                        ),
+                    )
+                }
             }
         }
     }

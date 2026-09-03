@@ -401,7 +401,7 @@ fn the_config_debug_does_not_leak_the_database_credential() {
     let debug = format!("{config:?}");
     assert!(
         !debug.contains("s3cr3t"),
-        "db password leaked into Debug: {debug}"
+        "db passphrase leaked into Debug: {debug}"
     );
 }
 
@@ -629,7 +629,7 @@ async fn registered_account(app: &migod::App, username: &str) -> Id {
                 username: username.to_string(),
                 email: None,
                 phone: None,
-                password: Secret::new("correct-horse-battery-staple"),
+                passphrase: Secret::new("correct-horse-battery-staple"),
                 locale: "en-US".to_string(),
                 country: None,
                 gender: None,
@@ -1189,7 +1189,7 @@ async fn emit_notification_reaches_a_subscribed_session_as_opcode_144() {
     let app = build_default_app().await;
     let bob = registered_account(&app, "bobnotif").await;
     let now = app.clock.now();
-    let bob_password = Secret::new("correct-horse-battery-staple");
+    let bob_passphrase = Secret::new("correct-horse-battery-staple");
     // A second sign-in to obtain a token for bob that the fake gateway-side transport
     // session can use to authenticate. The issued_at / expires_at are computed from
     // the context's now, so the token must be minted against the app's clock — not
@@ -1200,7 +1200,7 @@ async fn emit_notification_reaches_a_subscribed_session_as_opcode_144() {
         .sign_in(
             migo_auth::SignIn {
                 identifier: "bobnotif".to_string(),
-                password: bob_password,
+                passphrase: bob_passphrase,
                 device: migo_auth::DeviceClaim::new(Platform::Web, "notif test"),
                 captcha: None,
                 server: None,

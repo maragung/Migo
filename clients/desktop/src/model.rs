@@ -176,7 +176,7 @@ pub struct Account {
     /// contact to confirm nobody is in the middle. Grouped for reading, never for parsing.
     pub safety_number: String,
     /// Whether this device holds the account root: it can seal a `.migo` backup, sign future
-    /// add-device ceremonies, and derive the wallet addresses. A password-only device is a
+    /// add-device ceremonies, and derive the wallet addresses. A passphrase-only device is a
     /// passenger, and the backup form says so rather than letting a button fail at the last step.
     pub holds_root: bool,
 }
@@ -648,7 +648,7 @@ pub fn spaced_words(word: &str) -> String {
     }
 }
 
-/// A transient message shown in the corner: a send failure, a rate limit, a bad password.
+/// A transient message shown in the corner: a send failure, a rate limit, a bad passphrase.
 #[derive(Debug, Clone)]
 pub struct Toast {
     pub text: String,

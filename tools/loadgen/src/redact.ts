@@ -26,7 +26,7 @@ const URL_IPV6_HOST = new RegExp(`^(${SCHEME})\\[[0-9a-f:]+\\]`, 'i');
 
 /** Field names whose value is a secret. Bare `key`/`id` are intentionally excluded to avoid noise. */
 const SECRET_KEY =
-  'password|passwd|pwd|secret|token|api[-_]?key|apikey|access[-_]?key|authorization|auth|credential|private[-_]?key';
+  'passphrase|passwd|pwd|secret|token|api[-_]?key|apikey|access[-_]?key|authorization|auth|credential|private[-_]?key';
 
 /** `secret_key=value` or `secret_key: value`, capturing the label so only the value is masked. */
 const SECRET_ASSIGNMENT = new RegExp(`(\\b(?:${SECRET_KEY})\\b\\s*[=:]\\s*)(\\S+)`, 'gi');

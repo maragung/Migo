@@ -9,8 +9,8 @@ applied in order, never edited after merge (brief §126).
 | --------------------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | Internal PK                 | 128-bit **UUIDv7** stored as `uuid`                                              | Time-ordered → index locality; globally unique → no coordination between regions |
 | Client-generated message id | **ULID** (same 128 bits on the wire)                                             | Client can create an id offline; dedup is free (brief §68)                       |
-| Public user id              | `MGO-` + Crockford base32 of the first 40 bits + check char, e.g. `MGO-7F82A91C` | Short, human-speakable, immutable (brief §79)                                    |
-| Public room id              | `MGO-ROOM-82F91A`                                                                | Immutable; renaming a room never breaks links (brief §81)                        |
+| Public user id              | `MGO-` + 12 hex digits of a mix of the id's random half, e.g. `MGO-7F82A91CBBAD` | Short, human-speakable, immutable, derived not stored (brief §79)                |
+| Public room id              | `MGO-ROOM-82F91AB402`                                                            | Immutable; renaming a room never breaks links (brief §81)                        |
 
 Immutable ids everywhere; display names are mutable and never a key.
 

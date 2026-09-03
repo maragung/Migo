@@ -27,7 +27,7 @@ const CONFIG: Config = {
   locale: 'en-GB',
   country: 'GB',
   usernamePrefix: 'loadgen',
-  password: undefined,
+  passphrase: undefined,
   requestTimeoutMs: 12_345,
   maxErrorRate: 1,
   output: 'text',
@@ -51,7 +51,7 @@ function buildWithStubbedClient(
   try {
     const vu = new VirtualUser(index, {
       config,
-      password: 'pw',
+      passphrase: 'pw',
       runTag: 'tag42',
       onEventError: () => {},
     });

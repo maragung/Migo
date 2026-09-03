@@ -9,7 +9,7 @@
  *
  *   - **Identity** is read-only on purpose. The username is chosen once and can never change (it is
  *     part of the account's public name, §182), so the panel states that plainly rather than
- *     offering an edit that would only ever error. The account's public id (`MGO-XXXXXXXX`) is shown
+ *     offering an edit that would only ever error. The account's public id (`MGO-XXXXXXXXXXXX`) is shown
  *     beside it because it is the shareable handle a person hands out.
  *   - **Email** cannot be read back from the server — there is no "what is my email" call, by
  *     design — so the panel never claims to show the current one. It offers a single field that
@@ -80,7 +80,7 @@ export function AccountIdentityView({
 }: {
   /** The account's username, or `null` while the profile is still resolving. */
   username: string | null;
-  /** The account's public id (`MGO-XXXXXXXX`), or `null` while the profile is still resolving. */
+  /** The account's public id (`MGO-XXXXXXXXXXXX`), or `null` while the profile is still resolving. */
   publicId: string | null;
 }): ReactNode {
   return (
@@ -113,7 +113,7 @@ export function EmailFormView({
   const canSubmit = !busy && isLikelyEmail(value);
   return (
     <form
-      className="password-form"
+      className="passphrase-form"
       onSubmit={(event) => {
         event.preventDefault();
         if (canSubmit) {
@@ -188,7 +188,7 @@ export function PassphraseFormView({
     current.length > 0 && next.length >= MIN_PASSPHRASE_LENGTH && next === confirm && !busy;
   return (
     <form
-      className="password-form"
+      className="passphrase-form"
       onSubmit={(event) => {
         event.preventDefault();
         if (canSubmit && !saved) {
@@ -199,9 +199,9 @@ export function PassphraseFormView({
       <label className="field-label">
         Current passphrase
         <input
-          type="password"
+          type="passphrase"
           className="input"
-          autoComplete="current-password"
+          autoComplete="current-passphrase"
           value={current}
           onChange={(event) => onChange('current', event.target.value)}
           aria-label="Current passphrase"
@@ -210,9 +210,9 @@ export function PassphraseFormView({
       <label className="field-label">
         New passphrase
         <input
-          type="password"
+          type="passphrase"
           className="input"
-          autoComplete="new-password"
+          autoComplete="new-passphrase"
           value={next}
           onChange={(event) => onChange('next', event.target.value)}
           aria-label="New passphrase"
@@ -222,9 +222,9 @@ export function PassphraseFormView({
       <label className="field-label">
         Confirm new passphrase
         <input
-          type="password"
+          type="passphrase"
           className="input"
-          autoComplete="new-password"
+          autoComplete="new-passphrase"
           value={confirm}
           onChange={(event) => onChange('confirm', event.target.value)}
           aria-label="Confirm new passphrase"
@@ -306,9 +306,9 @@ export function KeyFileFormView({
       <label className="field-label">
         Passphrase
         <input
-          type="password"
+          type="passphrase"
           className="input"
-          autoComplete="new-password"
+          autoComplete="new-passphrase"
           value={credential}
           onChange={(event) => onChange('credential', event.target.value)}
           aria-label="Key file passphrase"
@@ -320,9 +320,9 @@ export function KeyFileFormView({
       <label className="field-label">
         Confirm passphrase
         <input
-          type="password"
+          type="passphrase"
           className="input"
-          autoComplete="new-password"
+          autoComplete="new-passphrase"
           value={confirm}
           onChange={(event) => onChange('confirm', event.target.value)}
           aria-label="Confirm key file passphrase"
@@ -433,7 +433,7 @@ export function AccountPanel(): ReactNode {
     setRefreshError(null);
     setRefreshSaved(false);
     client
-      .changePassword({ current_password: current, new_password: next })
+      .changePassphrase({ current_passphrase: current, new_passphrase: next })
       .then(async (grant) => {
         // The SDK installed the fresh tokens on the live client (every other session was revoked);
         // persist the replacement grant so a reload resumes this session rather than dropping to

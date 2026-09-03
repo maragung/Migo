@@ -270,7 +270,7 @@
     },
     {
       "code": 1308,
-      "symbol": "WEAK_PASSWORD",
+      "symbol": "WEAK_PASSPHRASE",
       "http": 400
     },
     {

@@ -50,9 +50,9 @@
 //! # Why `authenticated_at` is in the token
 //!
 //! Error code `REAUTHENTICATION_REQUIRED` (1108) exists for operations that need proof
-//! the human is still present — changing a password, removing the last device,
+//! the human is still present — changing a passphrase, removing the last device,
 //! deleting the account (brief section 125). Answering "how long ago did they type
-//! their password" needs a timestamp, not a bit: a freshness *bit* minted at sign-in
+//! their passphrase" needs a timestamp, not a bit: a freshness *bit* minted at sign-in
 //! would still read fresh fourteen minutes later, which is most of the token's life.
 //!
 //! It is carried forward across refreshes rather than reset, because a refresh is not

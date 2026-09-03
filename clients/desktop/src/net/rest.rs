@@ -95,7 +95,7 @@ const fn os_name() -> &'static str {
 #[derive(Debug, Serialize)]
 struct RegisterRequest<'a> {
     username: &'a str,
-    password: &'a str,
+    passphrase: &'a str,
     locale: &'a str,
     device: DeviceRequest,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -108,7 +108,7 @@ struct RegisterRequest<'a> {
 #[derive(Debug, Serialize)]
 struct LoginRequest<'a> {
     identifier: &'a str,
-    password: &'a str,
+    passphrase: &'a str,
     device: DeviceRequest,
     #[serde(skip_serializing_if = "Option::is_none")]
     captcha: Option<CaptchaProof<'a>>,
@@ -377,6 +377,17 @@ struct WalletBody<'a> {
     derivation_index: i32,
 }
 
+#[derive(Debug, Serialize)]
+struct PassphraseBody<'a> {
+    current_passphrase: &'a str,
+    new_passphrase: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct ContactBody<'a> {
+    email_or_phone: &'a str,
+}
+
 #[derive(Debug, Deserialize)]
 struct DevicesBody {
     #[serde(default)]
@@ -467,11 +478,11 @@ impl Rest {
     /// `identity_public_key` is the account identity's ML-DSA-65 public key when this device
     /// already holds the root it is founding the account with. Sending it is what makes the
     /// registration idempotent (brief §12): a retry carrying the same key reconciles into the
-    /// account the first attempt already made. `None` registers the password-only account.
+    /// account the first attempt already made. `None` registers the passphrase-only account.
     pub async fn register(
         &self,
         username: &str,
-        password: &str,
+        passphrase: &str,
         device: DeviceRequest,
         captcha: Option<CaptchaProof<'_>>,
         identity_public_key: Option<&[u8]>,
@@ -479,7 +490,7 @@ impl Rest {
         let identity_public_key = identity_public_key.map(b64);
         let body = RegisterRequest {
             username,
-            password,
+            passphrase,
             locale: "en",
             device,
             captcha,
@@ -495,13 +506,13 @@ impl Rest {
     pub async fn login(
         &self,
         identifier: &str,
-        password: &str,
+        passphrase: &str,
         device: DeviceRequest,
         captcha: Option<CaptchaProof<'_>>,
     ) -> Result<Grant, RestError> {
         let body = LoginRequest {
             identifier,
-            password,
+            passphrase,
             device,
             captcha,
         };
@@ -687,7 +698,7 @@ impl Rest {
     /// `POST /v1/auth/identity/key`.
     ///
     /// The legacy upgrade door, idempotent by design — a retry sends the same keys and the server
-    /// reconciles to the rows that already exist, so the worker can call it after every password
+    /// reconciles to the rows that already exist, so the worker can call it after every passphrase
     /// sign-in on a device that holds a root, without first asking whether it already did.
     pub async fn publish_identity_key(
         &self,
@@ -771,6 +782,50 @@ impl Rest {
             &format!("/v1/devices/{}/revoke", device_id.to_text()),
             reqwest::Method::POST,
             &(),
+        )
+        .await
+    }
+
+    /// Changes the account's sign-in passphrase: `POST /v1/auth/passphrase`.
+    ///
+    /// The answer is a fresh grant, because the server ends every session of the account — this
+    /// one included — and hands the caller the replacement. The worker adopts it the moment it
+    /// lands: the access token that paid for the change is already retired when the answer
+    /// arrives.
+    pub async fn change_passphrase(
+        &self,
+        access_token: &str,
+        current_passphrase: &str,
+        new_passphrase: &str,
+    ) -> Result<Grant, RestError> {
+        self.auth_json(
+            access_token,
+            "/v1/auth/passphrase",
+            reqwest::Method::POST,
+            &PassphraseBody {
+                current_passphrase,
+                new_passphrase,
+            },
+        )
+        .await
+    }
+
+    /// Records (or replaces) the caller's recoverable contact: `PUT /v1/auth/contact`, answered
+    /// 204.
+    ///
+    /// One string, and the server is the judge of the shape: an email containing `@` or a phone
+    /// starting with `+`, normalised on arrival so the store's unique index sees one canonical
+    /// value rather than every user's first guess.
+    pub async fn set_contact(
+        &self,
+        access_token: &str,
+        email_or_phone: &str,
+    ) -> Result<(), RestError> {
+        self.auth_expect_empty(
+            access_token,
+            "/v1/auth/contact",
+            reqwest::Method::PUT,
+            &ContactBody { email_or_phone },
         )
         .await
     }

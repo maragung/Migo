@@ -87,25 +87,25 @@ async function main(): Promise<void> {
   const suffix = randomBytes(2).toString('hex');
   const aliceUsername = `alice_${stamp}_${suffix}`;
   const bobUsername = `bob_${stamp}_${suffix}`;
-  const password = `correct-horse-battery-staple-${randomBytes(4).toString('hex')}`;
+  const passphrase = `correct-horse-battery-staple-${randomBytes(4).toString('hex')}`;
   log('boot', `target ${API_URL}, ${ROUNDS} rounds`);
 
   // 1. Register: two fresh accounts on the node.
   log('register', `registering ${aliceUsername} and ${bobUsername}`);
   const aliceClient = makeClient('alice_bot');
-  await aliceClient.register({ username: aliceUsername, password, locale: LOCALE });
+  await aliceClient.register({ username: aliceUsername, passphrase, locale: LOCALE });
   const aliceAccountId = aliceClient.accountId;
   await aliceClient.disconnect();
 
   const bobClient = makeClient('bob_bot');
-  await bobClient.register({ username: bobUsername, password, locale: LOCALE });
+  await bobClient.register({ username: bobUsername, passphrase, locale: LOCALE });
   log('register', `accounts ready: alice=${aliceAccountId} bob=${bobClient.accountId}`);
 
   // 2. Login: alice signs back in on a brand-new client — the credential path,
   //    exercised separately from registration.
   log('login', `signing ${aliceUsername} back in on a fresh client`);
   const aliceAgain = makeClient('alice_second_device');
-  await aliceAgain.login({ identifier: aliceUsername, password });
+  await aliceAgain.login({ identifier: aliceUsername, passphrase });
   if (aliceAgain.accountId !== aliceAccountId) {
     fail('login', `expected account ${aliceAccountId}, got ${aliceAgain.accountId}`);
   }

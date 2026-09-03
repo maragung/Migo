@@ -3,7 +3,7 @@
 //! `/v1/config` is the public, unauthenticated answer to "what is this node, and what will it
 //! let me do?" (brief section 118 lists config among the REST surfaces). A client fetches it
 //! before opening a socket to learn the node's identity, the feature bits it advertises, and the
-//! handful of policy limits a form needs to validate against — the minimum password length, the
+//! handful of policy limits a form needs to validate against — the minimum passphrase length, the
 //! largest body the server accepts, the biggest page a listing will return. It is derived
 //! entirely from configuration and node identity, so it exposes no secret and touches no
 //! service; every value here is one a client is meant to know.
@@ -35,7 +35,7 @@ struct Node {
 #[derive(Serialize)]
 struct Limits {
     allow_registration: bool,
-    password_min_length: usize,
+    passphrase_min_length: usize,
     max_devices_per_user: u32,
     max_body_bytes: usize,
     max_page_size: u32,
@@ -73,7 +73,7 @@ async fn config(State(state): State<ApiState>) -> Json<Document> {
         features: state.features(),
         limits: Limits {
             allow_registration: policy.allow_registration,
-            password_min_length: policy.password_min_length,
+            passphrase_min_length: policy.passphrase_min_length,
             max_devices_per_user: policy.max_devices_per_user,
             max_body_bytes: policy.max_body_bytes,
             max_page_size: MAX_PAGE_SIZE,

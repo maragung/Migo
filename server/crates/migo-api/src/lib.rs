@@ -157,7 +157,7 @@ struct Inner {
 #[derive(Clone, Debug)]
 struct Policy {
     allow_registration: bool,
-    password_min_length: usize,
+    passphrase_min_length: usize,
     max_devices_per_user: u32,
     max_body_bytes: usize,
     public_url: String,
@@ -176,7 +176,7 @@ impl ApiState {
     fn new(config: &Config, services: ApiServices) -> Self {
         let policy = Policy {
             allow_registration: config.auth.allow_registration,
-            password_min_length: config.auth.password_min_length,
+            passphrase_min_length: config.auth.passphrase_min_length,
             max_devices_per_user: config.auth.max_devices_per_user,
             max_body_bytes: config.http.max_body_bytes,
             public_url: config.http.public_url.clone(),

@@ -906,13 +906,15 @@ main {
 /*
  * The right pane's tab bar. The slate-800 strip: the compact back chevron (the single-column
  * story only — on a PC the left lists are always on screen beside the pane), the chevrons that
- * scroll the tab row, the persistent Home chip, and one closable chip per open thing.
+ * scroll the tab row, the persistent Games chip, and one closable chip per open thing. The
+ * chips carry the left strip's exact metrics — min-height, padding, radius — because the two
+ * bars are one navigation language, and a right chip that drew smaller read as a lesser tab.
  */
 .chat-tab-bar {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 5px 6px;
+  gap: 6px;
+  padding: 6px 8px;
   background: #1e293b;
   border-bottom: 1px solid #0f172a;
   flex-shrink: 0;
@@ -978,9 +980,11 @@ main {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 10px;
+  /* The left strip's metrics, exactly: the two bars are one navigation language. */
+  min-height: var(--touch);
+  padding: 6px 10px;
   border: none;
-  border-radius: 8px;
+  border-radius: 12px;
   background: #334155;
   color: #cbd5e1;
   font-size: var(--fs-body-sm);

@@ -24,7 +24,7 @@ import type { ServerEndpoint } from '@migo/sdk';
  *
  * The `.migo` file downloaded at registration and its passphrase are the whole sign-in: the file
  * carries the account root, the passphrase unseals it, and the ML-DSA identity ceremony (not a
- * password) turns the root into a session. There is no username field — the file names the
+ * passphrase) turns the root into a session. There is no username field — the file names the
  * account — and no server-side secret to type, because no server holds one that could open the
  * account.
  *
@@ -184,7 +184,7 @@ export default function LoginPage(): ReactNode {
           <h1>Migo</h1>
         </div>
         <p className="auth-sub">
-          Sign in with your account key file — your keys are yours alone, and no password of yours
+          Sign in with your account key file — your keys are yours alone, and no passphrase of yours
           is stored anywhere.
         </p>
 
@@ -265,10 +265,10 @@ export default function LoginPage(): ReactNode {
         <label className="field-label">
           Passphrase
           <input
-            type="password"
+            type="passphrase"
             value={passphrase}
             onChange={(event) => setPassphrase(event.target.value)}
-            autoComplete="current-password"
+            autoComplete="current-passphrase"
             required
           />
           <span className="field-hint">The passphrase you chose when the file was saved.</span>

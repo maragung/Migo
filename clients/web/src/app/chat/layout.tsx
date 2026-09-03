@@ -6,15 +6,17 @@
  * The new-ui-02 IA (docs/design mockup `new-ui-02.tsx`) is a split: the LEFT panel holds the
  * account's lists behind its own tab state (`leftTab`) — Main (friends), Chats (the
  * conversations, the one list that answers "did somebody write me?", with its unread dot on
- * the strip), Rooms, Games, Feed — and the RIGHT panel shows what the left panel's clicks
- * open, as closable tabs (`right`): a conversation (private, group, or room), the games
- * arcade, or a secondary panel the banner menu or a deep link reached. The Feed is not a
- * tab but the pane's resting chip — always first, never closed — so a pane with nothing open
- * shows the Feed, exactly the fallback an empty state owes. The two panels' states are
- * independent on purpose: reading Games on the left never disturbs the thread open on the right,
- * which is the model's whole offer. Below the PC breakpoint the panes take turns — the right
- * pane covers the phone while it has something to show, and `dismissed` remembers that its back
- * chevron sent the screen home to the lists without closing a thing.
+ * the strip), Rooms, Feed — and the RIGHT panel shows what the left panel's clicks
+ * open, as closable tabs (`right`): a conversation (private, group, or room), or a secondary
+ * panel the banner menu or a deep link reached. Games is the pane's resting chip — always
+ * first, never closed — so a pane with nothing open shows the arcade, and the catalogue
+ * never competes with the lists for the left panel. Closing a room or group tab also
+ * leaves the conversation: the chip was the last open door to it, and a room a person has
+ * walked out of should not linger as a tab they have to close twice. The two panels' states
+ * are independent on purpose: reading Feed on the left never disturbs the thread open on
+ * the right, which is the model's whole offer. Below the PC breakpoint the panes take
+ * turns — the right pane covers the phone while it has something to show, and `dismissed`
+ * remembers that its back chevron sent the screen home to the lists without closing a thing.
  *
  * The URL fragment stays the single source of truth for the open conversation (see
  * use-open-conversation.ts): every door into a thread — a conversation row, a room join, a
@@ -54,7 +56,6 @@ import { ConversationList } from '@/components/conversation-list.js';
 import { FriendsPanel } from '@/components/friends-panel.js';
 import { GamesPanel } from '@/components/games-panel.js';
 import { NotificationsPanel } from '@/components/notifications-panel.js';
-import { PaneEmpty } from '@/components/pane-empty.js';
 import { ProfilePanel } from '@/components/profile-panel.js';
 import { RequireReady } from '@/components/require-ready.js';
 import { RoomsPanel } from '@/components/rooms-panel.js';
@@ -143,7 +144,7 @@ function chatIdOf(conversationId: Id): string {
  * remaining tab (else the Feed) whenever the showing tab goes away.
  */
 function TabbedShell({ children }: { children: ReactNode }): ReactNode {
-  const { accountId } = useMigo();
+  const { accountId, client } = useMigo();
   const openId = useOpenConversation();
   const { items, unread } = useConversations();
   const rooms = useRooms();
@@ -254,6 +255,36 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
     [openId, right.tabs],
   );
 
+  /**
+   * Leaves the conversation a closed tab held, when leaving is what closing means.
+   *
+   * Best-effort by design: the tab is gone either way, and a leave the server refused (offline,
+   * already left) must not resurrect it. The failure the person sees is the room still in the
+   * Chats list on the next load — the honest signal, not a toast over a tab that is closed.
+   */
+  const leaveWhenClosed = useCallback(
+    (conversationId: Id): void => {
+      if (client === null) {
+        return;
+      }
+      const summary = items.find((item) => item.conversationId === conversationId);
+      if (summary === undefined) {
+        return;
+      }
+      if (summary.kind === ConversationKind.Room) {
+        const room = rooms.infoFor(conversationId);
+        if (room !== null) {
+          void client.rooms.leave(room.roomId).catch(() => undefined);
+        }
+        return;
+      }
+      if (summary.kind === ConversationKind.Group) {
+        void client.conversations.leave(conversationId).catch(() => undefined);
+      }
+    },
+    [client, items, rooms],
+  );
+
   const closeRight = useCallback(
     (id: string): void => {
       const tab = right.tabs.find((item) => item.id === id);
@@ -262,26 +293,27 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
         const active = s.active === id ? (tabs[tabs.length - 1]?.id ?? 'feed') : s.active;
         return { tabs, active };
       });
-      if (tab?.conversationId !== undefined && tab.conversationId === openId) {
-        // The open thread's chip: the fragment is cleared, and its effect is a no-op on a tab
-        // already removed — the fall-through above is the one that ran.
-        closeConversation();
+      if (tab?.conversationId !== undefined) {
+        // Closing a room or group tab is walking out of it: the chip was the conversation's
+        // last open door, and a room already left should not linger as a tab to close twice.
+        // A direct chat is not membership — closing it is the whole goodbye.
+        leaveWhenClosed(tab.conversationId);
+        if (tab.conversationId === openId) {
+          // The open thread's chip: the fragment is cleared, and its effect is a no-op on a tab
+          // already removed — the fall-through above is the one that ran.
+          closeConversation();
+        }
       }
     },
-    [openId, right.tabs],
+    [leaveWhenClosed, openId, right.tabs],
   );
 
   // The cross-section navigation every deep surface shares: the system tabs drive the left
   // panel, the secondary panels arrive in whichever shape the pane's display setting gives.
+  // Games is not among the destinations: it is the right pane's resting chip, not a list.
   const navigate = useCallback(
     (tab: SystemTab | PanelTab): void => {
-      if (
-        tab === 'friends' ||
-        tab === 'chats' ||
-        tab === 'rooms' ||
-        tab === 'games' ||
-        tab === 'feed'
-      ) {
+      if (tab === 'friends' || tab === 'chats' || tab === 'rooms' || tab === 'feed') {
         setLeftTab(tab);
         return;
       }
@@ -333,13 +365,14 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
   }));
 
   // What the pane shows for a non-chat target: the panel the kind names. The system tabs'
-  // content (Feed, Games) is deliberately absent — those live in the left panel, and a pane
-  // that could also draw them drew the same list twice, side by side. Both modes fall back to
-  // the resting Home state when nothing is open.
+  // content (Feed, the lists) is deliberately absent — those live in the left panel, and a pane
+  // that could also draw them drew the same list twice, side by side. Games is the exception
+  // that earns its place: it is the pane's resting chip, so the arcade is what an empty pane
+  // shows and what closing the last chip falls through to.
   const paneContent = (kind: Exclude<RightTabKind, 'chat'> | 'feed'): ReactNode => {
     switch (kind) {
       case 'feed':
-        return <PaneEmpty />;
+        return <GamesPanel />;
       case 'notifications':
         return <NotificationsPanel />;
       case 'search':
@@ -390,11 +423,6 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
         );
       case 'rooms':
         return <RoomsPanel onOpenConversation={openInTab} />;
-      case 'games':
-        // The catalogue without doors: the cards state the games, and the button below them
-        // opens the conversation a game is actually played in. Opening the arcade on the right
-        // used to be the cards' job, which is how the catalogue ended up in both panes at once.
-        return <GamesPanel />;
       case 'feed':
         return <SpacePanel onOpenConversation={openInTab} />;
     }
@@ -413,13 +441,19 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
       : !dismissed && !(right.tabs.length === 0 && right.active === 'feed');
 
   // The one-window mode's slim bar: the open thing's name as a plain label, and a close that
-  // takes the pane back to its resting Home. The right-tabs mode keeps the chip bar.
+  // takes the pane back to its resting Games. The right-tabs mode keeps the chip bar.
   const paneBar =
     chatsMode === 'list' ? (
       openId !== null && panel === null ? (
         <PaneBar
           title={chipTitleOf(openId, items, rooms, accountId, profiles)}
-          onClose={closeConversation}
+          // The close is a leave for rooms and groups here too: the gesture is the same one
+          // the chip's X makes in the tab mode, and what closing means should not change
+          // with the display setting.
+          onClose={() => {
+            leaveWhenClosed(openId);
+            closeConversation();
+          }}
           onBackToLists={() => setDismissed(true)}
         />
       ) : panel !== null ? (

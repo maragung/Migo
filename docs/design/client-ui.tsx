@@ -116,16 +116,16 @@ export default function App() {
 
   // Login State
   const [username, setUsername] = useState('reason007007');
-  const [password, setPassword] = useState('••••••••');
-  const [showPassword, setShowPassword] = useState(false);
+  const [passphrase, setPassphrase] = useState('••••••••');
+  const [showPassphrase, setShowPassphrase] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
   const [loginInvisible, setLoginInvisible] = useState(false);
 
   // Register State
   const [regUsername, setRegUsername] = useState('');
   const [regEmail, setRegEmail] = useState('');
-  const [regPassword, setRegPassword] = useState('');
-  const [regConfirmPassword, setRegConfirmPassword] = useState('');
+  const [regPassphrase, setRegPassphrase] = useState('');
+  const [regConfirmPassphrase, setRegConfirmPassphrase] = useState('');
 
   // Avatar Dropdown Menu Modal & Sub-Modals
   const [showAvatarMenu, setShowAvatarMenu] = useState(false);
@@ -349,8 +349,8 @@ export default function App() {
   // Register Handler
   const handleRegister = (e) => {
     e.preventDefault();
-    if (regPassword !== regConfirmPassword) {
-      alert('Password dan Konfirmasi Password tidak cocok!');
+    if (regPassphrase !== regConfirmPassphrase) {
+      alert('Passphrase dan Konfirmasi Passphrase tidak cocok!');
       return;
     }
     triggerFx('click');
@@ -758,19 +758,19 @@ export default function App() {
                   </div>
                   <div className="relative">
                     <input
-                      type={showPassword ? 'text' : 'password'}
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      placeholder="Password"
+                      type={showPassphrase ? 'text' : 'passphrase'}
+                      value={passphrase}
+                      onChange={(e) => setPassphrase(e.target.value)}
+                      placeholder="Passphrase"
                       className="w-full px-3.5 py-2.5 text-slate-800 bg-white border border-cyan-200 rounded-xl shadow-inner focus:outline-none focus:ring-2 focus:ring-cyan-400 text-xs pr-9 transition"
                       required
                     />
                     <button
                       type="button"
-                      onClick={() => setShowPassword(!showPassword)}
+                      onClick={() => setShowPassphrase(!showPassphrase)}
                       className="absolute right-3 top-3 text-slate-400 hover:text-cyan-700 transition"
                     >
-                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      {showPassphrase ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                     </button>
                   </div>
 
@@ -822,20 +822,20 @@ export default function App() {
                   </div>
                   <div>
                     <input
-                      type="password"
-                      value={regPassword}
-                      onChange={(e) => setRegPassword(e.target.value)}
-                      placeholder="Password Baru"
+                      type="passphrase"
+                      value={regPassphrase}
+                      onChange={(e) => setRegPassphrase(e.target.value)}
+                      placeholder="Passphrase Baru"
                       className="w-full px-3.5 py-2 text-slate-800 bg-white border border-cyan-200 rounded-xl shadow-inner focus:outline-none focus:ring-2 focus:ring-cyan-400 text-xs transition"
                       required
                     />
                   </div>
                   <div>
                     <input
-                      type="password"
-                      value={regConfirmPassword}
-                      onChange={(e) => setRegConfirmPassword(e.target.value)}
-                      placeholder="Konfirmasi Password"
+                      type="passphrase"
+                      value={regConfirmPassphrase}
+                      onChange={(e) => setRegConfirmPassphrase(e.target.value)}
+                      placeholder="Konfirmasi Passphrase"
                       className="w-full px-3.5 py-2 text-slate-800 bg-white border border-cyan-200 rounded-xl shadow-inner focus:outline-none focus:ring-2 focus:ring-cyan-400 text-xs transition"
                       required
                     />
@@ -1148,7 +1148,7 @@ export default function App() {
                           />
                         </label>
                         <label className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-xl cursor-pointer">
-                          <span>Ingat Password Login</span>
+                          <span>Ingat Passphrase Login</span>
                           <input
                             type="checkbox"
                             checked={rememberMe}

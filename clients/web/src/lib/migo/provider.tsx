@@ -57,7 +57,7 @@ export type AuthStatus = 'initializing' | 'anonymous' | 'connecting' | 'ready';
 /** The fields a registration form collects. */
 export interface RegisterForm {
   username: string;
-  password: string;
+  passphrase: string;
   email?: string;
   gender?: number;
 }
@@ -95,7 +95,7 @@ export interface MigoContextValue {
    * Signs in from a `.migo` account file and its passphrase — the only sign-in the web client has.
    *
    * Opening the container yields the account root, and the sign-in is the ML-DSA identity ceremony
-   * (§182), not a password: a stored device record answers the login challenge (the ceremony reuses
+   * (§182), not a passphrase: a stored device record answers the login challenge (the ceremony reuses
    * the device this browser introduced last time), and a browser with no record — or one whose
    * device the server no longer knows — falls back to add-device, which mints a fresh device
    * credential and records it for next time. Either way the session runs as a founding-grade
@@ -302,7 +302,7 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
         const created = buildClient({ server, keyStore: KeyStore.founding(root) });
         const params: Omit<RegisterParams, 'device'> = {
           username: form.username.trim(),
-          password: form.password,
+          passphrase: form.passphrase,
           identityPublicKey: account.IdentityKey.fromRoot(root).publicKey(),
         };
         if (form.email?.trim()) {

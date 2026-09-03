@@ -405,7 +405,7 @@ mod tests {
     use async_trait::async_trait;
 
     use migo_auth::{
-        Authenticator, Claims, Grant, Identity, PasswordChange, Refresh, Registration,
+        Authenticator, Claims, Grant, Identity, PassphraseChange, Refresh, Registration,
         SessionSummary, SignIn,
     };
     use migo_cache::MemoryCache;
@@ -509,13 +509,13 @@ mod tests {
             unimplemented!("the broadcast test never revokes devices")
         }
 
-        async fn change_password(
+        async fn change_passphrase(
             &self,
             _identity: &Identity,
-            _change: PasswordChange,
+            _change: PassphraseChange,
             _context: &RequestContext,
         ) -> migo_core::Result<Grant> {
-            unimplemented!("the broadcast test never changes passwords")
+            unimplemented!("the broadcast test never changes passphrases")
         }
 
         async fn set_contact(
@@ -554,7 +554,7 @@ mod tests {
             &self,
             _token_id: Id,
             _tag: &[u8],
-            _new_password: &migo_core::Secret,
+            _new_passphrase: &migo_core::Secret,
             _context: &RequestContext,
         ) -> migo_core::Result<()> {
             unimplemented!("the broadcast test never confirms a recovery flow")

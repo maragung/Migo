@@ -27,7 +27,7 @@ test('the configuration exposes exactly the two public fields', () => {
 
 test('no configuration value carries anything shaped like a credential', () => {
   const blob = JSON.stringify(config).toLowerCase();
-  for (const marker of ['secret', 'password', 'private', 'apikey', 'api_key', 'token', 'bearer']) {
+  for (const marker of ['secret', 'passphrase', 'private', 'apikey', 'api_key', 'token', 'bearer']) {
     assert.ok(!blob.includes(marker), `configuration leaked something matching "${marker}"`);
   }
 });

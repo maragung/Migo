@@ -20,7 +20,7 @@
 //! 2. **Only the public face crosses the wire.** A forced internal fault returns the envelope
 //!    with an empty public message and nothing about the cause — no address, no SQL, no path,
 //!    no crate name. A login failure is byte-identical for a missing account and a wrong
-//!    password, so neither response nor timing is an account-existence oracle.
+//!    passphrase, so neither response nor timing is an account-existence oracle.
 //! 3. **Input validation at every boundary.** Length limits hold at the edge and one past it;
 //!    absurd input — a non-id where an id is required, a body that is not the declared type, a
 //!    negative or overflowing count, a body past the ceiling — is refused, not tolerated.
@@ -69,9 +69,9 @@ use migo_store::MemoryStore;
 /// with `migo-auth`'s own tests so a token minted here would verify there too.
 const TEST_KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 
-/// A password that clears the floor: long enough, not on the common list, and not derived from
+/// A passphrase that clears the floor: long enough, not on the common list, and not derived from
 /// any username these tests register.
-const GOOD_PASSWORD: &str = "sunflower gravel bicycle";
+const GOOD_PASSPHRASE: &str = "sunflower gravel bicycle";
 
 /// A fixed wall-clock instant so token issue and expiry are deterministic.
 const NOW_MS: i64 = 1_800_000_000_000;
@@ -197,10 +197,10 @@ impl Harness {
     }
 
     /// Registers an account and returns the raw response.
-    async fn register(&self, ip: Option<&str>, username: &str, password: &str) -> Resp {
+    async fn register(&self, ip: Option<&str>, username: &str, passphrase: &str) -> Resp {
         let body = json!({
             "username": username,
-            "password": password,
+            "passphrase": passphrase,
             "device": { "display_name": "Integration Test" },
         });
         self.send(post_json("/v1/auth/register", ip, &body)).await
@@ -208,7 +208,7 @@ impl Harness {
 
     /// Registers an account expected to succeed and returns the parsed grant.
     async fn account(&self, ip: Option<&str>, username: &str) -> Value {
-        let resp = self.register(ip, username, GOOD_PASSWORD).await;
+        let resp = self.register(ip, username, GOOD_PASSPHRASE).await;
         assert_eq!(
             resp.status,
             StatusCode::CREATED,
@@ -426,7 +426,7 @@ async fn config_reports_policy_limits() {
     let resp = h.send(get("/v1/config")).await;
     let limits = &resp.json()["limits"];
     assert_eq!(limits["allow_registration"], true);
-    assert_eq!(limits["password_min_length"].as_u64(), Some(10));
+    assert_eq!(limits["passphrase_min_length"].as_u64(), Some(10));
     assert_eq!(limits["max_page_size"].as_u64(), Some(200));
 }
 
@@ -444,7 +444,7 @@ async fn config_is_unauthenticated() {
 async fn register_creates_an_account_and_returns_201() {
     let h = Harness::new();
     let resp = h
-        .register(Some("203.0.113.1"), "alice", GOOD_PASSWORD)
+        .register(Some("203.0.113.1"), "alice", GOOD_PASSPHRASE)
         .await;
     assert_eq!(resp.status, StatusCode::CREATED, "body={}", resp.text());
     let grant = resp.json();
@@ -467,7 +467,7 @@ async fn register_then_login_returns_the_same_account() {
     let created = h.account(Some("203.0.113.2"), "bob").await;
     let login = json!({
         "identifier": "bob",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Second Device" },
     });
     let resp = h
@@ -657,7 +657,7 @@ async fn a_garbage_refresh_token_is_refused_as_invalid() {
 
 /// The fake secret a forced internal fault carries, to prove none of its shapes escape.
 const LEAK_BAIT: &str =
-    "connection refused to 10.9.8.7:5432; password auth failed for user 'migo_prod'; \
+    "connection refused to 10.9.8.7:5432; passphrase auth failed for user 'migo_prod'; \
      at /var/lib/migo/store.rs:441 running SELECT * FROM accounts";
 
 #[tokio::test]
@@ -665,7 +665,7 @@ async fn an_internal_fault_discloses_nothing_in_the_body() {
     let h = Harness::with_failing_edge(LEAK_BAIT);
     let body = json!({
         "username": "nadia",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Device" },
     });
     let resp = h
@@ -682,7 +682,7 @@ async fn an_internal_fault_discloses_nothing_in_the_body() {
     for needle in [
         "10.9.8.7",
         "5432",
-        "password",
+        "passphrase",
         "migo_prod",
         "/var/lib",
         "store.rs",
@@ -699,7 +699,7 @@ async fn an_internal_fault_discloses_nothing_in_a_header() {
     let h = Harness::with_failing_edge(LEAK_BAIT);
     let body = json!({
         "username": "oscar",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Device" },
     });
     let resp = h
@@ -715,25 +715,25 @@ async fn an_internal_fault_discloses_nothing_in_a_header() {
 }
 
 #[tokio::test]
-async fn a_wrong_password_and_an_unknown_user_are_byte_identical() {
+async fn a_wrong_passphrase_and_an_unknown_user_are_byte_identical() {
     // The credential oracle stays closed: the response is the same, to the byte, whether the
-    // account is missing or the password is wrong. Both are sent addressless so neither is
+    // account is missing or the passphrase is wrong. Both are sent addressless so neither is
     // masked by a rate-limit refusal.
     let h = Harness::new();
     h.account(Some("203.0.113.30"), "peggy").await;
 
-    let wrong_password = json!({
+    let wrong_passphrase = json!({
         "identifier": "peggy",
-        "password": "definitely not the password",
+        "passphrase": "definitely not the passphrase",
         "device": { "display_name": "Device" },
     });
     let unknown_user = json!({
         "identifier": "nobody_here",
-        "password": "definitely not the password",
+        "passphrase": "definitely not the passphrase",
         "device": { "display_name": "Device" },
     });
     let a = h
-        .send(post_json("/v1/auth/login", None, &wrong_password))
+        .send(post_json("/v1/auth/login", None, &wrong_passphrase))
         .await;
     let b = h
         .send(post_json("/v1/auth/login", None, &unknown_user))
@@ -750,12 +750,12 @@ async fn an_invalid_credential_carries_only_the_public_sentence() {
     h.account(Some("203.0.113.31"), "quinn").await;
     let wrong = json!({
         "identifier": "quinn",
-        "password": "wrong",
+        "passphrase": "wrong",
         "device": { "display_name": "Device" },
     });
     let resp = h.send(post_json("/v1/auth/login", None, &wrong)).await;
     expect_error(&resp, StatusCode::UNAUTHORIZED, codes::INVALID_CREDENTIALS);
-    assert_eq!(resp.error_message(), "Username or password is incorrect");
+    assert_eq!(resp.error_message(), "Username or passphrase is incorrect");
     assert!(
         !resp.error_message().to_lowercase().contains("not found"),
         "the message must not hint that the account is missing"
@@ -768,7 +768,7 @@ async fn an_invalid_credential_carries_only_the_public_sentence() {
 async fn a_reserved_username_is_refused_with_its_own_code() {
     let h = Harness::new();
     let resp = h
-        .register(Some("203.0.113.40"), "admin", GOOD_PASSWORD)
+        .register(Some("203.0.113.40"), "admin", GOOD_PASSPHRASE)
         .await;
     expect_error(&resp, StatusCode::BAD_REQUEST, codes::USERNAME_RESERVED);
 }
@@ -777,7 +777,9 @@ async fn a_reserved_username_is_refused_with_its_own_code() {
 async fn a_username_at_the_length_limit_is_accepted() {
     let h = Harness::new();
     let name = format!("a{}", "b".repeat(31)); // 32 chars, the documented maximum
-    let resp = h.register(Some("203.0.113.41"), &name, GOOD_PASSWORD).await;
+    let resp = h
+        .register(Some("203.0.113.41"), &name, GOOD_PASSPHRASE)
+        .await;
     assert_eq!(resp.status, StatusCode::CREATED, "body={}", resp.text());
 }
 
@@ -785,12 +787,14 @@ async fn a_username_at_the_length_limit_is_accepted() {
 async fn a_username_past_the_length_limit_is_refused() {
     let h = Harness::new();
     let name = format!("a{}", "b".repeat(32)); // 33 chars, one past the maximum
-    let resp = h.register(Some("203.0.113.42"), &name, GOOD_PASSWORD).await;
+    let resp = h
+        .register(Some("203.0.113.42"), &name, GOOD_PASSPHRASE)
+        .await;
     expect_error(&resp, StatusCode::BAD_REQUEST, codes::FIELD_TOO_LONG);
 }
 
 #[tokio::test]
-async fn a_password_at_the_floor_is_accepted() {
+async fn a_passphrase_at_the_floor_is_accepted() {
     let h = Harness::new();
     // Ten characters, not on the common list, and not derived from the username.
     let resp = h
@@ -800,17 +804,17 @@ async fn a_password_at_the_floor_is_accepted() {
 }
 
 #[tokio::test]
-async fn a_password_below_the_floor_is_refused_as_weak() {
+async fn a_passphrase_below_the_floor_is_refused_as_weak() {
     let h = Harness::new();
     let resp = h.register(Some("203.0.113.44"), "sybil", "kryptonit").await; // nine chars
-    expect_error(&resp, StatusCode::BAD_REQUEST, codes::WEAK_PASSWORD);
+    expect_error(&resp, StatusCode::BAD_REQUEST, codes::WEAK_PASSPHRASE);
 }
 
 #[tokio::test]
 async fn registration_disabled_is_a_feature_disabled_refusal() {
     let h = Harness::with(|config| config.auth.allow_registration = false);
     let resp = h
-        .register(Some("203.0.113.45"), "trent", GOOD_PASSWORD)
+        .register(Some("203.0.113.45"), "trent", GOOD_PASSPHRASE)
         .await;
     expect_error(
         &resp,
@@ -880,7 +884,7 @@ async fn a_wrong_content_type_is_unsupported_media_type() {
     let h = Harness::new();
     let body = json!({
         "username": "ursula",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Device" },
     });
     let request = Request::builder()
@@ -899,7 +903,7 @@ async fn an_oversize_body_is_rejected_before_the_handler() {
     let h = Harness::with(|config| config.http.max_body_bytes = 256);
     let body = json!({
         "username": "victor",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "x".repeat(5_000) },
     });
     let bytes = serde_json::to_vec(&body).unwrap();
@@ -979,12 +983,12 @@ fn a_page_omits_the_cursor_at_the_end_of_the_sequence() {
 async fn a_second_registration_from_one_network_is_rate_limited() {
     let h = Harness::new();
     let first = h
-        .register(Some("203.0.113.60"), "wendy", GOOD_PASSWORD)
+        .register(Some("203.0.113.60"), "wendy", GOOD_PASSPHRASE)
         .await;
     assert_eq!(first.status, StatusCode::CREATED, "body={}", first.text());
     // Same /24, a different username: the refusal is the rate limiter, not a name collision.
     let second = h
-        .register(Some("203.0.113.61"), "xander", GOOD_PASSWORD)
+        .register(Some("203.0.113.61"), "xander", GOOD_PASSPHRASE)
         .await;
     expect_error(&second, StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED);
     assert!(
@@ -1000,11 +1004,11 @@ async fn a_second_registration_from_one_network_is_rate_limited() {
 #[tokio::test]
 async fn a_registration_from_another_network_is_unaffected() {
     let h = Harness::new();
-    h.register(Some("203.0.113.62"), "yolanda", GOOD_PASSWORD)
+    h.register(Some("203.0.113.62"), "yolanda", GOOD_PASSPHRASE)
         .await;
     // A different /24 has its own budget.
     let other = h
-        .register(Some("198.51.100.62"), "zack", GOOD_PASSWORD)
+        .register(Some("198.51.100.62"), "zack", GOOD_PASSPHRASE)
         .await;
     assert_eq!(other.status, StatusCode::CREATED, "body={}", other.text());
 }
@@ -1012,8 +1016,8 @@ async fn a_registration_from_another_network_is_unaffected() {
 #[tokio::test]
 async fn an_addressless_registration_is_never_rate_limited() {
     let h = Harness::new();
-    let first = h.register(None, "amy", GOOD_PASSWORD).await;
-    let second = h.register(None, "ben", GOOD_PASSWORD).await;
+    let first = h.register(None, "amy", GOOD_PASSPHRASE).await;
+    let second = h.register(None, "ben", GOOD_PASSPHRASE).await;
     assert_eq!(first.status, StatusCode::CREATED, "body={}", first.text());
     assert_eq!(second.status, StatusCode::CREATED, "body={}", second.text());
 }
@@ -1044,7 +1048,7 @@ async fn an_unauthenticated_logout_does_not_charge_the_limiter() {
 async fn one_networks_spending_leaves_another_networks_budget_intact() {
     let h = Harness::new();
     let pristine = h.peek_ip("9.9.9.9").await;
-    h.register(Some("203.0.113.64"), "carla", GOOD_PASSWORD)
+    h.register(Some("203.0.113.64"), "carla", GOOD_PASSPHRASE)
         .await;
     let victim = h.peek_ip("198.51.100.64").await;
     assert_eq!(
@@ -1086,7 +1090,7 @@ async fn no_response_header_carries_the_access_token() {
     let grant = h.account(Some("203.0.113.71"), "fiona").await;
     // Re-run register to capture its response headers with a known token in the body.
     let resp = h
-        .register(Some("198.51.100.72"), "gregor", GOOD_PASSWORD)
+        .register(Some("198.51.100.72"), "gregor", GOOD_PASSPHRASE)
         .await;
     let token = resp.json()["access_token"].as_str().unwrap().to_string();
     let refresh = resp.json()["refresh_token"].as_str().unwrap().to_string();
@@ -1108,7 +1112,7 @@ async fn no_response_header_carries_the_access_token() {
 async fn no_response_echoes_the_full_caller_ip() {
     let h = Harness::new();
     let resp = h
-        .register(Some("198.51.100.77"), "harriet", GOOD_PASSWORD)
+        .register(Some("198.51.100.77"), "harriet", GOOD_PASSPHRASE)
         .await;
     let headers = headers_joined(&resp.headers);
     assert!(
@@ -1497,7 +1501,7 @@ async fn an_idempotency_key_is_not_yet_honoured_on_replay() {
         None,
         Some(&json!({
             "username": "idem",
-            "password": GOOD_PASSWORD,
+            "passphrase": GOOD_PASSPHRASE,
             "device": { "display_name": "Device" },
         })),
     );
@@ -1520,7 +1524,7 @@ async fn an_idempotency_key_is_not_yet_honoured_on_replay() {
         None,
         Some(&json!({
             "username": "idem",
-            "password": GOOD_PASSWORD,
+            "passphrase": GOOD_PASSPHRASE,
             "device": { "display_name": "Device" },
         })),
     );
@@ -1561,7 +1565,7 @@ async fn a_registration_carries_the_disclosed_gender_and_refuses_a_number_outsid
             Some("203.0.113.50"),
             &json!({
                 "username": "gaia",
-                "password": GOOD_PASSWORD,
+                "passphrase": GOOD_PASSPHRASE,
                 "gender": 2,
                 "device": { "display_name": "Integration Test" },
             }),
@@ -1578,7 +1582,7 @@ async fn a_registration_carries_the_disclosed_gender_and_refuses_a_number_outsid
             Some("203.0.113.51"),
             &json!({
                 "username": "hbom",
-                "password": GOOD_PASSWORD,
+                "passphrase": GOOD_PASSPHRASE,
                 "gender": 7,
                 "device": { "display_name": "Integration Test" },
             }),
@@ -1594,7 +1598,7 @@ async fn a_registration_carries_the_disclosed_gender_and_refuses_a_number_outsid
 }
 
 #[tokio::test]
-async fn a_password_change_returns_a_replacement_grant_and_retires_the_old_password() {
+async fn a_passphrase_change_returns_a_replacement_grant_and_retires_the_old_passphrase() {
     let h = Harness::new();
     let grant = h.account(Some("203.0.113.60"), "piper").await;
     let token = grant["access_token"].as_str().unwrap().to_string();
@@ -1602,12 +1606,12 @@ async fn a_password_change_returns_a_replacement_grant_and_retires_the_old_passw
     let resp = h
         .send(build_req(
             Method::POST,
-            "/v1/auth/password",
+            "/v1/auth/passphrase",
             Some("203.0.113.60"),
             Some(&token),
             Some(&json!({
-                "current_password": GOOD_PASSWORD,
-                "new_password": "pelican trombone lantern",
+                "current_passphrase": GOOD_PASSPHRASE,
+                "new_passphrase": "pelican trombone lantern",
             })),
         ))
         .await;
@@ -1620,12 +1624,12 @@ async fn a_password_change_returns_a_replacement_grant_and_retires_the_old_passw
         "the replacement grant carries a fresh access token"
     );
 
-    // The old password no longer signs anybody in, and the new one does. Both
+    // The old passphrase no longer signs anybody in, and the new one does. Both
     // attempts come from their own network: a failed sign-in is priced against
     // the caller's bucket, and the test is not about the rate model.
     let old = json!({
         "identifier": "piper",
-        "password": GOOD_PASSWORD,
+        "passphrase": GOOD_PASSPHRASE,
         "device": { "display_name": "Second Device" },
     });
     let resp = h
@@ -1635,7 +1639,7 @@ async fn a_password_change_returns_a_replacement_grant_and_retires_the_old_passw
 
     let fresh = json!({
         "identifier": "piper",
-        "password": "pelican trombone lantern",
+        "passphrase": "pelican trombone lantern",
         "device": { "display_name": "Second Device" },
     });
     let resp = h

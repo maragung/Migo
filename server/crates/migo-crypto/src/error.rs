@@ -59,10 +59,10 @@ pub enum CryptoError {
     #[error("malformed ratchet header")]
     MalformedHeader,
 
-    /// Password hashing or verification failed for a reason internal to the
+    /// Passphrase hashing or verification failed for a reason internal to the
     /// hasher, such as an unparseable stored hash.
-    #[error("password hash operation failed")]
-    PasswordHash,
+    #[error("passphrase hash operation failed")]
+    PassphraseHash,
 
     /// A prekey bundle failed validation, so no session was established.
     ///

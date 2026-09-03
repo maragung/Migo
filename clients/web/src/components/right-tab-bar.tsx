@@ -3,13 +3,16 @@
 /**
  * The right pane's tab bar: everything the pane can show, as tabs.
  *
- * The pane has one mode now, not two: a persistent Home chip — the pane's resting content, the
- * thing it shows when nothing is open — followed by one closable chip per open thing
+ * The pane has one mode now, not two: a persistent Games chip — the pane's resting content, the
+ * arcade it shows when nothing is open — followed by one closable chip per open thing
  * (a conversation, a secondary panel the banner menu or a deep link opened). The system tabs'
- * content (Friends, Rooms, Games, Feed) never appears here: those live in the left panel, so
- * the pane cannot draw the same list twice. There is no "menu panel" to switch back to:
- * closing a chip falls through to the next one, and closing the last one leaves Home, which is
- * exactly the fallback the pane owes an empty state. The chevrons scroll the row without moving
+ * content (Friends, Rooms, Feed) never appears here: those live in the left panel, so
+ * the pane cannot draw the same list twice. Games, by contrast, is here and only here: it is
+ * a place rather than a list, and the right pane is where places open. There is no "menu
+ * panel" to switch back to:
+ * closing a chip falls through to the next one, and closing the last one leaves Games, which is
+ * exactly the fallback the pane owes an empty state. The chips carry the same metrics as the
+ * left strip's — one bar language, not two. The chevrons scroll the row without moving
  * the page; a compact back chevron — the single-column story only, where the pane covers the
  * whole screen — hands the screen back to the left lists without closing anything.
  */
@@ -21,7 +24,7 @@ import type { Id } from '@migo/sdk';
 
 import { Icon } from './icons.js';
 
-/** The closable things the right pane can hold besides its resting Home. */
+/** The closable things the right pane can hold besides its resting Games. */
 export type RightTabKind =
   'chat' | 'notifications' | 'search' | 'wallet' | 'profile' | 'account' | 'settings' | 'admins';
 
@@ -49,8 +52,8 @@ const SCROLL_STEP_PX = 240;
 /**
  * The bar itself.
  *
- * @param tabs The open closable tabs, in open order; the Home chip the bar renders itself.
- * @param active The tab the pane is showing — `'feed'` or a tab id.
+ * @param tabs The open closable tabs, in open order; the Games chip the bar renders itself.
+ * @param active The tab the pane is showing — `'feed'` (the resting Games) or a tab id.
  * @param onSelect Activates a chip (the Home chip included).
  * @param onClose Closes a chip; the owner decides what showing it next means.
  * @param onBackToLists Hands the screen back to the left lists (the single-column story only).
@@ -99,14 +102,14 @@ export function RightTabBar({
         <Icon name="back" size={16} />
       </button>
       <div className="chat-tabs" ref={rowRef}>
-        {/* The resting chip: always first, never closable — an empty pane still owes a home. */}
+        {/* The resting chip: always first, never closable — an empty pane still owes the arcade. */}
         <button
           type="button"
           className={`chat-tab${active === 'feed' ? ' active' : ''}`}
           aria-current={active === 'feed' ? 'page' : undefined}
           onClick={() => onSelect('feed')}
         >
-          <span className="tab-chip-label">Home</span>
+          <span className="tab-chip-label">Games</span>
         </button>
         {tabs.map((tab) => (
           <button

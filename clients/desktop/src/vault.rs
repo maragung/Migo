@@ -633,7 +633,7 @@ mod tests {
     }
 
     /// A body written before the account-root fields existed — no optionals at all — still opens,
-    /// as a device that signed in with a password before the upgrade does.
+    /// as a device that signed in with a passphrase before the upgrade does.
     #[test]
     fn a_body_from_before_the_root_still_decodes() {
         let identity = migo_crypto::IdentitySecret::generate(&mut OsRandom);

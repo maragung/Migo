@@ -65,7 +65,7 @@ A room has a **home region** that owns sequencing. Remote regions run an **edge 
 that subscribes once to the home region and fans out locally (brief §54–55):
 
 ```
-room MGO-ROOM-82F91A (home: asia-se-1)
+room MGO-ROOM-82F91AB402 (home: asia-se-1)
   ├─ shard asia-se-1   : 12 000 subscribers   ← authoritative sequencer
   ├─ edge eu-central-1 :  4 000 subscribers   ← one mesh stream in, local fanout out
   └─ edge us-east-1    :  6 000 subscribers
@@ -107,6 +107,6 @@ goes read-only from edge cache, and says so in the UI.
 
 ## 10. What is _not_ federated
 
-Private E2E plaintext (does not exist server-side), password hashes and credentials
+Private E2E plaintext (does not exist server-side), passphrase hashes and credentials
 (home region only), and node private keys. The mesh moves ciphertext, routing metadata,
 room events, and presence summaries — nothing else.

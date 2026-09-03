@@ -1,12 +1,12 @@
-//! Password hashing.
+//! Passphrase hashing.
 //!
-//! Argon2id, the memory-hard winner of the Password Hashing Competition and the
+//! Argon2id, the memory-hard winner of the Passphrase Hashing Competition and the
 //! algorithm [OWASP recommends] first. The "id" variant runs a data-independent
 //! pass followed by a data-dependent one, which resists side-channel attacks and
 //! GPU cracking at the same time — the two threats that matter for a credential
 //! database that might one day be stolen.
 //!
-//! What Migo does *not* do: SHA-256 of a password, with or without a salt, with or
+//! What Migo does *not* do: SHA-256 of a passphrase, with or without a salt, with or
 //! without a few thousand iterations of a loop somebody wrote. A GPU computes
 //! billions of SHA-256 hashes per second. Argon2id at these parameters costs 19
 //! MiB of memory per attempt, which is what makes parallel cracking expensive
@@ -24,7 +24,7 @@
 //! Parameters live in the encoded hash string, so they can be raised later and
 //! existing hashes keep verifying. A verify that succeeds against outdated
 //! parameters reports [`Verification::NeedsRehash`], and the caller re-hashes
-//! with the current cost while it still has the plaintext password in hand.
+//! with the current cost while it still has the plaintext passphrase in hand.
 //!
 //! [OWASP recommends]: https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html
 
@@ -43,27 +43,27 @@ pub const LANES: u32 = 1;
 /// Output length in bytes.
 pub const OUTPUT_LEN: usize = 32;
 
-/// Longest password accepted.
+/// Longest passphrase accepted.
 ///
 /// Not a security limit — long passphrases are good. It is a denial-of-service
-/// limit: Argon2 hashes its input, so a megabyte-long "password" costs the hash of
+/// limit: Argon2 hashes its input, so a megabyte-long "passphrase" costs the hash of
 /// a megabyte on every attempt, and an attacker will happily send one.
-pub const MAX_PASSWORD_BYTES: usize = 1024;
+pub const MAX_PASSPHRASE_BYTES: usize = 1024;
 
-/// Shortest password accepted.
+/// Shortest passphrase accepted.
 ///
 /// Length is the only requirement. Composition rules — one uppercase, one digit,
-/// one symbol — measurably push people toward `Password1!` and are not enforced
-/// here; the client shows a strength meter and checks against a breached-password
+/// one symbol — measurably push people toward `Passphrase1!` and are not enforced
+/// here; the client shows a strength meter and checks against a breached-passphrase
 /// list instead.
-pub const MIN_PASSWORD_BYTES: usize = 8;
+pub const MIN_PASSPHRASE_BYTES: usize = 8;
 
 /// Outcome of a successful verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verification {
-    /// The password matched and the stored hash uses current parameters.
+    /// The passphrase matched and the stored hash uses current parameters.
     Ok,
-    /// The password matched, but the hash was made with weaker parameters and
+    /// The passphrase matched, but the hash was made with weaker parameters and
     /// should be replaced now, while the plaintext is available.
     NeedsRehash,
 }
@@ -71,39 +71,39 @@ pub enum Verification {
 /// The configured hasher.
 fn hasher() -> Result<Argon2<'static>> {
     let params = Params::new(MEMORY_KIB, TIME_COST, LANES, Some(OUTPUT_LEN))
-        .map_err(|_| CryptoError::PasswordHash)?;
+        .map_err(|_| CryptoError::PassphraseHash)?;
     Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
 }
 
-/// Hashes a password, returning a PHC string that embeds the salt and parameters.
+/// Hashes a passphrase, returning a PHC string that embeds the salt and parameters.
 ///
-/// The salt is per-password and random. A shared or absent salt would let one
+/// The salt is per-passphrase and random. A shared or absent salt would let one
 /// precomputed table crack every account at once, and would make identical
-/// passwords visible as identical hashes.
-pub fn hash(password: &str, random: &mut dyn Random) -> Result<Secret> {
-    check_length(password)?;
+/// passphrases visible as identical hashes.
+pub fn hash(passphrase: &str, random: &mut dyn Random) -> Result<Secret> {
+    check_length(passphrase)?;
     let mut salt_bytes = [0u8; 16];
     random.fill_bytes(&mut salt_bytes);
-    let salt = SaltString::encode_b64(&salt_bytes).map_err(|_| CryptoError::PasswordHash)?;
+    let salt = SaltString::encode_b64(&salt_bytes).map_err(|_| CryptoError::PassphraseHash)?;
     let encoded = hasher()?
-        .hash_password(password.as_bytes(), &salt)
-        .map_err(|_| CryptoError::PasswordHash)?
+        .hash_password(passphrase.as_bytes(), &salt)
+        .map_err(|_| CryptoError::PassphraseHash)?
         .to_string();
     Ok(Secret::new(encoded))
 }
 
-/// Verifies a password against a stored hash.
+/// Verifies a passphrase against a stored hash.
 ///
-/// Returns `Ok(None)` when the password does not match — a wrong password is a
+/// Returns `Ok(None)` when the passphrase does not match — a wrong passphrase is a
 /// normal outcome, not an error, and conflating the two leads to callers that
 /// treat a malformed stored hash as a failed login and lock nobody out.
-pub fn verify(password: &str, stored: &Secret) -> Result<Option<Verification>> {
-    if password.len() > MAX_PASSWORD_BYTES {
+pub fn verify(passphrase: &str, stored: &Secret) -> Result<Option<Verification>> {
+    if passphrase.len() > MAX_PASSPHRASE_BYTES {
         // Refuse before hashing: this is the cheap path an attacker would abuse.
         return Ok(None);
     }
-    let parsed = PasswordHash::new(stored.expose()).map_err(|_| CryptoError::PasswordHash)?;
-    match hasher()?.verify_password(password.as_bytes(), &parsed) {
+    let parsed = PasswordHash::new(stored.expose()).map_err(|_| CryptoError::PassphraseHash)?;
+    match hasher()?.verify_password(passphrase.as_bytes(), &parsed) {
         Ok(()) => Ok(Some(if is_current(&parsed) {
             Verification::Ok
         } else {
@@ -123,20 +123,20 @@ fn is_current(parsed: &PasswordHash<'_>) -> bool {
         && params.t_cost() >= TIME_COST
 }
 
-/// Rejects passwords that are too short or long enough to be an attack.
-fn check_length(password: &str) -> Result<()> {
-    if password.len() < MIN_PASSWORD_BYTES {
+/// Rejects passphrases that are too short or long enough to be an attack.
+fn check_length(passphrase: &str) -> Result<()> {
+    if passphrase.len() < MIN_PASSPHRASE_BYTES {
         return Err(CryptoError::BadLength {
-            what: "password",
-            expected: MIN_PASSWORD_BYTES,
-            actual: password.len(),
+            what: "passphrase",
+            expected: MIN_PASSPHRASE_BYTES,
+            actual: passphrase.len(),
         });
     }
-    if password.len() > MAX_PASSWORD_BYTES {
+    if passphrase.len() > MAX_PASSPHRASE_BYTES {
         return Err(CryptoError::BadLength {
-            what: "password",
-            expected: MAX_PASSWORD_BYTES,
-            actual: password.len(),
+            what: "passphrase",
+            expected: MAX_PASSPHRASE_BYTES,
+            actual: passphrase.len(),
         });
     }
     Ok(())
@@ -151,7 +151,7 @@ mod tests {
     // these tests use a small number of hashes rather than a loop over many.
 
     #[test]
-    fn a_correct_password_verifies() {
+    fn a_correct_passphrase_verifies() {
         let mut random = SeededRandom::new(1);
         let stored = hash("kata sandi yang panjang", &mut random).expect("hashes");
         assert_eq!(
@@ -161,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_password_does_not_verify_and_is_not_an_error() {
+    fn a_wrong_passphrase_does_not_verify_and_is_not_an_error() {
         let mut random = SeededRandom::new(2);
         let stored = hash("correct horse battery", &mut random).expect("hashes");
         assert_eq!(
@@ -171,17 +171,17 @@ mod tests {
     }
 
     #[test]
-    fn the_same_password_hashes_differently_every_time() {
+    fn the_same_passphrase_hashes_differently_every_time() {
         let mut random = SeededRandom::new(3);
-        let first = hash("same password here", &mut random).expect("hashes");
-        let second = hash("same password here", &mut random).expect("hashes");
+        let first = hash("same passphrase here", &mut random).expect("hashes");
+        let second = hash("same passphrase here", &mut random).expect("hashes");
         assert_ne!(first.expose(), second.expose(), "salts must differ");
         assert_eq!(
-            verify("same password here", &first).expect("checks"),
+            verify("same passphrase here", &first).expect("checks"),
             Some(Verification::Ok)
         );
         assert_eq!(
-            verify("same password here", &second).expect("checks"),
+            verify("same passphrase here", &second).expect("checks"),
             Some(Verification::Ok)
         );
     }
@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn the_encoded_hash_names_argon2id_and_its_parameters() {
         let mut random = SeededRandom::new(4);
-        let stored = hash("a valid password", &mut random).expect("hashes");
+        let stored = hash("a valid passphrase", &mut random).expect("hashes");
         let encoded = stored.expose();
         assert!(encoded.starts_with("$argon2id$"), "{encoded}");
         assert!(encoded.contains(&format!("m={MEMORY_KIB}")), "{encoded}");
@@ -197,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn a_short_password_is_refused() {
+    fn a_short_passphrase_is_refused() {
         let mut random = SeededRandom::new(5);
         assert!(matches!(
             hash("short", &mut random),
@@ -206,15 +206,15 @@ mod tests {
     }
 
     #[test]
-    fn an_absurdly_long_password_is_refused_before_hashing() {
+    fn an_absurdly_long_passphrase_is_refused_before_hashing() {
         let mut random = SeededRandom::new(6);
-        let long = "x".repeat(MAX_PASSWORD_BYTES + 1);
+        let long = "x".repeat(MAX_PASSPHRASE_BYTES + 1);
         assert!(matches!(
             hash(&long, &mut random),
             Err(CryptoError::BadLength { .. })
         ));
 
-        let stored = hash("a valid password", &mut random).expect("hashes");
+        let stored = hash("a valid passphrase", &mut random).expect("hashes");
         assert_eq!(verify(&long, &stored).expect("checks"), None);
     }
 
@@ -225,12 +225,12 @@ mod tests {
         let weak = Argon2::new(Algorithm::Argon2id, Version::V0x13, weak_params);
         let salt = SaltString::encode_b64(&[9u8; 16]).expect("encodes");
         let encoded = weak
-            .hash_password(b"legacy password", &salt)
+            .hash_password(b"legacy passphrase", &salt)
             .expect("hashes")
             .to_string();
         let stored = Secret::new(encoded);
         assert_eq!(
-            verify("legacy password", &stored).expect("checks"),
+            verify("legacy passphrase", &stored).expect("checks"),
             Some(Verification::NeedsRehash)
         );
     }
@@ -238,29 +238,29 @@ mod tests {
     #[test]
     fn a_malformed_stored_hash_is_an_error_not_a_failed_login() {
         // The distinction matters: a corrupt row should page an operator, not
-        // silently tell a user their password is wrong.
+        // silently tell a user their passphrase is wrong.
         let stored = Secret::new("not a PHC string".to_string());
         assert_eq!(
-            verify("any password", &stored),
-            Err(CryptoError::PasswordHash)
+            verify("any passphrase", &stored),
+            Err(CryptoError::PassphraseHash)
         );
     }
 
     #[test]
     fn a_stored_hash_does_not_print_itself() {
         let mut random = SeededRandom::new(7);
-        let stored = hash("a valid password", &mut random).expect("hashes");
+        let stored = hash("a valid passphrase", &mut random).expect("hashes");
         let rendered = format!("{stored:?}");
         assert!(!rendered.contains("argon2"), "{rendered}");
     }
 
     #[test]
-    fn unicode_passwords_work() {
+    fn unicode_passphrases_work() {
         let mut random = SeededRandom::new(8);
-        let password = "kata sandi émoji 🔐 panjang";
-        let stored = hash(password, &mut random).expect("hashes");
+        let passphrase = "kata sandi émoji 🔐 panjang";
+        let stored = hash(passphrase, &mut random).expect("hashes");
         assert_eq!(
-            verify(password, &stored).expect("checks"),
+            verify(passphrase, &stored).expect("checks"),
             Some(Verification::Ok)
         );
     }

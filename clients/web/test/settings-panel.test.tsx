@@ -1,5 +1,5 @@
 /**
- * What the Settings tab is allowed to say about the account's devices, sessions, and password.
+ * What the Settings tab is allowed to say about the account's devices, sessions, and passphrase.
  *
  * The panel's data all arrives from the account-management REST surface, so its rendering tests
  * feed the exported presentational components exactly what the SDK calls return and pin the

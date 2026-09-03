@@ -5,19 +5,19 @@
 //!
 //! A bot needs three rows to exist — the backing account, its profile, and the `bot` row —
 //! and none of the three is usable without the others. An account with no bot row is an
-//! account whose password is a hash of bytes nobody kept: it can never be signed into and
+//! account whose passphrase is a hash of bytes nobody kept: it can never be signed into and
 //! nothing knows how to speak for it. So [`Bots::register`] hands all three to
 //! [`migo_store::traits::BotStore::register_bot`], which writes them in one transaction.
 //! There is no valid intermediate state for this service to leave behind on a crash.
 //!
-//! # The locked password hash is built once
+//! # The locked passphrase hash is built once
 //!
 //! Every bot account carries the same unusable-but-valid Argon2id hash, computed once in
 //! [`BotService::new`] from random bytes that are then discarded. Argon2id costs tens of
 //! milliseconds and megabytes of memory; running it per registration would make the register
 //! endpoint a memory-amplification lever for an attacker who can script it. Computing it once
 //! and cloning the result is safe because the hash is not a secret — it guards nothing a
-//! password could unlock — only a value that must be present and must never verify. This is
+//! passphrase could unlock — only a value that must be present and must never verify. This is
 //! the same choice, for the same reason, that `migo-auth` makes for its absent-account hash.
 //!
 //! # Ownership and the existence oracle
@@ -92,7 +92,7 @@ where
     S: Store + ?Sized,
     L: RateLimiter + ?Sized,
 {
-    /// Assembles a service, building the locked password hash once from `random`.
+    /// Assembles a service, building the locked passphrase hash once from `random`.
     ///
     /// `token_root` is the deployment secret bot tokens are keyed under; `random` is injected
     /// rather than fixed so a simulation can replay a run byte for byte.
@@ -182,16 +182,17 @@ fn token_invalid() -> Error {
     fault::error(codes::TOKEN_INVALID, "bot token is not recognised")
 }
 
-/// A valid Argon2id hash whose preimage was discarded, so no password verifies against it.
+/// A valid Argon2id hash whose preimage was discarded, so no passphrase verifies against it.
 ///
-/// Thirty-two random bytes are drawn, base64url-encoded into a password string, hashed, and
+/// Thirty-two random bytes are drawn, base64url-encoded into a passphrase string, hashed, and
 /// the preimage dropped.
 fn build_locked_hash(random: &mut dyn Random) -> Result<Secret> {
     let mut bytes = [0u8; 32];
     random.fill_bytes(&mut bytes);
-    let password = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
-    migo_crypto::password::hash(&password, random)
-        .map_err(|error| fault::internal(format!("could not build the bot password hash: {error}")))
+    let passphrase = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    migo_crypto::passphrase::hash(&passphrase, random).map_err(|error| {
+        fault::internal(format!("could not build the bot passphrase hash: {error}"))
+    })
 }
 
 /// Maps a stored [`Bot`] to the owner-facing [`BotView`], decoding its scopes.
@@ -286,7 +287,7 @@ where
                 account_id,
                 username: username.display().to_string(),
                 display_name,
-                password_hash: self.locked_hash.clone(),
+                passphrase_hash: self.locked_hash.clone(),
                 token_hash,
                 scopes: spec.scopes.to_i64(),
                 webhook_url,
@@ -449,7 +450,7 @@ fn command_payload(caller: &Caller, bot_id: Id, command: &str, args: &[String]) 
 ///
 /// # Errors
 ///
-/// Only if building the one-time locked password hash fails; see [`BotService::new`].
+/// Only if building the one-time locked passphrase hash fails; see [`BotService::new`].
 pub fn open(
     store: SharedStore,
     limiter: SharedRateLimiter,

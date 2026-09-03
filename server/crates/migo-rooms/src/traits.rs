@@ -150,7 +150,7 @@ pub trait Roomkeeper: Send + Sync {
     /// Resolves a deep link (brief section 82).
     ///
     /// Accepts a slug or the canonical text form of a room id, which is what
-    /// `migo://room/<id>` can carry. It does **not** accept the `MGO-ROOM-XXXXXX`
+    /// `migo://room/<id>` can carry. It does **not** accept the `MGO-ROOM-XXXXXXXXXX`
     /// alias: that alias is a lossy display projection of the id — `Id::public_id`
     /// says so — and resolving a link by it would mean resolving it to whichever room
     /// happened to collide.

@@ -1,4 +1,4 @@
-//! The sign-in lockout: a progressive time-out on repeated wrong passwords.
+//! The sign-in lockout: a progressive time-out on repeated wrong passphrases.
 //!
 //! # The ladder
 //!
@@ -12,15 +12,15 @@
 //! phone) counts against the same record, and the lock follows the account across networks — a
 //! distributed guessing attack cannot sidestep it by rotating addresses. The flip side, stated
 //! plainly: somebody who knows an account's username can keep that account locked by feeding it
-//! wrong passwords from anywhere, for at most the configured ceiling. That trade was chosen at
+//! wrong passphrases from anywhere, for at most the configured ceiling. That trade was chosen at
 //! the product level.
 //!
 //! # Time comes from the caller
 //!
 //! The gate holds no clock. Every method takes the request's `now`, which keeps the gate a pure
 //! state machine over `Timestamp`s and lets tests drive the whole ladder with a manual clock.
-//! Attempts that arrive *during* a lockout are refused without a password check and without
-//! counting — the ladder only climbs on failures that actually reached the password check.
+//! Attempts that arrive *during* a lockout are refused without a passphrase check and without
+//! counting — the ladder only climbs on failures that actually reached the passphrase check.
 
 use std::collections::HashMap;
 
@@ -61,7 +61,7 @@ impl Default for LockoutConfig {
 /// One account's standing with the gate.
 #[derive(Clone, Copy, Debug, Default)]
 struct Entry {
-    /// Wrong passwords since the last success.
+    /// Wrong passphrases since the last success.
     failures: u32,
     /// The lockout level the failures have reached (0 = none).
     tier: u32,
@@ -89,7 +89,7 @@ impl LockoutGate {
 
     /// Refuses the attempt while the account is locked, answering with the remaining
     /// milliseconds; otherwise lets it through untouched. A locked check counts nothing — the
-    /// ladder only climbs on failures that reached a password check.
+    /// ladder only climbs on failures that reached a passphrase check.
     ///
     /// # Errors
     ///
@@ -108,7 +108,7 @@ impl LockoutGate {
         Err(until.saturating_since(now))
     }
 
-    /// Records one wrong password and answers with the lockout this failure triggered, when it
+    /// Records one wrong passphrase and answers with the lockout this failure triggered, when it
     /// crossed onto a rung of the ladder (`Some(seconds)`), or `None` when the account stays
     /// unlocked.
     #[must_use]
@@ -206,7 +206,7 @@ mod tests {
             let _ = g.record_failure(now, "acct");
         }
         // Failures only count once the lockout has expired — the caller is expected to advance
-        // past it before the next attempt reaches a password check.
+        // past it before the next attempt reaches a passphrase check.
         let later = Timestamp::from_unix_ms(NOW_MS + 61_000);
         // Failures 6 and 7 climb nothing; failure 8 (5 + 3) lands on the next rung.
         assert_eq!(g.record_failure(later, "acct"), None);

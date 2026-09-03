@@ -13,7 +13,7 @@
 //! hopeful (ADR-0009).
 //!
 //! Every secret is a [`Secret`], which redacts itself in `Debug` and zeroes itself on
-//! drop. A `String` password would end up in a log the first time somebody added
+//! drop. A `String` passphrase would end up in a log the first time somebody added
 //! `#[derive(Debug)]` to a request wrapper and traced it.
 
 use std::net::IpAddr;
@@ -186,8 +186,8 @@ pub struct Registration {
     pub email: Option<String>,
     /// Phone, optional, same reasoning.
     pub phone: Option<String>,
-    /// Plaintext password, held only long enough to hash.
-    pub password: Secret,
+    /// Plaintext passphrase, held only long enough to hash.
+    pub passphrase: Secret,
     /// BCP-47 language tag.
     pub locale: String,
     /// ISO-3166 alpha-2 country, if the client discloses it.
@@ -200,7 +200,7 @@ pub struct Registration {
     /// The account identity's ML-DSA-65 public key, when the client is
     /// registering with a root secret. The account is created with identity
     /// login available from its first breath; `None` registers the
-    /// password-only account every legacy client still makes.
+    /// passphrase-only account every legacy client still makes.
     pub identity_public_key: Option<Vec<u8>>,
     /// Captcha proof, when the gate is engaged. `None` is rejected as
     /// `CAPTCHA_REQUIRED`; a present proof is consumed on the way in so
@@ -234,14 +234,14 @@ pub struct SignIn {
     /// different kinds of thing, and a form that demands they pick is a form that
     /// makes them wrong half the time.
     pub identifier: String,
-    /// Plaintext password.
-    pub password: Secret,
+    /// Plaintext passphrase.
+    pub passphrase: Secret,
     /// The device signing in.
     pub device: DeviceClaim,
     /// Captcha proof, required when the per-IP failure counter is at or
     /// past the configured threshold. A first attempt against a fresh
     /// account never needs one; a tenth attempt against the same
-    /// network after nine wrong passwords always does.
+    /// network after nine wrong passphrases always does.
     pub captcha: Option<CaptchaProof>,
     /// The server the client believes it is talking to, when it
     /// disclosed one on the form. Same defaulting rule as
@@ -378,7 +378,7 @@ pub struct RotationAnswer {
 /// account.
 ///
 /// This is the legacy-upgrade door (brief section 182, migration of
-/// password-era accounts): a client that just signed in with a password,
+/// passphrase-era accounts): a client that just signed in with a passphrase,
 /// built a root secret locally, and derived its identity key registers the
 /// public halves here. Idempotent by design — a retry sends the same keys
 /// and reconciles to the rows that already exist.

@@ -21,7 +21,7 @@
 //!             username: "ada".to_string(),
 //!             email: None,
 //!             phone: None,
-//!             password: Secret::new("correct horse battery staple"),
+//!             passphrase: Secret::new("correct horse battery staple"),
 //!             locale: "en".to_string(),
 //!             country: None,
 //!             gender: None,
@@ -59,7 +59,7 @@
 //!
 //! # What is deliberately not here
 //!
-//! *No password reset.* Recovery is brief section 106 and it is not an authentication
+//! *No passphrase reset.* Recovery is brief section 106 and it is not an authentication
 //! problem: it is a deliverability problem, a rate-limiting problem, and an
 //! account-takeover problem wearing an authentication costume. It gets its own crate with
 //! its own audit trail.
@@ -69,12 +69,12 @@
 //! a code that can be demanded but not registered — would be worse than shipping none.
 //!
 //! *No sessions for bots.* A bot presents a bot token, and turning that into a session is
-//! `migo-bots`' job, because the checks are different: no password, no device, no
+//! `migo-bots`' job, because the checks are different: no passphrase, no device, no
 //! presence, a token that an owner can rotate, and a much larger bucket.
 //!
 //! *No key material in this crate's state beyond the signing key.* Private keys are
 //! generated on the device and never sent to the server (brief section 47), so there is
-//! nothing here to protect on a user's behalf except the hash of their password and the
+//! nothing here to protect on a user's behalf except the hash of their passphrase and the
 //! tags of their refresh tokens — both of which are one-way.
 
 #![forbid(unsafe_code)]
@@ -106,7 +106,7 @@ pub use crate::model::{
 pub use crate::service::{open, Auth, ConcreteAuth, SharedAuth};
 pub use crate::tier::{of_account as tier_of_account, PROBATION_MILLIS, TRUSTED_MILLIS};
 pub use crate::token::{Claims, Signer, REFRESH_BYTES, TOKEN_BYTES, TOKEN_VERSION};
-pub use crate::traits::{Authenticator, Identity, PasswordChange, REAUTH_WINDOW_MS};
+pub use crate::traits::{Authenticator, Identity, PassphraseChange, REAUTH_WINDOW_MS};
 pub use migo_captcha::CaptchaProof;
 /// The gender enumeration, re-exported so the REST layer can parse the wire
 /// number without taking a dependency on the store crate for one type.

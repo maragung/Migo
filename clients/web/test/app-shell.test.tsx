@@ -1,12 +1,12 @@
 /**
  * What the messenger shell offers as the app's navigation.
  *
- * The right pane has one mode now, not two: a single tab bar whose first chip is the Home —
+ * The right pane has one mode now, not two: a single tab bar whose first chip is the Games —
  * the pane's resting content, always present, never closable — followed by one closable chip
  * per open thing: a conversation, or a secondary panel the banner menu or a deep link reached.
  * The system tabs' content (Friends, Rooms, Games, Feed) never opens here: those live in the
  * left panel, so the pane cannot draw the same list twice. There is no "menu panel" to switch
- * back to: closing a chip falls through to the next one, and closing the last one leaves Home,
+ * back to: closing a chip falls through to the next one, and closing the last one leaves Games,
  * which is exactly the fallback an empty pane owes. The shell is the app's whole navigation, so
  * its offer is its contract.
  *
@@ -88,15 +88,16 @@ function shell(
   );
 }
 
-test('the left strip offers the five system tabs in the reference order', () => {
+test('the left strip offers the system tabs in the reference order', () => {
   const markup = render(shell([], 'feed'));
 
   // The pattern anchors on the whole class attribute so the icon/label spans inside a chip
-  // (tab-chip-icon, tab-chip-label) never count — only the chip buttons do.
+  // (tab-chip-icon, tab-chip-label) never count — only the chip buttons do. Four, not five:
+  // Games is the right pane's resting chip, not a list, so it is not on the strip.
   const chips = markup.match(/class="tab-chip( active)?"/g) ?? [];
-  assert.equal(chips.length, 5, 'five system tabs on the left strip, nothing else');
+  assert.equal(chips.length, 4, 'four system tabs on the left strip, nothing else');
   let at = -1;
-  for (const label of ['Friends', 'Chats', 'Rooms', 'Games', 'Feed']) {
+  for (const label of ['Friends', 'Chats', 'Rooms', 'Feed']) {
     const found = markup.indexOf(`tab-chip-label">${label}</span>`);
     assert.ok(found !== -1, `the "${label}" tab is missing from the strip`);
     assert.ok(found > at, `the "${label}" tab is out of the reference order`);
@@ -127,20 +128,20 @@ test('the Chats chip carries the unread dot only when something is unread', () =
   assert.ok(unread.includes('aria-label="Unread messages"'), 'the dot says what it means');
 });
 
-test('an empty right pane still offers the Home chip, and never a menu panel', () => {
+test('an empty right pane still offers the Games chip, and never a menu panel', () => {
   const markup = render(shell([], 'feed'));
 
-  // The resting chip is the bar's own — an empty pane still owes a home.
+  // The resting chip is the bar's own — an empty pane still owes the arcade.
   assert.ok(
     markup.includes('class="chat-tab active"'),
-    'the Home chip must be present and active when nothing is open',
+    'the Games chip must be present and active when nothing is open',
   );
   assert.ok(markup.includes('aria-label="Open panels"'), 'the right pane must carry its tab bar');
   assert.ok(!markup.includes('Menu Panel'), 'the menu panel is gone: the pane is tabs only');
   assert.ok(!markup.includes('Panel: '), 'the pane no longer names a two-mode "panel" it shows');
 });
 
-test('every open thing is a closable chip beside the Home', () => {
+test('every open thing is a closable chip beside the Games', () => {
   const tabs: RightTabChip[] = [
     { id: 'chat:c1', kind: 'chat', conversationId: 'c1' as Id, title: 'reason008' },
     { id: 'search', kind: 'search', title: 'Search' },
@@ -157,10 +158,10 @@ test('every open thing is a closable chip beside the Home', () => {
     'the conversation chip must be closable',
   );
   assert.ok(markup.includes('aria-label="Close TopUp"'), 'the panel chips must be closable too');
-  // The resting chip is never closable — closing everything must leave the Home.
+  // The resting chip is never closable — closing everything must leave the Games.
   assert.ok(
-    !markup.includes('Close Home'),
-    "the Home chip has no close control; it is the pane's fallback",
+    !markup.includes('Close Games'),
+    "the Games chip has no close control; it is the pane's fallback",
   );
   // The chat tab is the active one, so the pane shows the thread, not the right content.
   assert.ok(markup.includes('class="thread-area"'), 'the active chat tab shows the thread');
@@ -174,9 +175,9 @@ test('exactly one chip is active per pane, never more', () => {
   ];
   const markup = render(shell(tabs, 'chat:c2', 'c2' as Id));
 
-  // Two open conversations plus the bar's own Home chip.
+  // Two open conversations plus the bar's own Games chip.
   const chatChips = markup.match(/class="chat-tab( active)?"/g) ?? [];
-  assert.equal(chatChips.length, 3, 'one chip per open thing, plus the Home');
+  assert.equal(chatChips.length, 3, 'one chip per open thing, plus the Games');
   assert.equal(markup.match(/class="chat-tab active"/g)?.length ?? 0, 1, 'one active chip');
   assert.equal(
     (markup.match(/aria-current="page"/g) ?? []).length,
@@ -265,10 +266,10 @@ test('the right-tabs mode hides the Chats chip from the side strip', () => {
     </AppShell>,
   );
 
-  // Four chips, not five: the right pane's tabs are the chats list in this mode, and a list
+  // Three chips, not four: the right pane's tabs are the chats list in this mode, and a list
   // and a tab bar showing the same conversations is the same door twice.
   const chips = markup.match(/class="tab-chip( active)?"/g) ?? [];
-  assert.equal(chips.length, 4, 'the Chats chip must be gone when the pane holds the chats');
+  assert.equal(chips.length, 3, 'the Chats chip must be gone when the pane holds the chats');
   assert.ok(!markup.includes('tab-chip-label">Chats</span>'), 'no Chats chip may remain');
   // The unread dot follows the chip it belongs to — with no chip, no dot.
   assert.ok(!markup.includes('tab-chip-dot'), 'no orphan unread dot without its chip');

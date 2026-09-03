@@ -1174,7 +1174,7 @@ fn wire_bundle(bundle: Bundle) -> WireBundle {
 /// resolves at render time.
 ///
 /// `public_id` is derived rather than stored: it is a lossy display projection of the account id
-/// (`MGO-XXXXXXXX`), which is why nothing persists it.
+/// (`MGO-XXXXXXXXXXXX`), which is why nothing persists it.
 fn wire_profile(card: ProfileCard) -> UserProfile {
     UserProfile {
         user_id: card.account_id,

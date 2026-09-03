@@ -1,5 +1,7 @@
 package com.migo.core
 
+import com.migo.core.account.DeviceCredential
+import com.migo.core.account.IdentityKey
 import com.migo.core.crypto.PrekeyBundle
 import com.migo.core.domain.ConversationsDomain
 import com.migo.core.domain.DeviceAddress
@@ -72,6 +74,7 @@ import com.migo.core.store.TxRecord
 import com.migo.core.wire.Id
 import com.migo.core.wire.NIL_ID
 import com.migo.core.wire.parseId
+import java.util.Base64
 import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -463,8 +466,8 @@ class MigoClient private constructor(
      * first attempt already landed (§12). Returns the grant so the caller can persist it, alongside
      * a [snapshot] of the key material, and later [resume] without registering again.
      */
-    suspend fun register(username: String, password: String, identityPublicKey: ByteArray? = null): Grant {
-        val grant = rest.register(username, password, deviceRequest(), options.locale, identityPublicKey)
+    suspend fun register(username: String, passphrase: String, identityPublicKey: ByteArray? = null): Grant {
+        val grant = rest.register(username, passphrase, deviceRequest(), options.locale, identityPublicKey)
         establish(grant)
         return grant
     }
@@ -475,8 +478,36 @@ class MigoClient private constructor(
      * [identifier] is a username, an email, or a public id: one field, because a user does not think of
      * those as different kinds of thing, and the server decides which it is.
      */
-    suspend fun login(identifier: String, password: String): Grant {
-        val grant = rest.login(identifier, password, deviceRequest())
+    suspend fun login(identifier: String, passphrase: String): Grant {
+        val grant = rest.login(identifier, passphrase, deviceRequest())
+        establish(grant)
+        return grant
+    }
+
+    /**
+     * Adds this device to an existing account through the add-device ceremony, then connects —
+     * the path a `.migo` container restore takes.
+     *
+     * [identity] is the account's ML-DSA key (the root's identity domain, held by the caller
+     * because the container is the caller's), and [deviceCredential] is the fresh per-device
+     * credential this device just minted. The ceremony needs both signatures because the two
+     * halves answer different questions: the identity key proves the root, and the credential
+     * introduces the device this grant will belong to — a root that leaks from a backup alone
+     * has the account half and none of the device half.
+     */
+    suspend fun addDevice(accountId: Id, identity: IdentityKey, deviceCredential: DeviceCredential): Grant {
+        val challenge = rest.addDeviceChallenge(accountId, deviceRequest())
+        val payload = try {
+            Base64.getDecoder().decode(challenge.payload)
+        } catch (_: IllegalArgumentException) {
+            throw SdkError("the server's challenge payload was not base64")
+        }
+        val grant = rest.addDevice(
+            parseId(challenge.challengeId),
+            identity.signLogin(payload),
+            deviceCredential.publicKey(),
+            deviceCredential.signLogin(payload),
+        )
         establish(grant)
         return grant
     }
@@ -635,6 +666,17 @@ class MigoClient private constructor(
         label: String? = null,
     ): WalletSummary =
         rest.registerWallet(requireConnected().grant.accessToken, address, derivationIndex, chainType, label)
+
+    /**
+     * Archives one of the account's registered wallets.
+     *
+     * The registration is hidden, not destroyed: the address is a pure function of the root, so a
+     * wallet the root still derives can be re-registered, and the list keeps the row with its
+     * archived timestamp rather than dropping it.
+     */
+    suspend fun archiveWallet(walletId: Id) {
+        rest.archiveWallet(requireConnected().grant.accessToken, walletId)
+    }
 
     // --- topic subscription ---
 

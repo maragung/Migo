@@ -146,7 +146,7 @@ export const CODE = {
   INVALID_KEY_MATERIAL: 1305,
   USERNAME_TAKEN: 1306,
   USERNAME_RESERVED: 1307,
-  WEAK_PASSWORD: 1308,
+  WEAK_PASSPHRASE: 1308,
   /** Captcha proof did not verify */
   INVALID_CAPTCHA: 1309,
   /** Captcha proof was consumed or expired */
@@ -241,7 +241,7 @@ export const ERROR_SYMBOLS: Record<number, string> = {
   1305: 'INVALID_KEY_MATERIAL',
   1306: 'USERNAME_TAKEN',
   1307: 'USERNAME_RESERVED',
-  1308: 'WEAK_PASSWORD',
+  1308: 'WEAK_PASSPHRASE',
   1309: 'INVALID_CAPTCHA',
   1310: 'CAPTCHA_EXPIRED',
   1311: 'CAPTCHA_REQUIRED',
@@ -750,7 +750,7 @@ export function decodeAuthenticate(r: Reader): Authenticate {
 
 export interface UserProfile {
   userId: Id;
-  /** MGO-XXXXXXXX, immutable, shareable */
+  /** MGO-XXXXXXXXXXXX, immutable, shareable */
   publicId: string;
   username: string;
   displayName: string;

@@ -97,6 +97,7 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
                 onServerEndpoint = model::setServerEndpoint,
                 onIdentifier = model::setIdentifier,
                 onSubmit = model::signIn,
+                onRestore = model::restoreFromBackup,
                 onDismissFailure = model::dismissFailure,
             )
 
@@ -260,6 +261,7 @@ private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifie
             state = state,
             onSendGift = model::sendGift,
             onRefresh = model::loadWallet,
+            onArchiveWallet = model::archiveWallet,
             onChainNetwork = model::selectChainNetwork,
             onChainBalance = model::refreshChainBalance,
             onChainPrepare = model::prepareChainSend,
@@ -274,6 +276,7 @@ private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifie
             onSignOut = model::signOut,
             onRefreshDevices = model::loadDevices,
             onRemoveDevice = model::revokeDevice,
+            onExport = model::exportBackup,
             modifier = modifier,
         )
     }

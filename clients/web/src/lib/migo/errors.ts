@@ -31,7 +31,7 @@ const LINES: Readonly<Record<string, string>> = {
   INVALID_CREDENTIALS: 'That username or passphrase is not right. Check them and try again.',
   USERNAME_TAKEN: 'That username is already taken. Try another one.',
   USERNAME_RESERVED: 'That username is reserved. Try another one.',
-  WEAK_PASSWORD: 'That passphrase is too easy to guess. Make it longer and more varied.',
+  WEAK_PASSPHRASE: 'That passphrase is too easy to guess. Make it longer and more varied.',
   ACCOUNT_SUSPENDED: 'This account has been suspended.',
   AUTH_LOCKED: 'Sign-in is temporarily locked after repeated failures. Wait a while and try again.',
   INVALID_CAPTCHA: 'That captcha answer did not match. Ask for a new challenge and try again.',

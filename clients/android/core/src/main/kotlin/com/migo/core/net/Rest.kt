@@ -109,19 +109,19 @@ data class DeviceRequest(
 @Serializable
 private data class RegisterRequest(
     val username: String,
-    val password: String,
+    val passphrase: String,
     val locale: String,
     val device: DeviceRequest,
     // The account identity's ML-DSA-65 public key, base64, when the registering device already
     // holds the account root (§12). Null by default and the Json instance skips it, so a
-    // password-only caller's wire shape is unchanged.
+    // passphrase-only caller's wire shape is unchanged.
     @SerialName("identity_public_key") val identityPublicKey: String? = null,
 )
 
 @Serializable
 private data class LoginRequest(
     val identifier: String,
-    val password: String,
+    val passphrase: String,
     val device: DeviceRequest,
 )
 
@@ -322,7 +322,7 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
      */
     suspend fun register(
         username: String,
-        password: String,
+        passphrase: String,
         device: DeviceRequest,
         locale: String = "en",
         identityPublicKey: ByteArray? = null,
@@ -331,7 +331,7 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
         RegisterRequest.serializer(),
         RegisterRequest(
             username,
-            password,
+            passphrase,
             locale,
             device,
             identityPublicKey?.let { Base64.getEncoder().encodeToString(it) },
@@ -344,8 +344,8 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
      * One identifier field, not a username field and an email field, because a user does not think
      * of those as different kinds of thing. The server decides which it is.
      */
-    suspend fun login(identifier: String, password: String, device: DeviceRequest): Grant =
-        post("/v1/auth/login", LoginRequest.serializer(), LoginRequest(identifier, password, device))
+    suspend fun login(identifier: String, passphrase: String, device: DeviceRequest): Grant =
+        post("/v1/auth/login", LoginRequest.serializer(), LoginRequest(identifier, passphrase, device))
 
     /** Exchanges a saved refresh token for a fresh pair. */
     suspend fun refresh(refreshToken: String, deviceId: Id): Grant = post(
@@ -483,7 +483,7 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
     }
 
     /**
-     * Publishes the caller's identity (and optionally device) public keys on a password-era
+     * Publishes the caller's identity (and optionally device) public keys on a passphrase-era
      * account — the legacy upgrade door, idempotent by design.
      */
     suspend fun publishIdentityKey(

@@ -208,15 +208,15 @@ wrong and impossible to notice in a green build.
 
 **Indistinguishability is asserted as an equality of outcomes, not of clocks.** A test
 that measures wall-clock time to prove two paths cost the same is a test that fails on a
-loaded CI runner. So `an_unknown_account_and_a_wrong_password_are_indistinguishable`
+loaded CI runner. So `an_unknown_account_and_a_wrong_passphrase_are_indistinguishable`
 asserts the two paths return the same error code, and the _mechanism_ that makes the times
 equal — a placeholder hash verified on the unknown-account path — is a construction-time
 field, exercised by every one of those tests rather than sampled by one of them.
 
 **Order of checks is tested, because order is the security property.** Three tests exist
 only to pin an ordering that a refactor would happily change: a suspended account is told
-so _after_ its password verifies, never before; a replayed refresh kills the family even
-when the token is also expired and also from the wrong device; and a weak password is
+so _after_ its passphrase verifies, never before; a replayed refresh kills the family even
+when the token is also expired and also from the wrong device; and a weak passphrase is
 refused _before_ anything is hashed. Each of these reads as an implementation detail and
 is not one.
 
@@ -227,7 +227,7 @@ string does not contain `113.77`. Asserting only the first half passes on a fiel
 appends the full address after the class.
 
 **The rate-limit tests assert the arithmetic, not the presence of a limit.**
-`a_wrong_password_costs_the_whole_anonymous_budget` pins the derived price against the
+`a_wrong_passphrase_costs_the_whole_anonymous_budget` pins the derived price against the
 shipped anonymous bucket, so lowering `anonymous_burst` in the config breaks the test
 rather than silently turning failure-pricing into a no-op. And
 `pressure_is_per_network_and_not_per_account` fails if anyone ever adds a per-account

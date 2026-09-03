@@ -5,7 +5,7 @@
 //! One root secret is the entire account, so one sealed blob is the entire
 //! backup: the root, a format version, and a creation timestamp, encrypted
 //! under a key derived from a *recovery credential* the user chose — not their
-//! password, not their e-mail, not their Google account (§182). The file is
+//! passphrase, not their e-mail, not their Google account (§182). The file is
 //! named `.migo`, copied to Google Drive or a USB stick by the user, and
 //! holds only ciphertext: a container in a cloud bucket is Argon2id work for
 //! whoever steals the bucket, and nothing else.

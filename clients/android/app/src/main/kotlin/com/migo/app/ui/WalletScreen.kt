@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
@@ -45,14 +46,16 @@ import com.migo.app.model.ChainTxRow
 import com.migo.app.model.PreparedChainTx
 import com.migo.app.model.avaxOf
 import com.migo.app.model.navaxOf
+import com.migo.core.net.WalletSummary
 import com.migo.core.protocol.GiftListing
 import com.migo.core.protocol.LedgerEntryWire
 import com.migo.core.protocol.RelationshipKind
 import com.migo.core.wire.Id
 
 /**
- * The Wallet section: the MIG balance, the gift shop, the statement, progression, badges, and the
- * leaderboard — the caller's whole economy under one address.
+ * The Wallet section: the MIG balance, the gift shop, the statement, progression, badges, the
+ * leaderboard, and the account's registered addresses — the caller's whole economy under one
+ * address.
  *
  * The coin is MIG. The balance leads; the statement states each line's signed amount from its reason
  * (the wire's amount is a magnitude); the shop states its prices before its recipients, so the spend
@@ -63,6 +66,7 @@ fun WalletScreen(
     state: AppState.SignedIn,
     onSendGift: (sku: String, recipient: Id) -> Unit,
     onRefresh: () -> Unit,
+    onArchiveWallet: (walletId: String) -> Unit,
     onChainNetwork: (ChainNetworkChoice) -> Unit,
     onChainBalance: () -> Unit,
     onChainPrepare: (recipient: String, amount: String) -> Unit,
@@ -77,6 +81,9 @@ fun WalletScreen(
     var recipientField by rememberSaveable { mutableStateOf("") }
     // The AVAX send form's own visibility; its text survives rotation in saveables below.
     var chainSending by rememberSaveable { mutableStateOf(false) }
+    // The wallet an Archive press is about to act on — the §70 confirmation is the whole point, and
+    // WalletSummary is not a saveable type either.
+    var confirmingArchive by remember { mutableStateOf<WalletSummary?>(null) }
 
     val kindFriend: Long = RelationshipKind.Friend.wire.toLong()
     val friends = state.friends.entries.filter { it.kind == kindFriend }
@@ -121,6 +128,19 @@ fun WalletScreen(
                         onNetwork = onChainNetwork,
                         onBalance = onChainBalance,
                         onSend = { chainSending = true },
+                    )
+                }
+
+                // The account's registered addresses: the server's own record of which derived
+                // wallets exist, archived rows included — a registration that is hidden, not
+                // destroyed, stays a fact the owner can see.
+                item { SectionLabel(text = "Registered addresses") }
+                item {
+                    RegisteredAddresses(
+                        registrations = state.wallet.registrations,
+                        archiving = state.wallet.archiving,
+                        failure = state.wallet.registrationFailure,
+                        onArchive = { confirmingArchive = it },
                     )
                 }
 
@@ -294,6 +314,30 @@ fun WalletScreen(
                 onSend = onChainSend,
             )
         }
+
+        // The §70 confirmation: archiving hides a registration on the account itself, so the
+        // person reads what that means before the server acts.
+        confirmingArchive?.let { wallet ->
+            AlertDialog(
+                onDismissRequest = { confirmingArchive = null },
+                title = { Text("Archive this address?") },
+                text = {
+                    Text(
+                        "The registration is hidden, not destroyed — the address is a function of " +
+                            "the account root, so it can be registered again.",
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        onArchiveWallet(wallet.walletId)
+                        confirmingArchive = null
+                    }) { Text("Archive", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { confirmingArchive = null }) { Text("Cancel") }
+                },
+            )
+        }
     }
 }
 
@@ -374,6 +418,76 @@ fun ledgerAmount(entry: LedgerEntryWire): String =
 /** The XP bar's filled fraction, clamped into 0..1 — an unfilled bar is honest, NaN% is not. */
 fun xpFraction(into: Long, total: Long): Float =
     if (total <= 0L) 0f else (into.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+
+/**
+ * The account's registered addresses, as the server knows them.
+ *
+ * A null list is the honest "not checked yet" — a panel that showed an empty list before the read
+ * landed would be saying "this account has no addresses", which on a wallet screen is the most
+ * reassuring wrong answer there is. Archived rows stay listed, drawn dimmed: hidden is not gone.
+ */
+@Composable
+private fun RegisteredAddresses(
+    registrations: List<WalletSummary>?,
+    archiving: Set<String>,
+    failure: String?,
+    onArchive: (WalletSummary) -> Unit,
+) {
+    val clipboard = LocalClipboardManager.current
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+        when (val rows = registrations) {
+            null -> Text(
+                text = "Not checked yet.",
+                style = MaterialTheme.typography.bodySmall,
+                color = LocalMigoExtra.current.faint,
+                modifier = Modifier.padding(vertical = 4.dp),
+            )
+            else -> for (row in rows) {
+                val archived = row.status == "archived"
+                val busy = row.walletId in archiving
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = row.address,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = if (archived) {
+                                LocalMigoExtra.current.faint
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                        )
+                        OneLine(
+                            text = buildString {
+                                append("wallet ${row.derivationIndex}")
+                                if (row.label != null) append(" · " + row.label)
+                                if (archived) append(" · archived")
+                            },
+                        )
+                    }
+                    TextButton(onClick = { clipboard.setText(AnnotatedString(row.address)) }) { Text("Copy") }
+                    if (!archived) {
+                        TextButton(onClick = { onArchive(row) }, enabled = !busy) {
+                            Text(if (busy) "Archiving…" else "Archive")
+                        }
+                    }
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
+        }
+        if (failure != null) {
+            Text(
+                text = failure,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(vertical = 4.dp),
+            )
+        }
+    }
+}
 
 /**
  * The AVAX panel (§184): one named network at a time, wallet 0's address, a balance the user asks

@@ -160,10 +160,10 @@ impl Id {
             self.0[13],
         ]));
         match kind {
-            PublicId::User => format!("MGO-{:08X}", (mixed >> 32) as u32),
-            PublicId::Room => format!("MGO-ROOM-{:06X}", (mixed & 0x00FF_FFFF) as u32),
-            PublicId::Group => format!("MGO-GRP-{:06X}", (mixed & 0x00FF_FFFF) as u32),
-            PublicId::Bot => format!("MGO-BOT-{:06X}", (mixed & 0x00FF_FFFF) as u32),
+            PublicId::User => format!("MGO-{:012X}", mixed >> 16),
+            PublicId::Room => format!("MGO-ROOM-{:010X}", mixed & 0xFF_FFFF_FFFF),
+            PublicId::Group => format!("MGO-GRP-{:010X}", mixed & 0xFF_FFFF_FFFF),
+            PublicId::Bot => format!("MGO-BOT-{:010X}", mixed & 0xFF_FFFF_FFFF),
         }
     }
 }
@@ -171,13 +171,13 @@ impl Id {
 /// Which alias format [`Id::public_id`] should render.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PublicId {
-    /// `MGO-7F82A91C`
+    /// `MGO-7F82A91CBBAD`
     User,
-    /// `MGO-ROOM-82F91A`
+    /// `MGO-ROOM-82F91AB402`
     Room,
-    /// `MGO-GRP-1C40BE`
+    /// `MGO-GRP-1C40BE79A5`
     Group,
-    /// `MGO-BOT-9A2D07`
+    /// `MGO-BOT-9A2D07C4E6`
     Bot,
 }
 
@@ -414,9 +414,15 @@ mod tests {
         let user = id.public_id(PublicId::User);
         let room = id.public_id(PublicId::Room);
         assert!(user.starts_with("MGO-"), "{user}");
-        assert_eq!(user.len(), 12);
+        assert_eq!(user.len(), 16);
+        assert!(
+            user.chars()
+                .skip(4)
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()),
+            "{user}"
+        );
         assert!(room.starts_with("MGO-ROOM-"), "{room}");
-        assert_eq!(room.len(), 15);
+        assert_eq!(room.len(), 19);
     }
 
     #[test]

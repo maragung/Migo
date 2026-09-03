@@ -1,6 +1,7 @@
 package com.migo.core.store
 
 import android.content.Context
+import com.migo.core.account.DeviceCredential
 import com.migo.core.account.MigoRoot
 import com.migo.core.crypto.AEAD_KEY_LEN
 import com.migo.core.crypto.AEAD_NONCE_LEN
@@ -8,6 +9,7 @@ import com.migo.core.crypto.AEAD_TAG_LEN
 import com.migo.core.crypto.Aead
 import com.migo.core.crypto.IdentitySecret
 import com.migo.core.crypto.KeyPair
+import com.migo.core.crypto.MlDsa
 import com.migo.core.crypto.SEED_LEN
 import com.migo.core.crypto.SymmetricKey
 import com.migo.core.wire.Id
@@ -167,6 +169,16 @@ class DeviceKeys(
      */
     val root: MigoRoot?,
     /**
+     * The device credential, when this device signed in through one of the ML-DSA ceremonies
+     * (register with an identity key, or restore from a container). Null on a passphrase
+     * sign-in, which registers no credential.
+     *
+     * Sealed for the same reason the root is: a device that presented this credential to join
+     * the account must present the *same* one next time, and a credential the vault forgot is
+     * a device that can only refresh until the day the refresh expires.
+     */
+    val deviceCredential: DeviceCredential? = null,
+    /**
      * This account's tracked AVAX transactions, newest first.
      *
      * Held by the caller between saves the same way the prekey pool is: the record list is the
@@ -180,7 +192,8 @@ class DeviceKeys(
     override fun toString(): String =
         "DeviceKeys(identity: ${identity.public()}, signed_prekey_id: $signedPrekeyId, " +
             "one_time_count: ${oneTime.size}, session: ${session ?: "none"}, " +
-            "root: ${if (root != null) "held" else "none"}, tx_count: ${txs.size})"
+            "root: ${if (root != null) "held" else "none"}, " +
+            "credential: ${if (deviceCredential != null) "held" else "none"}, tx_count: ${txs.size})"
 
     /**
      * Drops the one-time prekeys.
@@ -385,6 +398,10 @@ class Vault private constructor(private val file: File, private val wrappingKey:
         if (root != null) {
             w.optional(FIELD_ROOT) { sub -> sub.bytes(root.asBytes()) }
         }
+        val deviceCredential = keys.deviceCredential
+        if (deviceCredential != null) {
+            w.optional(FIELD_DEVICE_CREDENTIAL) { sub -> sub.bytes(deviceCredential.seed()) }
+        }
         val txs = keys.txs
         if (txs.isNotEmpty()) {
             w.optional(FIELD_TXS) { sub ->
@@ -433,6 +450,7 @@ class Vault private constructor(private val file: File, private val wrappingKey:
         var nextSignedPrekeyId: Long? = null
         var nextOneTimePrekeyId: Long? = null
         var root: MigoRoot? = null
+        var deviceCredential: DeviceCredential? = null
         var txs: List<TxRecord> = emptyList()
         val optionalCount = r.u32()
         for (i in 0L until optionalCount) {
@@ -451,6 +469,13 @@ class Vault private constructor(private val file: File, private val wrappingKey:
                     val bytes = sub.bytes()
                     if (bytes.size != MigoRoot.LEN) throw VaultError.Unreadable
                     root = MigoRoot.fromBytes(bytes)
+                }
+                FIELD_DEVICE_CREDENTIAL.toLong() -> {
+                    // The credential seed is ML-DSA's 32 bytes by construction; a wrong length
+                    // refuses the whole vault for the same reason a wrong-length root does.
+                    val seed = sub.bytes()
+                    if (seed.size != MlDsa.SEED_LEN) throw VaultError.Unreadable
+                    deviceCredential = DeviceCredential.fromSeed(seed)
                 }
                 FIELD_TXS.toLong() -> {
                     val count = sub.listLen()
@@ -476,6 +501,7 @@ class Vault private constructor(private val file: File, private val wrappingKey:
             nextOneTimePrekeyId ?: ((oneTime.keys.maxOrNull() ?: 0L) + 1L),
             session,
             root,
+            deviceCredential,
             txs,
         )
     }
@@ -502,6 +528,9 @@ class Vault private constructor(private val file: File, private val wrappingKey:
 
         /** The optional-field id under which this device's tracked AVAX transactions live. */
         private const val FIELD_TXS = 4
+
+        /** The optional-field id under which the device credential's seed lives. */
+        private const val FIELD_DEVICE_CREDENTIAL = 5
 
         /**
          * A ceiling on the one-time prekeys a vault may claim to hold.

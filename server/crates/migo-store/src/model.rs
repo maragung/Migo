@@ -300,8 +300,8 @@ pub enum RevokeReason {
     /// A retired refresh token was presented. Treated as theft: the whole
     /// family dies, not just this session.
     ReuseDetected = 2,
-    /// Password changed.
-    PasswordChanged = 3,
+    /// Passphrase changed.
+    PassphraseChanged = 3,
     /// Revoked by an operator or by moderation.
     AdminAction = 4,
     /// The device was removed.
@@ -322,7 +322,7 @@ impl RevokeReason {
             0 => Self::Logout,
             1 => Self::Rotated,
             2 => Self::ReuseDetected,
-            3 => Self::PasswordChanged,
+            3 => Self::PassphraseChanged,
             4 => Self::AdminAction,
             5 => Self::DeviceRemoved,
             _ => return None,
@@ -451,8 +451,8 @@ pub struct Account {
     pub email: Option<String>,
     /// Phone, if verified or pending.
     pub phone: Option<String>,
-    /// Argon2id PHC string. Never a plaintext password, never a reversible form.
-    pub password_hash: Secret,
+    /// Argon2id PHC string. Never a plaintext passphrase, never a reversible form.
+    pub passphrase_hash: Secret,
     /// Lifecycle state.
     pub status: AccountStatus,
     /// ISO-3166 alpha-2, if known.
@@ -483,7 +483,7 @@ pub struct NewAccount {
     /// Phone, optional.
     pub phone: Option<String>,
     /// Argon2id PHC string.
-    pub password_hash: Secret,
+    pub passphrase_hash: Secret,
     /// BCP-47 language tag.
     pub locale: String,
     /// ISO-3166 alpha-2.
@@ -619,7 +619,7 @@ pub struct Session {
     pub generation: i32,
     /// Creation time.
     pub created_at: Timestamp,
-    /// When the human last proved presence by typing a password or passkey.
+    /// When the human last proved presence by typing a passphrase or passkey.
     ///
     /// Carried forward across rotations rather than reset, because a refresh is not
     /// evidence a person is there — only evidence that whoever holds the token still
@@ -1554,7 +1554,7 @@ pub(crate) fn advanced_token(expected: Timestamp, at: Timestamp) -> Timestamp {
 /// A bot as stored: one row of `bot`, joined to nothing.
 ///
 /// A bot is an ordinary account that a human owns and that authenticates by a
-/// bearer token instead of a password (brief section 36). The backing account —
+/// bearer token instead of a passphrase (brief section 36). The backing account —
 /// [`Bot::account_id`], unique across all bots — is what carries the username,
 /// avatar, and profile, and what lets a bot be a conversation member, send
 /// messages, and be a moderation subject; this row is only the bot-specific part
@@ -1591,7 +1591,7 @@ pub struct Bot {
 ///
 /// The backing account, that account's profile, and the bot row are created
 /// together in [`crate::traits::BotStore::register_bot`], because none of the three
-/// is usable alone: a bot account with no bot row is an account whose password is a
+/// is usable alone: a bot account with no bot row is an account whose passphrase is a
 /// hash of bytes nobody kept — it can never be signed into and nothing else knows
 /// how to read it. There is no valid intermediate state, so there is one write, the
 /// same reasoning that makes `create_room` build a room, its conversation, and its
@@ -1610,10 +1610,10 @@ pub struct NewBot {
     pub username: String,
     /// The bot's name, stored on both the bot row and the profile's display name.
     pub display_name: String,
-    /// The backing account's password hash: a valid Argon2id hash of random bytes
-    /// that were discarded, so the account can never be signed into by password.
+    /// The backing account's passphrase hash: a valid Argon2id hash of random bytes
+    /// that were discarded, so the account can never be signed into by passphrase.
     /// Never a plaintext, never a known sentinel.
-    pub password_hash: Secret,
+    pub passphrase_hash: Secret,
     /// The keyed HMAC tag of the bot's freshly minted token. The token is returned
     /// to the owner once and never stored.
     pub token_hash: Vec<u8>,

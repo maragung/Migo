@@ -23,7 +23,7 @@
 //!
 //! The rate limiter and the metrics registry are the real ones, so their arithmetic and their
 //! label discipline are part of the test. Only the two edges that would touch a socket or a
-//! password are doubles: an in-memory [`Pipe`] that records what the server wrote, and a
+//! passphrase are doubles: an in-memory [`Pipe`] that records what the server wrote, and a
 //! [`FakeAuth`] that knows exactly one token. No test opens a real listener or binds an address.
 
 use std::collections::VecDeque;
@@ -34,7 +34,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use migo_auth::{
-    Authenticator, Capabilities, Claims, Grant, Identity, PasswordChange, Refresh, Registration,
+    Authenticator, Capabilities, Claims, Grant, Identity, PassphraseChange, Refresh, Registration,
     RequestContext, SessionSummary, SharedAuth, SignIn,
 };
 use migo_cache::MemoryCache;
@@ -239,13 +239,13 @@ impl Authenticator for FakeAuth {
         unimplemented!("the gateway never revokes devices")
     }
 
-    async fn change_password(
+    async fn change_passphrase(
         &self,
         _identity: &Identity,
-        _change: PasswordChange,
+        _change: PassphraseChange,
         _context: &RequestContext,
     ) -> migo_core::Result<Grant> {
-        unimplemented!("the gateway never changes passwords")
+        unimplemented!("the gateway never changes passphrases")
     }
 
     async fn set_contact(
@@ -284,7 +284,7 @@ impl Authenticator for FakeAuth {
         &self,
         _token_id: Id,
         _tag: &[u8],
-        _new_password: &migo_core::Secret,
+        _new_passphrase: &migo_core::Secret,
         _context: &RequestContext,
     ) -> migo_core::Result<()> {
         unimplemented!("the gateway never confirms a recovery flow")

@@ -193,7 +193,7 @@
     {
      "name": "public_id",
      "type": "string",
-     "doc": "MGO-XXXXXXXX, immutable, shareable"
+     "doc": "MGO-XXXXXXXXXXXX, immutable, shareable"
     },
     {
      "name": "username",

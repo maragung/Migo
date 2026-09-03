@@ -28,7 +28,7 @@ const GENDERS = [
 /**
  * Create a new account. Identity keys are generated on this device and never leave it.
  *
- * The one passphrase this form collects is the account's whole secret surface: it is the password
+ * The one passphrase this form collects is the account's whole secret surface: it is the passphrase
  * the server verifies at the founding registration, and it is the credential that seals the `.migo`
  * key file offered right after — which is why the file download needs no second passphrase to be
  * typed and why the sign-in screen asks for the file and this passphrase and nothing else.
@@ -38,7 +38,7 @@ export default function RegisterPage(): ReactNode {
   const router = useRouter();
 
   const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
+  const [passphrase, setPassphrase] = useState('');
   const [email, setEmail] = useState('');
   const [gender, setGender] = useState('');
   const [endpoint, setEndpoint] = useState<ServerEndpoint | null>(null);
@@ -91,7 +91,7 @@ export default function RegisterPage(): ReactNode {
       await register(
         {
           username,
-          password,
+          passphrase,
           email: email || undefined,
           gender: gender === '' ? undefined : Number(gender),
         },
@@ -165,10 +165,10 @@ export default function RegisterPage(): ReactNode {
         <label className="field-label">
           Passphrase
           <input
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            autoComplete="new-password"
+            type="passphrase"
+            value={passphrase}
+            onChange={(event) => setPassphrase(event.target.value)}
+            autoComplete="new-passphrase"
             minLength={10}
             required
           />
@@ -242,7 +242,7 @@ export default function RegisterPage(): ReactNode {
             username={username.trim()}
             accountId={accountId ?? ''}
             root={client?.keyStore.root()?.asBytes() ?? null}
-            passphrase={password}
+            passphrase={passphrase}
             onDone={() => setSaveOfferOpen(false)}
           />
         </BottomSheet>

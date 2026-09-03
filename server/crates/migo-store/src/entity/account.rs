@@ -27,9 +27,9 @@ pub struct Model {
     /// The `phone` column.
     #[sea_orm(column_type = "Text")]
     pub phone: Option<String>,
-    /// The `password_hash` column.
+    /// The `passphrase_hash` column.
     #[sea_orm(column_type = "Text")]
-    pub password_hash: String,
+    pub passphrase_hash: String,
     /// 0 active, 1 suspended, 2 deactivated, 3 deleted
     pub status: i16,
     /// The `country` column.

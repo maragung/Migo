@@ -92,6 +92,16 @@ pub struct SettingsState {
     pub backup_path: String,
     pub backup_credential: String,
     pub backup_confirm: String,
+    /// The recovery-contact form: one string, an email or a phone. Not a secret — the server
+    /// shows it back through recovery, and the field is a replace rather than an append.
+    pub contact: String,
+    /// The passphrase-change form. All three fields are secrets and are wiped the moment they
+    /// leave for the worker; `passphrase_confirm` exists for the same reason the backup form's
+    /// second credential field does — a passphrase mistyped on a one-shot form is an account
+    /// nobody can sign in to.
+    pub passphrase_current: String,
+    pub passphrase_next: String,
+    pub passphrase_confirm: String,
 }
 
 /// Draws the settings pane.
@@ -119,6 +129,8 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
                     sessions_section(ui, context, state);
                     ui.add_space(space::LG);
                     account_section(ui, context, state);
+                    ui.add_space(space::LG);
+                    sign_in_section(ui, context, state);
                     ui.add_space(space::LG);
                     backup_section(ui, context, state);
                     ui.add_space(space::XL);
@@ -500,7 +512,7 @@ fn account_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsS
 /// One account device row.
 ///
 /// The credential mark is the security question a device list exists to answer: a device *with* a
-/// credential can take part in the passwordless ceremony, and one appearing that the user does not
+/// credential can take part in the passphraseless ceremony, and one appearing that the user does not
 /// recognise is the moment to remove it — or rotate. The current device and already-revoked ones
 /// carry no button: removing the device the button is pressed on would sign its own user out
 /// mid-click, and a revoked device is gone.
@@ -636,6 +648,110 @@ fn wallet_row(
         });
 }
 
+/// The sign-in material: the recoverable contact, and the passphrase itself.
+///
+/// The contact form is a replace, not an append — the server keeps exactly one value, normalised
+/// on arrival — and the form says so, because a person who expected a list would expect a second
+/// save to keep both. The passphrase form states its cost before the button unlocks: the server
+/// ends every session of the account and answers with a replacement grant for this window, so
+/// every other device signs in again with the new passphrase.
+fn sign_in_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
+    let colors = palette(context.theme);
+    widgets::subheader(ui, context.theme, "Sign-in");
+
+    // --- recovery contact -------------------------------------------------------
+    ui.label(
+        RichText::new(
+            "A recovery contact — an email or a phone — is where a recovery starts. The account \
+             keeps one; saving replaces it.",
+        )
+        .font(egui::FontId::proportional(font::SMALL))
+        .color(colors.text_muted),
+    );
+    widgets::field(
+        ui,
+        context.theme,
+        "Email or phone",
+        &mut state.contact,
+        false,
+        "name@example.com or +62…",
+    );
+    ui.add_space(space::SM);
+    let contact_ready = !state.contact.trim().is_empty();
+    if widgets::primary_button(ui, context.theme, "Save contact", contact_ready)
+        .on_hover_text(
+            "The server judges the shape: an email containing @, or a phone starting with +.",
+        )
+        .clicked()
+    {
+        context.issue(Command::SetContact {
+            email_or_phone: state.contact.trim().to_owned(),
+        });
+    }
+
+    ui.add_space(space::LG);
+
+    // --- passphrase -------------------------------------------------------------
+    ui.label(
+        RichText::new(
+            "Changing the passphrase signs out every other session, on every device; this window \
+             stays signed in. The next time the app starts it may ask you to sign in again.",
+        )
+        .font(egui::FontId::proportional(font::SMALL))
+        .color(colors.text_muted),
+    );
+    ui.add_space(space::SM);
+    widgets::field(
+        ui,
+        context.theme,
+        "Current passphrase",
+        &mut state.passphrase_current,
+        true,
+        "",
+    );
+    widgets::field(
+        ui,
+        context.theme,
+        "New passphrase",
+        &mut state.passphrase_next,
+        true,
+        "long enough to stay unguessable",
+    );
+    widgets::field(
+        ui,
+        context.theme,
+        "Confirm new passphrase",
+        &mut state.passphrase_confirm,
+        true,
+        "",
+    );
+
+    let mismatch =
+        !state.passphrase_confirm.is_empty() && state.passphrase_next != state.passphrase_confirm;
+    if mismatch {
+        ui.label(
+            RichText::new("The two new passphrases do not match.")
+                .font(egui::FontId::proportional(font::SMALL))
+                .color(colors.danger),
+        );
+    }
+    let passphrase_ready = !state.passphrase_current.is_empty()
+        && !state.passphrase_next.is_empty()
+        && state.passphrase_next == state.passphrase_confirm;
+    ui.add_space(space::SM);
+    if widgets::primary_button(ui, context.theme, "Change passphrase", passphrase_ready).clicked() {
+        context.issue(Command::ChangePassphrase {
+            current: state.passphrase_current.clone(),
+            next: state.passphrase_next.clone(),
+        });
+        // Wipe all three the moment they leave for the worker; a form that kept them would be a
+        // third copy of the account's secret, on a pane that also shows the device list.
+        state.passphrase_current.clear();
+        state.passphrase_next.clear();
+        state.passphrase_confirm.clear();
+    }
+}
+
 /// The `.migo` backup form.
 ///
 /// Offered only on a device that holds the root, because a backup is a copy of the root and a
@@ -650,7 +766,7 @@ fn backup_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsSt
     if !holds_root {
         ui.label(
             RichText::new(
-                "This device signs in with your password and does not hold the account root, so \
+                "This device signs in with your passphrase and does not hold the account root, so \
                  it cannot make a backup. Seal one from a device that restored or created the \
                  account.",
             )

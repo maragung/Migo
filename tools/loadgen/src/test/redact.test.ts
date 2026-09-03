@@ -54,7 +54,7 @@ test('redact strips userinfo from a URL embedded in a sentence', () => {
 
 test('redact masks the value under a secret-looking key', () => {
   for (const [input, secret] of [
-    ['password=hunter2', 'hunter2'],
+    ['passphrase=hunter2', 'hunter2'],
     ['token: deadbeefcafebabe0123', 'deadbeefcafebabe0123'],
     ['api_key=AKIA0123456789ABCDEF', 'AKIA0123456789ABCDEF'],
     ['private-key: MIIEvQIBADAN', 'MIIEvQIBADAN'],

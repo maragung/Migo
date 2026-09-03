@@ -42,7 +42,7 @@ const ENDPOINT: ServerEndpoint = {
 };
 
 const USERNAME = 'alice';
-const PASSWORD = 'correct-horse-battery-staple';
+const PASSPHRASE = 'correct-horse-battery-staple';
 // The answer a user would have read off the rendered challenge image: five to six
 // letters and digits, nothing else.
 const CAPTCHA: CaptchaProof = {
@@ -144,14 +144,14 @@ test('the server form renders the picker body: transport, host, port, scheme, an
   );
 });
 
-test('MigoClient.register sends the username, password, email, and device block', async () => {
+test('MigoClient.register sends the username, passphrase, email, and device block', async () => {
   const calls: CapturedCall[] = [];
   const client = makeClient(calls);
 
   try {
     const grant: Grant = await client.register({
       username: USERNAME,
-      password: PASSWORD,
+      passphrase: PASSPHRASE,
       email: 'alice@example.com',
     });
     assert.equal(grant.isNewAccount, true);
@@ -167,7 +167,7 @@ test('MigoClient.register sends the username, password, email, and device block'
   assert.equal(headers['content-type'], 'application/json');
   const body = registerBodyOf(calls);
   assert.deepEqual(body.username, USERNAME, 'username is forwarded as-is');
-  assert.deepEqual(body.password, PASSWORD, 'password is forwarded as-is');
+  assert.deepEqual(body.passphrase, PASSPHRASE, 'passphrase is forwarded as-is');
   assert.deepEqual(body.email, 'alice@example.com', 'email is forwarded as-is');
   const device = body.device as Record<string, unknown>;
   assert.ok(device !== undefined, 'the device block is present');
@@ -240,7 +240,7 @@ test('MigoClient.register sends a captcha proof in the body when one is supplied
   try {
     const grant: Grant = await client.register({
       username: USERNAME,
-      password: PASSWORD,
+      passphrase: PASSPHRASE,
       captcha: CAPTCHA,
     });
     assert.equal(grant.isNewAccount, true);
@@ -263,7 +263,7 @@ test('MigoClient.register carries the disclosed gender in the server numbering',
   try {
     await client.register({
       username: USERNAME,
-      password: PASSWORD,
+      passphrase: PASSPHRASE,
       gender: 2,
     });
   } catch {
@@ -290,7 +290,7 @@ test('MigoClient.register carries the identity key as base64 when a founding roo
   try {
     await client.register({
       username: USERNAME,
-      password: PASSWORD,
+      passphrase: PASSPHRASE,
       identityPublicKey: identityKey,
     });
   } catch {
@@ -308,12 +308,12 @@ test('MigoClient.register carries the identity key as base64 when a founding roo
     'the base64 round-trips to the exact key bytes the caller supplied',
   );
 
-  // And the same call without the key must not carry the field at all, so a password-only
+  // And the same call without the key must not carry the field at all, so a passphrase-only
   // client's wire shape is unchanged.
   const bareCalls: CapturedCall[] = [];
   const bare = makeClient(bareCalls);
   try {
-    await bare.register({ username: USERNAME, password: PASSWORD });
+    await bare.register({ username: USERNAME, passphrase: PASSPHRASE });
   } catch {
     // The handshake is not under test here either.
   }

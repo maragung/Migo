@@ -17,7 +17,7 @@
 //!
 //! Two properties are load-bearing and easy to break by accident.
 //!
-//! An unknown account and a wrong password produce the same error *and take the same
+//! An unknown account and a wrong passphrase produce the same error *and take the same
 //! time*. The error is easy; the timing is not. A missing account has no hash to verify,
 //! so the natural implementation returns in microseconds while a real account spends
 //! forty milliseconds in Argon2id — a difference so large it is measurable over the
@@ -25,13 +25,13 @@
 //! missing account is verified against a placeholder hash created at startup, and the
 //! result is thrown away.
 //!
-//! A suspended account is reported as suspended only *after* the password has been
+//! A suspended account is reported as suspended only *after* the passphrase has been
 //! checked. Reporting it earlier would answer "does this account exist" to anyone who
 //! asked.
 //!
 //! # Why failure is priced higher than success
 //!
-//! A wrong password costs the whole anonymous endpoint bucket; a right one costs a fifth
+//! A wrong passphrase costs the whole anonymous endpoint bucket; a right one costs a fifth
 //! of it. Both numbers are derived from the resolved bucket at construction rather than
 //! written down, because the limiter writes nothing on a refusal — a penalty larger than
 //! the bucket is silently dropped, and a hardcoded penalty would become a no-op the day
@@ -39,7 +39,7 @@
 //! affordable and therefore always actually charged.
 //!
 //! There is deliberately no per-*account* failure limit. A limit that locks an account
-//! after N wrong passwords is a way for a stranger who knows a username to lock its owner
+//! after N wrong passphrases is a way for a stranger who knows a username to lock its owner
 //! out, which converts a nuisance into an outage. The pressure goes on the network the
 //! guesses come from.
 
@@ -88,7 +88,7 @@ use crate::model::{
 };
 use crate::tier;
 use crate::token::{Claims, Signer};
-use crate::traits::{Authenticator, Identity, PasswordChange};
+use crate::traits::{Authenticator, Identity, PassphraseChange};
 
 /// The opaque, dyn-erased handle every route layer and the chat
 /// shell hold onto. Its concrete type is `Auth<...>`; the
@@ -106,7 +106,7 @@ pub type ConcreteAuth = Arc<Auth<dyn Store, dyn RateLimiter>>;
 const FIRST_GENERATION: i32 = 1;
 
 /// How long a recovery token stays valid. One hour, picked because the
-/// threat model is a user who forgot the password and is reading the
+/// threat model is a user who forgot the passphrase and is reading the
 /// recovery email on the same device; longer than an hour is a window
 /// in which somebody with persistent access to the inbox can still
 /// use a token the user never opened.
@@ -147,7 +147,7 @@ impl Prices {
             attempt,
             penalty: full.saturating_sub(attempt),
             // Creating an account is the expensive one: it writes rows, hashes a
-            // password, and is the thing a spam operation needs thousands of.
+            // passphrase, and is the thing a spam operation needs thousands of.
             // An override exists for local development only.
             register,
         }
@@ -178,7 +178,7 @@ pub struct Auth<S: ?Sized = dyn Store, L: ?Sized = dyn RateLimiter> {
     /// The sign-in lockout, when the deployment has it turned on (the default).
     /// Keyed by account id and holding the whole ladder — see [`LockoutGate`].
     lockout: Option<Arc<LockoutGate>>,
-    /// The recovery MAC key, when the deployment has password-recovery
+    /// The recovery MAC key, when the deployment has passphrase-recovery
     /// turned on. `None` means the recovery endpoints are not mounted
     /// and `request_recovery` / `confirm_recovery` are short-circuited
     /// at the route layer. Holding only the key — and not the store —
@@ -232,7 +232,7 @@ where
     ///
     /// `random` is injected rather than fixed to [`OsRandom`] so a simulation can replay
     /// a run byte for byte (ADR-0009). It is used for session ids, family ids, device
-    /// ids, refresh tokens, and password salts.
+    /// ids, refresh tokens, and passphrase salts.
     pub fn new(
         store: Arc<S>,
         limiter: Arc<L>,
@@ -247,10 +247,10 @@ where
         let signer = Signer::new(key, &config.node.region)?;
         let prices = Prices::from_policies(limiter.policies(), &config.auth);
         let mut random = random;
-        let absent_hash = migo_crypto::password::hash(ABSENT_ACCOUNT_PLACEHOLDER, &mut *random)
+        let absent_hash = migo_crypto::passphrase::hash(ABSENT_ACCOUNT_PLACEHOLDER, &mut *random)
             .map_err(|error| {
-                fault::internal(format!("could not build the placeholder hash: {error}"))
-            })?;
+            fault::internal(format!("could not build the placeholder hash: {error}"))
+        })?;
         let lockout = (config.auth.lockout.enabled).then(|| {
             Arc::new(LockoutGate::new(LockoutConfig {
                 enabled: true,
@@ -339,7 +339,7 @@ where
         Id::generate_at(now, &mut **random)
     }
 
-    /// Salt material for one password hash, drawn before the blocking work starts.
+    /// Salt material for one passphrase hash, drawn before the blocking work starts.
     fn draw_salt(&self) -> [u8; SALT_CARRY] {
         let mut bytes = [0u8; SALT_CARRY];
         let mut random = self.random.lock();
@@ -353,9 +353,9 @@ where
         self.signer.mint_refresh(&mut **random)
     }
 
-    // --- password work ---------------------------------------------------------
+    // --- passphrase work ---------------------------------------------------------
 
-    /// Hashes a password off the async worker threads.
+    /// Hashes a passphrase off the async worker threads.
     ///
     /// Argon2id at the configured cost spends tens of milliseconds and 19 MiB in a tight
     /// loop. Doing that on a runtime worker stalls every other task that worker was
@@ -365,47 +365,47 @@ where
     /// The salt is drawn from the injected [`Random`] *before* the hop and replayed
     /// inside, so a seeded run stays reproducible even though the hashing happens on
     /// another thread.
-    async fn hash_password(&self, password: &str, meters: &Meters) -> Result<Secret> {
+    async fn hash_passphrase(&self, passphrase: &str, meters: &Meters) -> Result<Secret> {
         let salt = self.draw_salt();
-        let owned = password.to_string();
+        let owned = passphrase.to_string();
         let started = std::time::Instant::now();
         let hashed = tokio::task::spawn_blocking(move || {
             let mut random = CarriedRandom::new(salt);
-            migo_crypto::password::hash(&owned, &mut random)
+            migo_crypto::passphrase::hash(&owned, &mut random)
         })
         .await
-        .map_err(|_| fault::internal("password hashing task failed"))?;
+        .map_err(|_| fault::internal("passphrase hashing task failed"))?;
         meters.hash_took(started.elapsed().as_secs_f64() * 1_000.0);
         hashed.map_err(|error| {
-            // A refusal from the crypto crate at this point means the password broke a
+            // A refusal from the crypto crate at this point means the passphrase broke a
             // length bound the `credential` module should already have caught, so it is
             // reported as our bug rather than as the user's.
-            fault::internal(format!("password could not be hashed: {error}"))
+            fault::internal(format!("passphrase could not be hashed: {error}"))
         })
     }
 
-    /// Verifies a password off the async worker threads. See [`Auth::hash_password`].
-    async fn verify_password(
+    /// Verifies a passphrase off the async worker threads. See [`Auth::hash_passphrase`].
+    async fn verify_passphrase(
         &self,
-        password: &str,
+        passphrase: &str,
         stored: &Secret,
         meters: &Meters,
     ) -> Result<Option<migo_crypto::Verification>> {
-        let owned = password.to_string();
+        let owned = passphrase.to_string();
         let stored = stored.clone();
         let started = std::time::Instant::now();
         let outcome =
-            tokio::task::spawn_blocking(move || migo_crypto::password::verify(&owned, &stored))
+            tokio::task::spawn_blocking(move || migo_crypto::passphrase::verify(&owned, &stored))
                 .await
-                .map_err(|_| fault::internal("password verification task failed"))?;
+                .map_err(|_| fault::internal("passphrase verification task failed"))?;
         meters.hash_took(started.elapsed().as_secs_f64() * 1_000.0);
         match outcome {
             Ok(verification) => Ok(verification),
-            // A stored hash that will not parse is a corrupt row, not a wrong password.
-            // Reporting it as a wrong password would leave the owner locked out of their
+            // A stored hash that will not parse is a corrupt row, not a wrong passphrase.
+            // Reporting it as a wrong passphrase would leave the owner locked out of their
             // account with nothing in the logs to explain it.
             Err(error) => Err(fault::internal(format!(
-                "stored password hash is unusable: {error}"
+                "stored passphrase hash is unusable: {error}"
             ))),
         }
     }
@@ -571,7 +571,7 @@ where
     /// A claimed id that belongs to somebody else fails with `DEVICE_MISMATCH`. A claimed
     /// id that was revoked is *not* resurrected — a new device is registered instead,
     /// because reviving a revoked device on the next sign-in would make "revoke this
-    /// device" mean "revoke it until the password is typed again", which is not what the
+    /// device" mean "revoke it until the passphrase is typed again", which is not what the
     /// user was told the button does.
     async fn resolve_device(
         &self,
@@ -658,7 +658,7 @@ where
     /// Appends a security event.
     ///
     /// Only the events an operator or a user would need to reconstruct an incident:
-    /// registration, password change, device revocation, and family revocation. Not every
+    /// registration, passphrase change, device revocation, and family revocation. Not every
     /// sign-in — the session row and `last_login_at` already record those, and one audit
     /// row per sign-in would bury the four events that matter under millions that do not.
     ///
@@ -801,7 +801,7 @@ where
 
     /// Looks an account up by whatever the sign-in form accepts: email,
     /// phone, or username, folded. The one lookup every identifier-facing
-    /// path (password sign-in, recovery, challenge issue) shares, so the
+    /// path (passphrase sign-in, recovery, challenge issue) shares, so the
     /// three cannot drift into accepting different shapes.
     async fn find_account(&self, identifier: &str) -> Result<Option<Account>> {
         let identifier = identifier.trim();
@@ -928,7 +928,7 @@ where
     }
 
     /// Verifies one ML-DSA signature, collapsing every failure into the
-    /// same refusal a wrong password produces. A wrong length, an
+    /// same refusal a wrong passphrase produces. A wrong length, an
     /// undecodable key, and a forged signature are one answer, so the
     /// endpoint is not an oracle for which half failed.
     fn check_signature(
@@ -944,7 +944,7 @@ where
 impl<S: ?Sized, L: ?Sized> fmt::Debug for Auth<S, L> {
     /// Prints the policy in force and nothing else.
     ///
-    /// Not derived, and not derivable: this struct holds a signing key, a password hash,
+    /// Not derived, and not derivable: this struct holds a signing key, a passphrase hash,
     /// and a generator. A derived `Debug` on a type that holds a key is a key in a log
     /// line, waiting for somebody to add `?state` to a tracing span.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1120,9 +1120,9 @@ where
             .map(credential::phone)
             .transpose()
             .inspect_err(|_| self.meters.registration_refused())?;
-        credential::password(
-            &request.password,
-            self.config.password_min_length,
+        credential::passphrase(
+            &request.passphrase,
+            self.config.passphrase_min_length,
             Some(username.folded()),
         )
         .inspect_err(|_| self.meters.registration_refused())?;
@@ -1139,8 +1139,8 @@ where
         }
 
         let now = context.now;
-        let password_hash = self
-            .hash_password(request.password.expose(), &self.meters)
+        let passphrase_hash = self
+            .hash_passphrase(request.passphrase.expose(), &self.meters)
             .await?;
 
         let account_id = self.new_id(now);
@@ -1151,7 +1151,7 @@ where
                 username: username.display().to_string(),
                 email,
                 phone,
-                password_hash,
+                passphrase_hash,
                 locale: normalise_locale(&request.locale),
                 country: request.country.clone(),
                 created_at: now,
@@ -1176,7 +1176,7 @@ where
                 // A retry with a different (or no) identity key keeps the
                 // USERNAME_TAKEN answer: for a different key that is the honest
                 // "someone else owns that name" verdict, and without a key there is
-                // nothing to reconcile on but the password, which sign-in already
+                // nothing to reconcile on but the passphrase, which sign-in already
                 // exists to check.
                 return self
                     .reconcile_registration(&request, &username, context)
@@ -1205,7 +1205,7 @@ where
 
         // An account born with a root secret publishes its identity key up
         // front, so the challenge login works from the first breath (brief
-        // section 182). A password-only registration — every legacy client —
+        // section 182). A passphrase-only registration — every legacy client —
         // skips this and can publish later through the upgrade door.
         if let Some(public_key) = request.identity_public_key.as_ref() {
             let key_id = self.new_id(now);
@@ -1267,7 +1267,7 @@ where
     }
 
     async fn sign_in(&self, request: SignIn, context: &RequestContext) -> Result<Grant> {
-        // The progressive lockout leads: five wrong passwords for one identifier buy a
+        // The progressive lockout leads: five wrong passphrases for one identifier buy a
         // minute, every further three buy two more, capped. The key is the identifier the
         // attempt named (folded), so the lock follows the account's username across every
         // network — the product decision, with its trade accepted. The check runs before
@@ -1286,7 +1286,7 @@ where
 
         // Sign-in deliberately runs WITHOUT the captcha gate, whatever the config says: a
         // returning member is the person the product exists for, and standing between them and
-        // their account because a stranger from their network mistyped passwords is punishing
+        // their account because a stranger from their network mistyped passphrases is punishing
         // the wrong party. The flood-side pricing still applies — this call charges the
         // anonymous rate-limit bucket for the attempt — and `register` (plus recovery) keeps
         // its captcha gate. The gate's own failure counter is still recorded below on a failed
@@ -1307,7 +1307,7 @@ where
             // Verify against the placeholder so this path costs what the real one costs.
             // Without it the response time answers "does this account exist".
             let _ = self
-                .verify_password(request.password.expose(), &self.absent_hash, &self.meters)
+                .verify_passphrase(request.passphrase.expose(), &self.absent_hash, &self.meters)
                 .await;
             self.charge_penalty(context, Opcode::Authenticate).await;
             self.note_captcha_failure(context);
@@ -1326,9 +1326,9 @@ where
         };
 
         let verification = self
-            .verify_password(
-                request.password.expose(),
-                &account.password_hash,
+            .verify_passphrase(
+                request.passphrase.expose(),
+                &account.passphrase_hash,
                 &self.meters,
             )
             .await?;
@@ -1342,11 +1342,11 @@ where
                     tracing::warn!(seconds, "sign-in lockout engaged for an identifier");
                 }
             }
-            self.meters.signin(SignInOutcome::BadPassword);
+            self.meters.signin(SignInOutcome::BadPassphrase);
             return Err(fault::invalid_credentials());
         };
 
-        // Only now, with the password proven, is it safe to say anything specific about
+        // Only now, with the passphrase proven, is it safe to say anything specific about
         // the account.
         if !account.status.can_sign_in() {
             self.meters.signin(SignInOutcome::Suspended);
@@ -1358,23 +1358,23 @@ where
             // The plaintext is in hand exactly once per sign-in, so this is the only
             // moment a stored hash can be upgraded without asking the user for anything.
             match self
-                .hash_password(request.password.expose(), &self.meters)
+                .hash_passphrase(request.passphrase.expose(), &self.meters)
                 .await
             {
                 Ok(hash) => {
                     if let Err(error) = self
                         .store
-                        .set_password_hash(account.account_id, hash.expose(), now)
+                        .set_passphrase_hash(account.account_id, hash.expose(), now)
                         .await
                     {
-                        // A failed upgrade must not fail the sign-in: the password was
+                        // A failed upgrade must not fail the sign-in: the passphrase was
                         // correct, and the old hash still works.
-                        tracing::warn!(%error, "could not store a rehashed password");
+                        tracing::warn!(%error, "could not store a rehashed passphrase");
                     } else {
                         self.meters.rehashed();
                     }
                 }
-                Err(error) => tracing::warn!(%error, "could not rehash a password"),
+                Err(error) => tracing::warn!(%error, "could not rehash a passphrase"),
             }
         }
 
@@ -1740,10 +1740,10 @@ where
         })
     }
 
-    async fn change_password(
+    async fn change_passphrase(
         &self,
         identity: &Identity,
-        change: PasswordChange,
+        change: PassphraseChange,
         context: &RequestContext,
     ) -> Result<Grant> {
         self.charge_account(identity, context, Opcode::Authenticate)
@@ -1752,33 +1752,38 @@ where
         let account = self.live_account(identity.account_id()).await?;
 
         let verified = self
-            .verify_password(
+            .verify_passphrase(
                 change.current.expose(),
-                &account.password_hash,
+                &account.passphrase_hash,
                 &self.meters,
             )
             .await?;
         if verified.is_none() {
             return Err(fault::invalid_credentials());
         }
-        credential::password(
+        credential::passphrase(
             &change.next,
-            self.config.password_min_length,
+            self.config.passphrase_min_length,
             Some(&account.username),
         )?;
 
         let hash = self
-            .hash_password(change.next.expose(), &self.meters)
+            .hash_passphrase(change.next.expose(), &self.meters)
             .await?;
         self.store
-            .set_password_hash(account.account_id, hash.expose(), now)
+            .set_passphrase_hash(account.account_id, hash.expose(), now)
             .await?;
 
         // Every session, including this one. The replacement grant is what keeps the
         // caller signed in; anything else on any other device has to sign in again.
         let revoked = self
             .store
-            .revoke_account_sessions(account.account_id, None, RevokeReason::PasswordChanged, now)
+            .revoke_account_sessions(
+                account.account_id,
+                None,
+                RevokeReason::PassphraseChanged,
+                now,
+            )
             .await?;
         self.meters.sessions_revoked(revoked);
 
@@ -1789,7 +1794,7 @@ where
             .filter(|device| device.revoked_at.is_none())
             .ok_or_else(|| fault::error(codes::TOKEN_REVOKED, "the device was revoked"))?;
         let tier = tier::of_account(&account, now);
-        // `now` for `authenticated_at`: the current password was just typed, which is the
+        // `now` for `authenticated_at`: the current passphrase was just typed, which is the
         // strongest presence signal there is.
         let grant = self
             .open_session(&account, &device, tier, now, context, None, None, false)
@@ -1799,10 +1804,10 @@ where
         self.audit(
             Some(account.account_id),
             AuditActorKind::User,
-            "account.password.change",
+            "account.passphrase.change",
             AuditTargetKind::Account,
             Some(account.account_id),
-            format!("password changed; {revoked} sessions ended"),
+            format!("passphrase changed; {revoked} sessions ended"),
             context,
         )
         .await;
@@ -1915,7 +1920,7 @@ where
         &self,
         token_id: Id,
         tag: &[u8],
-        new_password: &Secret,
+        new_passphrase: &Secret,
         context: &RequestContext,
     ) -> Result<()> {
         let Some(recovery_key) = self.recovery.as_ref() else {
@@ -1956,21 +1961,21 @@ where
                     "the account behind this recovery token is gone",
                 )
             })?;
-        // Mirror the password rules that `change_password` enforces. A
+        // Mirror the passphrase rules that `change_passphrase` enforces. A
         // weak replacement is the failure mode a recovery flow is most
-        // likely to attract — the user forgot the old password, the
+        // likely to attract — the user forgot the old passphrase, the
         // temptation is to set something memorable, and memorable
         // collides with the common list more often than not.
-        credential::password(
-            new_password,
-            self.config.password_min_length,
+        credential::passphrase(
+            new_passphrase,
+            self.config.passphrase_min_length,
             Some(&account.username),
         )?;
         let hash = self
-            .hash_password(new_password.expose(), &self.meters)
+            .hash_passphrase(new_passphrase.expose(), &self.meters)
             .await?;
         self.store
-            .set_password_hash(account.account_id, hash.expose(), now)
+            .set_passphrase_hash(account.account_id, hash.expose(), now)
             .await?;
         // Revoke every session, including the one the user is on: a
         // recovery is exactly the moment a stolen token is most useful,
@@ -1978,16 +1983,21 @@ where
         // before is now signed in by whoever clicked the link.
         let revoked = self
             .store
-            .revoke_account_sessions(account.account_id, None, RevokeReason::PasswordChanged, now)
+            .revoke_account_sessions(
+                account.account_id,
+                None,
+                RevokeReason::PassphraseChanged,
+                now,
+            )
             .await?;
         self.meters.sessions_revoked(revoked);
         self.audit(
             Some(account.account_id),
             AuditActorKind::User,
-            "account.password.recover",
+            "account.passphrase.recover",
             AuditTargetKind::Account,
             Some(account.account_id),
-            format!("password recovered; {revoked} sessions ended"),
+            format!("passphrase recovered; {revoked} sessions ended"),
             context,
         )
         .await;
@@ -2191,7 +2201,7 @@ where
             return Err(challenge_invalid());
         }
         // Only now, with both signatures proven, is it safe to say anything
-        // specific about the account — the same rule password sign-in obeys.
+        // specific about the account — the same rule passphrase sign-in obeys.
         if !account.status.can_sign_in() {
             return Err(suspended(account.status));
         }
@@ -2482,7 +2492,9 @@ where
                     "account.identity.created",
                     AuditTargetKind::IdentityKey,
                     Some(key_id),
-                    format!("identity key v{KEY_VERSION_ONE} registered on a password-era account"),
+                    format!(
+                        "identity key v{KEY_VERSION_ONE} registered on a passphrase-era account"
+                    ),
                     context,
                 )
                 .await;
@@ -2842,7 +2854,7 @@ where
     /// public bytes, never a disclosure: a mismatched key learns nothing
     /// beyond the USERNAME_TAKEN verdict it would have received anyway, and
     /// the identity-key read it costs is priced by the register charge that
-    /// already ran. The account's password is verified too, so a leaked
+    /// already ran. The account's passphrase is verified too, so a leaked
     /// username plus a stolen identity key alone cannot be replayed into a
     /// session.
     async fn reconcile_registration(
@@ -2859,26 +2871,26 @@ where
         };
 
         let Some(public_key) = request.identity_public_key.as_ref() else {
-            // A password-only registration carries nothing to reconcile on; the
+            // A passphrase-only registration carries nothing to reconcile on; the
             // sign-in endpoint is the reconciliation path for that client.
             return Err(taken);
         };
         let Some(active) = self.store.active_identity_key(existing.account_id).await? else {
             // The name's owner registered without an identity key (a legacy
-            // password-only account): no key match is possible.
+            // passphrase-only account): no key match is possible.
             return Err(taken);
         };
         if public_key.as_slice() != active.public_key.as_slice() {
             return Err(taken);
         }
         // Only now, with the account proven to be this client's own, does the
-        // password get checked — and a wrong password is the generic
+        // passphrase get checked — and a wrong passphrase is the generic
         // invalid-credentials fault, so the reconcile path cannot be used as a
-        // password oracle for somebody else's name.
+        // passphrase oracle for somebody else's name.
         if self
-            .verify_password(
-                request.password.expose(),
-                &existing.password_hash,
+            .verify_passphrase(
+                request.passphrase.expose(),
+                &existing.passphrase_hash,
                 &self.meters,
             )
             .await?

@@ -2,6 +2,7 @@ package com.migo.app.model
 
 import com.migo.core.ConnectionState
 import com.migo.core.net.DeviceSummary
+import com.migo.core.net.WalletSummary
 import com.migo.core.protocol.BadgeWire
 import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.GiftListing
@@ -95,6 +96,7 @@ sealed interface AppState {
         val wallet: WalletState = WalletState(),
         val alerts: AlertsState = AlertsState(),
         val devices: DevicesState = DevicesState(),
+        val backup: BackupState = BackupState(),
     ) : AppState
 
     /**
@@ -185,6 +187,16 @@ data class WalletState(
     val loading: Boolean = false,
     /** The AVAX side (§184): one network at a time, balance by explicit refresh. */
     val chain: ChainState = ChainState(),
+    /**
+     * The account's registered wallet addresses, as the server knows them. Null before the first
+     * read lands — the same honest "not checked yet" the device list keeps, rather than an empty
+     * list that would read as "this account has no addresses".
+     */
+    val registrations: List<WalletSummary>? = null,
+    /** Wallet ids with an archive in flight, so only the pressed row shows its busy state. */
+    val archiving: Set<String> = emptySet(),
+    /** Why the last registrations read or archive could not answer. */
+    val registrationFailure: String? = null,
 )
 
 /**
@@ -308,6 +320,20 @@ data class DevicesState(
     val failure: String? = null,
     /** The sentence the last removal answered with, shown once. */
     val notice: String? = null,
+)
+
+/**
+ * The Profile panel's backup counter-state. Sealing a container is Argon2 work and a file write,
+ * so the button that started it owes the person who pressed it a sentence when it lands — success
+ * or failure — in the panel where they pressed it, not in the shell's banner.
+ */
+data class BackupState(
+    /** True while a container is being sealed and written. */
+    val sealing: Boolean = false,
+    /** The sentence the last export answered with, shown once. */
+    val notice: String? = null,
+    /** Why the last export could not answer. */
+    val failure: String? = null,
 )
 
 /** One row of the conversation list. */

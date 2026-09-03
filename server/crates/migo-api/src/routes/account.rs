@@ -1,10 +1,10 @@
-//! The account surface beyond the password: the ML-DSA identity ceremonies,
+//! The account surface beyond the passphrase: the ML-DSA identity ceremonies,
 //! the device list, and the wallet registry.
 //!
 //! The identity routes are a second front door to a session (brief section
 //! 182): a client that holds a root secret asks for a challenge, signs the
 //! canonical bytes it is given, and answers with the signatures. The
-//! handlers here stay as thin as the password ones — map the JSON body to
+//! handlers here stay as thin as the passphrase ones — map the JSON body to
 //! the authenticator's own types, let the service charge, verify, and audit,
 //! and map the result back.
 //!
@@ -278,7 +278,7 @@ async fn rotate(
 }
 
 /// `POST /v1/auth/identity/key` — publish the caller's identity (and
-/// optionally device) public keys on a password-era account. The legacy
+/// optionally device) public keys on a passphrase-era account. The legacy
 /// upgrade door, idempotent by design.
 #[derive(Deserialize)]
 struct PublishKeyBody {

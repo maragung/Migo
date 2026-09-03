@@ -1,5 +1,8 @@
 package com.migo.app.ui
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -8,21 +11,29 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.migo.app.model.AppState
+import com.migo.app.model.BackupState
 import com.migo.app.model.DevicesState
 import com.migo.core.net.DeviceSummary
 
@@ -30,11 +41,14 @@ import com.migo.core.net.DeviceSummary
  * The Profile section: the account, in the owner's own words.
  *
  * The facts are the ones the session already holds — the username, the account id, the server, the
- * connection — plus the account's devices and the sign-out. Profile facts are not editable yet
- * (profile editing rides the profile opcodes, which this build reads but does not write), so the
- * screen states what is true rather than offering controls that cannot work. The device list is
- * the exception: it is the account-root security view (§16-§18), and removing a device is a
- * control that works — which is exactly why it asks for confirmation first.
+ * connection — plus the account's devices, the `.migo` backup, and the sign-out. Profile facts are
+ * not editable yet (profile editing rides the profile opcodes, which this build reads but does not
+ * write), so the screen states what is true rather than offering controls that cannot work. The
+ * device list is the exception: it is the account-root security view (§16-§18), and removing a
+ * device is a control that works — which is exactly why it asks for confirmation first. The backup
+ * is the other exception: sealing the account into a container the person can carry to another
+ * device is a control that works, and its recovery credential lives in the form that uses it, never
+ * on the state object.
  */
 @Composable
 fun ProfileScreen(
@@ -42,6 +56,7 @@ fun ProfileScreen(
     onSignOut: () -> Unit,
     onRefreshDevices: () -> Unit,
     onRemoveDevice: (String) -> Unit,
+    onExport: (container: Uri, credential: String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var showId by rememberSaveable { mutableStateOf(false) }
@@ -83,6 +98,15 @@ fun ProfileScreen(
             devicesState = state.devices,
             onRefresh = onRefreshDevices,
             onRemove = { confirmRemove = it },
+        )
+
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+        SectionLabel(text = "Backup")
+        BackupSection(
+            backup = state.backup,
+            accountName = state.username,
+            onExport = onExport,
         )
 
         SectionLabel(text = "About")
@@ -200,6 +224,82 @@ private fun DevicesSection(
             )
         }
         Text("Refresh devices")
+    }
+}
+
+/**
+ * Seals the account into a `.migo` container: one credential field, one file the picker names.
+ *
+ * The credential is for the backup, not the account — a container sealed under the passphrase is a
+ * backup one passphrase breach opens — and it lives in this form's `remember`, never on the state
+ * object, for exactly as long as the form is on screen. The honest limit is stated where the
+ * person presses: a device that does not hold the root cannot seal one, and the view model's
+ * answer says so rather than offering a control that cannot work.
+ */
+@Composable
+private fun BackupSection(
+    backup: BackupState,
+    accountName: String,
+    onExport: (container: Uri, credential: String) -> Unit,
+) {
+    // A `remember` rather than `rememberSaveable`: the recovery credential follows the passphrase
+    // rule and stays out of the saved-state bundle.
+    var credential by remember { mutableStateOf("") }
+    val pickDestination = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { chosen ->
+        if (chosen != null) onExport(chosen, credential)
+    }
+
+    Text(
+        text = "A backup is a .migo file carrying the account root, sealed under a recovery " +
+            "credential of its own. Restoring it on another device joins the account from there.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+    )
+
+    OutlinedTextField(
+        value = credential,
+        onValueChange = { credential = it },
+        label = { Text("Recovery credential") },
+        singleLine = true,
+        enabled = !backup.sealing,
+        visualTransformation = PasswordVisualTransformation(),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+    )
+    Button(
+        onClick = { pickDestination.launch("$accountName.migo") },
+        enabled = !backup.sealing && credential.isNotEmpty(),
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+    ) {
+        if (backup.sealing) {
+            CircularProgressIndicator(
+                modifier = Modifier.width(16.dp),
+                strokeWidth = 2.dp,
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+        }
+        Text(if (backup.sealing) "Sealing…" else "Seal a backup")
+    }
+
+    if (backup.failure != null) {
+        Text(
+            text = backup.failure,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            textAlign = TextAlign.Start,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+        )
+    }
+    if (backup.notice != null) {
+        Text(
+            text = backup.notice,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.secondary,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+        )
     }
 }
 

@@ -1,5 +1,8 @@
 package com.migo.app.ui
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,6 +23,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -48,7 +52,7 @@ import com.migo.core.store.Transport
 /**
  * The sign-in and registration form, which are one screen because they differ by one button.
  *
- * Two forms would mean two copies of the server field, the account field and the password field, kept
+ * Two forms would mean two copies of the server field, the account field and the passphrase field, kept
  * consistent by hand, to express a difference the server treats as two endpoints and a person treats
  * as "I have an account" or "I do not".
  *
@@ -62,26 +66,42 @@ import com.migo.core.store.Transport
  * fields. The disclosure is the same shape the web and desktop clients ship — a self-hoster who
  * picks `migo.example.com:8443` here picks the same fields on every client.
  *
- * # The password never leaves this function
+ * # The passphrase never leaves this function
  *
  * It lives in a [remember] here -- not [rememberSaveable], so it is not written into the saved-state
- * bundle the system may persist to disk -- and is handed to [onSubmit] as an argument. There is no
- * field for it on [AppState], which is what keeps it out of every recomposition, every log line, and
- * every future `toString`.
+ * bundle the system may persist to disk -- and is handed to [onSubmit] as an argument. The same
+ * rule covers the backup's recovery credential on the restore path, handed to [onRestore]. There
+ * is no field for either on [AppState], which is what keeps them out of every recomposition, every
+ * log line, and every future `toString`.
+ *
+ * # The third door: restoring a `.migo` container
+ *
+ * A person holding an account backup joins the account from this screen too: the restore mode
+ * swaps the passphrase field for the container's recovery credential and adds the file picker
+ * above the submit. The username field becomes the greeting only -- optional, and defaulted to
+ * the account's public id by the session layer when left blank -- because the grant names the
+ * account, not anything typed here.
  */
 @Composable
 fun SignInScreen(
     form: AppState.SignedOut,
     onServerEndpoint: (ServerEndpoint) -> Unit,
     onIdentifier: (String) -> Unit,
-    onSubmit: (password: String, create: Boolean) -> Unit,
+    onSubmit: (passphrase: String, create: Boolean) -> Unit,
+    onRestore: (container: Uri, credential: String) -> Unit,
     onDismissFailure: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var password by remember { mutableStateOf("") }
+    var passphrase by remember { mutableStateOf("") }
     // Whether the person is registering does survive a rotation: it is a choice they made, and not a
-    // credential.
+    // credential. The restore mode's choice rides with it for the same reason; the chosen file's
+    // Uri does not, because a picker grant does not survive the process either.
     var creating by rememberSaveable { mutableStateOf(false) }
+    var restoring by rememberSaveable { mutableStateOf(false) }
+    var containerUri by remember { mutableStateOf<Uri?>(null) }
+    val pickContainer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { chosen ->
+        if (chosen != null) containerUri = chosen
+    }
     val extra = LocalMigoExtra.current
 
     Box(
@@ -138,7 +158,15 @@ fun SignInScreen(
                         OutlinedTextField(
                             value = form.identifier,
                             onValueChange = onIdentifier,
-                            label = { Text(if (creating) "Choose a username" else "Username or email") },
+                            label = {
+                                Text(
+                                    when {
+                                        creating -> "Choose a username"
+                                        restoring -> "Username (optional)"
+                                        else -> "Username or email"
+                                    },
+                                )
+                            },
                             singleLine = true,
                             enabled = !form.busy,
                             keyboardOptions = KeyboardOptions(
@@ -150,9 +178,11 @@ fun SignInScreen(
                         Spacer(modifier = Modifier.height(12.dp))
 
                         OutlinedTextField(
-                            value = password,
-                            onValueChange = { password = it },
-                            label = { Text("Password") },
+                            value = passphrase,
+                            onValueChange = { passphrase = it },
+                            label = {
+                                Text(if (restoring) "Recovery credential" else "Passphrase")
+                            },
                             singleLine = true,
                             enabled = !form.busy,
                             visualTransformation = PasswordVisualTransformation(),
@@ -162,11 +192,32 @@ fun SignInScreen(
                             ),
                             modifier = Modifier.fillMaxWidth(),
                         )
+                        if (restoring) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            OutlinedButton(
+                                onClick = { pickContainer.launch(arrayOf("*/*")) },
+                                enabled = !form.busy,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(
+                                    text = containerUri
+                                        ?.let { "Backup: ${it.lastPathSegment ?: "chosen"}" }
+                                        ?: "Choose the .migo backup file",
+                                    maxLines = 1,
+                                )
+                            }
+                        }
                         Spacer(modifier = Modifier.height(24.dp))
 
                         Button(
-                            onClick = { onSubmit(password, creating) },
-                            enabled = !form.busy,
+                            onClick = {
+                                if (restoring) {
+                                    containerUri?.let { onRestore(it, passphrase) }
+                                } else {
+                                    onSubmit(passphrase, creating)
+                                }
+                            },
+                            enabled = !form.busy && (!restoring || containerUri != null),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = extra.bannerB,
                                 contentColor = extra.bannerInk,
@@ -181,22 +232,49 @@ fun SignInScreen(
                                         color = extra.bannerInk,
                                     )
                                     Spacer(modifier = Modifier.width(12.dp))
-                                    Text(if (creating) "Creating account" else "Signing in")
+                                    Text(
+                                        when {
+                                            creating -> "Creating account"
+                                            restoring -> "Restoring account"
+                                            else -> "Signing in"
+                                        },
+                                    )
                                 }
                             } else {
-                                Text(if (creating) "Create account" else "Sign in")
+                                Text(if (restoring) "Restore account" else if (creating) "Create account" else "Sign in")
                             }
                         }
                         Spacer(modifier = Modifier.height(4.dp))
 
-                        TextButton(onClick = { creating = !creating }, enabled = !form.busy) {
-                            Text(
-                                text = if (creating) {
-                                    "I already have an account"
-                                } else {
-                                    "Create a new account"
-                                },
-                            )
+                        when {
+                            creating -> TextButton(
+                                onClick = { creating = false },
+                                enabled = !form.busy,
+                            ) {
+                                Text("I already have an account")
+                            }
+
+                            restoring -> TextButton(
+                                onClick = { restoring = false },
+                                enabled = !form.busy,
+                            ) {
+                                Text("Sign in instead")
+                            }
+
+                            else -> Row {
+                                TextButton(
+                                    onClick = { creating = true },
+                                    enabled = !form.busy,
+                                ) {
+                                    Text("Create a new account")
+                                }
+                                TextButton(
+                                    onClick = { restoring = true },
+                                    enabled = !form.busy,
+                                ) {
+                                    Text("Restore from a backup")
+                                }
+                            }
                         }
                         Spacer(modifier = Modifier.height(8.dp))
 
@@ -204,6 +282,15 @@ fun SignInScreen(
                             Text(
                                 text = "Your identity key is generated here and never sent to the server. " +
                                     "Signing out destroys it.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                        if (restoring) {
+                            Text(
+                                text = "The backup carries your account root. This device joins the account " +
+                                    "as a new device, with a fresh identity of its own.",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 textAlign = TextAlign.Center,

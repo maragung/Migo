@@ -346,7 +346,7 @@ impl From<entity::account::Model> for Account {
             username: row.username,
             email: row.email,
             phone: row.phone,
-            password_hash: Secret::new(row.password_hash),
+            passphrase_hash: Secret::new(row.passphrase_hash),
             status: AccountStatus::from_i16(row.status),
             country: row.country,
             locale: row.locale,
@@ -702,7 +702,7 @@ impl PostgresStore {
         // `SqlxPostgresConnector::connect` rather than `Database::connect`, which is
         // the generic entry point that dispatches to it. The generic one formats the
         // connection string into two of its own error messages, and this connection
-        // string carries a password: a URL parse failure would put the credential in
+        // string carries a passphrase: a URL parse failure would put the credential in
         // whatever log caught the startup error. The message below deliberately
         // reports the driver's complaint and not the URL.
         let db = SqlxPostgresConnector::connect(options)
@@ -752,7 +752,7 @@ impl AccountStore for PostgresStore {
             email_lower: Set(new.email.as_deref().map(fold)),
             email: Set(new.email),
             phone: Set(new.phone),
-            password_hash: Set(new.password_hash.expose().to_owned()),
+            passphrase_hash: Set(new.passphrase_hash.expose().to_owned()),
             status: Set(AccountStatus::Active.to_i16()),
             country: Set(canonical_country(new.country.as_deref())?),
             locale: Set(new.locale),
@@ -809,17 +809,17 @@ impl AccountStore for PostgresStore {
             .map(Into::into))
     }
 
-    async fn set_password_hash(&self, account_id: Id, hash: &str, at: Timestamp) -> Result<()> {
+    async fn set_passphrase_hash(&self, account_id: Id, hash: &str, at: Timestamp) -> Result<()> {
         let result = entity::account::Entity::update_many()
             .filter(entity::account::Column::AccountId.eq(uuid_of(account_id)))
             .set(entity::account::ActiveModel {
-                password_hash: Set(hash.to_owned()),
+                passphrase_hash: Set(hash.to_owned()),
                 updated_at: Set(stamp_of(at)),
                 ..Default::default()
             })
             .exec(&self.db)
             .await
-            .context("set_password_hash")?;
+            .context("set_passphrase_hash")?;
         if result.rows_affected == 0 {
             return Err(fault::not_found("account"));
         }
@@ -5197,7 +5197,7 @@ impl BotStore for PostgresStore {
             email_lower: Set(None),
             email: Set(None),
             phone: Set(None),
-            password_hash: Set(new.password_hash.expose().to_owned()),
+            passphrase_hash: Set(new.passphrase_hash.expose().to_owned()),
             status: Set(AccountStatus::Active.to_i16()),
             country: Set(canonical_country(None)?),
             locale: Set(new.locale),
@@ -6173,8 +6173,8 @@ impl CaptchaStore for PostgresStore {
 }
 
 /// A recovery row as it sits in the database.
-impl From<entity::password_recovery::Model> for RecoveryRow {
-    fn from(row: entity::password_recovery::Model) -> Self {
+impl From<entity::passphrase_recovery::Model> for RecoveryRow {
+    fn from(row: entity::passphrase_recovery::Model) -> Self {
         Self {
             token_id: id_of(row.token_id),
             account_id: id_of(row.account_id),
@@ -6193,7 +6193,7 @@ impl RecoveryStore for PostgresStore {
         // and a second request for the same token is not expected, but if it
         // happens the database decides the winner rather than the read-then-
         // write in the caller.
-        entity::password_recovery::Entity::insert(entity::password_recovery::ActiveModel {
+        entity::passphrase_recovery::Entity::insert(entity::passphrase_recovery::ActiveModel {
             token_id: Set(uuid_of(row.token_id)),
             account_id: Set(uuid_of(row.account_id)),
             tag: Set(row.tag),
@@ -6202,13 +6202,13 @@ impl RecoveryStore for PostgresStore {
             created_at: Set(stamp_of(row.created_at)),
         })
         .on_conflict(
-            sea_orm::sea_query::OnConflict::column(entity::password_recovery::Column::TokenId)
+            sea_orm::sea_query::OnConflict::column(entity::passphrase_recovery::Column::TokenId)
                 .update_columns([
-                    entity::password_recovery::Column::AccountId,
-                    entity::password_recovery::Column::Tag,
-                    entity::password_recovery::Column::ExpiresAt,
-                    entity::password_recovery::Column::ConsumedAt,
-                    entity::password_recovery::Column::CreatedAt,
+                    entity::passphrase_recovery::Column::AccountId,
+                    entity::passphrase_recovery::Column::Tag,
+                    entity::passphrase_recovery::Column::ExpiresAt,
+                    entity::passphrase_recovery::Column::ConsumedAt,
+                    entity::passphrase_recovery::Column::CreatedAt,
                 ])
                 .to_owned(),
         )
@@ -6220,7 +6220,7 @@ impl RecoveryStore for PostgresStore {
 
     async fn recovery_get(&self, token_id: Id) -> Result<Option<RecoveryRow>> {
         Ok(
-            entity::password_recovery::Entity::find_by_id(uuid_of(token_id))
+            entity::passphrase_recovery::Entity::find_by_id(uuid_of(token_id))
                 .one(&self.db)
                 .await
                 .context("recovery_get")?
@@ -6232,7 +6232,7 @@ impl RecoveryStore for PostgresStore {
         // The "stamp and return" is the whole point of `consume`: one
         // statement that rejects an already-consumed or expired row and
         // returns the row that was just stamped, so the caller can hand the
-        // account id back to `change_password` without a follow-up read.
+        // account id back to `change_passphrase` without a follow-up read.
         //
         // The `exec_with_returning` returns zero rows when the `where`
         // predicate failed: a token that was already consumed, has expired,
@@ -6242,11 +6242,11 @@ impl RecoveryStore for PostgresStore {
         // acceptable", and the row returning `None` is the way that split
         // is enforced.
         let stamped = stamp_of(at);
-        let update = entity::password_recovery::Entity::update_many()
-            .filter(entity::password_recovery::Column::TokenId.eq(uuid_of(token_id)))
-            .filter(entity::password_recovery::Column::ConsumedAt.is_null())
-            .filter(entity::password_recovery::Column::ExpiresAt.gt(stamped))
-            .set(entity::password_recovery::ActiveModel {
+        let update = entity::passphrase_recovery::Entity::update_many()
+            .filter(entity::passphrase_recovery::Column::TokenId.eq(uuid_of(token_id)))
+            .filter(entity::passphrase_recovery::Column::ConsumedAt.is_null())
+            .filter(entity::passphrase_recovery::Column::ExpiresAt.gt(stamped))
+            .set(entity::passphrase_recovery::ActiveModel {
                 consumed_at: Set(Some(stamped)),
                 ..Default::default()
             });
@@ -6272,8 +6272,8 @@ impl RecoveryStore for PostgresStore {
         let result = self
             .db
             .execute_raw(sql(
-                "delete from password_recovery where token_id in \
-                 (select token_id from password_recovery where expires_at <= $1 limit $2)",
+                "delete from passphrase_recovery where token_id in \
+                 (select token_id from passphrase_recovery where expires_at <= $1 limit $2)",
                 [stamp_value(before), Value::from(i64::from(limit))],
             ))
             .await

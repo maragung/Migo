@@ -49,7 +49,7 @@ The UI must state the actual guarantee, plainly. Overstating it is worse than no
 | Key agreement    | `x25519-dalek`                          | `@noble/curves/ed25519` (X25519) |
 | AEAD             | `chacha20poly1305` (XChaCha20-Poly1305) | `@noble/ciphers/chacha`          |
 | KDF              | `hkdf` + `sha2`                         | `@noble/hashes/hkdf`             |
-| Password hashing | `argon2` (Argon2id)                     | server-side only                 |
+| Passphrase hashing | `argon2` (Argon2id)                     | server-side only                 |
 | CSPRNG           | `getrandom` / OS                        | `crypto.getRandomValues`         |
 
 Rules, without exception:
@@ -79,7 +79,7 @@ opaque blob. The consequence of losing recovery material is stated before the us
 
 ## 4. Authentication
 
-- Password hashing: **Argon2id**, tuned per deployment, at least 19 MiB / t=2 / p=1,
+- Passphrase hashing: **Argon2id**, tuned per deployment, at least 19 MiB / t=2 / p=1,
   re-tuned as hardware improves and re-hashed transparently on login.
 - Access token: short-lived (15 min default), 130 bytes of fixed layout tagged with
   HMAC-SHA-256, carrying account, device, session, capabilities, region, issued-at,
@@ -102,7 +102,7 @@ opaque blob. The consequence of losing recovery material is stated before the us
   refreshes rather than reset, because a refresh is not proof a human is present. This
   is what `REAUTHENTICATION_REQUIRED` (1108) is decided from (brief §125).
 - Account enumeration: an unknown identifier is verified against a placeholder hash, so
-  "no such account" and "wrong password" cost the same wall-clock time and return the
+  "no such account" and "wrong passphrase" cost the same wall-clock time and return the
   same code.
 - There is deliberately **no per-account failure lockout.** Pricing is per network class,
   because a per-account counter lets a stranger who knows a username lock its owner out.
@@ -197,5 +197,5 @@ Rules that the table implies and code must keep true: the root and every domain
 seed are zeroized on drop and have no `Debug`/`Display`; the `.migo` open path
 returns one error for wrong-credential and tampered-file alike; challenge
 verification is charged against the same lockout and rate-limit scopes as
-password login; and every security-relevant state change emits an audit event
+passphrase login; and every security-relevant state change emits an audit event
 without secret material.

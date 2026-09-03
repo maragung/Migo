@@ -58,7 +58,7 @@ pub const ONE_TIME_PREKEY_LOW_WATER: u32 = 20;
 /// tokens in order to publish a public key.
 ///
 /// No `reauthenticated` flag. Publishing key material is not a step-up action: the device
-/// doing it already holds the private halves, so a second password prompt would protect
+/// doing it already holds the private halves, so a second passphrase prompt would protect
 /// nothing that the session token does not already protect.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Caller {

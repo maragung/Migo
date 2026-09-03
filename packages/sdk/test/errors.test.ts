@@ -7,7 +7,7 @@
  * the server withheld. Two invariants matter most and both fail silently if broken: a malformed or
  * opaque error body must collapse to a generic internal error rather than leak raw server text into
  * a structured field, and an authentication failure must look identical whether the account does not
- * exist or the password was wrong, because any observable difference is an account-enumeration
+ * exist or the passphrase was wrong, because any observable difference is an account-enumeration
  * oracle. These tests pin both, plus the retry and class-hierarchy contracts a caller relies on.
  */
 
@@ -31,22 +31,22 @@ test('a present hint follows the symbol; an absent hint leaves the symbol standi
   assert.equal(noHint.message, 'UNAUTHENTICATED');
 });
 
-test('an authentication failure is indistinguishable for a missing account and a wrong password', () => {
+test('an authentication failure is indistinguishable for a missing account and a wrong passphrase', () => {
   // The server answers both with INVALID_CREDENTIALS and an empty hint; if it did not, the SDK would
   // still expose no field that separates them. Build the two the way the REST layer would and prove
   // every observable is equal.
   const missingAccount = RemoteError.fromEnvelope(401, {
     error: { code: CODE.INVALID_CREDENTIALS, symbol: 'INVALID_CREDENTIALS', message: '' },
   });
-  const wrongPassword = RemoteError.fromEnvelope(401, {
+  const wrongPassphrase = RemoteError.fromEnvelope(401, {
     error: { code: CODE.INVALID_CREDENTIALS, symbol: 'INVALID_CREDENTIALS', message: '' },
   });
 
-  assert.equal(missingAccount.code, wrongPassword.code);
-  assert.equal(missingAccount.symbol, wrongPassword.symbol);
-  assert.equal(missingAccount.message, wrongPassword.message);
-  assert.equal(missingAccount.field, wrongPassword.field);
-  assert.equal(missingAccount.retryAfterMs, wrongPassword.retryAfterMs);
+  assert.equal(missingAccount.code, wrongPassphrase.code);
+  assert.equal(missingAccount.symbol, wrongPassphrase.symbol);
+  assert.equal(missingAccount.message, wrongPassphrase.message);
+  assert.equal(missingAccount.field, wrongPassphrase.field);
+  assert.equal(missingAccount.retryAfterMs, wrongPassphrase.retryAfterMs);
   // And the code is the credential one, not something that names which half failed.
   assert.equal(missingAccount.code, CODE.INVALID_CREDENTIALS);
 });

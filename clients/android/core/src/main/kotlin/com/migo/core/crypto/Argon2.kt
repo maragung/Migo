@@ -16,9 +16,9 @@ import org.bouncycastle.crypto.params.Argon2Parameters
  * client has ever read was sealed at 1.3, and 1.0 exists only in pre-standard implementations.
  */
 object Argon2 {
-    /** Derives [outputLength] bytes from [password] under the given cost parameters. */
+    /** Derives [outputLength] bytes from [passphrase] under the given cost parameters. */
     fun derive(
-        password: ByteArray,
+        passphrase: ByteArray,
         salt: ByteArray,
         memoryKib: Int,
         passes: Int,
@@ -35,7 +35,7 @@ object Argon2 {
         val generator = Argon2BytesGenerator()
         generator.init(params)
         val out = ByteArray(outputLength)
-        generator.generateBytes(password.copyOf(), out)
+        generator.generateBytes(passphrase.copyOf(), out)
         return out
     }
 }

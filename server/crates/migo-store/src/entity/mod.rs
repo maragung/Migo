@@ -39,7 +39,7 @@ pub mod message;
 pub mod node_peer;
 pub mod notification;
 pub mod one_time_prekey;
-pub mod password_recovery;
+pub mod passphrase_recovery;
 pub mod profile;
 pub mod progression;
 pub mod relationship;

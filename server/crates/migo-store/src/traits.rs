@@ -109,9 +109,9 @@ pub trait AccountStore: Send + Sync {
     /// Looks up by phone, exactly (the E.164 form is canonical).
     async fn account_by_phone(&self, phone: &str) -> Result<Option<Account>>;
 
-    /// Replaces the password hash. Callers revoke sessions separately, in the
-    /// same request, so that a password change logs other devices out.
-    async fn set_password_hash(&self, account_id: Id, hash: &str, at: Timestamp) -> Result<()>;
+    /// Replaces the passphrase hash. Callers revoke sessions separately, in the
+    /// same request, so that a passphrase change logs other devices out.
+    async fn set_passphrase_hash(&self, account_id: Id, hash: &str, at: Timestamp) -> Result<()>;
 
     /// Sets the recoverable contact on the account — the email or phone that
     /// account recovery and security notifications are addressed to.
@@ -1067,7 +1067,7 @@ pub trait GameStore: Send + Sync {
 
 /// The registry of bots and the credential behind each one.
 ///
-/// A bot is an account that authenticates by a bearer token rather than a password
+/// A bot is an account that authenticates by a bearer token rather than a passphrase
 /// (brief section 36), so `migo-auth` deliberately does not mint sessions for one —
 /// turning a bot token into a caller is a different set of checks and belongs to
 /// `migo-bots`. What lives here is the persistence those checks read and write: the
@@ -1091,7 +1091,7 @@ pub trait BotStore: Send + Sync {
     /// row, atomically.
     ///
     /// One write and not three, because the intermediate states are all invalid: an
-    /// account whose password is a hash of discarded bytes is unusable until the bot
+    /// account whose passphrase is a hash of discarded bytes is unusable until the bot
     /// row exists to authenticate it, and a profile is required for it to appear
     /// anywhere. A backend that can offer a transaction uses one; the in-memory
     /// backend takes its single lock for the whole operation. A username or token
@@ -1280,7 +1280,7 @@ pub trait CaptchaStore: Send + Sync {
     async fn delete_captcha(&self, challenge_id: Id) -> Result<()>;
 }
 
-/// A row in the `password_recovery` table.
+/// A row in the `passphrase_recovery` table.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryRow {
     /// The token id, surfaced to the client.
@@ -1291,13 +1291,13 @@ pub struct RecoveryRow {
     pub tag: Vec<u8>,
     /// When the token stops being accepted.
     pub expires_at: Timestamp,
-    /// Stamped when the token is exchanged for a new password.
+    /// Stamped when the token is exchanged for a new passphrase.
     pub consumed_at: Option<Timestamp>,
     /// When the row was inserted.
     pub created_at: Timestamp,
 }
 
-/// Storage for the password-recovery token table.
+/// Storage for the passphrase-recovery token table.
 ///
 /// Distinct from the captcha store because the two are not interchangeable:
 /// captcha rows are short-lived and one-shot, recovery rows are

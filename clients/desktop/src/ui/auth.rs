@@ -3,11 +3,11 @@
 //! # One passphrase, and what it protects
 //!
 //! Three secrets appear on these screens and they are not interchangeable, so the labels say which is
-//! which rather than saying "password" three times. The account password authenticates to the server
+//! which rather than saying "passphrase" three times. The account passphrase authenticates to the server
 //! and the server can verify it. The vault passphrase never leaves this machine: it derives the key
 //! that seals the identity and prekey material on disk, and no server can help recover it. A user who
 //! believes those are the same secret will pick the same string for both, which means a server
-//! breach that leaks a password hash also becomes a head start on their local key file.
+//! breach that leaks a passphrase hash also becomes a head start on their local key file.
 //!
 //! # What is not offered
 //!
@@ -32,7 +32,7 @@ use crate::ui::{widgets, Context, Screen};
 pub struct AuthState {
     pub server: ServerEndpoint,
     pub identifier: String,
-    pub password: String,
+    pub account_passphrase: String,
     pub passphrase: String,
     pub confirm: String,
     /// True from submit until the worker reports success or failure, so a second click cannot fire a
@@ -48,10 +48,10 @@ pub struct AuthState {
     pub server_form: ServerFormState,
     /// The restore form: where the `.migo` container is, and the recovery credential that opens it.
     ///
-    /// The credential is as secret as a password and is wiped with the rest; the path is not secret
+    /// The credential is as secret as a passphrase and is wiped with the rest; the path is not secret
     /// but lives beside it so the form is one struct. `restore_username` is not a secret at all:
     /// it is the account's name, stored beside the session so the unlock screen greets the right
-    /// person and a later passwordless login can name the account to the server.
+    /// person and a later passphraseless login can name the account to the server.
     pub restore_path: String,
     pub restore_credential: String,
     pub restore_username: String,
@@ -64,7 +64,7 @@ impl Default for AuthState {
         Self {
             server,
             identifier: String::new(),
-            password: String::new(),
+            account_passphrase: String::new(),
             passphrase: String::new(),
             confirm: String::new(),
             busy: false,
@@ -83,7 +83,7 @@ impl AuthState {
         // Overwrite before dropping. `String::clear` keeps the allocation, so zeroing first means the
         // bytes are not left sitting in a buffer the allocator may hand out unchanged.
         for field in [
-            &mut self.password,
+            &mut self.account_passphrase,
             &mut self.passphrase,
             &mut self.confirm,
             &mut self.restore_credential,
@@ -111,7 +111,7 @@ impl AuthState {
     fn register_ready(&self) -> bool {
         !self.server.host.trim().is_empty()
             && self.identifier.trim().len() >= 3
-            && self.password.len() >= 8
+            && self.account_passphrase.len() >= 8
             && self.passphrase.len() >= crate::vault::MIN_PASSPHRASE_BYTES
             && self.passphrase == self.confirm
     }
@@ -120,7 +120,7 @@ impl AuthState {
     fn sign_in_ready(&self) -> bool {
         !self.server.host.trim().is_empty()
             && !self.identifier.trim().is_empty()
-            && !self.password.is_empty()
+            && !self.account_passphrase.is_empty()
             && self.passphrase.len() >= crate::vault::MIN_PASSPHRASE_BYTES
     }
 
@@ -328,8 +328,8 @@ fn sign_in(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
     widgets::field(
         ui,
         context.theme,
-        "Account password",
-        &mut state.password,
+        "Account passphrase",
+        &mut state.account_passphrase,
         true,
         "",
     );
@@ -353,7 +353,7 @@ fn sign_in(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
         context.issue(Command::SignIn {
             server: state.server.clone(),
             identifier: state.identifier.trim().to_owned(),
-            password: state.password.clone(),
+            account_passphrase: state.account_passphrase.clone(),
             passphrase: state.passphrase.clone(),
             captcha: state.captcha.take_proof(),
         });
@@ -369,7 +369,7 @@ fn sign_in(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
             context.go(Screen::Register);
         }
         ui.add_space(space::XS);
-        // The third door: not a password, but the container a founding device sealed. It is offered
+        // The third door: not a passphrase, but the container a founding device sealed. It is offered
         // from sign-in because it is the same situation — an existing account, a new machine.
         if widgets::ghost_button(ui, context.theme, "Restore from a backup").clicked() {
             state.clear_secrets();
@@ -396,8 +396,8 @@ fn register(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
     widgets::field(
         ui,
         context.theme,
-        "Account password",
-        &mut state.password,
+        "Account passphrase",
+        &mut state.account_passphrase,
         true,
         "",
     );
@@ -425,7 +425,7 @@ fn register(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
     hint(
         ui,
         context,
-        "Two different secrets: the password signs you in to the server, the passphrase encrypts your keys here. Do not reuse one for the other.",
+        "Two different secrets: the account passphrase signs you in to the server, the vault passphrase encrypts your keys here. Do not reuse one for the other.",
     );
     captcha::show(ui, context, &mut state.captcha, &state.server);
     ui.add_space(space::LG);
@@ -435,7 +435,7 @@ fn register(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
         context.issue(Command::Register {
             server: state.server.clone(),
             username: state.identifier.trim().to_owned(),
-            password: state.password.clone(),
+            account_passphrase: state.account_passphrase.clone(),
             passphrase: state.passphrase.clone(),
             captcha: state.captcha.take_proof(),
         });

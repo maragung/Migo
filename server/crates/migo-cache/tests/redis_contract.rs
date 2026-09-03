@@ -95,7 +95,7 @@ async fn a_url_redis_cannot_parse_fails_at_construction() {
     assert_eq!(error.code(), migo_protocol::codes::VALIDATION_FAILED);
     assert!(
         !error.internal_message().contains("not-a-redis-url"),
-        "the URL carries a password and must not be echoed"
+        "the URL carries a passphrase and must not be echoed"
     );
 }
 

@@ -1,7 +1,7 @@
 //! The "Server" disclosure on the sign-in and registration forms.
 //!
 //! A user who has never opened this disclosure sees exactly the form they saw yesterday: identifier
-//! and password. A user who has opened it picks the host, port and scheme, and on
+//! and passphrase. A user who has opened it picks the host, port and scheme, and on
 //! "Use this server" the disclosure closes and the choice becomes the new form input.
 //!
 //! The transport is the one choice that is not behind the disclosure: a TCP/WebSocket/QUIC row of

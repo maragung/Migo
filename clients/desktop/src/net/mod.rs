@@ -119,7 +119,7 @@ pub enum Command {
     Register {
         server: ServerEndpoint,
         username: String,
-        password: String,
+        account_passphrase: String,
         passphrase: String,
         /// The answered captcha challenge, when the form held one and the answer had the shape
         /// worth sending. `None` submits without a proof.
@@ -129,7 +129,7 @@ pub enum Command {
     SignIn {
         server: ServerEndpoint,
         identifier: String,
-        password: String,
+        account_passphrase: String,
         passphrase: String,
         /// The answered captcha challenge, as on [`Command::Register`].
         captcha: Option<CaptchaAnswer>,
@@ -208,7 +208,7 @@ pub enum Command {
     /// Seal the account root into a `.migo` recovery container at `path`.
     ///
     /// The credential is the recovery credential the user chose for the container — a second
-    /// secret, deliberately not the vault passphrase and not the account password, because a
+    /// secret, deliberately not the vault passphrase and not the account passphrase, because a
     /// backup sealed under either of those is a backup one breach opens.
     ExportContainer { path: PathBuf, credential: String },
     /// Restore the account from a `.migo` container onto this device: the add-device ceremony,
@@ -222,13 +222,22 @@ pub enum Command {
         passphrase: String,
         /// The account's username, as the person knows it. The ceremony itself needs only the
         /// account id the container names; the username is stored beside the session so the
-        /// unlock screen greets the right person and a later passwordless login can name the
+        /// unlock screen greets the right person and a later passphraseless login can name the
         /// account to the server, which resolves names and not ids.
         username: String,
         server: ServerEndpoint,
     },
     /// Archive one of the account's registered wallet addresses.
     ArchiveWallet { wallet_id: Id },
+    /// Record (or replace) the account's recoverable contact — one string, an email or a phone,
+    /// and the server is the judge of the shape.
+    SetContact { email_or_phone: String },
+    /// Change the account's sign-in passphrase.
+    ///
+    /// Carries both secrets as raw strings for the same reason the auth forms do: the fields are
+    /// a person typing, and the worker is where "what they typed is not acceptable" becomes a
+    /// sentence worth reading (the server's own validation message) instead of a parse error.
+    ChangePassphrase { current: String, next: String },
     /// Refresh the AVAX balance of the account's first wallet on one network.
     ///
     /// A pull, never a poll (§184): the wallet surface asks when the user asks, and the worker
@@ -787,22 +796,36 @@ impl Worker {
             Command::Register {
                 server,
                 username,
-                password,
+                account_passphrase,
                 passphrase,
                 captcha,
             } => {
-                self.bootstrap(server, username, password, passphrase, captcha, true)
-                    .await;
+                self.bootstrap(
+                    server,
+                    username,
+                    account_passphrase,
+                    passphrase,
+                    captcha,
+                    true,
+                )
+                .await;
             }
             Command::SignIn {
                 server,
                 identifier,
-                password,
+                account_passphrase,
                 passphrase,
                 captcha,
             } => {
-                self.bootstrap(server, identifier, password, passphrase, captcha, false)
-                    .await;
+                self.bootstrap(
+                    server,
+                    identifier,
+                    account_passphrase,
+                    passphrase,
+                    captcha,
+                    false,
+                )
+                .await;
             }
             Command::Unlock { passphrase } => self.unlock(passphrase).await,
             Command::SignOut => self.sign_out().await,
@@ -884,6 +907,12 @@ impl Worker {
             Command::ArchiveWallet { wallet_id } => {
                 self.archive_wallet(wallet_id).await;
             }
+            Command::SetContact { email_or_phone } => {
+                self.set_contact(email_or_phone).await;
+            }
+            Command::ChangePassphrase { current, next } => {
+                self.change_passphrase(current, next).await;
+            }
             Command::ChainBalance { network } => self.chain_balance(network).await,
             Command::ChainPrepare {
                 network,
@@ -912,7 +941,7 @@ impl Worker {
         &mut self,
         server: ServerEndpoint,
         identifier: String,
-        password: String,
+        account_passphrase: String,
         passphrase: String,
         captcha: Option<CaptchaAnswer>,
         register: bool,
@@ -963,14 +992,15 @@ impl Worker {
         let grant = if register {
             rest.register(
                 &identifier,
-                &password,
+                &account_passphrase,
                 device,
                 proof,
                 identity_public_key.as_deref(),
             )
             .await
         } else {
-            rest.login(&identifier, &password, device, proof).await
+            rest.login(&identifier, &account_passphrase, device, proof)
+                .await
         };
         let grant = match grant {
             Ok(grant) => grant,
@@ -1064,7 +1094,7 @@ impl Worker {
         // The legacy upgrade door: a device that holds the root tells the server so, idempotently,
         // on every sign-in. A server that already has the keys reconciles to the same rows; one
         // that has never seen them records them now, which is what makes the account
-        // ML-DSA-loginable at all. A refusal here is a toast, not a failed sign-in — the password
+        // ML-DSA-loginable at all. A refusal here is a toast, not a failed sign-in — the passphrase
         // already worked.
         if root.is_some() {
             self.publish_root_material().await;
@@ -1118,7 +1148,7 @@ impl Worker {
             Ok(grant) => grant,
             Err(error) => {
                 // A dead refresh token is not a dead account on a device that holds the root: the
-                // ML-DSA login ceremony signs in without a password, using the very keys the
+                // ML-DSA login ceremony signs in without a passphrase, using the very keys the
                 // vault just gave back. Only when that too is impossible — no root, no credential,
                 // or a server that refuses — does the refresh failure stand as the answer.
                 match self.ceremony_login(&rest, &keys, &saved).await {
@@ -1165,14 +1195,14 @@ impl Worker {
         .await;
     }
 
-    /// The passwordless sign-in: the ML-DSA login ceremony, run from a vault that holds the root
+    /// The passphraseless sign-in: the ML-DSA login ceremony, run from a vault that holds the root
     /// and this device's credential.
     ///
     /// `None` means "this device cannot sign in this way" — no root, no credential, a challenge
     /// that would not issue, a signature that failed — and the caller reports the failure of the
     /// thing it was actually trying (the refresh exchange), rather than a stack of ceremony detail
     /// the user cannot act on. The server's own anti-enumeration shape makes this the right
-    /// behaviour: an unknown identifier and a wrong password produce the same `CHALLENGE_INVALID`,
+    /// behaviour: an unknown identifier and a wrong passphrase produce the same `CHALLENGE_INVALID`,
     /// so a ceremony error message would only ever be this client's guess.
     async fn ceremony_login(
         &mut self,
@@ -1829,7 +1859,7 @@ impl Worker {
             )
             .await
         {
-            // A toast rather than a failed sign-in: the password already worked, and the keys
+            // A toast rather than a failed sign-in: the passphrase already worked, and the keys
             // publish again on the next sign-in.
             self.sink.toast(
                 format!("could not publish the account identity: {error}"),
@@ -1903,6 +1933,61 @@ impl Worker {
                 self.sink
                     .toast("Wallet address archived", ToastKind::Success);
                 self.fetch_wallets().await;
+            }
+            Err(error) => {
+                self.sink.toast(error.to_string(), ToastKind::Error);
+            }
+        }
+    }
+
+    /// Records (or replaces) the account's recoverable contact.
+    ///
+    /// The server keeps exactly one value, normalised on arrival, so this is a replace rather
+    /// than an append — which is what the form's helper text says, so nobody expects a list.
+    async fn set_contact(&mut self, email_or_phone: String) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let outcome = signed
+            .rest
+            .set_contact(&signed.access_token, email_or_phone.trim())
+            .await;
+        match outcome {
+            Ok(()) => {
+                self.sink
+                    .toast("Recovery contact saved", ToastKind::Success);
+            }
+            Err(error) => {
+                self.sink.toast(error.to_string(), ToastKind::Error);
+            }
+        }
+    }
+
+    /// Changes the account's sign-in passphrase.
+    ///
+    /// The server ends every session of the account — this one included — and answers with a
+    /// replacement grant, which this worker adopts so the window stays signed in (a reconnect
+    /// after the server drops the old socket presents the new token). The vault cannot be
+    /// re-sealed from here — it opens under the device's own passphrase, which no session holds,
+    /// by design — so the saved refresh token stays retired: the next unlock falls back to the
+    /// ML-DSA ceremony where the device can run one, and asks for the new passphrase otherwise.
+    /// That is the honest cost of the change, and the form states it before the button unlocks.
+    async fn change_passphrase(&mut self, current: String, next: String) {
+        let Some(signed) = self.signed.as_mut() else {
+            return;
+        };
+        let outcome = signed
+            .rest
+            .change_passphrase(&signed.access_token, &current, &next)
+            .await;
+        match outcome {
+            Ok(grant) => {
+                signed.access_token = grant.access_token;
+                signed.account.session_id = grant.session_id;
+                self.sink.toast(
+                    "Passphrase changed; every other session was signed out",
+                    ToastKind::Success,
+                );
             }
             Err(error) => {
                 self.sink.toast(error.to_string(), ToastKind::Error);
@@ -2284,7 +2369,7 @@ impl Worker {
         else {
             return self.fail(
                 "this container does not name its account (it was sealed by an older build); \
-                 sign in with your password instead"
+                 sign in with your passphrase instead"
                     .to_owned(),
             );
         };
@@ -2343,7 +2428,7 @@ impl Worker {
 
         // The grant identifies the account by id; the username is a profile concern, not a session
         // one, and the server does not echo it back. The form's field is the greeting and the
-        // identifier a later passwordless login needs; if the person left it blank, the account id
+        // identifier a later passphraseless login needs; if the person left it blank, the account id
         // stands in, honestly unpronounceable.
         let username = {
             let typed = username.trim();

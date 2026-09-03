@@ -2,14 +2,14 @@
 //!
 //! One trait. The gateway, the HTTP API, and the bot runtime all take
 //! `Arc<dyn Authenticator>` and none of them knows whether the accounts live in Postgres
-//! or in a test double that accepts one password.
+//! or in a test double that accepts one passphrase.
 //!
 //! # Why the whole surface is one trait
 //!
 //! [`migo_store`] splits its work across ten narrow traits, because a crate that only
 //! needs to read a room should not be able to write a ledger. This one does not split,
 //! because the operations here are not independent: registering has to open a session,
-//! refreshing has to be able to revoke a family, changing a password has to revoke every
+//! refreshing has to be able to revoke a family, changing a passphrase has to revoke every
 //! session and open a replacement. Handing out a narrow `Refresher` that could rotate a
 //! session but not revoke its family would be handing out the half of the operation
 //! without the safety property.
@@ -37,8 +37,8 @@ pub const REAUTH_WINDOW_MS: u64 = 5 * 60 * 1_000;
 
 /// Who is calling, established from a verified token and the rows behind it.
 ///
-/// Deliberately not [`migo_store::model::Account`]: that row carries the password hash,
-/// and a type carrying a password hash should not be the type every handler holds and
+/// Deliberately not [`migo_store::model::Account`]: that row carries the passphrase hash,
+/// and a type carrying a passphrase hash should not be the type every handler holds and
 /// passes around. What is here is what a caller downstream of authentication actually
 /// needs.
 #[derive(Clone, Debug)]
@@ -98,23 +98,23 @@ impl Identity {
         }
         Err(migo_protocol::fault::error(
             migo_protocol::codes::REAUTHENTICATION_REQUIRED,
-            "the password was last entered too long ago for this operation",
+            "the passphrase was last entered too long ago for this operation",
         ))
     }
 }
 
-/// A password change.
+/// A passphrase change.
 ///
-/// The current password is required and is what makes this operation authenticated: a
+/// The current passphrase is required and is what makes this operation authenticated: a
 /// change that only needed a session token would turn a stolen token into a permanent
 /// takeover, since the thief could lock the owner out. It is also why this operation
 /// does not additionally demand [`Identity::require_fresh`] — typing the current
-/// password *is* the reauthentication.
+/// passphrase *is* the reauthentication.
 #[derive(Debug)]
-pub struct PasswordChange {
-    /// The password in force.
+pub struct PassphraseChange {
+    /// The passphrase in force.
     pub current: Secret,
-    /// The password to replace it with.
+    /// The passphrase to replace it with.
     pub next: Secret,
 }
 
@@ -125,7 +125,7 @@ pub trait Authenticator: Send + Sync {
     ///
     /// Fails with `FEATURE_DISABLED` when the deployment has registration turned off,
     /// `USERNAME_TAKEN` or `ALREADY_EXISTS` on a collision, `USERNAME_RESERVED`,
-    /// `WEAK_PASSWORD`, `VALIDATION_FAILED`, or `RATE_LIMITED`.
+    /// `WEAK_PASSPHRASE`, `VALIDATION_FAILED`, or `RATE_LIMITED`.
     ///
     /// The `server` field of `Registration` is the explicit
     /// `ServerEndpoint` the route layer passed in. The trait's
@@ -137,12 +137,12 @@ pub trait Authenticator: Send + Sync {
     /// and is the same shape the web form sends on the wire.
     async fn register(&self, request: Registration, context: &RequestContext) -> Result<Grant>;
 
-    /// Exchanges a password for a session.
+    /// Exchanges a passphrase for a session.
     ///
     /// Fails with `INVALID_CREDENTIALS` for both an unknown account and a wrong
-    /// password — the two are indistinguishable to the caller on purpose, in the
+    /// passphrase — the two are indistinguishable to the caller on purpose, in the
     /// response *and* in the time taken. `ACCOUNT_SUSPENDED` is only reachable after the
-    /// password has been verified, because reporting a suspension to whoever asks would
+    /// passphrase has been verified, because reporting a suspension to whoever asks would
     /// confirm the account exists.
     ///
     /// The `server` field follows the same defaulting rule as
@@ -229,17 +229,17 @@ pub trait Authenticator: Send + Sync {
         context: &RequestContext,
     ) -> Result<u64>;
 
-    /// Replaces the password, revokes every session, and opens a replacement.
+    /// Replaces the passphrase, revokes every session, and opens a replacement.
     ///
     /// Every session including the caller's own, which is why a [`Grant`] comes back:
     /// the client swaps its tokens and stays signed in, and every other device is logged
-    /// out. Keeping the current session alive instead would mean a password changed
+    /// out. Keeping the current session alive instead would mean a passphrase changed
     /// *because* a token was stolen left the thief's session running if they happened to
     /// be the one who changed it.
-    async fn change_password(
+    async fn change_passphrase(
         &self,
         identity: &Identity,
-        change: PasswordChange,
+        change: PassphraseChange,
         context: &RequestContext,
     ) -> Result<Grant>;
 
@@ -271,7 +271,7 @@ pub trait Authenticator: Send + Sync {
         >,
     >;
 
-    /// Starts a password-recovery flow: looks the account up by `identifier`
+    /// Starts a passphrase-recovery flow: looks the account up by `identifier`
     /// (the same email/phone/username shape [`Authenticator::sign_in`]
     /// accepts), mints a recovery row, and returns the row's `token_id` and
     /// the hex-encoded HMAC tag that the caller proves possession of when
@@ -289,7 +289,7 @@ pub trait Authenticator: Send + Sync {
         context: &RequestContext,
     ) -> Result<RecoveryRow>;
 
-    /// Confirms a recovery row, applies a new password, and revokes every
+    /// Confirms a recovery row, applies a new passphrase, and revokes every
     /// other session.
     ///
     /// The HMAC `tag` is verified with the per-purpose `LABEL_RECOVERY`
@@ -297,7 +297,7 @@ pub trait Authenticator: Send + Sync {
     /// call so a confirm cannot replay. `Ok(())` on success.
     ///
     /// Fails with `RECOVERY_NOT_FOUND` when the row is unknown, already
-    /// consumed, or expired; with `WEAK_PASSWORD` when the new password is
+    /// consumed, or expired; with `WEAK_PASSPHRASE` when the new passphrase is
     /// too short or on the common list; and with `INVALID_CAPTCHA` if the
     /// tag does not verify (the row is left in place, so a typo on the
     /// first try does not consume the row).
@@ -305,7 +305,7 @@ pub trait Authenticator: Send + Sync {
         &self,
         token_id: Id,
         tag: &[u8],
-        new_password: &Secret,
+        new_passphrase: &Secret,
         context: &RequestContext,
     ) -> Result<()>;
 
@@ -332,7 +332,7 @@ pub trait Authenticator: Send + Sync {
     /// The identity signature must verify against the account's active
     /// identity key; the device signature against the registered device's
     /// credential. A failure of either is `INVALID_CREDENTIALS` — the same
-    /// code, and the same answer, as a wrong password. A challenge that is
+    /// code, and the same answer, as a wrong passphrase. A challenge that is
     /// unknown, expired, already consumed, or issued for another purpose is
     /// `CHALLENGE_INVALID`.
     async fn answer_identity_challenge(
