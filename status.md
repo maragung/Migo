@@ -2046,7 +2046,7 @@ padahal leave-nya berhasil; simpan custom status di panel profil
 terlihat gagal setelah 30 detik padahal presence-nya terpasang.
 Akar doktrinnya ada di header dispatch lama ("`set` dan `leave`
 mengembalikan `Option<Fanout>` dan tidak dijawab") — diganti: yang
-menentukan jawab-bukannya adalah apa yang *client* tunggu (RPC vs
+menentukan jawab-bukannya adalah apa yang _client_ tunggu (RPC vs
 notify), bukan bentuk return service. `MessageReceipt` dan `Typing`
 benar (notify, memang tanpa jawab); keduanya kini meng-ack duluan,
 baru publish, dan ack-nya bersyarat tidak pada fanout — jalur
