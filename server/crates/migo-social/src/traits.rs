@@ -159,7 +159,7 @@ pub trait Graph: Send + Sync {
     /// Accounts this one has muted, newest first.
     ///
     /// The caller's own list and nothing else, exactly like
-    /// [`blocked`](Social::blocked) and for the same reason.
+    /// [`blocked`](Graph::blocked) and for the same reason.
     async fn muted(&self, caller: &Caller, limit: Option<u16>) -> Result<Vec<Edge>>;
 
     /// Marks or unmarks a favourite.

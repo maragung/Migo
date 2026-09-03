@@ -169,7 +169,7 @@ impl OpenVote {
 /// Half the room rounded up — the user's rule is a majority of the members
 /// present — with a floor of two, so that a room of one cannot vote (the only
 /// person a sole member could name is themselves, and self-removal is what
-/// [`Roomkeeper::leave`](crate::traits::Roomkeeper::leave) is for).
+/// [`Roomkeeper::leave`] is for).
 #[must_use]
 pub const fn votes_needed(member_count: u32) -> u32 {
     if member_count < 2 {
