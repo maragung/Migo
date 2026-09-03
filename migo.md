@@ -4138,6 +4138,9 @@ Opcode yang sudah ada di schema. STATUS: SCHEMA. Format setiap baris: nomor, nam
 87 ROOM_ROLE_SET, client ke server, User, 5, Critical
 88 ROOM_UPDATE, client ke server, User, 5, Critical
 89 ROOM_ARCHIVE, client ke server, User, 5, Critical
+90 ROOM_VOTE_KICK, client ke server, User, 5, Critical
+91 ROOM_VOTE_EVENT, server ke client, User, 0, Coalescable
+92 ROOM_SANCTION, client ke server, User, 10, Critical
 83 ROOM_MEMBER_EVENT, server ke client, User, 0, Coalescable
 84 ROOM_STATE_EVENT, server ke client, User, 0, Coalescable
 112 PROFILE_FETCH, client ke server, User, 3, Critical
@@ -4167,6 +4170,7 @@ Social:
 117 RELATIONSHIP_LIST, client ke server, User, 3, Critical
 118 SUGGESTIONS, client ke server, User, 3, Critical
 119 SEARCH, client ke server, User, 3, Critical
+120 MUTE_SET, client ke server, User, 5, Critical
 
 Media:
 
@@ -4256,6 +4260,8 @@ SyncStatus: Unknown, Ok, Truncated
 TopicKind: Unknown, Conversation, Room, User, Game
 RoomKind: Unknown, Public, Managed
 RoomRole: Unknown, Member, Helper, Moderator, Admin, Manager, Owner
+MemberChange: Unknown, Joined, Left, Disconnected, Reconnected, Kicked, Banned
+SanctionAction: Unknown, Mute, Unmute, Kick, Ban, Unban
 NotificationKind: Unknown, Message, Mention, Reply, FriendRequest, Gift, LevelUp, Achievement, RoomInvite, RoomAnnouncement, Event, GameChallenge
 RelationshipKind: Unknown, Friend, PendingOutgoing, PendingIncoming, Follow, Block, Favorite
 CloseReason: Unknown, ClientRequest, ServerShutdown, NodeDraining, SessionLagging, ResumeRequired, AuthExpired, Rebalance, ProtocolViolation
