@@ -10,7 +10,8 @@
 //! of them can be dropped into a new screen without dragging a context along.
 
 use egui::{
-    Align, Color32, CornerRadius, FontId, Layout, Response, RichText, Sense, Stroke, Ui, Vec2,
+    Align, Color32, CornerRadius, FontId, Layout, Response, RichText, Sense, Stroke, TextStyle, Ui,
+    Vec2,
 };
 
 use crate::theme::{font, palette, radius, space, text_style, Theme};
@@ -255,9 +256,12 @@ pub fn tab_chip(
     let icon_room = if icon.is_some() { 26.0 } else { 0.0 };
     let close_room = if closable { 24.0 } else { 0.0 };
     let padding = Vec2::new(space::MD, 0.0);
+    // The chip's height is the Small row plus a pad above and below, not a pixel count: the
+    // strip sizes itself from this same derivation, so chip, text and bar grow together.
+    let height = ui.text_style_height(&TextStyle::Small) + 2.0 * space::SM;
     let size = egui::vec2(
         galley.size().x + icon_room + close_room + padding.x * 2.0,
-        32.0,
+        height,
     );
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let mut outcome = ChipOutcome::default();

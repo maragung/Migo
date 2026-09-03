@@ -250,6 +250,22 @@ pub mod text_style {
     pub const OVERLINE: &str = "overline";
 }
 
+/// A chrome bar's height: the full row height of the text it carries, plus breathing room.
+///
+/// The bars used to hardcode pixel heights tuned to one type scale — 38 for the right pane's
+/// bars, 46 for the strip, 58 for the banner — which clipped the moment the type grew and gave
+/// nothing back when it shrank. Asking the font how tall its row is keeps a bar honest about
+/// what it has to fit. The result is in points; the interface zoom (the settings panel's scale
+/// control) scales it with everything else, so a bar's *proportion* lives here and a device's
+/// *absolute* size lives in the zoom.
+///
+/// `pad` is the breathing room above and below the row, so a two-row bar passes the sum of its
+/// rows and one pad that already counts twice.
+#[must_use]
+pub fn bar_height(rows: f32, pad: f32) -> f32 {
+    rows + 2.0 * pad
+}
+
 /// Looks up a named text style, falling back to body text if it was never registered.
 #[must_use]
 pub fn named(name: &'static str) -> TextStyle {

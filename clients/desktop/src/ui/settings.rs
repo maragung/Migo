@@ -114,7 +114,7 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
 
                     server_section(ui, context);
                     ui.add_space(space::LG);
-                    theme_section(ui, context);
+                    appearance_section(ui, context);
                     ui.add_space(space::LG);
                     sessions_section(ui, context, state);
                     ui.add_space(space::LG);
@@ -164,31 +164,49 @@ fn server_section(ui: &mut Ui, context: &mut Context<'_>) {
     }
 }
 
-/// The theme, with the toggle.
+/// The interface's own knobs: how big it draws, and where its theme lives.
 ///
-/// The top bar keeps its own toggle; this is the same action with room to explain itself, which
-/// is also why the button names the theme it switches *to* rather than the one it is leaving.
-fn theme_section(ui: &mut Ui, context: &mut Context<'_>) {
+/// The scale control drives egui's zoom, which grows and shrinks the whole interface — type,
+/// bars, spacing — as one piece, because that is what a person asking for a bigger interface
+/// means. The theme itself is the banner's sun/moon control, exactly as the web client draws it:
+/// one control per action, always visible, never a second copy hiding in a panel.
+fn appearance_section(ui: &mut Ui, context: &mut Context<'_>) {
     let colors = palette(context.theme);
     widgets::subheader(ui, context.theme, "Appearance");
 
-    let other = context.theme.flipped();
+    // The offered steps, as percentages. Discrete on purpose: four honest sizes beat a slider's
+    // infinity of sizes nobody can tell apart, and a whole percent is what the settings file
+    // stores — the choice has to survive a restart exactly as it was made.
+    const STEPS: [(f32, &str); 4] = [
+        (0.85, "Smaller"),
+        (1.0, "Normal"),
+        (1.15, "Larger"),
+        (1.3, "Largest"),
+    ];
+    ui.label(
+        RichText::new("Text size")
+            .font(egui::FontId::proportional(font::BODY))
+            .color(colors.text),
+    );
     ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(format!("Theme: {}", context.theme.label()))
-                .font(egui::FontId::proportional(font::BODY))
-                .color(colors.text),
-        );
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        for (zoom, label) in STEPS {
             if ui
-                .button(format!("Switch to {}", other.label()))
+                .add(egui::Button::new(label).selected(ui.ctx().zoom_factor() == zoom))
                 .on_hover_text("Applies to this window only, immediately.")
                 .clicked()
             {
-                context.want_theme(other);
+                context.want_zoom(zoom);
             }
-        });
+        }
     });
+    ui.label(
+        RichText::new(format!(
+            "Theme: {} — switch it with the sun or moon on the banner.",
+            context.theme.label()
+        ))
+        .font(egui::FontId::proportional(font::TINY))
+        .color(colors.text_muted),
+    );
 }
 
 /// The session list, its refresh, and per-row revoke.

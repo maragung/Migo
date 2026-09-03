@@ -40,6 +40,12 @@ pub struct Settings {
     /// before the field existed — means "follow the desktop's own preference".
     #[serde(default)]
     pub theme: Option<Theme>,
+    /// The interface scale, as a whole percentage of the default zoom (85, 100, 115, 130).
+    /// Absent means 100. A whole number rather than a float so the record stays `Eq` and the
+    /// file stays readable: a person opening settings.json should find `"ui_scale": 130`, not
+    /// `1.3000001`.
+    #[serde(default)]
+    pub ui_scale: Option<u8>,
 }
 
 impl Settings {
@@ -52,7 +58,15 @@ impl Settings {
             version: SETTINGS_VERSION,
             server: default_production_server_endpoint(),
             theme: None,
+            ui_scale: None,
         }
+    }
+
+    /// The record's zoom factor, as egui expects it: the percentage over a hundred, and 1.0
+    /// whenever no preference was ever saved.
+    #[must_use]
+    pub fn zoom(&self) -> f32 {
+        f32::from(self.ui_scale.unwrap_or(100)) / 100.0
     }
 
     /// The path to the settings file, under the platform's data directory.
@@ -160,6 +174,7 @@ mod tests {
             version: SETTINGS_VERSION,
             server: Settings::default_for_dev().server,
             theme: Some(Theme::Light),
+            ui_scale: None,
         };
         save(&path, &record).expect("save");
         let loaded = load(&path).expect("load");
@@ -167,6 +182,26 @@ mod tests {
         let text = fs::read_to_string(&path).expect("read");
         assert!(text.contains("\"light\""));
         let _ = fs::remove_file(&path);
+    }
+
+    /// The scale round-trips and resolves to a zoom factor, with the absent field reading as the
+    /// untouched default — a first run must not inherit a preference it never saved.
+    #[test]
+    fn ui_scale_round_trips_and_resolves() {
+        let path = std::env::temp_dir().join("migo-desktop-test-scale.json");
+        let record = Settings {
+            ui_scale: Some(130),
+            ..Settings::default_for_dev()
+        };
+        save(&path, &record).expect("save");
+        let loaded = load(&path).expect("load");
+        assert_eq!(loaded.ui_scale, Some(130));
+        assert_eq!(loaded.zoom(), 1.3);
+        let text = fs::read_to_string(&path).expect("read");
+        assert!(text.contains("\"ui_scale\": 130"));
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(Settings::default_for_dev().zoom(), 1.0);
     }
 
     /// A settings file written before the theme field existed still loads, with the theme
@@ -209,6 +244,7 @@ mod tests {
                 rest_scheme: RestScheme::Https,
             },
             theme: Some(Theme::Dark),
+            ui_scale: None,
         };
         let healed = heal_stale_server(stale);
         assert_eq!(healed.server, default_production_server_endpoint());
@@ -231,6 +267,7 @@ mod tests {
                 rest_scheme: RestScheme::Http,
             },
             theme: None,
+            ui_scale: None,
         };
         assert_eq!(heal_stale_server(mine.clone()), mine);
     }

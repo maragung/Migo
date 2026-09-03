@@ -99,6 +99,9 @@ impl App {
             .theme
             .unwrap_or_else(|| Theme::from_system(&cc.egui_ctx));
         theme::install(&cc.egui_ctx, theme);
+        // The saved interface scale, the same way. Applied before the first frame so the first
+        // thing a person sees is the size they chose, not a flash of the default snapping to it.
+        cc.egui_ctx.set_zoom_factor(settings.zoom());
 
         let net = Net::spawn(cc.egui_ctx.clone(), vault_path);
         // The server address is the one field the caller decides; everything else on the auth form
@@ -517,8 +520,12 @@ impl App {
 
         let mut selected: Option<Place> = None;
 
+        // The strip's height follows the chip it carries, and the chip follows the type scale
+        // (see [`widgets::tab_chip`]), so a bigger font buys a taller strip rather than a
+        // clipped chip.
+        let chip_row = ui.text_style_height(&egui::TextStyle::Small) + 2.0 * space::SM;
         egui::Panel::top("tab-strip")
-            .exact_size(46.0)
+            .exact_size(theme::bar_height(chip_row, space::XS))
             .frame(egui::Frame::new().fill(colors.nav))
             .show(ui, |ui| {
                 ui.add_space(space::XS);
@@ -584,8 +591,11 @@ impl App {
         let mut chat_pick: Option<migo_core::Id> = None;
         let mut chat_close: Option<migo_core::Id> = None;
 
+        // The bar carries the Small-styled "‹ Panels" button and chips, so its height is that
+        // style's row plus breathing room — not a pixel count tuned to one font size.
+        let bar = theme::bar_height(ui.text_style_height(&egui::TextStyle::Small), space::MD);
         egui::Panel::top("chat-bar")
-            .exact_size(38.0)
+            .exact_size(bar)
             .frame(egui::Frame::new().fill(BAR))
             .show(ui, |ui| {
                 ui.add_space(space::XS);
@@ -657,8 +667,11 @@ impl App {
 
         let mut close = false;
 
+        // Same derivation as the chat bar: the header names the panel in Small text, and its
+        // height is that row plus breathing room.
+        let bar = theme::bar_height(ui.text_style_height(&egui::TextStyle::Small), space::MD);
         egui::Panel::top("panel-header")
-            .exact_size(38.0)
+            .exact_size(bar)
             .frame(egui::Frame::new().fill(BAR))
             .show(ui, |ui| {
                 ui.add_space(space::XS);
@@ -727,8 +740,13 @@ impl App {
         let mut sign_out = false;
         let mut flip_theme = false;
 
+        // The banner's content is two text rows — the name in TITLE, the connection line in
+        // CAPTION — beside a 32pt avatar. Both rows are asked for, so the banner grows and
+        // shrinks with the type scale rather than clipping the moment the fonts do.
+        let rows = ui.text_style_height(&theme::named(theme::text_style::TITLE))
+            + ui.text_style_height(&theme::named(theme::text_style::CAPTION));
         egui::Panel::top("banner")
-            .exact_size(58.0)
+            .exact_size(theme::bar_height(rows, space::MD))
             .frame(egui::Frame::new())
             .show(ui, |ui| {
                 let rect = ui.max_rect();
@@ -936,6 +954,7 @@ impl App {
         let mut commands = std::mem::take(&mut self.commands);
         let mut navigate = None;
         let mut theme_choice = None;
+        let mut zoom_choice = None;
         let server = self.auth.server.clone();
         let mut context = Context {
             theme: self.theme,
@@ -945,6 +964,7 @@ impl App {
             commands: &mut commands,
             navigate: &mut navigate,
             theme_choice: &mut theme_choice,
+            zoom_choice: &mut zoom_choice,
         };
         crate::ui::chat::open(&mut context, &mut self.chat, conversation_id);
         self.commands = commands;
@@ -989,6 +1009,8 @@ impl eframe::App for App {
         let mut navigate: Option<Screen> = None;
         // A theme change requested by the banner's toggle or by a screen, applied after the frame.
         let mut theme_choice: Option<Theme> = None;
+        // An interface-scale change requested from the settings panel, applied after the frame.
+        let mut zoom_choice: Option<f32> = None;
         let screen = self.screen;
         let signed_in = screen == Screen::Chat && self.account.is_some();
         // A conversation opened anywhere inside this frame — a list row, a search hit, a joined
@@ -1025,6 +1047,7 @@ impl eframe::App for App {
                         commands: &mut self.commands,
                         navigate: &mut navigate,
                         theme_choice: &mut theme_choice,
+                        zoom_choice: &mut zoom_choice,
                     };
                     match self.place {
                         Place::Rooms => crate::ui::rooms::show(
@@ -1063,6 +1086,7 @@ impl eframe::App for App {
                             commands: &mut self.commands,
                             navigate: &mut navigate,
                             theme_choice: &mut theme_choice,
+                            zoom_choice: &mut zoom_choice,
                         };
                         crate::ui::chat::thread(ui, &mut context, &mut self.chat);
                     } else if let Some(panel) = self.right_panel {
@@ -1079,6 +1103,7 @@ impl eframe::App for App {
                             commands: &mut self.commands,
                             navigate: &mut navigate,
                             theme_choice: &mut theme_choice,
+                            zoom_choice: &mut zoom_choice,
                         };
                         match panel {
                             Place::Alerts => {
@@ -1138,6 +1163,7 @@ impl eframe::App for App {
                         commands: &mut self.commands,
                         navigate: &mut navigate,
                         theme_choice: &mut theme_choice,
+                        zoom_choice: &mut zoom_choice,
                     };
                     crate::ui::auth::show(ui, &mut context, &mut self.auth, screen);
                 }
@@ -1157,6 +1183,15 @@ impl eframe::App for App {
             self.theme = theme;
             theme::install(&ctx, theme);
             self.settings.theme = Some(theme);
+            self.persist_settings();
+        }
+
+        // The settings panel's scale control. Same after-the-frame timing as the theme, and the
+        // factor is rounded back to a whole percent before it is saved: the record is `Option<u8>`
+        // on purpose, and a choice made from the panel's steps is already whole.
+        if let Some(zoom) = zoom_choice {
+            ctx.set_zoom_factor(zoom);
+            self.settings.ui_scale = Some((zoom * 100.0).round() as u8);
             self.persist_settings();
         }
 

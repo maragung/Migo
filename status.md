@@ -2271,3 +2271,33 @@ Search sebelumnya tidak pernah terisi karena event-nya hanya menulis
 pane Rooms), elide baris percakapan mengikuti lebar nyata alih-alih
 hitungan karakter, dan salinan kosong ("Chats tab" yang tidak ada)
 diganti dengan arah yang benar.
+
+## 63. Desktop: skala antarmuka, bar yang mengikuti huruf, satu tombol tema (v0.16.1)
+
+Versi ini menyelesaikan tiga item desktop yang sengaja ditunda dari
+v0.16.0.
+
+**Skala antarmuka: zoom, bukan font-size.** Panel Settings kini punya
+seksi Appearance dengan kontrol ukuran teks empat langkah (Smaller,
+Normal, Larger, Largest) yang menggerakkan zoom egui — type, bar, dan
+jarak tumbuh sebagai satu kesatuan, karena itulah yang diminta orang
+yang minta antarmuka lebih besar. Pilihannya disimpan sebagai persen
+bulat (`"ui_scale": 130`, bukan `1.3000001`) di settings.json lewat
+`Option<u8>`, diterapkan sebelum frame pertama di `App::new`, dan
+dialirkan lewat `Context::zoom_choice` — pola yang sama dengan
+`theme_choice`: panel menyerahkan faktornya, shell yang menerapkan di
+antara frame.
+
+**Bar mengikuti type scale.** Empat bar chrome (tab strip, chat bar,
+panel header, banner) meninggalkan piksel tetap 46/38/38/58 yang
+dikalibrasi ke satu ukuran huruf. Helper baru
+`theme::bar_height(rows, pad)` bertanya berapa tinggi baris teks yang
+harus ditampungnya: bar satu baris dari row `TextStyle::Small`, banner
+dari jumlah row TITLE + CAPTION, dan chip tab ikut diturunkan dari
+row Small yang sama sehingga chip, teks, dan bar membesar bersama.
+Proporsi bar hidup di sini; ukuran absolut perangkat hidup di zoom.
+
+**Satu pemilik tema.** Toggle matahari/bulan hanya di banner — sama
+dengan web, satu kontrol per aksi, selalu terlihat. Salinan kedua di
+panel Settings dihapus; seksi Appearance kini menjelaskan tema aktif
+dan menunjuk ke kontrolnya di banner.

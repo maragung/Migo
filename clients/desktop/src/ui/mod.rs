@@ -147,6 +147,12 @@ pub struct Context<'a> {
     /// settings panel that had to round-trip the network thread to flip a palette would feel broken
     /// on a bad link.
     pub theme_choice: &'a mut Option<Theme>,
+    /// An interface-scale change requested from a screen, applied after the frame.
+    ///
+    /// Same reasoning as [`Context::theme_choice`]: a zoom is a window's own property, so the
+    /// settings panel hands the factor back and the shell applies it where the style lives —
+    /// once, between frames, rather than from inside a layout closure mid-draw.
+    pub zoom_choice: &'a mut Option<f32>,
 }
 
 impl Context<'_> {
@@ -163,5 +169,10 @@ impl Context<'_> {
     /// Asks to redraw the whole window in the other theme once this frame is finished.
     pub fn want_theme(&mut self, theme: Theme) {
         *self.theme_choice = Some(theme);
+    }
+
+    /// Asks to redraw the whole window at another interface scale once this frame is finished.
+    pub fn want_zoom(&mut self, zoom: f32) {
+        *self.zoom_choice = Some(zoom);
     }
 }
