@@ -2178,3 +2178,15 @@ karena angka lamanya per-room dan tidak dicatat. Regresi menaikkan
 kasus-kasusnya: orang asing tanpa teman mendapat 33 di room publiknya,
 kapasitas bernama 34, 2, bahkan 5000 semuanya diganti 33, dan tangga
 pertemanan diuji ulang sebagai perilaku managed.
+
+**Desktop ikut me-reload captcha dari penolakan.** Paritasnya yang
+tertinggal sebelumnya: web sudah menukar gambar dari `error.captcha`,
+desktop masih memaksa pengguna mencari tombol refresh. `RestError::Server`
+kini membawa challenge pengganti (boxed, seperti di server — error arm
+tetap seukuran pointer), dan jalur bootstrap menyerahkannya langsung
+sebagai `Event::CaptchaChallenge`: gambar bertukar tanpa round trip
+kedua, dengan `CaptchaRefused` tetap menjadi fallback untuk penolakan
+tanpa gantian. `hold()` juga menghapus jawaban yang sedang diketik saat
+gambar berganti — bacaan terhadap gambar lama tidak boleh ikut ke
+percobaan berikutnya. Regresi memaku parsing envelope dengan dan tanpa
+`captcha`, dan adopsi pengganti yang mengosongkan jawaban.

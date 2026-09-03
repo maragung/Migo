@@ -22,11 +22,19 @@ pub enum RestError {
     /// The server answered with its error envelope. The message is the server's own
     /// `public_message()`, which is the only string it ever puts on the wire — internal detail stays
     /// on the server by construction (brief section 161), so it is safe to show verbatim.
+    ///
+    /// `captcha` is the replacement challenge the server minted with this refusal, when it did: a
+    /// submitted proof is spent whatever the verdict, so a refusal that carries one is the next
+    /// challenge already in hand — no round trip to fetch what the server just offered. Boxed
+    /// because the challenge carries a rendered PNG's worth of base64 and `Result<T, RestError>`
+    /// crosses every call in this module — the error arm stays the size of a pointer, not of a
+    /// picture.
     #[error("{message}")]
     Server {
         code: u32,
         symbol: String,
         message: String,
+        captcha: Option<Box<CaptchaChallenge>>,
     },
 
     #[error("the server's answer was not in the expected form")]
@@ -230,6 +238,10 @@ struct ErrorBody {
     code: u32,
     symbol: String,
     message: String,
+    /// The fresh challenge a captcha-gated refusal carries, when it carries one. Absent on
+    /// every other envelope, and `default`ed so an older server's refusals parse unchanged.
+    #[serde(default)]
+    captcha: Option<CaptchaChallenge>,
 }
 
 /// One device of the signed-in account, as `GET /v1/auth/sessions` reports it.
@@ -841,6 +853,7 @@ impl Rest {
                 code: envelope.error.code,
                 symbol: envelope.error.symbol,
                 message: envelope.error.message,
+                captcha: envelope.error.captcha.map(Box::new),
             },
             Err(_) => {
                 if status >= 500 {
@@ -850,5 +863,35 @@ impl Rest {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The refusal envelope may carry the replacement challenge the server minted with it, and
+    /// an older server's refusals arrive without the field at all — both must parse. The
+    /// mapping into `RestError::Server` is three field moves and a box, so parsing is the part
+    /// that can rot.
+    #[test]
+    fn the_error_body_parses_a_replacement_captcha_and_tolerates_its_absence() {
+        let with = serde_json::from_str::<ErrorEnvelope>(
+            r#"{"error":{"code":1306,"symbol":"USERNAME_TAKEN","message":"that name is taken",
+                "captcha":{"challenge_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "image_png_base64":"aGVsbG8=","mode":"image","ttl_seconds":120}}}"#,
+        )
+        .expect("an envelope with a captcha parses");
+        let challenge = with.error.captcha.expect("the captcha crossed");
+        assert_eq!(challenge.challenge_id, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(challenge.image_png_base64, "aGVsbG8=");
+        assert_eq!(challenge.mode, "image");
+        assert_eq!(challenge.ttl_seconds, 120);
+
+        let without = serde_json::from_str::<ErrorEnvelope>(
+            r#"{"error":{"code":1300,"symbol":"VALIDATION_FAILED","message":"no"}}"#,
+        )
+        .expect("an envelope without a captcha parses");
+        assert!(without.error.captcha.is_none());
     }
 }

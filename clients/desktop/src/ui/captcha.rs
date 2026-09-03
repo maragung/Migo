@@ -72,6 +72,11 @@ impl CaptchaState {
                 self.image = Some(image);
                 self.texture = None;
                 self.failure = None;
+                // The picture changed, so whatever was typed belongs to it: a replacement
+                // that arrives with a refusal swaps the challenge out from under an answer
+                // that may still be on screen, and carrying it into the retry would submit
+                // the old reading against the new question.
+                self.answer.clear();
             }
             None => {
                 self.forget();
@@ -361,5 +366,45 @@ mod tests {
 
         captcha.answer = "AB3D7IOS".to_owned();
         assert!(captcha.take_proof().is_none(), "too long to send");
+    }
+
+    /// A refusal's replacement lands exactly like a fetched one — and the part worth pinning is
+    /// what it does to the answer already on screen: the picture changed, so the reading typed
+    /// against the old one is void, not carried into the retry.
+    #[test]
+    fn a_replacement_challenge_voids_the_answer_it_interrupted() {
+        let pixels = image::ImageBuffer::from_pixel(2, 2, image::Rgba([0u8, 0, 0, 255]));
+        let mut png = Vec::new();
+        pixels
+            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encoding a 2x2 PNG cannot fail");
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&png);
+
+        let mut captcha = CaptchaState::default();
+        captcha.hold(challenge("01ARZ3NDEKTSV4RRFFQ69G5FAV", &encoded));
+        captcha.answer = "  a b\t3d7 ".to_owned();
+
+        captcha.hold(challenge("01ARZ3NDEKTSV4RRFFQ69G5FAW", &encoded));
+        assert_eq!(
+            captcha.challenge_id.as_deref(),
+            Some("01ARZ3NDEKTSV4RRFFQ69G5FAW"),
+            "the replacement is the held challenge now"
+        );
+        assert_eq!(captcha.answer, "", "the old picture's answer is void");
+        assert!(
+            captcha.take_proof().is_none(),
+            "no proof exists until the new picture is read"
+        );
+    }
+
+    /// A challenge as the server issues it, around an encoded picture the tests share.
+    fn challenge(id: &str, image_png_base64: &str) -> CaptchaChallenge {
+        CaptchaChallenge {
+            challenge_id: id.to_owned(),
+            image_png_base64: image_png_base64.to_owned(),
+            mode: "image".to_owned(),
+            ttl_seconds: 120,
+        }
     }
 }

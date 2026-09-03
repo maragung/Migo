@@ -982,13 +982,23 @@ impl Worker {
                 }
                 // A captcha refusal is not a dead form: the attempt consumed the challenge
                 // either way, so tell the UI to drop it and draw a fresh one, and let the
-                // ordinary failure path below keep the form standing for the retry.
-                if matches!(
-                    &error,
+                // ordinary failure path below keep the form standing for the retry. A refusal
+                // that carries its own replacement skips even that round trip — the server
+                // minted the next challenge with the refusal, so it is handed straight to the
+                // form as though it had been fetched.
+                match &error {
+                    RestError::Server {
+                        captcha: Some(challenge),
+                        ..
+                    } => self
+                        .sink
+                        .send(Event::CaptchaChallenge((**challenge).clone())),
                     RestError::Server { symbol, .. }
-                        if CAPTCHA_REFUSAL_SYMBOLS.contains(&symbol.as_str())
-                ) {
-                    self.sink.send(Event::CaptchaRefused);
+                        if CAPTCHA_REFUSAL_SYMBOLS.contains(&symbol.as_str()) =>
+                    {
+                        self.sink.send(Event::CaptchaRefused);
+                    }
+                    _ => {}
                 }
                 return self.fail(error.to_string());
             }
