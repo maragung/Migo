@@ -1911,3 +1911,25 @@ bukan emoji yang berbeda wajah per OS.
 
 Test: store (identitas salt, upsert, byte round-trip verbatim, urutan
 terbaru-dulu, lupa satu baris tak menghapus tetangganya) + 296 web.
+
+## 55. Friends sekali sebut, ikon daftar di kanan, presence naik ke banner (v0.15.0)
+
+Layar Friends pernah menyebut namanya dua kali — judul panel, lalu
+heading seksi dengan kata yang sama — dan kontrol presence milik akun
+tersimpan di dalam panel itu, jauh dari identitas yang dikontrolnya.
+Sekarang panel adalah daftarnya: satu judul "Friends", dan di kanannya
+baris ikon horizontal — user-plus untuk Requests, block untuk Blocked,
+sparkle untuk Suggestions — yang mengganti isi panel; ikon terpilih
+bertanda, dan tiap ikon membawa hitungan apa yang dipegangnya
+(request menunggu terlihat tanpa harus dibuka). Daftar teman sendiri
+tak butuh heading di bawah judul yang sudah menamainya.
+
+Presence dan status naik ke banner profil: dropdown keadaan duduk di
+samping kiri chip coin dengan kaca yang sama, input status di bawah
+baris @username — di-seed sekali dari status yang profil sudah bawa —
+dan titik presence di samping nama kini mewarnai sesuai keadaan yang
+dropdown pegang. Picker pecah jadi dua kontrol (PresenceSelect,
+StatusInput) untuk dua kedudukan itu; keduanya tetap publish
+terkontrol penuh, dan di ponsel banner tetap satu baris ambient —
+input ikut baris @username yang menyembunyikan diri. Glyph baru:
+user-plus dan block.
