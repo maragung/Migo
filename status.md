@@ -2031,3 +2031,38 @@ menyamarkan pasangan (NOT_FOUND vs PRIVACY_RESTRICTED, section 180)
 sengaja tak punya entri: keduanya jatuh ke fallback generik yang lebih
 jujur ("The server turned that down. It is not your connection…")
 tanpa pernah membedakan keduanya.
+
+## 59. Dua opcode yang tak pernah menjawab: ROOM_LEAVE dan PRESENCE_SET kini meng-ack (v0.15.3)
+
+Audit menyeluruh login, register, pertemanan, rooms, dan chat di
+produksi (probe SDK tiga akun: aturan register, login dan kolaps
+enumerasi, siklus pertemanan penuh, DM dua arah terdekripsi, siklus
+room) menemukan 21 perilaku benar dan satu kelas bug di lapisan
+dispatch: handler `ROOM_LEAVE` dan `PRESENCE_SET` menjalankan service,
+mempublish fanout, lalu diam — tidak pernah `context.reply`, padahal
+SDK meng-`rpc.call` keduanya dengan timer 30 detik. Efeknya nyata:
+anggota yang leave di client mana pun menunggu 30 detik lalu timeout
+padahal leave-nya berhasil; simpan custom status di panel profil
+terlihat gagal setelah 30 detik padahal presence-nya terpasang.
+Akar doktrinnya ada di header dispatch lama ("`set` dan `leave`
+mengembalikan `Option<Fanout>` dan tidak dijawab") — diganti: yang
+menentukan jawab-bukannya adalah apa yang *client* tunggu (RPC vs
+notify), bukan bentuk return service. `MessageReceipt` dan `Typing`
+benar (notify, memang tanpa jawab); keduanya kini meng-ack duluan,
+baru publish, dan ack-nya bersyarat tidak pada fanout — jalur
+idempoten `Ok(None)` (leave yang kedua kalinya) tetap dijawab.
+
+Regresinya dijaga dari sisi socket: `tests/dispatch_replies.rs`
+membangun node utuh (gateway, dispatcher, auth, rooms, listener TCP
+sungguhan, tanpa double), mendaftar akun lewat pintu depan, lalu
+mengirim PRESENCE_SET dan dua ROOM_LEAVE (member + idempotent) sebagai
+frame dan meng-assert balasan datang: correlation benar, bukan error,
+`Acknowledged ok`. Diverifikasi menangkap bug: reply dihapus → test
+gagal dalam 5 detik.
+
+Satu temuan terdokumentasi: `custom_status` tidak punya jalur tulis —
+presence menolaknya (FEATURE_DISABLED, memang by design: rumahnya
+kolom profil) dan `ProfileUpdate` belum membawa field itu. Setelah fix
+ini, simpan custom status gagal cepat dengan pesan jelas ("That
+feature has been switched off on this server.") alih-alih hang 30
+detik; penambahan kolomnya menunggu evolusi IDL profil.

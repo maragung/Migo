@@ -22,13 +22,18 @@
 //!    A method that returns an `Option<Fanout>` describes a change to publish to a topic; `None`
 //!    means nothing changed and section 156 forbids a frame, so nothing is sent.
 //!
-//! # Reply-or-fan-out follows the return type, not a table
+//! # Reply-or-fan-out follows the caller, not the return type
 //!
-//! There is no per-opcode configuration of "does this reply". The domain trait already encodes it:
-//! `send`, `delete`, `sync`, `conversations`, `create`, `join`, and `list` return a payload and are
-//! answered; `receipt`, `typing`, `set`, and `leave` return only an `Option<Fanout>` and are not.
-//! `send`, `delete`, and `join` do both — the caller gets the authoritative reply, and everyone
-//! else on the topic gets the fan-out — so the reply goes first.
+//! There is no per-opcode configuration of "does this reply" — but the deciding fact is what the
+//! *client* awaits, not what the service returns. The SDK sends an opcode as either an RPC
+//! (`rpc.call`, with a request timer) or a notification (`rpc.notify`, fire-and-forget). An RPC
+//! opcode must get exactly one `reply` on every success path — including the ones where the
+//! service returns `Ok(None)` and there is no fan-out to ride on; a handler that replies only
+//! inside `if let Some(fanout)` leaves the no-op path hanging until the client's timer fires.
+//! `MessageReceipt` and `Typing` are notifications and correctly never reply. `PresenceSet` and
+//! `RoomLeave` are RPCs the SDK awaits, so they acknowledge first and then publish; the
+//! regression tests in `tests/dispatch_replies.rs` drive both over a real socket, because this
+//! silence is invisible from inside the process.
 //!
 //! # Excluding the sender
 //!
@@ -510,7 +515,12 @@ impl Dispatcher for AppDispatcher {
                     now,
                 );
                 let request: PresenceUpdate = from_frame(frame).map_err(fault::from_wire)?;
-                if let Some(fanout) = self.presence.set(&caller, request).await? {
+                let fanout = self.presence.set(&caller, request).await?;
+                // The caller awaits this acknowledgement — an SDK `presence.set` is an RPC, not a
+                // fire-and-forget publish — so it must land even when no fanout follows (an
+                // unchanged state publishes nothing but still succeeded).
+                context.reply(&Acknowledged { ok: true })?;
+                if let Some(fanout) = fanout {
                     let topic = Topic {
                         kind: TopicKind::User,
                         id: fanout.subject_id,
@@ -556,7 +566,13 @@ impl Dispatcher for AppDispatcher {
                     now,
                 );
                 let request: RoomLeaveRequest = from_frame(frame).map_err(fault::from_wire)?;
-                if let Some(fanout) = self.rooms.leave(&caller, request).await? {
+                let fanout = self.rooms.leave(&caller, request).await?;
+                // Reply before the fanout, and unconditionally: the service returns Ok(None)
+                // for an idempotent no-op leave (not a member, or already gone), which is a
+                // success the caller still awaits an acknowledgement for — gating the reply on
+                // the fanout left those paths hanging until the client's request timer fired.
+                context.reply(&Acknowledged { ok: true })?;
+                if let Some(fanout) = fanout {
                     publish_rooms(context, fanout)?;
                 }
                 Ok(())
