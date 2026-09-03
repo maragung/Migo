@@ -4571,6 +4571,7 @@ export interface RoomCreate {
   /** RoomKind: 1=Public, 2=Managed. */
   kind: number;
   topic?: string;
+  /** Requested capacity. Honoured for managed rooms within what the creator's friendships earn; a public room is seated at its fixed capacity and ignores this field. */
   maxMembers?: number;
 }
 

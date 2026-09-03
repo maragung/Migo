@@ -2537,7 +2537,8 @@
      "name": "max_members",
      "type": "u32",
      "optional": true,
-     "id": 2
+     "id": 2,
+     "doc": "Requested capacity. Honoured for managed rooms within what the creator's friendships earn; a public room is seated at its fixed capacity and ignores this field."
     }
    ]
   },

@@ -7237,6 +7237,7 @@ pub struct RoomCreate {
     /// RoomKind: 1=Public, 2=Managed.
     pub kind: u32,
     pub topic: Option<String>,
+    /// Requested capacity. Honoured for managed rooms within what the creator's friendships earn; a public room is seated at its fixed capacity and ignores this field.
     pub max_members: Option<u32>,
 }
 

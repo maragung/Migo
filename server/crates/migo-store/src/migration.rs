@@ -73,6 +73,7 @@ impl MigratorTrait for Migrator {
             Box::new(ProfileGender),
             Box::new(RoomNetworkBan),
             Box::new(ConversationGroups),
+            Box::new(PublicRoomCapacity),
         ]
     }
 }
@@ -324,6 +325,42 @@ impl MigrationTrait for ConversationGroups {
         // Same posture as every migration before it.
         Err(DbErr::Migration(
             "0008_conversation_groups cannot be rolled back: create a new database instead"
+                .to_owned(),
+        ))
+    }
+}
+
+/// `0009_public_room_capacity` -- the one-statement repair that seats every
+/// public room at the fixed 33. The rule itself lives in the rooms service
+/// (`capacity_for` in `crates/migo-rooms`); this migration catches the rooms
+/// created before the rule changed. See
+/// `server/migrations/0009_public_room_capacity.sql`.
+struct PublicRoomCapacity;
+
+impl MigrationName for PublicRoomCapacity {
+    fn name(&self) -> &str {
+        "0009_public_room_capacity"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for PublicRoomCapacity {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!(
+                "../../../migrations/0009_public_room_capacity.sql"
+            ))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Refused on purpose, and for a reason specific to this one: rolling back
+        // would have to pick the old number, and the old numbers were per-room
+        // choices the migration does not keep. There is no honest down.
+        Err(DbErr::Migration(
+            "0009_public_room_capacity cannot be rolled back: the prior capacities are not recorded"
                 .to_owned(),
         ))
     }

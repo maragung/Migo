@@ -73,15 +73,17 @@ pub const PERMANENT_BAN_MS: i64 = 253_402_300_799_000;
 /// so an operator who typed `1` finds out instead of wondering why the number moved.
 pub const MIN_ROOM_CAPACITY: i32 = 2;
 
-/// Capacity a creator with no friends at all may claim.
+/// Capacity a creator with no friends at all may claim for a managed room.
 ///
 /// A stranger's room is capped at a handful of seats because a room is a gathering and a
 /// gathering of strangers is the shape spam takes: an account that knows nobody on the
-/// service has vouched for nothing, and handing it a five-hundred-seat hall on day one is
-/// how a raid gets its venue.
+/// service has vouched for nothing, and handing it a fifty-seat hall on day one is
+/// how a raid gets its venue. Public rooms are exempt — their capacity is fixed by the
+/// kind (see [`PUBLIC_ROOM_MAX_MEMBERS`]) — so this floor and the friend ladder below
+/// shape managed rooms only.
 pub const BASE_ROOM_CAPACITY: i32 = 5;
 
-/// Capacity each accepted friendship adds, up to the kind's ceiling.
+/// Capacity each accepted friendship adds to a managed room, up to the managed ceiling.
 ///
 /// Ten seats per friend. A friend is a real person who answered a real request, which makes
 /// it the cheapest signal the store already carries for "this account is known to people
@@ -89,10 +91,13 @@ pub const BASE_ROOM_CAPACITY: i32 = 5;
 /// instead of with anything the creator can type.
 pub const CAPACITY_PER_FRIEND: i32 = 10;
 
-/// Largest capacity a public room may be created with.
+/// The capacity of every public room, fixed.
 ///
-/// Public rooms are the open front of the service, and the delivery path behind one
-/// sequencer is honest about what it can serve.
+/// Not a ceiling but the number itself: a public room is the open front of the service,
+/// the delivery path behind one sequencer is honest about what it can serve, and a
+/// capacity the creator could choose would be a knob on a thing that is not theirs to
+/// size. Creation ignores any requested capacity for the kind, and migration
+/// `0009_public_room_capacity` seated the rooms made before the rule.
 pub const PUBLIC_ROOM_MAX_MEMBERS: i32 = 33;
 
 /// Largest capacity a managed room may be created with.
@@ -104,16 +109,18 @@ pub const MANAGED_ROOM_MAX_MEMBERS: i32 = 50;
 /// The capacity a creator may claim for a room of `kind`, given how many accepted
 /// friendships they have.
 ///
-/// `BASE_ROOM_CAPACITY + CAPACITY_PER_FRIEND × friends`, never above the kind's ceiling.
-/// An unknown kind has no ceiling of its own, so it takes the public one — callers refuse
-/// `Unknown` long before this, and a default that silently granted the *larger* ceiling
-/// would be the wrong mistake to make.
+/// A public room is fixed: [`PUBLIC_ROOM_MAX_MEMBERS`], whatever the creator's friendships
+/// or preferences. Everything else — managed rooms, in practice — earns
+/// `BASE_ROOM_CAPACITY + CAPACITY_PER_FRIEND × friends`, never above the managed ceiling.
+/// An unknown kind takes the public number: callers refuse `Unknown` long before this,
+/// and a default that silently granted the *larger* ceiling would be the wrong mistake
+/// to make.
 #[must_use]
 pub fn capacity_for(kind: RoomKind, friends: u64) -> i32 {
-    let ceiling = match kind {
-        RoomKind::Managed => MANAGED_ROOM_MAX_MEMBERS,
-        _ => PUBLIC_ROOM_MAX_MEMBERS,
-    };
+    if matches!(kind, RoomKind::Public) {
+        return PUBLIC_ROOM_MAX_MEMBERS;
+    }
+    let ceiling = MANAGED_ROOM_MAX_MEMBERS;
     // Saturating: a friend count no i32 could hold must not wrap to a tiny allowance.
     let earned = i64::from(BASE_ROOM_CAPACITY).saturating_add(
         i64::from(CAPACITY_PER_FRIEND).saturating_mul(i64::try_from(friends).unwrap_or(i64::MAX)),

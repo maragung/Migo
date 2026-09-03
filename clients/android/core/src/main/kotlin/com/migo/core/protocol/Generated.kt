@@ -5825,6 +5825,7 @@ data class RoomCreate(
     /** RoomKind: 1=Public, 2=Managed. */
     val kind: Long,
     val topic: String? = null,
+    /** Requested capacity. Honoured for managed rooms within what the creator's friendships earn; a public room is seated at its fixed capacity and ignores this field. */
     val maxMembers: Long? = null,
 ) {
     fun encode(w: Writer) {

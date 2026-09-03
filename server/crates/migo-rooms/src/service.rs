@@ -78,7 +78,7 @@ use crate::model::{
     capacity_for, slug_is_valid, Authorized, Caller, NewRoomRequest, RoomsConfig, Sanction,
     Settings, TopicChange, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, MAX_MUTE_MS, MAX_NAME_LEN,
     MAX_QUERY_LEN, MAX_REASON_LEN, MAX_ROSTER_PAGE, MAX_SLOW_MODE_SECONDS, MAX_TOPIC_LEN,
-    MIN_ROOM_CAPACITY, PERMANENT_BAN_MS,
+    MIN_ROOM_CAPACITY, PERMANENT_BAN_MS, PUBLIC_ROOM_MAX_MEMBERS,
 };
 use crate::permission;
 use crate::traits::Roomkeeper;
@@ -735,27 +735,37 @@ where
             self.meters.create(CreateOutcome::RateLimited);
             return Err(err);
         }
-        // The capacity a creator may claim grows with their friendships: a room of this
-        // kind, sized for how many people on this service know the creator. Read here
-        // and not in `validate_new` because it is a store read, and a store read is a
-        // thing the rate limiter has had its say about first.
-        let friends = self
-            .store
-            .count_relationships(caller.account_id, RelationshipKind::Friend)
-            .await?;
-        let allowed = capacity_for(request.kind, friends);
-        if let Some(max) = request.max_members {
-            if max > allowed {
-                self.meters.create(CreateOutcome::Invalid);
-                return Err(fault::validation(
-                    "max_members",
-                    &format!(
-                        "above the capacity your friendships allow: {} for this kind",
-                        allowed
-                    ),
-                ));
+        // The capacity a managed room may claim grows with the creator's friendships:
+        // a room of that kind, sized for how many people on this service know the
+        // creator. Read here and not in `validate_new` because it is a store read,
+        // and a store read is a thing the rate limiter has had its say about first.
+        // A public room needs no read at all — its capacity is fixed by the kind, so
+        // the friendships are not consulted and any requested number is replaced.
+        let max_members = if request.kind == RoomKind::Public {
+            PUBLIC_ROOM_MAX_MEMBERS
+        } else {
+            let friends = self
+                .store
+                .count_relationships(caller.account_id, RelationshipKind::Friend)
+                .await?;
+            let allowed = capacity_for(request.kind, friends);
+            if let Some(max) = request.max_members {
+                if max > allowed {
+                    self.meters.create(CreateOutcome::Invalid);
+                    return Err(fault::validation(
+                        "max_members",
+                        &format!(
+                            "above the capacity your friendships allow: {} for this kind",
+                            allowed
+                        ),
+                    ));
+                }
             }
-        }
+            // A creator who named no capacity gets everything their friendships allow.
+            // The ceiling is the creator's, not a deployment default: a room is sized
+            // by who vouches for the person who made it.
+            request.max_members.unwrap_or(allowed)
+        };
         // Advisory, not authoritative. The store owns slug uniqueness and will refuse
         // a collision on its own; this read exists so the ordinary case — the name is
         // taken — comes back as `ALREADY_EXISTS` naming the field, instead of as the
@@ -778,10 +788,9 @@ where
             kind: request.kind,
             owner_id: caller.account_id,
             home_region: self.config.home_region.clone(),
-            // A creator who named no capacity gets everything their friendships allow.
-            // The ceiling is the creator's, not a deployment default: a room is sized
-            // by who vouches for the person who made it.
-            max_members: request.max_members.unwrap_or(allowed),
+            // Fixed for public rooms (a property of the kind, not a choice the creator
+            // makes); for everything else, what the friendships earn — see above.
+            max_members,
             encryption: view::encryption_for(request.kind),
             created_at: caller.now,
         };

@@ -699,7 +699,11 @@ async fn creation_refuses_what_it_cannot_store() {
             .create(
                 &alice,
                 NewRoomRequest {
+                    // Managed, because the allowance check is that kind's now: a
+                    // public room replaces whatever capacity the request named.
+                    kind: RoomKind::Managed,
                     max_members: Some(1_000_000),
+                    slug: "managed-hall".to_string(),
                     ..request(LOBBY, "Lobby")
                 },
             )
@@ -779,15 +783,64 @@ async fn creation_runs_out_of_budget_eventually() {
 }
 
 #[tokio::test]
-async fn a_strangers_room_is_small() {
+async fn a_public_room_seats_thirty_three_whatever_the_creator_asks() {
     let harness = Harness::new();
     let alice = caller(ALICE, ALICE_PHONE, NOW);
-    // Nobody vouches for Alice: the base capacity, and not a seat more.
+    // Nobody vouches for Alice, and it changes nothing: a public room's capacity is
+    // a property of the kind, not of who founded it or what they typed.
     let summary = harness
         .rooms
         .create(&alice, request(LOBBY, "Lobby"))
         .await
         .expect("a stranger may still found a room");
+    let room = harness.room_row(summary.room_id).await;
+    assert_eq!(room.max_members, PUBLIC_ROOM_MAX_MEMBERS);
+    assert_eq!(room.home_region, "local");
+    // A named capacity is neither honoured nor refused — it is replaced. More seats
+    // than the kind fixes, and fewer, land at the same number; the only request the
+    // service still rejects on capacity is one below the two-seat minimum, which
+    // `validate_new` owns.
+    for named in [PUBLIC_ROOM_MAX_MEMBERS + 1, 2, 5000] {
+        let summary = harness
+            .rooms
+            .create(
+                &alice,
+                NewRoomRequest {
+                    max_members: Some(named),
+                    slug: format!("public-{}", named),
+                    ..request(LOBBY, "Lobby")
+                },
+            )
+            .await
+            .unwrap_or_else(|_| {
+                panic!("a public room is created whatever capacity was named ({named})")
+            });
+        assert_eq!(
+            harness.room_row(summary.room_id).await.max_members,
+            PUBLIC_ROOM_MAX_MEMBERS,
+            "the named capacity {named} is replaced by the kind's fixed number"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_strangers_managed_room_is_small() {
+    let harness = Harness::new();
+    let alice = caller(ALICE, ALICE_PHONE, NOW);
+    // Nobody vouches for Alice: the managed ladder starts at the base capacity, and
+    // not a seat more.
+    let summary = harness
+        .rooms
+        .create(
+            &alice,
+            NewRoomRequest {
+                kind: RoomKind::Managed,
+                slug: "managed-lobby".to_string(),
+                ..request(LOBBY, "Lobby")
+            },
+        )
+        .await
+        .expect("a stranger may still found a managed room");
     let room = harness.room_row(summary.room_id).await;
     assert_eq!(room.max_members, BASE_ROOM_CAPACITY);
     assert_eq!(room.home_region, "local");
@@ -797,8 +850,9 @@ async fn a_strangers_room_is_small() {
             .create(
                 &alice,
                 NewRoomRequest {
+                    kind: RoomKind::Managed,
                     max_members: Some(BASE_ROOM_CAPACITY + 1),
-                    slug: "second-room".to_string(),
+                    slug: "managed-greedy".to_string(),
                     ..request(LOBBY, "Lobby")
                 },
             )
@@ -809,18 +863,21 @@ async fn a_strangers_room_is_small() {
 }
 
 #[tokio::test]
-async fn capacity_grows_ten_seats_per_friend() {
+async fn managed_capacity_grows_ten_seats_per_friend() {
     let harness = Harness::new();
     let alice = caller(ALICE, ALICE_PHONE, NOW);
     harness.befriend(ALICE, BOB, NOW).await;
     harness.befriend(ALICE, CAROL, NOW).await;
-    // 5 + 10 × 2 = 25 seats, and an explicit ask may claim all of them.
+    // The friendship ladder is the managed room's: 5 + 10 × 2 = 25 seats, and an
+    // explicit ask may claim all of them.
     let summary = harness
         .rooms
         .create(
             &alice,
             NewRoomRequest {
+                kind: RoomKind::Managed,
                 max_members: Some(25),
+                slug: "managed-hall".to_string(),
                 ..request(LOBBY, "Lobby")
             },
         )
@@ -837,8 +894,9 @@ async fn capacity_grows_ten_seats_per_friend() {
             .create(
                 &alice,
                 NewRoomRequest {
+                    kind: RoomKind::Managed,
                     max_members: Some(26),
-                    slug: "greedy-room".to_string(),
+                    slug: "managed-greedy".to_string(),
                     ..request(LOBBY, "Lobby")
                 },
             )
@@ -863,6 +921,7 @@ async fn capacity_grows_ten_seats_per_friend() {
         .create(
             &alice,
             NewRoomRequest {
+                kind: RoomKind::Managed,
                 slug: "third-room".to_string(),
                 ..request(LOBBY, "Lobby")
             },
@@ -877,10 +936,11 @@ async fn capacity_grows_ten_seats_per_friend() {
 }
 
 #[tokio::test]
-async fn the_kind_bounds_the_ceiling() {
+async fn the_kind_decides_the_capacity() {
     let harness = Harness::new();
     let alice = caller(ALICE, ALICE_PHONE, NOW);
-    // Five friendships would earn 55 seats; the kinds stop earlier.
+    // Five friendships would earn 55 seats on the managed ladder; the kinds stop
+    // earlier, and the public room does not climb at all.
     for other in [BOB, CAROL, DAVE, STRANGER, 12] {
         harness.befriend(ALICE, other, NOW).await;
     }
@@ -892,7 +952,7 @@ async fn the_kind_bounds_the_ceiling() {
     assert_eq!(
         harness.room_row(public.room_id).await.max_members,
         PUBLIC_ROOM_MAX_MEMBERS,
-        "a public room stops at its own ceiling"
+        "a public room's capacity is fixed, whatever the friendships"
     );
     let managed = harness
         .rooms
@@ -1165,7 +1225,12 @@ async fn a_full_room_refuses_the_next_arrival() {
         .create(
             &caller(ALICE, ALICE_PHONE, NOW),
             NewRoomRequest {
+                // Managed, because a two-seat room only exists when the request's
+                // capacity is honoured — a public room is seated at 33 whatever it
+                // asked for.
+                kind: RoomKind::Managed,
                 max_members: Some(2),
+                slug: "two-seats".to_string(),
                 ..request(LOBBY, "Two Seats")
             },
         )
