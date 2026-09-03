@@ -348,6 +348,10 @@ for (const file of readdirSync(MIGRATIONS)
     if (/^create (unique )?index /i.test(head)) continue;
     // A partition has the parent's columns by definition; the entity addresses the parent.
     if (/^create table \w+ partition of /i.test(head)) continue;
+    // A data backfill (`update … set …`) moves rows, not schema — the entity describes the
+    // table's shape, which the statement leaves alone. Named explicitly rather than skipped
+    // by default, for the same reason as the index skip above.
+    if (/^update \w+ set /i.test(head)) continue;
 
     // `alter table X add column …` grows a table an earlier migration created. The
     // definition is parsed by exactly the rules a create-table column is, then merged
