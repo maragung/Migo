@@ -2144,3 +2144,20 @@ tetap menjadi kegagalan. Penempatan panggilan sengaja tidak ikut
 fallback: pengguna yang menekan "video call" meminta video, dan
 menyerahkannya suara diam-diam adalah UI yang berbohong tentang apa
 yang ia lakukan.
+
+**Captcha ter-reload oleh server saat submit ditolak.** Bukti captcha
+sekali pakai: baris challenge dihapus saat gate membacanya, benar
+salah tidak penting — jadi detik form register gagal adalah juga detik
+gambar di layar mati, dan satu-satunya jalan pulang pengguna adalah
+tombol refresh. Kini penolakan itu sendiri yang membawa challenge
+berikutnya: register, login, dan recovery menyisipkan challenge
+segar (`error.captcha`, boxed agar error tetap seukuran pointer)
+setiap kali attempt membawa bukti atau penolakannya adalah milik
+gerbang itu sendiri (`CAPTCHA_REQUIRED` / `INVALID_CAPTCHA` /
+`CAPTCHA_EXPIRED`). Login salah password dari jaringan yang tak pernah
+menampilkan captcha tidak membawa apa pun — tidak ada widget untuk
+di-reload. SDK membacanya kembali (`RemoteError.captcha`), form
+register menyerahkannya langsung ke widget captcha, dan gambar bertukar
+di tempat — tanpa klik refresh, tanpa round trip kedua. Regresi
+integrasi memaku tiga bentuk penolakan itu plus kasus negatifnya, dan
+membuktikan challenge pengganti benar-benar hidup di store.
