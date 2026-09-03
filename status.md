@@ -2066,3 +2066,81 @@ kolom profil) dan `ProfileUpdate` belum membawa field itu. Setelah fix
 ini, simpan custom status gagal cepat dengan pesan jelas ("That
 feature has been switched off on this server.") alih-alih hang 30
 detik; penambahan kolomnya menunggu evolusi IDL profil.
+
+## 60. Chat, voice note, dan panggilan yang benar-benar tersambung (v0.15.4)
+
+Fase ini menutup lima kekosongan yang membuat fitur "ada tapi tidak
+bekerja" — semuanya ditemukan lewat audit berlapis (group chat,
+panggilan, voice note) lalu dipaku dari dua sisi sekaligus, server dan
+client, dengan regresi yang mengemudi socket sungguhan.
+
+**Media upload tidak pernah sekali pun berhasil.** `begin` menyegel
+token bermak (97 byte header + mime + tag 32 byte) yang tidak punya
+field di `MediaTicket` wire — dispatch mengirim `upload_id` 16 byte
+ke tempat token 129+ byte, dan setiap commit dari client mana pun
+mati sebagai `VALIDATION_FAILED: upload_ticket: unusable`. Karena file
+protokol generated adalah WIP milik pengguna, jembatannya dibangun di
+sisi server: peta _filed tickets_ (kap 8192, evict yang paling cepat
+kedaluwarsa) menyimpan token per `media_id`; trait `status/commit/
+abort` kini menerima `Id`; dispatch meneruskan `upload_id` apa adanya
+dan perpustakaan yang menyelesaikannya. Bug kedua di jembatan yang
+sama: `Commit.byte_size` `u64` dengan dispatch mengirim 0 (wire tidak
+membawa ukuran) sehingga cek kesepakatan ukuran tak pernah lolos —
+kini `Option<u64>`, `None` berarti "wire tidak bilang", dan jumlah
+byte milik storage tetap diperiksa terhadap klaim tiket. Regresinya
+`tests/media_wire.rs`: BEGIN → PUT → STATUS → COMMIT → FETCH_URL → GET
+dengan kesamaan byte penuh — jalur yang belum pernah hijau di
+produksi.
+
+**Voice note dari Chrome/Firefox akan ditolak sniff.** MediaRecorder
+menghasilkan `audio/webm` yang teridentifikasi sebagai `Identity::Webm`
+dan sniff memetakannya ke "video/webm" — whitelist Audio|VoiceNote
+kini menerima Webm, dengan regresi webm 8 KB yang commit di
+percakapan server-readable. (Safari tetap di luar jangkauan: ia merekam
+mp4; itu tertulis di dokumen, bukan disembunyikan.)
+
+**Panggilan tak berjawab kini punya undertaker.** `Callkeeper::sweep`
+ada tapi tidak pernah dipanggil dari migod — pemanggil yang
+browsernya mati tidak bisa cancel, penerima yang terdering tidak punya
+apa pun untuk di-decline, dan barisnya menjawab "ringing" selamanya.
+`App::spawn_call_sweeper` (tick 1 detik, `select` pada shutdown,
+dibangunkan dari `App::serve`) mempensiunkan ring kedaluwarsa dan
+menyiarkan `Call::ended_event()` — kini method publik di model — ke
+topik user _kedua_ pihak lewat `broadcast_to_topic`. Trait `sweep`
+mengembalikan `Vec<Call>`; penerbitnya yang memutuskan topiknya.
+
+**Dijawab di perangkat lain.** Answer dulu hanya terpublish ke
+pemanggil — penerima dengan dua perangkat (telepon dan laptop,
+keduanya berdering) terus berdering setelah salah satunya menjawab.
+`handle_answer` kini mem-publish `Connecting` ke topik user kedua
+pihak; client menambah `answersRingingCall` (Connecting/Connected pada
+ring yang tidak dilacak = "Answered on another device", bukan "Missed
+call") dan mirror lokal kedaluwarsa di sisi penerima — ring tidak
+pernah melewati undangannya. Dua regresi wire `tests/calls_wire.rs`
+dengan `MIGO_CALLS__RING_TTL_MS=5000`: satu ring tak dijawab oleh
+siapa pun dan kedua sesi tetap menerima `Ended(NoAnswer)`; satu
+answer dari "laptop" dan "telepon" yang masih berdering mendengar
+`Connecting`.
+
+**Anggota yang diundang kini mendengar grupnya.** Semua fanout
+messaging terpublish hanya ke topik percakapan — dan anggota yang baru
+ditambahkan tidak mungkin berlangganan topik yang belum pernah
+didengar klien-nya; grup baru muncul setelah refresh penuh. Event
+`Joined` yang sama kini juga terpublish ke topik user akun yang masuk,
+satu-satunya topik yang pasti sudah dilanggan setiap sesi sejak
+handshake; provider web menangkapnya (`Joined` atas nama akun sendiri
+untuk percakapan yang belum ada di daftar → muat ulang). Gap saudaranya
+juga ditutup: delta `State` (ganti nama) kini juga sampai ke topik user
+pelakunya — perangkat yang meminta rename dikecualikan dari salinan
+topik percakapan, jadi tanpa salinan itu layarnya terus menampilkan
+judul lama. Regresi `tests/groups_wire.rs` mengemudi undangan dan
+rename lewat TCP.
+
+**Menjawab video tanpa kamera.** `getUserMedia({video: true})` gagal →
+acceptCall menolak dengan `Busy` — kebohongan tentang perangkat yang
+sebenarnya bisa bicara. `answerMediaWithFallback` kini mencoba ulang
+sebagai audio saat kamera tidak ada; hanya kegagalan mikrofon yang
+tetap menjadi kegagalan. Penempatan panggilan sengaja tidak ikut
+fallback: pengguna yang menekan "video call" meminta video, dan
+menyerahkannya suara diam-diam adalah UI yang berbohong tentang apa
+yang ia lakukan.
