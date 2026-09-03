@@ -2161,3 +2161,20 @@ register menyerahkannya langsung ke widget captcha, dan gambar bertukar
 di tempat — tanpa klik refresh, tanpa round trip kedua. Regresi
 integrasi memaku tiga bentuk penolakan itu plus kasus negatifnya, dan
 membuktikan challenge pengganti benar-benar hidup di store.
+
+**Kapasitas room publik tetap 33.** Room publik adalah muka depan
+terbuka layanan ini, dan berapa banyak orang yang boleh masuk adalah
+keputusan layanan, bukan knob bagi pendirinya: `capacity_for` kini
+mengembalikan 33 untuk `Public` apa pun pertemanan sang pembuat, dan
+`create` mengganti nilai `max_members` yang diminta dengan angka itu —
+tidak ditolak, tidak dihormati, diganti, karena satu-satunya klien yang
+masih mengirim kapasitas adalah klien yang belum tahu aturannya berubah.
+Tangga pertemanan (5 + 10 per teman, plafon 50) tetap milik room
+managed, yang memang boleh dibaca server. Room yang dibuat sebelum
+aturan ini — termasuk dua room produksi yang duduk di 5000 kursi —
+diluruskan migrasi `0009_public_room_capacity`: satu `update` yang
+menempatkan setiap room `kind = 1` di 33, idempotent, tanpa `down`
+karena angka lamanya per-room dan tidak dicatat. Regresi menaikkan
+kasus-kasusnya: orang asing tanpa teman mendapat 33 di room publiknya,
+kapasitas bernama 34, 2, bahkan 5000 semuanya diganti 33, dan tangga
+pertemanan diuji ulang sebagai perilaku managed.
