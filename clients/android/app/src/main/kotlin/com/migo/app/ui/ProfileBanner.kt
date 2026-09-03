@@ -67,7 +67,16 @@ fun ProfileBanner(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box {
-                BannerAvatar(name = username, modifier = Modifier.clickable { menuOpen = true })
+                // The avatar's clickable is padded past the disc's own 43dp: this disc is the only
+                // entry to Profile, Wallet, Alerts, Search and sign-out, and a control that carries
+                // the whole account menu clears the 48dp touch minimum rather than the avatar's
+                // visual size.
+                BannerAvatar(
+                    name = username,
+                    modifier = Modifier
+                        .clickable { menuOpen = true }
+                        .padding(3.dp),
+                )
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                     for ((action, label) in listOf(
                         BannerAction.PROFILE to "My Profile",

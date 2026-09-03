@@ -64,7 +64,7 @@ sealed interface AppState {
      * Signed in. The conversation list is always present; [open] is the chat on top of it.
      *
      * The [section] is which destination the shell is showing — the new-ui-02 model's left panel:
-     * Friends, Chats, Rooms, Games and Feed as the system tabs, with the panels (Alerts, Search,
+     * Chats, Friends, Rooms, Games and Feed as the system tabs, with the panels (Alerts, Search,
      * Wallet, Profile) opened from the banner's avatar menu and covering the screen. Each section's
      * data lives in its own holder below, loaded on first entry and reloaded on demand; a section
      * never yet visited holds nulls, and its screen draws its skeleton.
@@ -98,12 +98,12 @@ sealed interface AppState {
     ) : AppState
 
     /**
-     * The shell's destinations. The first four are the reference's system tabs, in strip order; the
+     * The shell's destinations. The first five are the reference's system tabs, in strip order; the
      * rest are the panels the banner's avatar menu opens — they cover the screen rather than joining
      * the strip, which is the new-ui-02 model's phone story.
      */
     enum class Section {
-        FRIENDS, ROOMS, GAMES, FEED, ALERTS, SEARCH, WALLET, PROFILE;
+        CHATS, FRIENDS, ROOMS, GAMES, FEED, ALERTS, SEARCH, WALLET, PROFILE;
 
         /** True for the four panels the banner's menu opens, which cover the strip rather than join it. */
         val isPanel: Boolean

@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -75,10 +74,7 @@ fun SearchScreen(
         )
 
         if (state.search.loading) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(24.dp),
-                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
-            ) { CircularProgressIndicator() }
+            LoadingRow()
         } else if (query.isEmpty()) {
             Placeholder(text = "Find people by username, rooms by name,\nand your chats by title.", modifier = Modifier.weight(1f))
         } else if (

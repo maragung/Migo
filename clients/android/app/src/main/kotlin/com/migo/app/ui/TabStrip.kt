@@ -29,11 +29,12 @@ import com.migo.app.model.AppState
 /**
  * The left panel's tab strip: the new-ui-02 model's top navigation, as every client draws it.
  *
- * Four system tabs — Main (friends), Rooms, Games, Feed — the lists and streams a messenger
- * lives in. A conversation is never a chip here, exactly as the reference draws it: in the new
- * model a chat covers the screen the way a menu panel does, carrying its own way back, so the
- * strip is the lists and nothing else — which is also why it never has to stand down for a
- * thread again.
+ * Five system tabs — Chats, Friends, Rooms, Games, Feed — the lists and streams a messenger
+ * lives in. Chats leads because it is the product's centre: the conversation list is the
+ * tab the others ultimately feed. A conversation is never a chip here, exactly as the
+ * reference draws it: in the new model a chat covers the screen the way a menu panel does,
+ * carrying its own way back, so the strip is the lists and nothing else — which is also why
+ * it never has to stand down for a thread again.
  *
  * The strip scrolls horizontally rather than wrapping: the reference's strip is one row on every
  * screen size, and a second row would push the banner down by the height of a tab.
@@ -54,7 +55,13 @@ fun TabStrip(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             StripChip(
-                label = "Main",
+                label = "Chats",
+                glyph = TabGlyph.CHATS,
+                active = section == AppState.Section.CHATS,
+                onClick = { onSelect(AppState.Section.CHATS) },
+            )
+            StripChip(
+                label = "Friends",
                 glyph = TabGlyph.FRIENDS,
                 active = section == AppState.Section.FRIENDS,
                 onClick = { onSelect(AppState.Section.FRIENDS) },

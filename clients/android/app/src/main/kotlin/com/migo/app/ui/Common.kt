@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -20,7 +21,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -77,6 +80,23 @@ fun ErrorBanner(message: String?, onDismiss: () -> Unit, modifier: Modifier = Mo
                 Text(text = "Dismiss", color = MaterialTheme.colorScheme.onErrorContainer)
             }
         }
+    }
+}
+
+/**
+ * A centred spinner in a padded row: the "reading the first page" state a section shows before its
+ * list lands.
+ *
+ * One composable rather than the identical `Row { CircularProgressIndicator() }` four screens each
+ * carried — the shape is the same on every list, so it lives in one place.
+ */
+@Composable
+fun LoadingRow(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier.fillMaxWidth().padding(24.dp),
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        CircularProgressIndicator()
     }
 }
 
@@ -328,7 +348,7 @@ fun clockTime(millis: Long): String {
 }
 
 /** The tab strip's glyphs, in strip order. */
-enum class TabGlyph { FRIENDS, ROOMS, GAMES, FEED }
+enum class TabGlyph { CHATS, FRIENDS, ROOMS, GAMES, FEED }
 
 /**
  * A tab-strip glyph, drawn with the Canvas rather than typed or imported.
@@ -352,6 +372,20 @@ private fun DrawScope.drawGlyph(kind: TabGlyph, color: Color, stroke: Float) {
     fun p(x: Float, y: Float) = Offset(x * size.width, y * size.height)
     val cap = StrokeCap.Round
     when (kind) {
+        TabGlyph.CHATS -> {
+            // A speech bubble: a rounded-rectangle body with a short tail dropping from its lower
+            // left, the same outline the web client's SVG family marks conversations with.
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(size.width * 0.12f, size.height * 0.2f),
+                size = Size(size.width * 0.76f, size.height * 0.44f),
+                cornerRadius = CornerRadius(size.width * 0.16f),
+                style = Stroke(width = stroke),
+            )
+            drawLine(color, p(0.3f, 0.64f), p(0.24f, 0.84f), stroke, cap)
+            drawLine(color, p(0.24f, 0.84f), p(0.44f, 0.64f), stroke, cap)
+        }
+
         TabGlyph.FRIENDS -> {
             // Two people: a front figure and the one half a step behind.
             drawCircle(color = color, radius = size.width * 0.14f, center = p(0.36f, 0.3f), style = Stroke(width = stroke))

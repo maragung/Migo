@@ -8,6 +8,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -123,36 +124,49 @@ private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel) {
     )
 
     when {
-        open != null -> ChatScreen(
-            chat = open,
-            onBack = model::closeChat,
-            onDraft = model::setDraft,
-            onSend = model::send,
-            onLeave = open.roomId?.let { roomId ->
-                { model.leaveRoom(open.conversationId, roomId) }
-            },
-            onOpenMembers = open.roomId?.let { roomId ->
-                { model.openMembers(open.conversationId, roomId) }
-            },
-            onCloseMembers = { model.closeMembers(open.conversationId) },
-            onVoteKick = { target ->
-                open.roomId?.let { roomId -> model.voteKick(open.conversationId, roomId, target) }
-            },
-            onSanction = { target, action ->
-                open.roomId?.let { roomId -> model.sanction(open.conversationId, roomId, target, action) }
-            },
-            onMuteForMe = { userId, on -> model.muteForMe(open.conversationId, userId, on) },
-            selfId = state.accountId,
-            modifier = Modifier.fillMaxSize(),
-        )
+        // The banner rides on top of the chat too: a failure raised while reading (a send that did
+        // not go, a room event the server refused) is news the reader should get where they are,
+        // not after they back out and the strip's copy of the banner finally appears.
+        open != null -> Column(modifier = Modifier.fillMaxSize()) {
+            ErrorBanner(message = state.failure, onDismiss = model::dismissFailure)
+            ChatScreen(
+                chat = open,
+                onBack = model::closeChat,
+                onDraft = model::setDraft,
+                onSend = model::send,
+                onLeave = open.roomId?.let { roomId ->
+                    { model.leaveRoom(open.conversationId, roomId) }
+                },
+                onOpenMembers = open.roomId?.let { roomId ->
+                    { model.openMembers(open.conversationId, roomId) }
+                },
+                onCloseMembers = { model.closeMembers(open.conversationId) },
+                onVoteKick = { target ->
+                    open.roomId?.let { roomId -> model.voteKick(open.conversationId, roomId, target) }
+                },
+                onSanction = { target, action ->
+                    open.roomId?.let { roomId -> model.sanction(open.conversationId, roomId, target, action) }
+                },
+                onMuteForMe = { userId, on -> model.muteForMe(open.conversationId, userId, on) },
+                selfId = state.accountId,
+                modifier = Modifier.weight(1f),
+            )
+        }
 
-        // A menu panel covers the screen, with the model's own bar as its way back.
+        // A menu panel covers the screen, with the model's own bar as its way back. The banner
+        // comes too — a panel that swallows the failure message hides it from the only person
+        // who caused it.
         state.section.isPanel -> Column(modifier = Modifier.fillMaxSize()) {
             PanelBar(
                 title = panelTitle(state.section),
                 onBack = { model.selectSection(state.stripSection) },
             )
-            SectionScreen(state = state, model = model, modifier = Modifier.weight(1f))
+            ErrorBanner(message = state.failure, onDismiss = model::dismissFailure)
+            SectionScreen(
+                state = state,
+                model = model,
+                modifier = Modifier.weight(1f).navigationBarsPadding(),
+            )
         }
 
         else -> Column(modifier = Modifier.fillMaxSize()) {
@@ -175,15 +189,28 @@ private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel) {
                 },
             )
             ErrorBanner(message = state.failure, onDismiss = model::dismissFailure)
-            SectionScreen(state = state, model = model, modifier = Modifier.weight(1f))
+            // The gesture bar draws over the list's last row unless the section content stands
+            // above it — only the chat manages its own insets (its composer does), so every
+            // other destination pads here, once, at the edge that needs it.
+            SectionScreen(
+                state = state,
+                model = model,
+                modifier = Modifier.weight(1f).navigationBarsPadding(),
+            )
         }
     }
 }
 
-/** The section screens, as the tab strip's four destinations and the banner's panels. */
+/** The section screens, as the tab strip's five destinations and the banner's panels. */
 @Composable
 private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifier: Modifier = Modifier) {
     when (state.section) {
+        AppState.Section.CHATS -> ChatsScreen(
+            state = state,
+            onOpenConversation = { model.open(it.conversationId, it.title) },
+            modifier = modifier,
+        )
+
         AppState.Section.FRIENDS -> FriendsScreen(
             state = state,
             onQuery = model::setSearchQuery,

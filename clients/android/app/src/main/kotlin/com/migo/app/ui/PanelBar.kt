@@ -47,7 +47,9 @@ fun PanelBar(
                 modifier = Modifier
                     .background(color = extra.navActive, shape = RoundedCornerShape(8.dp))
                     .clickable(onClick = onBack)
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                    // The back control is the panel's only way out, so its touch target clears
+                    // the 48dp minimum even though its visible text is a short label row.
+                    .padding(horizontal = 8.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(

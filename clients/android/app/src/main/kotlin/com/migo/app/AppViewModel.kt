@@ -387,6 +387,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             state.copy(section = section, stripSection = strip)
         }
         when (section) {
+            // Chats reads the conversation list, which is loaded once at sign-in and kept live by
+            // the session's own events — entering the tab asks for nothing more.
+            AppState.Section.CHATS -> Unit
             AppState.Section.ROOMS -> if (signedInState?.rooms?.rooms == null) loadRooms()
             AppState.Section.FEED -> if (!spaceLoaded()) loadSpace()
             AppState.Section.FRIENDS -> if (!friendsLoaded()) loadFriends()

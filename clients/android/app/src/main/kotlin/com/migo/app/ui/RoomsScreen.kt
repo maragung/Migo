@@ -7,16 +7,18 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -99,10 +101,7 @@ fun RoomsScreen(
         )
 
         when {
-            state.rooms.loading -> Row(
-                modifier = Modifier.fillMaxWidth().padding(24.dp),
-                horizontalArrangement = Arrangement.Center,
-            ) { CircularProgressIndicator() }
+            state.rooms.loading -> LoadingRow()
             state.rooms.rooms == null && mine.isEmpty() -> Unit
             mine.isEmpty() && state.rooms.rooms?.isEmpty() == true -> Placeholder(
                 text = if (state.rooms.query.isBlank()) "No public rooms yet." else "No rooms matched.",
@@ -210,7 +209,14 @@ private fun CreateRoomDialog(
         onDismissRequest = onDismiss,
         title = { Text("Create a room") },
         text = {
-            Column {
+            // The form scrolls: on a small phone with the keyboard up, the stack of chips, help
+            // line, and three fields is taller than the dialog's share of the screen, and a field
+            // that cannot be scrolled to is a field that cannot be filled.
+            Column(
+                modifier = Modifier
+                    .verticalScroll(rememberScrollState())
+                    .heightIn(max = 420.dp),
+            ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     FilterChip(
                         selected = !managed,

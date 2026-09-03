@@ -1,5 +1,6 @@
 package com.migo.app.ui
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -11,9 +12,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
@@ -86,12 +87,14 @@ fun WalletScreen(
         }
 
         if (state.wallet.loading && state.wallet.balance == null) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(24.dp),
-                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
-            ) { CircularProgressIndicator() }
+            LoadingRow()
         } else {
-            LazyColumn(modifier = Modifier.fillMaxSize()) {
+            // The list is weighted, not fillMaxSize: a Column measures its non-weighted children
+            // first (the gift and AVAX forms below) and gives the weighted one what remains — the
+            // other order measures an unweighted fillMaxSize list at the whole remaining height
+            // and leaves the forms below it nothing, which is how both send flows once became
+            // forms no phone could see.
+            LazyColumn(modifier = Modifier.weight(1f)) {
                 // The balance: the two facts, coins first.
                 item {
                     Row(
@@ -143,8 +146,13 @@ fun WalletScreen(
                 if (state.wallet.badges.isNotEmpty()) {
                     item { SectionLabel(text = "Badges") }
                     item {
+                        // Badges are honours, not layout: the row scrolls rather than wrapping
+                        // (a second row would push the gift shop's prices down mid-read) or
+                        // clipping the honours a long account has earned.
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                            modifier = Modifier.fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 16.dp),
                             horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp),
                         ) {
                             for (badge in state.wallet.badges) {
