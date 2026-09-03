@@ -430,18 +430,19 @@ main {
  * on that glass regardless of theme.
  */
 .auth-screen {
-  min-height: 100%;
-  /* The register card (username, email, passphrase, gender, submit, cross-link, server link)
-     is taller than a short viewport; the page must scroll under a background that stays put.
-     `100dvh` tracks the real viewport on mobile URL-bar collapse; the `100%` line above is the
-     fallback for engines without it. `fixed` pins the gradient to the viewport so scrolling the
-     card never scrolls the sky. */
-  min-height: 100dvh;
-  display: grid;
-  place-items: center;
+  height: 100%;
+  /* The screen is the viewport, not a page: the register card (username, email, passphrase,
+     gender, captcha, submit, cross-link, server link) is taller than a short phone, and the
+     scrolling that fact demands belongs to the card, not the sky behind it. `100dvh` tracks
+     the real viewport on mobile URL-bar collapse; the `100%` line above is the fallback for
+     engines without it. `overflow: hidden` is what makes "fixed" mean fixed. */
+  height: 100dvh;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: 20px;
   background: var(--login-gradient);
-  background-attachment: fixed;
   color: #ffffff;
 }
 .auth-theme-toggle {
@@ -457,10 +458,16 @@ main {
 .auth-card {
   width: 100%;
   max-width: 420px;
-  /* A grid item's automatic minimum is its content's minimum, and the card's links row used to
+  /* The card is the screen's one scroll area: capped to the flex line (the viewport minus the
+     screen's padding) it scrolls its own contents when the register form outgrows a short
+     phone, so the brand and the gradient never ride away. `overflow-y: auto` also zeroes the
+     flex item's automatic minimum height, which is what lets the cap bite at all. */
+  max-height: 100%;
+  overflow-y: auto;
+  /* A flex item's automatic minimum is its content's minimum, and the card's links row used to
      set that at ~405px — wider than a 412px phone's card slot (viewport minus the screen's 20px
      padding), which pushed the whole page sideways and cut the card's right edge off. Zero lets
-     the card take its track's width; the links row below wraps so nothing inside needs the
+     the card take the flex line's width; the links row below wraps so nothing inside needs the
      extra room. */
   min-width: 0;
   background: rgba(255, 255, 255, 0.14);
@@ -2489,12 +2496,6 @@ main {
   padding: 0 12px;
   height: 44px;
   font-size: 18px;
-  line-height: 1;
-}
-.captcha-alt {
-  padding: 0 12px;
-  height: 44px;
-  font-size: 13px;
   line-height: 1;
 }
 /* The answer field is the widget's own row of the form, so it closes with the same

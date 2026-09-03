@@ -198,11 +198,12 @@ test('the captcha widget renders the challenge image, the answer input, and the 
     markup.includes('aria-label="Request a new captcha"'),
     'the refresh control must be present',
   );
+  // The refresh is the only challenge control: the alt rendering is the server's and the
+  // SDK's to speak of, never a button the form offers.
   assert.ok(
-    markup.includes('aria-label="Request an easier-to-read captcha"'),
-    'the easier-challenge control must be present',
+    !markup.includes('captcha-alt') && !markup.includes('Easier challenge'),
+    'no easier-challenge control may remain',
   );
-  assert.ok(markup.includes('Easier challenge'), 'the easier-challenge control must be labelled');
 });
 
 test('requestCaptcha posts the chosen mode and parses the image challenge', async () => {

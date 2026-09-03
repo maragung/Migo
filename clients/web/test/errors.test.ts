@@ -97,11 +97,40 @@ test('a wrong password and a missing account are indistinguishable to the user',
   assert.equal(friendlyError(wrongPassword), friendlyError(noSuchAccount));
 });
 
+test('a withheld error the client knows by symbol is named in plain words, never as the symbol', () => {
+  // The table exists for exactly these: conditions a person actually hits, where the server's
+  // silence (section 161) would otherwise collapse a real, fixable situation into a generic
+  // refusal. Each gets its own words, and the machine symbol never reaches the person.
+  const cases: Array<[symbol: string, expected: string]> = [
+    ['USERNAME_TAKEN', 'That username is already taken. Try another one.'],
+    ['WEAK_PASSWORD', 'That passphrase is too easy to guess. Make it longer and more varied.'],
+    [
+      'INVALID_CAPTCHA',
+      'That captcha answer did not match. Ask for a new challenge and try again.',
+    ],
+    ['MUTED', 'You are muted in this conversation. You can speak again once the mute lifts.'],
+    ['INSUFFICIENT_BALANCE', 'Not enough balance for that. Top up your wallet and try again.'],
+  ];
+  for (const [symbol, expected] of cases) {
+    const shown = friendlyError(new RemoteError(1300, symbol, ''));
+    assert.equal(shown, expected, `${symbol} lost its plain-words line`);
+    assert.ok(!shown.includes(symbol), `leaked the symbol ${symbol}`);
+  }
+});
+
+test("the server's disclosed text still outranks the client's table for a symbol it knows", () => {
+  // The server is the authority when it speaks: its line can carry what a static table cannot
+  // (here, the lock's actual duration). The table only fills the silence.
+  const err = new RemoteError(1406, 'AUTH_LOCKED', 'Account temporarily locked. Retry in 90 s');
+  assert.equal(friendlyError(err), 'Account temporarily locked. Retry in 90 s');
+});
+
 test('a withheld error message never leaks the machine symbol, and a restricted lookup is indistinguishable from a missing one', () => {
   // The server withholds the human message by default (section 161); the SDK then folds the empty
   // message into the bare symbol, so `error.message` is e.g. "PRIVACY_RESTRICTED". Surfacing that
   // would both leak internal vocabulary and — the section 180 rule — let a restricted profile be
-  // told apart from a missing one. Both must collapse to one generic, symbol-free line.
+  // told apart from a missing one. Neither symbol has a table entry, on purpose: both must collapse
+  // to one generic, symbol-free line.
   const restricted = friendlyError(new RemoteError(1003, 'PRIVACY_RESTRICTED', ''));
   const missing = friendlyError(new RemoteError(1004, 'NOT_FOUND', ''));
   assert.equal(restricted, missing);
@@ -111,6 +140,11 @@ test('a withheld error message never leaks the machine symbol, and a restricted 
     assert.ok(!/restrict/i.test(shown));
     assert.ok(shown.length > 0);
   }
+  // And the generic line itself says something honest about the shape of the refusal.
+  assert.ok(
+    restricted.startsWith('The server turned that down.'),
+    'the generic refusal line must still read as a refusal',
+  );
 });
 
 test('a bare SDK error surfaces its own developer message, and every case is non-empty', () => {

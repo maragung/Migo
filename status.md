@@ -2006,3 +2006,28 @@ panel tunggalnya), fragment effect mencetak ulang thread terbuka di
 mode yang baru dipilih. Web: 322 test termasuk gerbang storage mode,
 chip Chats yang hilang, bar pengganti, dan bagian Settings yang
 menawarkan kedua mode dengan cerita mode aktifnya.
+
+## 58. Halaman auth fixed ke layar, captcha satu kontrol, error punya nama (v0.15.2)
+
+Layar auth (login dan register) kini mengunci diri ke viewport
+(`100dvh`, `overflow: hidden`), dan kartu gelasnya menjadi satu-satunya
+area scroll: saat form register (username, email, passphrase, gender,
+captcha, submit, link) melebihi layar pendek, isinya yang menggulung —
+brand dan gradien tak pernah ikut pergi. Login yang pendek tak berubah.
+
+Tombol "Easier challenge" pada captcha dihapus: refresh (challenge
+baru, kode berbeda, rendering sama) satu-satunya kontrol. Jalur
+`image_alt` tetap hidup di SDK dan server — keputusan produk soal
+tombolnya, bukan soal protokolnya.
+
+`friendlyError` tak lagi berhenti di "The server rejected the request."
+Teks yang disahkan server tetap nomor satu (ia bisa bilang hal yang
+tabel statis tak bisa — interval retry, ukuran limit); untuk error yang
+disembunyikan teksnya (section 161), tabel simbol→kalimat menyebut
+kondisi yang benar-benar orang alami — USERNAME_TAKEN, WEAK_PASSWORD,
+INVALID_CAPTCHA, MUTED, INSUFFICIENT_BALANCE, ROOM_FULL, GROUP_FULL,
+AUTH_LOCKED, dan sekitar 25 lainnya. Simbol yang dipakai server untuk
+menyamarkan pasangan (NOT_FOUND vs PRIVACY_RESTRICTED, section 180)
+sengaja tak punya entri: keduanya jatuh ke fallback generik yang lebih
+jujur ("The server turned that down. It is not your connection…")
+tanpa pernah membedakan keduanya.

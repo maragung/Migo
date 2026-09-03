@@ -11,13 +11,11 @@
  *
  * A challenge is a picture, not a question in the clear: the server hands back
  * a PNG the user reads five to six letters and digits off, and nothing about
- * the answer crosses the wire until the user has typed it. Because a distorted
- * image is exactly what some users cannot read, the widget also carries an
- * "Easier challenge" control: it asks the server for `image_alt`, a
- * freshly-issued challenge (a different random code) rendered with larger
- * glyphs and less noise. It is still an image to solve — the product decision
- * is a gentler picture, not a different puzzle — so the answer field and the
- * proof are identical for both modes.
+ * the answer crosses the wire until the user has typed it. A picture the user
+ * cannot read is what the refresh control is for — it asks the server for a
+ * freshly-issued challenge (a different random code) in the same rendering.
+ * It is still an image to solve; the answer field and the proof never change
+ * shape between one challenge and the next.
  *
  * The widget has no idea which endpoint it lives on: it takes the {@link
  * ServerEndpoint} the user picked (or the default) and builds a one-shot
@@ -52,7 +50,7 @@ import { parseId } from '@migo/wire';
 import type { Id } from '@migo/wire';
 
 import { BootstrapClient, RemoteError } from '@migo/sdk';
-import type { CaptchaChallenge, CaptchaMode, CaptchaProof, ServerEndpoint } from '@migo/sdk';
+import type { CaptchaChallenge, CaptchaProof, ServerEndpoint } from '@migo/sdk';
 
 export interface CaptchaWidgetProps {
   /** The server the form is about to authenticate against. */
@@ -70,7 +68,6 @@ export interface CaptchaWidgetProps {
 interface WidgetState {
   challengeId: Id | null;
   imagePngBase64: string | null;
-  mode: CaptchaMode;
   answer: string;
   status: 'loading' | 'ready' | 'error';
   errorMessage: string | null;
@@ -79,7 +76,6 @@ interface WidgetState {
 const EMPTY: WidgetState = {
   challengeId: null,
   imagePngBase64: null,
-  mode: 'image',
   answer: '',
   status: 'loading',
   errorMessage: null,
@@ -118,9 +114,6 @@ function loadedFrom(challenge: CaptchaChallenge): WidgetState {
     // captcha id parsing rules.
     challengeId: parseId(String(challenge.challenge_id)),
     imagePngBase64: challenge.image_png_base64,
-    // The server echoes the mode it actually issued, so refresh asks for the same
-    // rendering again: a user who switched to the easier challenge keeps it.
-    mode: challenge.mode,
     answer: '',
     status: 'ready',
     errorMessage: null,
@@ -128,17 +121,16 @@ function loadedFrom(challenge: CaptchaChallenge): WidgetState {
 }
 
 /**
- * Maps a failed challenge request into the widget's error state, keeping the mode the
- * user asked for so a refresh retries the rendering they wanted.
+ * Maps a failed challenge request into the widget's error state.
  */
-function failedFrom(mode: CaptchaMode, cause: unknown): WidgetState {
-  return { ...EMPTY, mode, status: 'error', errorMessage: messageFor(cause) };
+function failedFrom(cause: unknown): WidgetState {
+  return { ...EMPTY, status: 'error', errorMessage: messageFor(cause) };
 }
 
 /**
- * Mounts a challenge image, an answer field, a refresh button, and an easier-challenge
- * button. The form reads the proof through `onChange`; the widget never calls the
- * network on the user's behalf except for the requests that load a fresh challenge.
+ * Mounts a challenge image, an answer field, and a refresh button. The form reads the proof
+ * through `onChange`; the widget never calls the network on the user's behalf except for the
+ * requests that load a fresh challenge.
  */
 export function CaptchaWidget({ endpoint, onChange }: CaptchaWidgetProps): ReactNode {
   const [state, setState] = useState<WidgetState>(EMPTY);
@@ -147,9 +139,7 @@ export function CaptchaWidget({ endpoint, onChange }: CaptchaWidgetProps): React
   // One captcha per (endpoint, mount) pair. The endpoint is part of the key
   // because a self-hosted user who picks a different host in the server sheet
   // needs a challenge the new server actually minted, not a stale one from
-  // the previous host that the new server would refuse to verify. A new
-  // server also means a fresh start from the default rendering: the alt-mode
-  // preference belongs to the challenge session, not to the endpoint.
+  // the previous host that the new server would refuse to verify.
   useEffect(() => {
     let cancelled = false;
     const bootstrap = new BootstrapClient(endpoint);
@@ -162,7 +152,7 @@ export function CaptchaWidget({ endpoint, onChange }: CaptchaWidgetProps): React
       })
       .catch((cause: unknown) => {
         if (cancelled) return;
-        setState(failedFrom('image', cause));
+        setState(failedFrom(cause));
       });
     return () => {
       cancelled = true;
@@ -187,26 +177,19 @@ export function CaptchaWidget({ endpoint, onChange }: CaptchaWidgetProps): React
     onChange({ challenge_id: state.challengeId, answer: state.answer });
   }, [state, onChange]);
 
-  // Refresh keeps the mode the current challenge was issued in (a user who
-  // asked for the easier rendering keeps it); the easier-challenge button
-  // deliberately moves to the alt rendering, which the server issues as a
-  // fresh challenge with a different code. Both share this one path: reset
-  // to loading, fetch, and land in ready or the shared error state.
-  const load = (nextMode: CaptchaMode): void => {
-    setState({ ...EMPTY, mode: nextMode });
+  // Refresh asks for a fresh challenge in the same rendering the widget always
+  // requests: reset to loading, fetch, and land in ready or the shared error state.
+  const refresh = (): void => {
+    setState(EMPTY);
     const bootstrap = new BootstrapClient(endpoint);
     bootstrap
-      .requestCaptcha(nextMode)
+      .requestCaptcha()
       .then((challenge) => {
         setState(loadedFrom(challenge));
       })
       .catch((cause: unknown) => {
-        setState(failedFrom(nextMode, cause));
+        setState(failedFrom(cause));
       });
-  };
-
-  const refresh = (): void => {
-    load(state.mode);
   };
 
   const imageSrc =
@@ -227,16 +210,6 @@ export function CaptchaWidget({ endpoint, onChange }: CaptchaWidgetProps): React
             aria-label="Request a new captcha"
           >
             ↻
-          </button>
-          <button
-            type="button"
-            className="btn btn-secondary captcha-alt"
-            onClick={() => load('image_alt')}
-            disabled={state.status === 'loading'}
-            aria-label="Request an easier-to-read captcha"
-            title="Ask for a fresh challenge with larger, clearer characters"
-          >
-            Easier challenge
           </button>
         </div>
       </div>
