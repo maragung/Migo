@@ -326,3 +326,32 @@ test('MigoClient.register carries the identity key as base64 when a founding roo
   // The key store exercises the founding path too; referencing it keeps the import honest.
   assert.ok(KeyStore.founding(root).root() !== null, 'the founding key store holds the root');
 });
+
+test('a server-sent replacement challenge adopts exactly like a refresh', async () => {
+  const { adoptedFrom } = await import('../src/components/captcha-widget.js');
+  // The state mid-answer: the user has read and answered the challenge the last submit
+  // spent, which is precisely the state a refusal interrupts.
+  const midAnswer = {
+    challengeId: '01ARZ3NDEKTSV4RRFFQ69G5FAV' as Id,
+    imagePngBase64: 'b2xk',
+    answer: 'AB3D7',
+    status: 'ready' as const,
+    errorMessage: null,
+  };
+  // What the server attaches to the refusal: the same shape POST /v1/auth/captcha returns.
+  const replacement = {
+    challenge_id: '01ARZ3NDEKTSV4RRFFQ69G5FAW' as Id,
+    image_png_base64: 'bmV3',
+    mode: 'image' as const,
+    ttl_seconds: 120,
+  };
+
+  const next = adoptedFrom(midAnswer, replacement);
+  assert.equal(next.challengeId, replacement.challenge_id, 'the widget holds the new id');
+  assert.equal(next.imagePngBase64, 'bmV3', 'the picture is the replacement render');
+  assert.equal(next.answer, '', 'the spent answer is cleared, not carried into the retry');
+  assert.equal(next.status, 'ready', 'the replacement lands ready, not loading');
+
+  // Nothing to adopt is the common render, and it must not disturb a live challenge.
+  assert.equal(adoptedFrom(midAnswer, null), midAnswer);
+});

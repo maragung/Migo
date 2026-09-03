@@ -15,7 +15,8 @@ import { useMigo } from '@/lib/migo/use-migo.js';
 import { defaultServerEndpoint } from '@/lib/config.js';
 import { loadServerEndpoint, saveServerEndpoint } from '@/lib/storage/server-endpoint-store.js';
 
-import type { CaptchaProof, ServerEndpoint } from '@migo/sdk';
+import type { CaptchaChallenge, CaptchaProof, ServerEndpoint } from '@migo/sdk';
+import { RemoteError } from '@migo/sdk';
 
 /** The gender options the profile accepts, in the server's numbering (1 male, 2 female, 3 other). */
 const GENDERS = [
@@ -45,6 +46,10 @@ export default function RegisterPage(): ReactNode {
   const [serverSheetOpen, setServerSheetOpen] = useState(false);
   const [saveOfferOpen, setSaveOfferOpen] = useState(false);
   const [captcha, setCaptcha] = useState<CaptchaProof | null>(null);
+  // The replacement challenge the server attached to the last refused submit, when it
+  // attached one. A submitted proof is spent whatever the verdict, so this is the live
+  // challenge the next attempt must answer — the widget swaps to it without a round trip.
+  const [freshCaptcha, setFreshCaptcha] = useState<CaptchaChallenge | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const submitting = status === 'connecting';
 
@@ -96,8 +101,14 @@ export default function RegisterPage(): ReactNode {
       // The account exists and this browser holds its founding root; offer the one-time key-file
       // download before the redirect carries the user away.
       setSaveOfferOpen(true);
-    } catch {
-      // The provider surfaces the reason through `error`; keep the form populated for a retry.
+    } catch (cause) {
+      // The provider surfaces the reason through `error`; keep the form populated for a
+      // retry. A refusal that carries the replacement captcha swaps the widget's picture
+      // on the spot — the proof this attempt spent is gone either way, and the user's
+      // next step should be reading the new challenge, not finding the refresh control.
+      if (cause instanceof RemoteError && cause.captcha !== undefined) {
+        setFreshCaptcha(cause.captcha);
+      }
     }
   }
 
@@ -183,7 +194,9 @@ export default function RegisterPage(): ReactNode {
             the card — no white panel — and only its proof (or a null while the user has not
             answered) rides along to the register call. The widget fetches from the endpoint
             the form is about to authenticate against, so it appears once the endpoint is. */}
-        {endpoint !== null ? <CaptchaWidget endpoint={endpoint} onChange={setCaptcha} /> : null}
+        {endpoint !== null ? (
+          <CaptchaWidget endpoint={endpoint} onChange={setCaptcha} replacement={freshCaptcha} />
+        ) : null}
 
         {validationError ? <p className="form-error">{validationError}</p> : null}
         {error ? <p className="form-error">{error}</p> : null}

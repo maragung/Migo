@@ -124,3 +124,45 @@ test('every SDK error is catchable as one type, and the transport errors are dis
   assert.equal(timeout.name, 'TimeoutError');
   assert.equal(remote.name, 'RemoteError');
 });
+
+test('a refusal may carry the replacement captcha the server minted with it', () => {
+  // A bootstrap refusal that spent a proof attaches the next challenge in the same envelope,
+  // so a form swaps its captcha picture without a second round trip. The attachment is
+  // optional and every other error shape is unchanged — the field is simply undefined.
+  const refused = RemoteError.fromEnvelope(409, {
+    error: {
+      code: 1306,
+      symbol: 'USERNAME_TAKEN',
+      message: 'that username is taken',
+      captcha: {
+        challenge_id: '01ARZ3NDEKTSV4RRFFQ69G5FAV',
+        image_png_base64: 'aGVsbG8=',
+        mode: 'image',
+        ttl_seconds: 120,
+      },
+    },
+  });
+  assert.equal(refused.captcha?.challenge_id, '01ARZ3NDEKTSV4RRFFQ69G5FAV');
+  assert.equal(refused.captcha?.image_png_base64, 'aGVsbG8=');
+  assert.equal(refused.captcha?.mode, 'image');
+  assert.equal(refused.captcha?.ttl_seconds, 120);
+
+  // Without the attachment there is nothing to read: undefined, not an empty object.
+  const plain = RemoteError.fromEnvelope(401, {
+    error: { code: CODE.INVALID_CREDENTIALS, symbol: 'INVALID_CREDENTIALS', message: '' },
+  });
+  assert.equal(plain.captcha, undefined);
+
+  // A malformed attachment must not turn a readable refusal into an exception — the error
+  // crosses with its code intact and the captcha simply missing.
+  const malformed = RemoteError.fromEnvelope(400, {
+    error: {
+      code: CODE.VALIDATION_FAILED,
+      symbol: 'VALIDATION_FAILED',
+      message: 'bad',
+      captcha: { challenge_id: 42 },
+    },
+  });
+  assert.equal(malformed.code, CODE.VALIDATION_FAILED);
+  assert.equal(malformed.captcha, undefined);
+});

@@ -24,11 +24,37 @@ use migo_protocol::fault;
 /// Handlers return `Result<T, ApiError>` and extractors use it as their rejection, so every
 /// failure path — a bad token, a validation failure, a refused rate-limit charge, a storage
 /// outage — lands in the same [`IntoResponse`] and comes out shaped identically.
-pub struct ApiError(Error);
+pub struct ApiError {
+    error: Error,
+    /// A fresh captcha challenge, attached to a refusal a captcha-gated form will want to
+    /// retry against. See [`ApiError::with_captcha`]. Boxed because the view carries a
+    /// rendered PNG and `Result<T, ApiError>` crosses nearly every handler in the crate —
+    /// the error arm stays the size of a pointer, not of a picture.
+    captcha: Option<Box<migo_captcha::CaptchaChallengeView>>,
+}
 
 impl From<Error> for ApiError {
     fn from(error: Error) -> Self {
-        Self(error)
+        Self {
+            error,
+            captcha: None,
+        }
+    }
+}
+
+impl ApiError {
+    /// Attaches a fresh captcha challenge to this refusal.
+    ///
+    /// A submitted proof is spent whether the rest of the attempt succeeded or not — the gate
+    /// deletes the challenge on use — so a form that has just watched its register fail is
+    /// holding a dead challenge id. The refusal itself carries the replacement, and the form
+    /// swaps the picture on the spot instead of waiting for the user to find the refresh
+    /// control. Attached only by the captcha-gated bootstrap handlers, and only when the
+    /// attempt carried a proof or the refusal is the gate's own; see `with_fresh_captcha`
+    /// in `routes/auth.rs`.
+    pub(crate) fn with_captcha(mut self, challenge: migo_captcha::CaptchaChallengeView) -> Self {
+        self.captcha = Some(Box::new(challenge));
+        self
     }
 }
 
@@ -41,7 +67,7 @@ struct Envelope<'a> {
 
 /// The error body a client receives. The `code` is the stable machine identifier, the `symbol`
 /// its name for a human reading logs, and the `message` the public sentence — never the internal
-/// one.
+/// one. `captcha` rides along only on the refusals that carry a replacement challenge.
 #[derive(Serialize)]
 struct Body<'a> {
     code: u32,
@@ -49,11 +75,13 @@ struct Body<'a> {
     message: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     retry_after_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    captcha: Option<&'a migo_captcha::CaptchaChallengeView>,
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let error = self.0;
+        let error = self.error;
         let status = StatusCode::from_u16(fault::http_status(error.code()))
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let retry_after = error.retry_after();
@@ -63,6 +91,7 @@ impl IntoResponse for ApiError {
                 symbol: error.symbol(),
                 message: error.public_message(),
                 retry_after_ms: retry_after,
+                captcha: self.captcha.as_deref(),
             },
         };
         let mut response = (status, Json(body)).into_response();

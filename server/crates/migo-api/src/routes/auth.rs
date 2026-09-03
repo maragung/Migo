@@ -372,6 +372,7 @@ async fn register(
             ))
         })?),
     };
+    let had_captcha = body.captcha.is_some();
     let registration = Registration {
         username: body.username,
         email: body.email,
@@ -390,10 +391,10 @@ async fn register(
         server,
     };
     let context = facts.context(now);
-    let grant = state
-        .authenticator()
-        .register(registration, &context)
-        .await?;
+    let grant = match state.authenticator().register(registration, &context).await {
+        Ok(grant) => grant,
+        Err(error) => return Err(with_fresh_captcha(&state, had_captcha, error).await),
+    };
     Ok((StatusCode::CREATED, Json(grant.into())))
 }
 
@@ -409,6 +410,7 @@ async fn login(
         .server
         .map(ServerEndpointBody::into_endpoint)
         .transpose()?;
+    let had_captcha = body.captcha.is_some();
     let sign_in = SignIn {
         identifier: body.identifier,
         password: Secret::new(body.password),
@@ -417,7 +419,10 @@ async fn login(
         server,
     };
     let context = facts.context(now);
-    let grant = state.authenticator().sign_in(sign_in, &context).await?;
+    let grant = match state.authenticator().sign_in(sign_in, &context).await {
+        Ok(grant) => grant,
+        Err(error) => return Err(with_fresh_captcha(&state, had_captcha, error).await),
+    };
     Ok(Json(grant.into()))
 }
 
@@ -454,6 +459,50 @@ async fn logout(
 }
 
 // --- captcha and recovery surface -----------------------------------------
+
+/// Attaches a replacement captcha to a refused bootstrap attempt, when the refusal is one a
+/// captcha form will retry against.
+///
+/// A submitted proof is spent the moment the gate reads it — the challenge row is deleted on
+/// use, right or wrong — so the form that just watched its attempt fail is holding a dead
+/// challenge id. The refresh control was the user's only way forward; this makes the refusal
+/// itself carry the next challenge, so the form swaps the picture on the spot and the retry
+/// starts from a live id with no extra round trip.
+///
+/// Attached in exactly two situations, both of which mean a captcha was on the user's screen:
+///
+/// - The attempt carried a proof. The proof is spent whatever the refusal says, so the widget's
+///   challenge is dead even when the refusal is about something else (a taken username, a weak
+///   password) — the common case, and the one the refresh click existed for.
+/// - The refusal is the gate's own (`CAPTCHA_REQUIRED`, `INVALID_CAPTCHA`, `CAPTCHA_EXPIRED`):
+///   the client is being told to go get a challenge, and the challenge arrives in the same
+///   response.
+///
+/// Everything else — a wrong-password login from a network that never tripped the gate, a
+/// malformed body — never showed the user a captcha, so there is nothing to reload. A disabled
+/// captcha service mints nothing and the refusal crosses as it always did.
+async fn with_fresh_captcha(
+    state: &ApiState,
+    had_proof: bool,
+    error: migo_core::Error,
+) -> crate::ApiError {
+    const GATE_CODES: &[u32] = &[
+        migo_protocol::codes::CAPTCHA_REQUIRED,
+        migo_protocol::codes::INVALID_CAPTCHA,
+        migo_protocol::codes::CAPTCHA_EXPIRED,
+    ];
+    if !had_proof && !GATE_CODES.contains(&error.code()) {
+        return crate::ApiError::from(error);
+    }
+    match state
+        .authenticator()
+        .issue_captcha(migo_captcha::CaptchaMode::Image, state.now())
+        .await
+    {
+        Some(challenge) => crate::ApiError::from(error).with_captcha(challenge),
+        None => crate::ApiError::from(error),
+    }
+}
 
 /// The request body of `POST /v1/auth/captcha`: absent, empty, or carrying a mode.
 ///
@@ -542,10 +591,13 @@ async fn recovery_request(
             ))
         })?;
     let context = facts.context(now);
-    let _ = state
+    if let Err(error) = state
         .authenticator()
         .request_recovery(&body.identifier, &captcha, &context)
-        .await?;
+        .await
+    {
+        return Err(with_fresh_captcha(&state, true, error).await);
+    }
     Ok(Json(RecoveryRequestResponse { ok: true }))
 }
 

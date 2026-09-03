@@ -17,6 +17,12 @@
  * It is still an image to solve; the answer field and the proof never change
  * shape between one challenge and the next.
  *
+ * The third way a challenge arrives is the {@link CaptchaWidgetProps.replacement}:
+ * a refused submit spends the proof whatever the verdict, so the server attaches
+ * the next challenge to the refusal itself, and the form hands it down here. The
+ * picture swaps on the spot — no refresh click, no second round trip — which is
+ * the "once submitted, reloaded by the server" the register form promises.
+ *
  * The widget has no idea which endpoint it lives on: it takes the {@link
  * ServerEndpoint} the user picked (or the default) and builds a one-shot
  * {@link BootstrapClient} over it, so the captcha is requested from the same
@@ -63,6 +69,16 @@ export interface CaptchaWidgetProps {
    * should not submit a proof.
    */
   onChange: (proof: CaptchaProof | null) => void;
+  /**
+   * A fresh challenge the server attached to a refused submit, when it attached one: a
+   * submitted proof is spent whether the attempt succeeded or not, so the refusal hands the
+   * next challenge over in the same response. The widget adopts it exactly as a refresh
+   * would — same rendering, cleared answer — and the retry starts from a live challenge
+   * with no refresh click and no second round trip. `null` (or an unchanged reference)
+   * changes nothing. Optional because a render that has no refusal to learn from is the
+   * common one.
+   */
+  replacement?: CaptchaChallenge | null;
 }
 
 interface WidgetState {
@@ -128,11 +144,27 @@ function failedFrom(cause: unknown): WidgetState {
 }
 
 /**
+ * The state a replacement challenge adopts: a fresh ready state built from it, or the
+ * current state untouched when there is nothing to adopt.
+ *
+ * Pure, so a test can pin the two halves of the server-sent reload — a replacement lands
+ * exactly like a refresh (new id, new picture, cleared answer), and a `null` (the common
+ * render, before any refusal) changes nothing. Exported for that test; the widget calls it
+ * from its adoption effect.
+ */
+export function adoptedFrom(
+  current: WidgetState,
+  replacement: CaptchaChallenge | null,
+): WidgetState {
+  return replacement === null ? current : loadedFrom(replacement);
+}
+
+/**
  * Mounts a challenge image, an answer field, and a refresh button. The form reads the proof
  * through `onChange`; the widget never calls the network on the user's behalf except for the
  * requests that load a fresh challenge.
  */
-export function CaptchaWidget({ endpoint, onChange }: CaptchaWidgetProps): ReactNode {
+export function CaptchaWidget({ endpoint, onChange, replacement }: CaptchaWidgetProps): ReactNode {
   const [state, setState] = useState<WidgetState>(EMPTY);
   const answerId = useId();
 
@@ -176,6 +208,14 @@ export function CaptchaWidget({ endpoint, onChange }: CaptchaWidgetProps): React
     }
     onChange({ challenge_id: state.challengeId, answer: state.answer });
   }, [state, onChange]);
+
+  // A replacement the server minted with a refusal lands here: adopt it exactly as a
+  // refresh would, minus the request. The dep is the object reference — every refusal
+  // builds a fresh one, so two refusals carrying different challenges both land even when
+  // the widget never re-mounts.
+  useEffect(() => {
+    setState((current) => adoptedFrom(current, replacement ?? null));
+  }, [replacement]);
 
   // Refresh asks for a fresh challenge in the same rendering the widget always
   // requests: reset to loading, fetch, and land in ready or the shared error state.

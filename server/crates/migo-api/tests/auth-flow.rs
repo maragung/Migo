@@ -941,6 +941,164 @@ async fn a_captcha_with_a_wrong_answer_is_refused_with_a_curated_message() {
     expect_error(&resp, StatusCode::BAD_REQUEST, codes::INVALID_CAPTCHA);
 }
 
+/// A refusal a captcha form will retry against carries the replacement challenge inline.
+///
+/// A submitted proof is spent the moment the gate reads it, so the moment a register fails is
+/// also the moment the widget's challenge dies. The user's old path back was the refresh
+/// control; the new one is the refusal itself, which hands the next challenge over in the same
+/// response — `error.captcha`, the same view `POST /v1/auth/captcha` returns, so the form swaps
+/// the picture on the spot. Pinned here for the three refusals that meet a captcha on screen:
+/// a spent-proof failure about something else (a taken username), the gate's own
+/// `CAPTCHA_REQUIRED`, and the wrong-answer `INVALID_CAPTCHA`. The negative case matters as
+/// much: a wrong-password login from a network that never showed a captcha carries nothing,
+/// because there is no widget to reload.
+#[tokio::test]
+async fn a_refused_bootstrap_carries_the_replacement_captcha() {
+    let h = Harness::new();
+    let ip = "203.0.113.90";
+
+    // Register one account to make the username taken.
+    let first = h.issue_captcha().await;
+    let first_body = json!({
+        "username": "grace",
+        "password": GOOD_PASSWORD,
+        "device": { "display_name": "Setup Device" },
+        "captcha": {
+            "challenge_id": first.challenge_id,
+            "answer": first.answer,
+        },
+    });
+    let first_resp = h
+        .send(post_json("/v1/auth/register", Some(ip), &first_body))
+        .await;
+    assert_eq!(
+        first_resp.status,
+        StatusCode::CREATED,
+        "setup register; body={}",
+        first_resp.text()
+    );
+
+    // The retry that fails for a reason that is not the captcha: same username, fresh
+    // (and correctly answered) proof. The proof is spent whatever the verdict, so the
+    // widget on the client is holding a dead id — the refusal must carry the next one.
+    let second = h.issue_captcha().await;
+    let retry_body = json!({
+        "username": "grace",
+        "password": GOOD_PASSWORD,
+        "device": { "display_name": "Retry Device" },
+        "captcha": {
+            "challenge_id": second.challenge_id,
+            "answer": second.answer,
+        },
+    });
+    let retry_resp = h
+        .send(post_json("/v1/auth/register", Some(ip), &retry_body))
+        .await;
+    expect_error(&retry_resp, StatusCode::CONFLICT, codes::USERNAME_TAKEN);
+    let replacement = &retry_resp.json()["error"]["captcha"];
+    assert!(
+        replacement["challenge_id"].is_string(),
+        "the refusal carries a challenge id; body={}",
+        retry_resp.text()
+    );
+    assert_ne!(
+        replacement["challenge_id"].as_str().unwrap(),
+        second.challenge_id.to_string(),
+        "the replacement is a fresh challenge, not the spent one echoed back"
+    );
+    let image = replacement["image_png_base64"]
+        .as_str()
+        .expect("the replacement carries the picture");
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(image)
+        .expect("the image is standard base64");
+    assert_eq!(&png[..4], b"\x89PNG", "the replacement is a renderable PNG");
+    // And the replacement is live: answering it completes a register that succeeds.
+    let replacement_id = replacement["challenge_id"].as_str().unwrap().to_string();
+    let stored = h
+        .captcha_store
+        .consume(
+            migo_core::Id::parse(&replacement_id).expect("the id parses"),
+            h.clock.now(),
+        )
+        .await
+        .expect("the store is reachable")
+        .expect("the replacement challenge is live in the store");
+    assert!(
+        stored.valid_at(h.clock.now()),
+        "the replacement challenge has not already expired"
+    );
+
+    // The gate's own refusal carries one too: a register without a proof once the gate
+    // is engaged is told CAPTCHA_REQUIRED *and* handed the challenge it must answer.
+    // (A wrong-password login is what trips the gate, and sign-in is never gated.)
+    let trip_body = json!({
+        "identifier": "grace",
+        "password": "deliberately-wrong",
+        "device": { "display_name": "Trip Device" },
+    });
+    let trip_resp = h
+        .send(post_json("/v1/auth/login", Some(ip), &trip_body))
+        .await;
+    assert_eq!(
+        trip_resp.status,
+        StatusCode::UNAUTHORIZED,
+        "the trip fails; body={}",
+        trip_resp.text()
+    );
+    let trip_error = &trip_resp.json()["error"];
+    assert!(
+        trip_error.get("captcha").is_none() || trip_error["captcha"].is_null(),
+        "a login that never showed a captcha carries no replacement; body={}",
+        trip_resp.text()
+    );
+    let gated_body = json!({
+        "username": "heidi",
+        "password": GOOD_PASSWORD,
+        "device": { "display_name": "Gated Device" },
+    });
+    let gated_resp = h
+        .send(post_json("/v1/auth/register", Some(ip), &gated_body))
+        .await;
+    expect_error(
+        &gated_resp,
+        StatusCode::BAD_REQUEST,
+        codes::CAPTCHA_REQUIRED,
+    );
+    assert!(
+        gated_resp.json()["error"]["captcha"]["challenge_id"].is_string(),
+        "the gate's refusal names the challenge to answer; body={}",
+        gated_resp.text()
+    );
+
+    // A wrong answer is the third refusal that meets a captcha on screen, and it too
+    // carries the next challenge rather than making the user press refresh to get one.
+    let challenge = h.issue_captcha().await;
+    let wrong = if challenge.answer == "000000" {
+        "000001".to_string()
+    } else {
+        "000000".to_string()
+    };
+    let wrong_body = json!({
+        "username": "ivan",
+        "password": GOOD_PASSWORD,
+        "device": { "display_name": "Wrong Answer Device" },
+        "captcha": {
+            "challenge_id": challenge.challenge_id,
+            "answer": wrong,
+        },
+    });
+    let wrong_resp = h
+        .send(post_json("/v1/auth/register", Some(ip), &wrong_body))
+        .await;
+    expect_error(&wrong_resp, StatusCode::BAD_REQUEST, codes::INVALID_CAPTCHA);
+    assert!(
+        wrong_resp.json()["error"]["captcha"]["challenge_id"].is_string(),
+        "the wrong-answer refusal carries the next challenge; body={}",
+        wrong_resp.text()
+    );
+}
+
 /// A recovery request without a captcha is refused before the gate is
 /// consulted: a recovery flow is captcha-required as a structural matter,
 /// not a gate-tripped one. The error is a validation error on the

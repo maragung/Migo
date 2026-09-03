@@ -15,6 +15,9 @@
 
 import { CODE } from '@migo/protocol';
 import type { Error as ProtocolErrorMessage } from '@migo/protocol';
+import type { Id } from '@migo/wire';
+
+import type { CaptchaChallenge, CaptchaMode } from './rest.js';
 
 /** The closed set of error codes, re-exported so callers branch on a name, not a magic number. */
 export { CODE } from '@migo/protocol';
@@ -43,6 +46,14 @@ export class RemoteError extends SdkError {
   readonly retryAfterMs: number | undefined;
   /** The offending field, for a validation error. */
   readonly field: string | undefined;
+  /**
+   * A fresh captcha challenge the server attached to this refusal, when there was one to
+   * attach: a bootstrap attempt that carried a proof spent it whatever the verdict, so the
+   * refusal hands the next challenge over in the same response. `undefined` on every other
+   * error — a caller reads it to swap the captcha picture without a second round trip, and
+   * never has to fetch a replacement the server already minted.
+   */
+  readonly captcha: CaptchaChallenge | undefined;
 
   constructor(
     code: number,
@@ -50,6 +61,7 @@ export class RemoteError extends SdkError {
     message: string,
     retryAfterMs?: number,
     field?: string,
+    captcha?: CaptchaChallenge,
   ) {
     // The symbol leads the JS message so a stack trace is legible; the human string, which may be
     // empty by design, only follows when present.
@@ -59,6 +71,7 @@ export class RemoteError extends SdkError {
     this.symbol = symbol;
     this.retryAfterMs = retryAfterMs;
     this.field = field;
+    this.captcha = captcha;
   }
 
   /** Whether the server asked the caller to back off and try again. */
@@ -81,9 +94,10 @@ export class RemoteError extends SdkError {
    * Builds a {@link RemoteError} from the REST error envelope.
    *
    * The envelope is `{ "error": { code, symbol, message, retry_after_ms } }` (snake_case, as the
-   * server emits it). A body that does not match that shape becomes a generic
-   * {@link CODE.INTERNAL_ERROR}, since a malformed error is still an error and the caller should
-   * not have to guess.
+   * server emits it) — plus, on the captcha-gated bootstrap refusals, an optional `captcha`
+   * object carrying the replacement challenge (see {@link RemoteError.captcha}). A body that
+   * does not match that shape becomes a generic {@link CODE.INTERNAL_ERROR}, since a malformed
+   * error is still an error and the caller should not have to guess.
    */
   static fromEnvelope(status: number, body: unknown): RemoteError {
     const envelope = (body as { error?: unknown } | null)?.error;
@@ -95,10 +109,43 @@ export class RemoteError extends SdkError {
       const retryAfterMs =
         typeof record['retry_after_ms'] === 'number' ? record['retry_after_ms'] : undefined;
       const field = typeof record['field'] === 'string' ? record['field'] : undefined;
-      return new RemoteError(code, symbol, message, retryAfterMs, field);
+      const captcha = captchaFrom(record['captcha']);
+      return new RemoteError(code, symbol, message, retryAfterMs, field, captcha);
     }
     return new RemoteError(CODE.INTERNAL_ERROR, 'INTERNAL_ERROR', `HTTP ${status}`);
   }
+}
+
+/**
+ * Coerces an error envelope's optional `captcha` object into a {@link CaptchaChallenge}, or
+ * `undefined` when it is absent or not challenge-shaped.
+ *
+ * Defensive for the same reason {@link RemoteError.fromEnvelope} is: a malformed attachment
+ * must not turn a readable refusal into an exception, and the caller that ignores `captcha`
+ * loses nothing. The shape mirrors what `POST /v1/auth/captcha` returns, so a form can hand
+ * the object to its widget without translation.
+ */
+function captchaFrom(raw: unknown): CaptchaChallenge | undefined {
+  if (typeof raw !== 'object' || raw === null) {
+    return undefined;
+  }
+  const record = raw as Record<string, unknown>;
+  if (
+    typeof record['challenge_id'] !== 'string' ||
+    typeof record['image_png_base64'] !== 'string'
+  ) {
+    return undefined;
+  }
+  const mode: CaptchaMode = record['mode'] === 'image_alt' ? 'image_alt' : 'image';
+  const ttl = typeof record['ttl_seconds'] === 'number' ? record['ttl_seconds'] : 0;
+  return {
+    // The string came off a JSON body the server shaped, so it is already the wire form of an
+    // id; the brand marks what every other challenge in the SDK already is.
+    challenge_id: record['challenge_id'] as Id,
+    image_png_base64: record['image_png_base64'],
+    mode,
+    ttl_seconds: ttl,
+  };
 }
 
 /**
