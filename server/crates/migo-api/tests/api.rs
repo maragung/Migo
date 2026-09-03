@@ -1547,3 +1547,148 @@ async fn an_idempotency_key_is_not_yet_honoured_on_replay() {
         replay.error_symbol()
     );
 }
+
+#[tokio::test]
+async fn a_registration_carries_the_disclosed_gender_and_refuses_a_number_outside_the_numbering() {
+    let h = Harness::new();
+
+    // The disclosed form crosses: the number lands on the account's profile.
+    // The store is the in-memory one behind the API, so the column's value is
+    // read back through the account surface the API itself would use.
+    let resp = h
+        .send(post_json(
+            "/v1/auth/register",
+            Some("203.0.113.50"),
+            &json!({
+                "username": "gaia",
+                "password": GOOD_PASSWORD,
+                "gender": 2,
+                "device": { "display_name": "Integration Test" },
+            }),
+        ))
+        .await;
+    assert_eq!(resp.status, StatusCode::CREATED, "body={}", resp.text());
+
+    // A number the numbering does not name is a client that is wrong, and the
+    // honest answer names the field instead of rounding to a disclosure the
+    // user never made.
+    let resp = h
+        .send(post_json(
+            "/v1/auth/register",
+            Some("203.0.113.51"),
+            &json!({
+                "username": "hbom",
+                "password": GOOD_PASSWORD,
+                "gender": 7,
+                "device": { "display_name": "Integration Test" },
+            }),
+        ))
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST, "body={}", resp.text());
+    assert_eq!(resp.error_symbol(), "VALIDATION_FAILED");
+    assert!(
+        resp.error_message().contains("gender"),
+        "the refusal names the field: {}",
+        resp.error_message()
+    );
+}
+
+#[tokio::test]
+async fn a_password_change_returns_a_replacement_grant_and_retires_the_old_password() {
+    let h = Harness::new();
+    let grant = h.account(Some("203.0.113.60"), "piper").await;
+    let token = grant["access_token"].as_str().unwrap().to_string();
+
+    let resp = h
+        .send(build_req(
+            Method::POST,
+            "/v1/auth/password",
+            Some("203.0.113.60"),
+            Some(&token),
+            Some(&json!({
+                "current_password": GOOD_PASSWORD,
+                "new_password": "pelican trombone lantern",
+            })),
+        ))
+        .await;
+    assert_eq!(resp.status, StatusCode::OK, "body={}", resp.text());
+    let replacement = resp.json();
+    assert!(
+        replacement["access_token"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty()),
+        "the replacement grant carries a fresh access token"
+    );
+
+    // The old password no longer signs anybody in, and the new one does. Both
+    // attempts come from their own network: a failed sign-in is priced against
+    // the caller's bucket, and the test is not about the rate model.
+    let old = json!({
+        "identifier": "piper",
+        "password": GOOD_PASSWORD,
+        "device": { "display_name": "Second Device" },
+    });
+    let resp = h
+        .send(post_json("/v1/auth/login", Some("198.51.100.61"), &old))
+        .await;
+    expect_error(&resp, StatusCode::UNAUTHORIZED, 1101);
+
+    let fresh = json!({
+        "identifier": "piper",
+        "password": "pelican trombone lantern",
+        "device": { "display_name": "Second Device" },
+    });
+    let resp = h
+        .send(post_json("/v1/auth/login", Some("198.52.100.62"), &fresh))
+        .await;
+    assert_eq!(resp.status, StatusCode::OK, "body={}", resp.text());
+}
+
+#[tokio::test]
+async fn a_contact_put_records_an_email_and_refuses_what_is_neither_email_nor_phone() {
+    let h = Harness::new();
+    let grant = h.account(Some("203.0.113.70"), "quinn").await;
+    let token = grant["access_token"].as_str().unwrap().to_string();
+
+    let resp = h
+        .send(build_req(
+            Method::PUT,
+            "/v1/auth/contact",
+            Some("203.0.113.70"),
+            Some(&token),
+            Some(&json!({ "email_or_phone": "quinn@example.org" })),
+        ))
+        .await;
+    assert_eq!(resp.status, StatusCode::NO_CONTENT, "body={}", resp.text());
+
+    // A string that is neither an email nor a phone is named as such — the
+    // surface is the one the SDK's updateContact has always described.
+    let resp = h
+        .send(build_req(
+            Method::PUT,
+            "/v1/auth/contact",
+            Some("203.0.113.70"),
+            Some(&token),
+            Some(&json!({ "email_or_phone": "not an address at all" })),
+        ))
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST, "body={}", resp.text());
+    assert_eq!(resp.error_symbol(), "VALIDATION_FAILED");
+    assert!(
+        resp.error_message().contains("contact"),
+        "the refusal names the field: {}",
+        resp.error_message()
+    );
+
+    // And the surface is authenticated: a stranger's PUT is not a contact edit.
+    let resp = h
+        .send(build_req(
+            Method::PUT,
+            "/v1/auth/contact",
+            Some("203.0.113.71"),
+            None,
+            Some(&json!({ "email_or_phone": "stranger@example.org" })),
+        ))
+        .await;
+    expect_error(&resp, StatusCode::UNAUTHORIZED, 1100);
+}

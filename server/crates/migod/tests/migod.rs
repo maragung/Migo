@@ -632,6 +632,7 @@ async fn registered_account(app: &migod::App, username: &str) -> Id {
                 password: Secret::new("correct-horse-battery-staple"),
                 locale: "en-US".to_string(),
                 country: None,
+                gender: None,
                 device: DeviceClaim::new(Platform::Web, "integration test"),
                 captcha: None,
                 server: None,

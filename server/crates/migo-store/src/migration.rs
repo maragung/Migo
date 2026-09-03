@@ -70,6 +70,7 @@ impl MigratorTrait for Migrator {
             Box::new(Recovery),
             Box::new(IdentityLogin),
             Box::new(GlobalAdmins),
+            Box::new(ProfileGender),
         ]
     }
 }
@@ -228,6 +229,35 @@ impl MigrationTrait for GlobalAdmins {
         // Same posture as every migration before it.
         Err(DbErr::Migration(
             "0005_global_admins cannot be rolled back: create a new database instead".to_owned(),
+        ))
+    }
+}
+
+/// `0006_profile_gender` -- the gender the account disclosed at registration,
+/// on the profile row next to `birth_year`. See
+/// `server/migrations/0006_profile_gender.sql` for the shape and the numbering.
+struct ProfileGender;
+
+impl MigrationName for ProfileGender {
+    fn name(&self) -> &str {
+        "0006_profile_gender"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for ProfileGender {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!("../../../migrations/0006_profile_gender.sql"))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Same posture as every migration before it.
+        Err(DbErr::Migration(
+            "0006_profile_gender cannot be rolled back: create a new database instead".to_owned(),
         ))
     }
 }

@@ -14,7 +14,7 @@
  * second option, not a placeholder: the choice persists and is validated the same as WebSocket.
  * Connecting over it requires a server with the QUIC listener enabled, and this client's wire
  * path is still WebSocket. The form accepts the choice and never blocks submit, so the user can
- * save a QUIC-capable server and the rest of the surface (REST, captcha) proceeds.
+ * save a QUIC-capable server and the rest of the surface (REST, the identity ceremonies) proceeds.
  */
 
 import { useId, useState } from 'react';

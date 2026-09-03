@@ -250,6 +250,44 @@ impl Visibility {
     }
 }
 
+/// The gender an account disclosed at registration.
+///
+/// Presentation the user controls, not a credential fact: the numbering lives
+/// in exactly two places — the `profile.gender` column comment
+/// (`server/migrations/0006_profile_gender.sql`) and here — and `None` on the
+/// wire and in the column means "not disclosed", which no numbered value may
+/// quietly stand in for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gender {
+    /// Male.
+    Male = 1,
+    /// Female.
+    Female = 2,
+    /// Any answer outside the two the form names.
+    Other = 3,
+}
+
+impl Gender {
+    /// Numeric form, as stored.
+    #[must_use]
+    pub const fn to_i16(self) -> i16 {
+        self as i16
+    }
+
+    /// Parses the stored form. An unknown value reads as undisclosed: a value
+    /// this build does not know is a newer client's, and guessing its meaning
+    /// on the user's behalf would invent a disclosure they never made.
+    #[must_use]
+    pub const fn from_i16(value: i16) -> Option<Self> {
+        match value {
+            1 => Some(Self::Male),
+            2 => Some(Self::Female),
+            3 => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
 /// Why a session was revoked. Recorded so support can answer "why was I logged
 /// out" without guessing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -466,6 +504,10 @@ pub struct Profile {
     pub avatar_media_id: Option<Id>,
     /// Year only: a full birth date is more personal data than a chat app needs.
     pub birth_year: Option<i16>,
+    /// Gender as disclosed at registration. `None` is "not disclosed" — a
+    /// different statement from any numbered value, and the only one a
+    /// registration from a pre-column client can honestly make.
+    pub gender: Option<Gender>,
     /// Who may see last-seen time.
     pub show_last_seen: Visibility,
     /// Who may start a conversation.

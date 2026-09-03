@@ -5,15 +5,17 @@
  * pinned in `packages/crypto`; what is pinned here is everything the auth screens add around it:
  *
  *   1. **The file's name is findable.** A username with spaces or accents must still produce a
- *      `migo-….migo` a person can recognise and click, and an empty sanitisation must not produce
- *      a dotfile.
+ *      `migo-….migo` a person can recognise and click, and an empty sanitisation must not produce a
+ *      dotfile.
  *   2. **The credential is judged before it is hashed.** Argon2id at 64 MiB is a real cost, so
  *      the mismatch and the too-short case must be refused locally, in one line, with no hashing
  *      spent on them.
- *   3. **The offer is honest.** A device with the root offers the download; a device without one
- *      says so in one sentence and offers no button that could not work.
- *   4. **The restore says one thing when it fails.** §182 forbids telling a wrong credential from
- *      a tampered file, so the screen's line is pinned word for word.
+ *   3. **The offer is honest.** A device with the root offers the download, sealed with the
+ *      registration passphrase the register screen handed in — the offer asks for nothing, because
+ *      the passphrase was already typed — and a device without a root says so in one sentence and
+ *      offers no button that could not work.
+ *   4. **The open says one thing when it fails.** §182 forbids telling a wrong passphrase from a
+ *      tampered file, so the sign-in screen's line is pinned word for word.
  */
 
 import assert from 'node:assert/strict';
@@ -22,7 +24,6 @@ import test from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import { containerFileName, credentialProblem, RESTORE_FAILED } from '../src/lib/account-file.js';
-import { RestoreAccountSheet } from '../src/components/restore-account-sheet.js';
 import { SaveAccountSheet } from '../src/components/save-account-sheet.js';
 
 const ROOT = new Uint8Array(32).fill(0x5a);
@@ -37,7 +38,7 @@ test('a username becomes a findable account file name', () => {
   assert.ok(!containerFileName('../etc/passwd').includes('/'));
 });
 
-test('a recovery credential is judged locally, before any Argon2id work is spent on it', () => {
+test('a typed credential pair is judged locally, before any Argon2id work is spent on it', () => {
   assert.equal(credentialProblem('correct horse', 'correct horse'), null);
   assert.equal(credentialProblem('12345678', '12345678'), null);
   // `?? ''`: a null (sealable) would fail the match, which is exactly the point — these three
@@ -47,58 +48,58 @@ test('a recovery credential is judged locally, before any Argon2id work is spent
   assert.match(credentialProblem('x'.repeat(1025), 'x'.repeat(1025)) ?? '', /too long/);
 });
 
-test('the save offer shows the credential fields and the download, and says what it is for', () => {
+test('the save offer seals with the registration passphrase and asks for nothing else', () => {
   const markup = renderToStaticMarkup(
-    <SaveAccountSheet username="alice" accountId="acct_1" root={ROOT} onDone={() => undefined} />,
+    <SaveAccountSheet
+      username="alice"
+      accountId="acct_1"
+      root={ROOT}
+      passphrase="correct-horse-battery-staple"
+      onDone={() => undefined}
+    />,
   );
   assert.ok(markup.includes('class="save-account"'), 'the offer body must render its shell');
-  assert.ok(markup.includes('Recovery credential'), 'the credential field must be labelled');
-  assert.ok(markup.includes('Confirm recovery credential'), 'the confirm field must be labelled');
+  // The offer asks for no credential: the passphrase it seals with is the one the register screen
+  // just collected, and a second secret to keep straight is a second secret to lose.
   assert.ok(
-    markup.includes('not your Migo password'),
-    'the credential must be distinguished from the account password',
+    !markup.includes('Recovery credential'),
+    'the offer must not ask for a credential of its own',
+  );
+  assert.ok(
+    !markup.includes('type="password"'),
+    'the offer must not collect any secret — the passphrase was already typed',
+  );
+  assert.ok(
+    markup.includes('sealed with your passphrase'),
+    'the offer must say which passphrase seals the file',
   );
   assert.ok(
     markup.includes('saved to this browser automatically'),
     'the offer must say the account is already saved locally',
   );
-  assert.ok(
-    markup.includes('Download account file'),
-    'the download control must name what it does',
-  );
-  assert.ok(markup.includes('Later'), 'declining must be an offered choice');
+  assert.ok(markup.includes('Download key file'), 'the download control must name what it does');
+  assert.ok(markup.includes('Continue'), 'continuing into the app must be an offered choice');
 });
 
 test('a device without the root gets the honest one-liner, not a dead button', () => {
   const markup = renderToStaticMarkup(
-    <SaveAccountSheet username="alice" accountId="acct_1" root={null} onDone={() => undefined} />,
+    <SaveAccountSheet
+      username="alice"
+      accountId="acct_1"
+      root={null}
+      passphrase="correct-horse-battery-staple"
+      onDone={() => undefined}
+    />,
   );
   assert.ok(markup.includes('does not hold the account root'), 'the honest line is missing');
-  assert.ok(
-    !markup.includes('Download account file'),
-    'no download control may render without a root',
-  );
+  assert.ok(!markup.includes('Download key file'), 'no download control may render without a root');
 });
 
-test('the restore sheet asks for the file, the credential, and nothing else', () => {
-  const markup = renderToStaticMarkup(
-    <RestoreAccountSheet onRestored={() => undefined} onCancel={() => undefined} />,
-  );
-  assert.ok(markup.includes('type="file"'), 'the file picker must be present');
-  assert.ok(
-    markup.includes('accept=".migo,application/octet-stream"'),
-    'the picker must prefer .migo files',
-  );
-  assert.ok(markup.includes('Recovery credential'), 'the credential field must be labelled');
-  assert.ok(markup.includes('>Restore</button>'), 'the restore control must be present');
-  assert.ok(!markup.includes(RESTORE_FAILED), 'no failure line before anything was attempted');
-});
-
-test('the restore failure line is one honest sentence, pinned word for word', () => {
-  // §182: a wrong credential, a tampered byte, and a foreign file are indistinguishable to the
-  // reader, so the screen has exactly one line for all three.
+test('the open-failure line is one honest sentence, pinned word for word', () => {
+  // §182: a wrong passphrase, a tampered byte, and a foreign file are indistinguishable to the
+  // reader, so the sign-in screen has exactly one line for all three.
   assert.equal(
     RESTORE_FAILED,
-    'That credential does not open this file, or the file is not an account file.',
+    'That passphrase does not open this file, or the file is not an account file.',
   );
 });

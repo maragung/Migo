@@ -1713,3 +1713,67 @@ kosong adalah keadaan wajar akun baru, bukan kegagalan baca. Test
 di spec_social mengunci dua sisi seam yang disusun handler: `suggest`
 wajib menjawab Vec kosong (bukan error), `profiles` wajib menolak batch
 kosong — sehingga guard di handler tidak kehilangan alasannya.
+
+## 52. Login hanya lewat file kunci .migo — gender, captcha pergi, panel My Account (v0.14.9)
+
+Permintaan: sistem login diperbarui menjadi **hanya** key file `.migo` yang
+diunduh saat selesai pendaftaran plus passphrasenya; kolom pendaftaran
+menjadi username, passphrase, email, gender; card captcha (background
+putih, tombol reload, "easier challenge") dihilangkan; setelah daftar
+muncul modal menawarkan unduh file kunci dan langsung masuk; di menu
+avatar ada "My Account" dengan unduh/ganti file kunci, ganti passphrase
+(tanpa bisa mengganti username), ganti email.
+
+Sisi server tiga hal. (1) **Gender**: migrasi 0006 menambah kolom
+`gender smallint` di `profile` (1 laki-laki, 2 perempuan, 3 lainnya, null
+tidak menyatakan), diekspos sebagai `Option<i16>` tervalidasi di
+`RegisterRequest` — nomor di luar penomoran ditolak VALIDATION_FAILED.
+Ditest di migo-auth (tercatat di profil; diam tetap diam) dan migo-api
+(201/400). (2) **Route kontak**: `PUT /v1/auth/contact` akhirnya diwujudkan
+— SDK sudah memanggilnya sejak v0.14.7 dan komentar CORS sudah
+menyebutnya, tapi routenya belum pernah terpasang. Test: 204 saat alamat
+valid, 400 untuk bukan email/telepon, 401 tanpa bearer. (3) Tidak ada
+perubahan captcha di server: gate dikendalikan `MIGO_CAPTCHA__ENABLED`,
+dan di produksi `.migod.env` kini mematikannya. Upacara identitas
+(§182) memang tidak pernah digerbangi captcha.
+
+Sisi web, halaman login diganti total: pilih file `.migo`, ketik
+passphrase, selesai — tidak ada lagi kolom username/password, chip akun
+tersimpan, maupun sheet restore. Penyedianya (`provider.tsx`) kini
+memegang `loginWithFile`: buka container (salah passphrase = satu kalimat
+jujur §182, tidak bisa dibedakan dari file rusak), lalu upacara ML-DSA
+dua tingkat — device record tersimpan (IndexedDB baru
+`device-record-store`, seed kredensial per akun) menjawab *login
+challenge* sebagai device yang sama, dan bila belum ada / device sudah
+dihapus server, jatuh ke *add-device* yang mencetak kredensial baru dan
+menyimpannya untuk login berikutnya; tanpa record, setiap login akan
+melahirkan device baru dan batasnya cuma delapan. Sesi berjalan sebagai
+device founding (root dari file mereproduksi identitas founding), grant
+disimpan, materi akun (kunci identitas + wallet 0) dipublikasikan
+idempoten.
+
+Pendaftaran memakai satu passphrase untuk dua peran: password di server
+dan kunci penyegelan file — makanya modal pasca-daftar tidak meminta
+kredensial kedua: langsung "Download key file" (disegel dengan passphrase
+tadi) dan "Continue". Widget captcha dihapus dari komponen, CSS
+(`.captcha-*`, `.register-grid`, `.auth-account-chip`,
+`.auth-restore-link`), dan testnya.
+
+Panel **My Account** baru (entry pertama menu avatar, ikon shield):
+identitas read-only (@username + MGO-XXXXXXXX, "Your username can never
+be changed."), email write-only (updateContact; tidak ada API untuk
+membaca email kembali — fieldnya jujur soal itu), ganti passphrase
+(changePassword + saveSession untuk grant pengganti; setelah sukses form
+berhenti menawarkan submit dan justru memperingatkan file lama masih
+terbuka dengan passphrase LAMA, menawarkan file segar bila device
+memegang root), dan unduh file kunci (hanya device dengan root; tanpa
+root, satu kalimat jujur dan tombol mati). Seksi password pindah dari
+Settings ke sini.
+
+Test: server 61 migo-auth / 73 migo-api; web 274 (wire shape upacara
+login & add-device, round-trip device record dengan seed, gender di body
+register, tawaran penyegelan tanpa input rahasia kedua, empat seksi
+panel + keadaan tanpa root). Catatan desain: klien desktop dan Android
+masih memakai login password (server tetap mendukung); pengguna web yang
+sudah ada tapi tidak menyimpan file .migo harus masuk dari perangkat
+yang masih bersesi atau membuat akun baru.

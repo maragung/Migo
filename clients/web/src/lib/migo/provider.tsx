@@ -4,8 +4,9 @@
  * The client lifecycle, owned by one React context.
  *
  * This provider is the single place a {@link MigoClient} is constructed, brought online, and torn down.
- * It handles the three ways a session begins — register a new account, log an existing one in, or
- * resume a persisted session on a return visit — and the persistence that makes resume possible:
+ * It handles the two ways a session begins — register a new account, or sign an existing one in from
+ * its `.migo` key file — plus the resume of a persisted session on a return visit, and the persistence
+ * that makes resume possible:
  *
  *   - The key-store snapshot (this device's private identity) is written to IndexedDB after every
  *     operation that can mutate it, so a reload keeps the identity and its ability to read history.
@@ -32,9 +33,11 @@ import type {
 } from '@migo/sdk';
 
 import { defaultServerEndpoint } from '@/lib/config.js';
+import { RESTORE_FAILED } from '@/lib/account-file.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { deviceDisplayName, webHello } from '@/lib/migo/hello.js';
 import { saveAccountRecord } from '@/lib/storage/account-record-store.js';
+import { loadDeviceRecord, saveDeviceRecord } from '@/lib/storage/device-record-store.js';
 import {
   clearKeyStoreSnapshot,
   loadKeyStoreSnapshot,
@@ -55,15 +58,15 @@ export interface RegisterForm {
   username: string;
   password: string;
   email?: string;
-  phone?: string;
-  country?: string;
+  gender?: number;
 }
 
-/** The fields a login form collects. */
-export interface LoginForm {
-  identifier: string;
-  password: string;
-}
+/**
+ * The container refused to open, and the screen owes the user the one honest sentence for it.
+ * Carries the line itself because the provider's generic error mapping has no way to tell a wrong
+ * passphrase from a tampered file — §182 forbids the distinction — and must not bury it.
+ */
+export class AccountFileError extends Error {}
 
 /** What the rest of the app reads and calls. */
 export interface MigoContextValue {
@@ -88,17 +91,16 @@ export interface MigoContextValue {
     captcha: CaptchaProof | null,
   ) => Promise<void>;
   /**
-   * Signs in to an existing account. The optional {@link KeyStore} is the restore path: a
-   * `.migo` account file opened on the login screen rebuilds the founding identity from the
-   * root, and that store is handed here so the session runs as the account's founding device —
-   * root present, E2EE history readable — instead of as a fresh additional device.
+   * Signs in from a `.migo` account file and its passphrase — the only sign-in the web client has.
+   *
+   * Opening the container yields the account root, and the sign-in is the ML-DSA identity ceremony
+   * (§182), not a password: a stored device record answers the login challenge (the ceremony reuses
+   * the device this browser introduced last time), and a browser with no record — or one whose
+   * device the server no longer knows — falls back to add-device, which mints a fresh device
+   * credential and records it for next time. Either way the session runs as a founding-grade
+   * device, because the root in the file reproduces the founding identity.
    */
-  login: (
-    form: LoginForm,
-    server: ServerEndpoint,
-    captcha: CaptchaProof | null,
-    restored?: KeyStore,
-  ) => Promise<void>;
+  loginWithFile: (bytes: Uint8Array, passphrase: string, server: ServerEndpoint) => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -300,11 +302,8 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
         if (form.email?.trim()) {
           params.email = form.email.trim();
         }
-        if (form.phone?.trim()) {
-          params.phone = form.phone.trim();
-        }
-        if (form.country?.trim()) {
-          params.country = form.country.trim();
+        if (form.gender !== undefined) {
+          params.gender = form.gender;
         }
         if (captcha !== null) {
           params.captcha = captcha;
@@ -339,13 +338,8 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
     [buildClient, markReady, enrolAccountMaterial, teardown, wireInbound],
   );
 
-  const login = useCallback(
-    async (
-      form: LoginForm,
-      server: ServerEndpoint,
-      captcha: CaptchaProof | null,
-      restored?: KeyStore,
-    ): Promise<void> => {
+  const loginWithFile = useCallback(
+    async (bytes: Uint8Array, passphrase: string, server: ServerEndpoint): Promise<void> => {
       setError(null);
       setStatus('connecting');
       try {
@@ -354,38 +348,119 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
         // Best-effort, see register above.
       }
       try {
-        // A restored key store is founding-grade (the identity is derived from the root, so it
-        // reproduces the founding device's published bundle); without one this is the plain
-        // path, a fresh additional-device identity.
-        const created = buildClient(
-          restored === undefined ? { server } : { server, keyStore: restored },
-        );
-        const grant = await created.login({
-          identifier: form.identifier.trim(),
-          password: form.password,
-          ...(captcha !== null ? { captcha } : {}),
+        // One container, one credential: the passphrase that sealed the file at registration opens
+        // it now (§182 — the reader cannot tell a wrong passphrase from a tampered file, and the
+        // screen owes the user one sentence, not a guess).
+        let opened: account.AccountFile;
+        try {
+          opened = await account.openContainer(passphrase, bytes);
+        } catch {
+          throw new AccountFileError(RESTORE_FAILED);
+        }
+        const root = opened.rootSecret();
+        const fileAccountId = opened.accountId;
+        if (fileAccountId === undefined) {
+          // A container sealed before accounts were named in the file: it can still found the
+          // identity, but the ceremonies have no account to introduce it to.
+          throw new AccountFileError(RESTORE_FAILED);
+        }
+        const accountId = fileAccountId as Id;
+        const bootstrap = new BootstrapClient(server);
+        const identity = account.IdentityKey.fromRoot(root);
+
+        // Tier one: the device record. A browser that signed in from a file before answers the
+        // login ceremony as the same device — the challenge is bound to it and to the username,
+        // and both signatures come from material this browser already holds. A record whose
+        // device the server no longer knows (revoked, or the record is stale) falls through to
+        // tier two, which is not a difference the user needs to be told about.
+        const record = await loadDeviceRecord(accountId);
+        let grant: Grant | null = null;
+        if (record !== undefined) {
+          try {
+            const challenge = await bootstrap.identityLoginChallenge({
+              identifier: record.username,
+              deviceId: record.deviceId,
+            });
+            grant = await bootstrap.identityLogin({
+              challengeId: challenge.challengeId,
+              identitySignature: identity.signLogin(challenge.payload),
+              deviceSignature: account.DeviceCredential.fromSeed(record.credentialSeed).signLogin(
+                challenge.payload,
+              ),
+            });
+          } catch {
+            grant = null;
+          }
+        }
+
+        // Tier two: add-device. The file's root signs the challenge and vouches for a fresh
+        // device credential, whose seed is then recorded here — the next sign-in takes tier one.
+        let username = record?.username ?? '';
+        if (grant === null) {
+          const credential = account.DeviceCredential.generate();
+          const challenge = await bootstrap.addDeviceChallenge({
+            accountId,
+            device: {
+              platform: webHello().platform,
+              displayName: deviceDisplayName(),
+            },
+          });
+          grant = await bootstrap.addDevice({
+            challengeId: challenge.challengeId,
+            identitySignature: identity.signLogin(challenge.payload),
+            devicePublicKey: credential.publicKey(),
+            deviceSignature: credential.signLogin(challenge.payload),
+          });
+          await saveDeviceRecord({
+            accountId,
+            deviceId: grant.deviceId,
+            username,
+            credentialSeed: credential.exposeSeed(),
+            savedAt: Date.now(),
+          });
+        }
+
+        // The file's root reproduces the founding identity deterministically, so the session runs
+        // as the account's founding device — root present, E2EE history readable.
+        const created = buildClient({
+          server,
+          keyStore: KeyStore.founding(root),
+          deviceId: grant.deviceId,
         });
+        await created.resume(grant);
+        // The grant names no username and tier two arrived without one; the profile is the only
+        // place it is written down. Best-effort: an empty username is survivable (the file name
+        // falls back to "account", and the banner fetches the profile on its own).
+        if (username === '') {
+          try {
+            username = (await created.profile.fetchOne(grant.accountId))?.username ?? '';
+          } catch {
+            // See above — the shell still renders.
+          }
+        }
         await Promise.all([
           saveSession({ grant }),
           saveKeyStoreSnapshot(created.keyStore.snapshot()),
           saveAccountRecord({
-            username: form.identifier.trim(),
+            username,
             accountId: grant.accountId,
-            hasRoot: created.keyStore.root() !== null,
+            hasRoot: true,
             savedAt: Date.now(),
           }),
         ]);
         wireInbound(created);
         void created.presence.setPresence(PresenceState.Online).catch(() => {});
+        // A founding-grade device publishes the account material idempotently — see resume.
+        void enrolAccountMaterial(created, grant, server);
         markReady(grant);
       } catch (cause) {
         await teardown();
         setStatus('anonymous');
-        setError(friendlyError(cause));
+        setError(cause instanceof AccountFileError ? cause.message : friendlyError(cause));
         throw cause;
       }
     },
-    [buildClient, markReady, teardown, wireInbound],
+    [buildClient, markReady, enrolAccountMaterial, teardown, wireInbound],
   );
 
   const logout = useCallback(async (): Promise<void> => {
@@ -498,7 +573,7 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
     client,
     persistKeyStore: scheduleKeyStorePersist,
     register,
-    login,
+    loginWithFile,
     logout,
   };
 

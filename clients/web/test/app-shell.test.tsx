@@ -41,7 +41,7 @@ function render(shell: ReactNode): string {
         persistKeyStore: () => {},
         client: null,
         register: () => Promise.resolve(),
-        login: () => Promise.resolve(),
+        loginWithFile: () => Promise.resolve(),
         logout: () => Promise.resolve(),
       }}
     >

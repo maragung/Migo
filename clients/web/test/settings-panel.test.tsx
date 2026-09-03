@@ -14,9 +14,9 @@
  *      an already-revoked one get no control; every other device gets exactly one Remove,
  *      labelled with the device it acts on, and a revoked device stays listed with its mark —
  *      "which phone was that" is a question about the past as much as the present.
- *   4. **The password form gates its submit.** An empty current password, a short new password,
- *      or a confirm that disagrees leaves the save button disabled — the gate lives in the
- *      markup, not only in the handler.
+ *
+ * The passphrase, email, and key-file controls moved to the "My Account" panel; their rules are
+ * pinned in account-panel.test.tsx, not here.
  */
 
 import assert from 'node:assert/strict';
@@ -26,7 +26,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import type { AccountSession, DeviceSummary, Id } from '@migo/sdk';
 
-import { DeviceList, PasswordFormView, SessionList } from '../src/components/settings-panel.js';
+import { DeviceList, SessionList } from '../src/components/settings-panel.js';
 
 const NOW = Date.parse('2026-08-26T12:00:00Z');
 
@@ -115,88 +115,6 @@ test('an account with one session sees it marked and nothing revocable', () => {
   );
 
   assert.ok(!markup.includes('>Revoke<'), 'a lone current session was offered a revoke');
-});
-
-test('the password form renders all three fields and gates the save on a complete, matching draft', () => {
-  const ready = renderToStaticMarkup(
-    <PasswordFormView
-      current="old-secret"
-      next="new-secret-1"
-      confirm="new-secret-1"
-      busy={false}
-      error={null}
-      saved={false}
-      onChange={() => {}}
-      onSubmit={() => {}}
-    />,
-  );
-
-  assert.ok(ready.includes('aria-label="Current password"'), 'the current field is missing');
-  assert.ok(ready.includes('aria-label="New password"'), 'the new field is missing');
-  assert.ok(ready.includes('aria-label="Confirm new password"'), 'the confirm field is missing');
-  assert.ok(ready.includes('>Change password</button>'), 'the submit control is missing');
-  // A complete, matching draft leaves the save enabled.
-  assert.ok(!ready.includes('disabled'), 'a complete draft must not disable the save');
-
-  // A confirm that disagrees keeps the save disabled — the gate must live in the markup.
-  const mismatch = renderToStaticMarkup(
-    <PasswordFormView
-      current="old-secret"
-      next="new-secret-1"
-      confirm="different"
-      busy={false}
-      error={null}
-      saved={false}
-      onChange={() => {}}
-      onSubmit={() => {}}
-    />,
-  );
-  assert.ok(mismatch.includes('disabled'), 'a mismatched confirm must disable the save');
-
-  // A short new password is not a password the server would accept; the form says so by gating.
-  const short = renderToStaticMarkup(
-    <PasswordFormView
-      current="old-secret"
-      next="short"
-      confirm="short"
-      busy={false}
-      error={null}
-      saved={false}
-      onChange={() => {}}
-      onSubmit={() => {}}
-    />,
-  );
-  assert.ok(short.includes('disabled'), 'a short new password must disable the save');
-});
-
-test('the password form states its failure and its success beside the fields they belong to', () => {
-  const failed = renderToStaticMarkup(
-    <PasswordFormView
-      current="wrong"
-      next="new-secret-1"
-      confirm="new-secret-1"
-      busy={false}
-      error="The server rejected the request."
-      saved={false}
-      onChange={() => {}}
-      onSubmit={() => {}}
-    />,
-  );
-  assert.ok(failed.includes('form-error'), 'a refused change lost its error line');
-
-  const done = renderToStaticMarkup(
-    <PasswordFormView
-      current=""
-      next=""
-      confirm=""
-      busy={false}
-      error={null}
-      saved
-      onChange={() => {}}
-      onSubmit={() => {}}
-    />,
-  );
-  assert.ok(done.includes('Password changed.'), 'a completed change lost its success line');
 });
 
 test('the device list marks the current device and offers it no removal', () => {

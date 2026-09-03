@@ -188,6 +188,7 @@ impl Harness {
                 bio: Some(format!("halo, saya {username}")),
                 avatar_media_id: Some(id(900 + account)),
                 birth_year: Some(1995),
+                gender: None,
                 show_last_seen,
                 who_can_message,
                 who_can_add,

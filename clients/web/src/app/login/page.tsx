@@ -1,48 +1,41 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import type { FormEvent, ReactNode } from 'react';
+import { useEffect, useState } from 'react';
+import type { ChangeEvent, FormEvent, ReactNode } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
 import { BottomSheet } from '@/components/bottom-sheet.js';
-import { RestoreAccountSheet } from '@/components/restore-account-sheet.js';
 import { ServerForm, transportLabel } from '@/components/server-form.js';
 import { Spinner } from '@/components/spinner.js';
 import { ThemeToggle } from '@/components/theme-toggle.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { defaultServerEndpoint } from '@/lib/config.js';
-import { loadAccountRecord } from '@/lib/storage/account-record-store.js';
-import type { AccountRecord } from '@/lib/storage/account-record-store.js';
+import { RESTORE_FAILED } from '@/lib/account-file.js';
 import { loadServerEndpoint, saveServerEndpoint } from '@/lib/storage/server-endpoint-store.js';
 
-import type { KeyStore, ServerEndpoint } from '@migo/sdk';
+import type { ServerEndpoint } from '@migo/sdk';
 
-/** Sign in to an existing account, then hand off to the chat shell. */
+/**
+ * Sign in with the account key file, then hand off to the chat shell.
+ *
+ * The `.migo` file downloaded at registration and its passphrase are the whole sign-in: the file
+ * carries the account root, the passphrase unseals it, and the ML-DSA identity ceremony (not a
+ * password) turns the root into a session. There is no username field — the file names the
+ * account — and no server-side secret to type, because no server holds one that could open the
+ * account.
+ */
 export default function LoginPage(): ReactNode {
-  const { status, error, login } = useMigo();
+  const { status, error, loginWithFile } = useMigo();
   const router = useRouter();
 
-  const [identifier, setIdentifier] = useState('');
-  const [password, setPassword] = useState('');
+  const [file, setFile] = useState<File | null>(null);
+  const [passphrase, setPassphrase] = useState('');
   const [endpoint, setEndpoint] = useState<ServerEndpoint | null>(null);
   const [endpointReady, setEndpointReady] = useState(false);
   const [serverSheetOpen, setServerSheetOpen] = useState(false);
-  const [restoreSheetOpen, setRestoreSheetOpen] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const submitting = status === 'connecting';
-
-  // The remembered account: when this browser has signed in before, the card collapses to a chip
-  // and a password. `full` is the both-fields form — the first visit, a shared browser, or the
-  // user's own choice against the remembered name.
-  const [record, setRecord] = useState<AccountRecord | null>(null);
-  const [mode, setMode] = useState<'saved' | 'full'>('full');
-  // The founding-grade store a restored `.migo` container produced, handed to login so the
-  // session runs as the account's founding device rather than a fresh additional one.
-  const [restoredStore, setRestoredStore] = useState<KeyStore | null>(null);
-  // The auto-prefill happens once: a user who chose "Use a different account" before the record
-  // finished loading must not have their typing overwritten by a late arrival.
-  const offeredRef = useRef(false);
 
   useEffect(() => {
     if (status === 'ready') {
@@ -50,9 +43,9 @@ export default function LoginPage(): ReactNode {
     }
   }, [status, router]);
 
-  // Pre-fill the server from the persisted endpoint, falling back to the build's default the
-  // register screen uses — a first visit has no snapshot, and without the fallback the card
-  // would render no server link and a Sign-in button that can never be pressed.
+  // Pre-fill the server from the persisted endpoint, falling back to the build's default — a first
+  // visit has no stored endpoint, and without the fallback the card would render no server link
+  // and a Sign-in button that can never be pressed.
   useEffect(() => {
     let cancelled = false;
     void loadServerEndpoint().then((stored) => {
@@ -60,32 +53,22 @@ export default function LoginPage(): ReactNode {
       setEndpoint(stored ?? defaultServerEndpoint());
       setEndpointReady(true);
     });
-    void loadAccountRecord().then((remembered) => {
-      if (cancelled || remembered === undefined || offeredRef.current) return;
-      offeredRef.current = true;
-      setRecord(remembered);
-      // Only collapse to the chip when the identifier field is still untouched — typing in it is
-      // the user's own answer to "which account?", and it wins over memory.
-      setMode((current) => (current === 'full' && identifier === '' ? 'saved' : current));
-    });
     return () => {
       cancelled = true;
     };
-    // `identifier` is deliberately not a dependency: the prefill decision is made once, when the
-    // record arrives, against the field's value at that moment.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function onFileChange(event: ChangeEvent<HTMLInputElement>): void {
+    setFile(event.target.files?.[0] ?? null);
+    setValidationError(null);
+  }
 
   async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    if (submitting || endpoint === null) {
+    if (submitting || endpoint === null || file === null) {
       return;
     }
-    const who = mode === 'saved' && record !== null ? record.username : identifier;
-    if (who.trim() === '') {
-      return;
-    }
-    // Persist the chosen endpoint *before* the bootstrap call, so a mid-flight failure can be retried
+    // Persist the chosen endpoint *before* the ceremony, so a mid-flight failure can be retried
     // against the same server without the form losing the address the user just confirmed.
     try {
       await saveServerEndpoint(endpoint);
@@ -94,12 +77,8 @@ export default function LoginPage(): ReactNode {
     }
     setValidationError(null);
     try {
-      await login(
-        { identifier: who, password },
-        endpoint,
-        null,
-        restoredStore === null ? undefined : restoredStore,
-      );
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      await loginWithFile(bytes, passphrase, endpoint);
     } catch {
       // The provider surfaces the reason through `error`; keep the form populated for a retry.
     }
@@ -118,6 +97,8 @@ export default function LoginPage(): ReactNode {
     setServerSheetOpen(false);
   }
 
+  const canSubmit = !submitting && file !== null && passphrase.length > 0 && endpoint !== null;
+
   return (
     <main className="auth-screen">
       <ThemeToggle className="auth-theme-toggle" />
@@ -128,63 +109,43 @@ export default function LoginPage(): ReactNode {
           </span>
           <h1>Migo</h1>
         </div>
-        <p className="auth-sub">Sign in to your private, end-to-end encrypted account.</p>
-
-        {mode === 'saved' && record !== null ? (
-          <div className="auth-account-chip">
-            Continue as <strong>{record.username}</strong>
-            <button
-              type="button"
-              className="auth-restore-link"
-              onClick={() => {
-                setMode('full');
-                setIdentifier('');
-              }}
-            >
-              Use a different account
-            </button>
-          </div>
-        ) : null}
-
-        {mode === 'full' ? (
-          <label className="field-label">
-            Username, email, or phone
-            <input
-              type="text"
-              value={identifier}
-              onChange={(event) => setIdentifier(event.target.value)}
-              autoComplete="username"
-              autoFocus
-              required
-            />
-          </label>
-        ) : null}
+        <p className="auth-sub">
+          Sign in with your account key file — your keys are yours alone, and no password of yours
+          is stored anywhere.
+        </p>
 
         <label className="field-label">
-          Password
+          Account key file
           <input
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            autoComplete="current-password"
+            type="file"
+            accept=".migo,application/octet-stream"
+            onChange={onFileChange}
             required
-            autoFocus={mode === 'saved'}
+            autoFocus
           />
+          <span className="field-hint">The .migo file you downloaded when you registered.</span>
         </label>
 
-        {restoredStore !== null ? (
-          <p className="hint" role="status">
-            Account file restored — sign in with your username and password.
+        <label className="field-label">
+          Passphrase
+          <input
+            type="password"
+            value={passphrase}
+            onChange={(event) => setPassphrase(event.target.value)}
+            autoComplete="current-password"
+            required
+          />
+          <span className="field-hint">The passphrase you chose when the file was saved.</span>
+        </label>
+
+        {validationError ? <p className="form-error">{validationError}</p> : null}
+        {error ? (
+          <p className="form-error" role="alert">
+            {error === RESTORE_FAILED ? RESTORE_FAILED : error}
           </p>
         ) : null}
-        {validationError ? <p className="form-error">{validationError}</p> : null}
-        {error ? <p className="form-error">{error}</p> : null}
 
-        <button
-          type="submit"
-          className="btn btn-primary btn-block"
-          disabled={submitting || endpoint === null}
-        >
+        <button type="submit" className="btn btn-primary btn-block" disabled={!canSubmit}>
           {submitting ? <Spinner /> : 'Sign in'}
         </button>
 
@@ -194,15 +155,6 @@ export default function LoginPage(): ReactNode {
 
         {endpointReady && endpoint !== null ? (
           <div className="auth-card-links">
-            {restoredStore === null ? (
-              <button
-                type="button"
-                className="auth-restore-link"
-                onClick={() => setRestoreSheetOpen(true)}
-              >
-                Restore from account file
-              </button>
-            ) : null}
             <button
               type="button"
               className="auth-server-link"
@@ -220,21 +172,6 @@ export default function LoginPage(): ReactNode {
             value={endpoint}
             onCommit={onServerConfirmed}
             onTransportPick={onServerCommit}
-          />
-        </BottomSheet>
-      ) : null}
-
-      {restoreSheetOpen ? (
-        <BottomSheet title="Restore your account" onClose={() => setRestoreSheetOpen(false)}>
-          <RestoreAccountSheet
-            onRestored={(store) => {
-              setRestoredStore(store);
-              setRestoreSheetOpen(false);
-              // The username lives on the server, not in the file — the full form is where it is
-              // typed, so the restore always ends at the both-fields sign-in.
-              setMode('full');
-            }}
-            onCancel={() => setRestoreSheetOpen(false)}
           />
         </BottomSheet>
       ) : null}

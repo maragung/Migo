@@ -1191,6 +1191,7 @@ where
                 bio: None,
                 avatar_media_id: None,
                 birth_year: None,
+                gender: request.gender,
                 // Private by default. A social product that starts everybody visible has
                 // decided on their behalf, and the people who would have chosen otherwise
                 // are the ones who most needed the choice.

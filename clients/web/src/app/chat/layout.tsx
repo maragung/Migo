@@ -42,6 +42,7 @@ import { AdminsPanel } from '@/components/admins-panel.js';
 import { AppShell } from '@/components/app-shell.js';
 import type { PanelTab, SystemTab } from '@/components/app-shell.js';
 import type { RightTabChip, RightTabKind } from '@/components/app-shell.js';
+import { AccountPanel } from '@/components/account-panel.js';
 import { ConversationList } from '@/components/conversation-list.js';
 import { FriendsPanel } from '@/components/friends-panel.js';
 import { GamesPanel } from '@/components/games-panel.js';
@@ -107,6 +108,7 @@ const KIND_TITLES: Readonly<Record<Exclude<RightTabKind, 'chat'>, string>> = {
   search: 'Search',
   wallet: 'TopUp',
   profile: 'Profile',
+  account: 'Account',
   settings: 'Settings',
   admins: 'Admins',
 };
@@ -281,6 +283,8 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
         return <WalletPanel />;
       case 'profile':
         return <ProfilePanel onOpenSettings={() => openRightTab('settings')} />;
+      case 'account':
+        return <AccountPanel />;
       case 'settings':
         return <SettingsPanel />;
       case 'admins':

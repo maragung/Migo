@@ -154,6 +154,7 @@ fn registration(username: &str) -> Registration {
         password: Secret::new(GOOD_PASSWORD),
         locale: "en".to_string(),
         country: Some("ID".to_string()),
+        gender: None,
         device: DeviceClaim::new(Platform::Web, "Firefox on Linux"),
         captcha: None,
         server: None,
@@ -244,6 +245,44 @@ async fn a_registration_also_creates_a_private_profile() {
         migo_store::model::Visibility::Friends,
         "a new account is not open to messages from strangers by default"
     );
+}
+
+#[tokio::test]
+async fn a_registration_records_the_disclosed_gender_and_silence_stays_silence() {
+    let harness = Harness::new();
+
+    // The disclosed form: the number the form sent lands on the profile unchanged.
+    let disclosed = harness
+        .auth
+        .register(
+            Registration {
+                gender: Some(migo_store::model::Gender::Female),
+                ..registration("ada")
+            },
+            &context(1_000),
+        )
+        .await
+        .expect("registration succeeds");
+    let profile = harness
+        .store
+        .profile(disclosed.account_id)
+        .await
+        .unwrap()
+        .expect("registration creates a profile");
+    assert_eq!(profile.gender, Some(migo_store::model::Gender::Female));
+
+    // The silent form: a registration from a client without the field writes
+    // "not disclosed", and nothing in the pipeline invents a value for it.
+    // (A later timestamp because a registration is priced against the
+    // anonymous bucket, and the fake clock is the only way to refill it.)
+    let silent = harness.register_at("brin", 60_000).await;
+    let profile = harness
+        .store
+        .profile(silent.account_id)
+        .await
+        .unwrap()
+        .expect("registration creates a profile");
+    assert_eq!(profile.gender, None);
 }
 
 #[tokio::test]

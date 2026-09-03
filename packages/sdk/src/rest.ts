@@ -92,6 +92,11 @@ export interface RegisterParams {
   phone?: string;
   locale?: string;
   country?: string;
+  /**
+   * Gender as the user disclosed it on the form: `1` male, `2` female, `3` other. Omitted when
+   * the user chose not to disclose — the server numbers the values and refuses anything else.
+   */
+  gender?: number;
   device: DeviceDescriptor;
   /**
    * The account identity's ML-DSA-65 public key, when the registering device already holds the
@@ -497,6 +502,7 @@ export class BootstrapClient {
       ...(params.phone !== undefined ? { phone: params.phone } : {}),
       ...(params.locale !== undefined ? { locale: params.locale } : {}),
       ...(params.country !== undefined ? { country: params.country } : {}),
+      ...(params.gender !== undefined ? { gender: params.gender } : {}),
       ...(params.identityPublicKey !== undefined
         ? { identity_public_key: toBase64(params.identityPublicKey) }
         : {}),

@@ -34,6 +34,11 @@ pub struct Model {
     pub searchable: bool,
     /// The `updated_at` column.
     pub updated_at: TimeDateTimeWithTimeZone,
+    /// 1 male, 2 female, 3 other; null not disclosed. Stored on the profile rather
+    /// than the account because it is presentation the user controls, not a
+    /// credential or a routing fact — the same line `birth_year` sits on, and it is
+    /// set the same way: once, at registration, by the person it describes.
+    pub gender: Option<i16>,
 }
 
 /// Foreign keys leaving `profile`.

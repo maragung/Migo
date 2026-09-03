@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * The Settings tab: the account's devices, its live sessions, and the password.
+ * The Settings tab: the account's devices and its live sessions.
  *
  * Devices and sessions are two views of the same security question, and both are
  * server-owned facts — the lists, each revocation, and the bulk sign-out all ask the
@@ -15,13 +15,12 @@
  * "This device" with no revoke control: the server refuses to let a session revoke
  * itself, and a button that always errors is a lie.
  *
- * Changing the password returns a fresh grant (new access and refresh tokens) that the SDK has
- * already installed on the live client; the panel's one extra duty is to persist that grant, so a
- * reload after the change resumes the session instead of dropping to the sign-in screen.
+ * The account's identity, email, passphrase, and key file live in the "My Account" panel
+ * (account-panel.tsx), not here — Settings is the device and session security surface.
  *
  * The presentational halves are exported as controlled components over plain data, so the rules
- * (the current-session badge, the disabled self-revoke, the confirm-match gate on the save
- * button) are testable without a live client, exactly like the other panels' extracted pieces.
+ * (the current-session badge, the disabled self-revoke) are testable without a live client,
+ * exactly like the other panels' extracted pieces.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -33,11 +32,9 @@ import { formatRelative } from '@/lib/format.js';
 import { getChoice, setChoice } from '@/lib/theme.js';
 import type { ThemeChoice } from '@/lib/theme.js';
 import { friendlyError } from '@/lib/migo/errors.js';
-import { saveSession } from '@/lib/storage/session-store.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 
 import { Spinner } from './spinner.js';
-import { BottomSheet } from './bottom-sheet.js';
 
 /** The presentational row for one of the account's devices. */
 export function DeviceRowView({
@@ -188,80 +185,7 @@ export function SessionList({
   );
 }
 
-/** The three password fields as a controlled view; the panel owns the draft. */
-export function PasswordFormView({
-  current,
-  next,
-  confirm,
-  busy,
-  error,
-  saved,
-  onChange,
-  onSubmit,
-}: {
-  current: string;
-  next: string;
-  confirm: string;
-  busy: boolean;
-  error: string | null;
-  saved: boolean;
-  onChange: (field: 'current' | 'next' | 'confirm', value: string) => void;
-  onSubmit: () => void;
-}): ReactNode {
-  const canSubmit = current.length > 0 && next.length >= 8 && next === confirm && !busy;
-  return (
-    <form
-      className="password-form"
-      onSubmit={(event) => {
-        event.preventDefault();
-        if (canSubmit) {
-          onSubmit();
-        }
-      }}
-    >
-      <label className="field-label">
-        Current password
-        <input
-          type="password"
-          className="input"
-          autoComplete="current-password"
-          value={current}
-          onChange={(event) => onChange('current', event.target.value)}
-          aria-label="Current password"
-        />
-      </label>
-      <label className="field-label">
-        New password
-        <input
-          type="password"
-          className="input"
-          autoComplete="new-password"
-          value={next}
-          onChange={(event) => onChange('next', event.target.value)}
-          aria-label="New password"
-        />
-      </label>
-      <label className="field-label">
-        Confirm new password
-        <input
-          type="password"
-          className="input"
-          autoComplete="new-password"
-          value={confirm}
-          onChange={(event) => onChange('confirm', event.target.value)}
-          aria-label="Confirm new password"
-        />
-      </label>
-      {error ? <p className="form-error">{error}</p> : null}
-      {saved ? <p className="hint">Password changed.</p> : null}
-      <button type="submit" className="btn btn-primary" disabled={!canSubmit}>
-        {busy ? <Spinner /> : 'Change password'}
-      </button>
-    </form>
-  );
-}
-
-/** The Settings tab panel: loads the device and session lists and owns the password draft. */
+/** The Settings tab panel: loads the device and session lists. */
 export function SettingsPanel(): ReactNode {
   const { client } = useMigo();
 
@@ -272,14 +196,6 @@ export function SettingsPanel(): ReactNode {
   const [signingOut, setSigningOut] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-
-  const [current, setCurrent] = useState('');
-  const [next, setNext] = useState('');
-  const [confirm, setConfirm] = useState('');
-  const [changing, setChanging] = useState(false);
-  const [passwordError, setPasswordError] = useState<string | null>(null);
-  const [passwordSaved, setPasswordSaved] = useState(false);
-  const [passwordSheetOpen, setPasswordSheetOpen] = useState(false);
 
   const currentSessionId = client?.grant.sessionId ?? null;
 
@@ -378,43 +294,6 @@ export function SettingsPanel(): ReactNode {
       });
   }, [client, signingOut, reload]);
 
-  const changePassword = useCallback((): void => {
-    if (!client || changing) {
-      return;
-    }
-    setChanging(true);
-    setPasswordError(null);
-    setPasswordSaved(false);
-    client
-      .changePassword({ current_password: current, new_password: next })
-      .then(async (grant) => {
-        // The SDK installed the fresh tokens on the live client; persist them so a reload
-        // resumes this session rather than dropping to the sign-in screen.
-        await saveSession({ grant }).catch(() => {});
-        setCurrent('');
-        setNext('');
-        setConfirm('');
-        setPasswordSaved(true);
-      })
-      .catch((cause: unknown) => {
-        setPasswordError(friendlyError(cause));
-      })
-      .finally(() => {
-        setChanging(false);
-      });
-  }, [client, changing, current, next]);
-
-  function onFieldChange(field: 'current' | 'next' | 'confirm', value: string): void {
-    setPasswordSaved(false);
-    if (field === 'current') {
-      setCurrent(value);
-    } else if (field === 'next') {
-      setNext(value);
-    } else {
-      setConfirm(value);
-    }
-  }
-
   return (
     <div className="panel">
       <h1 className="panel-title">Settings</h1>
@@ -460,39 +339,6 @@ export function SettingsPanel(): ReactNode {
           </>
         )}
       </section>
-
-      <section className="panel-section" aria-label="Change password">
-        <h2 className="panel-heading">Account</h2>
-        <p className="hint">Your password, changed in its own screen.</p>
-        <button
-          type="button"
-          className="btn btn-primary"
-          onClick={() => setPasswordSheetOpen(true)}
-        >
-          Change password
-        </button>
-      </section>
-
-      {passwordSheetOpen ? (
-        <BottomSheet
-          title="Change password"
-          onClose={() => {
-            setPasswordSheetOpen(false);
-            setPasswordSaved(false);
-          }}
-        >
-          <PasswordFormView
-            current={current}
-            next={next}
-            confirm={confirm}
-            busy={changing}
-            error={passwordError}
-            saved={passwordSaved}
-            onChange={onFieldChange}
-            onSubmit={changePassword}
-          />
-        </BottomSheet>
-      ) : null}
 
       <AppearanceSection />
       <AboutSection />

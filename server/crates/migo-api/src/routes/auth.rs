@@ -16,11 +16,11 @@
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use migo_auth::{DeviceClaim, Grant, Refresh, Registration, ServerEndpoint, SignIn};
+use migo_auth::{DeviceClaim, Gender, Grant, Refresh, Registration, ServerEndpoint, SignIn};
 use migo_core::{Id, Secret};
 use migo_protocol::Platform;
 
@@ -47,6 +47,7 @@ pub(crate) fn routes() -> Router<ApiState> {
             .route("/refresh", post(refresh))
             .route("/logout", post(logout))
             .route("/password", post(change_password))
+            .route("/contact", put(set_contact))
             .route("/sessions", get(list_sessions))
             .route("/sessions/revoke-others", post(revoke_other_sessions))
             .route("/sessions/{session_id}/revoke", post(revoke_one_session))
@@ -149,6 +150,12 @@ struct RegisterRequest {
     /// `Authenticator` decides whether `None` is acceptable and answers
     /// `CAPTCHA_REQUIRED` when it is not.
     captcha: Option<CaptchaProofBody>,
+    /// Gender as the user disclosed it on the form: `1` male, `2` female,
+    /// `3` other, absent for "not disclosed". A number outside the
+    /// numbering is a client that is wrong, not a value to round to the
+    /// nearest disclosure.
+    #[serde(default)]
+    gender: Option<i16>,
     /// The server the client believes it is talking to. Optional on
     /// the wire: a self-hosted client that has not opened the
     /// "Server" disclosure yet sends a body without a `server`
@@ -353,6 +360,18 @@ async fn register(
         .server
         .map(ServerEndpointBody::into_endpoint)
         .transpose()?;
+    // A number outside the numbering is refused rather than read as "not
+    // disclosed": the column's `None` is the user's own silence, and a wrong
+    // client's typo must not be recorded as the user's choice.
+    let gender = match body.gender {
+        None => None,
+        Some(raw) => Some(Gender::from_i16(raw).ok_or_else(|| {
+            crate::ApiError::from(migo_protocol::fault::validation(
+                "gender",
+                "must be 1 (male), 2 (female), or 3 (other); omit it to not disclose",
+            ))
+        })?),
+    };
     let registration = Registration {
         username: body.username,
         email: body.email,
@@ -360,6 +379,7 @@ async fn register(
         password: Secret::new(body.password),
         locale: body.locale,
         country: body.country,
+        gender,
         device: body.device.into_claim()?,
         identity_public_key: body
             .identity_public_key
@@ -584,6 +604,36 @@ async fn change_password(
         .change_password(&auth.identity, change, &context)
         .await?;
     Ok(Json(grant.into()))
+}
+
+/// The body of `PUT /v1/auth/contact`: the one recoverable contact the caller
+/// is recording. Exactly one of the two shapes — an email or a phone — and the
+/// service's own validation is the judge of which; the route forwards the
+/// string untouched.
+#[derive(Deserialize)]
+struct ContactBody {
+    email_or_phone: String,
+}
+
+/// `PUT /v1/auth/contact` — record (or replace, or clear) the caller's
+/// recoverable contact.
+///
+/// The wire contract the SDK's `updateContact` has spoken since the surface
+/// was designed (`email_or_phone`, one string); the handler is the last piece
+/// of that contract to exist. Idempotent by nature: the column holds one
+/// contact, and a second PUT overwrites the first.
+async fn set_contact(
+    State(state): State<ApiState>,
+    auth: Authenticated,
+    Json(body): Json<ContactBody>,
+) -> Result<StatusCode, crate::ApiError> {
+    let now = state.now();
+    let context = auth.facts.context(now);
+    state
+        .authenticator()
+        .set_contact(&auth.identity, &body.email_or_phone, &context)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Serialize)]

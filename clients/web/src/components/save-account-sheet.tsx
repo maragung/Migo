@@ -1,19 +1,21 @@
 'use client';
 
 /**
- * The offer a fresh registration sees: the account file, sealed and downloaded.
+ * The offer a fresh registration sees: the account key file, sealed with the passphrase the user
+ * just typed, and the choice to continue into the app.
  *
  * Registration makes this browser the founding device — the root is minted here, the E2EE identity
  * is derived from it, and both are already sealed into this browser's IndexedDB. What no server
  * holds is the root itself, so the `.migo` container is the only way the account can ever appear
- * on another device: one file, encrypted under a recovery credential the user chooses now (§182 —
- * not their password, not an e-mail, nothing the server could reset).
+ * on another device (§182): one file, encrypted under the registration passphrase — the same one
+ * that unlocks the account, because a second secret to keep straight is a second secret to lose.
  *
- * The credential is judged locally before any Argon2id work is spent on it; the sealing itself is
- * the crypto package's {@link account.sealContainer}, and a successful download says so in one
- * line and stays re-pressable, because a download the browser swallowed silently is not a saved
- * file. "Later" is an honest choice — the sheet can be declined — but it is the only moment the
- * offer is made, so the lead line says what declining means.
+ * That is also why the sheet asks for nothing: the passphrase is handed in by the register screen
+ * that just collected it, the sealing is the crypto package's {@link account.sealContainer}, and a
+ * successful download says so in one line and stays re-pressable, because a download the browser
+ * swallowed silently is not a saved file. "Continue" is the sign-in-now choice — the registration
+ * already opened the session, so continuing is simply walking through the door it opened — but
+ * declining the download is an honest choice too, and the lead line says what declining means.
  */
 
 import { useState } from 'react';
@@ -21,7 +23,7 @@ import type { ReactNode } from 'react';
 
 import { account } from '@migo/sdk';
 
-import { containerFileName, credentialProblem, downloadAccountFile } from '@/lib/account-file.js';
+import { containerFileName, downloadAccountFile } from '@/lib/account-file.js';
 
 import { Spinner } from './spinner.js';
 
@@ -29,6 +31,7 @@ export function SaveAccountSheet({
   username,
   accountId,
   root,
+  passphrase,
   onDone,
 }: {
   /** The account's username, for the file name. */
@@ -37,26 +40,18 @@ export function SaveAccountSheet({
   accountId: string;
   /** The account root as raw bytes, from the live key store; `null` on a device that somehow holds none. */
   root: Uint8Array | null;
+  /** The registration passphrase, which seals the file and later opens it on the sign-in screen. */
+  passphrase: string;
   /** Called when the user is finished with the offer, either way. */
   onDone: () => void;
 }): ReactNode {
-  const [credential, setCredential] = useState('');
-  const [confirm, setConfirm] = useState('');
   const [sealing, setSealing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
-  const problem = credentialProblem(credential, confirm);
-  const canSeal = !sealing && credential.length > 0 && problem === null;
-
   /** Seals the root into a container and offers it as a download. */
   function seal(): void {
     if (root === null) {
-      return;
-    }
-    const judged = credentialProblem(credential, confirm);
-    if (judged !== null) {
-      setError(judged);
       return;
     }
     setError(null);
@@ -67,7 +62,7 @@ export function SaveAccountSheet({
           account.MigoRoot.fromBytes(root),
           Math.floor(Date.now() / 1000),
         ).forAccount(accountId);
-        const bytes = await account.sealContainer(credential, file);
+        const bytes = await account.sealContainer(passphrase, file);
         downloadAccountFile(bytes, containerFileName(username));
         setSaved(true);
       } catch (cause) {
@@ -86,7 +81,7 @@ export function SaveAccountSheet({
         </p>
         <div className="form-actions">
           <button type="button" className="btn btn-ghost" onClick={onDone}>
-            Later
+            Continue
           </button>
         </div>
       </div>
@@ -96,46 +91,22 @@ export function SaveAccountSheet({
   return (
     <div className="save-account">
       <p className="hint">
-        Your account is saved to this browser automatically. The account file is the only way to
-        move it to another device — no server holds a copy of your keys.
+        Your account is saved to this browser automatically. The key file is the only way to move it
+        to another device — no server holds a copy of your keys — and the only way to sign in again
+        after this browser forgets you. Download it and keep it somewhere safe.
       </p>
-      <label className="field-label">
-        Recovery credential
-        <input
-          type="password"
-          value={credential}
-          onChange={(event) => {
-            setCredential(event.target.value);
-            setSaved(false);
-          }}
-          autoComplete="off"
-          placeholder="a phrase only you know"
-        />
-        <span className="field-hint">
-          At least 8 characters. This unlocks the file — it is not your Migo password.
-        </span>
-      </label>
-      <label className="field-label">
-        Confirm recovery credential
-        <input
-          type="password"
-          value={confirm}
-          onChange={(event) => {
-            setConfirm(event.target.value);
-            setSaved(false);
-          }}
-          autoComplete="off"
-        />
-      </label>
-      {credential.length > 0 && problem !== null ? <p className="form-error">{problem}</p> : null}
+      <p className="hint">
+        The file is sealed with your passphrase. Signing in later means this file and that
+        passphrase, nothing else.
+      </p>
       {error !== null ? <p className="form-error">{error}</p> : null}
-      {saved ? <p className="hint">Account file downloaded — keep it somewhere safe.</p> : null}
+      {saved ? <p className="hint">Key file downloaded — keep it somewhere safe.</p> : null}
       <div className="form-actions">
         <button type="button" className="btn btn-ghost" onClick={onDone}>
-          Later
+          Continue
         </button>
-        <button type="button" className="btn btn-primary" disabled={!canSeal} onClick={seal}>
-          {sealing ? <Spinner /> : 'Download account file'}
+        <button type="button" className="btn btn-primary" disabled={sealing} onClick={seal}>
+          {sealing ? <Spinner /> : 'Download key file'}
         </button>
       </div>
     </div>

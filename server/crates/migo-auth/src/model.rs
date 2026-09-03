@@ -192,6 +192,9 @@ pub struct Registration {
     pub locale: String,
     /// ISO-3166 alpha-2 country, if the client discloses it.
     pub country: Option<String>,
+    /// Gender as the user disclosed it on the registration form. `None` is
+    /// "not disclosed" and stays that way through to the column.
+    pub gender: Option<migo_store::model::Gender>,
     /// The device this registration comes from.
     pub device: DeviceClaim,
     /// The account identity's ML-DSA-65 public key, when the client is

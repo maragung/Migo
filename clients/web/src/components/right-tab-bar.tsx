@@ -22,7 +22,15 @@ import { Icon } from './icons.js';
 
 /** The closable things the right pane can hold besides its resting Feed. */
 export type RightTabKind =
-  'chat' | 'games' | 'notifications' | 'search' | 'wallet' | 'profile' | 'settings' | 'admins';
+  | 'chat'
+  | 'games'
+  | 'notifications'
+  | 'search'
+  | 'wallet'
+  | 'profile'
+  | 'account'
+  | 'settings'
+  | 'admins';
 
 /**
  * The pane's active target: `'feed'` (the resting tab, which the bar renders itself) or the id

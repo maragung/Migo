@@ -44,6 +44,7 @@ async fn seed_account(store: &MemoryStore, value: u128, username: &str) -> Id {
             bio: None,
             avatar_media_id: None,
             birth_year: None,
+            gender: None,
             show_last_seen: Visibility::Everyone,
             who_can_message: Visibility::Everyone,
             who_can_add: Visibility::Everyone,

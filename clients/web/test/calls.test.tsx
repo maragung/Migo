@@ -420,7 +420,7 @@ test('the call manager context starts with no call, no invite, and its actions b
         persistKeyStore: () => {},
         client: null,
         register: () => Promise.resolve(),
-        login: () => Promise.resolve(),
+        loginWithFile: () => Promise.resolve(),
         logout: () => Promise.resolve(),
       }}
     >

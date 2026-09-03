@@ -55,7 +55,7 @@ export function credentialProblem(credential: string, confirm: string): string |
 
 /** The honest line for every way an open can fail: §182 forbids naming which one it was. */
 export const RESTORE_FAILED =
-  'That credential does not open this file, or the file is not an account file.';
+  'That passphrase does not open this file, or the file is not an account file.';
 
 /**
  * Offers sealed container bytes to the browser as a download.

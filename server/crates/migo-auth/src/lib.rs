@@ -24,6 +24,7 @@
 //!             password: Secret::new("correct horse battery staple"),
 //!             locale: "en".to_string(),
 //!             country: None,
+//!             gender: None,
 //!             device: DeviceClaim::new(Platform::Web, "Firefox on Linux"),
 //!             captcha: None,
 //!             server: None,
@@ -107,3 +108,6 @@ pub use crate::tier::{of_account as tier_of_account, PROBATION_MILLIS, TRUSTED_M
 pub use crate::token::{Claims, Signer, REFRESH_BYTES, TOKEN_BYTES, TOKEN_VERSION};
 pub use crate::traits::{Authenticator, Identity, PasswordChange, REAUTH_WINDOW_MS};
 pub use migo_captcha::CaptchaProof;
+/// The gender enumeration, re-exported so the REST layer can parse the wire
+/// number without taking a dependency on the store crate for one type.
+pub use migo_store::model::Gender;

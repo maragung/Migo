@@ -426,12 +426,12 @@ main {
  * The auth screens wear the reference's cyan gradient in both themes: the gradient is the
  * brand moment, not a surface, so it does not flip with the light/dark switch. The card on
  * top is the mockup's glass — translucent white, blurred, hairline-bordered — and everything
- * inside it (fields, the captcha, the server link) is scoped below to stay readable
+ * inside it (fields, the file picker, the server link) is scoped below to stay readable
  * on that glass regardless of theme.
  */
 .auth-screen {
   min-height: 100%;
-  /* The register card (username, password, email, captcha, submit, cross-link, server link)
+  /* The register card (username, email, passphrase, gender, submit, cross-link, server link)
      is taller than a short viewport; the page must scroll under a background that stays put.
      `100dvh` tracks the real viewport on mobile URL-bar collapse; the `100%` line above is the
      fallback for engines without it. `fixed` pins the gradient to the viewport so scrolling the
@@ -522,6 +522,7 @@ main {
   color: rgba(255, 255, 255, 0.9);
 }
 .auth-screen .field-label input,
+.auth-screen .field-label select,
 .auth-screen .field-label textarea {
   background: #ffffff;
   border: 1px solid rgba(0, 172, 193, 0.35);
@@ -569,63 +570,6 @@ main {
 .auth-server-link:hover {
   color: #ffffff;
   text-decoration-style: solid;
-}
-.auth-restore-link {
-  background: transparent;
-  border: none;
-  padding: 4px 0;
-  color: #e0f7fa;
-  font-size: 12px;
-  text-decoration: underline dotted rgba(224, 247, 250, 0.6);
-  text-underline-offset: 3px;
-  cursor: pointer;
-}
-.auth-restore-link:hover {
-  color: #ffffff;
-  text-decoration-style: solid;
-}
-/* The remembered account, when this browser has one: one chip, then only the password. */
-.auth-account-chip {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 8px;
-  margin: 0 0 12px;
-  padding: 8px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.12);
-  color: rgba(255, 255, 255, 0.9);
-  font-size: 13px;
-}
-.auth-account-chip strong {
-  color: #ffffff;
-}
-.auth-screen .captcha-widget {
-  background: rgba(255, 255, 255, 0.85);
-  border-color: rgba(255, 255, 255, 0.5);
-}
-/* The register card's two-column form. On a phone the grid is a plain block — the fields,
-   then the captcha under them, as it always was. From the sheet breakpoint up, the card
-   widens and the captcha moves to the right of the fields, so a PC user reads the form
-   and solves the challenge in one eye-width instead of scrolling the card taller.
-   The fields column is a hair wider than the captcha's: the inputs are the primary work,
-   the challenge image is fixed at 200px and does not need the extra room. */
-.auth-card-wide {
-  max-width: 660px;
-}
-@media (min-width: 768px) {
-  .register-grid {
-    display: grid;
-    grid-template-columns: 1.15fr 1fr;
-    column-gap: 18px;
-    align-items: start;
-  }
-  /* The widget's own bottom margin is rhythm for the stacked layout; in the grid the
-     column's last row is the answer field, whose margin closes the gap to the submit. */
-  .register-grid .captcha-widget {
-    margin-bottom: 0;
-  }
 }
 
 /* --- app shell --- */
@@ -2208,6 +2152,7 @@ main {
   font-weight: 600;
 }
 .field-label input,
+.field-label select,
 .field-label textarea {
   background: var(--input);
   border: 1px solid var(--border);
@@ -2222,6 +2167,7 @@ main {
     box-shadow 0.15s ease;
 }
 .field-label input:focus,
+.field-label select:focus,
 .field-label textarea:focus {
   border-color: var(--accent);
   box-shadow: var(--glow);
@@ -2284,62 +2230,6 @@ main {
 .btn-secondary:hover {
   background: var(--panel-alt);
   border-color: var(--accent-border);
-}
-
-/* --- captcha widget on the auth forms --- */
-
-.captcha-widget {
-  margin: 0 0 11px;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--input);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.captcha-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.captcha-row .field-label {
-  flex: 1;
-  margin: 0;
-}
-.captcha-actions {
-  display: flex;
-  gap: 6px;
-}
-/* The challenge image: the server's PNG scales down on narrow screens, and the
-   border plus panel background keep the (possibly white) image readable — and the
-   loading placeholder visible — on both the light and dark themes. */
-.captcha-image {
-  max-width: 100%;
-  height: auto;
-  display: block;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  background: var(--panel);
-}
-/* The live region under the image announces the challenge lifecycle, never its
-   content; it stays visually quiet so it does not compete with the image itself. */
-.captcha-status {
-  margin: 0;
-  font-size: 12px;
-  color: var(--text-faint);
-}
-.captcha-refresh {
-  padding: 0 12px;
-  height: 44px;
-  font-size: 18px;
-  line-height: 1;
-}
-.captcha-alt {
-  padding: 0 12px;
-  height: 44px;
-  font-size: 13px;
-  line-height: 1;
 }
 
 /* --- segmented control (Direct / Group) --- */
@@ -4007,16 +3897,14 @@ button.activity-row-btn:focus-visible {
   font-size: 13px;
 }
 
-/* The save/restore sheets' bodies: one column, the crypto work is slow enough that the buttons
+/* The save sheet's body: one column, the crypto work is slow enough that the buttons
    must stay where they were while it runs. */
-.save-account,
-.restore-account {
+.save-account {
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
-.save-account .hint,
-.restore-account .hint {
+.save-account .hint {
   margin: 0;
 }
 
