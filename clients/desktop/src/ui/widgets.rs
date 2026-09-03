@@ -713,12 +713,18 @@ pub fn conversation_row(ui: &mut Ui, theme: Theme, content: RowContent<'_>) -> R
     inner.add_space(space::SM);
 
     inner.vertical(|ui| {
+        // Truncation follows the row's real width rather than a char count: a fixed count is
+        // wrong in both directions — cutting a title short on a wide window, and overflowing on
+        // a narrow one — and the row already knows how much room it has.
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(elide(content.title, 26))
-                    .font(FontId::proportional(font::BODY))
-                    .color(colors.text)
-                    .strong(),
+            ui.add(
+                egui::Label::new(
+                    RichText::new(content.title)
+                        .font(FontId::proportional(font::BODY))
+                        .color(colors.text)
+                        .strong(),
+                )
+                .truncate(),
             );
             if content.encrypted {
                 // A lock on a conversation that is genuinely end-to-end encrypted, and nothing at all
@@ -727,10 +733,13 @@ pub fn conversation_row(ui: &mut Ui, theme: Theme, content: RowContent<'_>) -> R
             }
         });
         if let Some(preview) = content.preview {
-            ui.label(
-                RichText::new(elide(preview, 38))
-                    .font(FontId::proportional(font::SMALL))
-                    .color(colors.text_muted),
+            ui.add(
+                egui::Label::new(
+                    RichText::new(preview)
+                        .font(FontId::proportional(font::SMALL))
+                        .color(colors.text_muted),
+                )
+                .truncate(),
             );
         }
     });

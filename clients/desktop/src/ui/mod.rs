@@ -60,10 +60,10 @@ pub enum Screen {
 /// would let the auth flow "navigate" to it, and a sign-out would have to remember to reset it
 /// rather than it simply being unreachable without an account.
 ///
-/// The order is the information architecture — the reference's tab strip (Main, Rooms, Games,
-/// Feed) first, then the panels that the right pane's own bar carries, the same split the
-/// web client's two panes and the Android client's covering screens draw, because it is one
-/// product.
+/// The order is the information architecture — the strip's tabs first (Friends, Rooms, Games,
+/// Feed), then the panels the account menu opens in the right pane (Alerts, Search, Wallet,
+/// Settings). It is the same split the web client's two panes and the Android client's
+/// covering screens draw, because it is one product.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Place {
     /// The social graph: friends, requests, adding by id.
@@ -89,7 +89,7 @@ impl Place {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::Friends => "Main",
+            Self::Friends => "Friends",
             Self::Rooms => "Rooms",
             Self::Games => "Games",
             Self::Feed => "Feed",
@@ -111,14 +111,11 @@ impl Place {
 
     /// The four places that are always on the strip, in the reference's order. A conversation
     /// is not one of them: it opens as its own closable tab on the right pane's bar (see the
-    /// shell's chat bar), which is the reference's whole model.
+    /// shell's chat bar), which is the reference's whole model. Feed and Games live here and
+    /// nowhere else — the left panel owns them, so the right pane can never draw the same
+    /// activity stream a second time. The right pane's panels (Alerts, Search, Wallet,
+    /// Settings) are not a strip at all: the banner's account menu opens each on its own.
     pub const SYSTEM_TABS: [Self; 4] = [Self::Friends, Self::Rooms, Self::Games, Self::Feed];
-
-    /// The places the right pane's menu bar offers, in the reference's order. Feed and Games
-    /// appear here as well as on the strip because the panes are independent: reading Games in
-    /// the right pane never disturbs what the left panel shows. Alerts and Search are not on
-    /// the bar — the reference keeps them off it, and the banner's menu opens them.
-    pub const RIGHT_TABS: [Self; 4] = [Self::Feed, Self::Games, Self::Wallet, Self::Settings];
 
     /// Whether the place is one of the strip's permanent four.
     #[must_use]

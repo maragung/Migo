@@ -42,8 +42,11 @@ pub struct App {
     /// Which system tab the left panel is showing — the left pane's own state, never disturbed
     /// by what the right pane does.
     place: Place,
-    /// The right pane's menu tab, shown when no conversation is active there.
-    right_place: Place,
+    /// The panel the right pane is showing, when it is showing one — the pane's own state, never
+    /// disturbed by what the left panel does. None is the pane's resting state, which is the
+    /// honest default: the system tabs' content lives on the left, so an empty pane owes the lists
+    /// a quiet neighbour, not a second copy of the feed.
+    right_panel: Option<Place>,
     /// The open conversation tabs, in open order — the right pane's closable chat chips.
     open_chats: Vec<migo_core::Id>,
     /// The conversation whose thread is showing, when a chat tab is the right pane's active one.
@@ -113,7 +116,7 @@ impl App {
             net,
             screen: Screen::Opening,
             place: Place::Friends,
-            right_place: Place::Feed,
+            right_panel: None,
             open_chats: Vec::new(),
             active_chat: None,
             connection: Connection::Offline,
@@ -180,7 +183,7 @@ impl App {
                     // graph or device list: those describe an account, and this may be a
                     // different one signing in over the same window.
                     self.place = Place::Friends;
-                    self.right_place = Place::Feed;
+                    self.right_panel = None;
                     self.open_chats.clear();
                     self.active_chat = None;
                     self.friends = FriendsState::default();
@@ -217,7 +220,7 @@ impl App {
                     self.wallet = WalletState::default();
                     self.activity.clear();
                     self.place = Place::Friends;
-                    self.right_place = Place::Feed;
+                    self.right_panel = None;
                     self.open_chats.clear();
                     self.active_chat = None;
                     self.screen = Screen::Unlock;
@@ -327,6 +330,14 @@ impl App {
                     self.settings_panel.wallets = crate::ui::settings::Fetch::from_result(result);
                 }
                 Event::Rooms(rows) => {
+                    // The wire answers both the Rooms pane and Search's room query with this one
+                    // event (the request carries the query; the answer does not), so the answer
+                    // lands in both homes. The query gate keeps a plain pane refresh from
+                    // overwriting a stale answer into a search that is no longer running.
+                    if !self.search.query.trim().is_empty() {
+                        self.search.rooms = Some(rows.clone());
+                        self.search.busy = false;
+                    }
                     self.rooms.rooms = rows;
                     self.rooms.loaded = true;
                 }
@@ -538,8 +549,9 @@ impl App {
         }
     }
 
-    /// The right pane's chat bar: the reference's slate strip — the cyan "‹ Menu Panel" control
-    /// that hands the pane back to its menu tabs, and one closable chip per open conversation.
+    /// The right pane's chat bar: the reference's slate strip — the cyan "‹ Panels" control that
+    /// hands the pane back from the thread to whatever is beneath it (an open panel, or the pane's
+    /// resting state), and one closable chip per open conversation.
     fn chat_bar(&mut self, ui: &mut egui::Ui) {
         // The reference's slate-800, worn in either theme: the bar is chrome, not surface, so it
         // does not follow the palette's surfaces the way a panel does.
@@ -581,7 +593,7 @@ impl App {
                     if ui
                         .add(
                             egui::Button::new(
-                                egui::RichText::new("\u{2039} Menu Panel")
+                                egui::RichText::new("\u{2039} Panels")
                                     .font(egui::FontId::proportional(crate::theme::font::SMALL))
                                     .color(colors.banner_ink)
                                     .strong(),
@@ -631,51 +643,56 @@ impl App {
         }
     }
 
-    /// The right pane's menu bar: its own teal header naming what it shows, with the reference's
-    /// small tab buttons. The left panel's tabs are a separate state — clicking Games here never
-    /// touches what the left panel shows, and that independence is the model's whole offer.
-    fn panel_bar(&mut self, ui: &mut egui::Ui) {
+    /// The right pane's panel header: one name, one close, no chips.
+    ///
+    /// The pane holds a single panel at a time (the banner's account menu opens each on its own),
+    /// so there is nothing to switch the name with — it is a label, not a control, and the close
+    /// is the bar's only button. That is the same slim bar the web client's one-window mode
+    /// draws, because it is one product.
+    fn panel_header(&mut self, ui: &mut egui::Ui, panel: Place) {
+        // The reference's slate-800, worn in either theme: the bar is chrome, not surface, so it
+        // does not follow the palette's surfaces the way a panel does.
+        const BAR: egui::Color32 = egui::Color32::from_rgb(0x1e, 0x29, 0x3b);
         let colors = palette(self.theme);
-        let right_place = self.right_place;
 
-        let mut pick: Option<Place> = None;
+        let mut close = false;
 
-        egui::Panel::top("panel-bar")
+        egui::Panel::top("panel-header")
             .exact_size(38.0)
-            .frame(egui::Frame::new().fill(colors.nav))
+            .frame(egui::Frame::new().fill(BAR))
             .show(ui, |ui| {
                 ui.add_space(space::XS);
                 ui.horizontal_centered(|ui| {
                     ui.label(
-                        egui::RichText::new(format!(
-                            "\u{2726} Panel: {}",
-                            right_place.right_label()
-                        ))
-                        .font(egui::FontId::proportional(crate::theme::font::SMALL))
-                        .color(colors.banner_ink)
-                        .strong(),
+                        egui::RichText::new(format!("\u{2726} {}", panel.right_label()))
+                            .font(egui::FontId::proportional(crate::theme::font::SMALL))
+                            .color(colors.banner_ink)
+                            .strong(),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        for candidate in Place::RIGHT_TABS {
-                            let selected = right_place == candidate;
-                            let outcome = widgets::tab_chip(
-                                ui,
-                                self.theme,
-                                candidate.right_label(),
-                                None,
-                                selected,
-                                false,
-                            );
-                            if outcome.clicked {
-                                pick = Some(candidate);
-                            }
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("\u{2715} Close")
+                                        .font(egui::FontId::proportional(crate::theme::font::SMALL))
+                                        .color(colors.banner_ink)
+                                        .strong(),
+                                )
+                                .fill(colors.accent)
+                                .corner_radius(egui::CornerRadius::same(crate::theme::radius::SM)),
+                            )
+                            .clicked()
+                        {
+                            close = true;
                         }
                     });
                 });
             });
 
-        if let Some(target) = pick {
-            self.select_place(target);
+        if close {
+            // Closing the only panel leaves the pane at its resting state — the same fallback
+            // the web client's Home chip is.
+            self.right_panel = None;
         }
     }
 
@@ -843,7 +860,7 @@ impl App {
             self.place = target;
         } else {
             self.active_chat = None;
-            self.right_place = target;
+            self.right_panel = Some(target);
         }
         self.entered_place(target);
     }
@@ -980,9 +997,16 @@ impl eframe::App for App {
         if signed_in {
             // The signed-in shell is the reference's split: a left panel that owns the account's
             // lists — its tab strip over the orange banner — and a right pane that runs on its
-            // own state, its menu tabs or the open conversations. The left panel claims its
-            // third of the window first; the central panel is the right pane and fills the rest.
-            let width = (ui.max_rect().width() * 0.32).clamp(300.0, 540.0);
+            // own state, an open conversation, an open panel, or its resting state. The left
+            // panel claims its share of the window first; the central panel is the right pane
+            // and fills the rest.
+            //
+            // The floor has to stay below the share, or the formula inverts: the old 0.32 with
+            // a 300px floor meant every window under 937px drew the panel at *more* than its
+            // share, growing as the window shrank. 40% with a 280px floor keeps floor ≤ share
+            // down to a 700px window, which is narrower than the app is usable at.
+            let avail = ui.max_rect().width();
+            let width = (avail * 0.4).clamp(280.0, 540.0);
             egui::Panel::left("left-pane")
                 .exact_size(width)
                 .frame(
@@ -1041,9 +1065,12 @@ impl eframe::App for App {
                             theme_choice: &mut theme_choice,
                         };
                         crate::ui::chat::thread(ui, &mut context, &mut self.chat);
-                    } else {
-                        // The menu pane: its own bar, then the tab it names.
-                        self.panel_bar(ui);
+                    } else if let Some(panel) = self.right_panel {
+                        // One open panel: the slim header names it and closes it, and the panel
+                        // is the whole pane. No chips, and none of the system tabs' content —
+                        // those live on the left, so this pane can never draw the same list
+                        // twice.
+                        self.panel_header(ui, panel);
                         let mut context = Context {
                             theme: self.theme,
                             connection: &self.connection,
@@ -1053,18 +1080,7 @@ impl eframe::App for App {
                             navigate: &mut navigate,
                             theme_choice: &mut theme_choice,
                         };
-                        match self.right_place {
-                            Place::Feed => {
-                                let activity = std::mem::take(&mut self.activity);
-                                crate::ui::space::show(
-                                    ui,
-                                    &mut context,
-                                    &mut self.space,
-                                    &activity,
-                                );
-                                self.activity = activity;
-                            }
-                            Place::Games => crate::ui::games::show(ui, &context),
+                        match panel {
                             Place::Alerts => {
                                 crate::ui::alerts::show(ui, &mut context, &mut self.alerts)
                             }
@@ -1082,9 +1098,24 @@ impl eframe::App for App {
                                 &mut context,
                                 &mut self.settings_panel,
                             ),
-                            // The system tabs are the left panel's; this pane can never land here.
-                            Place::Friends | Place::Rooms => {}
+                            // The system tabs are the left panel's; only a panel ever reaches
+                            // this branch.
+                            Place::Friends
+                            | Place::Rooms
+                            | Place::Games
+                            | Place::Feed => {}
                         }
+                    } else {
+                        // The pane at rest: no conversation, no panel. The lists are all on the
+                        // left, so the honest content is a mark and the one-line way in — the
+                        // desktop's own empty state, the same resting pane the web client's Home
+                        // chip shows.
+                        widgets::empty_state(
+                            ui,
+                            self.theme,
+                            "Nothing open",
+                            "Pick a conversation from the lists, or open a panel from the banner's menu.",
+                        );
                     }
                     // Whatever opened a conversation this frame opened a tab: the chip lands on
                     // the right pane's bar and the thread becomes the active surface.

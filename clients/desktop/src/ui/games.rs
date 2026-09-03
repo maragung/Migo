@@ -66,9 +66,9 @@ pub fn show(ui: &mut Ui, context: &Context<'_>) {
                 ui.add_space(space::MD);
                 ui.label(
                     RichText::new(
-                        "Open a conversation from the Chats tab and start one from its header — \
-                         the game plays out in the thread, and this desktop build lists while the \
-                         web client plays.",
+                        "Open a conversation from the Friends list or a joined room and start one \
+                         from its header — the game plays out in the thread, and this desktop \
+                         build lists while the web client plays.",
                     )
                     .font(egui::FontId::proportional(font::SMALL))
                     .color(colors.text_muted),

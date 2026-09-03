@@ -193,7 +193,7 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState) {
             ui,
             context.theme,
             "Nothing open",
-            "Pick a conversation on the left, or start a new one.",
+            "Open a friend from the Friends list, or join a room — the thread lands here.",
         );
         return;
     };
