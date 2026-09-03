@@ -26,7 +26,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import type { AccountSession, DeviceSummary, Id } from '@migo/sdk';
 
-import { DeviceList, SessionList } from '../src/components/settings-panel.js';
+import { DeviceList, SessionList, ChatsTabsSection } from '../src/components/settings-panel.js';
 
 const NOW = Date.parse('2026-08-26T12:00:00Z');
 
@@ -177,4 +177,45 @@ test('a busy removal disables only its own row', () => {
 
   assert.ok(markup.includes('disabled'), 'an in-flight removal must disable its control');
   assert.equal((markup.match(/disabled/g) ?? []).length, 1);
+});
+
+test('the Chats Tabs section offers both display modes with exactly one active', () => {
+  const markup = renderToStaticMarkup(<ChatsTabsSection mode="right" onPick={() => {}} />);
+
+  // Both choices are offered, each once, in the order the setting explains itself in.
+  assert.ok(markup.includes('Right tabs'), 'the right-tabs choice is missing');
+  assert.ok(markup.includes('Chats list'), 'the chats-list choice is missing');
+  const chips = markup.match(/aria-pressed="(true|false)"/g) ?? [];
+  assert.equal(chips.length, 2, 'exactly two choices, one per mode');
+  assert.equal(
+    (markup.match(/aria-pressed="true"/g) ?? []).length,
+    1,
+    'exactly one mode may be active at a time',
+  );
+  // The active choice's story is the one told: the right-tabs blurb, not the list's.
+  assert.ok(
+    markup.includes('docks as a closable tab in the right pane'),
+    'the right-tabs mode must carry its story',
+  );
+  assert.ok(
+    !markup.includes('one full window at a time'),
+    'the inactive mode’s story must not be told as if it were live',
+  );
+});
+
+test('the Chats Tabs section follows the shell’s choice, not the storage', () => {
+  const markup = renderToStaticMarkup(<ChatsTabsSection mode="list" onPick={() => {}} />);
+
+  assert.ok(
+    markup.includes('aria-pressed="true">Chats list'),
+    'the shell’s handed mode must be the active one',
+  );
+  assert.ok(
+    markup.includes('one full window at a time'),
+    'the chats-list mode must carry its story',
+  );
+  assert.ok(
+    !markup.includes('docks as a closable tab in the right pane'),
+    'the inactive mode’s story must not be told as if it were live',
+  );
 });

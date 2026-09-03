@@ -56,9 +56,7 @@ export function applyMemberEvent(
     return summary;
   }
   if (event.change === MemberChange.Joined) {
-    return held.includes(event.userId)
-      ? summary
-      : { ...summary, members: [...held, event.userId] };
+    return held.includes(event.userId) ? summary : { ...summary, members: [...held, event.userId] };
   }
   const departing =
     event.change === MemberChange.Left ||
@@ -294,9 +292,7 @@ export function ConversationsProvider({ children }: { children: ReactNode }): Re
       client.messaging.rotateSenderKey(event.conversationId);
       setItems((prev) =>
         prev.map((item) =>
-          item.conversationId === event.conversationId
-            ? applyMemberEvent(item, event)
-            : item,
+          item.conversationId === event.conversationId ? applyMemberEvent(item, event) : item,
         ),
       );
     });

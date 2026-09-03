@@ -54,6 +54,11 @@ export type AppTab = SystemTab | PanelTab;
  * @param onBackToLists Hands the screen back to the left lists (the single-column story only).
  * @param onOpenPanel Opens a secondary panel as a right-pane tab — the banner menu's action.
  * @param chatsUnread Whether any conversation has an unread message — the Chats chip's dot.
+ * @param chatsTabHidden Omits the Chats chip from the left strip (the mode whose chats live in the
+ *   right pane's own tabs).
+ * @param rightBarOverride Replaces the right pane's tab bar — the mode whose chats open one window
+ *   at a time and whose panels arrive without chips. `undefined` keeps the bar; `null` renders
+ *   nothing.
  * @param children The active conversation's thread, already chosen by the owner.
  */
 export function AppShell({
@@ -73,6 +78,8 @@ export function AppShell({
   theme,
   onToggleTheme,
   chatsUnread,
+  chatsTabHidden = false,
+  rightBarOverride,
 }: {
   leftTab: SystemTab;
   leftContent: ReactNode;
@@ -93,22 +100,38 @@ export function AppShell({
   onToggleTheme?: () => void;
   /** Whether any conversation has an unread message — the Chats chip's dot. */
   chatsUnread?: boolean;
+  /** Omits the Chats chip from the left strip (the right-tabs mode). */
+  chatsTabHidden?: boolean;
+  /**
+   * Replaces the right pane's tab bar: `undefined` keeps the bar, `null` renders nothing, and a
+   * node (the one-window mode's slim panel bar) renders in its place.
+   */
+  rightBarOverride?: ReactNode;
 }): ReactNode {
   return (
     <div className={`app${showRight ? ' show-right' : ''}`}>
       <div className="app-left">
-        <TabStrip active={leftTab} onSelectSystem={onSelectSystem} chatsUnread={chatsUnread} />
+        <TabStrip
+          active={leftTab}
+          onSelectSystem={onSelectSystem}
+          chatsUnread={chatsUnread}
+          hideChats={chatsTabHidden}
+        />
         <ProfileBanner onOpenPanel={onOpenPanel} theme={theme} onToggleTheme={onToggleTheme} />
         <div className="app-body">{leftContent}</div>
       </div>
       <div className="app-right">
-        <RightTabBar
-          tabs={rightTabs}
-          active={activeRight}
-          onSelect={onSelectRight}
-          onClose={onCloseRight}
-          onBackToLists={onBackToLists}
-        />
+        {rightBarOverride !== undefined ? (
+          rightBarOverride
+        ) : (
+          <RightTabBar
+            tabs={rightTabs}
+            active={activeRight}
+            onSelect={onSelectRight}
+            onClose={onCloseRight}
+            onBackToLists={onBackToLists}
+          />
+        )}
         <div className="app-body">
           {activeChat !== null ? <main className="thread-area">{children}</main> : rightContent}
         </div>

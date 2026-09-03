@@ -17,7 +17,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { ConversationKind, EncryptionMode, MemberChange } from '@migo/sdk';
-import type { ConversationMemberEvent, ConversationStateEvent, ConversationSummary, Id } from '@migo/sdk';
+import type {
+  ConversationMemberEvent,
+  ConversationStateEvent,
+  ConversationSummary,
+  Id,
+} from '@migo/sdk';
 
 import { applyMemberEvent, applyStateEvent } from '../src/lib/migo/conversations-provider.js';
 
@@ -70,7 +75,10 @@ test('a summary without a member list is left alone', () => {
 });
 
 test('the rest of the summary rides along untouched', () => {
-  const next = applyMemberEvent(summary({ title: 'Weekend plans' }), memberEvent(MemberChange.Kicked, BOB));
+  const next = applyMemberEvent(
+    summary({ title: 'Weekend plans' }),
+    memberEvent(MemberChange.Kicked, BOB),
+  );
   assert.equal(next.title, 'Weekend plans');
   assert.equal(next.conversationId, 'conv_1');
   assert.equal(next.kind, ConversationKind.Group);

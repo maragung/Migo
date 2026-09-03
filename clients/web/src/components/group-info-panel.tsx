@@ -451,9 +451,7 @@ export function GroupInfoPanel({
     if (!active) {
       return;
     }
-    withBusy(targetId, () =>
-      active.conversations.mute(conversationId, targetId, Date.now() + ms),
-    );
+    withBusy(targetId, () => active.conversations.mute(conversationId, targetId, Date.now() + ms));
   }
 
   function unmute(targetId: Id): void {

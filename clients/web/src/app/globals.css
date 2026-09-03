@@ -978,6 +978,13 @@ main {
   color: #ffffff;
   font-weight: 700;
 }
+/* The one-window mode's title chip: a label, not a control — nothing to switch it with. */
+.chat-tab.pane-tab,
+.chat-tab.pane-tab:hover {
+  background: var(--accent-bright);
+  color: #ffffff;
+  cursor: default;
+}
 
 /*
  * The banner: the orange-to-amber gradient that owns the account — avatar with its menu, the

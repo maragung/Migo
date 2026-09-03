@@ -1978,3 +1978,31 @@ memanjang dari 2 menjadi 9 metode plus tiga stream listener dengan
 start/stop. Web: 313 test termasuk gerbang founder/vote/mute yang
 dipinkan murni dan proyeksi member/state pada daftar percakapan.
 Registri section 145 dan enum ConversationRole masuk migo.md.
+
+## 57. Tabs chat jadi pilihan tampilan: chip kanan atau daftar Chats satu jendela (v0.15.1)
+
+Cara pane kanan memegang chat adalah fakta tentang orangnya, bukan
+tentang sesinya — jadi sekarang ia pengaturan. Settings (menu avatar)
+mendapat bagian "Chats Tabs" dengan dua pilihan, dan pilihannya
+bertahan di localStorage kunci `migo:chat-tabs-mode` sebagai string
+polos (bukan material kunci, jadi aturan audit localStorage tak
+tersentuh), gagal-baca dan gagal-tulis sama-sama jatuh ke default.
+
+"Right tabs" (default, perilaku selama ini): setiap chat terbuka
+menjadi chip yang bisa ditutup di pane kanan, dan chip Chats di strip
+kiri disembunyikan — chip-nya memang daftarnya.
+
+"Chats list": chip Chats kembali ke strip kiri, bar tab pane kanan
+hilang sama sekali, dan sebuah chat terbuka sebagai satu jendela
+penuh — fragment URL tetap satu-satunya kebenaran tentang chat yang
+terbuka, jadi Back dan tombol close tak pernah berselisih. PaneBar
+tipis menggantikan bar chip: satu label judul (span, bukan tombol —
+tak ada yang bisa diganti), chevron back untuk satu kolom, dan close
+yang mengembalikan pane ke Feed-nya. Panel sekunder dan arcade
+mengikuti bentuk yang sama lewat satu state `panel`.
+
+Pergantian mode mendamaikan ulang pane di tempat: chip dibuang (atau
+panel tunggalnya), fragment effect mencetak ulang thread terbuka di
+mode yang baru dipilih. Web: 322 test termasuk gerbang storage mode,
+chip Chats yang hilang, bar pengganti, dan bagian Settings yang
+menawarkan kedua mode dengan cerita mode aktifnya.

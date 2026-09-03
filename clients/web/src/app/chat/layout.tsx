@@ -23,6 +23,13 @@
  * closing) removes the thread's tab and falls through to the most recent remaining one, else
  * the Feed — Back and the close button can never disagree about what is open.
  *
+ * How the right pane holds its chats is a display setting (see lib/chat-tabs-mode.ts), not a
+ * session choice: the right-tabs default docks every open chat as a closable chip, and the
+ * one-window mode drops the pane's tab bar entirely — the Chats list returns to the side tabs,
+ * a chat opens as one full window at a time over whatever the pane was resting on, and a slim
+ * title bar (one label, one close) replaces the chips. The setting writes through to
+ * localStorage so the preference follows the person, not the tab they made it in.
+ *
  * The rooms provider sits inside the conversations provider because the two lists describe the
  * same objects from two sides: a join notes the room in both, and the sidebar's room rows and
  * the thread header read the room record back out.
@@ -54,11 +61,14 @@ import { SearchPanel } from '@/components/search-panel.js';
 import { SettingsPanel } from '@/components/settings-panel.js';
 import { SpacePanel } from '@/components/space-panel.js';
 import { WalletPanel } from '@/components/wallet-panel.js';
+import { PaneBar } from '@/components/right-tab-bar.js';
 import { CallOverlay } from '@/components/call-overlay.js';
 import { ConversationsProvider } from '@/lib/migo/conversations-provider.js';
 import { RoomsProvider } from '@/lib/migo/rooms-provider.js';
 import { MutedProvider } from '@/lib/migo/muted-provider.js';
 import { CallManagerProvider } from '@/lib/migo/call-manager.js';
+import { getChatTabsMode, setChatTabsMode } from '@/lib/chat-tabs-mode.js';
+import type { ChatTabsMode } from '@/lib/chat-tabs-mode.js';
 import {
   closeConversation,
   openConversation,
@@ -96,6 +106,9 @@ interface RightTabItem {
   /** The conversation a chat tab shows. */
   conversationId?: Id;
 }
+
+/** What the one-window mode's pane can hold: any non-chat thing, the arcade included. */
+type PanePanel = Exclude<RightTabKind, 'chat'>;
 
 /** The right pane's whole state, in one object so no transition can tear it. */
 interface RightPaneState {
@@ -141,15 +154,30 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
   // The right pane's back chevron (single-column only): the pane keeps its tabs, the screen
   // goes home to the lists until the next chip opens or activates.
   const [dismissed, setDismissed] = useState(false);
+  // How the pane holds its chats — a display setting, read once here and written through by
+  // pickChatsMode below. In the one-window mode the pane's chips are gone, so `panel` holds the
+  // one non-chat thing it can show instead, full-window like a chat.
+  const [chatsMode, setChatsMode] = useState<ChatTabsMode>(() => getChatTabsMode());
+  const [panel, setPanel] = useState<PanePanel | null>(null);
 
   // The previous fragment, so a cleared fragment can remove exactly the thread it named.
   const prevOpenRef = useRef<Id | null>(null);
 
   // The fragment effect: every door into a thread lands here, whatever opened it. Clearing the
-  // fragment (Back, the chip's close) lands here too, and takes the thread's tab with it.
+  // fragment (Back, the chip's close) lands here too, and takes the thread's tab with it. The
+  // one-window mode keeps the fragment as the truth — it just shows the thread full-window
+  // instead of minting a chip for it.
   useEffect(() => {
     const prev = prevOpenRef.current;
     prevOpenRef.current = openId;
+    if (chatsMode === 'list') {
+      if (openId !== null) {
+        // A chat opening takes the whole pane, whatever it was resting on.
+        setPanel(null);
+        setDismissed(false);
+      }
+      return;
+    }
     if (openId === null) {
       if (prev !== null) {
         const gone = chatIdOf(prev);
@@ -169,7 +197,18 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
       active: id,
     }));
     setDismissed(false);
-  }, [openId]);
+  }, [openId, chatsMode]);
+
+  /** Writes a display choice through to storage and reconciles the pane with it. */
+  const pickChatsMode = useCallback((mode: ChatTabsMode): void => {
+    setChatsMode(mode);
+    setChatTabsMode(mode);
+    // The pane's shape changes wholesale: drop the chips (or the lone panel) and let the
+    // fragment effect re-mint the open thread in the mode that was just chosen.
+    setPanel(null);
+    setRight({ tabs: [], active: 'feed' });
+    setDismissed(false);
+  }, []);
 
   /** Opens (or activates) a one-per-kind tab: the arcade, a secondary panel. */
   const openRightTab = useCallback((kind: Exclude<RightTabKind, 'chat'>): void => {
@@ -179,6 +218,19 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
     }));
     setDismissed(false);
   }, []);
+
+  /** Opens a secondary panel in whichever shape the display setting gives the pane. */
+  const openPanel = useCallback(
+    (kind: PanePanel): void => {
+      if (chatsMode === 'list') {
+        setPanel(kind);
+        setDismissed(false);
+        return;
+      }
+      openRightTab(kind);
+    },
+    [chatsMode, openRightTab],
+  );
 
   const selectRight = useCallback(
     (id: string): void => {
@@ -220,7 +272,7 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
   );
 
   // The cross-section navigation every deep surface shares: the system tabs drive the left
-  // panel, the secondary panels arrive as the right pane's tabs.
+  // panel, the secondary panels arrive in whichever shape the pane's display setting gives.
   const navigate = useCallback(
     (tab: SystemTab | PanelTab): void => {
       if (
@@ -233,9 +285,9 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
         setLeftTab(tab);
         return;
       }
-      openRightTab(tab);
+      openPanel(tab);
     },
-    [openRightTab],
+    [openPanel],
   );
 
   const openInTab = useCallback((conversationId: Id): void => {
@@ -243,8 +295,9 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
   }, []);
 
   // The chips' titles: a room is its #name, a direct chat is the peer's display name — the
-  // same derivation the conversation rows use, read from the same sources.
-  const peerIds = right.tabs.flatMap((tab) => {
+  // same derivation the conversation rows use, read from the same sources. The one-window
+  // mode's slim bar titles the open thread the same way, so its peer rides along too.
+  const tabPeerIds = right.tabs.flatMap((tab) => {
     if (tab.kind !== 'chat' || tab.conversationId === undefined) {
       return [];
     }
@@ -255,6 +308,18 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
     const other = summary.members?.find((member) => member !== accountId) ?? null;
     return other !== null ? [other] : [];
   });
+  const openPeerId = (() => {
+    if (chatsMode !== 'list' || openId === null) {
+      return null;
+    }
+    const summary = items.find((item) => item.conversationId === openId);
+    if (summary?.kind !== ConversationKind.Direct) {
+      return null;
+    }
+    return summary.members?.find((member) => member !== accountId) ?? null;
+  })();
+  const peerIds =
+    openPeerId !== null ? Array.from(new Set([...tabPeerIds, openPeerId])) : tabPeerIds;
   const profiles = useProfiles(peerIds);
 
   const chatChips = right.tabs.map((tab): RightTabChip => ({
@@ -267,13 +332,10 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
         : KIND_TITLES[tab.kind as Exclude<RightTabKind, 'chat'>],
   }));
 
-  // What the pane is showing: the thread (the route's own page) for a chat tab, the owner's
-  // content for everything else — the Feed included, as the pane's resting tab.
-  const activeItem =
-    right.active === 'feed' ? null : (right.tabs.find((tab) => tab.id === right.active) ?? null);
-  const activeChat = activeItem?.kind === 'chat' ? (activeItem.conversationId ?? null) : null;
-  const rightContent = (() => {
-    switch (activeItem?.kind ?? 'feed') {
+  // What the pane shows for a non-chat target: the panel the kind names — the Feed included, as
+  // the pane's resting content, which both modes fall back to when nothing is open.
+  const paneContent = (kind: Exclude<RightTabKind, 'chat'> | 'feed'): ReactNode => {
+    switch (kind) {
       case 'feed':
         return <SpacePanel onOpenConversation={openInTab} />;
       case 'games':
@@ -285,17 +347,35 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
       case 'wallet':
         return <WalletPanel />;
       case 'profile':
-        return <ProfilePanel onOpenSettings={() => openRightTab('settings')} />;
+        return <ProfilePanel onOpenSettings={() => openPanel('settings')} />;
       case 'account':
         return <AccountPanel />;
       case 'settings':
-        return <SettingsPanel />;
+        return <SettingsPanel chatTabsMode={chatsMode} onChatTabsMode={pickChatsMode} />;
       case 'admins':
         return <AdminsPanel />;
-      case 'chat':
-        return null;
     }
-  })();
+  };
+
+  // What the pane is showing: the thread (the route's own page) for a chat target, the owner's
+  // content for everything else. The one-window mode shows the open thread full-window — unless
+  // a panel took the pane after it, in which case closing the panel hands the pane back.
+  const activeItem =
+    right.active === 'feed' ? null : (right.tabs.find((tab) => tab.id === right.active) ?? null);
+  const activeChat =
+    chatsMode === 'list'
+      ? panel === null
+        ? openId
+        : null
+      : activeItem?.kind === 'chat'
+        ? (activeItem.conversationId ?? null)
+        : null;
+  const rightContent =
+    chatsMode === 'list'
+      ? paneContent(panel ?? 'feed')
+      : activeItem?.kind === 'chat'
+        ? null
+        : paneContent(activeItem?.kind ?? 'feed');
 
   const leftContent = (() => {
     switch (leftTab) {
@@ -311,7 +391,7 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
       case 'rooms':
         return <RoomsPanel onOpenConversation={openInTab} />;
       case 'games':
-        return <GamesPanel onActivate={() => openRightTab('games')} />;
+        return <GamesPanel onActivate={() => openPanel('games')} />;
       case 'feed':
         return <SpacePanel onOpenConversation={openInTab} />;
     }
@@ -322,6 +402,32 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
   // anywhere — which is the messenger whose postman never rings.
   const chatsUnread = unread.size > 0 || items.some((item) => item.lastSeq > item.readSeq);
 
+  // The pane shows while it holds something: a chip (or two) in the right-tabs mode, the open
+  // thread or panel in the one-window mode — an empty pane gets out of the lists' way.
+  const showRight =
+    chatsMode === 'list'
+      ? !dismissed && (openId !== null || panel !== null)
+      : !dismissed && !(right.tabs.length === 0 && right.active === 'feed');
+
+  // The one-window mode's slim bar: the open thing's name as a plain label, and a close that
+  // takes the pane back to its resting Feed. The right-tabs mode keeps the chip bar.
+  const paneBar =
+    chatsMode === 'list' ? (
+      openId !== null && panel === null ? (
+        <PaneBar
+          title={chipTitleOf(openId, items, rooms, accountId, profiles)}
+          onClose={closeConversation}
+          onBackToLists={() => setDismissed(true)}
+        />
+      ) : panel !== null ? (
+        <PaneBar
+          title={KIND_TITLES[panel]}
+          onClose={() => setPanel(null)}
+          onBackToLists={() => setDismissed(true)}
+        />
+      ) : null
+    ) : undefined;
+
   return (
     <SectionNavProvider navigate={navigate}>
       <AppShell
@@ -331,13 +437,15 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
         activeRight={right.active}
         activeChat={activeChat}
         rightContent={rightContent}
-        showRight={!dismissed && !(right.tabs.length === 0 && right.active === 'feed')}
+        showRight={showRight}
         onSelectSystem={setLeftTab}
         onSelectRight={selectRight}
         onCloseRight={closeRight}
         onBackToLists={() => setDismissed(true)}
-        onOpenPanel={openRightTab}
+        onOpenPanel={openPanel}
         chatsUnread={chatsUnread}
+        chatsTabHidden={chatsMode === 'right'}
+        rightBarOverride={paneBar}
       >
         {children}
       </AppShell>

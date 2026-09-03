@@ -34,7 +34,12 @@ const JOINED = Date.parse('2026-08-26T12:00:00Z');
 const NOW = Date.parse('2026-09-01T12:00:00Z');
 
 function entry(overrides: Partial<ConversationRosterEntry> = {}): ConversationRosterEntry {
-  return { accountId: 'user_ada' as Id, role: ConversationRole.Member, joinedAt: JOINED, ...overrides };
+  return {
+    accountId: 'user_ada' as Id,
+    role: ConversationRole.Member,
+    joinedAt: JOINED,
+    ...overrides,
+  };
 }
 
 test('group roles are Founder and Member, and unknown is Member', () => {
@@ -59,7 +64,7 @@ test('the founder controls need a founder who is neither the target nor themselv
   assert.equal(canFounderAct(founder, member, true), false);
 });
 
-test('the vote is every member\'s own, but never against a founder or themselves', () => {
+test("the vote is every member's own, but never against a founder or themselves", () => {
   assert.equal(canVoteKickGroup(ConversationRole.Member, false), true);
   // Never against yourself.
   assert.equal(canVoteKickGroup(ConversationRole.Member, true), false);

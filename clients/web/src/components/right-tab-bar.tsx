@@ -152,3 +152,52 @@ export function RightTabBar({
     </nav>
   );
 }
+
+/**
+ * The one-window mode's slim bar: one title, one close, no chips.
+ *
+ * The display setting that drops the right-pane tabs still needs a way to say what the pane is
+ * showing and to leave it — the bar carries the single open panel's name as a plain label (it is
+ * not a control; there is nothing to switch it with), the mobile back chevron, and a close that
+ * returns the pane to its resting Feed.
+ */
+export function PaneBar({
+  title,
+  onClose,
+  onBackToLists,
+}: {
+  /** What the pane is showing, as the banner menu named it. */
+  title: string;
+  /** Returns the pane to its resting Feed. */
+  onClose: () => void;
+  /** Hands the screen back to the left lists (the single-column story only). */
+  onBackToLists: () => void;
+}): ReactNode {
+  return (
+    <nav className="chat-tab-bar" aria-label={title}>
+      <button
+        type="button"
+        className="chat-back"
+        onClick={onBackToLists}
+        aria-label="Back to the lists"
+        title="Back to the lists"
+      >
+        <Icon name="back" size={16} />
+      </button>
+      <div className="chat-tabs">
+        <span className="chat-tab pane-tab active" aria-current="page">
+          <span className="tab-chip-label">{title}</span>
+        </span>
+      </div>
+      <button
+        type="button"
+        className="chat-scroll"
+        onClick={onClose}
+        aria-label={`Close ${title}`}
+        title={`Close ${title}`}
+      >
+        <Icon name="close" size={16} />
+      </button>
+    </nav>
+  );
+}

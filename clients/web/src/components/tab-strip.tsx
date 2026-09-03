@@ -65,19 +65,23 @@ export const PANEL_LABELS: Readonly<Record<PanelTab, string>> = {
  * @param active The left panel's tab id.
  * @param onSelectSystem Switches the left panel to a system tab.
  * @param chatsUnread Whether any conversation has an unread message — the Chats chip's dot.
+ * @param hideChats Omits the Chats chip, for the display mode whose chats live in the right pane's
+ *   own tabs — a list and a tab bar showing the same conversations is the same door twice.
  */
 export function TabStrip({
   active,
   onSelectSystem,
   chatsUnread = false,
+  hideChats = false,
 }: {
   active: SystemTab;
   onSelectSystem: (tab: SystemTab) => void;
   chatsUnread?: boolean;
+  hideChats?: boolean;
 }): ReactNode {
   return (
     <nav className="tab-strip" aria-label="Sections">
-      {SYSTEM_TABS.map((section) => (
+      {SYSTEM_TABS.filter((section) => !(hideChats && section.id === 'chats')).map((section) => (
         <button
           key={section.id}
           type="button"

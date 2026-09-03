@@ -458,10 +458,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
       ) : null}
 
       {isGroup && groupInfoOpen ? (
-        <GroupInfoPanel
-          conversationId={conversationId}
-          title={summary?.title ?? 'Group'}
-        />
+        <GroupInfoPanel conversationId={conversationId} title={summary?.title ?? 'Group'} />
       ) : null}
 
       {loading && messages.length === 0 ? (
