@@ -71,6 +71,7 @@ impl MigratorTrait for Migrator {
             Box::new(IdentityLogin),
             Box::new(GlobalAdmins),
             Box::new(ProfileGender),
+            Box::new(RoomNetworkBan),
         ]
     }
 }
@@ -258,6 +259,38 @@ impl MigrationTrait for ProfileGender {
         // Same posture as every migration before it.
         Err(DbErr::Migration(
             "0006_profile_gender cannot be rolled back: create a new database instead".to_owned(),
+        ))
+    }
+}
+
+/// `0007_room_network_ban` -- the one-row-per-account network ban a global
+/// admin's third kick escalates to: banned from every chatroom at once. See
+/// `server/migrations/0007_room_network_ban.sql` for the shape, and
+/// `crates/migo-rooms` for the join-time check and the store paths it calls.
+struct RoomNetworkBan;
+
+impl MigrationName for RoomNetworkBan {
+    fn name(&self) -> &str {
+        "0007_room_network_ban"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for RoomNetworkBan {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!(
+                "../../../migrations/0007_room_network_ban.sql"
+            ))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Same posture as every migration before it.
+        Err(DbErr::Migration(
+            "0007_room_network_ban cannot be rolled back: create a new database instead".to_owned(),
         ))
     }
 }

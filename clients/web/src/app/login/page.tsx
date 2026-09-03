@@ -70,7 +70,9 @@ export default function LoginPage(): ReactNode {
       .then((rows) => {
         if (cancelled) return;
         setSaved(rows);
-        setChosenId(rows.length > 0 ? rows[0].id : null);
+        // `rows[0]?.id` rather than a length guard: noUncheckedIndexedAccess narrows
+        // nothing on `rows.length > 0`, and the fallback picks the same empty state.
+        setChosenId(rows[0]?.id ?? null);
       })
       .catch(() => {
         if (!cancelled) setSaved([]);
@@ -146,9 +148,7 @@ export default function LoginPage(): ReactNode {
       .then((rows) => {
         setSaved(rows);
         if (imported === null) {
-          setChosenId((current) =>
-            current === file.id ? (rows.length > 0 ? rows[0].id : null) : current,
-          );
+          setChosenId((current) => (current === file.id ? (rows[0]?.id ?? null) : current));
         }
       })
       .catch(() => {
@@ -212,7 +212,7 @@ export default function LoginPage(): ReactNode {
               aria-label="Choose a different key file"
               onClick={() => {
                 setImported(null);
-                setChosenId(remembered.length > 0 ? remembered[0].id : null);
+                setChosenId(remembered[0]?.id ?? null);
               }}
             >
               <Icon name="close" size={16} />
