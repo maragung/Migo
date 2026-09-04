@@ -46,7 +46,9 @@ use migo_core::config::Environment;
 use migo_core::metrics::Registry;
 use migo_core::{Clock, Config, Id, OsRandom, Random, Shutdown, SystemClock};
 use migo_crypto::NodeSecret;
-use migo_economy::{Attributes, Catalogue, Category, Listing, Price, SharedAnnouncer, SharedTreasurer, Sku};
+use migo_economy::{
+    Attributes, Catalogue, Category, Listing, Price, SharedAnnouncer, SharedTreasurer, Sku,
+};
 use migo_federation::{MeshConfig, SharedMesh};
 use migo_games::{SharedReferee, SharedRewards};
 use migo_gateway::{Dispatcher, Gateway, GatewayServices};

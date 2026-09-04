@@ -163,9 +163,7 @@ pub(crate) async fn handle_store_purchase(
     let request: StorePurchase = from_frame(frame).map_err(fault::from_wire)?;
     let sku = Sku::parse(&request.sku)
         .ok_or_else(|| fault::validation("sku", "unknown catalogue code"))?;
-    let outcome = svc
-        .purchase(&caller, &sku, &request.client_key)
-        .await?;
+    let outcome = svc.purchase(&caller, &sku, &request.client_key).await?;
     tracing::info!(
         account = %caller.account_id,
         sku = %request.sku,
