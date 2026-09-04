@@ -93,6 +93,12 @@ jobs:
       # CI egress to redden an otherwise-green build. Three attempts with growing backoff
       # turn a transient 429 into a slower green; a genuine compile error still fails all
       # three and reports exactly as it would without the loop.
+      #
+      # The output is tee'd to a file so a failure can surface its own cause as annotations:
+      # workflow logs are admin-gated on this repository, but `::error::` annotations are
+      # visible to anyone who can see the run — and a red build whose error text only the
+      # repository admin can read is a build that fails twice, once on the runner and once
+      # when someone tries to fix it.
       - name: Assemble and unit-test
         working-directory: clients/android
         run: |
@@ -106,7 +112,10 @@ jobs:
           }
           for attempt in 1 2 3; do
             echo "::group::Gradle attempt ${attempt}/3"
-            if gradle_build; then echo "::endgroup::"; exit 0; fi
+            if gradle_build 2>&1 | tee "$RUNNER_TEMP/gradle-attempt-${attempt}.log"; then
+              echo "::endgroup::"
+              exit 0
+            fi
             echo "::endgroup::"
             if [ "${attempt}" -lt 3 ]; then
               echo "Attempt ${attempt} failed; backing off $((attempt * 20))s before retry."
@@ -115,6 +124,23 @@ jobs:
           done
           echo "All 3 Gradle attempts failed." >&2
           exit 1
+
+      # A failure annotates itself: every Kotlin compiler line ("e: file:line:col message") and
+      # every failed-test line from the last attempt is re-emitted as a workflow error
+      # annotation, so the error text is readable by anyone who can see the run — the logs
+      # themselves are admin-gated. Capped at twenty annotations, the most GitHub will show.
+      - name: Surface the failure as annotations
+        if: failure()
+        working-directory: clients/android
+        run: |
+          last=$(ls -1v "$RUNNER_TEMP"/gradle-attempt-*.log 2>/dev/null | tail -n 1)
+          [ -n "$last" ] || exit 0
+          grep -E '^e: |FAILED|Execution failed for task' "$last" \
+            | grep -vE '^\s*at ' \
+            | head -n 20 \
+            | while IFS= read -r line; do
+                echo "::error::${line}"
+              done
 
       # The debug APK, kept as a downloadable artifact of every build. It is unsigned and
       # not a release (that is release.yml's job on a version tag), but it is the thing a
