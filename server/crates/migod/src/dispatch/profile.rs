@@ -200,5 +200,6 @@ fn wire_profile(card: migo_social::model::ProfileCard) -> UserProfile {
         badges: None,
         verified: None,
         custom_status: None,
+        birth_year: card.birth_year.map(|year| year as u32),
     }
 }

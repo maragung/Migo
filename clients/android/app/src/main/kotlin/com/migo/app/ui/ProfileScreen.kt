@@ -299,10 +299,12 @@ private fun ProfileEditSection(
 
     // The form's own text, primed from the read and re-primed when a new read lands. `remember`
     // keyed on the profile: a save's answer replaces the profile object, so the fields follow the
-    // server's version of what was just written.
+    // server's version of what was just written. The birth year joins this priming now that the
+    // wire carries it back — an untouched field still sends nothing, but "untouched" is measured
+    // against the year the server holds rather than always starting blank.
     var displayName by remember(profile) { mutableStateOf(profile.displayName) }
     var bio by remember(profile) { mutableStateOf(profile.bio ?: "") }
-    var birthYear by remember(profile) { mutableStateOf("") }
+    var birthYear by remember(profile) { mutableStateOf(profile.birthYear?.toString() ?: "") }
     var status by remember(profile) { mutableStateOf(profile.customStatus ?: "") }
     // The privacy selections: null is "leave as-is"; a picked index maps to the wire value.
     var showLastSeenChoice by remember(profile) { mutableStateOf(-1) }
@@ -338,7 +340,7 @@ private fun ProfileEditSection(
         value = birthYear,
         onValueChange = { birthYear = it.filter { ch -> ch.isDigit() }.take(4) },
         label = { Text("Birth year (optional)") },
-        supportingText = { Text("Not public; a value is a change, blank leaves it.") },
+        supportingText = { Text("Not public; visible only on your own profile.") },
         singleLine = true,
         enabled = !edit.busy,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),

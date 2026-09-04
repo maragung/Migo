@@ -28,6 +28,9 @@ import { Spinner } from './spinner.js';
 const UNCHANGED = '';
 
 /** The birth-year bounds the panel accepts; anything else is left out of the patch, not sent. */
+// The floor is not a statement about living memory — the server holds any i16 year and
+// the wire any u32 — it is a typo net: a three-digit year is a slip of the keyboard, and
+// a person born before 1900 would be the oldest human who ever lived.
 const BIRTH_YEAR_MIN = 1900;
 const BIRTH_YEAR_MAX = 2100;
 
@@ -70,10 +73,12 @@ const PRIVACY_FIELDS: ReadonlyArray<PrivacyField> = [
  * content moved, a privacy select only when an audience was explicitly chosen. A user editing their
  * name therefore never re-states a privacy setting they never saw.
  *
- * The same posture covers the birth year and the searchable switch — the wire's profile carries
- * neither back to its owner, so the birth year starts empty ("do not touch") and the switch joins
- * the patch only once flipped. The custom status is a different wire: it is presence, not profile
- * ({@link PresenceDomain.setPresence} carries it), so it is published on its own after the save.
+ * The same posture covers the searchable switch — the wire's profile carries no current value for
+ * it, so the switch joins the patch only once flipped. The birth year used to share that posture;
+ * since the wire grew `birthYear` it seeds from the profile and joins the patch exactly like the
+ * text fields, when its draft differs from what the server holds. The custom status is a different
+ * wire: it is presence, not profile ({@link PresenceDomain.setPresence} carries it), so it is
+ * published on its own after the save.
  *
  * Standing — level, XP, badges — arrives from the economy domain and is view-only here; the Gifts
  * tab owns the interactive side of the same facts.
@@ -150,6 +155,7 @@ export function ProfilePanel({ onOpenSettings }: { onOpenSettings?: () => void }
     setDisplayName(profile.displayName);
     setBio(profile.bio ?? '');
     setCustomStatus(profile.customStatus ?? '');
+    setBirthYear(profile.birthYear === undefined ? '' : String(profile.birthYear));
     setPrimed(true);
   }, [profile, primed]);
 
@@ -158,7 +164,7 @@ export function ProfilePanel({ onOpenSettings }: { onOpenSettings?: () => void }
       return;
     }
     const patch = buildProfilePatch(profile, { displayName, bio }, privacy, {
-      ...(birthYear.trim().length > 0 ? { birthYear: birthYear.trim() } : {}),
+      birthYear,
       ...(searchableTouched ? { searchable } : {}),
     });
     const statusChanged = customStatus !== (profile.customStatus ?? '');
@@ -184,7 +190,7 @@ export function ProfilePanel({ onOpenSettings }: { onOpenSettings?: () => void }
           whoCanMessage: UNCHANGED,
           whoCanAdd: UNCHANGED,
         });
-        setBirthYear('');
+        setBirthYear(resolved.birthYear === undefined ? '' : String(resolved.birthYear));
         setSearchableTouched(false);
       }
       if (statusChanged) {
@@ -264,7 +270,7 @@ export function ProfilePanel({ onOpenSettings }: { onOpenSettings?: () => void }
     (displayName.trim() !== profile.displayName ||
       bio !== (profile.bio ?? '') ||
       customStatus !== (profile.customStatus ?? '') ||
-      (birthYear.trim().length > 0 && validBirthYear(birthYear) !== undefined) ||
+      birthYear !== (profile.birthYear === undefined ? '' : String(profile.birthYear)) ||
       searchableTouched ||
       privacy.showLastSeen !== UNCHANGED ||
       privacy.whoCanMessage !== UNCHANGED ||
@@ -393,11 +399,9 @@ export function ProfilePanel({ onOpenSettings }: { onOpenSettings?: () => void }
           onChange={(event) => setBirthYear(event.target.value)}
           min={BIRTH_YEAR_MIN}
           max={BIRTH_YEAR_MAX}
-          placeholder="Leave as-is"
+          placeholder="Not disclosed"
         />
-        <span className="hint">
-          Not public; the wire never sends it back, so a value is a change.
-        </span>
+        <span className="hint">Not public; visible only on your own profile panel.</span>
       </label>
 
       <label className="field-label toggle-field">
@@ -484,9 +488,10 @@ export function validBirthYear(raw: string): number | undefined {
  * display name must never re-state a privacy setting they never saw.
  *
  * The extra fields follow the same rule with their own leave-as-is shapes: the birth year joins only
- * when it names a plausible year, and the searchable switch only when it was flipped at all — its
- * untouched state is "do not touch" precisely because the wire's profile carries no current value
- * to pre-select.
+ * when its draft differs from the year the profile carries (the wire echoes it back, so "same year"
+ * is knowable and "empty against disclosed" is a change to send, not a guess), and the searchable
+ * switch only when it was flipped at all — its untouched state is "do not touch" precisely because
+ * the wire's profile carries no current value to pre-select.
  */
 export function buildProfilePatch(
   current: UserProfile,
@@ -511,9 +516,15 @@ export function buildProfilePatch(
     patch.whoCanAdd = Number(privacy.whoCanAdd);
   }
   if (extra !== undefined) {
-    const year = validBirthYear(extra.birthYear ?? '');
-    if (year !== undefined) {
-      patch.birthYear = year;
+    const currentYear = current.birthYear === undefined ? '' : String(current.birthYear);
+    if ((extra.birthYear ?? '') !== currentYear) {
+      const year = validBirthYear(extra.birthYear ?? '');
+      // A draft that differs but names no plausible year is a typo, and the panel's
+      // contract is to send only what it can stand behind — the field stays untouched
+      // rather than the save failing on it.
+      if (year !== undefined) {
+        patch.birthYear = year;
+      }
     }
     if (extra.searchable !== undefined) {
       patch.searchable = extra.searchable;

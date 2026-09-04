@@ -362,6 +362,10 @@ pub struct ProfileCard {
     pub country: Option<String>,
     /// BCP-47 language tag.
     pub locale: String,
+    /// Year of birth, if its owner disclosed it. Year only — a full birth date is
+    /// more personal data than a chat profile needs, and the wire's optional field
+    /// keeps "withheld" a distinct statement from any year.
+    pub birth_year: Option<i16>,
 }
 
 /// The stricter of two visibility settings.

@@ -1227,6 +1227,8 @@ data class UserProfile(
     val customStatus: String? = null,
     /** The avatar media object; clients fetch a short-lived URL for it. */
     val avatarMediaId: Id? = null,
+    /** Year of birth, as its owner disclosed it. Year only; absent when withheld. */
+    val birthYear: Long? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -1245,6 +1247,7 @@ data class UserProfile(
         if (verified != null) present++
         if (customStatus != null) present++
         if (avatarMediaId != null) present++
+        if (birthYear != null) present++
         w.u32(present)
         if (avatarUrl != null) {
             val value = avatarUrl
@@ -1307,6 +1310,12 @@ data class UserProfile(
                 w.id(value)
             }
         }
+        if (birthYear != null) {
+            val value = birthYear
+            w.optional(11) { w ->
+                w.u32(value)
+            }
+        }
         w.leave()
     }
 
@@ -1327,6 +1336,7 @@ data class UserProfile(
             var verified: Boolean? = null
             var customStatus: String? = null
             var avatarMediaId: Id? = null
+            var birthYear: Long? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
@@ -1341,11 +1351,12 @@ data class UserProfile(
                     8L -> verified = sub.bool()
                     9L -> customStatus = sub.str()
                     10L -> avatarMediaId = sub.id()
+                    11L -> birthYear = sub.u32()
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return UserProfile(userId, publicId, username, displayName, avatarUrl, bio, country, language, level, presence, badges, verified, customStatus, avatarMediaId)
+            return UserProfile(userId, publicId, username, displayName, avatarUrl, bio, country, language, level, presence, badges, verified, customStatus, avatarMediaId, birthYear)
         }
     }
 }

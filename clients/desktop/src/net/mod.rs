@@ -1841,6 +1841,7 @@ impl Worker {
             public_id: profile.public_id.clone(),
             bio: profile.bio.clone(),
             custom_status: profile.custom_status.clone(),
+            birth_year: profile.birth_year,
             presence: profile
                 .presence
                 .map(|state| model::Presence::from_wire(state.to_wire()))

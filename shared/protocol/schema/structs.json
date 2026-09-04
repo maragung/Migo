@@ -263,6 +263,13 @@
      "optional": true,
      "id": 10,
      "doc": "The avatar media object; clients fetch a short-lived URL for it."
+    },
+    {
+     "name": "birth_year",
+     "type": "u32",
+     "optional": true,
+     "id": 11,
+     "doc": "Year of birth, as its owner disclosed it. Year only; absent when withheld."
     }
    ]
   },

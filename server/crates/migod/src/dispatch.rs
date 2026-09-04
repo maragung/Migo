@@ -1175,6 +1175,9 @@ fn wire_bundle(bundle: Bundle) -> WireBundle {
 ///
 /// `public_id` is derived rather than stored: it is a lossy display projection of the account id
 /// (`MGO-XXXXXXXXXXXX`), which is why nothing persists it.
+///
+/// `birth_year` is carried when its owner disclosed it; the store keeps it as an `i16` year and
+/// the wire as a `u32`, and the projection is the one widening that cannot lose a year.
 fn wire_profile(card: ProfileCard) -> UserProfile {
     UserProfile {
         user_id: card.account_id,
@@ -1191,6 +1194,7 @@ fn wire_profile(card: ProfileCard) -> UserProfile {
         badges: None,
         verified: None,
         custom_status: None,
+        birth_year: card.birth_year.map(|year| year as u32),
     }
 }
 

@@ -591,6 +591,10 @@ pub struct OwnProfile {
     /// talks to declines to store one, so this is what the wire said, not a promise the save
     /// will stick — the refusal arrives as the toast the presence wire already raises.
     pub custom_status: Option<String>,
+    /// The year of birth its owner disclosed, as the profile wire echoes it back. Year only;
+    /// `None` is "not disclosed", a statement the pane draws as an empty field rather than
+    /// a guessed one.
+    pub birth_year: Option<u32>,
     /// The state the status line rode the last time it was published. The worker keeps its own
     /// seed for the status save; this copy is the pane's record of where the account stood
     /// when the card was read.

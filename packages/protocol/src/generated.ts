@@ -765,6 +765,8 @@ export interface UserProfile {
   customStatus?: string;
   /** The avatar media object; clients fetch a short-lived URL for it. */
   avatarMediaId?: Id;
+  /** Year of birth, as its owner disclosed it. Year only; absent when withheld. */
+  birthYear?: number;
 }
 
 export function encodeUserProfile(w: Writer, v: UserProfile): void {
@@ -784,6 +786,7 @@ export function encodeUserProfile(w: Writer, v: UserProfile): void {
   if (v.verified !== undefined) present++;
   if (v.customStatus !== undefined) present++;
   if (v.avatarMediaId !== undefined) present++;
+  if (v.birthYear !== undefined) present++;
   w.u32(present);
   if (v.avatarUrl !== undefined) { const value = v.avatarUrl; w.optional(1, (w) => { w.str(value); }); }
   if (v.bio !== undefined) { const value = v.bio; w.optional(2, (w) => { w.str(value); }); }
@@ -795,6 +798,7 @@ export function encodeUserProfile(w: Writer, v: UserProfile): void {
   if (v.verified !== undefined) { const value = v.verified; w.optional(8, (w) => { w.bool(value); }); }
   if (v.customStatus !== undefined) { const value = v.customStatus; w.optional(9, (w) => { w.str(value); }); }
   if (v.avatarMediaId !== undefined) { const value = v.avatarMediaId; w.optional(10, (w) => { w.id(value); }); }
+  if (v.birthYear !== undefined) { const value = v.birthYear; w.optional(11, (w) => { w.u32(value); }); }
   w.leave();
 }
 
@@ -819,6 +823,7 @@ export function decodeUserProfile(r: Reader): UserProfile {
       case 8: out.verified = sub.bool(); break;
       case 9: out.customStatus = sub.str(); break;
       case 10: out.avatarMediaId = sub.id(); break;
+      case 11: out.birthYear = sub.u32(); break;
       default: break; // unknown optional field: skipped by length
     }
   }

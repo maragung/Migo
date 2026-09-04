@@ -73,6 +73,31 @@ test('a bio is sent when it changed and the stored profile had none', () => {
   );
 });
 
+test('a birth year is sent only when it differs from the one the profile carries', () => {
+  // The wire echoes the year back now, so "same year" is knowable and must not be
+  // re-sent — the same leave-what-you-never-touched rule as the text fields.
+  const withYear = { ...PROFILE, birthYear: 1990 };
+  assert.deepEqual(
+    buildProfilePatch(withYear, { displayName: 'Ada', bio: '' }, UNCHANGED, {
+      birthYear: '1990',
+    }),
+    {},
+  );
+  assert.deepEqual(
+    buildProfilePatch(withYear, { displayName: 'Ada', bio: '' }, UNCHANGED, {
+      birthYear: '1991',
+    }),
+    { birthYear: 1991 },
+  );
+  // A draft that names no plausible year is a typo, not a change to send.
+  assert.deepEqual(
+    buildProfilePatch(PROFILE, { displayName: 'Ada', bio: '' }, UNCHANGED, {
+      birthYear: 'carbuncle',
+    }),
+    {},
+  );
+});
+
 test('a joined room projects to a Room conversation read at its tip', () => {
   const room: RoomSummary = {
     roomId: 'room_1' as Id,

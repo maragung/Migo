@@ -1720,6 +1720,8 @@ pub struct UserProfile {
     pub custom_status: Option<String>,
     /// The avatar media object; clients fetch a short-lived URL for it.
     pub avatar_media_id: Option<Id>,
+    /// Year of birth, as its owner disclosed it. Year only; absent when withheld.
+    pub birth_year: Option<u32>,
 }
 
 impl Encode for UserProfile {
@@ -1738,7 +1740,8 @@ impl Encode for UserProfile {
             + usize::from(self.badges.is_some())
             + usize::from(self.verified.is_some())
             + usize::from(self.custom_status.is_some())
-            + usize::from(self.avatar_media_id.is_some());
+            + usize::from(self.avatar_media_id.is_some())
+            + usize::from(self.birth_year.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.avatar_url {
             w.optional(1, |w| {
@@ -1805,6 +1808,12 @@ impl Encode for UserProfile {
                 Ok(())
             })?;
         }
+        if let Some(v) = &self.birth_year {
+            w.optional(11, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -1842,6 +1851,7 @@ impl Decode for UserProfile {
                 8 => out.verified = Some(sub.read_bool()?),
                 9 => out.custom_status = Some(sub.read_string()?),
                 10 => out.avatar_media_id = Some(sub.read_id()?),
+                11 => out.birth_year = Some(sub.read_u32()?),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }

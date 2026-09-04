@@ -14,8 +14,10 @@
 //! privacy control starts as "Leave as-is" and joins the save only once the user chooses;
 //! a naive form pre-selected with a default would overwrite a deliberate choice with that
 //! default. The searchable switch follows the same rule — its untouched state is "do not
-//! touch" — and the birth year joins the patch only when it names a plausible year, because
-//! a birth year of "3" is a typo, not a fact about a person.
+//! touch" — while the birth year, which the wire does echo back, seeds from the card and
+//! joins the patch exactly like the text fields: only when its draft differs from what the
+//! server holds. A draft that names no plausible year is a typo, and the pane sends only
+//! what it can stand behind.
 //!
 //! # The status rides a different wire
 //!
@@ -80,7 +82,10 @@ impl ProfileState {
         self.display_name = profile.display_name.clone();
         self.bio = profile.bio.clone().unwrap_or_default();
         self.custom_status = profile.custom_status.clone().unwrap_or_default();
-        self.birth_year.clear();
+        self.birth_year = profile
+            .birth_year
+            .map(|year| year.to_string())
+            .unwrap_or_default();
         self.show_last_seen = -1;
         self.who_can_message = -1;
         self.who_can_add = -1;
@@ -107,7 +112,11 @@ impl ProfileState {
         self.display_name.trim() != profile.display_name
             || self.bio != profile.bio.clone().unwrap_or_default()
             || self.custom_status.trim() != profile.custom_status.clone().unwrap_or_default()
-            || self.birth_year.trim().parse::<u32>().is_ok()
+            || self.birth_year
+                != profile
+                    .birth_year
+                    .map(|year| year.to_string())
+                    .unwrap_or_default()
             || self.show_last_seen >= 0
             || self.who_can_message >= 0
             || self.who_can_add >= 0
@@ -301,10 +310,10 @@ fn form_section(
         "Birth year (optional)",
         &mut state.birth_year,
         false,
-        "Leave as-is",
+        "Not disclosed",
     );
     ui.label(
-        RichText::new("Not public; the wire never sends it back, so a value is a change.")
+        RichText::new("Not public; visible only on your own profile pane.")
             .font(egui::FontId::proportional(font::TINY))
             .color(colors.text_muted),
     );
@@ -441,14 +450,27 @@ fn valid_birth_year(raw: &str) -> Option<u32> {
 /// The patch a dirty form sends, or `None` when the drafts changed nothing on this wire.
 ///
 /// Every field applies the same rule: it joins the patch only when it differs from the card,
-/// and the privacy choices only when a choice was made at all. The result is a save that
-/// touches exactly what the user touched — the wire's absent-means-unchanged contract.
+/// and the privacy choices only when a choice was made at all. The birth year follows the
+/// text fields' rule now that the wire echoes it back: the draft joins only when it differs
+/// from the year the card carries, and a differing draft must still name a plausible year —
+/// "carbuncle" is a typo, and the pane sends only what it can stand behind. The result is a
+/// save that touches exactly what the user touched — the wire's absent-means-unchanged
+/// contract.
 fn build_patch(state: &ProfileState, profile: &OwnProfile) -> Option<Command> {
+    let current_year = profile
+        .birth_year
+        .map(|year| year.to_string())
+        .unwrap_or_default();
+    let birth_year = if state.birth_year != current_year {
+        valid_birth_year(&state.birth_year)
+    } else {
+        None
+    };
     let patch = crate::net::ProfilePatch {
         display_name: (state.display_name.trim() != profile.display_name)
             .then(|| state.display_name.trim().to_owned()),
         bio: (state.bio != profile.bio.clone().unwrap_or_default()).then(|| state.bio.clone()),
-        birth_year: valid_birth_year(&state.birth_year),
+        birth_year,
         show_last_seen: choice_value(state.show_last_seen),
         who_can_message: choice_value(state.who_can_message),
         who_can_add: choice_value(state.who_can_add),

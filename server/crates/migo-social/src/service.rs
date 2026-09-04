@@ -1312,6 +1312,7 @@ where
                 avatar_media_id: profile.avatar_media_id,
                 country: account.country,
                 locale: account.locale,
+                birth_year: profile.birth_year,
             });
         }
         self.meters.profiles(asked, out.len());
