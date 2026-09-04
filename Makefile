@@ -183,6 +183,16 @@ build-store: ## Build the React+Vite store app into the web export's /store
 	# the same bytes, same origin, sharing the web client's IndexedDB session.
 	$(PNPM) --filter @migo/store build
 
+.PHONY: contracts-check
+contracts-check: ## The Solidity gates (forge fmt/build/test), when forge is installed
+	# Local and convenience only: CI installs Foundry itself (contracts.yml), and a machine
+	# without forge skips rather than fails — the workflow is the gate of record.
+	@if command -v forge >/dev/null 2>&1; then \
+		cd contracts && forge fmt --check && forge build && forge test; \
+	else \
+		echo "forge not found; the contracts workflow is the gate of record"; \
+	fi
+
 # ---------------------------------------------------------------- run
 
 .PHONY: dev

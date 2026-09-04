@@ -1,0 +1,62 @@
+name: Contracts
+
+# The Solidity contracts under contracts/: build, test, and format — the same gates the
+# Rust and TypeScript surfaces already run. Foundry is installed by the workflow itself,
+# so a contributor needs nothing beyond git to keep this surface honest.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "contracts/**"
+      - ".github/workflows/contracts.yml"
+  pull_request:
+    paths:
+      - "contracts/**"
+      - ".github/workflows/contracts.yml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  forge:
+    name: Forge — build, test, fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The OpenZeppelin and forge-std sources live in submodules; a contracts
+          # change without them is a build that cannot compile.
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # Pinned: the toolchain a release's verified source must match, and the one
+          # the fmt rules below were written against.
+          version: v1.3.2
+
+      - name: Check formatting
+        run: forge fmt --check
+
+      - name: Build
+        run: forge build
+
+      - name: Test
+        run: forge test
+
+      # The compile artifacts a deployment would verify against; attached so a
+      # reviewer can diff what CI tested against what a run deployed.
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contracts-forge-out
+          path: contracts/out/
+          retention-days: 7

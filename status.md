@@ -2485,3 +2485,43 @@ dijoin jatuh ke belakang, urut stabil.
 kini jadi notice di thread (#86), delivery + read receipt
 end-to-end (#87), dan ketiga klien otomatis membuka jendela chat
 saat paket datang untuk percakapan yang belum punya tab (#89).
+
+## 67. Kontrak on-chain Migo: MGO token dan Treasury (contracts/)
+
+Folder `contracts/` baru — Solidity + **OpenZeppelin v5.6.1** (submodule) + Foundry.
+Dua kontrak, keduanya kecil supaya janji on-chain-nya bisa diaudit utuh:
+
+**MgoToken** (`src/MgoToken.sol`) — ERC-20 upgradeable (UUPS) dengan
+`permit` (EIP-2612) dan `burnable`. Desimal 18, transfer nilai penuh
+tanpa tax/pause/hook — supaya harga di store dan angka di chain tidak
+pernah beda koma. MINT dan UPGRADER lewat `AccessManager` (role dengan
+delay): kompromi kunci operator jadi jendela reaksi, bukan printer
+instan. `initialize` disegel di constructor.
+
+**Treasury** (`src/Treasury.sol`) — alamat tujuan pembayaran store.
+AVAX lewat `receive()`, USDT/USDC lewat ERC-20 transfer (atau
+`pay(token, amount, reference)` untuk mencatat reference di log chain —
+reference = key idempotensi `sku:txHash` supaya ledger server dan log
+chain bisa direkonsiliasi baris per baris). Tanpa logika konversi,
+tanpa tabel harga: harga adalah apa yang transaksi pembeli katakan,
+entitlement ditulis server setelah chain konfirmasi. Sweep saldo
+hanya owner, ReentrancyGuard + SafeERC20, semuanya ter-emit.
+
+**Deploy** (`script/StorePayments.s.sol`) — AccessManager → MGO
+(impl + proxy ERC-1967) → Treasury; menulis `deployment.json` (di-ignore)
+yang isinya persis konstanta yang `chain-purchase.ts` butuh: ganti
+`MGO_TOKEN_FUJI` dan `MGO_TREASURY_FUJI` dari file itu, USDT/USDC
+Fuji dari alamat kontraknya. Variabel env: `MIGO_DEPLOYER_PRIVATE_KEY`
+(tidak pernah di-log/commit), `MIGO_ADMIN` (default: deployer).
+
+**Test** (`test/MgoToken.t.sol`) — bentuk yang store pakai (AVAX value
+transfer, ERC-20 transfer+reference, mint/transfer/burn/permit) dan
+bentuk yang harus ditolak (mint tanpa role, burn saldo orang, sweep
+oleh non-owner, re-initialize, pay nol). Mock ERC-20 untuk jalur
+SafeERC20.
+
+**CI**: workflow `contracts.yml` (build/test/fmt, Foundry di-install
+workflow-nya, submodules recursive) + target `make contracts-check`
+yang skip sopan bila `forge` tidak ada lokal. Build/test tetap CI-only
+sesuai aturan: lokal hanya `forge fmt --check`-nya yang tidak jalan
+di mesin tanpa forge.

@@ -1,0 +1,29 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.24"
+# The OpenZeppelin v5 constructors and initializers take no unnecessary slack: a stricter
+# optimizer run count than the default 200 makes the deployed bytecode smaller and the
+# audit surface tighter, while v5's own CI covers the well-trodden paths.
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+
+# `via_ir` is slow; keep the fast feedback loop for `forge test` usable by skipping it
+# unless the run is a release-shaping one.
+[profile.test]
+via_ir = false
+
+[profile.ci]
+verbosity = 2
+
+# Formatting: two-space indent, 120-col line, the shape the Solidity ecosystem's own
+# style guide and every OZ file already follow.
+[fmt]
+line_length = 120
+tab_width = 2
+bracket_spacing = false
+
+# See more config options:
+# https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

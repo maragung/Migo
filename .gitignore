@@ -66,3 +66,13 @@ Thumbs.db
 var/
 # VPS deployment — stable env written by the deployment; never committed
 .migod.env
+
+# --- Foundry (contracts/) ---
+# Build artifacts and caches: forge owns them, `forge build` regenerates them.
+/contracts/cache/
+/contracts/out/
+# A deployment run's addresses are per-run output (the README's deploy section reads
+# deployment.json after a run); a committed one would be a stale address that reads as
+# authoritative. The deploy wallet's key is read from the environment, never written.
+/contracts/deployment.json
+/contracts/broadcast/
