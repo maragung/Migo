@@ -36,67 +36,67 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
  * {SafeERC20}/{Address} calls-only send keep the usual drain shapes out.
  */
 contract Treasury is Ownable, ReentrancyGuard {
-    using SafeERC20 for IERC20;
+  using SafeERC20 for IERC20;
 
-    /// @notice Emitted for every value arrival, native or token.
-    event PaymentReceived(
-        /// The token the payment was made in: address zero for native AVAX.
-        address indexed token,
-        /// The payer, as the payment's own transaction names them.
-        address indexed payer,
-        /// The amount, in the token's smallest unit.
-        uint256 amount,
-        /// The store's idempotency key (`sku:txHash`) when the payer sent one; the
-        /// transfer's calldata or the payer's own reference otherwise. A direct AVAX send
-        /// with no data carries the empty string.
-        string reference
-    );
+  /// @notice Emitted for every value arrival, native or token.
+  event PaymentReceived(
+    /// The token the payment was made in: address zero for native AVAX.
+    address indexed token,
+    /// The payer, as the payment's own transaction names them.
+    address indexed payer,
+    /// The amount, in the token's smallest unit.
+    uint256 amount,
+    /// The store's idempotency key (`sku:txHash`) when the payer sent one; the
+    /// transfer's calldata or the payer's own note otherwise. A direct AVAX send
+    /// with no data carries the empty string.
+    string note
+  );
 
-    /// @notice Emitted for every owner sweep.
-    event Swept(
-        /// The token swept: address zero for native AVAX.
-        address indexed token,
-        /// Where the balance went.
-        address indexed to,
-        /// The whole balance moved.
-        uint256 amount
-    );
+  /// @notice Emitted for every owner sweep.
+  event Swept(
+    /// The token swept: address zero for native AVAX.
+    address indexed token,
+    /// Where the balance went.
+    address indexed to,
+    /// The whole balance moved.
+    uint256 amount
+  );
 
-    /// @param initialOwner The address that may sweep balances. The deploy script sets
-    ///   this to the deployment's operator wallet; ownership transfers follow the
-    ///   standard two-step Ownable flow.
-    constructor(address initialOwner) Ownable(initialOwner) {}
+  /// @param initialOwner The address that may sweep balances. The deploy script sets
+  ///   this to the deployment's operator wallet; ownership transfers follow the
+  ///   standard two-step Ownable flow.
+  constructor(address initialOwner) Ownable(initialOwner) {}
 
-    /// @notice AVAX arrivals. Plain value transfers land here; the reference is whatever
-    ///   calldata the sender attached (the store attaches none — its key is the tx hash).
-    receive() external payable {
-        emit PaymentReceived(address(0), msg.sender, msg.value, "");
-    }
+  /// @notice AVAX arrivals. Plain value transfers land here; the reference is whatever
+  ///   calldata the sender attached (the store attaches none — its key is the tx hash).
+  receive() external payable {
+    emit PaymentReceived(address(0), msg.sender, msg.value, "");
+  }
 
-    /// @notice Token arrivals have no hook: a payment is *recognised* when the payer (or
-    /// the store, off-chain) logs it. The treasury keeps this function so a payer who
-    /// wants the on-chain log to carry a reference can make it explicit: the payer
-    /// approves, then calls `pay(token, amount, reference)` and this contract pulls.
-    function pay(IERC20 token, uint256 amount, string calldata reference) external nonReentrant {
-        require(amount > 0, "Treasury: zero amount");
-        SafeERC20.safeTransferFrom(token, msg.sender, address(this), amount);
-        emit PaymentReceived(address(token), msg.sender, amount, reference);
-    }
+  /// @notice Token arrivals have no hook: a payment is *recognised* when the payer (or
+  /// the store, off-chain) logs it. The treasury keeps this function so a payer who
+  /// wants the on-chain log to carry a reference can make it explicit: the payer
+  /// approves, then calls `pay(token, amount, note)` and this contract pulls.
+  function pay(IERC20 token, uint256 amount, string calldata note) external nonReentrant {
+    require(amount > 0, "Treasury: zero amount");
+    SafeERC20.safeTransferFrom(token, msg.sender, address(this), amount);
+    emit PaymentReceived(address(token), msg.sender, amount, note);
+  }
 
-    /// @notice Moves the whole AVAX balance out. Only the owner, never during a payment.
-    function sweepNative(address to) external onlyOwner nonReentrant {
-        uint256 amount = address(this).balance;
-        require(amount > 0, "Treasury: nothing to sweep");
-        Address.sendValue(payable(to), amount);
-        emit Swept(address(0), to, amount);
-    }
+  /// @notice Moves the whole AVAX balance out. Only the owner, never during a payment.
+  function sweepNative(address to) external onlyOwner nonReentrant {
+    uint256 amount = address(this).balance;
+    require(amount > 0, "Treasury: nothing to sweep");
+    Address.sendValue(payable(to), amount);
+    emit Swept(address(0), to, amount);
+  }
 
-    /// @notice Moves the whole balance of `token` out. Only the owner, never during a
-    ///   pull-payment (the {SafeERC20} calls guard the arbitrary-token shapes).
-    function sweepToken(IERC20 token, address to) external onlyOwner nonReentrant {
-        uint256 amount = token.balanceOf(address(this));
-        require(amount > 0, "Treasury: nothing to sweep");
-        SafeERC20.safeTransfer(token, to, amount);
-        emit Swept(address(token), to, amount);
-    }
+  /// @notice Moves the whole balance of `token` out. Only the owner, never during a
+  ///   pull-payment (the {SafeERC20} calls guard the arbitrary-token shapes).
+  function sweepToken(IERC20 token, address to) external onlyOwner nonReentrant {
+    uint256 amount = token.balanceOf(address(this));
+    require(amount > 0, "Treasury: nothing to sweep");
+    SafeERC20.safeTransfer(token, to, amount);
+    emit Swept(address(token), to, amount);
+  }
 }

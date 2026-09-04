@@ -3,6 +3,17 @@ src = "src"
 out = "out"
 libs = ["lib"]
 solc_version = "0.8.24"
+# The OZ submodule is `contracts/`-pathed (`@openzeppelin/contracts/...` is the
+# `contracts-upgradeable` style); remap both import spellings to the one source tree so
+# either idiom resolves to the same audited files.
+remappings = [
+    "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "openzeppelin-contracts/=lib/openzeppelin-contracts/",
+]
+# The deploy script writes the run's addresses to deployment.json (gitignored) — the one
+# file a script is allowed to touch, named here rather than opened with a broad ./ grant.
+fs_permissions = [{ access = "write", path = "./deployment.json" }]
 # The OpenZeppelin v5 constructors and initializers take no unnecessary slack: a stricter
 # optimizer run count than the default 200 makes the deployed bytecode smaller and the
 # audit surface tighter, while v5's own CI covers the well-trodden paths.

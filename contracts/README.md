@@ -26,9 +26,9 @@ USDT/USDC as an ERC-20 transfer with the treasury as recipient. The store's clie
 transaction from the account's own wallet-0 key; the Migo server is never a blockchain
 proxy and never moves a payment.
 
-The MGO amount is what the payment is *quoted* in (1 coin = 1 MGO at the client's
+The MGO amount is what the payment is _quoted_ in (1 coin = 1 MGO at the client's
 constant): after the chain confirms, the client tells the server
-`economy.purchase(sku, key, txHash)` and the *server* writes the entitlement — the
+`economy.purchase(sku, key, txHash)` and the _server_ writes the entitlement — the
 chain records the money, the server records what it bought. The treasury does no
 conversion and holds no price table; keeping that logic off-chain keeps the contract's
 on-chain promise to receive, record, and sweep.
@@ -43,7 +43,7 @@ export MIGO_DEPLOYER_PRIVATE_KEY=0x…   # the deploy wallet (never committed, n
 export MIGO_ADMIN=0x…                  # optional: the operator wallet; defaults to the deployer
 
 forge script script/StorePayments.s.sol \
-  --rpc-url https://api.avax.network/ext/bc/C/rpc \
+  --rpc-url https://api.avax-test.network/ext/bc/C/rpc \
   --broadcast --verify
 ```
 
@@ -52,8 +52,8 @@ exactly the list the store's constants need:
 
 ```ts
 // clients/store/src/lib/chain-purchase.ts
-export const MGO_TOKEN_FUJI    = '0x…';  // deployment.json's mgoToken
-export const MGO_TREASURY_FUJI = '0x…';  // deployment.json's treasury
+export const MGO_TOKEN_FUJI = '0x…'; // deployment.json's mgoToken
+export const MGO_TREASURY_FUJI = '0x…'; // deployment.json's treasury
 ```
 
 USDT/USDC on Fuji are third-party contracts (testnet tokens are redeployed at their
