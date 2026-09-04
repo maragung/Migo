@@ -64,6 +64,10 @@ pub struct ProfileState {
     who_can_add: i8,
     /// The searchable draft: `-1` untouched, `0` off, `1` on.
     searchable: i8,
+    /// The avatar picker's path draft. Not a save-section field: the avatar acts on its own
+    /// button, and the path stays after an upload the way the backup path does, because a
+    /// second change usually starts from a folder rather than a blank.
+    avatar_path: String,
 }
 
 impl ProfileState {
@@ -159,7 +163,7 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut ProfileState) {
                             );
                         }
                         Some(profile) => {
-                            identity_section(ui, context, &profile);
+                            identity_section(ui, context, state, &profile);
                             ui.add_space(space::LG);
                             form_section(ui, context, state, &profile);
                             ui.add_space(space::LG);
@@ -173,7 +177,16 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut ProfileState) {
 }
 
 /// The read-only head: who this card is, in the shape every other surface shows it.
-fn identity_section(ui: &mut Ui, context: &mut Context<'_>, profile: &OwnProfile) {
+///
+/// The avatar button lives here rather than in the form because it is not a draft — it acts
+/// the moment it is pressed, uploading the file and pointing the profile at it in one
+/// action, the same "two steps, one action" contract the web panel's change-photo carries.
+fn identity_section(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    state: &mut ProfileState,
+    profile: &OwnProfile,
+) {
     let colors = palette(context.theme);
     widgets::subheader(ui, context.theme, "Account");
 
@@ -198,6 +211,44 @@ fn identity_section(ui: &mut Ui, context: &mut Context<'_>, profile: &OwnProfile
             .font(egui::FontId::monospace(font::SMALL))
             .color(colors.text_muted),
     );
+
+    avatar_section(ui, context, state);
+}
+
+/// The avatar picker: a path, a button, and the honest limits.
+///
+/// egui has no file dialog in this build, so the path is typed — the same contract the
+/// backup seal's "Save as" field already holds, and the only one this pane can stand behind.
+/// The server's own policy caps the file at two mebibytes and re-judges the bytes at commit,
+/// so the pane's job is only to say where the file is.
+fn avatar_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut ProfileState) {
+    widgets::subheader(ui, context.theme, "Avatar");
+
+    ui.label(
+        RichText::new(
+            "A local image, uploaded as your avatar: PNG, JPEG, WebP, GIF or AVIF, up to 2 MiB. \
+             The server judges the bytes, not the name.",
+        )
+        .font(egui::FontId::proportional(font::SMALL))
+        .color(palette(context.theme).text_muted),
+    );
+    ui.add_space(space::SM);
+    widgets::field(
+        ui,
+        context.theme,
+        "Image file",
+        &mut state.avatar_path,
+        false,
+        "e.g. ~/Pictures/me.png",
+    );
+    let ready = !state.avatar_path.trim().is_empty();
+    if widgets::primary_button(ui, context.theme, "Change photo", ready)
+        .on_hover_text("Uploads the image and points your profile at it — one action.")
+        .clicked()
+    {
+        let path = std::path::PathBuf::from(state.avatar_path.trim());
+        context.issue(Command::ChangeAvatar { path });
+    }
 }
 
 /// The editable fields: name, bio, status, birth year, privacy.

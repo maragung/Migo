@@ -67,6 +67,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bytes = "1"
 
+# The media commit's digest is the SHA-256 of the uploaded bytes — the server records it for
+# dedup and integrity, and the web client sends the real one, so this client does too. Same
+# version the server graph uses, so the two dependency graphs share one copy of the crate.
+sha2 = "0.10"
 # The captcha challenge arrives as base64 text over REST and becomes pixels on a texture: base64
 # unwraps the wire form, `image` decodes the PNG inside it. Only the PNG codec is compiled in —
 # the server promises exactly one format, and a decoder that accepts more is a client that can be

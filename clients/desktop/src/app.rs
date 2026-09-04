@@ -361,6 +361,11 @@ impl App {
                 Event::ProfileSaved(profile) => {
                     self.profile_panel.file(profile);
                 }
+                Event::AvatarChangeFailed { reason } => {
+                    // The avatar button's own refusal: filed beside the form the person is
+                    // looking at, the same sentence-shape a refused profile save takes.
+                    self.profile_panel.fail(reason);
+                }
                 Event::Admins(answer) => {
                     // The standing-and-list answer. The banner menu's gate reads it too: an
                     // answer that says the account holds neither role keeps the menu entry

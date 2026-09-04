@@ -243,6 +243,14 @@ pub enum Command {
     /// status never flips the account online or offline as a side effect. An empty string
     /// clears the line.
     SaveStatus { status: String },
+    /// Upload a local image as the account's new avatar and point the profile at it.
+    ///
+    /// The path is read here, in the worker, because reading a file is I/O the UI thread must
+    /// not own; the bytes, their claimed type, and a digest are all the wire needs. One command
+    /// for both steps — upload then patch — because they are one action to the user: a failure
+    /// anywhere surfaces beside the button that started it, and a success arrives as the
+    /// profile's own saved event, the same one a save sends.
+    ChangeAvatar { path: PathBuf },
     /// Read the account's standing on the admin surface, and the admin list when the answer is
     /// owner. One command for both because the standing is not a fact the UI should hold while
     /// a list loads: the panel decides nothing on it, it only draws what arrives.
@@ -472,6 +480,12 @@ pub enum Event {
     /// The profile pane's save was accepted: the reply is the refreshed card, the same shape the
     /// fetch returns, so the pane replaces its copy from the reply instead of re-reading.
     ProfileSaved(crate::model::OwnProfile),
+    /// An avatar upload was refused — the file would not read, the server declined the bytes,
+    /// or the profile patch behind them was rejected.
+    ///
+    /// Filed beside the pane's own failure line rather than toasted, for the same reason the
+    /// profile save's refusals are: the person is looking at the button that started it.
+    AvatarChangeFailed { reason: String },
     /// The owner's admin management surface: the standing first, and with it the list.
     ///
     /// The standing is carried rather than remembered by the UI because it is a server fact,
@@ -644,6 +658,15 @@ struct Signed {
     profile_presence: Option<migo_protocol::PresenceState>,
 }
 
+/// One avatar upload in flight: the bytes the worker read, waiting for the ticket that says
+/// where they go.
+struct AvatarPending {
+    /// The path, kept for the failure sentences that name it.
+    path: PathBuf,
+    /// The bytes themselves, held until the ticket's URL is known and they can be PUT.
+    bytes: Vec<u8>,
+}
+
 /// The reconnect schedule after a lost gateway connection.
 ///
 /// Exponential backoff with jitter and a cap, driven from the worker's main select loop rather than
@@ -802,6 +825,14 @@ struct Worker {
     /// The account id rides along so a different account signing in over the same window never
     /// inherits another account's history.
     txs: Option<(Id, Vec<TxRecord>)>,
+    /// One avatar upload between its BEGIN and the ticket's arrival. The bytes wait here
+    /// because the worker never blocks on a reply; the frame arm completes the flow when the
+    /// ticket lands. Replaced, never queued — a second pick while one is in flight refuses at
+    /// the UI before a command is ever issued.
+    avatar_pending: Option<AvatarPending>,
+    /// An avatar upload between its COMMIT and the acknowledgement that closes it: the media
+    /// id the profile patch will name once the server says the object exists.
+    avatar_commit_pending: Option<(Id, PathBuf)>,
     /// One HTTP client for every chain call. A `reqwest::Client` shares its connection pool, so
     /// cloning it per operation is free, and the chain conversation stays off the Migo session's
     /// client entirely.
@@ -820,6 +851,8 @@ impl Worker {
             pending_leave: None,
             pending_registration: None,
             txs: None,
+            avatar_pending: None,
+            avatar_commit_pending: None,
             chain_http: reqwest::Client::new(),
         }
     }
@@ -987,6 +1020,7 @@ impl Worker {
             Command::OwnProfile => self.fetch_own_profile().await,
             Command::SaveProfile(patch) => self.save_profile(patch).await,
             Command::SaveStatus { status } => self.save_status(status).await,
+            Command::ChangeAvatar { path } => self.change_avatar(path).await,
             Command::Admins => self.fetch_admins().await,
             Command::GrantAdmin { username } => self.grant_admin(username).await,
             Command::RevokeAdmin { account_id } => {
@@ -1853,6 +1887,176 @@ impl Worker {
             custom_status: Some(status).filter(|status| !status.is_empty()),
         };
         self.request(Opcode::PresenceSet, &message).await;
+    }
+
+    /// Uploads a local image as the account's avatar and patches the profile to point at it.
+    ///
+    /// The web panel's own flow, on this client's wires: `MEDIA_UPLOAD_BEGIN` over the socket
+    /// mints the ticket, the bytes PUT to the ticket's URL over plain HTTP, `MEDIA_UPLOAD_COMMIT`
+    /// closes it with the real SHA-256 of what was sent — the digest is the one thing the server
+    /// records about the bytes, and sending a placeholder would make this client the odd one out
+    /// in every future integrity check — and then the profile patch carries the new media id.
+    /// A failure anywhere aborts the ticket (best-effort; the abort's own failure never masks
+    /// the real one), so the server does not hold a half-written object, and is filed beside the
+    /// pane's form rather than toasted.
+    ///
+    /// The MIME type is claimed from the file's extension, because the client has nothing else
+    /// to read it from — the server is the authority anyway: it sniffs the bytes at commit and
+    /// records what it found, refusing anything that is not an image.
+    async fn change_avatar(&mut self, path: PathBuf) {
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.sink.send(Event::AvatarChangeFailed {
+                    reason: format!("Could not read the file: {error}"),
+                });
+                return;
+            }
+        };
+        if bytes.is_empty() {
+            self.sink.send(Event::AvatarChangeFailed {
+                reason: "The file is empty.".to_owned(),
+            });
+            return;
+        }
+        let content_type = Self::image_mime_of(&path).to_owned();
+
+        // Begin: one ticket, over the live socket, matched by correlation the way every
+        // fire-and-forget request here is. The reply arrives as a frame and is routed below.
+        let begin = migo_protocol::MediaBegin {
+            kind: 0, // Avatar: the wire's own numbering, zero.
+            content_type,
+            size: bytes.len() as u64,
+            conversation_id: None,
+            width: None,
+            height: None,
+            duration_ms: None,
+        };
+        if self
+            .send_and_remember(Opcode::MediaUploadBegin, &begin)
+            .await
+            .is_none()
+        {
+            return;
+        }
+        self.avatar_pending = Some(AvatarPending { path, bytes });
+    }
+
+    /// Sends one request whose reply this worker will match by correlation when it arrives.
+    ///
+    /// The avatar flow needs an answer before its next step, but the worker's shape is a loop
+    /// that never blocks on one frame — so the request goes out, the pending state remembers
+    /// what the answer is for, and the frame arm finishes the job. Returns the correlation id
+    /// the reply must carry, or `None` when the send itself failed (already reported).
+    async fn send_and_remember<T: migo_protocol::Encode>(
+        &mut self,
+        opcode: Opcode,
+        value: &T,
+    ) -> Option<u32> {
+        let Some(gateway) = self.gateway.as_mut() else {
+            self.sink.toast("not connected", ToastKind::Error);
+            return None;
+        };
+        let correlation = gateway.correlate();
+        if let Err(error) = gateway.send(opcode, correlation, value).await {
+            self.on_disconnect(error);
+            return None;
+        }
+        Some(correlation)
+    }
+
+    /// A `MEDIA_UPLOAD_BEGIN` reply arrived while an avatar upload was pending: PUT the bytes,
+    /// commit with their digest, then patch the profile.
+    async fn avatar_ticket_arrived(&mut self, ticket: migo_protocol::MediaTicket) {
+        let Some(pending) = self.avatar_pending.take() else {
+            return;
+        };
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+
+        // PUT the bytes. This is the data plane: plain HTTP to the signed URL, no token.
+        if let Err(error) = signed
+            .rest
+            .put_upload_bytes(&ticket.upload_url, pending.bytes.clone())
+            .await
+        {
+            self.abort_avatar(ticket.upload_id).await;
+            self.sink.send(Event::AvatarChangeFailed {
+                reason: error.to_string(),
+            });
+            return;
+        }
+
+        // Commit with the real digest of the bytes that were sent.
+        let digest = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&pending.bytes);
+            hasher.finalize().to_vec()
+        };
+        let commit = migo_protocol::MediaCommit {
+            upload_id: ticket.upload_id,
+            digest,
+        };
+        if self
+            .send_and_remember(Opcode::MediaUploadCommit, &commit)
+            .await
+            .is_none()
+        {
+            self.abort_avatar(ticket.upload_id).await;
+            return;
+        }
+        self.avatar_commit_pending = Some((ticket.upload_id, pending.path));
+    }
+
+    /// The `MEDIA_UPLOAD_COMMIT` acknowledgement arrived: the object exists, so point the
+    /// profile at it. The commit's ack carries only `ok`, so the media id rides here in the
+    /// worker's own pending state rather than in the reply.
+    async fn avatar_committed(&mut self) {
+        let Some((media_id, _path)) = self.avatar_commit_pending.take() else {
+            return;
+        };
+        let message = migo_protocol::ProfileUpdate {
+            display_name: None,
+            bio: None,
+            avatar_media_id: Some(media_id),
+            birth_year: None,
+            show_last_seen: None,
+            who_can_message: None,
+            who_can_add: None,
+            searchable: None,
+        };
+        self.request(Opcode::ProfileUpdate, &message).await;
+    }
+
+    /// Abandons an upload ticket, best-effort, so the server does not hold bytes nobody is
+    /// coming back for. A failure of the abort itself is not an error worth reporting: the
+    /// ticket expires on its own and the bytes die with it.
+    async fn abort_avatar(&mut self, upload_id: Id) {
+        let message = migo_protocol::MediaAbort { upload_id };
+        self.request(Opcode::MediaUploadAbort, &message).await;
+    }
+
+    /// The MIME type to claim for an avatar file, from its extension.
+    ///
+    /// `image/*` for the formats the server's sniffer recognises as images, and a neutral claim
+    /// for anything else — the server re-judges from the bytes at commit, so the claim only has
+    /// to be honest, never right.
+    fn image_mime_of(path: &std::path::Path) -> &'static str {
+        match path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("png") => "image/png",
+            Some("jpg") | Some("jpeg") => "image/jpeg",
+            Some("webp") => "image/webp",
+            Some("gif") => "image/gif",
+            Some("avif") => "image/avif",
+            _ => "application/octet-stream",
+        }
     }
 
     /// Reads the admin surface's own gate, then the list it guards — one answer either way.
@@ -3216,6 +3420,15 @@ impl Worker {
             Opcode::Typing => self.on_typing(&frame),
             Opcode::ProfileFetch => self.on_profiles(&frame),
             Opcode::ProfileUpdate => self.on_profile_saved(&frame),
+            // The avatar upload's own replies. Matched by correlation against the pending
+            // state rather than decoded for the world: a ticket that was not asked for is a
+            // late answer to something else, ignored by the `take()` inside.
+            Opcode::MediaUploadBegin => {
+                if let Ok(ticket) = gateway::decode::<migo_protocol::MediaTicket>(&frame) {
+                    self.avatar_ticket_arrived(ticket).await;
+                }
+            }
+            Opcode::MediaUploadCommit => self.avatar_committed().await,
             Opcode::RelationshipList => self.on_relationships(&frame).await,
             // The acknowledgement of a FRIEND_REQUEST or FRIEND_RESPOND. Both mean the graph
             // moved and the list in the UI is now stale, so both take the same action: re-read.

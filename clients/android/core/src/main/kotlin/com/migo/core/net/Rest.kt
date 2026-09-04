@@ -690,6 +690,24 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
     }
 
     /**
+     * PUTs the raw bytes of an upload to the signed URL a ticket carried: the media data plane.
+     *
+     * The URL is absolute and server-minted — not `base + path` — and it is the *whole* authorisation:
+     * no bearer token is attached, because the signature inside the URL is what names the object and
+     * the account, and adding a second credential would imply the URL alone was not enough. The
+     * content type is always `application/octet-stream`, the object being an opaque blob to the HTTP
+     * layer — its real type is the claim made at MEDIA_UPLOAD_BEGIN, which the server verifies against
+     * the bytes at commit. A non-2xx answer is mapped by the same [failure] every other response is.
+     */
+    suspend fun putUploadBytes(url: String, bytes: ByteArray) {
+        val request = Request.Builder()
+            .url(url)
+            .put(bytes.toRequestBody(OCTET_STREAM_MEDIA))
+            .build()
+        execute(request).use { if (!it.isSuccessful) throw failure(it) }
+    }
+
+    /**
      * Posts a JSON body to one of the four bootstrap endpoints and reads a [Grant] back.
      *
      * The request serializer arrives as a value rather than through a reified type parameter, because
@@ -823,5 +841,8 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
 
     private companion object {
         val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+
+        /** The upload data plane's one content type: the blob is opaque to the HTTP layer. */
+        val OCTET_STREAM_MEDIA = "application/octet-stream".toMediaType()
     }
 }

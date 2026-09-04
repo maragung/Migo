@@ -919,6 +919,31 @@ impl Rest {
         .await
     }
 
+    /// The media data plane: PUTs the raw bytes of an upload to the signed URL a ticket carried.
+    ///
+    /// This is the one request in the whole client that is neither JSON nor authenticated — the
+    /// URL's own signature is the authorisation, and the bytes are an opaque blob to the HTTP
+    /// layer. `application/octet-stream` regardless of what the object really is, because the
+    /// type was claimed at begin and the server judges it against the bytes at commit.
+    ///
+    /// Kept here, next to the auth'd helpers, because the two planes are one upload from the
+    /// caller's point of view; the worker drives the opcodes, this drives the bytes.
+    pub async fn put_upload_bytes(&self, url: &str, bytes: Vec<u8>) -> Result<(), RestError> {
+        let response = self
+            .http
+            .put(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(bytes)
+            .send()
+            .await
+            .map_err(|_| RestError::Transport)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(self.failure(response).await)
+        }
+    }
+
     /// One authenticated request that answers with a JSON body.
     async fn auth_json<B: Serialize, T: DeserializeOwned>(
         &self,

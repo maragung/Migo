@@ -14,6 +14,7 @@ import com.migo.core.domain.KeyStore
 import com.migo.core.domain.KeysDomain
 import com.migo.core.domain.Listener
 import com.migo.core.domain.ListenerSet
+import com.migo.core.domain.MediaDomain
 import com.migo.core.domain.MessageDeletion
 import com.migo.core.domain.MessagingDomain
 import com.migo.core.domain.NotificationsDomain
@@ -54,6 +55,7 @@ import com.migo.core.protocol.Op
 import com.migo.core.protocol.PROTOCOL_VERSION
 import com.migo.core.protocol.Platform
 import com.migo.core.protocol.PresenceEvent
+import com.migo.core.protocol.ProfileUpdate
 import com.migo.core.protocol.ResumeRequest
 import com.migo.core.protocol.RoomMemberEvent
 import com.migo.core.protocol.RoomStateEvent
@@ -64,6 +66,7 @@ import com.migo.core.protocol.SyncResponse
 import com.migo.core.protocol.Topic
 import com.migo.core.protocol.TopicKind
 import com.migo.core.protocol.TypingEvent
+import com.migo.core.protocol.UserProfile
 import com.migo.core.protocol.Welcome
 import com.migo.core.session.GroupCrypto
 import com.migo.core.session.GroupPersistence
@@ -195,9 +198,11 @@ val DEFAULT_REPLENISH_POLICY = PrekeyReplenishPolicy(low = 16, batch = 64)
  * The features this build actually implements, as the HELLO bitmask.
  *
  * Announced honestly: a bit here is a promise that the code behind it exists, and the server may enable
- * behaviour on the strength of it. [Feature.MEDIA_UPLOAD] and [Feature.VOICE_MESSAGE] are absent because
- * their upload path is still specification (migo.md sections 167 and 168) -- this client can decode a
- * media or voice-note reference in a message, which is a different thing from being able to produce one.
+ * behaviour on the strength of it. [Feature.MEDIA_UPLOAD] is now announced because the upload path
+ * exists in this build ([MediaDomain], plus the avatar flow in [changeAvatar]); [Feature.VOICE_MESSAGE]
+ * remains absent because that path is still specification (migo.md section 168) -- this client can
+ * decode a media or voice-note reference in a message, which is a different thing from being able to
+ * produce one.
  * [Feature.BOTS], [Feature.TRANSLATION] and [Feature.ECONOMY] are absent for the same reason;
  * [Feature.QUIC] because this build has no Kotlin QUIC runtime and connects over WebSocket even when a
  * QUIC endpoint is chosen, so announcing the bit would be a promise the wire cannot keep; and
@@ -214,7 +219,15 @@ val DEFAULT_CLIENT_FEATURES: ULong = Feature.COMPRESSION or
     Feature.TYPING or
     Feature.ROOMS or
     Feature.GAMES or
+    Feature.MEDIA_UPLOAD or
     Feature.RESUME
+
+/**
+ * The media domain's own kind numbering for an avatar. Kept here rather than as a `const` on the
+ * protocol object because the wire does not carry it as an enum — it is one byte the media service
+ * re-judges — so the SDK owning its own name for it is the honest shape.
+ */
+const val AVATAR_KIND: Long = 0L
 
 /** Everything needed to construct a client. One instance drives one device's session. */
 class MigoClientOptions(
@@ -421,6 +434,9 @@ class MigoClient private constructor(
 
     /** The economy domain of the live session. */
     val economy: EconomyDomain get() = requireConnected().economy
+
+    /** The media object plane of the live session: uploads and their URLs. */
+    val media: MediaDomain get() = requireConnected().media
 
     /** Friendship changes, bridged across reconnects like every application-facing stream. */
     fun onFriendEvent(listener: Listener<FriendEvent>): Subscription = friendListeners.add(listener)
@@ -649,6 +665,22 @@ class MigoClient private constructor(
      */
     suspend fun revokeDevice(deviceId: Id): DeviceRevoked =
         rest.revokeDevice(requireConnected().grant.accessToken, deviceId)
+
+    /**
+     * Uploads an image as the account's avatar and points the profile at it — one action, the web
+     * panel's own flow.
+     *
+     * The bytes are claimed as [contentType] (the picker's belief; the server re-judges the bytes at
+     * commit) and uploaded profile-scoped, because an avatar's audience is whoever may see the
+     * profile, not a conversation's members. Returns the updated profile, so the caller can refresh
+     * its copy from the reply instead of re-reading. Fails loudly on a too-large or non-image file —
+     * the server's refusal, already in the caller's language.
+     */
+    suspend fun changeAvatar(bytes: ByteArray, contentType: String): UserProfile {
+        val session = requireConnected()
+        val mediaId = session.media.upload(kind = AVATAR_KIND, contentType = contentType, bytes = bytes)
+        return session.profile.update(ProfileUpdate(avatarMediaId = mediaId))
+    }
 
     /**
      * Changes the account's sign-in passphrase and keeps this session signed in.
@@ -1120,6 +1152,7 @@ class MigoClient private constructor(
             games = GamesDomain(rpc, options.onEventError),
             social = SocialDomain(rpc, options.onEventError),
             economy = EconomyDomain(rpc),
+            media = MediaDomain(rpc, rest),
         )
         session.startAll()
         bridge(session)
@@ -1314,6 +1347,7 @@ private class Session(
     val games: GamesDomain,
     val social: SocialDomain,
     val economy: EconomyDomain,
+    val media: MediaDomain,
 ) {
     /** Registers every inbound handler. Called before the pump starts. */
     fun startAll() {

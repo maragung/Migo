@@ -1509,6 +1509,47 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Uploads a picked image as the account's avatar, then points the profile at it.
+     *
+     * The two steps are one action to the person, so the busy state covers both and a failure
+     * anywhere surfaces beside the picker that started it — the same shape the web panel's
+     * change-photo carries. The bytes are read from the picked [Uri] off the main thread (the same
+     * dispatch the backup restore uses), and the content type is the picker's claim — the server
+     * re-judges the bytes at commit, so the claim only has to be honest, never right. The reply is
+     * the authoritative profile and is filed into the edit state, so the form's drafts follow the
+     * server's version of what was just written.
+     */
+    fun changeAvatar(image: Uri, contentType: String) {
+        val live = session ?: return
+        if ((_state.value as? AppState.SignedIn)?.profileEdit?.busy == true) return
+        signedIn { it.copy(profileEdit = it.profileEdit.copy(busy = true, failure = null, notice = null)) }
+        viewModelScope.launch {
+            try {
+                val bytes = withContext(Dispatchers.IO) {
+                    getApplication<Application>().contentResolver.openInputStream(image)?.use { it.readBytes() }
+                        ?: throw IOException("the chosen image could not be read")
+                }
+                val updated = live.client.changeAvatar(bytes, contentType)
+                signedIn {
+                    it.copy(
+                        profileEdit = it.profileEdit.copy(
+                            busy = false,
+                            profile = updated,
+                            notice = "Photo changed.",
+                        ),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn {
+                    it.copy(profileEdit = it.profileEdit.copy(busy = false, failure = readable(failure)))
+                }
+            }
+        }
+    }
+
+    /**
      * Saves the Profile panel's form. The patch is assembled by the caller from the form's fields,
      * which is where the absent-means-unchanged rule lives: a field the person never touched is
      * null in the patch, and null is the one value the server treats as "leave it".

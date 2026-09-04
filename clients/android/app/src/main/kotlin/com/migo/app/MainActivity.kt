@@ -285,6 +285,7 @@ private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifie
             onSaveStatus = model::saveCustomStatus,
             onChangePassphrase = model::changePassphrase,
             onSaveContact = model::saveContact,
+            onChangeAvatar = model::changeAvatar,
             modifier = modifier,
         )
 

@@ -34,6 +34,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -82,10 +83,24 @@ fun ProfileScreen(
     onSaveStatus: (String) -> Unit,
     onChangePassphrase: (current: String, next: String) -> Unit,
     onSaveContact: (contact: String) -> Unit,
+    onChangeAvatar: (image: Uri, contentType: String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var showId by rememberSaveable { mutableStateOf(false) }
     var confirmRemove by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // The image picker: one choice, and the avatar's own upload starts from it. The type is
+    // image/* because the server's sniffer accepts exactly the picture formats — anything else
+    // the picker could hand over is a file this flow would only ever be refused on.
+    val context = LocalContext.current
+    val pickAvatar = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { chosen ->
+        if (chosen != null) {
+            val claimed = context.contentResolver.getType(chosen) ?: "application/octet-stream"
+            onChangeAvatar(chosen, claimed)
+        }
+    }
 
     Column(modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         ScreenTitle(title = "Profile")
@@ -115,6 +130,33 @@ fun ProfileScreen(
                 }
             }
         }
+
+        // The avatar's own control, in the identity block it belongs to: not a form field — it
+        // acts the moment it is pressed, uploading the picked image and pointing the profile at
+        // it in one action, exactly the contract the web panel's change-photo button holds. The
+        // server judges the bytes, not the name, so the picker's only job is to offer pictures.
+        TextButton(
+            onClick = { pickAvatar.launch("image/*") },
+            enabled = !state.profileEdit.busy,
+            modifier = Modifier.padding(horizontal = 16.dp),
+        ) {
+            Text(
+                text = if (state.profileEdit.busy) {
+                    "Changing photo…"
+                } else {
+                    "Change photo"
+                },
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        Text(
+            text = "A PNG, JPEG, WebP, GIF or AVIF image, up to 2 MiB. The server judges the " +
+                "bytes, not the name.",
+            style = MaterialTheme.typography.labelSmall,
+            color = LocalMigoExtra.current.faint,
+            modifier = Modifier.padding(horizontal = 16.dp),
+        )
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
