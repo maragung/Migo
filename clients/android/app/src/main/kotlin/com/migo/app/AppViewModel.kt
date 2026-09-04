@@ -1596,6 +1596,101 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Changes the account's sign-in passphrase.
+     *
+     * The server ends every other session of the account and answers with a replacement grant for
+     * this one; the grant is installed and the vault re-sealed under it (the same write a refresh
+     * makes), so the next launch resumes rather than dropping to the sign-in screen with a
+     * passphrase the vault no longer matches. The form's fields are the screen's own; a success
+     * notice is what wipes them.
+     */
+    fun changePassphrase(current: String, next: String) {
+        val live = session ?: return
+        val form = _state.value as? AppState.SignedIn ?: return
+        if (form.accountSecurity.busy) return
+        if (next.length < 8) {
+            signedIn {
+                it.copy(accountSecurity = it.accountSecurity.copy(failure = "The new passphrase is too short."))
+            }
+            return
+        }
+        if (current == next) {
+            signedIn {
+                it.copy(accountSecurity = it.accountSecurity.copy(failure = "The new passphrase is the same as the current one."))
+            }
+            return
+        }
+        signedIn { it.copy(accountSecurity = it.accountSecurity.copy(busy = true, failure = null, notice = null)) }
+        viewModelScope.launch {
+            try {
+                live.client.changePassphrase(current, next)
+                try {
+                    live.persist()
+                } catch (saveFailure: Exception) {
+                    signedIn {
+                        it.copy(
+                            accountSecurity = it.accountSecurity.copy(
+                                busy = false,
+                                failure = "The passphrase changed, but the vault could not be saved: " +
+                                    "${readable(saveFailure)}",
+                            ),
+                        )
+                    }
+                    return@launch
+                }
+                signedIn {
+                    it.copy(
+                        accountSecurity = it.accountSecurity.copy(
+                            busy = false,
+                            notice = "Passphrase changed. Other devices signed out; this one stays in.",
+                        ),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn {
+                    it.copy(accountSecurity = it.accountSecurity.copy(busy = false, failure = readable(failure)))
+                }
+            }
+        }
+    }
+
+    /**
+     * Records (or replaces) the account's recovery contact.
+     *
+     * The one string is not a secret — the server shows it back through recovery — and a save is a
+     * replace, so the field clears on success rather than keeping the saved value as a draft.
+     */
+    fun saveContact(contact: String) {
+        val live = session ?: return
+        val form = _state.value as? AppState.SignedIn ?: return
+        if (form.accountSecurity.busy) return
+        val trimmed = contact.trim()
+        if (trimmed.isEmpty() || (!trimmed.contains('@') && !trimmed.startsWith("+"))) {
+            signedIn {
+                it.copy(accountSecurity = it.accountSecurity.copy(failure = "Enter an email address or a phone number starting with +."))
+            }
+            return
+        }
+        signedIn { it.copy(accountSecurity = it.accountSecurity.copy(busy = true, failure = null, notice = null)) }
+        viewModelScope.launch {
+            try {
+                live.client.setContact(trimmed)
+                signedIn {
+                    it.copy(accountSecurity = it.accountSecurity.copy(busy = false, notice = "Recovery contact saved."))
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn {
+                    it.copy(accountSecurity = it.accountSecurity.copy(busy = false, failure = readable(failure)))
+                }
+            }
+        }
+    }
+
+    /**
      * Removes one of the account's devices.
      *
      * Its sessions end with it and its credential stops working, so a lost phone is gone from the

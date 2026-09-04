@@ -134,6 +134,17 @@ private data class RefreshRequest(
 @Serializable
 private data class LogoutRequest(@SerialName("session_id") val sessionId: String)
 
+/** The passphrase-change body: the current one proves the caller, the next one replaces it. */
+@Serializable
+private data class PassphraseRequest(
+    @SerialName("current_passphrase") val currentPassphrase: String,
+    @SerialName("new_passphrase") val newPassphrase: String,
+)
+
+/** The recovery-contact body: one string the server judges the shape of. */
+@Serializable
+private data class ContactRequest(@SerialName("email_or_phone") val emailOrPhone: String)
+
 /** One body shape covers both anonymous ceremonies; the purpose picks the reading. */
 @Serializable
 private data class ChallengeRequest(
@@ -559,6 +570,50 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
     suspend fun archiveWallet(accessToken: String, walletId: Id) {
         send("POST", "/v1/wallets/${walletId.value}", "", accessToken)
             .use { if (!it.isSuccessful) throw failure(it) }
+    }
+
+    /**
+     * Changes the account's sign-in passphrase: `POST /v1/auth/passphrase`, answered with a
+     * replacement [Grant].
+     *
+     * The replacement is the point: the change ends every other session of the account, and this
+     * device's answer is the fresh pair that keeps it signed in. The caller must install the
+     * grant it gets back -- tokens, session id -- the same way a sign-in does, or the next
+     * refresh will use a token the server has already revoked.
+     */
+    suspend fun changePassphrase(
+        accessToken: String,
+        currentPassphrase: String,
+        newPassphrase: String,
+    ): Grant = respond(
+        send(
+            "POST",
+            "/v1/auth/passphrase",
+            json.encodeToString(
+                PassphraseRequest.serializer(),
+                PassphraseRequest(currentPassphrase, newPassphrase),
+            ),
+            accessToken,
+        ),
+        Grant.serializer(),
+    )
+
+    /**
+     * Records (or replaces) the caller's recoverable contact: `PUT /v1/auth/contact`, answered
+     * 204.
+     *
+     * One string, and the server is the judge of the shape: an email containing `@` or a phone
+     * starting with `+`, normalised on arrival so the store's unique index sees one canonical
+     * value rather than every user's first guess. A replace rather than an append -- the account
+     * keeps one contact, and saving a new one is the whole request.
+     */
+    suspend fun setContact(accessToken: String, emailOrPhone: String) {
+        send(
+            "PUT",
+            "/v1/auth/contact",
+            json.encodeToString(ContactRequest.serializer(), ContactRequest(emailOrPhone)),
+            accessToken,
+        ).use { if (!it.isSuccessful) throw failure(it) }
     }
 
     /**

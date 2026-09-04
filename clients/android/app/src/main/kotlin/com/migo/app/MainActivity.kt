@@ -280,6 +280,8 @@ private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifie
             onLoadProfile = model::loadOwnProfile,
             onSaveProfile = model::saveProfile,
             onSaveStatus = model::saveCustomStatus,
+            onChangePassphrase = model::changePassphrase,
+            onSaveContact = model::saveContact,
             modifier = modifier,
         )
     }

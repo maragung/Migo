@@ -648,6 +648,41 @@ class MigoClient private constructor(
     suspend fun revokeDevice(deviceId: Id): DeviceRevoked =
         rest.revokeDevice(requireConnected().grant.accessToken, deviceId)
 
+    /**
+     * Changes the account's sign-in passphrase and keeps this session signed in.
+     *
+     * The change ends every other session of the account, on every device; the replacement grant
+     * this device gets back is installed the same way a refresh installs one — tokens on the
+     * session, re-authenticated over the live socket — and returned so the caller can persist it
+     * the same way a sign-in persists its grant. The next time the app starts it may ask for the
+     * new passphrase.
+     */
+    suspend fun changePassphrase(current: String, next: String): Grant = lifecycleLock.withLock {
+        val session = requireConnected()
+        val replacement = rest.changePassphrase(session.grant.accessToken, current, next)
+        val authenticate = com.migo.core.protocol.Authenticate(
+            accessToken = replacement.accessToken,
+            deviceId = parseId(replacement.deviceId),
+        )
+        session.rpc.call(
+            Op.AUTHENTICATE,
+            { w -> authenticate.encode(w) },
+            { r -> com.migo.core.protocol.Authenticated.decode(r) },
+        )
+        session.grant = replacement
+        replacement
+    }
+
+    /**
+     * Records (or replaces) the account's recovery contact — an email or a phone.
+     *
+     * Not a secret: the server shows it back through recovery, and the field is a replace rather
+     * than an append. The server judges the shape; this method only carries the string.
+     */
+    suspend fun setContact(emailOrPhone: String) {
+        rest.setContact(requireConnected().grant.accessToken, emailOrPhone)
+    }
+
     /** The account's registered wallet addresses, as the server knows them. */
     suspend fun registeredWallets(): List<WalletSummary> =
         rest.wallets(requireConnected().grant.accessToken)

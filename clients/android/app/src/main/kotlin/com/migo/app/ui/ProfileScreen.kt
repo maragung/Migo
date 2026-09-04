@@ -38,6 +38,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.migo.app.model.AccountSecurityState
 import com.migo.app.model.AppState
 import com.migo.app.model.BackupState
 import com.migo.app.model.DevicesState
@@ -50,8 +51,9 @@ import com.migo.core.net.DeviceSummary
  * The facts are the ones the session already holds — the username, the account id, the server, the
  * connection — plus the profile the person can now edit (display name, bio, custom status, birth
  * year, search visibility, the three privacy choices — the same form the web client's Profile
- * panel carries, absent-means-unchanged on every privacy control), the account's devices, the
- * `.migo` backup, and the sign-out. The custom status rides the presence wire rather than the
+ * panel carries, absent-means-unchanged on every privacy control), the passphrase change and the
+ * recovery contact (the web Account panel's two account-level controls), the account's devices,
+ * the `.migo` backup, and the sign-out. The custom status rides the presence wire rather than the
  * profile patch, exactly as on web, so saving a sentence never flips the presence state.
  *
  * The device list is the account-root security view (§16-§18), and removing a device is a control
@@ -78,6 +80,8 @@ fun ProfileScreen(
         whoCanAdd: Long?,
     ) -> Unit,
     onSaveStatus: (String) -> Unit,
+    onChangePassphrase: (current: String, next: String) -> Unit,
+    onSaveContact: (contact: String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var showId by rememberSaveable { mutableStateOf(false) }
@@ -120,6 +124,15 @@ fun ProfileScreen(
             onLoad = onLoadProfile,
             onSave = onSaveProfile,
             onSaveStatus = onSaveStatus,
+        )
+
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+        SectionLabel(text = "Account security")
+        AccountSecuritySection(
+            security = state.accountSecurity,
+            onChangePassphrase = onChangePassphrase,
+            onSaveContact = onSaveContact,
         )
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -410,6 +423,133 @@ private fun TriStateSwitch(choice: Int, onChoice: (Int) -> Unit, enabled: Boolea
     }
     OutlinedButton(onClick = { onChoice(if (choice <= 0) 1 else 0) }, enabled = enabled) {
         Text(label)
+    }
+}
+
+/**
+ * The account-security half of the Profile panel: the passphrase-change form and the
+ * recovery-contact form.
+ *
+ * The two passphrase secrets and the contact string live in the composable's own state — not on
+ * the [AccountSecurityState] object — because state objects survive recomposition and get logged
+ * in bug reports, and a secret's only safe home is the field it is typed into, wiped the moment
+ * the save takes it. They wipe on the success notice rather than on the click: a refused change
+ * keeps its typed text (the person is mid-edit), a successful one starts fresh.
+ */
+@Composable
+private fun AccountSecuritySection(
+    security: AccountSecurityState,
+    onChangePassphrase: (current: String, next: String) -> Unit,
+    onSaveContact: (contact: String) -> Unit,
+) {
+    var current by rememberSaveable { mutableStateOf("") }
+    var next by rememberSaveable { mutableStateOf("") }
+    var confirm by rememberSaveable { mutableStateOf("") }
+    var contact by rememberSaveable { mutableStateOf("") }
+
+    // A success notice is the one event that means the typed secrets are spent: the server has
+    // taken them and the vault is re-sealed. Cleared here rather than in the click so a refusal
+    // keeps the person's typing.
+    LaunchedEffect(security.notice) {
+        if (security.notice != null) {
+            current = ""
+            next = ""
+            confirm = ""
+            contact = ""
+        }
+    }
+
+    Text(
+        text = "Changing the passphrase signs out every other session, on every device; this " +
+            "one stays signed in.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+    )
+    OutlinedTextField(
+        value = current,
+        onValueChange = { current = it },
+        label = { Text("Current passphrase") },
+        singleLine = true,
+        visualTransformation = PasswordVisualTransformation(),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+        enabled = !security.busy,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+    )
+    OutlinedTextField(
+        value = next,
+        onValueChange = { next = it },
+        label = { Text("New passphrase") },
+        singleLine = true,
+        visualTransformation = PasswordVisualTransformation(),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+        enabled = !security.busy,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+    )
+    OutlinedTextField(
+        value = confirm,
+        onValueChange = { confirm = it },
+        label = { Text("Confirm new passphrase") },
+        singleLine = true,
+        visualTransformation = PasswordVisualTransformation(),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+        enabled = !security.busy,
+        isError = confirm.isNotEmpty() && next != confirm,
+        supportingText = if (confirm.isNotEmpty() && next != confirm) {
+            { Text("The new passphrases do not match.") }
+        } else {
+            null
+        },
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+    )
+    if (security.failure != null) {
+        Text(
+            text = security.failure ?: "",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+        )
+    }
+    if (security.notice != null) {
+        Text(
+            text = security.notice ?: "",
+            style = MaterialTheme.typography.bodySmall,
+            color = LocalMigoExtra.current.positive,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+        )
+    }
+    Button(
+        onClick = { onChangePassphrase(current, next) },
+        enabled = !security.busy && current.isNotEmpty() && next.isNotEmpty() && next == confirm,
+        modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 8.dp),
+    ) {
+        Text(if (security.busy) "Working…" else "Change passphrase")
+    }
+
+    Spacer(modifier = Modifier.padding(8.dp))
+
+    Text(
+        text = "A recovery contact — an email or a phone — is where a recovery starts. The " +
+            "account keeps one; saving replaces it.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+    )
+    OutlinedTextField(
+        value = contact,
+        onValueChange = { contact = it },
+        label = { Text("Email or phone") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+        enabled = !security.busy,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+    )
+    Button(
+        onClick = { onSaveContact(contact) },
+        enabled = !security.busy && contact.isNotBlank(),
+        modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 8.dp),
+    ) {
+        Text("Save contact")
     }
 }
 

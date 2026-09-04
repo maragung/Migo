@@ -99,6 +99,7 @@ sealed interface AppState {
         val devices: DevicesState = DevicesState(),
         val backup: BackupState = BackupState(),
         val profileEdit: ProfileEditState = ProfileEditState(),
+        val accountSecurity: AccountSecurityState = AccountSecurityState(),
     ) : AppState
 
     /**
@@ -356,6 +357,20 @@ data class ProfileEditState(
     /** The sentence the last save answered with, shown once. */
     val notice: String? = null,
     /** Why the last read or save could not answer. */
+    val failure: String? = null,
+)
+
+/**
+ * The Profile panel's account-security half: the passphrase-change form and the recovery-contact
+ * form. The two secrets never leave this object except through the view model's save calls, which
+ * wipe them the moment the worker takes them — the same contract the backup credential follows.
+ */
+data class AccountSecurityState(
+    /** True while either form's save is in flight. */
+    val busy: Boolean = false,
+    /** The sentence the last save answered with, shown once. */
+    val notice: String? = null,
+    /** Why the last save could not answer. */
     val failure: String? = null,
 )
 
