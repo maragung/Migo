@@ -46,6 +46,8 @@ import com.migo.core.protocol.InboxItem
 import com.migo.core.protocol.LedgerEntryWire
 import com.migo.core.protocol.MemberChange
 import com.migo.core.protocol.NotificationEvent
+import com.migo.core.protocol.PresenceState
+import com.migo.core.protocol.ProfileUpdate
 import com.migo.core.protocol.ReceiptKind
 import com.migo.core.protocol.RoomJoinResponse
 import com.migo.core.protocol.RoomMemberEvent
@@ -1478,6 +1480,117 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 throw cancelled
             } catch (failure: Exception) {
                 signedIn { it.copy(devices = it.devices.copy(loading = false, failure = readable(failure))) }
+            }
+        }
+    }
+
+    /**
+     * Reads the caller's own profile for the Profile panel's editable form.
+     *
+     * The same fetch the member lists use, pointed at this account's own id — one read primes both
+     * the read-only heading (username, public id, level) and every editable field's initial text.
+     */
+    fun loadOwnProfile() {
+        val live = session ?: return
+        signedIn { it.copy(profileEdit = it.profileEdit.copy(busy = true, failure = null, notice = null)) }
+        viewModelScope.launch {
+            try {
+                val profile = live.client.profile.fetchOne(live.client.accountId)
+                signedIn { it.copy(profileEdit = it.profileEdit.copy(busy = false, profile = profile)) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn {
+                    it.copy(profileEdit = it.profileEdit.copy(busy = false, failure = readable(failure)))
+                }
+            }
+        }
+    }
+
+    /**
+     * Saves the Profile panel's form. The patch is assembled by the caller from the form's fields,
+     * which is where the absent-means-unchanged rule lives: a field the person never touched is
+     * null in the patch, and null is the one value the server treats as "leave it".
+     *
+     * The custom status is *not* part of this call — it rides the presence wire (see
+     * [saveCustomStatus]), because that is where the server keeps it and saving it here would
+     * flip the account's presence state as a side effect.
+     */
+    fun saveProfile(
+        displayName: String,
+        bio: String,
+        birthYear: String,
+        searchable: Boolean?,
+        showLastSeen: Long?,
+        whoCanMessage: Long?,
+        whoCanAdd: Long?,
+    ) {
+        val live = session ?: return
+        val current = _state.value as? AppState.SignedIn ?: return
+        if (current.profileEdit.busy) return
+        signedIn { it.copy(profileEdit = it.profileEdit.copy(busy = true, failure = null, notice = null)) }
+        viewModelScope.launch {
+            try {
+                val saved = live.client.profile.update(
+                    ProfileUpdate(
+                        displayName = displayName.ifBlank { null },
+                        bio = bio.ifBlank { null },
+                        birthYear = birthYear.trim().toIntOrNull(),
+                        searchable = searchable,
+                        showLastSeen = showLastSeen,
+                        whoCanMessage = whoCanMessage,
+                        whoCanAdd = whoCanAdd,
+                    ),
+                )
+                signedIn {
+                    it.copy(
+                        profileEdit = it.profileEdit.copy(
+                            busy = false,
+                            profile = saved,
+                            notice = "Profile saved.",
+                        ),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn {
+                    it.copy(profileEdit = it.profileEdit.copy(busy = false, failure = readable(failure)))
+                }
+            }
+        }
+    }
+
+    /**
+     * Publishes a custom status line beside the presence the account already shows.
+     *
+     * Separate from [saveProfile] because the wire is separate: an empty line clears the status,
+     * and the state the account is in right now is re-published unchanged so saving a sentence
+     * does not silently mark an away account online.
+     */
+    fun saveCustomStatus(status: String) {
+        val live = session ?: return
+        val current = _state.value as? AppState.SignedIn ?: return
+        if (current.profileEdit.busy) return
+        signedIn { it.copy(profileEdit = it.profileEdit.copy(busy = true, failure = null, notice = null)) }
+        viewModelScope.launch {
+            try {
+                val presence = current.profileEdit.profile?.presence ?: PresenceState.ONLINE
+                live.client.presence.set(presence, status.trim().ifEmpty { null })
+                signedIn {
+                    it.copy(
+                        profileEdit = it.profileEdit.copy(
+                            busy = false,
+                            notice = if (status.isBlank()) "Status cleared." else "Status saved.",
+                        ),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn {
+                    it.copy(profileEdit = it.profileEdit.copy(busy = false, failure = readable(failure)))
+                }
             }
         }
     }

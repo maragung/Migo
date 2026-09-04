@@ -194,6 +194,27 @@ pub fn place_icon(ui: &mut Ui, theme: Theme, place: crate::ui::Place, active: bo
             painter.line_segment([p(0.62, 0.48), p(0.92, 0.48)], stroke);
             painter.line_segment([p(0.62, 0.38), p(0.62, 0.62)], stroke);
         }
+        crate::ui::Place::Profile => {
+            // A person card: the bust of a profile beside a card's lines.
+            painter.add(egui::Shape::circle_stroke(
+                p(0.32, 0.3),
+                side * 0.14,
+                stroke,
+            ));
+            painter.add(egui::Shape::line(
+                vec![
+                    p(0.12, 0.85),
+                    p(0.15, 0.6),
+                    p(0.32, 0.52),
+                    p(0.5, 0.6),
+                    p(0.52, 0.85),
+                ],
+                stroke,
+            ));
+            painter.line_segment([p(0.6, 0.3), p(0.9, 0.3)], stroke);
+            painter.line_segment([p(0.6, 0.5), p(0.9, 0.5)], stroke);
+            painter.line_segment([p(0.6, 0.7), p(0.82, 0.7)], stroke);
+        }
         crate::ui::Place::Settings => {
             // A dial: a circle with spokes, the honest settings mark.
             painter.add(egui::Shape::circle_stroke(p(0.5, 0.5), side * 0.22, stroke));

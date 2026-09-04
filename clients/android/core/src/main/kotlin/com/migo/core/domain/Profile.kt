@@ -3,6 +3,7 @@ package com.migo.core.domain
 import com.migo.core.protocol.Op
 import com.migo.core.protocol.ProfileRequest
 import com.migo.core.protocol.ProfileResponse
+import com.migo.core.protocol.ProfileUpdate
 import com.migo.core.protocol.UserProfile
 import com.migo.core.wire.Id
 
@@ -47,4 +48,21 @@ class ProfileDomain(private val rpc: Rpc) {
      */
     suspend fun fetchOne(userId: Id): UserProfile? =
         fetch(listOf(userId)).firstOrNull { it.userId == userId }
+
+    /**
+     * Edits the caller's own profile, sending only the fields that are non-null in [patch].
+     *
+     * Null fields keep their current server-side values — the patch is a delta, not a replacement —
+     * so a caller saving a new display name does not also have to know (and re-send) its privacy
+     * settings. Returns the full updated profile, the same shape [fetch] returns, so the caller can
+     * refresh its cached copy from the reply instead of re-reading. The one wire-level wrinkle: an
+     * empty bio or a cleared display name is an *explicit* value, not an omission, so this port
+     * takes `null` as "leave it" and the caller sends "" only on purpose.
+     */
+    suspend fun update(patch: ProfileUpdate): UserProfile =
+        rpc.call(
+            Op.PROFILE_UPDATE,
+            { w -> patch.encode(w) },
+            { r -> UserProfile.decode(r) },
+        )
 }

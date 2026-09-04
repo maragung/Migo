@@ -14,6 +14,7 @@ import com.migo.core.protocol.RelationshipEntry
 import com.migo.core.protocol.RoomRole
 import com.migo.core.protocol.RoomSummary
 import com.migo.core.protocol.SuggestedUser
+import com.migo.core.protocol.UserProfile
 import com.migo.core.store.ServerEndpoint
 import com.migo.core.wire.Id
 import java.math.BigInteger
@@ -97,6 +98,7 @@ sealed interface AppState {
         val alerts: AlertsState = AlertsState(),
         val devices: DevicesState = DevicesState(),
         val backup: BackupState = BackupState(),
+        val profileEdit: ProfileEditState = ProfileEditState(),
     ) : AppState
 
     /**
@@ -333,6 +335,27 @@ data class BackupState(
     /** The sentence the last export answered with, shown once. */
     val notice: String? = null,
     /** Why the last export could not answer. */
+    val failure: String? = null,
+)
+
+/**
+ * The Profile panel's editable half: the account's own profile as the server holds it, and the
+ * form's saving state. The profile rows are a read; this is the write side, and the two stay in
+ * one holder because the form the person edits is primed from the same fetch that renders it.
+ *
+ * The privacy choices (showLastSeen / whoCanMessage / whoCanAdd) and the search switch are
+ * absent-means-unchanged, exactly as on the web: the controls start as "leave as-is" and join the
+ * save only once the person touches them, because the server never sends current values back and
+ * a naive form would overwrite them with defaults.
+ */
+data class ProfileEditState(
+    /** The caller's profile, or null before the first read lands. */
+    val profile: UserProfile? = null,
+    /** True while the profile is being read or the form is being saved. */
+    val busy: Boolean = false,
+    /** The sentence the last save answered with, shown once. */
+    val notice: String? = null,
+    /** Why the last read or save could not answer. */
     val failure: String? = null,
 )
 

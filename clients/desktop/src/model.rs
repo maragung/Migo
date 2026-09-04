@@ -554,6 +554,39 @@ pub struct GiftRow {
     pub category: String,
 }
 
+/// The signed-in account's own profile, as the profile pane holds it.
+///
+/// Reduced by the worker from the wire's `UserProfile` so the pane never sees a half-shape —
+/// the wire marks fields optional, and the pane's job is form fields, not decoding rules. The
+/// privacy values (last-seen, messaging, add) are deliberately absent: the server never sends
+/// them back even to their owner, so the pane's controls start as "leave as-is" and only a
+/// choice the user makes joins a save.
+#[derive(Debug, Clone)]
+pub struct OwnProfile {
+    /// The id the reply must carry for it to be this account's card. Kept beside the row the
+    /// pane holds so a later surface (a name map, a share sheet) can match on it without a
+    /// second fetch; the worker already matched on it before the pane ever saw the card.
+    #[expect(
+        dead_code,
+        reason = "carried for future surfaces; the pane draws names, not ids"
+    )]
+    pub account_id: Id,
+    pub username: String,
+    pub display_name: String,
+    /// The shareable MGO-… form, drawn for copying rather than for parsing.
+    pub public_id: String,
+    pub bio: Option<String>,
+    /// The custom status line, as the presence wire last published it. The server this build
+    /// talks to declines to store one, so this is what the wire said, not a promise the save
+    /// will stick — the refusal arrives as the toast the presence wire already raises.
+    pub custom_status: Option<String>,
+    /// The state the status line rode the last time it was published. The worker keeps its own
+    /// seed for the status save; this copy is the pane's record of where the account stood
+    /// when the card was read.
+    #[expect(dead_code, reason = "the pane draws the status, not the state it rode")]
+    pub presence: Presence,
+}
+
 /// One account found by search or offered as a suggestion.
 #[derive(Debug, Clone)]
 pub struct PersonRow {

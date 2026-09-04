@@ -19,6 +19,7 @@ pub mod captcha;
 pub mod chat;
 pub mod friends;
 pub mod games;
+pub mod profile;
 pub mod rooms;
 pub mod search;
 pub mod server_form;
@@ -80,6 +81,9 @@ pub enum Place {
     Search,
     /// The MIG balance, the gift shop, the statement, progression, badges, leaderboard.
     Wallet,
+    /// The account's own card: display name, bio, custom status, and the privacy of last-seen,
+    /// messaging, and friend requests. The account menu's "My Profile", on the right pane.
+    Profile,
     /// Server, theme, devices, sign-out.
     Settings,
 }
@@ -96,6 +100,7 @@ impl Place {
             Self::Alerts => "Alerts",
             Self::Search => "Search",
             Self::Wallet => "Wallet",
+            Self::Profile => "Profile",
             Self::Settings => "Settings",
         }
     }

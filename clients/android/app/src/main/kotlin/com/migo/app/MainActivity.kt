@@ -277,6 +277,9 @@ private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifie
             onRefreshDevices = model::loadDevices,
             onRemoveDevice = model::revokeDevice,
             onExport = model::exportBackup,
+            onLoadProfile = model::loadOwnProfile,
+            onSaveProfile = model::saveProfile,
+            onSaveStatus = model::saveCustomStatus,
             modifier = modifier,
         )
     }

@@ -57,6 +57,7 @@ pub struct App {
     chat: ChatState,
     friends: FriendsState,
     settings_panel: SettingsState,
+    profile_panel: crate::ui::profile::ProfileState,
     rooms: RoomsState,
     space: SpaceState,
     alerts: AlertsState,
@@ -128,6 +129,7 @@ impl App {
             chat: ChatState::default(),
             friends: FriendsState::default(),
             settings_panel: SettingsState::default(),
+            profile_panel: crate::ui::profile::ProfileState::default(),
             rooms: RoomsState::default(),
             space: SpaceState::default(),
             alerts: AlertsState::default(),
@@ -191,6 +193,7 @@ impl App {
                     self.active_chat = None;
                     self.friends = FriendsState::default();
                     self.settings_panel = SettingsState::default();
+                    self.profile_panel = crate::ui::profile::ProfileState::default();
                     self.rooms = RoomsState::default();
                     self.space = SpaceState::default();
                     self.alerts = AlertsState::default();
@@ -216,6 +219,7 @@ impl App {
                     // reason the threads do, and the pane starts its next session NotAsked.
                     self.friends = FriendsState::default();
                     self.settings_panel = SettingsState::default();
+                    self.profile_panel = crate::ui::profile::ProfileState::default();
                     self.rooms = RoomsState::default();
                     self.space = SpaceState::default();
                     self.alerts = AlertsState::default();
@@ -331,6 +335,22 @@ impl App {
                 }
                 Event::Wallets(result) => {
                     self.settings_panel.wallets = crate::ui::settings::Fetch::from_result(result);
+                }
+                Event::OwnProfile(result) => {
+                    // The fetch's own answer, arriving as either a card or the reason there is
+                    // none. Filed rather than toasted: the pane is on screen when it asks, so
+                    // the sentence belongs beside the form that caused it.
+                    match result {
+                        Ok(profile) => {
+                            self.profile_panel.file(profile);
+                        }
+                        Err(reason) => {
+                            self.profile_panel.fail(reason);
+                        }
+                    }
+                }
+                Event::ProfileSaved(profile) => {
+                    self.profile_panel.file(profile);
                 }
                 Event::Rooms(rows) => {
                     // The wire answers both the Rooms pane and Search's room query with this one
@@ -817,7 +837,7 @@ impl App {
                                     .strong(),
                                 |ui| {
                                     if ui.button("My Profile").clicked() {
-                                        opened = Some(Place::Settings);
+                                        opened = Some(Place::Profile);
                                         ui.close();
                                     }
                                     if ui.button("My Credits & TopUp").clicked() {
@@ -833,6 +853,12 @@ impl App {
                                     }
                                     if ui.button("Search").clicked() {
                                         opened = Some(Place::Search);
+                                        ui.close();
+                                    }
+                                    // Settings keeps its own entry now that "My Profile" opens the
+                                    // profile pane: server, theme, devices, and the way out.
+                                    if ui.button("Settings").clicked() {
+                                        opened = Some(Place::Settings);
                                         ui.close();
                                     }
                                     if ui.button("Exit / Logout").clicked() {
@@ -935,6 +961,7 @@ impl App {
             }),
             Place::Alerts | Place::Feed => self.commands.push(Command::Notifications),
             Place::Wallet => self.commands.push(Command::Wallet),
+            Place::Profile => self.commands.push(Command::OwnProfile),
             Place::Search => {
                 if self.search.suggestions.is_empty() {
                     self.commands.push(Command::Suggestions);
@@ -1066,7 +1093,11 @@ impl eframe::App for App {
                             crate::ui::friends::show(ui, &mut context, &mut self.friends)
                         }
                         // The panels are the right pane's tabs; the strip can never land here.
-                        Place::Alerts | Place::Search | Place::Wallet | Place::Settings => {}
+                        Place::Alerts
+                        | Place::Search
+                        | Place::Wallet
+                        | Place::Profile
+                        | Place::Settings => {}
                     }
                 });
         }
@@ -1118,6 +1149,11 @@ impl eframe::App for App {
                             Place::Wallet => {
                                 crate::ui::wallet::show(ui, &mut context, &mut self.wallet)
                             }
+                            Place::Profile => crate::ui::profile::show(
+                                ui,
+                                &mut context,
+                                &mut self.profile_panel,
+                            ),
                             Place::Settings => crate::ui::settings::show(
                                 ui,
                                 &mut context,

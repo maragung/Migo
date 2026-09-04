@@ -99,6 +99,31 @@ impl std::fmt::Debug for CaptchaAnswer {
     }
 }
 
+/// What a profile save wants changed: the wire's absent-means-unchanged contract, in the UI's
+/// own vocabulary.
+///
+/// A struct rather than seven loose fields because the save has seven of them and the forms
+/// that build one share the shape: every `None` is a control the user did not touch, and the
+/// wire keeps the corresponding server-side value.
+#[derive(Debug, Default, Clone)]
+pub struct ProfilePatch {
+    /// New display name, or absent to leave it.
+    pub display_name: Option<String>,
+    /// New bio, or absent to leave it.
+    pub bio: Option<String>,
+    /// New birth year, or absent.
+    pub birth_year: Option<u32>,
+    /// New last-seen visibility: absent is "leave as-is", because the server never sends the
+    /// current value back even to its owner.
+    pub show_last_seen: Option<u32>,
+    /// New messaging visibility, same absent rule.
+    pub who_can_message: Option<u32>,
+    /// New friend-request visibility, same absent rule.
+    pub who_can_add: Option<u32>,
+    /// New search opt-in: absent is "the switch was never flipped".
+    pub searchable: Option<bool>,
+}
+
 /// What the UI asks the worker to do.
 #[derive(Debug)]
 pub enum Command {
@@ -203,6 +228,21 @@ pub enum Command {
     Devices,
     /// Remove one of the account's devices: its sessions end with it (brief section 18).
     RevokeDevice { device_id: Id },
+    /// Read the signed-in account's own profile card for the profile pane.
+    ///
+    /// Rides the same `PROFILE_FETCH` the names map uses, with the session's own id as the one
+    /// subject; the worker routes the self card to [`Event::OwnProfile`] so the pane gets its
+    /// copy without the pane knowing the fetch is a batch.
+    OwnProfile,
+    /// Patch the caller's own profile. Absent fields keep their server-side values — the wire
+    /// is a delta, not a replacement — so a save that changes a display name does not also have
+    /// to know (and re-send) the privacy settings.
+    SaveProfile(ProfilePatch),
+    /// Publish the custom status line. It rides the presence wire, not the profile patch, so
+    /// the worker re-publishes the account's last-known presence state beside it and saving a
+    /// status never flips the account online or offline as a side effect. An empty string
+    /// clears the line.
+    SaveStatus { status: String },
     /// Read the account's registered wallet addresses over REST.
     Wallets,
     /// Seal the account root into a `.migo` recovery container at `path`.
@@ -396,6 +436,14 @@ pub enum Event {
     /// list's does: "could not check" and "you have one device" are different facts and only one
     /// should reassure anybody.
     Devices(Result<Vec<DeviceRow>, String>),
+    /// The signed-in account's own profile card, or the reason it could not be had.
+    ///
+    /// The same shape `Devices` pins: the pane's "not loaded yet" and "the server would not say"
+    /// are different sentences, and only the second one is a complaint.
+    OwnProfile(Result<crate::model::OwnProfile, String>),
+    /// The profile pane's save was accepted: the reply is the refreshed card, the same shape the
+    /// fetch returns, so the pane replaces its copy from the reply instead of re-reading.
+    ProfileSaved(crate::model::OwnProfile),
     /// The account's registered wallet addresses.
     Wallets(Result<Vec<EvmWalletRow>, String>),
     /// The AVAX balance of the account's first wallet, in wei, on the network asked.
@@ -548,6 +596,13 @@ struct Signed {
     /// reconnect; cleared when the gateway reconnects, because subscriptions live and die with
     /// the session that held them.
     watched: HashSet<Id>,
+    /// The account's presence state as the last profile card or presence event stated it.
+    ///
+    /// The custom status publishes beside a state, and a status save must not invent one: this
+    /// is the last state the account was known to stand in, so saving a status re-publishes
+    /// exactly that. Seeded `Online` — the same default a session announces itself with — so a
+    /// status saved before any card arrives says the same thing the connect path already did.
+    profile_presence: Option<migo_protocol::PresenceState>,
 }
 
 /// The reconnect schedule after a lost gateway connection.
@@ -890,6 +945,9 @@ impl Worker {
             Command::RevokeDevice { device_id } => {
                 self.revoke_device(device_id).await;
             }
+            Command::OwnProfile => self.fetch_own_profile().await,
+            Command::SaveProfile(patch) => self.save_profile(patch).await,
+            Command::SaveStatus { status } => self.save_status(status).await,
             Command::Wallets => self.fetch_wallets().await,
             Command::ExportContainer { path, credential } => {
                 self.export_container(path, credential).await;
@@ -1268,6 +1326,7 @@ impl Worker {
             devices: HashMap::new(),
             members: HashMap::new(),
             watched: HashSet::new(),
+            profile_presence: None,
         });
         self.txs = Some((account_id, txs));
 
@@ -1677,6 +1736,79 @@ impl Worker {
         ids.truncate(PROFILE_BATCH);
         let message = migo_protocol::ProfileRequest { user_ids: ids };
         self.request(Opcode::ProfileFetch, &message).await;
+    }
+
+    /// Reads the signed-in account's own profile card.
+    ///
+    /// The same `PROFILE_FETCH` the names map uses, with the session's own id as the one
+    /// subject. The reply is routed by opcode like every reply here, so `on_profiles` is the
+    /// one place that decides where a card lands: when a card answers for this account it is
+    /// the pane's copy, and it is sent to the pane as well as to the names map, so one
+    /// refresh serves both.
+    async fn fetch_own_profile(&mut self) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let me = signed.account.account_id;
+        let message = migo_protocol::ProfileRequest { user_ids: vec![me] };
+        self.request(Opcode::ProfileFetch, &message).await;
+    }
+
+    /// Reduces one wire card to the profile pane's row.
+    fn own_profile_from_wire(profile: &migo_protocol::UserProfile) -> crate::model::OwnProfile {
+        crate::model::OwnProfile {
+            account_id: profile.user_id,
+            username: profile.username.clone(),
+            display_name: profile.display_name.clone(),
+            public_id: profile.public_id.clone(),
+            bio: profile.bio.clone(),
+            custom_status: profile.custom_status.clone(),
+            presence: profile
+                .presence
+                .map(|state| model::Presence::from_wire(state.to_wire()))
+                .unwrap_or(model::Presence::Online),
+        }
+    }
+
+    /// Patches the caller's own profile and files the refreshed card with the pane.
+    ///
+    /// The wire's patch semantics are the form's: an absent field is "leave it", so the
+    /// command carries `None` for every control the user did not touch. The reply is the
+    /// caller's own card read back through the same path a fetch takes, which makes it the
+    /// authoritative copy — the pane replaces its profile from it rather than re-reading.
+    async fn save_profile(&mut self, patch: crate::net::ProfilePatch) {
+        let message = migo_protocol::ProfileUpdate {
+            display_name: patch.display_name,
+            bio: patch.bio,
+            avatar_media_id: None,
+            birth_year: patch.birth_year,
+            show_last_seen: patch.show_last_seen,
+            who_can_message: patch.who_can_message,
+            who_can_add: patch.who_can_add,
+            searchable: patch.searchable,
+        };
+        self.request(Opcode::ProfileUpdate, &message).await;
+    }
+
+    /// Publishes the custom status beside the account's last-known presence state.
+    ///
+    /// The status rides the presence wire, not the profile patch: republishing it here means
+    /// saving a status never flips the account's presence as a side effect. The profile's
+    /// card is the best seed for "where the account stood" — a `None` presence (the server
+    /// this build talks to does not put one on profile cards) falls back to `Online`, the
+    /// same choice the web client makes for the same reason.
+    async fn save_status(&mut self, status: String) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let state = signed
+            .profile_presence
+            .unwrap_or(migo_protocol::PresenceState::Online);
+        let message = migo_protocol::PresenceUpdate {
+            state,
+            custom_status: Some(status).filter(|status| !status.is_empty()),
+        };
+        self.request(Opcode::PresenceSet, &message).await;
     }
 
     /// Fetches the device/session list over REST and reduces it to rows the settings screen can
@@ -2960,6 +3092,7 @@ impl Worker {
             Opcode::KeyBundleFetch => self.on_bundles(&frame),
             Opcode::Typing => self.on_typing(&frame),
             Opcode::ProfileFetch => self.on_profiles(&frame),
+            Opcode::ProfileUpdate => self.on_profile_saved(&frame),
             Opcode::RelationshipList => self.on_relationships(&frame).await,
             // The acknowledgement of a FRIEND_REQUEST or FRIEND_RESPOND. Both mean the graph
             // moved and the list in the UI is now stale, so both take the same action: re-read.
@@ -3152,6 +3285,7 @@ impl Worker {
         let Ok(response) = gateway::decode::<migo_protocol::ProfileResponse>(frame) else {
             return;
         };
+        let me = self.signed.as_ref().map(|signed| signed.account.account_id);
         let mut names = HashMap::with_capacity(response.profiles.len());
         for profile in &response.profiles {
             let name = if profile.display_name.is_empty() {
@@ -3172,9 +3306,42 @@ impl Worker {
                     });
                 }
             }
+            // A card answering for this account is the pane's copy as well as a name. The
+            // match is on the id, not the position: a response is untrusted input, and the
+            // self fetch asked for exactly this id, so a card that does not carry it is a
+            // card the pane was never asking for.
+            if Some(profile.user_id) == me {
+                if let Some(signed) = self.signed.as_mut() {
+                    signed.profile_presence = profile.presence;
+                }
+                let own = Self::own_profile_from_wire(profile);
+                self.sink.send(Event::OwnProfile(Ok(own)));
+            }
             names.insert(profile.user_id, name);
         }
         self.sink.send(Event::Names(names));
+    }
+
+    /// The reply a PROFILE_UPDATE carries: the caller's own card, read back through the same
+    /// path a fetch takes. It refreshes the pane's copy — and the seed the status save
+    /// republishes beside — before the pane hears about it as a saved fact.
+    fn on_profile_saved(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(profile) = gateway::decode::<migo_protocol::UserProfile>(frame) else {
+            return;
+        };
+        let me = self.signed.as_ref().map(|signed| signed.account.account_id);
+        if me != Some(profile.user_id) {
+            // Not this account's card: a mismatched reply is untrusted input, and filing a
+            // stranger's profile as this account's save would draw somebody else's name in the
+            // pane's form. Drop it rather than guess.
+            return;
+        }
+        if let Some(signed) = self.signed.as_mut() {
+            signed.profile_presence = profile.presence;
+        }
+        let own = Self::own_profile_from_wire(&profile);
+        self.sink.toast("Profile saved", ToastKind::Success);
+        self.sink.send(Event::ProfileSaved(own));
     }
 
     /// The relationship list came back: reduce it to model rows, then ask for the two things a
@@ -3245,6 +3412,15 @@ impl Worker {
         let state = model::Presence::from_wire(event.state.to_wire());
         if state == model::Presence::Unknown {
             return;
+        }
+        // The self seed the status save republishes beside: an event about this account is
+        // fresher than any profile card, so it takes over as the last-known state.
+        if let Some(signed) = self.signed.as_ref() {
+            if event.user_id == signed.account.account_id {
+                if let Some(signed) = self.signed.as_mut() {
+                    signed.profile_presence = Some(event.state);
+                }
+            }
         }
         self.sink.send(Event::PresenceChanged {
             user_id: event.user_id,
