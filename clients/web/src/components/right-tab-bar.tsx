@@ -8,7 +8,8 @@
  * (a conversation, a secondary panel the banner menu or a deep link opened). The system tabs'
  * content (Friends, Rooms, Feed) never appears here: those live in the left panel, so
  * the pane cannot draw the same list twice. Games, by contrast, is here and only here: it is
- * a place rather than a list, and the right pane is where places open. There is no "menu
+ * a place rather than a list, and the right pane is where places open — the Store joins it
+ * the same way, the store bundle docked as an iframe behind its chip. There is no "menu
  * panel" to switch back to:
  * closing a chip falls through to the next one, and closing the last one leaves Games, which is
  * exactly the fallback the pane owes an empty state. The chips carry the same metrics as the
@@ -26,7 +27,15 @@ import { Icon } from './icons.js';
 
 /** The closable things the right pane can hold besides its resting Games. */
 export type RightTabKind =
-  'chat' | 'notifications' | 'search' | 'wallet' | 'profile' | 'account' | 'settings' | 'admins';
+  | 'chat'
+  | 'notifications'
+  | 'search'
+  | 'wallet'
+  | 'profile'
+  | 'account'
+  | 'settings'
+  | 'admins'
+  | 'store';
 
 /**
  * The pane's active target: `'feed'` (the resting tab, which the bar renders itself) or the id

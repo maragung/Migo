@@ -29,7 +29,7 @@ export type SystemTab = 'friends' | 'chats' | 'rooms' | 'feed';
 
 /** The secondary panels the right pane can show, shared with the banner menu that opens them. */
 export type PanelTab =
-  'notifications' | 'search' | 'wallet' | 'profile' | 'account' | 'settings' | 'admins';
+  'notifications' | 'search' | 'wallet' | 'profile' | 'account' | 'settings' | 'admins' | 'store';
 
 interface SystemSection {
   id: SystemTab;
@@ -58,6 +58,7 @@ export const PANEL_LABELS: Readonly<Record<PanelTab, string>> = {
   account: 'Account',
   settings: 'Settings',
   admins: 'Admins',
+  store: 'Store',
 };
 
 /**

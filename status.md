@@ -2525,3 +2525,39 @@ workflow-nya, submodules recursive) + target `make contracts-check`
 yang skip sopan bila `forge` tidak ada lokal. Build/test tetap CI-only
 sesuai aturan: lokal hanya `forge fmt --check`-nya yang tidak jalan
 di mesin tanpa forge.
+
+## 68. Store: pair live di kartu, BTC.b menggantikan USDC, dan store jadi tab di pane kanan
+
+**Harga mengikuti coin yang diklik** — baris harga kartu kini
+"150 MGO (≈ 0.15 USDT) on Avalanche Fuji": harga tetap berbicara
+dalam MGO, dan dalam kurung adalah konversi live ke currency yang
+chip-nya sedang aktif. Sisi MGO pair adalah konstanta kebijakan
+`MGO_USD = 0.001` (angka di balik contoh "150 MGO = 0.15 USDT");
+sisi currency dibaca live dari endpoint spot publik Coinbase
+(AVAX-USD, BTC-USD; CORS-friendly, tanpa key, cache 60 detik),
+USDT dikutip di peg $1. Jumlah yang dikirim chain adalah hasil
+konversi itu — bukan lagi unit MGO mentah — dibulatkan ke atas di
+unit terkecil token (BTC.b 8 desimal, AVAX/USDT 18) supaya treasury
+tidak pernah menerima kurang dari yang dikutip layar konfirmasi.
+Layar konfirmasi menambah baris "You pay" dengan jumlah persisnya
+dan rate yang dipakai.
+
+**USDC keluar, BTC.b masuk** — `PayCurrency` kini `avax | usdt | btcb`;
+`USDC_FUJI` diganti `BTCB_FUJI` (placeholder nol sampai deploy;
+chip-nya tetap disabled jujur selama placeholder).
+
+**Store di tab kanan seperti chat window** — entri Store di menu
+banner avatar tidak lagi `window.open` tab browser: sekarang membuka
+tab "Store" yang bisa ditutup di bar tab pane kanan, sejajar dengan
+tab chat. Isinya iframe same-origin `/store/` (komponen
+`store-panel.tsx`) — bundle store tetap aplikasinya sendiri, berbagi
+sesi via IndexedDB, jadi tanpa bridge dan tanpa duplikasi logika
+pembelian; frame mengisi pane dan scroll di dalamnya. `PanelTab` /
+`RightTabKind` mendapat anggota `'store'`.
+
+**CI contracts** — kegagalan run 2 (langkah "Check formatting") adalah
+drift versi: pin `v1.3.2` memformat berbeda dari forge lokal 1.8.1
+yang dipakai menformat sumber; pin diganti `v1.8.1`. Submodule OZ di
+`contracts/lib/` kini di-ignore eslint dan prettier (standing yang
+sama dengan node_modules — sumber upstream yang di-pin, bukan milik
+kita untuk diformat).

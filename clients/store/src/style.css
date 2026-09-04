@@ -430,6 +430,13 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* The live-rate aside inside a quoted value: same line, quieter — the number is the promise,
+   the rate is where it came from. */
+.quoted-sub {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
 .form-error {
   color: var(--danger-text);
   background: color-mix(in srgb, var(--danger) 10%, transparent);

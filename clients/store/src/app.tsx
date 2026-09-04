@@ -15,10 +15,11 @@
  *
  * # The pay flow
  *
- * Chips choose the currency (AVAX native / USDT / USDC; a placeholder contract disables its
- * chip honestly). Buy → prepare (the chain's own fees/gas/nonce, quoted line by line) → confirm
- * (the exact fields the signature covers) → pay on Fuji → the entitlement is written when — and
- * only when — the chain says CONFIRMED.
+ * Chips choose the currency (AVAX native / USDT / BTC.b; a placeholder contract disables its
+ * chip honestly) and the price line answers in it — the MGO price converted through the live
+ * USD pair, the same number the payment sends. Buy → prepare (the chain's own fees/gas/nonce,
+ * quoted line by line) → confirm (the exact fields the signature covers) → pay on Fuji → the
+ * entitlement is written when — and only when — the chain says CONFIRMED.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -30,11 +31,14 @@ import type { Entitlement, GiftListing, MigoClient } from '@migo/sdk';
 import { SHELVES } from './lib/packs.js';
 import type { StorePack } from './lib/packs.js';
 import {
-  currencyAvailable,
   CURRENCY_META,
+  currencyAvailable,
+  fetchUsdPrice,
   mgoOf,
   payOnChain,
+  paymentUnitsFor,
   preparePurchase,
+  unitsOf,
 } from './lib/chain-purchase.js';
 import type { PayCurrency, PreparedPurchase, PurchaseProgress } from './lib/chain-purchase.js';
 import { persistSnapshot, restoreSession } from './lib/session.js';
@@ -295,7 +299,32 @@ function PackCard({
   const [currency, setCurrency] = useState<PayCurrency>('avax');
   const [sheet, setSheet] = useState(false);
 
+  // The clicked currency's live USD rate, so the price line can answer in it. A failed or
+  // unpayable read leaves the plain MGO price — never a number this card cannot name.
+  const [usdPrice, setUsdPrice] = useState<number | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setUsdPrice(null);
+    if (!currencyAvailable(currency)) {
+      return;
+    }
+    fetchUsdPrice(currency)
+      .then((rate) => {
+        if (!cancelled) {
+          setUsdPrice(rate);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [currency]);
+
   const preview = pack.items.slice(0, 8);
+  const converted =
+    usdPrice !== null
+      ? unitsOf(paymentUnitsFor(coins, currency, usdPrice), CURRENCY_META[currency].decimals)
+      : null;
 
   return (
     <div className="pack-card">
@@ -309,10 +338,10 @@ function PackCard({
         {owned ? (
           <span className="pack-owned">Owned ✓</span>
         ) : (
-          <>
-            <span className="pack-price">{coins} coins</span>
-            <span>· {mgoOf(BigInt(coins) * 10n ** 18n)} MGO</span>
-          </>
+          <span className="pack-price">
+            {coins} MGO
+            {converted !== null ? ` (≈ ${converted} ${CURRENCY_META[currency].label})` : ''}
+          </span>
         )}
         <span className="currency-note">on {FUJI_TESTNET.name}</span>
       </div>
@@ -356,6 +385,7 @@ function PackCard({
           pack={pack}
           coins={coins}
           currency={currency}
+          usdPrice={usdPrice}
           client={client}
           onClose={() => setSheet(false)}
           onPurchased={() => {
@@ -383,6 +413,7 @@ function BuySheet({
   pack,
   coins,
   currency,
+  usdPrice,
   client,
   onClose,
   onPurchased,
@@ -390,6 +421,7 @@ function BuySheet({
   pack: StorePack;
   coins: number;
   currency: PayCurrency;
+  usdPrice: number | null;
   client: MigoClient;
   onClose: () => void;
   onPurchased: () => void;
@@ -401,10 +433,18 @@ function BuySheet({
   const [busy, setBusy] = useState(false);
 
   // Prepare as soon as the sheet opens: the confirm screen is what the user lands on, not a wait.
+  // The card's rate rides along when it has one so the quote matches what the shelf showed.
   useEffect(() => {
     let cancelled = false;
     setProgress({ step: 'preparing', txHash: null, outcome: null });
-    preparePurchase({ client, sku: pack.sku, name: pack.name, coins, currency })
+    preparePurchase({
+      client,
+      sku: pack.sku,
+      name: pack.name,
+      coins,
+      currency,
+      usdPrice: usdPrice ?? undefined,
+    })
       .then((next) => {
         if (!cancelled) {
           setPrepared(next);
@@ -420,7 +460,7 @@ function BuySheet({
     return () => {
       cancelled = true;
     };
-  }, [client, pack, coins, currency]);
+  }, [client, pack, coins, currency, usdPrice]);
 
   const pay = useCallback((): void => {
     if (prepared === null || busy) {
@@ -496,6 +536,16 @@ function BuySheet({
               <div className="quoted-line">
                 <span className="quoted-label">Pay with</span>
                 <span className="quoted-value">{CURRENCY_META[prepared.currency].label}</span>
+              </div>
+              <div className="quoted-line">
+                <span className="quoted-label">You pay</span>
+                <span className="quoted-value">
+                  {unitsOf(prepared.payUnits, CURRENCY_META[prepared.currency].decimals)}{' '}
+                  {CURRENCY_META[prepared.currency].label}{' '}
+                  <span className="quoted-sub">
+                    (1 {CURRENCY_META[prepared.currency].label} = ${prepared.usdPrice} USD, live)
+                  </span>
+                </span>
               </div>
               <div className="quoted-line">
                 <span className="quoted-label">From</span>

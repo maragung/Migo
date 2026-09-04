@@ -62,6 +62,7 @@ import { RoomsPanel } from '@/components/rooms-panel.js';
 import { SearchPanel } from '@/components/search-panel.js';
 import { SettingsPanel } from '@/components/settings-panel.js';
 import { SpacePanel } from '@/components/space-panel.js';
+import { StorePanel } from '@/components/store-panel.js';
 import { WalletPanel } from '@/components/wallet-panel.js';
 import { PaneBar } from '@/components/right-tab-bar.js';
 import { CallOverlay } from '@/components/call-overlay.js';
@@ -128,6 +129,7 @@ const KIND_TITLES: Readonly<Record<Exclude<RightTabKind, 'chat'>, string>> = {
   account: 'Account',
   settings: 'Settings',
   admins: 'Admins',
+  store: 'Store',
 };
 
 /** A chat tab's identity, so a conversation can never open twice. */
@@ -434,6 +436,8 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
         return <SettingsPanel chatTabsMode={chatsMode} onChatTabsMode={pickChatsMode} />;
       case 'admins':
         return <AdminsPanel />;
+      case 'store':
+        return <StorePanel />;
     }
   };
 

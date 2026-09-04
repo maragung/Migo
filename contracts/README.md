@@ -1,7 +1,7 @@
 # Migo's on-chain contracts
 
 The store's payment legs live here: **MGO**, the ERC-20 the prices are quoted in, and
-the **Treasury**, the address every AVAX/USDT/USDC payment lands in. Foundry layout,
+the **Treasury**, the address every AVAX/USDT/BTC.b payment lands in. Foundry layout,
 OpenZeppelin v5 underneath, [Solidity style guide] throughout.
 
 ```
@@ -21,10 +21,11 @@ contracts/
 ## The payment model (what is on-chain and what is not)
 
 The buyer pays the **Treasury** directly — native AVAX as a plain value transfer, or
-USDT/USDC as an ERC-20 transfer with the treasury as recipient. The store's client
-(`clients/store/src/lib/chain-purchase.ts`) builds, signs, and broadcasts that
-transaction from the account's own wallet-0 key; the Migo server is never a blockchain
-proxy and never moves a payment.
+USDT/BTC.b as an ERC-20 transfer with the treasury as recipient (BTC.b carries its own
+8 decimals; the client converts the MGO price through a live USD pair and sends the
+converted amount). The store's client (`clients/store/src/lib/chain-purchase.ts`) builds,
+signs, and broadcasts that transaction from the account's own wallet-0 key; the Migo
+server is never a blockchain proxy and never moves a payment.
 
 The MGO amount is what the payment is _quoted_ in (1 coin = 1 MGO at the client's
 constant): after the chain confirms, the client tells the server
@@ -56,7 +57,7 @@ export const MGO_TOKEN_FUJI = '0x…'; // deployment.json's mgoToken
 export const MGO_TREASURY_FUJI = '0x…'; // deployment.json's treasury
 ```
 
-USDT/USDC on Fuji are third-party contracts (testnet tokens are redeployed at their
+USDT and BTC.b on Fuji are third-party contracts (testnet tokens are redeployed at their
 owners' whim); set their current addresses the same way. With all four constants real,
 the store's currency chips enable and every payment quotes the exact fields the
 signature covers.

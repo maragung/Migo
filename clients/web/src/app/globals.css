@@ -1238,6 +1238,26 @@ main {
   min-height: 0;
 }
 
+/* --- the Store tab: the /store/ app docked in the pane --- */
+
+/* The pane is the store's viewport: the frame fills it and the shelves scroll inside the
+   frame, so the pane's own scroll and the store's never fight. Same-origin, no granted
+   capabilities beyond what the origin already serves. */
+.store-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.store-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  background: var(--bg);
+}
+
 /* --- the Games tab: the catalogue as cards --- */
 
 .games-lede {
