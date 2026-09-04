@@ -2,7 +2,7 @@
 
 /**
  * The offer a fresh registration sees: the account key file, sealed with the passphrase the user
- * just typed, and the choice to continue into the app.
+ * just typed, and the way out to the sign-in page.
  *
  * Registration makes this browser the founding device — the root is minted here, the E2EE identity
  * is derived from it, and both are already sealed into this browser's IndexedDB. What no server
@@ -14,10 +14,10 @@
  * browser's key-file store on the spot — that is what the lead line's "saved to this browser
  * automatically" has meant since the login screen grew its account list. Downloading the file is
  * offered with the same bytes, no second Argon2id run, and stays re-pressable: a download the
- * browser swallowed silently is not a saved file. "Continue" is the sign-in-now choice — the
- * registration already opened the session, so continuing is simply walking through the door it
- * opened — but declining the download is an honest choice too, and the lead line says what
- * declining means.
+ * browser swallowed silently is not a saved file. "Go to sign-in" ends the registration the way
+ * every later visit begins — the account's owner signs in with this file and the passphrase
+ * themselves — so the button waits for the seal, and declining the download is an honest choice
+ * too: the lead line says what declining means.
  */
 
 import { useEffect, useState } from 'react';
@@ -135,16 +135,17 @@ export function SaveAccountSheet({
         after this browser forgets you. Download it and keep it somewhere safe.
       </p>
       <p className="save-account-sub">
-        The file is sealed with your passphrase. Signing in later means this file and that
-        passphrase, nothing else.
+        The file is sealed with your passphrase. Signing in means this file and that passphrase,
+        nothing else — the next screen asks you for both.
       </p>
       {error !== null ? <p className="form-error">{error}</p> : null}
       {saved ? (
         <p className="save-account-done">Key file downloaded — keep it somewhere safe.</p>
       ) : null}
       <div className="form-actions">
-        <button type="button" className="btn btn-ghost" onClick={onDone}>
-          Continue
+        <button type="button" className="btn btn-ghost" onClick={onDone} disabled={sealed === null}>
+          {sealed === null ? <Spinner /> : null}
+          Go to sign-in
         </button>
         <button
           type="button"

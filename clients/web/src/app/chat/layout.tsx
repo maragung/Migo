@@ -38,7 +38,9 @@
  *
  * The call manager wraps everything under the session gate — a call can start from a thread
  * header and must keep ringing across pane switches — and the overlay it feeds renders after the
- * app div so a live call sits over the whole shell, not inside one pane of it.
+ * app div so a live call sits over the whole shell, not inside one pane of it. The connection
+ * Snackbar sits at the same level for the same reason: "Reconnecting…" is news about the session,
+ * not about whichever pane is showing.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -70,6 +72,7 @@ import { ConversationsProvider } from '@/lib/migo/conversations-provider.js';
 import { RoomsProvider } from '@/lib/migo/rooms-provider.js';
 import { MutedProvider } from '@/lib/migo/muted-provider.js';
 import { CallManagerProvider } from '@/lib/migo/call-manager.js';
+import { ConnectionSnackbar } from '@/components/connection-snackbar.js';
 import { getChatTabsMode, setChatTabsMode } from '@/lib/chat-tabs-mode.js';
 import type { ChatTabsMode } from '@/lib/chat-tabs-mode.js';
 import {
@@ -537,6 +540,7 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
       >
         {children}
       </AppShell>
+      <ConnectionSnackbar />
       <CallOverlay />
     </SectionNavProvider>
   );

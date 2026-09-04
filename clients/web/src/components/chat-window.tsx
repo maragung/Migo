@@ -32,8 +32,9 @@ import { GiftPicker } from './gift-picker.js';
 import { GroupInfoPanel } from './group-info-panel.js';
 import { MessageComposer } from './message-composer.js';
 import { MessageList, senderNameOf } from './message-list.js';
+import type { InterleavedRow } from './message-list.js';
 import { RoomInfoPanel } from './room-info-panel.js';
-import { RoomNoticeList } from './room-notice-list.js';
+import { RoomNoticeLine } from './room-notice-line.js';
 import { Icon } from './icons.js';
 import { Spinner } from './spinner.js';
 import { TypingIndicator } from './typing-indicator.js';
@@ -182,10 +183,31 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   const roomInfo = rooms.infoFor(conversationId);
 
   // The open room's live membership pills — who joined, left, dropped, or was removed — kept only
-  // for the room on screen and rendered in the transcript's live region below.
+  // for the room on screen and interleaved into the transcript at the moment each happened.
   const roomNotices = useRoomNotices(roomInfo?.roomId ?? null);
   // The open group's own membership pills, from the same-shaped stream a room uses.
   const groupNotices = useGroupNotices(isGroup ? conversationId : null);
+  // The two tails as interleaved rows: each membership change becomes a system line the message
+  // list places in time order among the bubbles, instead of a pile accumulating under the thread.
+  // The keys carry the stream they came from because each tail numbers its own arrivals.
+  const noticeRows = useMemo<InterleavedRow[]>(() => {
+    const rows: InterleavedRow[] = [];
+    for (const notice of roomNotices) {
+      rows.push({
+        at: notice.at,
+        key: `room-${notice.seq}`,
+        node: <RoomNoticeLine notice={notice} />,
+      });
+    }
+    for (const notice of groupNotices) {
+      rows.push({
+        at: notice.at,
+        key: `group-${notice.seq}`,
+        node: <RoomNoticeLine notice={notice} place="group" />,
+      });
+    }
+    return rows;
+  }, [roomNotices, groupNotices]);
 
   // Every sender in the thread resolves to a profile (names, avatars, reply quotes), plus the
   // direct peer so the header shows a name even before they have spoken, plus the players of any
@@ -501,10 +523,9 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
           loadingEarlier={loadingEarlier}
           onLoadEarlier={loadEarlier}
           mediaUrlFor={mediaUrlFor}
+          interleaved={noticeRows}
           liveSlot={
             <>
-              {isRoom ? <RoomNoticeList notices={roomNotices} /> : null}
-              {isGroup ? <RoomNoticeList notices={groupNotices} place="group" /> : null}
               <GameEventList
                 rows={game.rows}
                 views={game.views}

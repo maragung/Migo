@@ -14,7 +14,6 @@ import { useMigo } from '@/lib/migo/use-migo.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
 
 import { Avatar } from './avatar.js';
-import { ConnectionBadge } from './connection-badge.js';
 import { ContextMenu } from './context-menu.js';
 import { useContextMenu } from './context-menu.js';
 import type { ContextAction } from './context-menu.js';
@@ -239,11 +238,6 @@ export function FriendsPanel({
 
   return (
     <div className="panel panel-flush">
-      {/* The account's ambient line. The presence and status controls live in the profile
-          banner, where the account's own identity lives; the people search and the
-          New-conversation affordance are header icons below, not a form above the list. */}
-      <ConnectionBadge />
-
       {/* One title, not two: the panel is "Friends" and the lists beneath it are its views —
           the right-aligned icons switch between them (the search sits left of Requests, and
           New chat rides at the group's edge), and each view icon carries its count when there

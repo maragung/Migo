@@ -1519,10 +1519,6 @@ main {
 
 /* --- sidebar footer (account + sign out) --- */
 
-.sidebar .conn-badge {
-  align-self: flex-start;
-  margin: 8px 12px 2px;
-}
 .sidebar-footer {
   display: flex;
   align-items: center;
@@ -2355,33 +2351,40 @@ main {
   place-items: center;
 }
 
-/* --- connection badge --- */
+/* --- connection snackbar --- */
 
-.conn-badge {
+/* The one connection notice, fixed over the whole shell: "Reconnecting…" is news about the
+   session, not about whichever pane is showing, so it rides above both panes at the bottom of
+   the screen and disappears the moment the connection is healthy again. */
+.conn-snackbar {
+  position: fixed;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  z-index: var(--z-toast);
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-dim);
-  padding: 3px 8px;
+  gap: 8px;
+  max-width: min(92vw, 480px);
+  padding: 8px 14px;
   border-radius: 999px;
   border: 1px solid var(--border);
-  background: var(--panel-alt);
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  font-size: 13px;
+  box-shadow: 0 6px 24px rgb(0 0 0 / 0.25);
 }
-.conn-badge .dot {
+.conn-snackbar .dot {
+  flex: none;
   width: 8px;
   height: 8px;
   border-radius: 50%;
 }
-.conn-ok .dot {
-  background: var(--positive);
-  box-shadow: 0 0 8px var(--positive-glow);
-}
-.conn-wait .dot {
+.conn-snackbar.snack-wait .dot {
   background: var(--warning);
   animation: pulse 1.3s infinite;
 }
-.conn-down .dot {
+.conn-snackbar.snack-down .dot {
   background: var(--danger);
 }
 @keyframes pulse {
@@ -2492,6 +2495,37 @@ main {
 .field-label input::placeholder,
 .field-label textarea::placeholder {
   color: var(--text-faint);
+}
+/* A passphrase field ({@link PassphraseInput}): the masked input plus the show/hide eye, which
+   sits inside the field's right edge so the dots never run under it. */
+.passphrase-field {
+  position: relative;
+  display: block;
+}
+.passphrase-field input {
+  width: 100%;
+  padding-right: 34px;
+}
+.passphrase-toggle {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+.passphrase-toggle:hover,
+.passphrase-toggle:focus-visible {
+  color: var(--text);
 }
 .muted {
   color: var(--text-faint);
@@ -2864,8 +2898,9 @@ main {
   font-weight: 600;
 }
 
-/* The open room's live membership pills, in the transcript's live region: centered system lines,
-   the day-divider treatment applied to who is coming and going. */
+/* The open room's live membership pills: centered system lines, the day-divider treatment
+   applied to who is coming and going. They render interleaved in the transcript (a
+   .room-notice directly under .message-list) at the moment each change happened. */
 .room-notices {
   list-style: none;
   margin: 8px 0 0;
@@ -2884,6 +2919,11 @@ main {
   color: var(--text-faint);
   font-size: 12px;
   text-align: center;
+}
+/* A pill interleaved among the bubbles, rather than inside a .room-notices list: the same
+   centered treatment, with its own breathing room from the rows around it. */
+.message-list > .room-notice {
+  margin: 6px 0 0;
 }
 .guess-card {
   align-self: stretch;

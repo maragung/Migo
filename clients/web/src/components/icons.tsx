@@ -52,7 +52,9 @@ export type IconName =
   | 'file'
   | 'download'
   | 'user-plus'
-  | 'block';
+  | 'block'
+  | 'eye'
+  | 'eye-off';
 
 /** The drawn body of each icon, as `<path>`/`<circle>` elements under one `<g>`. */
 const GLYPHS: Readonly<Record<IconName, ReactNode>> = {
@@ -126,6 +128,18 @@ const GLYPHS: Readonly<Record<IconName, ReactNode>> = {
     <>
       <circle cx="12" cy="12" r="8.5" />
       <path d="m6 6 12 12" />
+    </>
+  ),
+  eye: (
+    <>
+      <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" />
+      <circle cx="12" cy="12" r="3" />
+    </>
+  ),
+  'eye-off': (
+    <>
+      <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" />
+      <path d="m4 4 16 16" />
     </>
   ),
   settings: (

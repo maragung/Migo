@@ -40,6 +40,7 @@ import { useMigo } from '@/lib/migo/use-migo.js';
 import { useProfile } from '@/lib/migo/use-profiles.js';
 
 import { BottomSheet } from './bottom-sheet.js';
+import { PassphraseInput } from './passphrase-input.js';
 import { Spinner } from './spinner.js';
 
 /** The house-rule minimum for a new account passphrase, in characters. */
@@ -198,36 +199,33 @@ export function PassphraseFormView({
     >
       <label className="field-label">
         Current passphrase
-        <input
-          type="passphrase"
+        <PassphraseInput
           className="input"
-          autoComplete="current-passphrase"
           value={current}
           onChange={(event) => onChange('current', event.target.value)}
-          aria-label="Current passphrase"
+          autoComplete="current-passphrase"
+          ariaLabel="Current passphrase"
         />
       </label>
       <label className="field-label">
         New passphrase
-        <input
-          type="passphrase"
+        <PassphraseInput
           className="input"
-          autoComplete="new-passphrase"
           value={next}
           onChange={(event) => onChange('next', event.target.value)}
-          aria-label="New passphrase"
+          autoComplete="new-passphrase"
+          ariaLabel="New passphrase"
         />
         <span className="field-hint">At least {MIN_PASSPHRASE_LENGTH} characters.</span>
       </label>
       <label className="field-label">
         Confirm new passphrase
-        <input
-          type="passphrase"
+        <PassphraseInput
           className="input"
-          autoComplete="new-passphrase"
           value={confirm}
           onChange={(event) => onChange('confirm', event.target.value)}
-          aria-label="Confirm new passphrase"
+          autoComplete="new-passphrase"
+          ariaLabel="Confirm new passphrase"
         />
       </label>
       {!saved ? (
@@ -305,13 +303,12 @@ export function KeyFileFormView({
       </p>
       <label className="field-label">
         Passphrase
-        <input
-          type="passphrase"
+        <PassphraseInput
           className="input"
-          autoComplete="new-passphrase"
           value={credential}
           onChange={(event) => onChange('credential', event.target.value)}
-          aria-label="Key file passphrase"
+          autoComplete="new-passphrase"
+          ariaLabel="Key file passphrase"
         />
         <span className="field-hint">
           At least 8 characters. This unlocks the file — it need not be your Migo passphrase.
@@ -319,13 +316,12 @@ export function KeyFileFormView({
       </label>
       <label className="field-label">
         Confirm passphrase
-        <input
-          type="passphrase"
+        <PassphraseInput
           className="input"
-          autoComplete="new-passphrase"
           value={confirm}
           onChange={(event) => onChange('confirm', event.target.value)}
-          aria-label="Confirm key file passphrase"
+          autoComplete="new-passphrase"
+          ariaLabel="Confirm key file passphrase"
         />
       </label>
       {credential.length > 0 && problem !== null ? <p className="form-error">{problem}</p> : null}

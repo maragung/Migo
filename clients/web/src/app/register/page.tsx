@@ -7,6 +7,7 @@ import { useRouter } from 'next/navigation';
 
 import { BottomSheet } from '@/components/bottom-sheet.js';
 import { CaptchaWidget } from '@/components/captcha-widget.js';
+import { PassphraseInput } from '@/components/passphrase-input.js';
 import { SaveAccountSheet } from '@/components/save-account-sheet.js';
 import { ServerForm, transportLabel } from '@/components/server-form.js';
 import { Spinner } from '@/components/spinner.js';
@@ -14,6 +15,7 @@ import { ThemeToggle } from '@/components/theme-toggle.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { defaultServerEndpoint } from '@/lib/config.js';
 import { loadServerEndpoint, saveServerEndpoint } from '@/lib/storage/server-endpoint-store.js';
+import { loadKeyFiles } from '@/lib/storage/key-file-store.js';
 
 import type { CaptchaChallenge, CaptchaProof, ServerEndpoint } from '@migo/sdk';
 import { RemoteError } from '@migo/sdk';
@@ -32,9 +34,14 @@ const GENDERS = [
  * the server verifies at the founding registration, and it is the credential that seals the `.migo`
  * key file offered right after — which is why the file download needs no second passphrase to be
  * typed and why the sign-in screen asks for the file and this passphrase and nothing else.
+ *
+ * A successful registration ends at the sign-in door, not inside the app: the key-file offer is
+ * honoured, the session registration opened is closed, and the user signs back in with the file
+ * and the passphrase themselves — the same steps every later visit takes, rehearsed once while
+ * the passphrase is still fresh.
  */
 export default function RegisterPage(): ReactNode {
-  const { status, error, register, client, accountId } = useMigo();
+  const { status, error, register, client, accountId, logout } = useMigo();
   const router = useRouter();
 
   const [username, setUsername] = useState('');
@@ -52,14 +59,6 @@ export default function RegisterPage(): ReactNode {
   const [freshCaptcha, setFreshCaptcha] = useState<CaptchaChallenge | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const submitting = status === 'connecting';
-
-  useEffect(() => {
-    // The hand-off to the chat shell waits out the key-file offer: the root is only in memory
-    // until this moment passes, and the offer is the one chance to seal it into a file.
-    if (status === 'ready' && !saveOfferOpen) {
-      router.replace('/chat');
-    }
-  }, [status, saveOfferOpen, router]);
 
   useEffect(() => {
     let cancelled = false;
@@ -124,6 +123,34 @@ export default function RegisterPage(): ReactNode {
     setServerSheetOpen(false);
   }
 
+  /**
+   * Ends a successful registration: back to the sign-in page, with the session registration
+   * opened closed behind the user, so the account is entered the way it will be entered every
+   * later visit — the key file and the passphrase, typed by its owner.
+   *
+   * The sign-out is only safe once the sealed container is remembered somewhere: logging out also
+   * clears this browser's key-store snapshot, and the key file is then the account's only key.
+   * The key-file *store* is what gets checked, not the sheet's state, so the corner X is judged
+   * by the same rule as the button — and a registration whose file never sealed (or never got
+   * saved) keeps its session and lands in the app instead of at a door that cannot open.
+   */
+  async function finishRegistration(): Promise<void> {
+    setSaveOfferOpen(false);
+    let hasFile = false;
+    try {
+      const rows = await loadKeyFiles();
+      hasFile = rows.some((row) => row.accountId === accountId);
+    } catch {
+      hasFile = false;
+    }
+    if (!hasFile) {
+      router.replace('/chat');
+      return;
+    }
+    await logout();
+    router.replace('/login');
+  }
+
   return (
     <main className="auth-screen">
       <ThemeToggle className="auth-theme-toggle" />
@@ -164,8 +191,7 @@ export default function RegisterPage(): ReactNode {
 
         <label className="field-label">
           Passphrase
-          <input
-            type="passphrase"
+          <PassphraseInput
             value={passphrase}
             onChange={(event) => setPassphrase(event.target.value)}
             autoComplete="new-passphrase"
@@ -240,14 +266,14 @@ export default function RegisterPage(): ReactNode {
         <BottomSheet
           title="Your account key file"
           variant="auth"
-          onClose={() => setSaveOfferOpen(false)}
+          onClose={() => void finishRegistration()}
         >
           <SaveAccountSheet
             username={username.trim()}
             accountId={accountId ?? ''}
             root={client?.keyStore.root()?.asBytes() ?? null}
             passphrase={passphrase}
-            onDone={() => setSaveOfferOpen(false)}
+            onDone={() => void finishRegistration()}
           />
         </BottomSheet>
       ) : null}

@@ -78,7 +78,10 @@ test('the save offer seals with the registration passphrase and asks for nothing
     'the offer must say the account is already saved locally',
   );
   assert.ok(markup.includes('Download key file'), 'the download control must name what it does');
-  assert.ok(markup.includes('Continue'), 'continuing into the app must be an offered choice');
+  assert.ok(
+    markup.includes('Go to sign-in'),
+    'the way out to the sign-in screen must be an offered choice',
+  );
 });
 
 test('a device without the root gets the honest one-liner, not a dead button', () => {

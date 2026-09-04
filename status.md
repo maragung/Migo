@@ -2561,3 +2561,56 @@ yang dipakai menformat sumber; pin diganti `v1.8.1`. Submodule OZ di
 `contracts/lib/` kini di-ignore eslint dan prettier (standing yang
 sama dengan node_modules — sumber upstream yang di-pin, bukan milik
 kita untuk diformat).
+
+## 69. Notice membership masuk urutan waktu, daftar berakhir di layar login, passphrase tersamar, Snackbar reconnect
+
+**Notice "has joined / disconnected / came back" kini sejajar waktu
+dengan pesan** — dulu notice membership room/group ditampilkan di
+`liveSlot` MessageList (di bawah seluruh transkrip), jadi notice
+yang terjadi sepuluh menit lalu tetap menumpuk di bawah pesan yang
+baru saja dikirim. Sekarang `MessageList` menerima prop `interleaved`:
+setiap notice (RoomNotice dari `useRoomNotices`/`useGroupNotices`)
+menjadi baris sistem yang ditempatkan pada momen kejadiannya di
+antara bubble (merge stabil by timestamp — `at` notice vs
+`createdAt` pesan; notice yang lebih tua dari semua pesan termuat
+tetap dirender di atasnya). Baris sistem memutus run sender seperti
+day-divider. `RoomNoticeList` diganti `RoomNoticeLine` (file
+`room-notice-line.tsx`) yang me-resolve nama profilnya sendiri.
+Test: tiga kasus baru di `message-rows.test.tsx` (posisi di antara
+pesan, notice lebih tua dari semua pesan, pemutusan run sender).
+
+**Daftar selesai di pintu login, bukan auto-login** — setelah
+registrasi sukses, tawaran key-file tetap muncul, tapi tombolnya
+kini "Go to sign-in": sesi yang dibuka registrasi ditutup
+(`logout()`) dan pengguna mendarat di `/login` untuk masuk sendiri
+dengan file + passphrase — langkah yang sama dengan setiap kunjungan
+berikutnya. Pengaman: sign-out ini hanya jalan kalau container tersegel
+sudah benar-benar tersimpan (dicek ke key-file store by accountId,
+bukan state sheet — jadi tombol X di pojok dihakimi sama); kalau file
+belum tersimpan, sesi tetap hidup dan pengguna masuk ke `/chat`
+(karena logout juga menghapus key-store snapshot, file adalah satu2nya
+kunci akun). Tombol "Go to sign-in" menunggu seal selesai (disabled +
+spinner) supaya jalan yang ditawarkan tidak buntu.
+
+**Passphrase tersamar (*** per karakter) dengan toggle mata** —
+`type="passphrase"` bukan tipe input HTML yang sah, jadi browser
+merendernya sebagai teks polos: passphrase tampil terang di layar
+login, register, dan panel akun. Semua 7 input kini
+`PassphraseInput` (`passphrase-input.tsx`): default
+`type="password"` (masking browser sendiri), tombol mata untuk
+show/hide (ikon `eye`/`eye-off` baru di `icons.tsx`,
+`aria-pressed` + label). Test baru `passphrase-input.test.tsx`
+mem-pin default tersamar — regresi yang membuatnya plain text lagi
+tidak akan lolos diam-diam.
+
+**Snackbar reconnect di bawah layar** — `ConnectionSnackbar`
+(`connection-snackbar.tsx`) menggantikan `ConnectionBadge` yang hanya
+terlihat di tab Friends: satu notice fixed di bawah tengah shell,
+di atas kedua pane (z-index `--z-toast`), untuk semua state
+transport tidak sehat pada sesi signed-in — "Connecting…",
+"Reconnecting… your messages will send when it returns.",
+"Offline. Migo reconnects automatically." — dan diam total saat
+sehat (silence is the healthy state) maupun saat belum login (state
+connecting di layar auth milik tombol submitnya). Badge lama dihapus
+beserta CSS-nya; test `connection-snackbar.test.tsx` mem-pin
+disiplin itu.

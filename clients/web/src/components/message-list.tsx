@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, KeyboardEvent, ReactNode } from 'react';
+import { Fragment } from 'react';
 
 import { ContentType } from '@migo/sdk';
 import type { Id, IncomingMessage, MediaRefContent, MessageContent, UserProfile } from '@migo/sdk';
@@ -244,6 +245,13 @@ export interface MessageListProps {
   /** How many rows the live slot holds, so auto-scroll follows their arrival too. */
   liveRowCount?: number;
   /**
+   * Centered system rows — membership notices — placed *inside* the transcript at the moment they
+   * happened, in time order with the messages around them, rather than pinned under the thread:
+   * a join that preceded a message reads above it, not below every message that follows. Absent
+   * for contexts that have none.
+   */
+  interleaved?: ReadonlyArray<InterleavedRow>;
+  /**
    * Opens the Wallet section for a $MIG token reference in message text. Optional: without it
    * the text renders without the chips, which is how a context with no wallet section renders.
    */
@@ -259,6 +267,23 @@ export interface MessageListProps {
  * scrolling up is seamless and the DOM stays bounded.
  */
 const RENDER_WINDOW = 150;
+
+/**
+ * One centered system row the transcript interleaves among the bubbles — a membership notice —
+ * at the time it happened.
+ */
+export interface InterleavedRow {
+  /** When the row happened (wall-clock ms): the position the merge places it at. */
+  at: number;
+  /** A stable key for the rendered row, unique among the interleaved rows. */
+  key: string | number;
+  /** The row's own content; the caller decides how a system line reads. */
+  node: ReactNode;
+}
+
+/** One entry of the merged render sequence: a message bubble, or an interleaved system row. */
+type ThreadRow =
+  { kind: 'message'; message: ThreadMessage } | { kind: 'notice'; row: InterleavedRow };
 
 export function MessageList({
   messages,
@@ -277,6 +302,7 @@ export function MessageList({
   mediaUrlFor,
   liveSlot,
   liveRowCount,
+  interleaved,
   onOpenWallet,
 }: MessageListProps): ReactNode {
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -309,6 +335,36 @@ export function MessageList({
     return map;
   }, [visible]);
 
+  // The merged render sequence: the visible messages, with each interleaved system row spliced in
+  // ahead of the first message that postdates it. `visible` is in send order and the notices arrive
+  // in live order, so one stable walk places every row — no sort, no reorder of either side.
+  const rows = useMemo<ThreadRow[]>(() => {
+    if (interleaved === undefined || interleaved.length === 0) {
+      return visible.map((message) => ({ kind: 'message' as const, message }));
+    }
+    const pending = [...interleaved].sort((a, b) => a.at - b.at);
+    let cursor = 0;
+    const out: ThreadRow[] = [];
+    for (const message of visible) {
+      while (cursor < pending.length) {
+        const row = pending[cursor];
+        if (row === undefined || row.at > message.createdAt) {
+          break;
+        }
+        out.push({ kind: 'notice', row });
+        cursor += 1;
+      }
+      out.push({ kind: 'message', message });
+    }
+    while (cursor < pending.length) {
+      const row = pending[cursor];
+      if (row !== undefined) {
+        out.push({ kind: 'notice', row });
+      }
+      cursor += 1;
+    }
+    return out;
+  }, [visible, interleaved]);
   // The scroll follows both surfaces that can grow: a new message and a new live row are each a
   // reason to bring the bottom into view. An empty transcript has nothing to scroll to.
   useEffect(() => {
@@ -340,7 +396,14 @@ export function MessageList({
           {loadingEarlier ? 'Loading…' : 'Load earlier messages'}
         </button>
       ) : null}
-      {visible.map((message) => {
+      {rows.map((entry) => {
+        if (entry.kind === 'notice') {
+          // A system line breaks the sender run the way a day divider does: the block after it
+          // reads as a new turn, and the pill itself is centered, not part of a bubble stack.
+          lastSender = null;
+          return <Fragment key={entry.row.key}>{entry.row.node}</Fragment>;
+        }
+        const message = entry.message;
         const dayLabel = formatDayLabel(message.createdAt);
         const showDivider = dayLabel !== lastDay;
         lastDay = dayLabel;

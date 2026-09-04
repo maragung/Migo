@@ -26,6 +26,7 @@ import { ContentType } from '@migo/sdk';
 import type { Id, UserProfile } from '@migo/sdk';
 
 import { MessageList } from '../src/components/message-list.js';
+import type { InterleavedRow } from '../src/components/message-list.js';
 import type { ThreadMessage } from '../src/lib/migo/use-chat.js';
 
 const CREATED = Date.parse('2026-08-26T12:00:00Z');
@@ -40,6 +41,7 @@ function msg(fields: {
   text: string;
   deleted?: boolean;
   replyTo?: Id;
+  createdAt?: number;
 }): ThreadMessage {
   seq += 1;
   return {
@@ -49,7 +51,7 @@ function msg(fields: {
     senderId: fields.senderId,
     senderDevice: 'dev_1' as Id,
     content: { type: ContentType.Text, text: fields.text },
-    createdAt: CREATED,
+    createdAt: fields.createdAt ?? CREATED,
     ...(fields.deleted ? { deleted: true } : {}),
     ...(fields.replyTo ? { replyTo: fields.replyTo } : {}),
   };
@@ -57,7 +59,7 @@ function msg(fields: {
 
 function render(
   messages: ThreadMessage[],
-  props: { readUpTo?: number; showSenders?: boolean } = {},
+  props: { readUpTo?: number; showSenders?: boolean; interleaved?: InterleavedRow[] } = {},
 ): string {
   return renderToStaticMarkup(
     <MessageList
@@ -72,6 +74,7 @@ function render(
       hasEarlier={false}
       loadingEarlier={false}
       onLoadEarlier={() => {}}
+      interleaved={props.interleaved}
     />,
   );
 }
@@ -158,6 +161,58 @@ test('a group thread names each sender once per run, with an avatar on the run h
   // One avatar on the run head; our own messages never carry a sender header.
   const avatars = markup.match(/class="avatar"/g) ?? [];
   assert.equal(avatars.length, 1, 'exactly the run head should carry an avatar');
+});
+
+test('an interleaved system row sits between the messages around it, in time order', () => {
+  // The join happened between the two messages, so the pill must read between them — not under
+  // the thread, where a live-region pile would put it below even the message that followed it.
+  const before = msg({ senderId: 'ada' as Id, text: 'before the join' });
+  const after = msg({
+    senderId: 'ada' as Id,
+    text: 'after the join',
+    createdAt: CREATED + 60_000,
+  });
+  const markup = render([before, after], {
+    interleaved: [{ at: CREATED + 30_000, key: 'room-1', node: 'Bekti joined the room' }],
+  });
+
+  const at = (needle: string): number => markup.indexOf(needle);
+  assert.ok(
+    at('before the join') < at('Bekti joined the room') &&
+      at('Bekti joined the room') < at('after the join'),
+    'a membership notice did not sit between the messages around it',
+  );
+});
+
+test('an interleaved row older than every loaded message still renders, ahead of them', () => {
+  const only = msg({ senderId: 'ada' as Id, text: 'the only message' });
+  const markup = render([only], {
+    interleaved: [{ at: CREATED - 60_000, key: 'room-0', node: 'Bekti came back' }],
+  });
+
+  const at = (needle: string): number => markup.indexOf(needle);
+  assert.ok(
+    at('Bekti came back') < at('the only message'),
+    'an early notice was dropped or misplaced',
+  );
+});
+
+test('an interleaved system line breaks the sender run', () => {
+  // A pill between two messages from one sender reads as a new turn: the sender's name shows
+  // again on the message after it, the way it does after a day divider.
+  const first = msg({ senderId: 'ada' as Id, text: 'first from Ada' });
+  const second = msg({
+    senderId: 'ada' as Id,
+    text: 'second from Ada',
+    createdAt: CREATED + 60_000,
+  });
+  const markup = render([first, second], {
+    showSenders: true,
+    interleaved: [{ at: CREATED + 30_000, key: 'room-1', node: 'Bekti left' }],
+  });
+
+  const names = markup.match(/class="sender-name"/g) ?? [];
+  assert.equal(names.length, 2, 'a system line should break the sender run');
 });
 
 test('the load-earlier control appears only when history is missing, and shows its busy state', () => {

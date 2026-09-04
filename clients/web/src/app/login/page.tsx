@@ -7,6 +7,7 @@ import { useRouter } from 'next/navigation';
 
 import { BottomSheet } from '@/components/bottom-sheet.js';
 import { Icon } from '@/components/icons.js';
+import { PassphraseInput } from '@/components/passphrase-input.js';
 import { ServerForm, transportLabel } from '@/components/server-form.js';
 import { Spinner } from '@/components/spinner.js';
 import { ThemeToggle } from '@/components/theme-toggle.js';
@@ -264,8 +265,7 @@ export default function LoginPage(): ReactNode {
 
         <label className="field-label">
           Passphrase
-          <input
-            type="passphrase"
+          <PassphraseInput
             value={passphrase}
             onChange={(event) => setPassphrase(event.target.value)}
             autoComplete="current-passphrase"
