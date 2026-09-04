@@ -32,7 +32,7 @@ import androidx.compose.ui.unit.dp
 import com.migo.core.ConnectionState
 
 /** What the banner's avatar menu was asked for. */
-enum class BannerAction { PROFILE, WALLET, ALERTS, SEARCH, SIGN_OUT }
+enum class BannerAction { PROFILE, WALLET, ALERTS, SEARCH, ADMINS, SIGN_OUT }
 
 /**
  * The profile banner: the orange strip that carries who is signed in.
@@ -41,12 +41,17 @@ enum class BannerAction { PROFILE, WALLET, ALERTS, SEARCH, SIGN_OUT }
  * the session's own surface — it says who is here and what they have, the same way in daylight and
  * in the dark. The avatar opens the menu the five tabs cannot carry: the profile, the wallet, the
  * panels, and the way out.
+ *
+ * [owner] gates the Admins entry, which the sign-in standing check answers: the management
+ * page's whole point is that its existence is not public information, and the server refuses
+ * every read and write there for anybody else anyway — so a non-owner never sees the word.
  */
 @Composable
 fun ProfileBanner(
     username: String,
     connection: ConnectionState,
     balance: Long?,
+    owner: Boolean,
     onAction: (BannerAction) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -78,13 +83,19 @@ fun ProfileBanner(
                         .padding(3.dp),
                 )
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    for ((action, label) in listOf(
-                        BannerAction.PROFILE to "My Profile",
-                        BannerAction.WALLET to "My Credits & TopUp",
-                        BannerAction.ALERTS to "Alerts",
-                        BannerAction.SEARCH to "Search",
-                        BannerAction.SIGN_OUT to "Exit / Logout",
-                    )) {
+                    // Built as a list of (action, label) pairs, then the owner's own entry
+                    // appended before the way out — a conditional inside a loop would draw it
+                    // in place, but this reads as the menu's shape: five entries for
+                    // everybody, a sixth for the one account that owns the deployment.
+                    val entries = buildList {
+                        add(BannerAction.PROFILE to "My Profile")
+                        add(BannerAction.WALLET to "My Credits & TopUp")
+                        add(BannerAction.ALERTS to "Alerts")
+                        add(BannerAction.SEARCH to "Search")
+                        if (owner) add(BannerAction.ADMINS to "Global Admins")
+                        add(BannerAction.SIGN_OUT to "Exit / Logout")
+                    }
+                    for ((action, label) in entries) {
                         DropdownMenuItem(
                             text = {
                                 Text(

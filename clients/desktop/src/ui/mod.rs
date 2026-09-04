@@ -13,6 +13,7 @@
 //! click that changes the conversation list cannot mutate the list a later widget in the same frame
 //! is still iterating.
 
+pub mod admins;
 pub mod alerts;
 pub mod auth;
 pub mod captcha;
@@ -84,6 +85,11 @@ pub enum Place {
     /// The account's own card: display name, bio, custom status, and the privacy of last-seen,
     /// messaging, and friend requests. The account menu's "My Profile", on the right pane.
     Profile,
+    /// The Owner/CEO's management page for the global admins — who may moderate every public
+    /// room. Offered by the banner menu only when the server says this account is the owner,
+    /// because the management page's whole point is that its existence is not public
+    /// information.
+    Admins,
     /// Server, theme, devices, sign-out.
     Settings,
 }
@@ -101,6 +107,7 @@ impl Place {
             Self::Search => "Search",
             Self::Wallet => "Wallet",
             Self::Profile => "Profile",
+            Self::Admins => "Admins",
             Self::Settings => "Settings",
         }
     }

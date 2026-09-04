@@ -89,5 +89,6 @@ fun panelTitle(section: AppState.Section): String = when (section) {
     AppState.Section.SEARCH -> "Search"
     AppState.Section.WALLET -> "TopUp"
     AppState.Section.PROFILE -> "Profile"
+    AppState.Section.ADMINS -> "Admins"
     else -> "Panel"
 }

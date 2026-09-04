@@ -243,6 +243,15 @@ pub enum Command {
     /// status never flips the account online or offline as a side effect. An empty string
     /// clears the line.
     SaveStatus { status: String },
+    /// Read the account's standing on the admin surface, and the admin list when the answer is
+    /// owner. One command for both because the standing is not a fact the UI should hold while
+    /// a list loads: the panel decides nothing on it, it only draws what arrives.
+    Admins,
+    /// Appoint a global admin by username. Owner-only; the server is the judge.
+    GrantAdmin { username: String },
+    /// Revoke one global admin by the id the list reported. Owner-only, confirmed by the UI
+    /// before it is sent, because a revocation takes moderation away from a person.
+    RevokeAdmin { account_id: Id },
     /// Read the account's registered wallet addresses over REST.
     Wallets,
     /// Seal the account root into a `.migo` recovery container at `path`.
@@ -313,6 +322,25 @@ pub enum Command {
     },
     /// Stop the worker. Sent on window close.
     Shutdown,
+}
+
+/// What the owner's admin surface holds between asks, as one answer.
+///
+/// `Closed` rather than an error: an account that is neither owner nor admin asked honestly and
+/// the answer is "not yours to open", which is not a failure of the request. A real refusal —
+/// unreachable server, unknown route — stays a `Failed` with its reason, because "could not
+/// check" and "not yours" are different sentences and only one of them is a complaint.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum AdminsAnswer {
+    /// Asked, not answered.
+    #[default]
+    Loading,
+    /// The caller is this deployment's owner, and these are the admins.
+    Owner(Vec<crate::model::AdminRow>),
+    /// The caller holds neither role. The surface exists; it is not theirs.
+    Closed,
+    /// The ask itself failed, for a reason safe to show as-is.
+    Failed(String),
 }
 
 /// What the worker tells the UI.
@@ -444,6 +472,17 @@ pub enum Event {
     /// The profile pane's save was accepted: the reply is the refreshed card, the same shape the
     /// fetch returns, so the pane replaces its copy from the reply instead of re-reading.
     ProfileSaved(crate::model::OwnProfile),
+    /// The owner's admin management surface: the standing first, and with it the list.
+    ///
+    /// The standing is carried rather than remembered by the UI because it is a server fact,
+    /// not a UI preference: a stale client that kept the surface open after the owner
+    /// designation moved would draw a management page it no longer owns. `Closed` is the
+    /// honest answer for an account that holds neither role, drawn as a sentence — the same
+    /// treatment the web client gives it.
+    Admins(AdminsAnswer),
+    /// An admin grant or revoke was refused. Filed rather than toasted because it belongs
+    /// beside the form or row that caused it.
+    AdminChangeFailed { reason: String },
     /// The account's registered wallet addresses.
     Wallets(Result<Vec<EvmWalletRow>, String>),
     /// The AVAX balance of the account's first wallet, in wei, on the network asked.
@@ -948,6 +987,11 @@ impl Worker {
             Command::OwnProfile => self.fetch_own_profile().await,
             Command::SaveProfile(patch) => self.save_profile(patch).await,
             Command::SaveStatus { status } => self.save_status(status).await,
+            Command::Admins => self.fetch_admins().await,
+            Command::GrantAdmin { username } => self.grant_admin(username).await,
+            Command::RevokeAdmin { account_id } => {
+                self.revoke_admin(account_id).await;
+            }
             Command::Wallets => self.fetch_wallets().await,
             Command::ExportContainer { path, credential } => {
                 self.export_container(path, credential).await;
@@ -1809,6 +1853,85 @@ impl Worker {
             custom_status: Some(status).filter(|status| !status.is_empty()),
         };
         self.request(Opcode::PresenceSet, &message).await;
+    }
+
+    /// Reads the admin surface's own gate, then the list it guards — one answer either way.
+    ///
+    /// The standing is asked first and decides whether the list is even requested: a
+    /// non-owner's list read is not an error to catch, it is a read this client never makes.
+    async fn fetch_admins(&mut self) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let standing = signed.rest.admin_standing(&signed.access_token).await;
+        let answer = match standing {
+            Err(error) => AdminsAnswer::Failed(error.to_string()),
+            Ok(standing) if !standing.owner => AdminsAnswer::Closed,
+            Ok(_) => match signed.rest.global_admins(&signed.access_token).await {
+                Ok(list) => AdminsAnswer::Owner(
+                    list.into_iter()
+                        .map(|admin| crate::model::AdminRow {
+                            account_id: admin.account_id,
+                            username: admin.username,
+                            granted_at: Timestamp::from_unix_ms(admin.granted_at_ms),
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                Err(error) => AdminsAnswer::Failed(error.to_string()),
+            },
+        };
+        self.sink.send(Event::Admins(answer));
+    }
+
+    /// Appoints a global admin, then re-reads the list so the pane shows the server's truth
+    /// rather than its own echo of the request.
+    async fn grant_admin(&mut self, username: String) {
+        let outcome = match self.signed.as_ref() {
+            Some(signed) => signed
+                .rest
+                .grant_global_admin(&signed.access_token, &username)
+                .await
+                .map(|view| view.username),
+            None => return,
+        };
+        match outcome {
+            Ok(name) => {
+                self.sink
+                    .toast(format!("{name} is now a global admin."), ToastKind::Success);
+                self.fetch_admins().await;
+            }
+            Err(error) => {
+                self.sink.send(Event::AdminChangeFailed {
+                    reason: error.to_string(),
+                });
+            }
+        }
+    }
+
+    /// Revokes a global admin, then re-reads the list. The revoke arrives already confirmed by
+    /// the pane — a two-step destructive action on an accidental click is the pane's rule, not
+    /// the worker's, because only the pane knows what a row's click meant.
+    async fn revoke_admin(&mut self, account_id: Id) {
+        let outcome = match self.signed.as_ref() {
+            Some(signed) => {
+                signed
+                    .rest
+                    .revoke_global_admin(&signed.access_token, account_id)
+                    .await
+            }
+            None => return,
+        };
+        match outcome {
+            Ok(()) => {
+                self.sink.toast("Admin revoked.", ToastKind::Success);
+                self.fetch_admins().await;
+            }
+            Err(error) => {
+                self.sink.send(Event::AdminChangeFailed {
+                    reason: error.to_string(),
+                });
+            }
+        }
     }
 
     /// Fetches the device/session list over REST and reduces it to rows the settings screen can

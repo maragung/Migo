@@ -58,6 +58,7 @@ pub struct App {
     friends: FriendsState,
     settings_panel: SettingsState,
     profile_panel: crate::ui::profile::ProfileState,
+    admins_panel: crate::ui::admins::AdminsState,
     rooms: RoomsState,
     space: SpaceState,
     alerts: AlertsState,
@@ -130,6 +131,7 @@ impl App {
             friends: FriendsState::default(),
             settings_panel: SettingsState::default(),
             profile_panel: crate::ui::profile::ProfileState::default(),
+            admins_panel: crate::ui::admins::AdminsState::default(),
             rooms: RoomsState::default(),
             space: SpaceState::default(),
             alerts: AlertsState::default(),
@@ -194,6 +196,7 @@ impl App {
                     self.friends = FriendsState::default();
                     self.settings_panel = SettingsState::default();
                     self.profile_panel = crate::ui::profile::ProfileState::default();
+                    self.admins_panel = crate::ui::admins::AdminsState::default();
                     self.rooms = RoomsState::default();
                     self.space = SpaceState::default();
                     self.alerts = AlertsState::default();
@@ -204,6 +207,11 @@ impl App {
                     // The banner carries the balance, so the session's first reads include the
                     // wallet the same way they include the conversation list.
                     self.commands.push(Command::Wallet);
+                    // The banner menu's owner gate: one whoami read per session, so the admins
+                    // pane's existence is offered only to the account the deployment names.
+                    // The whoami never fails on standing, so the non-owner's answer is a
+                    // quiet `Closed` — a fact, not a refusal to catch.
+                    self.commands.push(Command::Admins);
                 }
                 Event::SignedOut => {
                     self.account = None;
@@ -220,6 +228,7 @@ impl App {
                     self.friends = FriendsState::default();
                     self.settings_panel = SettingsState::default();
                     self.profile_panel = crate::ui::profile::ProfileState::default();
+                    self.admins_panel = crate::ui::admins::AdminsState::default();
                     self.rooms = RoomsState::default();
                     self.space = SpaceState::default();
                     self.alerts = AlertsState::default();
@@ -351,6 +360,17 @@ impl App {
                 }
                 Event::ProfileSaved(profile) => {
                     self.profile_panel.file(profile);
+                }
+                Event::Admins(answer) => {
+                    // The standing-and-list answer. The banner menu's gate reads it too: an
+                    // answer that says the account holds neither role keeps the menu entry
+                    // hidden, and one that arrives after the entry was opened files the
+                    // sentence the pane draws.
+                    self.admins_panel.answer = answer;
+                    self.admins_panel.settled();
+                }
+                Event::AdminChangeFailed { reason } => {
+                    self.admins_panel.fail(reason);
                 }
                 Event::Rooms(rows) => {
                     // The wire answers both the Rooms pane and Search's room query with this one
@@ -861,6 +881,19 @@ impl App {
                                         opened = Some(Place::Settings);
                                         ui.close();
                                     }
+                                    // The owner's own management page. Offered only when the
+                                    // sign-in standing check said this account is the owner — the
+                                    // surface's existence is not public information, and the
+                                    // server refuses every read and write here for anybody
+                                    // else anyway. A non-owner never sees the word.
+                                    if matches!(
+                                        self.admins_panel.answer,
+                                        crate::net::AdminsAnswer::Owner(_)
+                                    ) && ui.button("Global Admins").clicked()
+                                    {
+                                        opened = Some(Place::Admins);
+                                        ui.close();
+                                    }
                                     if ui.button("Exit / Logout").clicked() {
                                         out = true;
                                         ui.close();
@@ -962,6 +995,7 @@ impl App {
             Place::Alerts | Place::Feed => self.commands.push(Command::Notifications),
             Place::Wallet => self.commands.push(Command::Wallet),
             Place::Profile => self.commands.push(Command::OwnProfile),
+            Place::Admins => self.commands.push(Command::Admins),
             Place::Search => {
                 if self.search.suggestions.is_empty() {
                     self.commands.push(Command::Suggestions);
@@ -1097,6 +1131,7 @@ impl eframe::App for App {
                         | Place::Search
                         | Place::Wallet
                         | Place::Profile
+                        | Place::Admins
                         | Place::Settings => {}
                     }
                 });
@@ -1153,6 +1188,11 @@ impl eframe::App for App {
                                 ui,
                                 &mut context,
                                 &mut self.profile_panel,
+                            ),
+                            Place::Admins => crate::ui::admins::show(
+                                ui,
+                                &mut context,
+                                &mut self.admins_panel,
                             ),
                             Place::Settings => crate::ui::settings::show(
                                 ui,

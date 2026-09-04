@@ -511,6 +511,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             AppState.Section.WALLET -> if (!walletLoaded()) loadWallet()
             AppState.Section.ALERTS -> if (!alertsLoaded()) loadAlerts()
             AppState.Section.PROFILE -> if (signedInState?.devices?.devices == null) loadDevices()
+            AppState.Section.ADMINS -> if (signedInState?.admins?.owner == false) loadAdmins()
             AppState.Section.GAMES -> Unit
         }
     }
@@ -1731,11 +1732,150 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Reads the admin surface's own gate, then the list it guards — one answer either way.
+     *
+     * The standing is asked first and decides whether the list is even requested: a
+     * non-owner's list read is not an error to catch, it is a read this client never makes.
+     * The banner menu's entry reads the same fields, so the whoami that runs here is what
+     * offers the surface at all — the management page's existence is not public information.
+     */
+    fun loadAdmins() {
+        val live = session ?: return
+        signedIn {
+            it.copy(
+                admins = it.admins.copy(
+                    loading = true,
+                    failure = null,
+                    notice = null,
+                    closed = false,
+                ),
+            )
+        }
+        viewModelScope.launch {
+            try {
+                val standing = live.client.adminStanding()
+                if (!standing.owner) {
+                    signedIn {
+                        it.copy(
+                            admins = it.admins.copy(
+                                loading = false,
+                                owner = false,
+                                closed = true,
+                                admins = null,
+                            ),
+                        )
+                    }
+                    return@launch
+                }
+                val rows = live.client.globalAdmins()
+                signedIn {
+                    it.copy(
+                        admins = it.admins.copy(
+                            loading = false,
+                            owner = true,
+                            admins = rows,
+                        ),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn {
+                    it.copy(admins = it.admins.copy(loading = false, failure = readable(failure)))
+                }
+            }
+        }
+    }
+
+    /**
+     * Appoints a global admin by username, then re-reads the list, because the server's own
+     * row — the original grant's date, not the repeated appointment's — is the truth worth
+     * showing.
+     */
+    fun grantAdmin(username: String) {
+        val live = session ?: return
+        val form = _state.value as? AppState.SignedIn ?: return
+        if (form.admins.busy) return
+        val trimmed = username.trim()
+        if (trimmed.isEmpty()) return
+        signedIn { it.copy(admins = it.admins.copy(busy = true, failure = null, notice = null)) }
+        viewModelScope.launch {
+            try {
+                val view = live.client.grantGlobalAdmin(trimmed)
+                signedIn {
+                    it.copy(
+                        admins = it.admins.copy(
+                            busy = false,
+                            notice = "${view.username} is now a global admin.",
+                        ),
+                    )
+                }
+                loadAdmins()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn {
+                    it.copy(admins = it.admins.copy(busy = false, failure = readable(failure)))
+                }
+            }
+        }
+    }
+
+    /**
+     * Revokes one global admin, then re-reads the list. The revoke arrives already confirmed
+     * by the screen — a revocation takes moderation away from a person, which is not
+     * something to do on a stray click — and the row stays disabled while its own revoke is
+     * in flight, so the pressed row is the only one that shows its busy state.
+     */
+    fun revokeAdmin(accountId: String) {
+        val live = session ?: return
+        val id = try {
+            parseId(accountId.trim())
+        } catch (_: WireError) {
+            signedIn { it.copy(admins = it.admins.copy(failure = "That is not a valid account id.")) }
+            return
+        }
+        signedIn {
+            it.copy(
+                admins = it.admins.copy(
+                    revoking = it.admins.revoking + accountId,
+                    failure = null,
+                    notice = null,
+                ),
+            )
+        }
+        viewModelScope.launch {
+            try {
+                live.client.revokeGlobalAdmin(id)
+                signedIn {
+                    it.copy(
+                        admins = it.admins.copy(
+                            revoking = it.admins.revoking - accountId,
+                            notice = "Admin revoked.",
+                        ),
+                    )
+                }
+                loadAdmins()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn {
+                    it.copy(
+                        admins = it.admins.copy(
+                            revoking = it.admins.revoking - accountId,
+                            failure = readable(failure),
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
     // The lazy-load questions: has a section's first read landed? A section answers false while
     // its read is in flight or was never started, so re-entry re-reads only what never arrived.
     private val signedInState: AppState.SignedIn?
         get() = _state.value as? AppState.SignedIn
-
     private fun spaceLoaded(): Boolean = signedInState?.space?.loading == false && signedInState?.space?.rows?.isNotEmpty() == true
 
     private fun friendsLoaded(): Boolean = signedInState?.friends?.loading == false && signedInState?.friends?.entries?.isNotEmpty() == true
@@ -1817,6 +1957,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         // The wallet's combined read also fills the banner's $MIG balance, so the session starts
         // with it -- the desktop client issues its wallet command at sign-in for the same reason.
         loadWallet()
+        // The banner menu's owner gate: one whoami read per session, so the Admins entry is
+        // offered only to the account the deployment names. The whoami never fails on standing
+        // -- `owner: false` is the answer, not a refusal to catch -- so a non-owner costs one
+        // cheap call and never sees the word.
+        loadAdmins()
         // The AVAX Activity list rides the session's own tracked records: no read, no server call
         // -- the vault already answered it when it handed back the session.
         signedIn {

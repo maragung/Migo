@@ -313,6 +313,17 @@ pub struct DeviceRow {
     pub is_current: bool,
 }
 
+/// One appointed global admin, for the owner's management pane — who may moderate every public
+/// room, appointed when, and the one action the row carries: taking the appointment away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminRow {
+    pub account_id: Id,
+    /// The account's username, resolved at read time.
+    pub username: String,
+    /// When the grant happened.
+    pub granted_at: Timestamp,
+}
+
 /// One registered wallet address, for the security panel's account-root section. Address and
 /// metadata only — the key behind it never left the device that derived it.
 #[derive(Debug, Clone, PartialEq, Eq)]

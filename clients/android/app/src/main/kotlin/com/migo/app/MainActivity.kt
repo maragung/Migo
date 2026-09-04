@@ -20,6 +20,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.migo.app.model.AppState
+import com.migo.app.ui.AdminsScreen
 import com.migo.app.ui.AlertsScreen
 import com.migo.app.ui.BannerAction
 import com.migo.app.ui.ChatScreen
@@ -180,12 +181,14 @@ private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel) {
                 username = state.username,
                 connection = state.connection,
                 balance = state.wallet.balance,
+                owner = state.admins.owner,
                 onAction = { action ->
                     when (action) {
                         BannerAction.PROFILE -> model.selectSection(AppState.Section.PROFILE)
                         BannerAction.WALLET -> model.selectSection(AppState.Section.WALLET)
                         BannerAction.ALERTS -> model.selectSection(AppState.Section.ALERTS)
                         BannerAction.SEARCH -> model.selectSection(AppState.Section.SEARCH)
+                        BannerAction.ADMINS -> model.selectSection(AppState.Section.ADMINS)
                         BannerAction.SIGN_OUT -> model.signOut()
                     }
                 },
@@ -282,6 +285,14 @@ private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifie
             onSaveStatus = model::saveCustomStatus,
             onChangePassphrase = model::changePassphrase,
             onSaveContact = model::saveContact,
+            modifier = modifier,
+        )
+
+        AppState.Section.ADMINS -> AdminsScreen(
+            state = state,
+            onGrant = model::grantAdmin,
+            onRevoke = model::revokeAdmin,
+            onRefresh = model::loadAdmins,
             modifier = modifier,
         )
     }

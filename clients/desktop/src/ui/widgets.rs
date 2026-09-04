@@ -243,6 +243,23 @@ pub fn place_icon(ui: &mut Ui, theme: Theme, place: crate::ui::Place, active: bo
                 );
             }
         }
+        crate::ui::Place::Admins => {
+            // A shield: the mark the whole product stamps authority with. One outline for the
+            // badge, a notch for the point, and a check for the mandate it carries.
+            painter.add(egui::Shape::line(
+                vec![
+                    p(0.2, 0.12),
+                    p(0.8, 0.12),
+                    p(0.8, 0.5),
+                    p(0.5, 0.9),
+                    p(0.2, 0.5),
+                    p(0.2, 0.12),
+                ],
+                stroke,
+            ));
+            painter.line_segment([p(0.36, 0.48), p(0.46, 0.6)], stroke);
+            painter.line_segment([p(0.46, 0.6), p(0.68, 0.32)], stroke);
+        }
     }
 }
 

@@ -205,6 +205,34 @@ data class DeviceRevoked(val ok: Boolean = false, val revoked: Long = 0)
 private data class WalletsResponse(val wallets: List<WalletSummary> = emptyList())
 
 /**
+ * One appointed global admin, as the owner's list renders it. The appointer is carried on the
+ * wire but not read here: the screen names the appointer in prose (always the Owner/CEO in
+ * this version), and a field kept only to be ignored is a field that lies about the shape the
+ * screen draws.
+ */
+@Serializable
+data class AdminView(
+    @SerialName("account_id") val accountId: String,
+    val username: String,
+    @SerialName("granted_by") val grantedBy: String? = null,
+    @SerialName("granted_at_ms") val grantedAtMs: Long,
+)
+
+/**
+ * What the caller may open of the admin surface. Owner comes from configuration, not data --
+ * the deployment names its Owner/CEO -- so `owner: false` is an answer a client can act on
+ * (hide the surface) rather than a failure to catch.
+ */
+@Serializable
+data class AdminStanding(val owner: Boolean = false, val admin: Boolean = false)
+
+@Serializable
+private data class AdminsResponse(val admins: List<AdminView> = emptyList())
+
+@Serializable
+private data class GrantAdminRequest(val username: String)
+
+/**
  * A session, as the server issues it.
  *
  * Never logged and never written anywhere but the sealed vault. [toString] is overridden rather than
@@ -614,6 +642,51 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
             json.encodeToString(ContactRequest.serializer(), ContactRequest(emailOrPhone)),
             accessToken,
         ).use { if (!it.isSuccessful) throw failure(it) }
+    }
+
+    // --- the admin surface ------------------------------------------------------------
+    //
+    // The Owner/CEO's management surface over the global admins. Every route here except whoami
+    // is owner-only on the server, so this client offers nothing it cannot honestly call: the
+    // whoami gate decides whether the surface exists at all, and the reads and writes follow
+    // only for the account the deployment names.
+
+    /**
+     * What the caller may open of the admin surface: `GET /v1/admins/whoami`.
+     *
+     * Never fails on standing -- an account that is neither owner nor admin gets
+     * `{owner: false, admin: false}`, which is the answer, not an error -- so a client that
+     * asks on sign-in can decide whether its owner surface exists without a refusal to catch.
+     */
+    suspend fun adminStanding(accessToken: String): AdminStanding =
+        respond(send("GET", "/v1/admins/whoami", null, accessToken), AdminStanding.serializer())
+
+    /** Every global admin, with usernames resolved: `GET /v1/admins`. Owner-only. */
+    suspend fun globalAdmins(accessToken: String): List<AdminView> =
+        respond(send("GET", "/v1/admins", null, accessToken), AdminsResponse.serializer()).admins
+
+    /**
+     * Appoints a global admin by username: `PUT /v1/admins`, idempotent -- a repeated
+     * appointment keeps the original grant. Owner-only.
+     */
+    suspend fun grantGlobalAdmin(accessToken: String, username: String): AdminView = respond(
+        send(
+            "PUT",
+            "/v1/admins",
+            json.encodeToString(GrantAdminRequest.serializer(), GrantAdminRequest(username)),
+            accessToken,
+        ),
+        AdminView.serializer(),
+    )
+
+    /**
+     * Revokes a global admin: `DELETE /v1/admins/{id}`, answered 204. Owner-only. Revoking an
+     * account that is not one is a quiet 204 -- the same shape rule the wallet archive
+     * follows, so the list that follows a revoke is the truth rather than the echo.
+     */
+    suspend fun revokeGlobalAdmin(accessToken: String, accountId: Id) {
+        send("DELETE", "/v1/admins/${accountId.value}", null, accessToken)
+            .use { if (!it.isSuccessful) throw failure(it) }
     }
 
     /**

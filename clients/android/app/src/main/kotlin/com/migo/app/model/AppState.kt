@@ -1,6 +1,7 @@
 package com.migo.app.model
 
 import com.migo.core.ConnectionState
+import com.migo.core.net.AdminView
 import com.migo.core.net.DeviceSummary
 import com.migo.core.net.WalletSummary
 import com.migo.core.protocol.BadgeWire
@@ -100,6 +101,7 @@ sealed interface AppState {
         val backup: BackupState = BackupState(),
         val profileEdit: ProfileEditState = ProfileEditState(),
         val accountSecurity: AccountSecurityState = AccountSecurityState(),
+        val admins: AdminsState = AdminsState(),
     ) : AppState
 
     /**
@@ -108,11 +110,11 @@ sealed interface AppState {
      * the strip, which is the new-ui-02 model's phone story.
      */
     enum class Section {
-        CHATS, FRIENDS, ROOMS, GAMES, FEED, ALERTS, SEARCH, WALLET, PROFILE;
+        CHATS, FRIENDS, ROOMS, GAMES, FEED, ALERTS, SEARCH, WALLET, PROFILE, ADMINS;
 
-        /** True for the four panels the banner's menu opens, which cover the strip rather than join it. */
+        /** True for the panels the banner's menu opens, which cover the strip rather than join it. */
         val isPanel: Boolean
-            get() = this == ALERTS || this == SEARCH || this == WALLET || this == PROFILE
+            get() = this == ALERTS || this == SEARCH || this == WALLET || this == PROFILE || this == ADMINS
     }
 }
 
@@ -371,6 +373,33 @@ data class AccountSecurityState(
     /** The sentence the last save answered with, shown once. */
     val notice: String? = null,
     /** Why the last save could not answer. */
+    val failure: String? = null,
+)
+
+/**
+ * The Admins panel: the Owner/CEO's management page over the global admins. The standing is
+ * asked once per session (a whoami that never fails on standing) and gates the banner menu's
+ * very entry, because the management page's whole point is that its existence is not public
+ * information -- a non-owner never sees the word. `Closed` is a fact, not a failure: the
+ * honest answer for an account that holds neither role, drawn as a sentence the same way the
+ * web client draws it.
+ */
+data class AdminsState(
+    /** The list, once the standing said owner and the read answered. Null before that. */
+    val admins: List<AdminView>? = null,
+    /** True while the standing-and-list read is in flight. */
+    val loading: Boolean = false,
+    /** True for the account this deployment names as its Owner/CEO. */
+    val owner: Boolean = false,
+    /** The standing was asked and the answer is "not yours to open". */
+    val closed: Boolean = false,
+    /** True while a grant or a revoke is in flight. */
+    val busy: Boolean = false,
+    /** Account ids with a revoke in flight, so only the pressed row shows its busy state. */
+    val revoking: Set<String> = emptySet(),
+    /** The sentence the last grant or revoke answered with, shown once. */
+    val notice: String? = null,
+    /** Why the last read or change could not answer. */
     val failure: String? = null,
 )
 

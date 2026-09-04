@@ -514,7 +514,7 @@ private fun AccountSecuritySection(
         Text(
             text = security.notice ?: "",
             style = MaterialTheme.typography.bodySmall,
-            color = LocalMigoExtra.current.positive,
+            color = MaterialTheme.colorScheme.secondary,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
         )
     }

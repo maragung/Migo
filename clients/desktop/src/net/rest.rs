@@ -400,6 +400,34 @@ struct WalletsBody {
     wallets: Vec<RegisteredWallet>,
 }
 
+/// One appointed global admin, as the owner's list renders it. Wire field names are the
+/// server's own (`granted_at_ms`), the same compromise every summary struct here makes so the
+/// JSON the panel sees matches the API it came from.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdminView {
+    pub account_id: Id,
+    pub username: String,
+    /// Who appointed them — always the Owner/CEO in this version.
+    #[expect(
+        dead_code,
+        reason = "the pane names the appointer in prose, not per row"
+    )]
+    pub granted_by: Id,
+    /// When the grant happened, in milliseconds since the epoch.
+    pub granted_at_ms: i64,
+}
+
+/// What the caller may open of the admin surface. Owner comes from configuration, not data —
+/// the deployment names its Owner/CEO — so `owner: false` is an answer the client can act on
+/// (hide the surface) rather than a failure to catch. `admin` is unread here on purpose: the
+/// pane gates on the owner bit and the admin bit is the server's own concern, carried anyway
+/// because the wire sends it and a struct that dropped it would lie about the answer's shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct AdminStanding {
+    pub owner: bool,
+    pub admin: bool,
+}
+
 /// Standard base64 with padding, the form every account-root endpoint speaks.
 fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -826,6 +854,67 @@ impl Rest {
             "/v1/auth/contact",
             reqwest::Method::PUT,
             &ContactBody { email_or_phone },
+        )
+        .await
+    }
+
+    /// What the caller may open of the admin surface: `GET /v1/admins/whoami`.
+    ///
+    /// Never fails on standing — an account that is neither owner nor admin gets
+    /// `{owner: false, admin: false}`, which is the answer, not an error — so a client that
+    /// asks on sign-in can decide whether its owner surface exists without a refusal to catch.
+    pub async fn admin_standing(&self, access_token: &str) -> Result<AdminStanding, RestError> {
+        self.auth_json(access_token, "/v1/admins/whoami", reqwest::Method::GET, &())
+            .await
+    }
+
+    /// Every global admin, with usernames resolved: `GET /v1/admins`. Owner-only — the server
+    /// refuses it for anybody else, and that refusal is the list's own security rather than
+    /// something this client adds on top.
+    pub async fn global_admins(&self, access_token: &str) -> Result<Vec<AdminView>, RestError> {
+        #[derive(Deserialize)]
+        struct AdminsBody {
+            #[serde(default)]
+            admins: Vec<AdminView>,
+        }
+        let body: AdminsBody = self
+            .auth_json(access_token, "/v1/admins", reqwest::Method::GET, &())
+            .await?;
+        Ok(body.admins)
+    }
+
+    /// Appoints a global admin by username: `PUT /v1/admins`, idempotent. Owner-only.
+    pub async fn grant_global_admin(
+        &self,
+        access_token: &str,
+        username: &str,
+    ) -> Result<AdminView, RestError> {
+        #[derive(Serialize)]
+        struct GrantBody<'a> {
+            username: &'a str,
+        }
+        self.auth_json(
+            access_token,
+            "/v1/admins",
+            reqwest::Method::PUT,
+            &GrantBody { username },
+        )
+        .await
+    }
+
+    /// Revokes a global admin: `DELETE /v1/admins/{id}`, answered 204. Owner-only. Revoking an
+    /// account that is not one is a quiet 204 — the same shape rule the wallet archive follows,
+    /// so the list that follows a revoke is the truth rather than the echo.
+    pub async fn revoke_global_admin(
+        &self,
+        access_token: &str,
+        account_id: Id,
+    ) -> Result<(), RestError> {
+        self.auth_expect_empty(
+            access_token,
+            &format!("/v1/admins/{}", account_id.to_text()),
+            reqwest::Method::DELETE,
+            &(),
         )
         .await
     }

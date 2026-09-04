@@ -26,6 +26,8 @@ import com.migo.core.domain.SocialDomain
 import com.migo.core.domain.Subscription
 import com.migo.core.domain.SyncDomain
 import com.migo.core.domain.TypingDomain
+import com.migo.core.net.AdminStanding
+import com.migo.core.net.AdminView
 import com.migo.core.net.DeviceRequest
 import com.migo.core.net.DeviceRevoked
 import com.migo.core.net.DeviceSummary
@@ -681,6 +683,32 @@ class MigoClient private constructor(
      */
     suspend fun setContact(emailOrPhone: String) {
         rest.setContact(requireConnected().grant.accessToken, emailOrPhone)
+    }
+
+    /**
+     * What the caller may open of the admin surface. The one route any signed-in account may
+     * call: a client asks it on sign-in to decide whether the owner surface exists at all,
+     * because the whoami never fails on standing -- `owner: false` is the answer, not a
+     * refusal to catch.
+     */
+    suspend fun adminStanding(): AdminStanding =
+        rest.adminStanding(requireConnected().grant.accessToken)
+
+    /** Every global admin, with usernames resolved. Owner-only; the server is the gate. */
+    suspend fun globalAdmins(): List<AdminView> =
+        rest.globalAdmins(requireConnected().grant.accessToken)
+
+    /** Appoints a global admin by username, idempotently. Owner-only. */
+    suspend fun grantGlobalAdmin(username: String): AdminView =
+        rest.grantGlobalAdmin(requireConnected().grant.accessToken, username)
+
+    /**
+     * Revokes a global admin by the id the list reported. Owner-only. The revoke arrives
+     * already confirmed by the screen -- a revocation takes moderation away from a person,
+     * which is not something to do on a stray click.
+     */
+    suspend fun revokeGlobalAdmin(accountId: Id) {
+        rest.revokeGlobalAdmin(requireConnected().grant.accessToken, accountId)
     }
 
     /** The account's registered wallet addresses, as the server knows them. */
