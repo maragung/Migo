@@ -5,6 +5,14 @@ dist/
 coverage/
 **/target/
 
+# Vendored Foundry dependencies (OpenZeppelin, forge-std submodules) and what forge writes
+# when it builds and broadcasts: pinned or generated sources, not ours to format — forge fmt
+# owns the Solidity layout, and the submodules' own JS/Markdown is upstream's.
+contracts/lib/
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+
 # Generated sources. Two formatters fighting over one file is a diff that never settles:
 # the generator owns the layout, and `make protocol-check` is what enforces it.
 packages/protocol/src/generated.ts

@@ -37,6 +37,15 @@ export default tseslint.config(
       // A user-authored design reference kept at the root, outside every tsconfig (the same
       // reason as docs/design/**). Not tracked, not shipped; linting it only errors.
       'new-ui-02.tsx',
+      // Vendored dependencies: the Foundry submodules under contracts/lib (OpenZeppelin,
+      // forge-std). Pinned upstream sources, not ours to lint — the same standing as
+      // node_modules, just checked in so CI can build without fetching.
+      'contracts/lib/**',
+      // What Foundry writes when it builds and broadcasts: artifacts and run records, no
+      // hand-edited source anywhere among them.
+      'contracts/out/**',
+      'contracts/cache/**',
+      'contracts/broadcast/**',
     ],
   },
   js.configs.recommended,

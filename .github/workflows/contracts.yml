@@ -7,12 +7,12 @@ on:
   push:
     branches: [main]
     paths:
-      - "contracts/**"
-      - ".github/workflows/contracts.yml"
+      - 'contracts/**'
+      - '.github/workflows/contracts.yml'
   pull_request:
     paths:
-      - "contracts/**"
-      - ".github/workflows/contracts.yml"
+      - 'contracts/**'
+      - '.github/workflows/contracts.yml'
 
 permissions:
   contents: read
@@ -38,9 +38,10 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          # Pinned: the toolchain a release's verified source must match, and the one
-          # the fmt rules below were written against.
-          version: v1.3.2
+          # Pinned to the version the repo is formatted and tested with locally —
+          # forge's fmt rules drift between releases, and a mismatched pin fails
+          # `forge fmt --check` on sources that are clean under the local toolchain.
+          version: v1.8.1
 
       - name: Check formatting
         run: forge fmt --check
