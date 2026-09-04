@@ -4103,8 +4103,9 @@ Range opcode:
 176 sampai 191 games dan bots
 192 sampai 207 moderation
 208 sampai 223 federation
-224 sampai 239 calls
-240 sampai 255 reserved
+224 sampai 238 calls
+239 sampai 240 store (pembelian on-chain dan entitlement)
+241 sampai 255 reserved
 
 Konvensi penamaan. Nama opcode memakai SCREAMING_SNAKE_CASE. Response TIDAK memiliki opcode sendiri: response dibawa pada correlation dari request-nya dan diacu dengan nama struct dalam PascalCase, misalnya MESSAGE_SEND dijawab MessageAccepted, SYNC dijawab SyncResponse, dan SUBSCRIBE dijawab SubscribeResponse. Karena itu satu nomor opcode mencakup satu request beserta response-nya, dan jumlah opcode tidak membengkak dua kali.
 
@@ -4161,6 +4162,10 @@ Opcode yang sudah ada di schema. STATUS: SCHEMA. Format setiap baris: nomor, nam
 184 GAME_VIEW, client ke server, User, 2, Critical
 185 GAME_ABANDON, client ke server, User, 2, Critical
 186 GAME_CATALOGUE, client ke server, User, 1, Critical
+239 STORE_PURCHASE, client ke server, User, 5, Critical
+240 ENTITLEMENTS, client ke server, User, 1, Droppable
+
+Opcode store ditempatkan di kepala range reserved, bukan di range economy, karena range economy 160 sampai 175 sudah terisi penuh oleh opcode yang lebih dulu; nomor 239 dan 240 terkirim bersama v0.16.4 sehingga tidak dinomori ulang.
 
 Opcode yang direncanakan. STATUS: BUILT untuk seluruh range yang tercantum di atas, termasuk call 224 sampai 238. STATUS: SCHEMA untuk metadata block section 141 dan flag bit 0x40 yang belum masuk registri. STATUS: SPEC untuk SFU group call penuh yang membutuhkan deployment terpisah. Setiap opcode ditambahkan ke opcodes.json bersamaan dengan implementasi handler-nya, sesuai aturan alokasi section 146.
 

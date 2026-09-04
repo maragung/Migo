@@ -174,7 +174,11 @@ def tracked_files() -> list[str]:
         capture_output=True,
         check=True,
     )
-    return [path for path in result.stdout.decode("utf-8").split("\0") if path]
+    paths = [path for path in result.stdout.decode("utf-8").split("\0") if path]
+    # A submodule's gitlink is listed by ls-files but lives on disk as a directory
+    # (contracts/lib). It is not ours to scan — pinned upstream sources, the same
+    # standing as node_modules — and opening it as a file only errors.
+    return [path for path in paths if not os.path.isdir(os.path.join(ROOT, path))]
 
 
 def looks_textual(path: str) -> bool:
