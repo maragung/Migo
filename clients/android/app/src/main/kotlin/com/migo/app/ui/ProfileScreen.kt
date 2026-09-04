@@ -501,6 +501,11 @@ private fun AccountSecuritySection(
         }
     }
 
+    // Whether the two new-passphrase fields disagree, once both have something to compare.
+    // Named once: the field's error styling and its supporting line must agree, and a repeated
+    // condition is a second place they can drift apart.
+    val mismatched = confirm.isNotEmpty() && next != confirm
+
     Text(
         text = "Changing the passphrase signs out every other session, on every device; this " +
             "one stays signed in.",
@@ -536,8 +541,8 @@ private fun AccountSecuritySection(
         visualTransformation = PasswordVisualTransformation(),
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
         enabled = !security.busy,
-        isError = confirm.isNotEmpty() && next != confirm,
-        supportingText = if (confirm.isNotEmpty() && next != confirm) {
+        isError = mismatched,
+        supportingText = if (mismatched) {
             { Text("The new passphrases do not match.") }
         } else {
             null
