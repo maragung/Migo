@@ -1576,7 +1576,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         signedIn { it.copy(profileEdit = it.profileEdit.copy(busy = true, failure = null, notice = null)) }
         viewModelScope.launch {
             try {
-                val presence = current.profileEdit.profile?.presence ?: PresenceState.ONLINE
+                val presence = current.profileEdit.profile?.presence ?: PresenceState.Online
                 live.client.presence.set(presence, status.trim().ifEmpty { null })
                 signedIn {
                     it.copy(
