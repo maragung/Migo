@@ -2370,3 +2370,56 @@ bawah passphrase perangkat, yang memang tak pernah dipegang sesi), jadi
 refresh token tersimpan resmi pensiun: unlock berikutnya jatuh ke
 upacara ML-DSA bila perangkat mampu, atau minta passphrase baru — dan
 formulirnya jujur soal itu.
+
+## 65. Paritas penuh panel akun web di desktop dan Android (v0.16.3)
+
+Versi ini menutup survei terakhir: setiap pintu yang panel web punya,
+klien desktop dan Android kini punya padanannya — masing-masing memakai
+bentuk perangkatnya sendiri.
+
+**Sunting profil di dua klien.** PROFILE_UPDATE (111) kini dikirim
+desktop dan Android, dengan kontrak absent-means-unchanged yang panel
+web pegang: kontrol privasi mulai dari "biarkan" dan hanya ikut
+dalam patch saat disentuh, karena server tidak pernah mengirim nilai
+privasi terkini bahkan ke pemiliknya. Status kustom tetap naik kawat
+presence, diterbitkan di samping state akun, jadi menyimpan satu
+kalimat tidak pernah membalik presence. Balasan adalah kartu segar;
+kedua klien mengganti salinannya dari balasan itu, bukan membaca ulang.
+
+**Keamanan akun di Android.** Dua kontrol level akun yang dulu hanya
+panel web punya: ganti passphrase (server mengakhiri semua sesi lain
+dan menjawab dengan grant pengganti yang diadopsi seperti refresh —
+perangkat ini tetap masuk) dan kontak pemulihan. Keduanya tinggal di
+seksi "Account security" layar Profile, di samping perangkat dan
+cadangan.
+
+**Panel Admins, gerbang dua lapis.** Halaman owner-only untuk
+moderator setiap room publik — kini ada di desktop (panel kanan di
+balik entri menu banner yang hanya ditawarkan saat whoami bilang
+owner) dan Android (layar covering, gerbang yang sama). whoami
+ditanya sekali per sesi; non-owner tidak pernah melihat kata itu,
+dan server tetap menolak semua baca-tulis di sana. Revoke dua
+langkah — klik pertama mengubah tombol baris menjadi konfirmasi yang
+menyebut nama akunnya.
+
+**Unggah avatar.** Alur change-photo panel web di kawat dua klien
+lainnya: MEDIA_UPLOAD_BEGIN mencetak tiket lewat soket, byte di-PUT
+ke URL bertanda tangan lewat HTTP polos (tanpa token — tanda tangan
+di URL adalah seluruh otorisasinya), MEDIA_UPLOAD_COMMIT menutup
+dengan SHA-256 asli dari byte yang dikirim, lalu patch profil
+membawa id media baru. Kegagalan di mana pun membatalkan tiket
+best-effort. Desktop: worker tetap tak pernah memblok satu frame —
+permintaan keluar lewat send_and_remember, state pending mengingat
+untuk apa jawabannya, dan lengan frame menyelesaikan pekerjaan.
+Android: MediaDomain baru di SDK inti (begin/PUT/commit/abort plus
+unggah satu-panggilan), bit fitur MEDIA_UPLOAD kini diumumkan karena
+kodenya sungguh ada, dan pemilih GetContent di layar Profile yang
+klaimnya keyakinan pemilih — server yang menilai byte-nya.
+
+**Pelajaran CI.** Workflow Android hanya terpicu oleh
+clients/android/**, shared/protocol/**, dan berkas workflow — dan
+kegagalannya tidak memerah CI main. Tiga build merah berturut-turut
+tidak terlihat karena itu: kesalahan kapitalisasi enum (entri enum
+Kotlin yang digenerate adalah PascalCase) hanya tercompile di gerbang
+Android. Sejak sini, setiap push yang menyentuh Kotlin ditonton di
+kedua workflow sampai keduanya hijau.
