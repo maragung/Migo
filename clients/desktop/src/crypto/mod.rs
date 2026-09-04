@@ -10,10 +10,12 @@
 //!
 //! - [`content`]: the inner plaintext, `content_type || MSE body || padding`.
 //! - [`envelope`]: the outer bytes the server routes but cannot read.
+//! - [`group`]: the sender-key layer — one chain per conversation, distributed pairwise.
 //! - [`session`]: one ratchet per remote device, and the X3DH policy that starts them.
 
 pub mod content;
 pub mod envelope;
+pub mod group;
 pub mod session;
 
 /// What can go wrong between "the user pressed Enter" and "the envelope is on the wire".

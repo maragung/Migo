@@ -775,6 +775,12 @@ impl Dispatcher for AppDispatcher {
             Opcode::Leaderboard => {
                 economy_read::handle_leaderboard(context, frame, &self.economy).await
             }
+            Opcode::StorePurchase => {
+                economy::handle_store_purchase(context, frame, &self.economy).await
+            }
+            Opcode::Entitlements => {
+                economy::handle_entitlements(context, frame, &self.economy).await
+            }
 
             // --- bots ---
             Opcode::BotCommand => bots::handle_command(context, frame, &self.bots).await,

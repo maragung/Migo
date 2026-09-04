@@ -6524,6 +6524,146 @@ export function decodeConversationStateEvent(r: Reader): ConversationStateEvent 
   return out;
 }
 
+/** Buys a catalogue item from the caller's own account. */
+export interface StorePurchase {
+  /** Catalogue code, e.g. `emoticon.frog_set`. */
+  sku: string;
+  /** Caller's idempotency key; a repeat returns the first purchase. */
+  clientKey: string;
+  /** The on-chain payment's transaction hash, when the purchase was paid on-chain (Avalanche C-Chain). Recorded with the entitlement so a purchase can be audited against the chain. */
+  txHash?: string;
+}
+
+export function encodeStorePurchase(w: Writer, v: StorePurchase): void {
+  w.enter();
+  w.str(v.sku);
+  w.str(v.clientKey);
+  let present = 0;
+  if (v.txHash !== undefined) present++;
+  w.u32(present);
+  if (v.txHash !== undefined) { const value = v.txHash; w.optional(1, (w) => { w.str(value); }); }
+  w.leave();
+}
+
+export function decodeStorePurchase(r: Reader): StorePurchase {
+  r.enter();
+  const sku = r.str();
+  const clientKey = r.str();
+  const out: StorePurchase = { sku, clientKey } as StorePurchase;
+  const optionalCount = r.u32();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.txHash = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
+  r.leave();
+  return out;
+}
+
+/** The purchase's answer: what was bought, what it cost, and whether this call was a repeat of an earlier one. */
+export interface StorePurchaseResult {
+  sku: string;
+  price: number;
+  duplicate: boolean;
+}
+
+export function encodeStorePurchaseResult(w: Writer, v: StorePurchaseResult): void {
+  w.enter();
+  w.str(v.sku);
+  w.u64(v.price);
+  w.bool(v.duplicate);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeStorePurchaseResult(r: Reader): StorePurchaseResult {
+  r.enter();
+  const sku = r.str();
+  const price = r.u64();
+  const duplicate = r.bool();
+  const out: StorePurchaseResult = { sku, price, duplicate } as StorePurchaseResult;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Empty; the caller's own entitlements are the session's. */
+export interface EntitlementsReq {
+}
+
+export function encodeEntitlementsReq(w: Writer, _v: EntitlementsReq): void {
+  w.enter();
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeEntitlementsReq(r: Reader): EntitlementsReq {
+  r.enter();
+  const out: EntitlementsReq = {  } as EntitlementsReq;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** One thing an account owns: a catalogue code and when it was acquired. */
+export interface Entitlement {
+  sku: string;
+  acquiredAt: number;
+}
+
+export function encodeEntitlement(w: Writer, v: Entitlement): void {
+  w.enter();
+  w.str(v.sku);
+  w.timestamp(v.acquiredAt);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeEntitlement(r: Reader): Entitlement {
+  r.enter();
+  const sku = r.str();
+  const acquiredAt = r.timestamp();
+  const out: Entitlement = { sku, acquiredAt } as Entitlement;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** Everything the caller owns, oldest first. */
+export interface EntitlementsResponse {
+  items: Entitlement[];
+}
+
+export function encodeEntitlementsResponse(w: Writer, v: EntitlementsResponse): void {
+  w.enter();
+  { w.listLen(v.items.length); for (const item of v.items) { encodeEntitlement(w, item); } }
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeEntitlementsResponse(r: Reader): EntitlementsResponse {
+  r.enter();
+  const items = ((): Entitlement[] => { const n = r.listLen(); const v: Entitlement[] = []; for (let i = 0; i < n; i++) v.push(decodeEntitlement(r)); return v; })();
+  const out: EntitlementsResponse = { items } as EntitlementsResponse;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
 export type DeliveryClass = 'Critical' | 'Coalescable' | 'Droppable';
 export type AuthLevel = 'None' | 'User' | 'Bot' | 'Server';
 export type Direction = 'client_to_server' | 'server_to_client' | 'both';
@@ -6696,6 +6836,10 @@ export const OP = {
   CALL_SFU_EVENT: 238,
   /** Group metadata moved: a rename. Deltas only, coalesced per conversation. */
   CONVERSATION_STATE_EVENT: 52,
+  /** Buys a store item for the caller; the ledger and the entitlement are written together. */
+  STORE_PURCHASE: 239,
+  /** Everything the caller owns, oldest first. */
+  ENTITLEMENTS: 240,
 } as const;
 export type OpcodeValue = (typeof OP)[keyof typeof OP];
 
@@ -6827,6 +6971,8 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   237: { code: 237, name: 'CALL_SFU_JOIN', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallInvite', response: 'CallTurnResponse' },
   238: { code: 238, name: 'CALL_SFU_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallStateEvent', coalesceKey: 'call_id' },
   52: { code: 52, name: 'CONVERSATION_STATE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ConversationStateEvent', coalesceKey: 'conversation_id' },
+  239: { code: 239, name: 'STORE_PURCHASE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'StorePurchase', response: 'StorePurchaseResult' },
+  240: { code: 240, name: 'ENTITLEMENTS', cost: 1, cls: 'Droppable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'EntitlementsReq', response: 'EntitlementsResponse' },
 };
 
 export function opcodeName(code: number): string {

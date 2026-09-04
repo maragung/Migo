@@ -8011,6 +8011,158 @@ data class ConversationStateEvent(
     }
 }
 
+/** Buys a catalogue item from the caller's own account. */
+data class StorePurchase(
+    /** Catalogue code, e.g. `emoticon.frog_set`. */
+    val sku: String,
+    /** Caller's idempotency key; a repeat returns the first purchase. */
+    val clientKey: String,
+    /** The on-chain payment's transaction hash, when the purchase was paid on-chain (Avalanche C-Chain). Recorded with the entitlement so a purchase can be audited against the chain. */
+    val txHash: String? = null,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(sku)
+        w.str(clientKey)
+        var present = 0
+        if (txHash != null) present++
+        w.u32(present)
+        if (txHash != null) {
+            val value = txHash
+            w.optional(1) { w ->
+                w.str(value)
+            }
+        }
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): StorePurchase {
+            r.enter()
+            val sku = r.str()
+            val clientKey = r.str()
+            var txHash: String? = null
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> txHash = sub.str()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
+            }
+            r.leave()
+            return StorePurchase(sku, clientKey, txHash)
+        }
+    }
+}
+
+/** The purchase's answer: what was bought, what it cost, and whether this call was a repeat of an earlier one. */
+data class StorePurchaseResult(
+    val sku: String,
+    val price: Long,
+    val duplicate: Boolean,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(sku)
+        w.u64(price)
+        w.bool(duplicate)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): StorePurchaseResult {
+            r.enter()
+            val sku = r.str()
+            val price = r.u64()
+            val duplicate = r.bool()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return StorePurchaseResult(sku, price, duplicate)
+        }
+    }
+}
+
+/** Empty; the caller's own entitlements are the session's. */
+class EntitlementsReq(
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): EntitlementsReq {
+            r.enter()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return EntitlementsReq()
+        }
+    }
+}
+
+/** One thing an account owns: a catalogue code and when it was acquired. */
+data class Entitlement(
+    val sku: String,
+    val acquiredAt: Long,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.str(sku)
+        w.timestamp(acquiredAt)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): Entitlement {
+            r.enter()
+            val sku = r.str()
+            val acquiredAt = r.timestamp()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return Entitlement(sku, acquiredAt)
+        }
+    }
+}
+
+/** Everything the caller owns, oldest first. */
+data class EntitlementsResponse(
+    val items: List<Entitlement>,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.listLen(items.size)
+        for (item in items) { item.encode(w) }
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): EntitlementsResponse {
+            r.enter()
+            val items = run { val n = r.listLen(); val acc = ArrayList<Entitlement>(n); for (i in 0 until n) acc.add(Entitlement.decode(r)); acc }
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return EntitlementsResponse(items)
+        }
+    }
+}
+
 /** Delivery class, deciding what happens when a session queue is full. */
 enum class DeliveryClass { Critical, Coalescable, Droppable }
 /** Minimum session state an opcode requires. */
@@ -8187,6 +8339,10 @@ object Op {
     const val CALL_SFU_EVENT: Long = 238L
     /** Group metadata moved: a rename. Deltas only, coalesced per conversation. */
     const val CONVERSATION_STATE_EVENT: Long = 52L
+    /** Buys a store item for the caller; the ledger and the entitlement are written together. */
+    const val STORE_PURCHASE: Long = 239L
+    /** Everything the caller owns, oldest first. */
+    const val ENTITLEMENTS: Long = 240L
 }
 
 /** Static metadata for one opcode: its rate-limit cost, delivery class, required auth, and shape. */
@@ -8318,6 +8474,8 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     237L to OpcodeMeta(237L, "CALL_SFU_JOIN", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallInvite", "CallTurnResponse", null),
     238L to OpcodeMeta(238L, "CALL_SFU_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "CallStateEvent", null, "call_id"),
     52L to OpcodeMeta(52L, "CONVERSATION_STATE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ConversationStateEvent", null, "conversation_id"),
+    239L to OpcodeMeta(239L, "STORE_PURCHASE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "StorePurchase", "StorePurchaseResult", null),
+    240L to OpcodeMeta(240L, "ENTITLEMENTS", 1, DeliveryClass.Droppable, AuthLevel.User, Direction.ClientToServer, false, "EntitlementsReq", "EntitlementsResponse", null),
 )
 
 /** Human name for an opcode, for logs and errors. Never used on the wire. */

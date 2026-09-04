@@ -49,8 +49,26 @@ export interface RoomInfo {
 export interface RoomsContextValue {
   /** The room behind a conversation, when this shell knows one. */
   infoFor: (conversationId: Id) => RoomInfo | null;
+  /**
+   * The live record for a room id, when this shell watches one.
+   *
+   * The directory's rows hold the counts a `ROOM_LIST` page carried — a snapshot from the moment
+   * of the read — while this record is the one the state deltas keep current. A row whose room
+   * is joined renders these counts instead, so the directory moves with the room rather than
+   * with the last refresh.
+   */
+  liveFor: (roomId: Id) => RoomInfo | null;
   /** Records or refreshes a room from a join reply (the one moment the wire names both). */
   noteRoom: (info: RoomInfo) => void;
+  /**
+   * Drops a room's record after a leave.
+   *
+   * The server's leave fan-out deliberately excludes the leaver's own device, so no state delta
+   * will ever correct the held counts — without this call a left room's row keeps showing the
+   * counts it had while joined ("1 online, 1 member" in a room of nobody). The directory page
+   * re-reads on its own triggers and is the honest count after that.
+   */
+  forgetRoom: (roomId: Id) => void;
 }
 
 const RoomsContext = createContext<RoomsContextValue | null>(null);
@@ -163,6 +181,23 @@ export function RoomsProvider({ children }: { children: ReactNode }): ReactNode 
     [commit, watch],
   );
 
+  // The leave's other half. The server's member event names the leaver as the fan-out's
+  // excluded device, so nothing on the wire will ever bring the held record down to the room's
+  // real counts — the drop happens here, at the one place that knows the leave succeeded.
+  const forgetRoom = useCallback(
+    (roomId: Id): void => {
+      const conversationId = byRoomId.current.get(roomId);
+      if (conversationId === undefined) {
+        return;
+      }
+      const next = new Map(roomsRef.current);
+      next.delete(conversationId);
+      byRoomId.current.delete(roomId);
+      commit(next);
+    },
+    [commit],
+  );
+
   // Restore the remembered rooms once per session: their names back on the rows, their topics
   // back under watch, so the counters live again without a re-join. The stored copy is only a
   // floor — a join in this session re-notes the room with fresher counters over it. A copy
@@ -230,7 +265,18 @@ export function RoomsProvider({ children }: { children: ReactNode }): ReactNode 
     [],
   );
 
-  const value: RoomsContextValue = { infoFor, noteRoom };
+  // The reverse index the context exposes: the same records, addressed by room id. The map is
+  // small (the rooms this account joined) and the commit that updates it always runs before the
+  // re-render a consumer's read drives, so a lookup here is never behind the rendered state.
+  const liveFor = useCallback((roomId: Id): RoomInfo | null => {
+    const conversationId = byRoomId.current.get(roomId);
+    if (conversationId === undefined) {
+      return null;
+    }
+    return roomsRef.current.get(conversationId) ?? null;
+  }, []);
+
+  const value: RoomsContextValue = { infoFor, liveFor, noteRoom, forgetRoom };
   return <RoomsContext.Provider value={value}>{children}</RoomsContext.Provider>;
 }
 

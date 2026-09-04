@@ -46,7 +46,7 @@ use migo_core::config::Environment;
 use migo_core::metrics::Registry;
 use migo_core::{Clock, Config, Id, OsRandom, Random, Shutdown, SystemClock};
 use migo_crypto::NodeSecret;
-use migo_economy::{Catalogue, SharedAnnouncer, SharedTreasurer};
+use migo_economy::{Attributes, Catalogue, Category, Listing, Price, SharedAnnouncer, SharedTreasurer, Sku};
 use migo_federation::{MeshConfig, SharedMesh};
 use migo_games::{SharedReferee, SharedRewards};
 use migo_gateway::{Dispatcher, Gateway, GatewayServices};
@@ -437,7 +437,7 @@ impl App {
             cache.clone(),
             limiter.clone(),
             announcer,
-            Catalogue::with_default_gifts(),
+            store_catalogue(),
             migo_economy::EconomyConfig::default(),
             &registry,
         );
@@ -674,6 +674,46 @@ fn node_info(config: &Config) -> NodeInfo {
 /// — the subsystems run it through HKDF, not as an Ed25519 key — so the base64 text is fine as-is.
 /// Absent, the environment decides: production refuses to start (a token signed under a default is
 /// a token nobody can rotate), while development and staging mint an ephemeral secret and say so.
+/// The catalogue this node sells: the ten gifts every deployment carries, plus the emoticon and
+/// sticker packs the Store fronts.
+///
+/// The non-gift listings are configuration, here rather than in `migo_economy`, because they are
+/// this deployment's merchandising choice — the crate supplies the mechanism (the `Category`
+/// vocabulary and the `Catalogue` table), the root decides what is on the shelf. Prices are in
+/// coins, the store's spendable currency; the web Store converts them to an MGO amount at
+/// purchase time for the on-chain payment.
+fn store_catalogue() -> Catalogue {
+    let mut catalogue = Catalogue::with_default_gifts();
+    for (category, slug, price) in STORE_PACKS {
+        let sku = Sku::new(category, slug).expect("pack slug is a valid sku");
+        catalogue.list(Listing {
+            sku,
+            price: Price::coins(price),
+            attributes: Attributes::none(),
+            reputation: 0,
+        });
+    }
+    catalogue
+}
+
+/// The emoticon and sticker packs this deployment sells: (category, slug, price in coins).
+///
+/// The slug is what the clients' Store and composer match on — `emoticon.*` packs appear in the
+/// composer's Emoticons tab once owned, `sticker.*` packs in its Stickers tab. The art itself is
+/// client-side: the slug names a pack the clients ship, so a price here with no client art is a
+/// pack nobody can render, and the clients' lists and this table are changed together.
+const STORE_PACKS: [(Category, &str, i64); 9] = [
+    (Category::Sticker, "frog_set", 150),
+    (Category::Sticker, "cat_set", 150),
+    (Category::Sticker, "panda_set", 200),
+    (Category::Sticker, "party_set", 250),
+    (Category::Sticker, "love_set", 200),
+    (Category::Sticker, "work_set", 180),
+    (Category::Sticker, "summer_set", 220),
+    (Category::Sticker, "spooky_set", 260),
+    (Category::Sticker, "newyear_set", 300),
+];
+
 fn resolve_node_secret(config: &Config) -> anyhow::Result<Vec<u8>> {
     if let Some(signing_key) = config.node.signing_key.as_ref() {
         return Ok(signing_key.expose().as_bytes().to_vec());

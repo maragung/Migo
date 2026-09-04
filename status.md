@@ -2423,3 +2423,65 @@ tidak terlihat karena itu: kesalahan kapitalisasi enum (entri enum
 Kotlin yang digenerate adalah PascalCase) hanya tercompile di gerbang
 Android. Sejak sini, setiap push yang menyentuh Kotlin ditonton di
 kedua workflow sampai keduanya hijau.
+
+## 66. Store on-chain di Fuji, pilihan Emoticons/Stickers, dan Rooms sort Recent (v0.16.4)
+
+Versi ini mengubah pembelian store dari koin virtual menjadi
+pembayaran nyata di blockchain — dan menutupnya dengan pemilih
+emoticon yang menunjukkan apa yang dibeli.
+
+**Store sebagai aplikasi React+Vite sendiri.** `clients/store` kini
+ada: satu aplikasi Vite (`base: '/store/'`) yang outDir-nya jatuh
+langsung ke dalam `clients/web/out/store`, jadi file server :19992
+yang sudah ada menyajikannya tanpa konfigurasi baru. sesinya bukan
+sesi baru: aplikasi ini dibuka di origin yang sama dengan klien web
+dan membaca IndexedDB yang sama (grant + snapshot keystore), lalu
+`MigoClient.resume` — pengguna yang sudah masuk di Migo web masuk
+ke store tanpa sign-in kedua dan tanpa token di URL.
+
+**Pembayaran on-chain (Avalanche C-Chain Fuji).** Harga tetap angka
+koin di katalog server (`STORE_PURCHASE` 239); pembayarannya kini
+token nyata di Fuji: AVAX (transfer native ke treasury), atau
+USDT/USDC (calldata ERC-20 `transfer(address,uint256)`, tanpa paket
+kripto baru — bidang `data` Eip1559Tx yang sudah ada). Wallet 0
+akun (`EvmWallet.fromRoot`) yang menandatangani; `ChainClient`
+yang broadcast dan track — server Migo tidak pernah jadi proxy
+blockchain, tx hash hanya ikut `STORE_PURCHASE` untuk audit.
+alur: siapkan (fee/gas/nonce dari RPC sendiri, dikutip baris per
+baris) → konfirmasi (semua bidang yang ditandatangani) → bayar →
+`ENTITLEMENTS` (240) baru dibuka saat chain bilang CONFIRMED.
+`clientKey` idempotensi diturunkan dari SKU + tx hash, jadi
+pembayaran yang sama tak pernah membeli dua kali. Alamat kontrak
+MGO/treasury/USDT/USDC masih placeholder — konstanta satu baris
+di `chain-purchase.ts` begitu kontrak dideploy; chip mata uang
+yang tak tersedia tampil disabled dengan alasan, bukan dijual
+palsu. `make build-store` masuk CI dan release (tarball web
+kini memverifikasi `out/store/index.html` juga).
+
+**Pemilih Emoticons/Stickers di composer.** Tombol smile di samping
+🎁: dua tab. Emoticons = set bebas semua akun + item emoticon pack
+yang dimiliki; Stickers = pack stiker milik akun, dikelompokkan per
+pack dengan judul. Glyph disisipkan di caret (ref insert yang
+composer miliki, bukan jalan pintas DOM), lalu terkirim sebagai teks
+pesan biasa — percakapan E2EE, tidak ada tipe konten baru. Kepemilikan
+dibaca sekali per sesi lewat `ENTITLEMENTS`; "belum punya pack" pada
+tab Stickers mengarahkan ke menu Profile → Store.
+
+**Kesepakatan SKU dua pihak.** Katalog server (harga) dan
+`lib/store/packs.ts` (seni) adalah dua setengah kontrak yang sama:
+slug `sticker.frog_set` dst. dihargai server, digambar klien. 9 pack
+stiker (frog/cat/panda/party/love/work/summer/spooky/newyear).
+
+**Menu avatar → Store.** Entri "Store" di dropdown banner profil
+membuka tab baru ke `/store/` (bukan panel — aplikasi lain, chat tetap
+terbuka di sampingnya).
+
+**Rooms: sort Recent.** Chip keempat di panel Rooms selain
+All/Popular/New: room yang diurutkan berdasar pesan terakhir
+conversation-nya (`lastMessage.createdAt`), room yang belum
+dijoin jatuh ke belakang, urut stabil.
+
+**Notices room, receipt, dan auto-open.** Enter/leave/disconnect
+kini jadi notice di thread (#86), delivery + read receipt
+end-to-end (#87), dan ketiga klien otomatis membuka jendela chat
+saat paket datang untuk percakapan yang belum punya tab (#89).

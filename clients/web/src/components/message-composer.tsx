@@ -1,7 +1,7 @@
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
-import type { ChangeEvent, KeyboardEvent, ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ChangeEvent, KeyboardEvent, ReactNode, RefObject } from 'react';
 
 import { VOICE_NOTE_MAX_MS } from '@/lib/migo/voice.js';
 import type { VoiceRecording } from '@/lib/migo/voice.js';
@@ -42,6 +42,16 @@ interface ComposerProps {
   onGift?: () => void;
   /** Whether the gift picker is open, so the control reflects it. */
   giftOpen?: boolean;
+  /** Whether the emoticon picker is open, so the smile control reflects it. */
+  emoticonOpen?: boolean;
+  /** Toggles the inline emoticon/sticker picker (the 😊 beside the attach button). */
+  onToggleEmoticon?: () => void;
+  /**
+   * The handle the emoticon picker inserts through. The composer owns the textarea, so the only
+   * honest way for a sibling component to insert at the caret is a ref the composer fills with a
+   * small function it controls — never a reach into the DOM the composer did not sanction.
+   */
+  insertRef?: RefObject<{ insert: (glyph: string) => void } | null>;
 }
 
 export function MessageComposer({
@@ -54,6 +64,9 @@ export function MessageComposer({
   onCancelReply,
   onGift,
   giftOpen,
+  emoticonOpen,
+  onToggleEmoticon,
+  insertRef,
 }: ComposerProps): ReactNode {
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
@@ -65,6 +78,39 @@ export function MessageComposer({
   const typingActiveRef = useRef(false);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // The insert handle the picker (a sibling, rendered by the chat window) uses. Filling the ref
+  // is an effect, not a render-time assignment, because the function closes over state that
+  // changes per keystroke and a stale closure would drop the draft mid-typing.
+  useEffect(() => {
+    if (insertRef !== undefined) {
+      insertRef.current = {
+        insert: (glyph: string): void => {
+          const textarea = textareaRef.current;
+          if (textarea === null) {
+            setText((current) => current + glyph);
+            return;
+          }
+          const start = textarea.selectionStart ?? textarea.value.length;
+          const end = textarea.selectionEnd ?? textarea.value.length;
+          const next = `${textarea.value.slice(0, start)}${glyph}${textarea.value.slice(end)}`;
+          setText(next);
+          // Restore the caret after React re-renders the value: the glyph lands where the caret
+          // was, and the next keystroke continues from after it.
+          requestAnimationFrame(() => {
+            textarea.focus();
+            textarea.setSelectionRange(start + glyph.length, start + glyph.length);
+          });
+        },
+      };
+    }
+    return () => {
+      if (insertRef !== undefined) {
+        insertRef.current = null;
+      }
+    };
+  }, [insertRef]);
 
   const stopTyping = useCallback((): void => {
     if (idleTimerRef.current) {
@@ -227,6 +273,7 @@ export function MessageComposer({
       ) : (
         <div className="composer">
           <textarea
+            ref={textareaRef}
             value={text}
             onChange={onChange}
             onKeyDown={onKeyDown}
@@ -253,6 +300,18 @@ export function MessageComposer({
           >
             <Icon name="attach" size={20} />
           </button>
+          {onToggleEmoticon !== undefined ? (
+            <button
+              type="button"
+              className={`attach-btn ${emoticonOpen ? 'active' : ''}`}
+              onClick={onToggleEmoticon}
+              disabled={disabled || uploading}
+              aria-label={emoticonOpen ? 'Close emoticon picker' : 'Open emoticon picker'}
+              aria-pressed={emoticonOpen}
+            >
+              <Icon name="smile" size={20} />
+            </button>
+          ) : null}
           {onGift !== undefined ? (
             <button
               type="button"

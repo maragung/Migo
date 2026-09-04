@@ -314,10 +314,11 @@ jobs:
       # build-ts before build-web: the web app imports @migo/sdk and its siblings by their
       # compiled dist/ entry points, so those packages have to be built before `next build`
       # can resolve them — the same order the web image's Dockerfile builds in.
-      - name: Build the SDK packages and the web client
+      - name: Build the SDK packages, the web client, and the store
         run: |
           make build-ts
           make build-web
+          make build-store
 
       - name: Package the tarball and checksum
         run: |
@@ -327,6 +328,10 @@ jobs:
           # Fail loudly if the export produced nothing: an empty out/ would otherwise tar into
           # a valid-looking but useless asset that only reveals itself when someone deploys it.
           test -f "${out}/index.html" || { echo "web export produced no ${out}/index.html" >&2; exit 1; }
+          # The store is a Vite build whose outDir lands inside the web export (out/store), so
+          # the same loud failure applies to it: a missing bundle would serve /store/ as the
+          # app shell's 404 page instead of the shop.
+          test -f "${out}/store/index.html" || { echo "store build produced no ${out}/store/index.html" >&2; exit 1; }
           mkdir -p dist
           # -C out . archives the contents of the directory rather than the directory itself,
           # so there is no leading out/ component to strip on unpack.

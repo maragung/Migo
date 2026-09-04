@@ -25,7 +25,7 @@ use crate::settings::{self, Settings};
 use crate::theme::{self, palette, space, Theme};
 use crate::ui::alerts::AlertsState;
 use crate::ui::auth::AuthState;
-use crate::ui::chat::ChatState;
+use crate::ui::chat::{ChatState, RoomNotice, MAX_ROOM_NOTICES};
 use crate::ui::friends::FriendsState;
 use crate::ui::rooms::RoomsState;
 use crate::ui::search::SearchState;
@@ -276,6 +276,14 @@ impl App {
                         if incoming && self.chat.selected != Some(conversation_id) {
                             conversation.unread = conversation.unread.saturating_add(1);
                         }
+                        // A message for a conversation with no tab mints the tab — the user's rule
+                        // for chat windows: a room, group, or private chat's window comes into
+                        // being when a packet arrives for it, not only when someone clicks. The
+                        // mint does not steal the active surface: the unread badge is the
+                        // attention signal, and the person's click still activates.
+                        if incoming {
+                            self.activate_chat(conversation_id);
+                        }
                     } else {
                         // A message for a conversation not in the list yet: ask for the list rather
                         // than inventing an entry from one message, which would get the member set and
@@ -291,6 +299,24 @@ impl App {
                     self.chat.accept(conversation_id, message_id, seq);
                 }
                 Event::SendFailed { message_id } => self.chat.reject(message_id),
+                Event::Receipt {
+                    conversation_id,
+                    user_id,
+                    kind: migo_protocol::ReceiptKind::Read,
+                    seq,
+                } => {
+                    // Who read is kept out of the marker for now — the tick pair says "read", and
+                    // naming the reader in a two-person direct chat is redundant while in a room
+                    // it would want a name lookup this handler has no room to run. The watermark
+                    // is the fact that changes the screen.
+                    let _ = user_id;
+                    self.chat.note_read(conversation_id, seq);
+                }
+                // A Delivered (or unrecognised) watermark. Delivered is a server-side fact about
+                // transport, not a reader: it advances nothing the user can see here, and an
+                // unknown kind is a newer server's vocabulary — the same forward-compatibility
+                // rule the opcode router applies.
+                Event::Receipt { .. } => {}
                 Event::Typing {
                     conversation_id,
                     user_id,
@@ -395,12 +421,59 @@ impl App {
                     title,
                 } => {
                     self.rooms.joined.insert(room_id, conversation_id);
+                    // The one wire moment that names both halves: the conversation learns which
+                    // room it is, so the notice tail and the live counts can find it.
+                    if let Some(conversation) = self
+                        .chat
+                        .conversations
+                        .iter_mut()
+                        .find(|c| c.conversation_id == conversation_id)
+                    {
+                        conversation.room_id = Some(room_id);
+                    }
                     self.toasts.push(Toast::success(format!("Joined {title}")));
                     self.open_conversation(conversation_id);
                 }
                 Event::RoomLeft { room_id } => {
                     self.rooms.joined.remove(&room_id);
                     self.toasts.push(Toast::info("Left the room"));
+                    // The conversation is closed server-side; its notice tail goes with it.
+                    self.chat.room_notices.remove(&room_id);
+                }
+                // A membership change in a watched room: the notice line lands in the room's
+                // thread, and the member total — when the event carries it — folds into the
+                // rooms pane's live count, so the directory row moves with the room.
+                Event::RoomMember {
+                    room_id,
+                    user_id,
+                    change,
+                    member_count,
+                } => {
+                    let verb = notice_verb(change);
+                    let tail = self.chat.room_notices.entry(room_id).or_default();
+                    let seq = tail.last().map(|n| n.seq + 1).unwrap_or(0);
+                    tail.push(RoomNotice { user_id, verb, seq });
+                    if tail.len() > MAX_ROOM_NOTICES {
+                        let cut = tail.len() - MAX_ROOM_NOTICES;
+                        tail.drain(0..cut);
+                    }
+                    let live = self.rooms.live.entry(room_id).or_default();
+                    live.member_count = member_count;
+                }
+                // A watched room's counters moved: fold the deltas onto the live record, absent
+                // meaning unchanged, and reset the tail when the room goes.
+                Event::RoomState {
+                    room_id,
+                    online_count,
+                    member_count,
+                } => {
+                    let live = self.rooms.live.entry(room_id).or_default();
+                    if online_count.is_some() {
+                        live.online_count = online_count;
+                    }
+                    if member_count.is_some() {
+                        live.member_count = member_count;
+                    }
                 }
                 Event::Alerts(rows) => {
                     self.alerts.items = rows;
@@ -1307,5 +1380,23 @@ fn merge_names(
         if !name.is_empty() {
             cache.insert(id, name);
         }
+    }
+}
+
+/// The sentence half of a membership notice: what happened, without who.
+///
+/// The same map the web and Android clients draw from, so the three clients say the same thing
+/// about the same event. `Unknown` never reaches here — the net layer already collapsed it onto
+/// the `joined` flag — but the match stays total so a newer enum value cannot compile its way
+/// into silence.
+fn notice_verb(change: migo_protocol::MemberChange) -> &'static str {
+    match change {
+        migo_protocol::MemberChange::Joined => "joined the room",
+        migo_protocol::MemberChange::Left => "left",
+        migo_protocol::MemberChange::Disconnected => "disconnected",
+        migo_protocol::MemberChange::Reconnected => "came back",
+        migo_protocol::MemberChange::Kicked => "was kicked",
+        migo_protocol::MemberChange::Banned => "was banned",
+        migo_protocol::MemberChange::Unknown => "left",
     }
 }

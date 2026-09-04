@@ -364,8 +364,12 @@ jobs:
       # The full static-export build runs in CI — where every heavy build belongs — so a
       # Next.js regression (a bad route, a client-only API on the server path) fails the
       # pipeline before it can reach a release, without costing the dev machine anything.
-      - name: Web production build
-        run: make build-web
+      # The store is a Vite build into the web export's /store; building it here too, so
+      # a store regression fails the pipeline the same way.
+      - name: Web and store production build
+        run: |
+          make build-web
+          make build-store
 
   # ------------------------------------------------------------------ audit
   # Advisories are news, not a reason to block an unrelated change: a CVE published

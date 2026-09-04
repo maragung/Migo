@@ -39,6 +39,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.migo.app.model.AppState
 import com.migo.app.model.ConversationRow
+import com.migo.app.model.RoomLiveInfo
 import com.migo.core.protocol.RoomKind
 import com.migo.core.protocol.RoomSummary
 import com.migo.core.wire.Id
@@ -62,6 +63,8 @@ fun RoomsScreen(
     onOpenConversation: (ConversationRow) -> Unit,
     onCreate: (slug: String, name: String, kind: RoomKind, topic: String?) -> Unit,
     onRefresh: () -> Unit,
+    /** The live record a room's event streams keep current, for the directory rows to count from. */
+    liveCounts: (Id) -> RoomLiveInfo? = { null },
     modifier: Modifier = Modifier,
 ) {
     var field by rememberSaveable { mutableStateOf(state.rooms.query) }
@@ -111,7 +114,11 @@ fun RoomsScreen(
                 if (mine.isNotEmpty()) {
                     item(key = "mine-label") { SectionLabel(text = "Your rooms") }
                     items(mine, key = { "mine-${it.conversationId.value}" }) { row ->
-                        YourRoomRow(row = row, onOpen = { onOpenConversation(row) })
+                        // The same live record the directory reads, so the account's own rooms
+                        // count online members here too — the row a returning user reads first.
+                        val roomId = row.roomId
+                        val live = if (roomId == null) null else liveCounts(roomId)
+                        YourRoomRow(row = row, live = live, onOpen = { onOpenConversation(row) })
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     }
                 }
@@ -121,8 +128,19 @@ fun RoomsScreen(
                         state.rooms.rooms.orEmpty().filter { row -> mineByRoom[row.roomId] == null },
                         key = { "dir-${it.roomId.value}" },
                     ) { room ->
+                        // The page's counts are a snapshot from the moment of the read; the live
+                        // record is the one the member and state events keep current. A row whose
+                        // room the account is in counts in front of the user instead of waiting
+                        // for a refresh. Rooms not watched keep their page counts: the deltas only
+                        // arrive on the room's own topic, which the shell subscribes on join.
+                        val live = liveCounts(room.roomId)
+                        val counted = if (live == null) room else room.copy(
+                            memberCount = live.memberCount,
+                            onlineCount = live.onlineCount,
+                            maxMembers = live.maxMembers,
+                        )
                         DirectoryRow(
-                            room = room,
+                            room = counted,
                             joining = state.rooms.joining.contains(room.roomId),
                             onJoin = { onJoin(room) },
                         )
@@ -151,7 +169,7 @@ private fun List<ConversationRow>.byRoomId(): Map<Id, ConversationRow> =
 
 /** One of this account's own rooms: the name, the last line, and the way back in. */
 @Composable
-private fun YourRoomRow(row: ConversationRow, onOpen: () -> Unit) {
+private fun YourRoomRow(row: ConversationRow, live: RoomLiveInfo?, onOpen: () -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -165,10 +183,13 @@ private fun YourRoomRow(row: ConversationRow, onOpen: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
             )
-            if (row.unread > 0) {
-                OneLine(text = "${row.unread} unread")
-            } else {
-                OneLine(text = row.preview ?: "Open the room")
+            // The preview line keeps its place; the live online count rides beside it, the same
+            // "N online" the chat's own header states, so the list and the thread never disagree.
+            when {
+                row.unread > 0 -> OneLine(text = "${row.unread} unread")
+                live != null && live.memberCount > 0L ->
+                    OneLine(text = "${row.preview ?: "Open the room"} · ${live.onlineCount} online")
+                else -> OneLine(text = row.preview ?: "Open the room")
             }
         }
         Button(onClick = onOpen) { Text("Open") }

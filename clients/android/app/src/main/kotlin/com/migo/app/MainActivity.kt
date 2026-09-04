@@ -233,6 +233,7 @@ private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifie
             onOpenConversation = { model.open(it.conversationId, it.title) },
             onCreate = model::createRoom,
             onRefresh = model::loadRooms,
+            liveCounts = model::liveCountsFor,
             modifier = modifier,
         )
 

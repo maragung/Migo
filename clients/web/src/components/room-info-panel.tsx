@@ -37,6 +37,7 @@ import { friendlyError } from '@/lib/migo/errors.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
+import { useRooms } from '@/lib/migo/rooms-provider.js';
 import { closeConversation } from '@/lib/migo/use-open-conversation.js';
 
 import { Avatar } from './avatar.js';
@@ -300,6 +301,7 @@ export function RoomInfoPanel({
 }): ReactNode {
   const { client, accountId } = useMigo();
   const { forgetConversation } = useConversations();
+  const { forgetRoom } = useRooms();
 
   const [roster, setRoster] = useState<RosterEntry[] | null>(null);
   const [standing, setStanding] = useState<AdminStanding | null>(null);
@@ -497,6 +499,10 @@ export function RoomInfoPanel({
     client.rooms
       .leave(roomId)
       .then(() => {
+        // The room's record goes before the conversation: the server's member fan-out excludes
+        // the leaver's own device, so the held counts would otherwise outlive the membership
+        // and the directory row would keep showing a room of one that nobody is in.
+        forgetRoom(roomId);
         forgetConversation(conversationId);
         closeConversation();
       })
@@ -506,7 +512,7 @@ export function RoomInfoPanel({
       .finally(() => {
         setLeaving(false);
       });
-  }, [client, leaving, roomId, conversationId, forgetConversation]);
+  }, [client, leaving, roomId, conversationId, forgetConversation, forgetRoom]);
 
   return (
     <div className="room-info" aria-label="Room details">

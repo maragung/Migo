@@ -200,6 +200,45 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
     setDismissed(false);
   }, [openId, chatsMode]);
 
+  // A message that arrives for a conversation with no tab mints the tab — the user's rule for
+  // windows: chat windows for rooms, groups, and private chats come into being when a packet
+  // arrives for them, not only when someone clicks. Create only: the tab joins the pane's chips
+  // but does not take the active one, so a message landing mid-read never yanks the thread out
+  // from under the reader — the unread badge on the chip is the attention signal, and the
+  // fragment effect still owns activation whenever the person does click through. The
+  // one-window mode is exempt: its single surface is the fragment's, and minting a hidden tab
+  // there would only stockpile ghosts for the mode's back chevron to find.
+  const tabIdsRef = useRef<ReadonlySet<string>>(new Set());
+  tabIdsRef.current = new Set(right.tabs.map((tab) => tab.id));
+  useEffect(() => {
+    if (client === null || chatsMode === 'list') {
+      return;
+    }
+    const off = client.messaging.onMessage((message) => {
+      if (message.senderId === accountId) {
+        // Echoes of this account's own sends (multi-device sync included): the sending device
+        // already minted its tab through the open conversation.
+        return;
+      }
+      const id = chatIdOf(message.conversationId);
+      if (tabIdsRef.current.has(id)) {
+        return;
+      }
+      setRight((s) => {
+        if (s.tabs.some((tab) => tab.id === id)) {
+          return s;
+        }
+        return {
+          tabs: [...s.tabs, { id, kind: 'chat', conversationId: message.conversationId }],
+          active: s.active,
+        };
+      });
+    });
+    return () => {
+      off();
+    };
+  }, [client, chatsMode, accountId]);
+
   /** Writes a display choice through to storage and reconciles the pane with it. */
   const pickChatsMode = useCallback((mode: ChatTabsMode): void => {
     setChatsMode(mode);
@@ -274,7 +313,15 @@ function TabbedShell({ children }: { children: ReactNode }): ReactNode {
       if (summary.kind === ConversationKind.Room) {
         const room = rooms.infoFor(conversationId);
         if (room !== null) {
-          void client.rooms.leave(room.roomId).catch(() => undefined);
+          void client.rooms
+            .leave(room.roomId)
+            .then(() => {
+              // The leaver's own device is excluded from the member fan-out, so nothing on the
+              // wire corrects the held record — drop it here or the directory row keeps showing
+              // the counts the room had while this account was in it.
+              rooms.forgetRoom(room.roomId);
+            })
+            .catch(() => undefined);
         }
         return;
       }

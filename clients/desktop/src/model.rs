@@ -76,9 +76,6 @@ pub enum Body {
     Reaction { emoji: String, target: Id },
     /// A body this build understands the envelope of but not the content type — a newer peer.
     Unsupported { content_type: u8 },
-    /// The envelope opened but the plaintext did not parse, or it never opened at all. The string
-    /// is a short reason, never key material and never a partial plaintext.
-    Undecryptable(String),
 }
 
 impl Body {
@@ -96,7 +93,6 @@ impl Body {
             }
             Self::Reaction { emoji, .. } => format!("Reacted {emoji}"),
             Self::Unsupported { .. } => "Unsupported message".to_string(),
-            Self::Undecryptable(_) => "Could not be decrypted".to_string(),
         }
     }
 }
@@ -136,6 +132,9 @@ pub struct Conversation {
     pub updated_at: Option<Timestamp>,
     /// How many messages arrived that the user has not looked at.
     pub unread: u32,
+    /// The room behind this conversation, when it is a room — the thread's notice tail and the
+    /// rooms pane's live counts are keyed by it. `None` for direct and group conversations.
+    pub room_id: Option<Id>,
 }
 
 impl Conversation {

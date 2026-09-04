@@ -23,11 +23,19 @@ export function BottomSheet({
   title,
   onClose,
   children,
+  variant = 'plain',
 }: {
   /** Announced as the dialog's accessible name. */
   title: string;
   /** Called on backdrop tap, close button, or Escape. */
   onClose: () => void;
+  /**
+   * The auth variant dresses the sheet as the auth screens' glass — the cyan gradient behind,
+   * the frosted card, white ink. The one sheet that follows a registration follows the card it
+   * follows: a white panel rising off a darkened gradient reads as a system dialog that lost its
+   * way, not as the register screen's own last step.
+   */
+  variant?: 'plain' | 'auth';
   children: ReactNode;
 }): ReactNode {
   const sheetRef = useRef<HTMLDivElement>(null);
@@ -46,10 +54,13 @@ export function BottomSheet({
   }, [onClose]);
 
   return (
-    <div className="sheet-backdrop" onClick={onClose}>
+    <div
+      className={`sheet-backdrop${variant === 'auth' ? ' sheet-backdrop-auth' : ''}`}
+      onClick={onClose}
+    >
       <div
         ref={sheetRef}
-        className="sheet"
+        className={`sheet${variant === 'auth' ? ' sheet-auth' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-label={title}

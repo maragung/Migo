@@ -176,6 +176,13 @@ build-ts: ## Build the TypeScript packages (protocol, wire, crypto, sdk)
 build-web: ## Build the Next.js web client
 	$(PNPM) --filter @migo/web build
 
+.PHONY: build-store
+build-store: ## Build the React+Vite store app into the web export's /store
+	# The store's Vite outDir is clients/web/out/store, so it lands inside the web bundle the
+	# release tarball already carries and the :19992 file server already serves — /store/ is
+	# the same bytes, same origin, sharing the web client's IndexedDB session.
+	$(PNPM) --filter @migo/store build
+
 # ---------------------------------------------------------------- run
 
 .PHONY: dev

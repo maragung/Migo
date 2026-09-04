@@ -42,12 +42,13 @@ const PAGE_SIZE = 30;
 const SEARCH_DEBOUNCE_MS = 300;
 
 /** The directory's client-side sorts; the wire's own ordering is the default. */
-type Sort = 'default' | 'popular' | 'new';
+type Sort = 'default' | 'popular' | 'new' | 'recent';
 
 const SORTS: ReadonlyArray<{ id: Sort; label: string }> = [
   { id: 'default', label: 'All' },
   { id: 'popular', label: 'Popular' },
   { id: 'new', label: 'New' },
+  { id: 'recent', label: 'Recent' },
 ];
 
 /**
@@ -63,7 +64,7 @@ export function RoomsPanel({
 }): ReactNode {
   const { client } = useMigo();
   const { items: conversations } = useConversations();
-  const { infoFor } = useRooms();
+  const { infoFor, liveFor } = useRooms();
   const { join, joining, error } = useJoinRoom(onOpenConversation);
 
   const [rooms, setRooms] = useState<RoomSummary[] | null>(null);
@@ -153,9 +154,54 @@ export function RoomsPanel({
       // No created-at on the wire: "New" is the catalogue's own order read back-to-front — the
       // closest the directory can honestly offer.
       list.reverse();
+    } else if (sort === 'recent') {
+      // "Recent" is the account's own history, not the catalogue's: rooms this user has been in,
+      // ranked by their conversation's last message time (the summary's sealed lastMessage
+      // carries `createdAt`; a room with none falls back to zero). The directory page's other
+      // rooms follow in their own order — a directory that *hid* the un-joined rooms would stop
+      // being a directory, and one that ranked them by a freshness it cannot know would lie
+      // about which room was busy.
+      const activity = new Map<Id, number>();
+      for (const conversation of conversations) {
+        const info = infoFor(conversation.conversationId);
+        if (conversation.kind === ConversationKind.Room && info !== null) {
+          activity.set(info.roomId, conversation.lastMessage?.createdAt ?? 0);
+        }
+      }
+      list.sort((left, right) => {
+        const a = activity.get(left.roomId) ?? -1;
+        const b = activity.get(right.roomId) ?? -1;
+        // Rooms never joined sort last, in the directory's own order; among joined rooms the
+        // most recently active comes first. Equal keys keep the comparator stable per spec
+        // (`Array.prototype.sort` is stable), so the page order survives.
+        return b - a;
+      });
     }
     return list;
-  }, [rooms, sort]);
+  }, [rooms, sort, conversations, infoFor]);
+
+  // The rows the panel actually draws: the directory page with the live counts a joined room's
+  // record carries laid over it. A snapshot row says "12 online" until the user refreshes; the
+  // overlay is what the state deltas keep current, so a room someone is watching counts in front
+  // of them — the same counts its thread header shows, from the same record, not a second source.
+  // Rooms the shell does not watch (the not-yet-joined rest of the page) keep their page counts:
+  // the deltas only arrive on the room's own topic, which the shell subscribes on join.
+  const rows = useMemo(
+    () =>
+      sorted.map((room) => {
+        const live = liveFor(room.roomId);
+        if (live === null) {
+          return room;
+        }
+        return {
+          ...room,
+          ...(live.memberCount !== undefined ? { memberCount: live.memberCount } : {}),
+          ...(live.onlineCount !== undefined ? { onlineCount: live.onlineCount } : {}),
+          ...(live.maxMembers !== undefined ? { maxMembers: live.maxMembers } : {}),
+        };
+      }),
+    [sorted, liveFor],
+  );
 
   function onSubmit(event: FormEvent<HTMLFormElement>): void {
     // The debounce already carries the query; submit only stops a mid-pause round trip by
@@ -259,7 +305,7 @@ export function RoomsPanel({
         />
       ) : rooms === null ? (
         <Skeleton rows={4} />
-      ) : sorted.length === 0 ? (
+      ) : rows.length === 0 ? (
         <EmptyState
           icon="rooms"
           title={query.trim().length > 0 ? 'No rooms matched your search.' : 'No public rooms yet.'}
@@ -267,7 +313,7 @@ export function RoomsPanel({
         />
       ) : (
         <ul className="room-list" aria-label="Public rooms">
-          {sorted.map((room) => {
+          {rows.map((room) => {
             const conversationId = joinedByRoomId.get(room.roomId);
             return (
               <RoomRow
@@ -275,11 +321,17 @@ export function RoomsPanel({
                 room={room}
                 joined={conversationId !== undefined}
                 joining={joining.has(room.roomId)}
-                onJoin={() => void join(room)}
-                onOpen={() => {
+                onEnter={() => {
+                  // Already a member: the shell holds the conversation, so opening is enough —
+                  // the join round trip would only relearn what the shell already knows. Not
+                  // one: the join flow is the one path that projects the reply and opens the
+                  // thread, and "xx has entered" is the server's notice to *others*, not a
+                  // second one to the joiner.
                   if (conversationId !== undefined) {
                     onOpenConversation(conversationId);
+                    return;
                   }
+                  void join(room);
                 }}
               />
             );
@@ -300,60 +352,66 @@ export function RoomsPanel({
   );
 }
 
-/** One directory row: the facts of a join decision, and the way in. */
+/** One directory row: the facts of a join decision, and the way in.
+ *
+ * The whole row is the way in. Clicking it joins the room (when not already a member) and opens
+ * the thread, or just opens the thread when the shell already holds the conversation — the same
+ * gesture for both states, because the distinction a Join/Open button pair drew is one the
+ * clicker does not need to make: "take me to this room" is both sentences. The join-in-flight
+ * state stays visible as a spinner on the row, and the row disables while its join settles so a
+ * double click cannot fire a second one.
+ */
 function RoomRow({
   room,
   joined,
   joining,
-  onJoin,
-  onOpen,
+  onEnter,
 }: {
   room: RoomSummary;
   joined: boolean;
   joining: boolean;
-  onJoin: () => void;
-  onOpen: () => void;
+  onEnter: () => void;
 }): ReactNode {
   return (
     <li className="room-row">
-      <Avatar name={room.name} id={room.roomId} size={36} avatarUrl={room.avatarUrl} />
-      <div className="person-main">
-        <span className="person-name room-name">
-          {room.name}
-          {room.maxMembers !== undefined && room.maxMembers > 0 ? (
-            <span
-              className="capacity-badge"
-              title={`${(room.onlineCount ?? 0).toLocaleString()} online of ${room.maxMembers.toLocaleString()} maximum`}
-            >
-              {capacityLabel(room.onlineCount, room.maxMembers)}
-            </span>
+      <button
+        type="button"
+        className="room-row-link"
+        disabled={joining}
+        onClick={onEnter}
+        aria-label={`Open ${room.name}`}
+      >
+        <Avatar name={room.name} id={room.roomId} size={36} avatarUrl={room.avatarUrl} />
+        <div className="person-main">
+          <span className="person-name room-name">
+            {room.name}
+            {room.maxMembers !== undefined && room.maxMembers > 0 ? (
+              <span
+                className="capacity-badge"
+                title={`${(room.onlineCount ?? 0).toLocaleString()} online of ${room.maxMembers.toLocaleString()} maximum`}
+              >
+                {capacityLabel(room.onlineCount, room.maxMembers)}
+              </span>
+            ) : null}
+            {room.verified ? (
+              <span className="verified-mark" title="Verified room" aria-label="Verified room">
+                <Icon name="verified" size={16} />
+              </span>
+            ) : null}
+          </span>
+          <span className="person-sub">
+            {(room.memberCount ?? 0).toLocaleString()} members ·{' '}
+            {(room.onlineCount ?? 0).toLocaleString()} online
+            {room.category ? ` · ${room.category}` : ''}
+          </span>
+          {room.topic || room.description ? (
+            <span className="person-note">{room.topic ?? room.description}</span>
           ) : null}
-          {room.verified ? (
-            <span className="verified-mark" title="Verified room" aria-label="Verified room">
-              <Icon name="verified" size={16} />
-            </span>
-          ) : null}
+        </div>
+        <span className="room-row-go" aria-hidden="true">
+          {joining ? <Spinner /> : joined ? 'Open' : 'Join'}
         </span>
-        <span className="person-sub">
-          {(room.memberCount ?? 0).toLocaleString()} members ·{' '}
-          {(room.onlineCount ?? 0).toLocaleString()} online
-          {room.category ? ` · ${room.category}` : ''}
-        </span>
-        {room.topic || room.description ? (
-          <span className="person-note">{room.topic ?? room.description}</span>
-        ) : null}
-      </div>
-      <div className="person-actions">
-        {joined ? (
-          <button type="button" className="btn btn-ghost" onClick={onOpen}>
-            Open
-          </button>
-        ) : (
-          <button type="button" className="btn btn-primary" disabled={joining} onClick={onJoin}>
-            {joining ? <Spinner /> : 'Join'}
-          </button>
-        )}
-      </div>
+      </button>
     </li>
   );
 }

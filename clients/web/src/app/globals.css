@@ -3696,7 +3696,7 @@ button.digest-row:focus-visible {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--panel);
@@ -3704,6 +3704,35 @@ button.digest-row:focus-visible {
 .room-row:hover {
   border-color: var(--accent-border-soft);
   background: var(--accent-soft);
+}
+/* The whole row is the way in: a real button, so it is focusable, keyboard-activatable, and
+   screen-reader-labelled — the Join/Open buttons it replaces were the same affordance split in
+   two. Resets the button chrome so the row keeps the look it had, and keeps the go hint on the
+   far edge standing in for what the pill button used to say. */
+.room-row-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.room-row-link:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.room-row-go {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 13px;
 }
 .room-name {
   display: inline-flex;
@@ -3855,6 +3884,64 @@ button.activity-row-btn:focus-visible {
     border-radius: var(--radius-lg);
     border-bottom: 1px solid var(--border);
   }
+}
+
+/* The auth variant: the register flow's key-file offer, dressed as the auth screen it follows.
+   The backdrop is the register screen's own cyan gradient (lightly veiled, so the card behind
+   still reads through it), and the sheet is the auth glass — frosted, white-inked, the same
+   border and radius the register card wears. White ink needs its own close affordance (the
+   plain sheet's icon button dims on a panel; here it reads as an afterthought on glass) and the
+   save sheet's own ghost button has to stay legible against the frosted card, so its border
+   rides the white-alpha the auth card's own inputs do. */
+.sheet-backdrop-auth {
+  background: linear-gradient(180deg, var(--login-a) 0%, var(--login-b) 55%, var(--login-c) 100%);
+}
+.sheet-backdrop-auth::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 30, 34, 0.35);
+}
+.sheet-auth {
+  position: relative;
+  border-color: rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  color: #ffffff;
+}
+.sheet-auth .sheet-handle {
+  background: rgba(255, 255, 255, 0.4);
+}
+.sheet-auth .sheet-title {
+  color: #ffffff;
+}
+.sheet-auth .icon-btn {
+  color: rgba(255, 255, 255, 0.9);
+}
+.sheet-auth .icon-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+  color: #ffffff;
+}
+/* The save sheet on glass: the lead reads as the register card's own copy — white, not the
+   panel's dimmed text, because dimming is a panel convention and glass diffuses enough. */
+.sheet-auth .save-account-lead {
+  color: #ffffff;
+}
+.sheet-auth .save-account-sub {
+  color: rgba(255, 255, 255, 0.75);
+}
+.sheet-auth .save-account .btn-ghost {
+  border-color: rgba(255, 255, 255, 0.4);
+  color: #ffffff;
+}
+.sheet-auth .save-account .btn-ghost:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.6);
+}
+.sheet-auth .form-error {
+  color: #ffe3e3;
 }
 
 /* --- the shared states: skeleton, empty, error --- */
@@ -4424,4 +4511,91 @@ button.activity-row-btn:focus-visible {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* --- the composer's emoticon and sticker picker -------------------------- */
+
+/* The picker shares the gift picker's row: a panel that grows above the composer, with the
+   tab chips in its head and the glyphs in a grid below. */
+.emoticon-picker {
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.emoticon-picker .panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* The glyph grid: 8 per row on a desktop thread, fewer as the pane narrows. Emoticon cells
+   are compact; sticker cells are the same grid at 2.4× the size, because a sticker is a
+   one-shot image, not part of a sentence. */
+.emoticon-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 2px;
+}
+
+@media (max-width: 560px) {
+  .emoticon-grid {
+    grid-template-columns: repeat(6, 1fr);
+  }
+}
+
+.sticker-grid {
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+
+.emoticon-cell {
+  font: inherit;
+  font-size: 20px;
+  line-height: 1.4;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+.emoticon-cell:hover {
+  background: var(--accent-soft);
+}
+
+.sticker-cell {
+  font-size: 34px;
+  padding: 8px 0;
+  line-height: 1.3;
+}
+
+/* The Stickers tab's grouping: each owned pack is a titled section, because the pack is what
+   was bought and the pack is what the eye scans. */
+.sticker-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.sticker-group-name {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.emoticon-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 0;
 }

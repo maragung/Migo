@@ -1,0 +1,18 @@
+{
+  "extends": "../web/tsconfig.json",
+  "compilerOptions": {
+    // The Vite app: same strictness as the web client, without Next's plugin and artifacts.
+    "plugins": [],
+    "baseUrl": ".",
+    "paths": { "@/*": ["./src/*"] },
+    "jsx": "react-jsx",
+    "noEmit": true,
+    "incremental": true,
+    // Vite consumes @migo/sdk through its dist; the web client's tsconfig does the same and
+    // resolves it through the workspace symlink.
+    "allowJs": false,
+    "checkJs": false
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts", "src/vite-env.d.ts"],
+  "exclude": ["node_modules", "dist"]
+}

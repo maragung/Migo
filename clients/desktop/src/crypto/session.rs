@@ -1,10 +1,12 @@
-//! One Double Ratchet per remote device, and the X3DH policy that starts them.
+//! One Double Ratchet per conversation and remote device, and the X3DH policy that starts them.
 //!
-//! A conversation is not a session. Every *device* a peer signs in on has its own long-term identity
-//! and its own ratchet, so a two-person chat where each side has a laptop and a phone is four
-//! ratchets, and a message is sealed once per recipient device. That is what makes a compromised
-//! phone unable to read what the laptop received, and it is why this store is keyed by device id
-//! rather than by account or conversation.
+//! A conversation is not a session, and neither is a device. Every *device* a peer signs in on has
+//! its own long-term identity, and the web and Android clients key the pairwise layer by
+//! `(conversation, device)` — the session that carries a sender-key distribution for one room is
+//! not the session that carries a direct chat with the same person. This store matches that
+//! keying exactly: one ratchet per pair, so a two-person chat where each side has a laptop and a
+//! phone is four ratchets, and a message is sealed once per recipient device. That is what makes
+//! a compromised phone unable to read what the laptop received.
 //!
 //! # When X3DH runs
 //!
@@ -197,10 +199,10 @@ struct Entry {
     origin: Option<Preamble>,
 }
 
-/// Every session this device holds, keyed by remote device id.
+/// Every session this device holds, keyed by conversation and remote device id.
 pub struct SessionStore {
     keys: DeviceKeys,
-    sessions: HashMap<Id, Entry>,
+    sessions: HashMap<(Id, Id), Entry>,
 }
 
 impl SessionStore {
@@ -226,20 +228,46 @@ impl SessionStore {
         self.sessions.clear();
     }
 
-    /// Seals `plaintext` for one device, starting a session from `bundle` if there is none.
+    /// Forgets the sessions of one conversation, or of one device within it.
+    ///
+    /// Called when leaving a conversation: the membership that authorised those ratchets is gone,
+    /// and keeping them would let a re-join re-use a chain the departed member may still hold.
+    /// With `device`, only that device's sessions are dropped — the shape a peer's identity key
+    /// change wants (section 155).
+    pub fn forget(&mut self, conversation: Id, device: Option<Id>) {
+        match device {
+            Some(device) => {
+                self.sessions.remove(&(conversation, device));
+            }
+            None => {
+                self.sessions.retain(|(id, _), _| *id != conversation);
+            }
+        }
+    }
+
+    /// This device's E2EE identity, for the group layer that signs every broadcast it seals.
+    #[must_use]
+    pub fn identity(&self) -> &IdentitySecret {
+        &self.keys.identity
+    }
+
+    /// Seals `plaintext` for one device in one conversation, starting a session from `bundle` if
+    /// there is none.
     ///
     /// `bundle` is required only for the first message; pass `None` once a session exists. A caller
     /// that has no bundle and no session gets [`CryptoError::NoBundle`] rather than a silent
     /// plaintext send.
     pub fn seal(
         &mut self,
+        conversation: Id,
         device: Id,
         bundle: Option<&PrekeyBundle>,
         plaintext: &[u8],
     ) -> Result<Envelope, CryptoError> {
         let mut random = OsRandom;
+        let key = (conversation, device);
 
-        if !self.sessions.contains_key(&device) {
+        if !self.sessions.contains_key(&key) {
             let bundle = bundle.ok_or(CryptoError::NoBundle)?;
             // `initiate` verifies the bundle's signed prekey against the claimed identity before it
             // does any Diffie-Hellman. That check is what makes the server untrusted: it chooses
@@ -249,7 +277,7 @@ impl SessionStore {
             let session =
                 RatchetSession::initiator(&seed, bundle.signed_prekey.public_key, &mut random)?;
             self.sessions.insert(
-                device,
+                key,
                 Entry {
                     session,
                     outgoing_preamble: Some(preamble_of(&initial)),
@@ -258,7 +286,7 @@ impl SessionStore {
             );
         }
 
-        let entry = self.sessions.get_mut(&device).expect("inserted above");
+        let entry = self.sessions.get_mut(&key).expect("inserted above");
         let (header, ciphertext) = entry.session.encrypt_next(plaintext, &mut random)?;
 
         // The peer has replied, so it has the session; the preamble has done its job and every
@@ -273,17 +301,24 @@ impl SessionStore {
         })
     }
 
-    /// Opens an envelope from one device, answering X3DH first if it carries a preamble.
-    pub fn open(&mut self, device: Id, envelope: &Envelope) -> Result<Vec<u8>, CryptoError> {
+    /// Opens an envelope from one device in one conversation, answering X3DH first if it carries
+    /// a preamble.
+    pub fn open(
+        &mut self,
+        conversation: Id,
+        device: Id,
+        envelope: &Envelope,
+    ) -> Result<Vec<u8>, CryptoError> {
+        let key = (conversation, device);
         if let Some(preamble) = &envelope.preamble {
             let already = self
                 .sessions
-                .get(&device)
+                .get(&key)
                 .is_some_and(|entry| entry.origin.as_ref() == Some(preamble));
             if !already {
                 let session = self.answer(preamble)?;
                 self.sessions.insert(
-                    device,
+                    key,
                     Entry {
                         session,
                         outgoing_preamble: None,
@@ -293,10 +328,7 @@ impl SessionStore {
             }
         }
 
-        let entry = self
-            .sessions
-            .get_mut(&device)
-            .ok_or(CryptoError::NoSession)?;
+        let entry = self.sessions.get_mut(&key).ok_or(CryptoError::NoSession)?;
         let plaintext = entry
             .session
             .decrypt(&envelope.header, &envelope.ciphertext)?;

@@ -237,7 +237,11 @@ export default function RegisterPage(): ReactNode {
       ) : null}
 
       {saveOfferOpen ? (
-        <BottomSheet title="Your account key file" onClose={() => setSaveOfferOpen(false)}>
+        <BottomSheet
+          title="Your account key file"
+          variant="auth"
+          onClose={() => setSaveOfferOpen(false)}
+        >
           <SaveAccountSheet
             username={username.trim()}
             accountId={accountId ?? ''}

@@ -9895,6 +9895,200 @@ impl Decode for ConversationStateEvent {
     }
 }
 
+/// Buys a catalogue item from the caller's own account.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StorePurchase {
+    /// Catalogue code, e.g. `emoticon.frog_set`.
+    pub sku: String,
+    /// Caller's idempotency key; a repeat returns the first purchase.
+    pub client_key: String,
+    /// The on-chain payment's transaction hash, when the purchase was paid on-chain (Avalanche C-Chain). Recorded with the entitlement so a purchase can be audited against the chain.
+    pub tx_hash: Option<String>,
+}
+
+impl Encode for StorePurchase {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.sku)?;
+        w.write_str(&self.client_key)?;
+        let present = usize::from(self.tx_hash.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.tx_hash {
+            w.optional(1, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for StorePurchase {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.sku = r.read_string()?;
+        out.client_key = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.tx_hash = Some(sub.read_string()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// The purchase's answer: what was bought, what it cost, and whether this call was a repeat of an earlier one.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StorePurchaseResult {
+    pub sku: String,
+    pub price: u64,
+    pub duplicate: bool,
+}
+
+impl Encode for StorePurchaseResult {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.sku)?;
+        w.write_u64(self.price);
+        w.write_bool(self.duplicate);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for StorePurchaseResult {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.sku = r.read_string()?;
+        out.price = r.read_u64()?;
+        out.duplicate = r.read_bool()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Empty; the caller's own entitlements are the session's.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct EntitlementsReq {}
+
+impl Encode for EntitlementsReq {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for EntitlementsReq {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let out = Self::default();
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// One thing an account owns: a catalogue code and when it was acquired.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Entitlement {
+    pub sku: String,
+    pub acquired_at: Timestamp,
+}
+
+impl Encode for Entitlement {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_str(&self.sku)?;
+        w.write_timestamp(self.acquired_at);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for Entitlement {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.sku = r.read_string()?;
+        out.acquired_at = r.read_timestamp()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// Everything the caller owns, oldest first.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct EntitlementsResponse {
+    pub items: Vec<Entitlement>,
+}
+
+impl Encode for EntitlementsResponse {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        {
+            w.list_len(self.items.len())?;
+            for item in self.items.iter() {
+                item.encode(w)?;
+            }
+        }
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for EntitlementsResponse {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.items = {
+            let n = r.read_list_len()?;
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                v.push(Entitlement::decode(r)?);
+            }
+            v
+        };
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
 /// Delivery class, deciding what happens when a session queue is full (ADR-0008).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeliveryClass {
@@ -10098,6 +10292,10 @@ pub enum Opcode {
     CallSfuEvent = 238,
     /// Group metadata moved: a rename. Deltas only, coalesced per conversation.
     ConversationStateEvent = 52,
+    /// Buys a store item for the caller; the ledger and the entitlement are written together.
+    StorePurchase = 239,
+    /// Everything the caller owns, oldest first.
+    Entitlements = 240,
 }
 
 impl Opcode {
@@ -10224,6 +10422,8 @@ impl Opcode {
             237 => Self::CallSfuJoin,
             238 => Self::CallSfuEvent,
             52 => Self::ConversationStateEvent,
+            239 => Self::StorePurchase,
+            240 => Self::Entitlements,
             _ => return None,
         })
     }
@@ -10345,6 +10545,8 @@ impl Opcode {
             Self::CallSfuJoin => "CALL_SFU_JOIN",
             Self::CallSfuEvent => "CALL_SFU_EVENT",
             Self::ConversationStateEvent => "CONVERSATION_STATE_EVENT",
+            Self::StorePurchase => "STORE_PURCHASE",
+            Self::Entitlements => "ENTITLEMENTS",
         }
     }
 
@@ -10466,6 +10668,8 @@ impl Opcode {
             Self::CallSfuJoin => 20,
             Self::CallSfuEvent => 0,
             Self::ConversationStateEvent => 0,
+            Self::StorePurchase => 5,
+            Self::Entitlements => 1,
         }
     }
 
@@ -10586,6 +10790,8 @@ impl Opcode {
             Self::CallSfuJoin => DeliveryClass::Critical,
             Self::CallSfuEvent => DeliveryClass::Coalescable,
             Self::ConversationStateEvent => DeliveryClass::Coalescable,
+            Self::StorePurchase => DeliveryClass::Critical,
+            Self::Entitlements => DeliveryClass::Droppable,
         }
     }
 
@@ -10706,6 +10912,8 @@ impl Opcode {
             Self::CallSfuJoin => AuthLevel::User,
             Self::CallSfuEvent => AuthLevel::User,
             Self::ConversationStateEvent => AuthLevel::User,
+            Self::StorePurchase => AuthLevel::User,
+            Self::Entitlements => AuthLevel::User,
         }
     }
 
@@ -10826,6 +11034,8 @@ impl Opcode {
             Self::CallSfuJoin => Direction::ClientToServer,
             Self::CallSfuEvent => Direction::ServerToClient,
             Self::ConversationStateEvent => Direction::ServerToClient,
+            Self::StorePurchase => Direction::ClientToServer,
+            Self::Entitlements => Direction::ClientToServer,
         }
     }
 
@@ -10947,6 +11157,8 @@ impl Opcode {
             Self::CallSfuJoin => false,
             Self::CallSfuEvent => false,
             Self::ConversationStateEvent => false,
+            Self::StorePurchase => false,
+            Self::Entitlements => false,
         }
     }
 
@@ -11075,5 +11287,7 @@ impl Opcode {
         Self::CallSfuJoin,
         Self::CallSfuEvent,
         Self::ConversationStateEvent,
+        Self::StorePurchase,
+        Self::Entitlements,
     ];
 }

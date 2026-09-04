@@ -49,6 +49,7 @@ use tokio::sync::mpsc;
 use crate::config::{ServerEndpoint, Transport};
 use crate::crypto::content::{self, Content};
 use crate::crypto::envelope::Envelope;
+use crate::crypto::group::GroupStore;
 use crate::crypto::session::{DeviceKeys, SessionStore, ONE_TIME_PREKEY_COUNT};
 use crate::model::{
     self, Account, AlertRow, Body, ChainNetwork, ChainTxRow, Connection, Conversation, Delivery,
@@ -67,6 +68,14 @@ use crate::vault::{self, SavedSession, TxRecord};
 /// A fifth of the published pool. Low enough that the warning is not noise on a busy account, high
 /// enough that there is still time to act before the pool is empty.
 const ONE_TIME_PREKEY_LOW_WATER: usize = ONE_TIME_PREKEY_COUNT as usize / 5;
+
+/// How many undecryptable messages one sender may have held at once, awaiting its distribution.
+///
+/// The SDK holds the same bound. The number is a compromise the same way every skipped-message
+/// bound is: generous enough that a burst of sends before a distribution lands survives, small
+/// enough that a sender whose distribution never comes costs a bounded amount of memory. Held
+/// messages drop oldest-first.
+const MAX_PENDING_PER_SENDER: usize = 64;
 
 /// The server's error symbols that mean "the captcha proof is dead, whatever else is true".
 ///
@@ -408,6 +417,18 @@ pub enum Event {
     },
     /// An outgoing message could not be sent.
     SendFailed { message_id: Id },
+    /// Someone else's receipt watermark moved: they delivered or read up to `seq`.
+    ///
+    /// The UI's read marker turns on this. Only `Read` watermarks mark messages read; a
+    /// `Delivered` one may arrive first (the server advances Delivered before Read) and the
+    /// marker must not treat it as read. Own receipts never arrive here — [`Self::on_receipt`]
+    /// drops them — so the recipient of this event is always a peer.
+    Receipt {
+        conversation_id: Id,
+        user_id: Id,
+        kind: migo_protocol::ReceiptKind,
+        seq: u64,
+    },
     /// Someone started or stopped typing.
     Typing {
         conversation_id: Id,
@@ -448,6 +469,27 @@ pub enum Event {
     },
     /// A leave was accepted; the rooms pane drops the room from its joined set.
     RoomLeft { room_id: Id },
+    /// Someone came, went, dropped, came back, or was removed in a room this account watches.
+    ///
+    /// Carries the room's own wire event as far as the room id, member id, the change enum, and the
+    /// running member total — the fields a notice line and a live count are drawn from. Not the
+    /// decrypted display name: that is a profile fetch away, and the chat pane resolves it the way
+    /// it resolves a direct conversation's title.
+    RoomMember {
+        room_id: Id,
+        user_id: Id,
+        change: migo_protocol::MemberChange,
+        member_count: Option<u32>,
+    },
+    /// A watched room's counters moved: the online tally, the member total, or the capacity ceiling.
+    ///
+    /// Each field is a delta — absent means unchanged — so the model folds it onto what it holds
+    /// rather than replacing a snapshot.
+    RoomState {
+        room_id: Id,
+        online_count: Option<u32>,
+        member_count: Option<u32>,
+    },
     /// The durable notification inbox, newest first.
     Alerts(Vec<AlertRow>),
     /// A notification was pushed: the cue to re-read whatever inbox-shaped surface is showing.
@@ -637,12 +679,46 @@ struct Signed {
     account: Account,
     access_token: String,
     sessions: SessionStore,
+    /// The sender-key layer: one outbound chain per conversation, one receiver per remote sender
+    /// device. Every content message — rooms and direct chats both — is sealed here, the same
+    /// architecture the web and Android clients speak; the pairwise layer below it now carries
+    /// only key distributions.
+    groups: GroupStore,
+    /// Messages held because the sender's distribution has not arrived yet, keyed by
+    /// `(conversation, sender device)`.
+    ///
+    /// The SDK holds these for the same reason: the pairwise channel and the group fan-out are
+    /// two transports, and a content message can win the race against its own key. Bounded per
+    /// sender by [`MAX_PENDING_PER_SENDER`], drained when the distribution arrives.
+    pending: HashMap<(Id, Id), Vec<migo_protocol::MessageEvent>>,
     /// Prekey bundles already fetched, by device id, so a conversation does not refetch per message.
     bundles: HashMap<Id, migo_crypto::x3dh::PrekeyBundle>,
     /// Which devices belong to which account, learned from KEY_BUNDLE responses.
     devices: HashMap<Id, Vec<Id>>,
     /// Members of each conversation, from the conversation list.
     members: HashMap<Id, Vec<Id>>,
+    /// Conversation topics this session has already subscribed to.
+    ///
+    /// The hub delivers a topic's events only to subscribed sessions, so the desktop client that
+    /// never subscribes hears nothing: no live messages, no receipts, no room events. The ids are
+    /// tracked like the presence watches below so a list re-read does not re-send a SUBSCRIBE per
+    /// conversation; cleared when the gateway reconnects, because subscriptions live and die with
+    /// the session that held them.
+    conversations_watched: HashSet<Id>,
+    /// Room topics this session has subscribed to — the room's own event stream (member and state
+    /// deltas), the one place the wire ever names a room's live totals.
+    ///
+    /// Tracked so a list re-read or a reconnect does not re-send a SUBSCRIBE per room. Unlike the
+    /// two sets above this one is *not* cleared on reconnect: the subscriptions die with the
+    /// session, but the room ids are still the ones the account is in, so the reconnect path
+    /// re-subscribes from it rather than forgetting which rooms the session cared about. Freed on
+    /// leave — the server's membership gate would refuse the topic anyway, but a set that grows
+    /// with every room ever entered is a slow leak.
+    rooms_watched: HashSet<Id>,
+    /// Room id → the conversation behind it, remembered from the join (the one wire moment that
+    /// names both). Needed at leave time: the ack names only the room, but the crypto state and
+    /// the membership bookkeeping are keyed by conversation.
+    room_conversations: HashMap<Id, Id>,
     /// Account ids whose user topics this session has already subscribed to for presence.
     ///
     /// Tracked so a relationship refresh does not re-send a SUBSCRIBE for every friend on every
@@ -1393,6 +1469,12 @@ impl Worker {
         // keep from here until the session ends.
         let txs = keys.txs.clone();
         let sessions = SessionStore::new(keys);
+        // The group layer signs with the same identity the pairwise layer identifies with, so a
+        // broadcast's signature is verifiable against the identity its distributions carried.
+        let groups = GroupStore::new(migo_crypto::IdentitySecret::from_seeds(
+            sessions.identity().expose_signing_seed(),
+            sessions.identity().expose_exchange_seed(),
+        ));
 
         self.signed = Some(Signed {
             server,
@@ -1400,9 +1482,14 @@ impl Worker {
             account: account.clone(),
             access_token,
             sessions,
+            groups,
+            pending: HashMap::new(),
             bundles: HashMap::new(),
             devices: HashMap::new(),
             members: HashMap::new(),
+            conversations_watched: HashSet::new(),
+            rooms_watched: HashSet::new(),
+            room_conversations: HashMap::new(),
             watched: HashSet::new(),
             profile_presence: None,
         });
@@ -1517,10 +1604,21 @@ impl Worker {
                 self.publish_keys().await;
                 // A fresh session holds no subscriptions, so the accounts this device watches for
                 // presence go back to "never subscribed" and the own-topic subscribe below is the
-                // only one that can be sent unconditionally.
+                // only one that can be sent unconditionally. The conversation topics go the same
+                // way — they are re-subscribed by the list read that follows, which is sent
+                // unconditionally below for exactly this reason. The room topics are the
+                // exception: the list read cannot recover them (the conversation summary names no
+                // room id), so their ids are kept across the reconnect and re-subscribed here.
+                let rooms_to_watch: Vec<Id> = self
+                    .signed
+                    .as_ref()
+                    .map(|signed| signed.rooms_watched.iter().copied().collect())
+                    .unwrap_or_default();
                 if let Some(signed) = self.signed.as_mut() {
                     signed.watched.clear();
+                    signed.conversations_watched.clear();
                 }
+                self.watch_topics(TopicKind::Room, rooms_to_watch).await;
                 self.subscribe_self().await;
                 self.announce_presence().await;
                 self.request_conversations().await;
@@ -2932,7 +3030,13 @@ impl Worker {
         self.sync_wallets().await;
     }
 
-    /// Encrypts one text message for every device of every other member, and sends it.
+    /// Sends one text message: the sender-key path the web and Android clients speak.
+    ///
+    /// Every message — rooms and direct chats both — is sealed once with the conversation's chain
+    /// and fanned out. Before that, the chain itself is distributed to any recipient device that
+    /// lacks it, one pairwise-sealed `ControlEvent` per device, so the server never holds a chain
+    /// key. The audience is every member's devices plus this account's own other devices (a
+    /// message must reach the account's phone as surely as the peer's), minus this device.
     async fn send_text(&mut self, conversation_id: Id, text: String) {
         let Some(signed) = self.signed.as_mut() else {
             return;
@@ -2959,28 +3063,33 @@ impl Worker {
             Err(_) => return self.sink.send(Event::SendFailed { message_id }),
         };
 
-        // The recipient set is every device of every other member. One envelope per device is what
-        // makes a compromised phone unable to read what the laptop received.
-        let peers: Vec<Id> = signed
+        // The audience the SDK's `recipientDevices` computes: members ∪ this account, devices of
+        // each, minus this sending device. Devices are known only through KEY_BUNDLE responses;
+        // an account with no bundle yet is a peer this client cannot reach, so the send is
+        // retried after the fetch the code below triggers.
+        let members: Vec<Id> = signed
             .members
             .get(&conversation_id)
-            .map(|members| {
-                members
-                    .iter()
-                    .copied()
-                    .filter(|id| *id != signed.account.account_id)
-                    .collect()
-            })
+            .cloned()
             .unwrap_or_default();
-
+        // The audience the SDK's `recipientDevices` computes: members ∪ this account (the account's
+        // other devices must receive this message for sync), devices of each, minus this sending
+        // device.
+        let mut audience: Vec<Id> = members;
+        if !audience.contains(&signed.account.account_id) {
+            audience.push(signed.account.account_id);
+        }
+        let my_device = signed.account.device_id;
         let mut targets: Vec<Id> = Vec::new();
-        for peer in &peers {
-            match signed.devices.get(peer) {
-                Some(devices) => targets.extend(devices.iter().copied()),
+        for user in &audience {
+            match signed.devices.get(user) {
+                Some(devices) => {
+                    targets.extend(devices.iter().copied().filter(|id| *id != my_device));
+                }
                 None => {
-                    // No bundle yet. Ask for one; the message is retried when it arrives.
+                    // No device list yet. Ask for one; the message is retried when it arrives.
                     let request = migo_protocol::KeyBundleRequest {
-                        user_id: *peer,
+                        user_id: *user,
                         device_id: None,
                     };
                     self.request(Opcode::KeyBundleFetch, &request).await;
@@ -2994,39 +3103,78 @@ impl Worker {
             }
         }
 
-        if targets.is_empty() {
-            self.sink
-                .toast("no other device to send to yet", ToastKind::Info);
-            self.sink.send(Event::SendFailed { message_id });
-            return;
-        }
-
-        // One MESSAGE_SEND per recipient device, sharing the message id so the conversation shows one
-        // message rather than one per device.
-        for device in targets {
+        // The pairwise layer carries only distributions. Each one holds the chain key as of *now*,
+        // so it must be taken before the content seal — handing it out after the first message
+        // would gate that message out of the receiver's chain, which is the late-joiner property
+        // applied to everyone.
+        let distribution = signed.groups.distribution(conversation_id);
+        for device in &targets {
             let Some(signed) = self.signed.as_mut() else {
                 return;
             };
-            let bundle = signed.bundles.get(&device).cloned();
-            let envelope = match signed.sessions.seal(device, bundle.as_ref(), &plaintext) {
-                Ok(envelope) => envelope,
-                Err(_) => continue,
+            if !signed.groups.needs_distribution(conversation_id, *device) {
+                continue;
+            }
+            let bundle = signed.bundles.get(device).cloned();
+            let control = content::encode(
+                &Content::ControlEvent {
+                    event: "sender-key".to_owned(),
+                    data: Some(distribution.clone()),
+                },
+                true,
+            );
+            let Ok(control) = control else {
+                continue;
             };
-            let bytes = match envelope.encode() {
-                Ok(bytes) => bytes,
-                Err(_) => continue,
+            let envelope =
+                match signed
+                    .sessions
+                    .seal(conversation_id, *device, bundle.as_ref(), &control)
+                {
+                    Ok(envelope) => envelope,
+                    // A device whose bundle will not start a session is skipped, not fatal: the
+                    // content message still reaches it only if a distribution did, and its next
+                    // send re-offers one.
+                    Err(_) => continue,
+                };
+            let Ok(bytes) = envelope.encode() else {
+                continue;
             };
-            let message = migo_protocol::MessageSend {
-                message_id,
+            let exchange = migo_protocol::MessageSend {
+                message_id: Id::generate_at(Timestamp::now(), &mut OsRandom),
                 conversation_id,
-                kind: MessageKind::Text,
+                kind: MessageKind::KeyExchange,
                 envelope: bytes,
                 reply_to: None,
                 expires_in_ms: None,
                 sender_key_id: None,
             };
-            self.request(Opcode::MessageSend, &message).await;
+            self.request(Opcode::MessageSend, &exchange).await;
+            if let Some(signed) = self.signed.as_mut() {
+                signed.groups.mark_distributed(conversation_id, *device);
+            }
         }
+
+        // One MESSAGE_SEND for the whole conversation: sealed once, fanned out by the server to
+        // every device the distribution reached. This is the entire point of the sender-key
+        // design — the pairwise cost is paid per device once, not per message.
+        let Some(signed) = self.signed.as_mut() else {
+            return;
+        };
+        let sealed = match signed.groups.seal(conversation_id, &plaintext) {
+            Ok(sealed) => sealed,
+            Err(_) => return self.sink.send(Event::SendFailed { message_id }),
+        };
+        let message = migo_protocol::MessageSend {
+            message_id,
+            conversation_id,
+            kind: MessageKind::Text,
+            envelope: sealed.envelope,
+            reply_to: None,
+            expires_in_ms: None,
+            sender_key_id: Some(sealed.chain_id),
+        };
+        self.request(Opcode::MessageSend, &message).await;
     }
 
     /// Requests the public room directory, narrowed by a query when one is held.
@@ -3179,27 +3327,44 @@ impl Worker {
         self.sink.send(Event::Rooms(rows));
     }
 
-    /// A join was accepted: note the conversation's (empty) member set, re-read the list, and tell
-    /// the UI which thread to open.
+    /// A join was accepted: watch the room's own topic, note the conversation's (empty) member
+    /// set, re-read the list, and tell the UI which thread to open.
+    ///
+    /// The room topic is the join's other half. The conversation topic (subscribed by the list
+    /// read below) carries the messages; the room topic carries who is in the room — the member
+    /// and state events the notices and the live counts are drawn from. Without it a joined room
+    /// shows its opening snapshot forever, silently.
     async fn on_room_joined(&mut self, frame: &migo_protocol::Frame) {
         let Ok(joined) = gateway::decode::<migo_protocol::RoomJoinResponse>(frame) else {
             return;
         };
+        let mut to_watch: Vec<Id> = Vec::new();
         if let Some(signed) = self.signed.as_mut() {
             // A room's member set is served by the roster, not the join; the empty set here only
             // seeds the map so a send before the list re-reads does not mis-address.
             signed.members.entry(joined.conversation_id).or_default();
+            signed
+                .room_conversations
+                .insert(joined.room.room_id, joined.conversation_id);
+            if signed.rooms_watched.insert(joined.room.room_id) {
+                to_watch.push(joined.room.room_id);
+            }
         }
         self.sink.send(Event::RoomJoined {
             conversation_id: joined.conversation_id,
             room_id: joined.room.room_id,
             title: joined.room.name,
         });
+        self.watch_topics(TopicKind::Room, to_watch).await;
         self.request_conversations().await;
     }
 
-    /// A leave was accepted: the rooms pane drops the room, and the conversation list re-reads so
-    /// the closed conversation stops being offered.
+    /// A leave was accepted: stop watching the room's topic, drop the rooms pane's entry, and
+    /// re-read the list so the closed conversation stops being offered.
+    ///
+    /// The room's crypto state goes with it: the membership that authorised this device's chain
+    /// and its receiver states is gone, and a re-join must start fresh chains rather than
+    /// re-using keys the departed members may still hold.
     async fn on_room_left(&mut self, frame: &migo_protocol::Frame) {
         let Ok(acknowledged) = gateway::decode::<migo_protocol::Acknowledged>(frame) else {
             return;
@@ -3210,8 +3375,79 @@ impl Worker {
         if !acknowledged.ok {
             return;
         }
+        // The conversation id the room maps to, remembered from the join: the leave ack names
+        // only the room, but the crypto state is keyed by conversation.
+        let conversation = self
+            .signed
+            .as_ref()
+            .and_then(|signed| signed.room_conversations.get(&room_id).copied());
+        if let Some(signed) = self.signed.as_mut() {
+            signed.rooms_watched.remove(&room_id);
+            signed.room_conversations.remove(&room_id);
+            if let Some(conversation) = conversation {
+                signed.groups.forget(conversation);
+                signed.sessions.forget(conversation, None);
+                signed.pending.retain(|(id, _), _| *id != conversation);
+            }
+        }
         self.sink.send(Event::RoomLeft { room_id });
         self.request_conversations().await;
+    }
+
+    /// A member event off a watched room's topic: someone came, went, dropped, or was removed.
+    ///
+    /// Forwarded whole rather than reduced to a sentence here: the display name is a profile
+    /// fetch away and belongs with the chat pane's other name lookups, and the change enum and
+    /// member total are the two facts both a notice line and a live count are drawn from.
+    fn on_room_member(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(event) = gateway::decode::<migo_protocol::RoomMemberEvent>(frame) else {
+            return;
+        };
+        let change = event
+            .change
+            .filter(|change| *change != migo_protocol::MemberChange::Unknown)
+            .unwrap_or(if event.joined {
+                migo_protocol::MemberChange::Joined
+            } else {
+                migo_protocol::MemberChange::Left
+            });
+        // A departure from a room this session is in kills the room's outbound chain: the member
+        // who left may still hold its key, and the one thing a chain must not do after a member
+        // leaves is keep sealing. The next send builds a fresh chain and distributes it to
+        // everyone remaining. A member *joining* needs no rotation — the chain key they are
+        // handed starts at the current position, so history stays sealed to them.
+        if matches!(
+            change,
+            migo_protocol::MemberChange::Left
+                | migo_protocol::MemberChange::Disconnected
+                | migo_protocol::MemberChange::Kicked
+                | migo_protocol::MemberChange::Banned
+        ) {
+            if let Some(signed) = self.signed.as_mut() {
+                if let Some(conversation) = signed.room_conversations.get(&event.room_id) {
+                    signed.groups.rotate(*conversation);
+                }
+            }
+        }
+        self.sink.send(Event::RoomMember {
+            room_id: event.room_id,
+            user_id: event.user_id,
+            change,
+            member_count: event.member_count,
+        });
+    }
+
+    /// A state event off a watched room's topic: the counters moved. A delta, folded — never a
+    /// snapshot — so an event that carries only the online tally leaves the member total alone.
+    fn on_room_state(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(event) = gateway::decode::<migo_protocol::RoomStateEvent>(frame) else {
+            return;
+        };
+        self.sink.send(Event::RoomState {
+            room_id: event.room_id,
+            online_count: event.online_count,
+            member_count: event.member_count,
+        });
     }
 
     /// The inbox came back: reduce it to rows.
@@ -3414,6 +3650,9 @@ impl Worker {
             Opcode::Ping => self.on_ping(&frame).await,
             Opcode::MessageEvent => self.on_message(&frame),
             Opcode::MessageSend => self.on_accepted(&frame),
+            // Someone's delivery or read watermark moved. The event reaches the conversation's
+            // subscribers only — one more reason the SUBSCRIBE-on-list-read path above matters.
+            Opcode::MessageReceipt => self.on_receipt(&frame),
             Opcode::ConversationList => self.on_conversations(&frame).await,
             Opcode::ConversationCreate => self.on_conversation_created(&frame).await,
             Opcode::Sync => self.on_history(&frame),
@@ -3439,6 +3678,8 @@ impl Worker {
             Opcode::RoomList => self.on_rooms(&frame),
             Opcode::RoomJoin | Opcode::RoomCreate => self.on_room_joined(&frame).await,
             Opcode::RoomLeave => self.on_room_left(&frame).await,
+            Opcode::RoomMemberEvent => self.on_room_member(&frame),
+            Opcode::RoomStateEvent => self.on_room_state(&frame),
             Opcode::NotificationList => self.on_alerts(&frame),
             Opcode::NotificationEvent => self.on_alert_pushed(&frame),
             Opcode::BalanceFetch => self.on_balance(&frame),
@@ -3473,10 +3714,59 @@ impl Worker {
         let Ok(event) = gateway::decode::<migo_protocol::MessageEvent>(frame) else {
             return;
         };
+        // Route by kind, exactly the way the SDK's `#onMessageEvent` does. A KeyExchange is a
+        // sender-key distribution riding the pairwise channel: it either opens (and is adopted)
+        // or it was sealed for another device and is dropped silently — both normal. Anything
+        // else is content and goes to the group layer. The reply-frame path `on_accepted` is not
+        // involved: this arm is the *event* opcode, pushed by the server.
+        if event.kind == MessageKind::KeyExchange {
+            self.on_key_exchange(&event);
+            return;
+        }
         let Some(message) = self.decrypt(&event) else {
             return;
         };
         self.sink.send(Event::Message(message));
+    }
+
+    /// Handles one KeyExchange event: a sender-key distribution, or fan-out noise sealed for
+    /// another device.
+    ///
+    /// A distribution sealed for a different device reaches this one too and cannot open — that
+    /// is expected, not an error. One that does open is adopted, and the pending messages held
+    /// for that sender are drained: the distribution that unlocks them just arrived.
+    fn on_key_exchange(&mut self, event: &migo_protocol::MessageEvent) {
+        let plaintext = {
+            let Some(signed) = self.signed.as_mut() else {
+                return;
+            };
+            match Envelope::decode(&event.envelope).and_then(|envelope| {
+                signed
+                    .sessions
+                    .open(event.conversation_id, event.sender_device, &envelope)
+            }) {
+                Ok(plaintext) => plaintext,
+                // Sealed for another device, or a version this store cannot answer. Expected.
+                Err(_) => return,
+            }
+        };
+        let Ok(content) = content::decode(&plaintext) else {
+            return;
+        };
+        let Content::ControlEvent { event: name, data } = content else {
+            // A control event over the pairwise channel that is not a sender-key distribution.
+            return;
+        };
+        if name != "sender-key" {
+            return;
+        }
+        let Some(data) = data else { return };
+        if let Some(signed) = self.signed.as_mut() {
+            signed
+                .groups
+                .accept(event.conversation_id, event.sender_device, &data);
+        }
+        self.drain_pending(event.conversation_id, event.sender_device);
     }
 
     fn on_accepted(&mut self, frame: &migo_protocol::Frame) {
@@ -3490,12 +3780,43 @@ impl Worker {
         });
     }
 
+    /// One receipt watermark arrived: a member of a conversation delivered or read up to `seq`.
+    ///
+    /// Own receipts are dropped — the UI's read marker means *someone else* read it, and a
+    //  watermark this account stamped itself would mark its own outgoing messages read. The
+    /// server stamps `user_id` itself, so absence is the only other shape and that too is
+    /// nothing to show.
+    fn on_receipt(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(event) = gateway::decode::<migo_protocol::MessageReceipt>(frame) else {
+            return;
+        };
+        let Some(user_id) = event.user_id else {
+            return;
+        };
+        if let Some(signed) = self.signed.as_ref() {
+            if user_id == signed.account.account_id {
+                return;
+            }
+        }
+        self.sink.send(Event::Receipt {
+            conversation_id: event.conversation_id,
+            user_id,
+            kind: event.kind,
+            seq: event.seq,
+        });
+    }
+
     async fn on_conversations(&mut self, frame: &migo_protocol::Frame) {
         let Ok(response) = gateway::decode::<migo_protocol::ConversationListResponse>(frame) else {
             return;
         };
         let me = self.signed.as_ref().map(|signed| signed.account.account_id);
         let mut out = Vec::with_capacity(response.conversations.len());
+        // The conversation ids to subscribe, gathered across the whole page the way the SDK's
+        // `loadConversations` gathers them: one SUBSCRIBE frame for the list rather than one per
+        // conversation. Without this the desktop hears no live traffic at all — the hub keys its
+        // fan-out by subscriber set, and a session that never asked never receives.
+        let mut to_watch: Vec<Id> = Vec::new();
         // The peers whose names a direct conversation's title is drawn from. Gathered across the
         // whole list so one PROFILE_FETCH titles every direct chat, rather than one fetch per
         // row — the list arrives all at once, so the fetch is per-list.
@@ -3516,6 +3837,9 @@ impl Worker {
                 signed
                     .members
                     .insert(summary.conversation_id, members.clone());
+                if signed.conversations_watched.insert(summary.conversation_id) {
+                    to_watch.push(summary.conversation_id);
+                }
             }
             let preview = summary
                 .last_message
@@ -3532,25 +3856,59 @@ impl Worker {
                 updated_at: summary.last_message.as_ref().map(|event| event.created_at),
                 unread: u32::try_from(summary.last_seq.saturating_sub(summary.read_seq))
                     .unwrap_or(u32::MAX),
+                // A Room-kind conversation has a room behind it — but the summary names no room
+                // id, so it stays `None` here. The join event (the one wire moment that names
+                // both) fills it; a room joined in an earlier session keeps `None`, and its
+                // notice tail is simply absent until the next join — the same room topic the
+                // notices need cannot be subscribed without the id either.
+                room_id: None,
             });
         }
         self.sink.send(Event::Conversations(out));
         self.fetch_profiles(peers).await;
+        self.watch_conversations(to_watch).await;
+    }
+
+    /// Subscribes the session to a batch of conversation topics, the gate every live event passes
+    /// through.
+    ///
+    /// Best effort by the same reasoning the presence watches are: the server answers a refused
+    /// SUBSCRIBE without a reason (the answer cannot become a probe), and a client that toasted
+    /// about every declined watch would be inventing reasons the server chose not to give. A
+    /// conversation left unwatched still converges through the history read on open.
+    async fn watch_conversations(&mut self, ids: Vec<Id>) {
+        self.watch_topics(TopicKind::Conversation, ids).await;
+    }
+
+    /// The one SUBSCRIBE sender both watch kinds share: one frame for the whole batch, whatever
+    /// the topic kind, so a list read or a reconnect costs one round trip rather than one per id.
+    async fn watch_topics(&mut self, kind: TopicKind, ids: Vec<Id>) {
+        if ids.is_empty() {
+            return;
+        }
+        let topics: Vec<Topic> = ids.into_iter().map(|id| Topic { kind, id }).collect();
+        let request = SubscribeRequest { topics };
+        self.request(Opcode::Subscribe, &request).await;
     }
 
     async fn on_conversation_created(&mut self, frame: &migo_protocol::Frame) {
         let Ok(summary) = gateway::decode::<migo_protocol::ConversationSummary>(frame) else {
             return;
         };
+        let mut to_watch: Vec<Id> = Vec::new();
         if let Some(signed) = self.signed.as_mut() {
             signed.members.insert(
                 summary.conversation_id,
                 summary.members.clone().unwrap_or_default(),
             );
+            if signed.conversations_watched.insert(summary.conversation_id) {
+                to_watch.push(summary.conversation_id);
+            }
         }
         self.sink.send(Event::ConversationCreated {
             conversation_id: summary.conversation_id,
         });
+        self.watch_conversations(to_watch).await;
         self.request_conversations().await;
     }
 
@@ -3767,28 +4125,62 @@ impl Worker {
 
     /// Decrypts one MESSAGE_EVENT into something the UI can show.
     ///
-    /// A message that will not decrypt becomes [`Body::Undecryptable`] rather than disappearing. A
-    /// silently dropped message is indistinguishable from one that was never sent, and the gap in the
-    /// sequence numbers would go unexplained; a visible placeholder tells the user something arrived
-    /// that this device cannot read, which is the truth.
+    /// The content path runs through the group layer: the message opens under the sender's chain
+    /// when a distribution has been accepted, and is *held* — not failed — when one has not, the
+    /// same buffering the SDK does, because the distribution may still be in flight. A message
+    /// that will not open even with a key becomes [`Body::Undecryptable`] rather than
+    /// disappearing: a silently dropped message is indistinguishable from one that was never
+    /// sent, and the gap in the sequence numbers would go unexplained.
     fn decrypt(&mut self, event: &migo_protocol::MessageEvent) -> Option<Message> {
-        let signed = self.signed.as_mut()?;
-        let outgoing = event.sender_id == signed.account.account_id;
-        let mine = event.sender_device == signed.account.device_id;
+        let (outgoing, mine) = {
+            let signed = self.signed.as_ref()?;
+            (
+                event.sender_id == signed.account.account_id,
+                event.sender_device == signed.account.device_id,
+            )
+        };
 
         let body = if mine {
-            // Our own message, echoed back. The ratchet cannot open what it sealed, so there is
-            // nothing to decrypt — the UI already has this text from the optimistic insert.
+            // Our own message, echoed back. The chain that sealed it is this device's, and its
+            // keys advance on seal, so there is nothing to open — the UI already has this text
+            // from the optimistic insert.
             Body::Text(String::new())
         } else {
-            match Envelope::decode(&event.envelope)
-                .and_then(|envelope| signed.sessions.open(event.sender_device, &envelope))
-                .map_err(|error| error.to_string())
-                .and_then(|plaintext| {
-                    content::decode(&plaintext).map_err(|_| "unreadable content".to_owned())
-                }) {
-                Ok(content) => body_of(content),
-                Err(reason) => Body::Undecryptable(reason),
+            let held = {
+                let signed = self.signed.as_mut()?;
+                if !signed
+                    .groups
+                    .has_receiver(event.conversation_id, event.sender_device)
+                {
+                    None
+                } else {
+                    Some(
+                        signed
+                            .groups
+                            .open(event.conversation_id, event.sender_device, &event.envelope)
+                            .map_err(|error| error.to_string())
+                            .and_then(|plaintext| {
+                                content::decode(&plaintext)
+                                    .map_err(|_| "unreadable content".to_owned())
+                            }),
+                    )
+                }
+            };
+            match held {
+                // The sender's distribution has not arrived yet, or the message names a chain it
+                // does not know (a rotation not caught up to). Hold the message in both cases:
+                // the distribution that unlocks it may still be in flight, and a message that
+                // vanishes silently is indistinguishable from one never sent. Drained the moment
+                // a distribution is adopted.
+                None => {
+                    self.buffer(event.clone());
+                    return None;
+                }
+                Some(Err(_)) => {
+                    self.buffer(event.clone());
+                    return None;
+                }
+                Some(Ok(content)) => body_of(content),
             }
         };
 
@@ -3807,6 +4199,43 @@ impl Worker {
             sent_at: event.created_at,
             delivery: Delivery::Received,
         })
+    }
+
+    /// Holds one undecryptable message, dropping the oldest once the per-sender bound is reached.
+    ///
+    /// The bound is the same defence the pairwise ratchet's skipped-message list makes: a sender
+    /// whose distributions never arrive must not grow this store forever. When a distribution does
+    /// arrive, [`Self::drain_pending`] replays what it held, in arrival order.
+    fn buffer(&mut self, event: migo_protocol::MessageEvent) {
+        let Some(signed) = self.signed.as_mut() else {
+            return;
+        };
+        let key = (event.conversation_id, event.sender_device);
+        let list = signed.pending.entry(key).or_default();
+        list.push(event);
+        while list.len() > MAX_PENDING_PER_SENDER {
+            list.remove(0);
+        }
+    }
+
+    /// Replays the messages held for one sender, in arrival order.
+    ///
+    /// Called when a distribution for that sender is adopted. A message that still does not open
+    /// — a second rotation was announced between the hold and the drain — is re-held once; a
+    /// message that opens is delivered as if it had just arrived.
+    fn drain_pending(&mut self, conversation_id: Id, sender_device: Id) {
+        let Some(signed) = self.signed.as_mut() else {
+            return;
+        };
+        let held = signed
+            .pending
+            .remove(&(conversation_id, sender_device))
+            .unwrap_or_default();
+        for event in held {
+            if let Some(message) = self.decrypt(&event) {
+                self.sink.send(Event::Message(message));
+            }
+        }
     }
 
     /// Handles a lost connection: drop the socket, report it, arm the retry.

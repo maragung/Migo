@@ -34,6 +34,9 @@ export default tseslint.config(
       // document the look, not code that ships. They sit outside every tsconfig, so the
       // typed rules can only produce parser errors over them.
       'docs/design/**',
+      // A user-authored design reference kept at the root, outside every tsconfig (the same
+      // reason as docs/design/**). Not tracked, not shipped; linting it only errors.
+      'new-ui-02.tsx',
     ],
   },
   js.configs.recommended,

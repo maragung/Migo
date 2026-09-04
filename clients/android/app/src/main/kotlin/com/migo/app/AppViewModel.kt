@@ -402,6 +402,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * [open] as an incoming message drives it: the title is the conversation's row (already held,
+     * because the message's own bump put it there or the list had it), and a conversation the list
+     * does not know yet is not invented from one message — the read that [open]'s caller asked for
+     * by tapping a row cannot happen here, so the list is reloaded and the row's unread badge
+     * carries the message until the person taps through.
+     */
+    private fun openFromMessage(conversationId: Id) {
+        val row = signedInState?.conversations?.find { it.conversationId == conversationId }
+        if (row != null) {
+            open(conversationId, row.title)
+        } else {
+            refreshConversations()
+        }
+    }
+
     /** Closes the open chat, which is what drops its decrypted messages. */
     fun closeChat() = signedIn { it.copy(open = null) }
 
@@ -628,12 +644,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Leaves a room: the server closes the conversation for this account, and the list stops
      * offering it. The open chat (if it is this room's) closes with it.
+     *
+     * The cached room summary goes too. The leave fan-out excludes this device, so no member or
+     * state event will ever correct its counts — without the drop, the directory row keeps
+     * showing the room as it was while this account was in it ("1 online" in a room of nobody)
+     * until the next directory read happens to overwrite it.
      */
     fun leaveRoom(conversationId: Id, roomId: Id) {
         val live = session ?: return
         viewModelScope.launch {
             try {
                 live.client.rooms.leave(roomId)
+                roomInfo.remove(roomId)
                 signedIn { current ->
                     current.copy(
                         conversations = current.conversations.filterNot { it.conversationId == conversationId },
@@ -2094,6 +2116,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 ),
             )
         }
+        // A message for a conversation with no chat on screen mints the window — the user's rule
+        // for chat windows: a room, group, or private chat's screen comes into being when a
+        // packet arrives for it, not only when a row is tapped. This is the phone story: there is
+        // one chat surface, so minting is opening — the message has a row to be found from
+        // Back if the reader would rather not be taken there. Echoes of this account's own
+        // sends (multi-device sync included) do not open anything: the sending device's screen
+        // is the one that matters, and a synchronized echo yanking the reader away from
+        // Friends mid-scroll is a push, not a window.
+        if (!mine && !onScreen) {
+            openFromMessage(message.conversationId)
+        }
         if (onScreen && !mine) {
             viewModelScope.launch {
                 try {
@@ -2132,6 +2165,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun rememberRooms(rooms: List<RoomSummary>) {
         for (summary in rooms) roomInfo[summary.roomId] = summary
     }
+
+    /**
+     * A room's live shape, from the last summary seen for it, as the Rooms directory reads it.
+     *
+     * Public where [liveInfoFor] is private because the directory is a different caller with the
+     * same need: its rows hold the counts the page carried — a snapshot from the moment of the
+     * read — and this is the record the member and state events keep current, so a row whose
+     * room the account is in counts in front of the user instead of waiting for a refresh.
+     */
+    fun liveCountsFor(roomId: Id): RoomLiveInfo? = liveInfoFor(roomId)
 
     /**
      * The live shape a room chat should open with, from the last summary seen for the room.

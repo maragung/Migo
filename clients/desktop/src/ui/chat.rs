@@ -44,7 +44,35 @@ pub struct ChatState {
     pub typing_sent: bool,
     /// True until the first message that must be scrolled into view has been.
     pub scroll_to_end: bool,
+    /// Room membership notices, keyed by room id: who came, who went, who was shown the door.
+    ///
+    /// A live tail, not history — the same cap the web and Android clients keep — reset when the
+    /// room changes. The name a line reads out is resolved at draw time from `names`, the way a
+    /// typing line's is, so a display name that arrives late still lands on the line.
+    pub room_notices: HashMap<Id, Vec<RoomNotice>>,
+    /// The highest sequence number a peer has read, per conversation: another member's Read
+    /// watermark, the same `readUpTo` the web and Android clients track.
+    ///
+    /// Own receipts never land here (the net layer drops them), so the value is always someone
+    /// else's read — which is exactly what an outgoing message's read marker claims. Monotonic:
+    /// a receipt is a watermark, so an older one arriving late never drags it backwards.
+    pub read_up_to: HashMap<Id, u64>,
 }
+
+/// One room membership line in the thread's tail.
+#[derive(Debug, Clone)]
+pub struct RoomNotice {
+    /// Who the change is about.
+    pub user_id: Id,
+    /// The sentence, minus the name: "joined the room", "disconnected", and the rest.
+    pub verb: &'static str,
+    /// Arrival order, stable across the repaint loop.
+    pub seq: u64,
+}
+
+/// How many recent membership changes a room keeps on screen at once. Public because the app's
+/// event handler trims to it when a notice arrives — the same bound, written in one place.
+pub const MAX_ROOM_NOTICES: usize = 50;
 
 impl ChatState {
     /// Replaces the conversation list, keeping the open conversation selected if it survived.
@@ -118,6 +146,18 @@ impl ChatState {
             if let Some(message) = thread.iter_mut().find(|m| m.message_id == message_id) {
                 message.delivery = Delivery::Failed;
             }
+        }
+    }
+
+    /// Folds a peer's Read watermark: everything they have read, up to `seq`.
+    ///
+    /// Monotonic, because a receipt is a cumulative claim — "I have read through here" — so a
+    /// late-arriving older watermark must not undo a newer one. The marker an outgoing row draws
+    /// reads this, the same way the web client's `readUpTo` does.
+    pub fn note_read(&mut self, conversation_id: Id, seq: u64) {
+        let watermark = self.read_up_to.entry(conversation_id).or_insert(seq);
+        if seq > *watermark {
+            *watermark = seq;
         }
     }
 
@@ -277,17 +317,68 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState) {
                 } else {
                     peer_seed.as_deref()
                 };
-                message_row(ui, context, message, sender.as_deref(), avatar_seed);
+                // The read marker rides only outgoing messages with a server sequence: a peer's
+                // watermark claims "I read through N", which a message still Sending has no seq
+                // to be measured against yet.
+                let read = message.outgoing
+                    && message.seq > 0
+                    && state
+                        .read_up_to
+                        .get(&conversation_id)
+                        .is_some_and(|mark| message.seq <= *mark);
+                message_row(ui, context, message, sender.as_deref(), avatar_seed, read);
                 ui.add_space(space::SM);
             }
             ui.add_space(space::SM);
         });
+
+    // The room's own life, after the messages: who came, who went, who dropped. A live tail, not
+    // history — the notices arrived while the room was open, in arrival order, and a reader who
+    // wants the durable roster opens the rooms pane.
+    room_notices(ui, context, state, conversation_id);
 
     if typing_height > 0.0 {
         typing_line(ui, context, state, conversation_id);
     }
 
     composer(ui, context, state, conversation_id);
+}
+
+/// The room membership tail: "Ana joined the room", "Bo disconnected", newest last.
+///
+/// Drawn inside the thread's scroll as its final lines, after the messages — the ambient
+/// "someone came in" a chat shows, not a durable record. Names resolve the way the typing line's
+/// do, at draw time, so a profile that arrives late still lands on its line.
+fn room_notices(ui: &mut Ui, context: &Context<'_>, state: &ChatState, conversation_id: Id) {
+    let colors = palette(context.theme);
+    // Room-kind conversations are the only ones with notices, so the lookup costs one map miss
+    // on every direct chat — cheaper than threading the room id down from the header.
+    let Some(room_id) = state
+        .conversations
+        .iter()
+        .find(|c| c.conversation_id == conversation_id)
+        .and_then(|c| c.room_id)
+    else {
+        return;
+    };
+    let Some(notices) = state.room_notices.get(&room_id) else {
+        return;
+    };
+    for notice in notices {
+        let who = state
+            .names
+            .get(&notice.user_id)
+            .cloned()
+            .unwrap_or_else(|| model::short_id(notice.user_id));
+        ui.horizontal(|ui| {
+            ui.add_space(space::LG);
+            ui.label(
+                RichText::new(format!("{who} {}", notice.verb))
+                    .font(egui::FontId::proportional(font::TINY))
+                    .color(colors.text_muted),
+            );
+        });
+    }
 }
 
 /// The compact header over the open conversation: title, encryption state, and the counts that
@@ -379,6 +470,7 @@ fn message_row(
     message: &Message,
     sender: Option<&str>,
     avatar_seed: Option<&str>,
+    read: bool,
 ) {
     let (text, tone) = match &message.body {
         Body::Text(text) => (text.clone(), BubbleTone::Normal),
@@ -404,19 +496,12 @@ fn message_row(
             format!("Unsupported message (type {content_type}). Update Migo to read it."),
             BubbleTone::Problem,
         ),
-        // Shown, not hidden. A message that cannot be decrypted still happened, and the gap it would
-        // otherwise leave in the sequence numbers has no other explanation on screen. The reason is
-        // safe to render: it is a short classification produced by this client, never key material and
-        // never part of a plaintext.
-        Body::Undecryptable(reason) => (
-            format!("This message could not be decrypted on this device: {reason}."),
-            BubbleTone::Problem,
-        ),
     };
     let meta = format!(
-        "{} {}",
+        "{} {}{}",
         model::clock(message.sent_at),
-        tick(message.delivery)
+        tick(message.delivery),
+        if read { " \u{2713}\u{2713}" } else { "" }
     );
     if let Some(sender) = sender {
         let colors = palette(context.theme);
@@ -448,7 +533,9 @@ fn message_row(
 /// The delivery mark shown after the timestamp.
 ///
 /// Only outgoing messages carry one, because a tick on something received tells the reader nothing
-/// they do not already know by seeing it.
+/// they do not already know by seeing it. A read message upgrades one tick to two — the same
+/// pair the web client draws — but the upgrade is decided by the caller (the read watermark),
+/// not here: the marker means *someone else* read it, and this function has no way to know.
 fn tick(state: Delivery) -> &'static str {
     match state {
         Delivery::Sending => "\u{00B7}\u{00B7}\u{00B7}",

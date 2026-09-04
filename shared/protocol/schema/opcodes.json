@@ -1,1258 +1,1280 @@
 {
- "$comment": "Opcode registry. Hot opcodes are kept below 0x80 so they encode in a single varint byte. A request/response opcode reuses the same code for the reply, matched by correlation id; errors ride the ERROR flag. Every opcode MUST declare a rate-limit cost (ADR-0006) and a delivery class (ADR-0008).",
- "ranges": [
-  {
-   "from": 1,
-   "to": 15,
-   "name": "control"
-  },
-  {
-   "from": 16,
-   "to": 31,
-   "name": "auth_keys"
-  },
-  {
-   "from": 32,
-   "to": 63,
-   "name": "messaging"
-  },
-  {
-   "from": 64,
-   "to": 79,
-   "name": "presence"
-  },
-  {
-   "from": 80,
-   "to": 111,
-   "name": "rooms"
-  },
-  {
-   "from": 112,
-   "to": 127,
-   "name": "social"
-  },
-  {
-   "from": 128,
-   "to": 143,
-   "name": "media"
-  },
-  {
-   "from": 144,
-   "to": 159,
-   "name": "notifications"
-  },
-  {
-   "from": 160,
-   "to": 175,
-   "name": "economy"
-  },
-  {
-   "from": 176,
-   "to": 191,
-   "name": "games_bots"
-  },
-  {
-   "from": 192,
-   "to": 207,
-   "name": "moderation"
-  },
-  {
-   "from": 208,
-   "to": 223,
-   "name": "federation"
-  },
-  {
-   "from": 224,
-   "to": 255,
-   "name": "reserved"
-  }
- ],
- "opcodes": [
-  {
-   "name": "HELLO",
-   "code": 1,
-   "direction": "client_to_server",
-   "payload": "Hello",
-   "response": "Welcome",
-   "auth": "None",
-   "cost": 5,
-   "class": "Critical",
-   "doc": "Handshake. Also carries optional token and resume."
-  },
-  {
-   "name": "PING",
-   "code": 2,
-   "direction": "both",
-   "payload": "Ping",
-   "response": "Pong",
-   "auth": "None",
-   "cost": 1,
-   "class": "Critical"
-  },
-  {
-   "name": "ACK",
-   "code": 3,
-   "direction": "client_to_server",
-   "payload": "Ack",
-   "auth": "None",
-   "cost": 0,
-   "class": "Critical",
-   "doc": "Cumulative watermark; retires held frames."
-  },
-  {
-   "name": "ERROR",
-   "code": 4,
-   "direction": "server_to_client",
-   "payload": "Error",
-   "auth": "None",
-   "cost": 0,
-   "class": "Critical",
-   "doc": "Standalone (non-correlated) error, usually fatal."
-  },
-  {
-   "name": "RECONNECT_HINT",
-   "code": 5,
-   "direction": "server_to_client",
-   "payload": "ReconnectHint",
-   "auth": "None",
-   "cost": 0,
-   "class": "Critical"
-  },
-  {
-   "name": "AUTHENTICATE",
-   "code": 6,
-   "direction": "client_to_server",
-   "payload": "Authenticate",
-   "response": "Authenticated",
-   "auth": "None",
-   "cost": 10,
-   "class": "Critical"
-  },
-  {
-   "name": "SUBSCRIBE",
-   "code": 7,
-   "direction": "client_to_server",
-   "payload": "SubscribeRequest",
-   "response": "SubscribeResponse",
-   "auth": "User",
-   "cost": 2,
-   "class": "Critical"
-  },
-  {
-   "name": "UNSUBSCRIBE",
-   "code": 8,
-   "direction": "client_to_server",
-   "payload": "SubscribeRequest",
-   "response": "SubscribeResponse",
-   "auth": "User",
-   "cost": 1,
-   "class": "Critical"
-  },
-  {
-   "name": "KEY_PUBLISH",
-   "code": 16,
-   "direction": "client_to_server",
-   "payload": "KeyPublish",
-   "response": "KeyPublishResult",
-   "auth": "User",
-   "cost": 20,
-   "class": "Critical",
-   "doc": "Publish public identity/prekeys for this device."
-  },
-  {
-   "name": "KEY_BUNDLE_FETCH",
-   "code": 17,
-   "direction": "client_to_server",
-   "payload": "KeyBundleRequest",
-   "response": "KeyBundleResponse",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical"
-  },
-  {
-   "name": "MESSAGE_SEND",
-   "code": 32,
-   "direction": "client_to_server",
-   "payload": "MessageSend",
-   "response": "MessageAccepted",
-   "auth": "User",
-   "cost": 1,
-   "class": "Critical"
-  },
-  {
-   "name": "MESSAGE_EVENT",
-   "code": 33,
-   "direction": "server_to_client",
-   "payload": "MessageEvent",
-   "auth": "User",
-   "cost": 0,
-   "class": "Critical",
-   "ack_required": true
-  },
-  {
-   "name": "MESSAGE_RECEIPT",
-   "code": 34,
-   "direction": "both",
-   "payload": "MessageReceipt",
-   "auth": "User",
-   "cost": 1,
-   "class": "Critical"
-  },
-  {
-   "name": "MESSAGE_DELETE",
-   "code": 35,
-   "direction": "client_to_server",
-   "payload": "MessageDelete",
-   "response": "MessageAccepted",
-   "auth": "User",
-   "cost": 2,
-   "class": "Critical"
-  },
-  {
-   "name": "SYNC",
-   "code": 36,
-   "direction": "client_to_server",
-   "payload": "SyncRequest",
-   "response": "SyncResponse",
-   "auth": "User",
-   "cost": 3,
-   "class": "Critical"
-  },
-  {
-   "name": "CONVERSATION_LIST",
-   "code": 37,
-   "direction": "client_to_server",
-   "payload": "ConversationListRequest",
-   "response": "ConversationListResponse",
-   "auth": "User",
-   "cost": 3,
-   "class": "Critical"
-  },
-  {
-   "name": "CONVERSATION_CREATE",
-   "code": 38,
-   "direction": "client_to_server",
-   "payload": "ConversationCreateRequest",
-   "response": "ConversationSummary",
-   "auth": "User",
-   "cost": 10,
-   "class": "Critical"
-  },
-  {
-   "name": "TYPING",
-   "code": 39,
-   "direction": "both",
-   "payload": "TypingEvent",
-   "auth": "User",
-   "cost": 1,
-   "class": "Coalescable",
-   "coalesce_key": "conversation_id"
-  },
-  {
-   "name": "MESSAGE_EDIT",
-   "code": 40,
-   "direction": "client_to_server",
-   "payload": "MessageEdit",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 2,
-   "class": "Critical",
-   "doc": "Edits a message's text in place."
-  },
-  {
-   "name": "REACTION_SET",
-   "code": 41,
-   "direction": "client_to_server",
-   "payload": "ReactionSet",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 1,
-   "class": "Critical",
-   "doc": "Sets or removes the caller's reaction to a message."
-  },
-  {
-   "name": "REACTION_EVENT",
-   "code": 42,
-   "direction": "server_to_client",
-   "payload": "ReactionEvent",
-   "response": null,
-   "auth": "User",
-   "cost": 0,
-   "class": "Coalescable",
-   "doc": "A reaction was added or removed.",
-   "coalesce_key": "target_message_id"
-  },
-  {
-   "name": "CONVERSATION_INVITE",
-   "code": 43,
-   "direction": "client_to_server",
-   "payload": "ConversationInviteRequest",
-   "response": "ConversationSummary",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical",
-   "doc": "Adds members to a group. Any current member may invite, within the group size cap."
-  },
-  {
-   "name": "CONVERSATION_LEAVE",
-   "code": 44,
-   "direction": "client_to_server",
-   "payload": "ConversationLeaveRequest",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 2,
-   "class": "Critical",
-   "doc": "Leaves a group conversation. The last founder out promotes the earliest remaining member."
-  },
-  {
-   "name": "CONVERSATION_ROSTER",
-   "code": 45,
-   "direction": "client_to_server",
-   "payload": "ConversationRosterRequest",
-   "response": "ConversationRosterResponse",
-   "auth": "User",
-   "cost": 1,
-   "class": "Critical",
-   "doc": "Reads a conversation's member list with roles and mutes."
-  },
-  {
-   "name": "CONVERSATION_MUTE",
-   "code": 46,
-   "direction": "client_to_server",
-   "payload": "ConversationMuteRequest",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical",
-   "doc": "A founder mutes or unmutes one member of a group. A muted member's sends are refused."
-  },
-  {
-   "name": "CONVERSATION_KICK",
-   "code": 47,
-   "direction": "client_to_server",
-   "payload": "ConversationKickRequest",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical",
-   "doc": "A founder removes a member outright, no vote."
-  },
-  {
-   "name": "CONVERSATION_VOTE_KICK",
-   "code": 48,
-   "direction": "client_to_server",
-   "payload": "ConversationVoteKickRequest",
-   "response": "ConversationVoteKickResponse",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical",
-   "doc": "Starts or joins a kick vote in a group. A strict majority of the members carries it."
-  },
-  {
-   "name": "CONVERSATION_VOTE_EVENT",
-   "code": 49,
-   "direction": "server_to_client",
-   "payload": "ConversationVoteEvent",
-   "auth": "User",
-   "cost": 0,
-   "class": "Coalescable",
-   "coalesce_key": "conversation_id",
-   "doc": "A group kick vote's running tally; the newest tally per conversation is the one that matters."
-  },
-  {
-   "name": "CONVERSATION_MEMBER_EVENT",
-   "code": 50,
-   "direction": "server_to_client",
-   "payload": "ConversationMemberEvent",
-   "auth": "User",
-   "cost": 0,
-   "class": "Coalescable",
-   "coalesce_key": "conversation_id",
-   "doc": "A group's membership moved. Clients rotate sender keys on every change."
-  },
-  {
-   "name": "CONVERSATION_UPDATE",
-   "code": 51,
-   "direction": "client_to_server",
-   "payload": "ConversationUpdateRequest",
-   "response": "ConversationSummary",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical",
-   "doc": "A founder renames a group."
-  },
-  {
-   "name": "PRESENCE_SET",
-   "code": 64,
-   "direction": "client_to_server",
-   "payload": "PresenceUpdate",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 1,
-   "class": "Coalescable"
-  },
-  {
-   "name": "PRESENCE_EVENT",
-   "code": 65,
-   "direction": "server_to_client",
-   "payload": "PresenceEvent",
-   "auth": "User",
-   "cost": 0,
-   "class": "Coalescable",
-   "coalesce_key": "user_id"
-  },
-  {
-   "name": "ROOM_JOIN",
-   "code": 80,
-   "direction": "client_to_server",
-   "payload": "RoomJoinRequest",
-   "response": "RoomJoinResponse",
-   "auth": "User",
-   "cost": 20,
-   "class": "Critical"
-  },
-  {
-   "name": "ROOM_LEAVE",
-   "code": 81,
-   "direction": "client_to_server",
-   "payload": "RoomLeaveRequest",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical"
-  },
-  {
-   "name": "ROOM_LIST",
-   "code": 82,
-   "direction": "client_to_server",
-   "payload": "RoomListRequest",
-   "response": "RoomListResponse",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical"
-  },
-  {
-   "name": "ROOM_MEMBER_EVENT",
-   "code": 83,
-   "direction": "server_to_client",
-   "payload": "RoomMemberEvent",
-   "auth": "User",
-   "cost": 0,
-   "class": "Coalescable",
-   "coalesce_key": "room_id"
-  },
-  {
-   "name": "ROOM_STATE_EVENT",
-   "code": 84,
-   "direction": "server_to_client",
-   "payload": "RoomStateEvent",
-   "auth": "User",
-   "cost": 0,
-   "class": "Coalescable",
-   "coalesce_key": "room_id"
-  },
-  {
-   "name": "ROOM_CREATE",
-   "code": 85,
-   "direction": "client_to_server",
-   "payload": "RoomCreate",
-   "response": "RoomJoinResponse",
-   "auth": "User",
-   "cost": 20,
-   "class": "Critical",
-   "doc": "Creates a room; the caller becomes its Owner."
-  },
-  {
-   "name": "ROOM_ROSTER",
-   "code": 86,
-   "direction": "client_to_server",
-   "payload": "RosterReq",
-   "response": "RosterResponse",
-   "auth": "User",
-   "cost": 3,
-   "class": "Critical",
-   "doc": "Reads a room's roster, highest role first."
-  },
-  {
-   "name": "ROOM_ROLE_SET",
-   "code": 87,
-   "direction": "client_to_server",
-   "payload": "RoomRoleSet",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical",
-   "doc": "Changes a member's role."
-  },
-  {
-   "name": "ROOM_UPDATE",
-   "code": 88,
-   "direction": "client_to_server",
-   "payload": "RoomUpdate",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical",
-   "doc": "Updates a room's settings."
-  },
-  {
-   "name": "ROOM_ARCHIVE",
-   "code": 89,
-   "direction": "client_to_server",
-   "payload": "RoomArchive",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical",
-   "doc": "Archives a room."
-  },
-  {
-   "name": "ROOM_VOTE_KICK",
-   "code": 90,
-   "direction": "client_to_server",
-   "payload": "RoomVoteKick",
-   "response": "RoomVoteKickResponse",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical",
-   "doc": "Starts, or adds the caller's voice to, a vote to kick a member. The vote passes at half the room's members."
-  },
-  {
-   "name": "ROOM_VOTE_EVENT",
-   "code": 91,
-   "direction": "server_to_client",
-   "payload": "RoomVoteEvent",
-   "auth": "User",
-   "cost": 0,
-   "class": "Coalescable",
-   "coalesce_key": "room_id",
-   "doc": "A kick vote's running tally; the newest tally per room is the one that matters."
-  },
-  {
-   "name": "ROOM_SANCTION",
-   "code": 92,
-   "direction": "client_to_server",
-   "payload": "RoomSanction",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 10,
-   "class": "Critical",
-   "doc": "Mutes, kicks, or bans a member. Needs the room's own permission; a global admin needs neither membership nor rank."
-  },
-  {
-   "name": "PROFILE_UPDATE",
-   "code": 111,
-   "direction": "client_to_server",
-   "payload": "ProfileUpdate",
-   "response": "UserProfile",
-   "auth": "User",
-   "cost": 3,
-   "class": "Critical",
-   "doc": "Updates the caller's own profile and privacy settings."
-  },
-  {
-   "name": "PROFILE_FETCH",
-   "code": 112,
-   "direction": "client_to_server",
-   "payload": "ProfileRequest",
-   "response": "ProfileResponse",
-   "auth": "User",
-   "cost": 3,
-   "class": "Critical"
-  },
-  {
-   "name": "FRIEND_REQUEST",
-   "code": 113,
-   "direction": "client_to_server",
-   "payload": "FriendTarget",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 10,
-   "class": "Critical"
-  },
-  {
-   "name": "FRIEND_RESPOND",
-   "code": 114,
-   "direction": "client_to_server",
-   "payload": "FriendRespond",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical"
-  },
-  {
-   "name": "FRIEND_EVENT",
-   "code": 115,
-   "direction": "server_to_client",
-   "payload": "FriendEvent",
-   "auth": "User",
-   "cost": 0,
-   "class": "Critical"
-  },
-  {
-   "name": "BLOCK_SET",
-   "code": 116,
-   "direction": "client_to_server",
-   "payload": "FriendTarget",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical"
-  },
-  {
-   "name": "RELATIONSHIP_LIST",
-   "code": 117,
-   "direction": "client_to_server",
-   "payload": "RelationshipListReq",
-   "response": "RelationshipList",
-   "auth": "User",
-   "cost": 3,
-   "class": "Critical"
-  },
-  {
-   "name": "SUGGESTIONS",
-   "code": 118,
-   "direction": "client_to_server",
-   "payload": "SuggestReq",
-   "response": "SearchResponse",
-   "auth": "User",
-   "cost": 3,
-   "class": "Critical",
-   "doc": "Friend suggestions from the social graph."
-  },
-  {
-   "name": "SEARCH",
-   "code": 119,
-   "direction": "client_to_server",
-   "payload": "SearchReq",
-   "response": "SearchResponse",
-   "auth": "User",
-   "cost": 3,
-   "class": "Critical",
-   "doc": "Searches public profiles."
-  },
-  {
-   "name": "MUTE_SET",
-   "code": 120,
-   "direction": "client_to_server",
-   "payload": "MuteSet",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical",
-   "doc": "Mutes or unmutes one account for the caller. A muted account's room messages are not shown to the muter, in every room."
-  },
-  {
-   "name": "MEDIA_UPLOAD_BEGIN",
-   "code": 128,
-   "direction": "client_to_server",
-   "payload": "MediaBegin",
-   "response": "MediaTicket",
-   "auth": "User",
-   "cost": 10,
-   "class": "Critical"
-  },
-  {
-   "name": "MEDIA_UPLOAD_STATUS",
-   "code": 129,
-   "direction": "client_to_server",
-   "payload": "MediaStatusReq",
-   "response": "MediaProgress",
-   "auth": "User",
-   "cost": 2,
-   "class": "Critical"
-  },
-  {
-   "name": "MEDIA_UPLOAD_COMMIT",
-   "code": 130,
-   "direction": "client_to_server",
-   "payload": "MediaCommit",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical"
-  },
-  {
-   "name": "MEDIA_UPLOAD_ABORT",
-   "code": 131,
-   "direction": "client_to_server",
-   "payload": "MediaAbort",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 1,
-   "class": "Critical"
-  },
-  {
-   "name": "MEDIA_FETCH_URL",
-   "code": 132,
-   "direction": "client_to_server",
-   "payload": "MediaFetch",
-   "response": "MediaUrl",
-   "auth": "User",
-   "cost": 3,
-   "class": "Critical"
-  },
-  {
-   "name": "MEDIA_STATE_EVENT",
-   "code": 133,
-   "direction": "server_to_client",
-   "payload": "MediaStateEvent",
-   "auth": "User",
-   "cost": 0,
-   "class": "Coalescable",
-   "coalesce_key": "object_id"
-  },
-  {
-   "name": "NOTIFICATION_EVENT",
-   "code": 144,
-   "direction": "server_to_client",
-   "payload": "NotificationEvent",
-   "auth": "User",
-   "cost": 0,
-   "class": "Droppable"
-  },
-  {
-   "name": "NOTIFICATION_ACK",
-   "code": 145,
-   "direction": "client_to_server",
-   "payload": "NotificationAck",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 1,
-   "class": "Critical"
-  },
-  {
-   "name": "NOTIFICATION_LIST",
-   "code": 146,
-   "direction": "client_to_server",
-   "payload": "InboxReq",
-   "response": "InboxResponse",
-   "auth": "User",
-   "cost": 3,
-   "class": "Critical"
-  },
-  {
-   "name": "GIFT_SEND",
-   "code": 160,
-   "direction": "client_to_server",
-   "payload": "GiftSend",
-   "response": "GiftSendResult",
-   "auth": "User",
-   "cost": 20,
-   "class": "Critical"
-  },
-  {
-   "name": "BALANCE_FETCH",
-   "code": 161,
-   "direction": "client_to_server",
-   "payload": "WalletReq",
-   "response": "WalletView",
-   "auth": "User",
-   "cost": 3,
-   "class": "Critical"
-  },
-  {
-   "name": "ECONOMY_EVENT",
-   "code": 162,
-   "direction": "server_to_client",
-   "payload": "EconomyEvent",
-   "auth": "User",
-   "cost": 0,
-   "class": "Critical"
-  },
-  {
-   "name": "GIFT_CATALOGUE",
-   "code": 163,
-   "direction": "client_to_server",
-   "payload": "GiftCatalogueReq",
-   "response": "GiftCatalogueResponse",
-   "auth": "User",
-   "cost": 1,
-   "class": "Critical",
-   "doc": "Lists the gift catalogue."
-  },
-  {
-   "name": "LEDGER_HISTORY",
-   "code": 164,
-   "direction": "client_to_server",
-   "payload": "LedgerReq",
-   "response": "LedgerResponse",
-   "auth": "User",
-   "cost": 3,
-   "class": "Critical",
-   "doc": "Reads the caller's statement."
-  },
-  {
-   "name": "PROGRESSION",
-   "code": 165,
-   "direction": "client_to_server",
-   "payload": "ProgressionReq",
-   "response": "ProgressionWire",
-   "auth": "User",
-   "cost": 2,
-   "class": "Critical",
-   "doc": "Reads one account's XP and level."
-  },
-  {
-   "name": "BADGES",
-   "code": 166,
-   "direction": "client_to_server",
-   "payload": "BadgesReq",
-   "response": "BadgesResponse",
-   "auth": "User",
-   "cost": 2,
-   "class": "Critical",
-   "doc": "Reads one account's badges."
-  },
-  {
-   "name": "LEADERBOARD",
-   "code": 167,
-   "direction": "client_to_server",
-   "payload": "LeaderboardReq",
-   "response": "LeaderboardResponse",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical",
-   "doc": "Reads a leaderboard."
-  },
-  {
-   "name": "GAME_ACTION",
-   "code": 176,
-   "direction": "client_to_server",
-   "payload": "GameAction",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 2,
-   "class": "Critical"
-  },
-  {
-   "name": "GAME_EVENT",
-   "code": 177,
-   "direction": "server_to_client",
-   "payload": "GameEvent",
-   "auth": "User",
-   "cost": 0,
-   "class": "Critical"
-  },
-  {
-   "name": "BOT_COMMAND",
-   "code": 178,
-   "direction": "client_to_server",
-   "payload": "BotCommand",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 2,
-   "class": "Critical"
-  },
-  {
-   "name": "BOT_EVENT",
-   "code": 179,
-   "direction": "server_to_client",
-   "payload": "BotEvent",
-   "auth": "User",
-   "cost": 0,
-   "class": "Critical"
-  },
-  {
-   "name": "BOT_REGISTER",
-   "code": 180,
-   "direction": "client_to_server",
-   "payload": "BotRegister",
-   "response": "BotView",
-   "auth": "Bot",
-   "cost": 20,
-   "class": "Critical"
-  },
-  {
-   "name": "GAME_START",
-   "code": 183,
-   "direction": "client_to_server",
-   "payload": "GameStart",
-   "response": "GameViewWire",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical",
-   "doc": "Starts a game in a conversation."
-  },
-  {
-   "name": "GAME_VIEW",
-   "code": 184,
-   "direction": "client_to_server",
-   "payload": "GameId",
-   "response": "GameViewWire",
-   "auth": "User",
-   "cost": 2,
-   "class": "Critical",
-   "doc": "Reads a game's state as the caller sees it."
-  },
-  {
-   "name": "GAME_ABANDON",
-   "code": 185,
-   "direction": "client_to_server",
-   "payload": "GameId",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 2,
-   "class": "Critical",
-   "doc": "Abandons an open game."
-  },
-  {
-   "name": "GAME_CATALOGUE",
-   "code": 186,
-   "direction": "client_to_server",
-   "payload": "GiftCatalogueReq",
-   "response": "GameCatalogueResponse",
-   "auth": "User",
-   "cost": 1,
-   "class": "Critical",
-   "doc": "Lists the games this node can play."
-  },
-  {
-   "name": "REPORT_CREATE",
-   "code": 192,
-   "direction": "client_to_server",
-   "payload": "ReportFile",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 20,
-   "class": "Critical"
-  },
-  {
-   "name": "MODERATION_ACTION",
-   "code": 193,
-   "direction": "client_to_server",
-   "payload": "ModAction",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 10,
-   "class": "Critical"
-  },
-  {
-   "name": "MODERATION_EVENT",
-   "code": 194,
-   "direction": "server_to_client",
-   "payload": "ModerationEvent",
-   "auth": "User",
-   "cost": 0,
-   "class": "Critical"
-  },
-  {
-   "name": "FED_HELLO",
-   "code": 208,
-   "direction": "both",
-   "payload": "FedHello",
-   "response": "FedHello",
-   "auth": "Server",
-   "cost": 5,
-   "class": "Critical"
-  },
-  {
-   "name": "FED_AUTH",
-   "code": 209,
-   "direction": "both",
-   "payload": "FedAuth",
-   "response": "Acknowledged",
-   "auth": "Server",
-   "cost": 5,
-   "class": "Critical"
-  },
-  {
-   "name": "FED_PING",
-   "code": 210,
-   "direction": "both",
-   "payload": "FedPing",
-   "response": "FedPong",
-   "auth": "Server",
-   "cost": 1,
-   "class": "Critical"
-  },
-  {
-   "name": "FED_FORWARD",
-   "code": 211,
-   "direction": "both",
-   "payload": "FedForward",
-   "response": "Acknowledged",
-   "auth": "Server",
-   "cost": 1,
-   "class": "Critical"
-  },
-  {
-   "name": "FED_ACK",
-   "code": 212,
-   "direction": "both",
-   "payload": "FedAck",
-   "response": "Acknowledged",
-   "auth": "Server",
-   "cost": 0,
-   "class": "Critical"
-  },
-  {
-   "name": "FED_ROOM_SUBSCRIBE",
-   "code": 213,
-   "direction": "both",
-   "payload": "FedRouting",
-   "response": "Acknowledged",
-   "auth": "Server",
-   "cost": 2,
-   "class": "Critical"
-  },
-  {
-   "name": "FED_ROOM_EVENT",
-   "code": 214,
-   "direction": "both",
-   "payload": "FedRoomEvent",
-   "response": "Acknowledged",
-   "auth": "Server",
-   "cost": 0,
-   "class": "Critical"
-  },
-  {
-   "name": "FED_PRESENCE_DIGEST",
-   "code": 215,
-   "direction": "both",
-   "payload": "FedPresenceDigest",
-   "response": "Acknowledged",
-   "auth": "Server",
-   "cost": 0,
-   "class": "Coalescable",
-   "coalesce_key": "region"
-  },
-  {
-   "name": "FED_KEY_ROTATE",
-   "code": 216,
-   "direction": "both",
-   "payload": "FedKeyRotate",
-   "response": "Acknowledged",
-   "auth": "Server",
-   "cost": 5,
-   "class": "Critical"
-  },
-  {
-   "name": "FED_HEALTH",
-   "code": 217,
-   "direction": "both",
-   "payload": "FedHealth",
-   "response": "FedHealth",
-   "auth": "Server",
-   "cost": 1,
-   "class": "Critical"
-  },
-  {
-   "name": "FED_SHARD_MAP",
-   "code": 218,
-   "direction": "both",
-   "payload": "FedShardMap",
-   "response": "Acknowledged",
-   "auth": "Server",
-   "cost": 2,
-   "class": "Critical"
-  },
-  {
-   "name": "FED_ERROR",
-   "code": 219,
-   "direction": "both",
-   "payload": "FedError",
-   "response": "Acknowledged",
-   "auth": "Server",
-   "cost": 0,
-   "class": "Critical"
-  },
-  {
-   "name": "FED_CALL_RELAY",
-   "code": 220,
-   "direction": "both",
-   "payload": "FedForward",
-   "response": "Acknowledged",
-   "auth": "Server",
-   "cost": 1,
-   "class": "Critical"
-  },
-  {
-   "name": "FED_DIRECTORY",
-   "code": 221,
-   "direction": "both",
-   "payload": "FedDirectoryReq",
-   "response": "FedDirectory",
-   "auth": "Server",
-   "cost": 2,
-   "class": "Critical"
-  },
-  {
-   "name": "CALL_INVITE",
-   "code": 224,
-   "direction": "client_to_server",
-   "payload": "CallInvite",
-   "response": "CallInviteResult",
-   "auth": "User",
-   "cost": 20,
-   "class": "Critical",
-   "doc": "Invites a callee to a call."
-  },
-  {
-   "name": "CALL_INVITE_EVENT",
-   "code": 225,
-   "direction": "server_to_client",
-   "payload": "CallInviteEvent",
-   "response": null,
-   "auth": "User",
-   "cost": 0,
-   "class": "Critical",
-   "doc": "Tells the callee a call is ringing."
-  },
-  {
-   "name": "CALL_ANSWER",
-   "code": 226,
-   "direction": "client_to_server",
-   "payload": "CallAnswer",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical",
-   "doc": "The callee answers."
-  },
-  {
-   "name": "CALL_DECLINE",
-   "code": 227,
-   "direction": "client_to_server",
-   "payload": "CallDecline",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical",
-   "doc": "The callee declines."
-  },
-  {
-   "name": "CALL_CANCEL",
-   "code": 228,
-   "direction": "client_to_server",
-   "payload": "CallCancel",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 5,
-   "class": "Critical",
-   "doc": "The caller cancels before an answer."
-  },
-  {
-   "name": "CALL_END",
-   "code": 229,
-   "direction": "both",
-   "payload": "CallEnd",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 2,
-   "class": "Critical",
-   "doc": "Ends a call; always with a reason."
-  },
-  {
-   "name": "CALL_SDP",
-   "code": 230,
-   "direction": "both",
-   "payload": "CallSdp",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 3,
-   "class": "Critical",
-   "doc": "Relays a sealed SDP offer or answer."
-  },
-  {
-   "name": "CALL_ICE",
-   "code": 231,
-   "direction": "both",
-   "payload": "CallIce",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 1,
-   "class": "Critical",
-   "doc": "Relays a batch of sealed ICE candidates."
-  },
-  {
-   "name": "CALL_STATE_EVENT",
-   "code": 232,
-   "direction": "server_to_client",
-   "payload": "CallStateEvent",
-   "response": null,
-   "auth": "User",
-   "cost": 0,
-   "class": "Critical",
-   "doc": "A call's state change."
-  },
-  {
-   "name": "CALL_RENEGOTIATE",
-   "code": 233,
-   "direction": "both",
-   "payload": "CallRenegotiate",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 3,
-   "class": "Critical",
-   "doc": "Renegotiates mid-call."
-  },
-  {
-   "name": "CALL_KEY_UPDATE",
-   "code": 234,
-   "direction": "both",
-   "payload": "CallKeyUpdate",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 3,
-   "class": "Critical",
-   "doc": "Re-keys call media."
-  },
-  {
-   "name": "CALL_STATS",
-   "code": 235,
-   "direction": "client_to_server",
-   "payload": "CallStats",
-   "response": "Acknowledged",
-   "auth": "User",
-   "cost": 1,
-   "class": "Droppable",
-   "doc": "Aggregate quality numbers."
-  },
-  {
-   "name": "CALL_TURN_FETCH",
-   "code": 236,
-   "direction": "client_to_server",
-   "payload": "CallTurnFetch",
-   "response": "CallTurnResponse",
-   "auth": "User",
-   "cost": 10,
-   "class": "Critical",
-   "doc": "Requests TURN credentials."
-  },
-  {
-   "name": "CALL_SFU_JOIN",
-   "code": 237,
-   "direction": "client_to_server",
-   "payload": "CallInvite",
-   "response": "CallTurnResponse",
-   "auth": "User",
-   "cost": 20,
-   "class": "Critical",
-   "doc": "Joins a group call via SFU."
-  },
-  {
-   "name": "CALL_SFU_EVENT",
-   "code": 238,
-   "direction": "server_to_client",
-   "payload": "CallStateEvent",
-   "response": null,
-   "auth": "User",
-   "cost": 0,
-   "class": "Coalescable",
-   "doc": "SFU group call state.",
-   "coalesce_key": "call_id"
-  },
-  {
-   "name": "CONVERSATION_STATE_EVENT",
-   "code": 52,
-   "direction": "server_to_client",
-   "payload": "ConversationStateEvent",
-   "auth": "User",
-   "cost": 0,
-   "class": "Coalescable",
-   "coalesce_key": "conversation_id",
-   "doc": "Group metadata moved: a rename. Deltas only, coalesced per conversation."
-  }
- ]
+  "$comment": "Opcode registry. Hot opcodes are kept below 0x80 so they encode in a single varint byte. A request/response opcode reuses the same code for the reply, matched by correlation id; errors ride the ERROR flag. Every opcode MUST declare a rate-limit cost (ADR-0006) and a delivery class (ADR-0008).",
+  "ranges": [
+    {
+      "from": 1,
+      "to": 15,
+      "name": "control"
+    },
+    {
+      "from": 16,
+      "to": 31,
+      "name": "auth_keys"
+    },
+    {
+      "from": 32,
+      "to": 63,
+      "name": "messaging"
+    },
+    {
+      "from": 64,
+      "to": 79,
+      "name": "presence"
+    },
+    {
+      "from": 80,
+      "to": 111,
+      "name": "rooms"
+    },
+    {
+      "from": 112,
+      "to": 127,
+      "name": "social"
+    },
+    {
+      "from": 128,
+      "to": 143,
+      "name": "media"
+    },
+    {
+      "from": 144,
+      "to": 159,
+      "name": "notifications"
+    },
+    {
+      "from": 160,
+      "to": 175,
+      "name": "economy"
+    },
+    {
+      "from": 176,
+      "to": 191,
+      "name": "games_bots"
+    },
+    {
+      "from": 192,
+      "to": 207,
+      "name": "moderation"
+    },
+    {
+      "from": 208,
+      "to": 223,
+      "name": "federation"
+    },
+    {
+      "from": 224,
+      "to": 255,
+      "name": "reserved"
+    }
+  ],
+  "opcodes": [
+    {
+      "name": "HELLO",
+      "code": 1,
+      "direction": "client_to_server",
+      "payload": "Hello",
+      "response": "Welcome",
+      "auth": "None",
+      "cost": 5,
+      "class": "Critical",
+      "doc": "Handshake. Also carries optional token and resume."
+    },
+    {
+      "name": "PING",
+      "code": 2,
+      "direction": "both",
+      "payload": "Ping",
+      "response": "Pong",
+      "auth": "None",
+      "cost": 1,
+      "class": "Critical"
+    },
+    {
+      "name": "ACK",
+      "code": 3,
+      "direction": "client_to_server",
+      "payload": "Ack",
+      "auth": "None",
+      "cost": 0,
+      "class": "Critical",
+      "doc": "Cumulative watermark; retires held frames."
+    },
+    {
+      "name": "ERROR",
+      "code": 4,
+      "direction": "server_to_client",
+      "payload": "Error",
+      "auth": "None",
+      "cost": 0,
+      "class": "Critical",
+      "doc": "Standalone (non-correlated) error, usually fatal."
+    },
+    {
+      "name": "RECONNECT_HINT",
+      "code": 5,
+      "direction": "server_to_client",
+      "payload": "ReconnectHint",
+      "auth": "None",
+      "cost": 0,
+      "class": "Critical"
+    },
+    {
+      "name": "AUTHENTICATE",
+      "code": 6,
+      "direction": "client_to_server",
+      "payload": "Authenticate",
+      "response": "Authenticated",
+      "auth": "None",
+      "cost": 10,
+      "class": "Critical"
+    },
+    {
+      "name": "SUBSCRIBE",
+      "code": 7,
+      "direction": "client_to_server",
+      "payload": "SubscribeRequest",
+      "response": "SubscribeResponse",
+      "auth": "User",
+      "cost": 2,
+      "class": "Critical"
+    },
+    {
+      "name": "UNSUBSCRIBE",
+      "code": 8,
+      "direction": "client_to_server",
+      "payload": "SubscribeRequest",
+      "response": "SubscribeResponse",
+      "auth": "User",
+      "cost": 1,
+      "class": "Critical"
+    },
+    {
+      "name": "KEY_PUBLISH",
+      "code": 16,
+      "direction": "client_to_server",
+      "payload": "KeyPublish",
+      "response": "KeyPublishResult",
+      "auth": "User",
+      "cost": 20,
+      "class": "Critical",
+      "doc": "Publish public identity/prekeys for this device."
+    },
+    {
+      "name": "KEY_BUNDLE_FETCH",
+      "code": 17,
+      "direction": "client_to_server",
+      "payload": "KeyBundleRequest",
+      "response": "KeyBundleResponse",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical"
+    },
+    {
+      "name": "MESSAGE_SEND",
+      "code": 32,
+      "direction": "client_to_server",
+      "payload": "MessageSend",
+      "response": "MessageAccepted",
+      "auth": "User",
+      "cost": 1,
+      "class": "Critical"
+    },
+    {
+      "name": "MESSAGE_EVENT",
+      "code": 33,
+      "direction": "server_to_client",
+      "payload": "MessageEvent",
+      "auth": "User",
+      "cost": 0,
+      "class": "Critical",
+      "ack_required": true
+    },
+    {
+      "name": "MESSAGE_RECEIPT",
+      "code": 34,
+      "direction": "both",
+      "payload": "MessageReceipt",
+      "auth": "User",
+      "cost": 1,
+      "class": "Critical"
+    },
+    {
+      "name": "MESSAGE_DELETE",
+      "code": 35,
+      "direction": "client_to_server",
+      "payload": "MessageDelete",
+      "response": "MessageAccepted",
+      "auth": "User",
+      "cost": 2,
+      "class": "Critical"
+    },
+    {
+      "name": "SYNC",
+      "code": 36,
+      "direction": "client_to_server",
+      "payload": "SyncRequest",
+      "response": "SyncResponse",
+      "auth": "User",
+      "cost": 3,
+      "class": "Critical"
+    },
+    {
+      "name": "CONVERSATION_LIST",
+      "code": 37,
+      "direction": "client_to_server",
+      "payload": "ConversationListRequest",
+      "response": "ConversationListResponse",
+      "auth": "User",
+      "cost": 3,
+      "class": "Critical"
+    },
+    {
+      "name": "CONVERSATION_CREATE",
+      "code": 38,
+      "direction": "client_to_server",
+      "payload": "ConversationCreateRequest",
+      "response": "ConversationSummary",
+      "auth": "User",
+      "cost": 10,
+      "class": "Critical"
+    },
+    {
+      "name": "TYPING",
+      "code": 39,
+      "direction": "both",
+      "payload": "TypingEvent",
+      "auth": "User",
+      "cost": 1,
+      "class": "Coalescable",
+      "coalesce_key": "conversation_id"
+    },
+    {
+      "name": "MESSAGE_EDIT",
+      "code": 40,
+      "direction": "client_to_server",
+      "payload": "MessageEdit",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 2,
+      "class": "Critical",
+      "doc": "Edits a message's text in place."
+    },
+    {
+      "name": "REACTION_SET",
+      "code": 41,
+      "direction": "client_to_server",
+      "payload": "ReactionSet",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 1,
+      "class": "Critical",
+      "doc": "Sets or removes the caller's reaction to a message."
+    },
+    {
+      "name": "REACTION_EVENT",
+      "code": 42,
+      "direction": "server_to_client",
+      "payload": "ReactionEvent",
+      "response": null,
+      "auth": "User",
+      "cost": 0,
+      "class": "Coalescable",
+      "doc": "A reaction was added or removed.",
+      "coalesce_key": "target_message_id"
+    },
+    {
+      "name": "CONVERSATION_INVITE",
+      "code": 43,
+      "direction": "client_to_server",
+      "payload": "ConversationInviteRequest",
+      "response": "ConversationSummary",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical",
+      "doc": "Adds members to a group. Any current member may invite, within the group size cap."
+    },
+    {
+      "name": "CONVERSATION_LEAVE",
+      "code": 44,
+      "direction": "client_to_server",
+      "payload": "ConversationLeaveRequest",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 2,
+      "class": "Critical",
+      "doc": "Leaves a group conversation. The last founder out promotes the earliest remaining member."
+    },
+    {
+      "name": "CONVERSATION_ROSTER",
+      "code": 45,
+      "direction": "client_to_server",
+      "payload": "ConversationRosterRequest",
+      "response": "ConversationRosterResponse",
+      "auth": "User",
+      "cost": 1,
+      "class": "Critical",
+      "doc": "Reads a conversation's member list with roles and mutes."
+    },
+    {
+      "name": "CONVERSATION_MUTE",
+      "code": 46,
+      "direction": "client_to_server",
+      "payload": "ConversationMuteRequest",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical",
+      "doc": "A founder mutes or unmutes one member of a group. A muted member's sends are refused."
+    },
+    {
+      "name": "CONVERSATION_KICK",
+      "code": 47,
+      "direction": "client_to_server",
+      "payload": "ConversationKickRequest",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical",
+      "doc": "A founder removes a member outright, no vote."
+    },
+    {
+      "name": "CONVERSATION_VOTE_KICK",
+      "code": 48,
+      "direction": "client_to_server",
+      "payload": "ConversationVoteKickRequest",
+      "response": "ConversationVoteKickResponse",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical",
+      "doc": "Starts or joins a kick vote in a group. A strict majority of the members carries it."
+    },
+    {
+      "name": "CONVERSATION_VOTE_EVENT",
+      "code": 49,
+      "direction": "server_to_client",
+      "payload": "ConversationVoteEvent",
+      "auth": "User",
+      "cost": 0,
+      "class": "Coalescable",
+      "coalesce_key": "conversation_id",
+      "doc": "A group kick vote's running tally; the newest tally per conversation is the one that matters."
+    },
+    {
+      "name": "CONVERSATION_MEMBER_EVENT",
+      "code": 50,
+      "direction": "server_to_client",
+      "payload": "ConversationMemberEvent",
+      "auth": "User",
+      "cost": 0,
+      "class": "Coalescable",
+      "coalesce_key": "conversation_id",
+      "doc": "A group's membership moved. Clients rotate sender keys on every change."
+    },
+    {
+      "name": "CONVERSATION_UPDATE",
+      "code": 51,
+      "direction": "client_to_server",
+      "payload": "ConversationUpdateRequest",
+      "response": "ConversationSummary",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical",
+      "doc": "A founder renames a group."
+    },
+    {
+      "name": "PRESENCE_SET",
+      "code": 64,
+      "direction": "client_to_server",
+      "payload": "PresenceUpdate",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 1,
+      "class": "Coalescable"
+    },
+    {
+      "name": "PRESENCE_EVENT",
+      "code": 65,
+      "direction": "server_to_client",
+      "payload": "PresenceEvent",
+      "auth": "User",
+      "cost": 0,
+      "class": "Coalescable",
+      "coalesce_key": "user_id"
+    },
+    {
+      "name": "ROOM_JOIN",
+      "code": 80,
+      "direction": "client_to_server",
+      "payload": "RoomJoinRequest",
+      "response": "RoomJoinResponse",
+      "auth": "User",
+      "cost": 20,
+      "class": "Critical"
+    },
+    {
+      "name": "ROOM_LEAVE",
+      "code": 81,
+      "direction": "client_to_server",
+      "payload": "RoomLeaveRequest",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical"
+    },
+    {
+      "name": "ROOM_LIST",
+      "code": 82,
+      "direction": "client_to_server",
+      "payload": "RoomListRequest",
+      "response": "RoomListResponse",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical"
+    },
+    {
+      "name": "ROOM_MEMBER_EVENT",
+      "code": 83,
+      "direction": "server_to_client",
+      "payload": "RoomMemberEvent",
+      "auth": "User",
+      "cost": 0,
+      "class": "Coalescable",
+      "coalesce_key": "room_id"
+    },
+    {
+      "name": "ROOM_STATE_EVENT",
+      "code": 84,
+      "direction": "server_to_client",
+      "payload": "RoomStateEvent",
+      "auth": "User",
+      "cost": 0,
+      "class": "Coalescable",
+      "coalesce_key": "room_id"
+    },
+    {
+      "name": "ROOM_CREATE",
+      "code": 85,
+      "direction": "client_to_server",
+      "payload": "RoomCreate",
+      "response": "RoomJoinResponse",
+      "auth": "User",
+      "cost": 20,
+      "class": "Critical",
+      "doc": "Creates a room; the caller becomes its Owner."
+    },
+    {
+      "name": "ROOM_ROSTER",
+      "code": 86,
+      "direction": "client_to_server",
+      "payload": "RosterReq",
+      "response": "RosterResponse",
+      "auth": "User",
+      "cost": 3,
+      "class": "Critical",
+      "doc": "Reads a room's roster, highest role first."
+    },
+    {
+      "name": "ROOM_ROLE_SET",
+      "code": 87,
+      "direction": "client_to_server",
+      "payload": "RoomRoleSet",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical",
+      "doc": "Changes a member's role."
+    },
+    {
+      "name": "ROOM_UPDATE",
+      "code": 88,
+      "direction": "client_to_server",
+      "payload": "RoomUpdate",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical",
+      "doc": "Updates a room's settings."
+    },
+    {
+      "name": "ROOM_ARCHIVE",
+      "code": 89,
+      "direction": "client_to_server",
+      "payload": "RoomArchive",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical",
+      "doc": "Archives a room."
+    },
+    {
+      "name": "ROOM_VOTE_KICK",
+      "code": 90,
+      "direction": "client_to_server",
+      "payload": "RoomVoteKick",
+      "response": "RoomVoteKickResponse",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical",
+      "doc": "Starts, or adds the caller's voice to, a vote to kick a member. The vote passes at half the room's members."
+    },
+    {
+      "name": "ROOM_VOTE_EVENT",
+      "code": 91,
+      "direction": "server_to_client",
+      "payload": "RoomVoteEvent",
+      "auth": "User",
+      "cost": 0,
+      "class": "Coalescable",
+      "coalesce_key": "room_id",
+      "doc": "A kick vote's running tally; the newest tally per room is the one that matters."
+    },
+    {
+      "name": "ROOM_SANCTION",
+      "code": 92,
+      "direction": "client_to_server",
+      "payload": "RoomSanction",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 10,
+      "class": "Critical",
+      "doc": "Mutes, kicks, or bans a member. Needs the room's own permission; a global admin needs neither membership nor rank."
+    },
+    {
+      "name": "PROFILE_UPDATE",
+      "code": 111,
+      "direction": "client_to_server",
+      "payload": "ProfileUpdate",
+      "response": "UserProfile",
+      "auth": "User",
+      "cost": 3,
+      "class": "Critical",
+      "doc": "Updates the caller's own profile and privacy settings."
+    },
+    {
+      "name": "PROFILE_FETCH",
+      "code": 112,
+      "direction": "client_to_server",
+      "payload": "ProfileRequest",
+      "response": "ProfileResponse",
+      "auth": "User",
+      "cost": 3,
+      "class": "Critical"
+    },
+    {
+      "name": "FRIEND_REQUEST",
+      "code": 113,
+      "direction": "client_to_server",
+      "payload": "FriendTarget",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 10,
+      "class": "Critical"
+    },
+    {
+      "name": "FRIEND_RESPOND",
+      "code": 114,
+      "direction": "client_to_server",
+      "payload": "FriendRespond",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical"
+    },
+    {
+      "name": "FRIEND_EVENT",
+      "code": 115,
+      "direction": "server_to_client",
+      "payload": "FriendEvent",
+      "auth": "User",
+      "cost": 0,
+      "class": "Critical"
+    },
+    {
+      "name": "BLOCK_SET",
+      "code": 116,
+      "direction": "client_to_server",
+      "payload": "FriendTarget",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical"
+    },
+    {
+      "name": "RELATIONSHIP_LIST",
+      "code": 117,
+      "direction": "client_to_server",
+      "payload": "RelationshipListReq",
+      "response": "RelationshipList",
+      "auth": "User",
+      "cost": 3,
+      "class": "Critical"
+    },
+    {
+      "name": "SUGGESTIONS",
+      "code": 118,
+      "direction": "client_to_server",
+      "payload": "SuggestReq",
+      "response": "SearchResponse",
+      "auth": "User",
+      "cost": 3,
+      "class": "Critical",
+      "doc": "Friend suggestions from the social graph."
+    },
+    {
+      "name": "SEARCH",
+      "code": 119,
+      "direction": "client_to_server",
+      "payload": "SearchReq",
+      "response": "SearchResponse",
+      "auth": "User",
+      "cost": 3,
+      "class": "Critical",
+      "doc": "Searches public profiles."
+    },
+    {
+      "name": "MUTE_SET",
+      "code": 120,
+      "direction": "client_to_server",
+      "payload": "MuteSet",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical",
+      "doc": "Mutes or unmutes one account for the caller. A muted account's room messages are not shown to the muter, in every room."
+    },
+    {
+      "name": "MEDIA_UPLOAD_BEGIN",
+      "code": 128,
+      "direction": "client_to_server",
+      "payload": "MediaBegin",
+      "response": "MediaTicket",
+      "auth": "User",
+      "cost": 10,
+      "class": "Critical"
+    },
+    {
+      "name": "MEDIA_UPLOAD_STATUS",
+      "code": 129,
+      "direction": "client_to_server",
+      "payload": "MediaStatusReq",
+      "response": "MediaProgress",
+      "auth": "User",
+      "cost": 2,
+      "class": "Critical"
+    },
+    {
+      "name": "MEDIA_UPLOAD_COMMIT",
+      "code": 130,
+      "direction": "client_to_server",
+      "payload": "MediaCommit",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical"
+    },
+    {
+      "name": "MEDIA_UPLOAD_ABORT",
+      "code": 131,
+      "direction": "client_to_server",
+      "payload": "MediaAbort",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 1,
+      "class": "Critical"
+    },
+    {
+      "name": "MEDIA_FETCH_URL",
+      "code": 132,
+      "direction": "client_to_server",
+      "payload": "MediaFetch",
+      "response": "MediaUrl",
+      "auth": "User",
+      "cost": 3,
+      "class": "Critical"
+    },
+    {
+      "name": "MEDIA_STATE_EVENT",
+      "code": 133,
+      "direction": "server_to_client",
+      "payload": "MediaStateEvent",
+      "auth": "User",
+      "cost": 0,
+      "class": "Coalescable",
+      "coalesce_key": "object_id"
+    },
+    {
+      "name": "NOTIFICATION_EVENT",
+      "code": 144,
+      "direction": "server_to_client",
+      "payload": "NotificationEvent",
+      "auth": "User",
+      "cost": 0,
+      "class": "Droppable"
+    },
+    {
+      "name": "NOTIFICATION_ACK",
+      "code": 145,
+      "direction": "client_to_server",
+      "payload": "NotificationAck",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 1,
+      "class": "Critical"
+    },
+    {
+      "name": "NOTIFICATION_LIST",
+      "code": 146,
+      "direction": "client_to_server",
+      "payload": "InboxReq",
+      "response": "InboxResponse",
+      "auth": "User",
+      "cost": 3,
+      "class": "Critical"
+    },
+    {
+      "name": "GIFT_SEND",
+      "code": 160,
+      "direction": "client_to_server",
+      "payload": "GiftSend",
+      "response": "GiftSendResult",
+      "auth": "User",
+      "cost": 20,
+      "class": "Critical"
+    },
+    {
+      "name": "BALANCE_FETCH",
+      "code": 161,
+      "direction": "client_to_server",
+      "payload": "WalletReq",
+      "response": "WalletView",
+      "auth": "User",
+      "cost": 3,
+      "class": "Critical"
+    },
+    {
+      "name": "ECONOMY_EVENT",
+      "code": 162,
+      "direction": "server_to_client",
+      "payload": "EconomyEvent",
+      "auth": "User",
+      "cost": 0,
+      "class": "Critical"
+    },
+    {
+      "name": "GIFT_CATALOGUE",
+      "code": 163,
+      "direction": "client_to_server",
+      "payload": "GiftCatalogueReq",
+      "response": "GiftCatalogueResponse",
+      "auth": "User",
+      "cost": 1,
+      "class": "Critical",
+      "doc": "Lists the gift catalogue."
+    },
+    {
+      "name": "LEDGER_HISTORY",
+      "code": 164,
+      "direction": "client_to_server",
+      "payload": "LedgerReq",
+      "response": "LedgerResponse",
+      "auth": "User",
+      "cost": 3,
+      "class": "Critical",
+      "doc": "Reads the caller's statement."
+    },
+    {
+      "name": "PROGRESSION",
+      "code": 165,
+      "direction": "client_to_server",
+      "payload": "ProgressionReq",
+      "response": "ProgressionWire",
+      "auth": "User",
+      "cost": 2,
+      "class": "Critical",
+      "doc": "Reads one account's XP and level."
+    },
+    {
+      "name": "BADGES",
+      "code": 166,
+      "direction": "client_to_server",
+      "payload": "BadgesReq",
+      "response": "BadgesResponse",
+      "auth": "User",
+      "cost": 2,
+      "class": "Critical",
+      "doc": "Reads one account's badges."
+    },
+    {
+      "name": "LEADERBOARD",
+      "code": 167,
+      "direction": "client_to_server",
+      "payload": "LeaderboardReq",
+      "response": "LeaderboardResponse",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical",
+      "doc": "Reads a leaderboard."
+    },
+    {
+      "name": "GAME_ACTION",
+      "code": 176,
+      "direction": "client_to_server",
+      "payload": "GameAction",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 2,
+      "class": "Critical"
+    },
+    {
+      "name": "GAME_EVENT",
+      "code": 177,
+      "direction": "server_to_client",
+      "payload": "GameEvent",
+      "auth": "User",
+      "cost": 0,
+      "class": "Critical"
+    },
+    {
+      "name": "BOT_COMMAND",
+      "code": 178,
+      "direction": "client_to_server",
+      "payload": "BotCommand",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 2,
+      "class": "Critical"
+    },
+    {
+      "name": "BOT_EVENT",
+      "code": 179,
+      "direction": "server_to_client",
+      "payload": "BotEvent",
+      "auth": "User",
+      "cost": 0,
+      "class": "Critical"
+    },
+    {
+      "name": "BOT_REGISTER",
+      "code": 180,
+      "direction": "client_to_server",
+      "payload": "BotRegister",
+      "response": "BotView",
+      "auth": "Bot",
+      "cost": 20,
+      "class": "Critical"
+    },
+    {
+      "name": "GAME_START",
+      "code": 183,
+      "direction": "client_to_server",
+      "payload": "GameStart",
+      "response": "GameViewWire",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical",
+      "doc": "Starts a game in a conversation."
+    },
+    {
+      "name": "GAME_VIEW",
+      "code": 184,
+      "direction": "client_to_server",
+      "payload": "GameId",
+      "response": "GameViewWire",
+      "auth": "User",
+      "cost": 2,
+      "class": "Critical",
+      "doc": "Reads a game's state as the caller sees it."
+    },
+    {
+      "name": "GAME_ABANDON",
+      "code": 185,
+      "direction": "client_to_server",
+      "payload": "GameId",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 2,
+      "class": "Critical",
+      "doc": "Abandons an open game."
+    },
+    {
+      "name": "GAME_CATALOGUE",
+      "code": 186,
+      "direction": "client_to_server",
+      "payload": "GiftCatalogueReq",
+      "response": "GameCatalogueResponse",
+      "auth": "User",
+      "cost": 1,
+      "class": "Critical",
+      "doc": "Lists the games this node can play."
+    },
+    {
+      "name": "REPORT_CREATE",
+      "code": 192,
+      "direction": "client_to_server",
+      "payload": "ReportFile",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 20,
+      "class": "Critical"
+    },
+    {
+      "name": "MODERATION_ACTION",
+      "code": 193,
+      "direction": "client_to_server",
+      "payload": "ModAction",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 10,
+      "class": "Critical"
+    },
+    {
+      "name": "MODERATION_EVENT",
+      "code": 194,
+      "direction": "server_to_client",
+      "payload": "ModerationEvent",
+      "auth": "User",
+      "cost": 0,
+      "class": "Critical"
+    },
+    {
+      "name": "FED_HELLO",
+      "code": 208,
+      "direction": "both",
+      "payload": "FedHello",
+      "response": "FedHello",
+      "auth": "Server",
+      "cost": 5,
+      "class": "Critical"
+    },
+    {
+      "name": "FED_AUTH",
+      "code": 209,
+      "direction": "both",
+      "payload": "FedAuth",
+      "response": "Acknowledged",
+      "auth": "Server",
+      "cost": 5,
+      "class": "Critical"
+    },
+    {
+      "name": "FED_PING",
+      "code": 210,
+      "direction": "both",
+      "payload": "FedPing",
+      "response": "FedPong",
+      "auth": "Server",
+      "cost": 1,
+      "class": "Critical"
+    },
+    {
+      "name": "FED_FORWARD",
+      "code": 211,
+      "direction": "both",
+      "payload": "FedForward",
+      "response": "Acknowledged",
+      "auth": "Server",
+      "cost": 1,
+      "class": "Critical"
+    },
+    {
+      "name": "FED_ACK",
+      "code": 212,
+      "direction": "both",
+      "payload": "FedAck",
+      "response": "Acknowledged",
+      "auth": "Server",
+      "cost": 0,
+      "class": "Critical"
+    },
+    {
+      "name": "FED_ROOM_SUBSCRIBE",
+      "code": 213,
+      "direction": "both",
+      "payload": "FedRouting",
+      "response": "Acknowledged",
+      "auth": "Server",
+      "cost": 2,
+      "class": "Critical"
+    },
+    {
+      "name": "FED_ROOM_EVENT",
+      "code": 214,
+      "direction": "both",
+      "payload": "FedRoomEvent",
+      "response": "Acknowledged",
+      "auth": "Server",
+      "cost": 0,
+      "class": "Critical"
+    },
+    {
+      "name": "FED_PRESENCE_DIGEST",
+      "code": 215,
+      "direction": "both",
+      "payload": "FedPresenceDigest",
+      "response": "Acknowledged",
+      "auth": "Server",
+      "cost": 0,
+      "class": "Coalescable",
+      "coalesce_key": "region"
+    },
+    {
+      "name": "FED_KEY_ROTATE",
+      "code": 216,
+      "direction": "both",
+      "payload": "FedKeyRotate",
+      "response": "Acknowledged",
+      "auth": "Server",
+      "cost": 5,
+      "class": "Critical"
+    },
+    {
+      "name": "FED_HEALTH",
+      "code": 217,
+      "direction": "both",
+      "payload": "FedHealth",
+      "response": "FedHealth",
+      "auth": "Server",
+      "cost": 1,
+      "class": "Critical"
+    },
+    {
+      "name": "FED_SHARD_MAP",
+      "code": 218,
+      "direction": "both",
+      "payload": "FedShardMap",
+      "response": "Acknowledged",
+      "auth": "Server",
+      "cost": 2,
+      "class": "Critical"
+    },
+    {
+      "name": "FED_ERROR",
+      "code": 219,
+      "direction": "both",
+      "payload": "FedError",
+      "response": "Acknowledged",
+      "auth": "Server",
+      "cost": 0,
+      "class": "Critical"
+    },
+    {
+      "name": "FED_CALL_RELAY",
+      "code": 220,
+      "direction": "both",
+      "payload": "FedForward",
+      "response": "Acknowledged",
+      "auth": "Server",
+      "cost": 1,
+      "class": "Critical"
+    },
+    {
+      "name": "FED_DIRECTORY",
+      "code": 221,
+      "direction": "both",
+      "payload": "FedDirectoryReq",
+      "response": "FedDirectory",
+      "auth": "Server",
+      "cost": 2,
+      "class": "Critical"
+    },
+    {
+      "name": "CALL_INVITE",
+      "code": 224,
+      "direction": "client_to_server",
+      "payload": "CallInvite",
+      "response": "CallInviteResult",
+      "auth": "User",
+      "cost": 20,
+      "class": "Critical",
+      "doc": "Invites a callee to a call."
+    },
+    {
+      "name": "CALL_INVITE_EVENT",
+      "code": 225,
+      "direction": "server_to_client",
+      "payload": "CallInviteEvent",
+      "response": null,
+      "auth": "User",
+      "cost": 0,
+      "class": "Critical",
+      "doc": "Tells the callee a call is ringing."
+    },
+    {
+      "name": "CALL_ANSWER",
+      "code": 226,
+      "direction": "client_to_server",
+      "payload": "CallAnswer",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical",
+      "doc": "The callee answers."
+    },
+    {
+      "name": "CALL_DECLINE",
+      "code": 227,
+      "direction": "client_to_server",
+      "payload": "CallDecline",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical",
+      "doc": "The callee declines."
+    },
+    {
+      "name": "CALL_CANCEL",
+      "code": 228,
+      "direction": "client_to_server",
+      "payload": "CallCancel",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical",
+      "doc": "The caller cancels before an answer."
+    },
+    {
+      "name": "CALL_END",
+      "code": 229,
+      "direction": "both",
+      "payload": "CallEnd",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 2,
+      "class": "Critical",
+      "doc": "Ends a call; always with a reason."
+    },
+    {
+      "name": "CALL_SDP",
+      "code": 230,
+      "direction": "both",
+      "payload": "CallSdp",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 3,
+      "class": "Critical",
+      "doc": "Relays a sealed SDP offer or answer."
+    },
+    {
+      "name": "CALL_ICE",
+      "code": 231,
+      "direction": "both",
+      "payload": "CallIce",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 1,
+      "class": "Critical",
+      "doc": "Relays a batch of sealed ICE candidates."
+    },
+    {
+      "name": "CALL_STATE_EVENT",
+      "code": 232,
+      "direction": "server_to_client",
+      "payload": "CallStateEvent",
+      "response": null,
+      "auth": "User",
+      "cost": 0,
+      "class": "Critical",
+      "doc": "A call's state change."
+    },
+    {
+      "name": "CALL_RENEGOTIATE",
+      "code": 233,
+      "direction": "both",
+      "payload": "CallRenegotiate",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 3,
+      "class": "Critical",
+      "doc": "Renegotiates mid-call."
+    },
+    {
+      "name": "CALL_KEY_UPDATE",
+      "code": 234,
+      "direction": "both",
+      "payload": "CallKeyUpdate",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 3,
+      "class": "Critical",
+      "doc": "Re-keys call media."
+    },
+    {
+      "name": "CALL_STATS",
+      "code": 235,
+      "direction": "client_to_server",
+      "payload": "CallStats",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 1,
+      "class": "Droppable",
+      "doc": "Aggregate quality numbers."
+    },
+    {
+      "name": "CALL_TURN_FETCH",
+      "code": 236,
+      "direction": "client_to_server",
+      "payload": "CallTurnFetch",
+      "response": "CallTurnResponse",
+      "auth": "User",
+      "cost": 10,
+      "class": "Critical",
+      "doc": "Requests TURN credentials."
+    },
+    {
+      "name": "CALL_SFU_JOIN",
+      "code": 237,
+      "direction": "client_to_server",
+      "payload": "CallInvite",
+      "response": "CallTurnResponse",
+      "auth": "User",
+      "cost": 20,
+      "class": "Critical",
+      "doc": "Joins a group call via SFU."
+    },
+    {
+      "name": "CALL_SFU_EVENT",
+      "code": 238,
+      "direction": "server_to_client",
+      "payload": "CallStateEvent",
+      "response": null,
+      "auth": "User",
+      "cost": 0,
+      "class": "Coalescable",
+      "doc": "SFU group call state.",
+      "coalesce_key": "call_id"
+    },
+    {
+      "name": "CONVERSATION_STATE_EVENT",
+      "code": 52,
+      "direction": "server_to_client",
+      "payload": "ConversationStateEvent",
+      "auth": "User",
+      "cost": 0,
+      "class": "Coalescable",
+      "coalesce_key": "conversation_id",
+      "doc": "Group metadata moved: a rename. Deltas only, coalesced per conversation."
+    },
+    {
+      "name": "STORE_PURCHASE",
+      "code": 239,
+      "direction": "client_to_server",
+      "payload": "StorePurchase",
+      "response": "StorePurchaseResult",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical",
+      "doc": "Buys a store item for the caller; the ledger and the entitlement are written together."
+    },
+    {
+      "name": "ENTITLEMENTS",
+      "code": 240,
+      "direction": "client_to_server",
+      "payload": "EntitlementsReq",
+      "response": "EntitlementsResponse",
+      "auth": "User",
+      "cost": 1,
+      "class": "Droppable",
+      "doc": "Everything the caller owns, oldest first."
+    }
+  ]
 }

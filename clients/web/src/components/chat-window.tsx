@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import { ConversationKind, ContentType, EncryptionMode, MemberChange } from '@migo/sdk';
@@ -21,9 +21,11 @@ import { resolveMediaUrl } from '@/lib/migo/media.js';
 import { presenceLabel, usePresence } from '@/lib/migo/use-presence.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
 import { closeConversation } from '@/lib/migo/use-open-conversation.js';
+import { useOwnedPacks } from '@/lib/migo/use-owned-packs.js';
 
 import { Avatar } from './avatar.js';
 import { CallButtons } from './call-buttons.js';
+import { EmoticonPicker } from './emoticon-picker.js';
 import { GameEventList } from './game-events.js';
 import { GameLauncher } from './game-launcher.js';
 import { GiftPicker } from './gift-picker.js';
@@ -127,6 +129,13 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   const [giftRecipient, setGiftRecipient] = useState<Id | null>(null);
   const [giftBusy, setGiftBusy] = useState(false);
   const [giftError, setGiftError] = useState<string | null>(null);
+  // The composer's emoticon/sticker picker, beside the gift picker it shares the row with.
+  const [emoticonOpen, setEmoticonOpen] = useState(false);
+  // The account's purchased packs: one read per session, shared across every chat window.
+  const ownedPacks = useOwnedPacks(client);
+  // The handle the picker inserts through; the composer fills it on mount. A ref rather than
+  // state because it is a stable function the composer owns, not a value the tree renders.
+  const emoticonInputRef = useRef<{ insert: (glyph: string) => void } | null>(null);
 
   /**
    * The media resolver the message list embeds images through. A failure resolves to `null` rather
@@ -519,6 +528,17 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
       ) : null}
 
       <TypingIndicator userId={typingUser} />
+      {emoticonOpen ? (
+        <EmoticonPicker
+          owned={ownedPacks}
+          onInsert={(glyph) => {
+            // The picker inserts into the composer's own state through the shared send path:
+            // appending to the draft keeps the glyph editable before send, the same as typing it.
+            emoticonInputRef.current?.insert(glyph);
+          }}
+          onClose={() => setEmoticonOpen(false)}
+        />
+      ) : null}
       {giftOpen ? (
         giftCatalogue === null ? (
           <div className="center-fill">
@@ -548,8 +568,17 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
         disabled={!!error}
         replyPreview={replyPreview}
         onCancelReply={() => setReplyTo(null)}
-        onGift={() => setGiftOpen((open) => !open)}
+        onGift={() => {
+          setEmoticonOpen(false);
+          setGiftOpen((open) => !open);
+        }}
         giftOpen={giftOpen}
+        emoticonOpen={emoticonOpen}
+        onToggleEmoticon={() => {
+          setGiftOpen(false);
+          setEmoticonOpen((open) => !open);
+        }}
+        insertRef={emoticonInputRef}
       />
 
       {profileOpen && peerId !== null ? (

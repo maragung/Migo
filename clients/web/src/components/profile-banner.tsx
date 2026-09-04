@@ -42,6 +42,13 @@ const MENU: ReadonlyArray<{
 ];
 
 /**
+ * The store link, rendered as the menu's own entry apart from the panels because it is not a
+ * panel: the store is a separate app served at /store/ on the same origin (shares this
+ * browser's session through IndexedDB), so opening it is a new tab, not a tab in the shell.
+ */
+const STORE_URL = '/store/';
+
+/**
  * The owner-only entry, rendered apart from the everyday menu because its
  * visibility is a server answer, not a build constant: the deployment's
  * Owner/CEO is named in configuration, and a client that asked nothing would
@@ -229,6 +236,20 @@ export function ProfileBanner({
                 <span>{OWNER_ENTRY.label}</span>
               </button>
             ) : null}
+            <button
+              type="button"
+              role="menuitem"
+              className="banner-menu-item"
+              onClick={() => {
+                setMenuOpen(false);
+                // A new tab, not a panel: the store is its own app on this origin, and keeping
+                // the chat open beside it is the point of opening it that way.
+                window.open(STORE_URL, '_blank', 'noopener');
+              }}
+            >
+              <Icon name="gift" size={16} />
+              <span>Store</span>
+            </button>
             <div className="banner-menu-divider" aria-hidden="true" />
             <button
               type="button"

@@ -40,10 +40,17 @@ import {
   decodeBadgesResponse,
   encodeLeaderboardReq,
   decodeLeaderboardResponse,
+  encodeStorePurchase,
+  decodeStorePurchaseResult,
+  encodeEntitlementsReq,
+  decodeEntitlementsResponse,
 } from '@migo/protocol';
 import type {
   BadgeWire,
   BadgesReq,
+  Entitlement,
+  EntitlementsReq,
+  EntitlementsResponse,
   GiftCatalogueReq,
   GiftListing,
   GiftSend,
@@ -55,6 +62,8 @@ import type {
   ProgressionReq,
   ProgressionWire,
   RankWire,
+  StorePurchase,
+  StorePurchaseResult,
   WalletReq,
   WalletView,
 } from '@migo/protocol';
@@ -185,5 +194,45 @@ export class EconomyDomain {
       request,
     );
     return response.ranks;
+  }
+
+  /**
+   * Buys a catalogue item for the caller's own account.
+   *
+   * `sku` is a catalogue code (e.g. `"sticker.frog_set"`) from {@link getGiftCatalogue} — the
+   * same call lists every category the server sells, not only gifts, because the wire's
+   * `category` field already carries which shelf a listing sits on. `clientKey` is the
+   * caller's idempotency key: one per purchase intent, so a retry after a network failure
+   * returns the first purchase instead of charging twice. `txHash`, when the purchase was paid
+   * on-chain, rides along for the server's audit log.
+   */
+  async purchase(sku: string, clientKey: string, txHash?: string): Promise<StorePurchaseResult> {
+    const request: StorePurchase = { sku, clientKey };
+    if (txHash !== undefined) {
+      request.txHash = txHash;
+    }
+    return this.#rpc.call(
+      OP.STORE_PURCHASE,
+      encodeStorePurchase,
+      decodeStorePurchaseResult,
+      request,
+    );
+  }
+
+  /**
+   * Everything the caller owns, oldest first.
+   *
+   * The entitlements are the composer's purchased-pack source: a pack whose SKU appears here
+   * is a pack the picker shows.
+   */
+  async getEntitlements(): Promise<Entitlement[]> {
+    const request: EntitlementsReq = {};
+    const response: EntitlementsResponse = await this.#rpc.call(
+      OP.ENTITLEMENTS,
+      encodeEntitlementsReq,
+      decodeEntitlementsResponse,
+      request,
+    );
+    return response.items;
   }
 }

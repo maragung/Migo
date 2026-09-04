@@ -24,8 +24,22 @@ pub struct RoomsState {
     /// Room id → conversation id for every room this session entered (joined or created). The
     /// rows offer Open and Leave through it; the app fills it from the join events.
     pub joined: std::collections::HashMap<migo_core::Id, migo_core::Id>,
+    /// Room id → the live member/online totals the room's own events keep current.
+    ///
+    /// The page's counts are a snapshot from the moment of the read; these are the ones the
+    /// member and state events tick, so a row whose room this account is in counts in front of
+    /// the user instead of waiting for a refresh. Rooms not watched keep their page counts: the
+    /// deltas only arrive on the room's own topic, which is subscribed on join.
+    pub live: std::collections::HashMap<migo_core::Id, LiveCounts>,
     /// The Create Room form, when it is open.
     pub creating: Option<CreateRoomForm>,
+}
+
+/// A watched room's running totals, folded from the room's event streams.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LiveCounts {
+    pub member_count: Option<u32>,
+    pub online_count: Option<u32>,
 }
 
 /// The Create Room form's fields, held across frames while the window is open.
@@ -112,12 +126,24 @@ pub fn show(
 
     let rows: Vec<crate::model::RoomRow> = state.rooms.clone();
     let joined = state.joined.clone();
+    let live = state.live.clone();
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.add_space(space::XS);
             for room in &rows {
-                room_row(ui, context, chat, room, joined.get(&room.room_id).copied());
+                // The overlay: a watched room's live totals read in place of the page's snapshot,
+                // so the row never disagrees with the thread's own header.
+                let row = if let Some(counts) = live.get(&room.room_id) {
+                    crate::model::RoomRow {
+                        member_count: counts.member_count.unwrap_or(room.member_count),
+                        online_count: counts.online_count.unwrap_or(room.online_count),
+                        ..room.clone()
+                    }
+                } else {
+                    room.clone()
+                };
+                room_row(ui, context, chat, &row, joined.get(&room.room_id).copied());
             }
             ui.add_space(space::XL);
         });
