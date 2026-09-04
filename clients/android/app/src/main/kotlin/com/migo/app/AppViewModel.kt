@@ -1577,7 +1577,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     ProfileUpdate(
                         displayName = displayName.ifBlank { null },
                         bio = bio.ifBlank { null },
-                        birthYear = birthYear.trim().toIntOrNull(),
+                        birthYear = birthYear.trim().toLongOrNull(),
                         searchable = searchable,
                         showLastSeen = showLastSeen,
                         whoCanMessage = whoCanMessage,
