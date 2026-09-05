@@ -14,6 +14,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.migo.app.model.AppState
@@ -43,6 +44,9 @@ fun PanelBar(
                 .padding(horizontal = 6.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // The back control is the restyle's white active pill, so its ink is the teal head the
+            // white pill carries in the tab strip, not the bar's white.
+            val pillInk = Color(0xFF0D6373)
             Row(
                 modifier = Modifier
                     .background(color = extra.navActive, shape = RoundedCornerShape(8.dp))
@@ -56,14 +60,14 @@ fun PanelBar(
                     text = "‹",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
-                    color = extra.bannerInk,
+                    color = pillInk,
                 )
                 Spacer(modifier = Modifier.width(3.dp))
                 Text(
                     text = "Menu Panel",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
-                    color = extra.bannerInk,
+                    color = pillInk,
                 )
             }
             Spacer(modifier = Modifier.width(10.dp))

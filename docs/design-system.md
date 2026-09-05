@@ -3,7 +3,7 @@
 **One product, one identity, every screen size.**
 
 This is the source of truth for Migo's visual language. The canonical machine-readable tokens
-live in [`shared/design/tokens.json`](../shared/design/tokens.json) (v3); the web client reads them as
+live in [`shared/design/tokens.json`](../shared/design/tokens.json) (v4); the web client reads them as
 CSS custom properties in `clients/web/src/app/globals.css`, the Android client maps them into
 `clients/android/app/src/main/kotlin/com/migo/app/ui/Theme.kt`, and the desktop client maps them
 into `clients/desktop/src/theme.rs`. The `/design` route in the web client renders the whole
@@ -11,64 +11,87 @@ system — colours, type, spacing, icons, components, states — as living docum
 
 The character: **compact, social, realtime, lightweight, modern, highly usable.** Dense rows,
 small headers, short functional motion, one accent, one icon family. Not a SaaS dashboard, not
-a card-based social clone. The v3 identity is the `docs/design/new-client-ui.tsx` reference's:
-a teal-and-orange messenger with a top tab strip, an orange profile banner, closable chat tabs,
-and a cream light surface.
+a card-based social clone.
+
+The v4 identity is a **flat modern restyle** of the mig33 lineage: solid colours only — no
+gradients, no glossy highlights, no bevels or inset shadows, no text shadows. Separation comes
+from 1px borders and a single soft elevation shadow, used only by things that genuinely float.
+A deep-teal tab strip sits over a flat-orange "me card"; lists are flush hairline rows rather
+than cards; the transcript is a script, not a stack of bubbles; each panel closes with a pale
+status band.
 
 ## Colour
 
-Two designed palettes — light and dark — switched by `<html data-theme>`. Dark is the home skin
-and the default; light is a designed palette (the reference's cream), not an inversion.
+Two designed palettes — light and dark — switched by `<html data-theme>`. Light is the reference's
+own pale teal; dark is a designed deep-teal skin, not an inversion.
 
 | Role             | Light     | Dark      |
 | ---------------- | --------- | --------- |
-| Background       | `#fdfbf7` | `#0c1517` |
-| Surface (panel)  | `#ffffff` | `#122023` |
-| Surface (sunken) | `#f5f1e8` | `#1a2c30` |
-| Border           | `#e8e2d4` | `#24393e` |
-| Ink (primary)    | `#1e2b2e` | `#e9f4f5` |
-| Ink (secondary)  | `#5c6a6d` | `#9db4b8` |
-| Ink (tertiary)   | `#9aa5a7` | `#64808a` |
-| Accent           | `#00838f` | `#00bcd4` |
-| Accent (bright)  | `#00acc1` | `#26c6da` |
-| Positive         | `#059669` | `#2fce7e` |
-| Warning          | `#e67700` | `#f59f00` |
-| Danger           | `#e03131` | `#ff5c7a` |
-| Gold (badges)    | `#d97706` | `#fcc419` |
+| Background       | `#eef7fa` | `#072a33` |
+| Surface (panel)  | `#ffffff` | `#0c3a46` |
+| Surface (sunken) | `#eef7fa` | `#114b5a` |
+| Border           | `#cfe3ea` | `#1a5866` |
+| Ink (primary)    | `#134e5e` | `#e6f4f8` |
+| Ink (secondary)  | `#5f8a99` | `#a3c4cd` |
+| Ink (tertiary)   | `#8fb0bb` | `#6f97a3` |
+| Accent           | `#1287a0` | `#1fa5c0` |
+| Accent (strong)  | `#0d6373` | `#157e94` |
+| Nav strip        | `#0d4353` | `#06222a` |
+| Positive         | `#3fce6b` | `#3fce6b` |
+| Warning / away   | `#f5b83d` | `#f5b83d` |
+| Danger / unread  | `#e5503c` | `#ff6a54` |
+| Gold (credits)   | `#f0a912` | `#f7c13a` |
+| Status band      | `#e5f4f7` | `#0a333e` |
 
-Two gradients sit above the themes and ignore them — the front door does not change with the
+Two surfaces sit above the themes and ignore them — the front door does not change with the
 lights:
 
-- **The banner gradient** (the profile banner): `#ea580c → #f97316 → #f59e0b`, carrying white
-  ink. The active tab's underline is its middle stop.
-- **The login gradient** (the sign-in screen): `#0093af → #00acc1 → #00838f`, carrying white
-  ink. The submit button on it is the banner's orange.
+- **The me card** (the profile banner): flat `#f5820c`, white ink, its counter chips in `#d2690b`.
+- **The auth screen**: a flat `#0f96ad` ground carrying a solid `#0b6f82` card, white ink, and the
+  banner's orange on the submit button.
+
+Both survive as three-stop "gradient" tokens whose stops are set to one colour each, so every
+existing gradient call site paints a solid band without being rewritten.
 
 Tints (hovers, soft fills, soft borders) are mixed from the accent at paint time
 (`color-mix` on web) so they follow the accent across themes without a variable per tint.
 
+### Nickname colours
+
+The transcript names every line, and a name's colour is a hash of the name, so one person keeps
+one colour down a busy room. The hash is a 31-multiplier polynomial —
+`h = (h * 31 + name.charCodeAt(i)) >>> 0`, then `h % 8` — and it is **byte-identical on all three
+clients**, so a person's colour identity survives moving between them. Only the eight-colour ramp
+changes per theme (the light hues are chosen against white and half of them vanish on a dark
+ground); each index keeps its hue, and only lightness moves. Your own lines take the fixed
+`selfName` teal instead of joining the cycle.
+
 ## Typography
 
-System fonts, no webfont. Base size 14px; the scale is small and dense on purpose.
+`'Segoe UI', Tahoma, Verdana, Geneva, sans-serif` — the reference's own stack, no webfont. Base
+size 13px; the scale is small and dense on purpose.
 
-| Step     | Size                         | Use                          |
-| -------- | ---------------------------- | ---------------------------- |
-| micro    | 11px, 600, uppercase, +0.4px | section headings, tab labels |
-| meta     | 12px                         | timestamps, metadata         |
-| body-sm  | 13px                         | secondary body, chips        |
-| body     | 14px                         | messages, controls           |
-| title-sm | 16px, 600                    | subtitles, banner name       |
-| title    | 18px, 700                    | panel titles                 |
-| display  | 22px, 700                    | the greeting                 |
+| Step     | Size                           | Use                           |
+| -------- | ------------------------------ | ----------------------------- |
+| micro    | 10.5px, 700, uppercase, +0.4px | section headings, status band |
+| meta     | 11.5px                         | timestamps, metadata          |
+| body-sm  | 12px                           | secondary body, chips         |
+| body     | 13px                           | messages, controls            |
+| title-sm | 14px, 700                      | row names, banner name        |
+| title    | 16px, 700                      | panel titles                  |
+| display  | 20px, 700                      | the greeting                  |
 
 ## Spacing, radius, elevation
 
 - Spacing: a 4px base — 4, 8, 12, 16, 20, 24, 32, 40, 48 (`--sp-1` … `--sp-12`).
-- Radius: 4 (sm), 6 (md), 8 (lg), 12 (tab chip), 999 (pill). Message bubbles sit at **16px with
-  a small corner tail** (top-left incoming, top-right outgoing); the composer's input is a
-  **capsule**; the tab strip's chips are **12px rounded** with the active fill in accent-bright.
-- Elevation: flat → raised (`0 2px 8px rgba(0,0,0,.08)`) → overlay; an accent glow for focus and
-  the active state. Nothing floats without a reason.
+- Radius: 4 (sm), 6 (md — inputs, the composer field, retro tabs), 9 (tab chips), 12 (window
+  frames, lg), 16 (the auth card), 999 (pill). **List rows have no radius at all**: they are flush
+  hairline rows, and a rounded row is a card.
+- Elevation: exactly **two** shadows in the system — the frame
+  (`0 12px 32px rgba(4,48,60,.16)`) and menus (`0 10px 24px rgba(4,48,60,.18)`). No glows: the
+  `--glow*` tokens survive as `none` so their hundred call sites paint nothing. Focus is a **ring**
+  — zero blur, zero offset, `0 0 0 3px var(--accent-glow)` — which is not an elevation, and is the
+  one thing flatness is not allowed to cost keyboard users.
 
 ## Icons
 
@@ -79,34 +102,50 @@ with their own canvas (strokes, no icon dependency). Emoji are content (reaction
 
 ## Layout
 
-One shell, one composition — the reference draws the same model at every size:
+Two independent panels on a PC, one column on a phone:
 
-- The **tab strip** across the top: the system tabs **Friends, Chats, Rooms, Games, Feed**, then
-  one closable chip per open conversation (and, on the desktop, per open panel). The active tab
-  is the accent-bright fill with the orange underline; the strip is the `nav` token's surface.
-- The **profile banner** under it: the orange gradient, the avatar (a white-ringed translucent
-  disc), the name, the connection state, the $MIG balance — and the avatar's dropdown menu
-  carrying **My Profile, My Credits & TopUp, Alerts, Search, Exit / Logout** (and Settings on
-  the clients that have a settings panel).
-- Content below, capped at a readable measure; a thread never hides the strip.
+- The **tab strip** across the top of the left panel: the system tabs **Friends, Chats, Rooms,
+  Feed** on the deep-teal band. The active tab is a solid white pill with teal ink and a short
+  underline drawn inside it. The strip scrolls rather than hiding a tab.
+- The **me card** under it: the flat orange band, the avatar in a presence-coloured ring with a
+  white halo, the name with a blinking presence dot, the `@handle`, the account's editable status
+  line, the presence control — and the avatar's dropdown carrying **My Profile, My Credits &
+  TopUp, Store, Settings, Exit / Logout**.
+- The **list** below, as flush hairline rows (58px; rooms 66px, which carry an occupancy bar).
+- The **status band** at the foot: the credit balance on the left, a lowercase hint on the right
+  saying what the open list responds to.
+- The **right panel** carries its own bar in the same teal: a persistent Games chip and one
+  closable chip per open conversation or panel. Below the PC breakpoint the two panes take turns.
 
 Breakpoints: 320 / 360 / 375 / 390 / 412 / 430 / 480 / 600 / 768 / 820 / 1024 / 1280 / 1440 / 1920+.
 
 ## Navigation
 
-System tabs, in strip order: **Friends, Chats, Rooms, Games, Feed.** Dynamic tabs: **one per
-open conversation**, closable at the chip. Panels — **Alerts, Search, Wallet, Profile,
-Settings** — open from the banner's avatar menu (the desktop also gives them closable strip
-chips). The same list on every platform, re-composed per size — never a different information
-architecture for a different device.
+Left-panel system tabs, in strip order: **Friends, Chats, Rooms, Feed.** The right pane's tabs:
+**Games** (its resting content) plus one closable chip per open conversation. Panels — **Alerts,
+Search, Wallet, Profile, Account, Settings, Admins, Store** — open from the me card's avatar menu
+as right-pane tabs. The same list on every platform, re-composed per size — never a different
+information architecture for a different device.
+
+## The transcript
+
+A script, not a stack of bubbles. Every line opens with the sender's nickname and a colon in that
+sender's hashed colour, then the text, then a small trailing clock. What _is_ run-gated is the
+avatar: a 24px gutter is reserved on every line and filled with a 22px disc only on the first of a
+run, so the text column starts at one x whether or not a face is drawn. A day divider or an
+interleaved system notice starts a new run.
+
+Three things the reference does not draw are kept, because they carry meaning the layout cannot:
+content-free **tombstones** for deleted messages, **read ticks** derived from `seq <= readUpTo`,
+and **reply quotes** that render `[deleted]` when their target is gone.
 
 ## Components
 
-The shared vocabulary: TabStrip, ProfileBanner, AvatarMenu, Avatar, PresenceIndicator, Badge,
-Button, IconButton, Input, SearchInput, UserRow, ConversationRow, MessageBubble, MessageComposer,
-RoomRow, RoomMessage, MemberList, ActivityRow, GamesPanel, TokenReference, ProfileHeader,
-NotificationRow, SettingsRow, ContextMenu, BottomSheet, Dialog, Toast, Tooltip, Skeleton,
-EmptyState, ErrorState.
+The shared vocabulary: TabStrip, RightTabBar, ProfileBanner, AvatarMenu, ListFooter, Avatar,
+PresenceIndicator, Badge, Button, IconButton, Input, SearchInput, UserRow, ConversationRow,
+MessageLine, MessageComposer, RoomRow, MemberList, ActivityRow, GamesPanel, TokenReference,
+ProfileHeader, NotificationRow, SettingsRow, ContextMenu, BottomSheet, Dialog, Toast, Tooltip,
+Skeleton, EmptyState, ErrorState.
 
 Every component is responsive, themed by tokens, and carries its own ARIA semantics.
 
@@ -118,13 +157,18 @@ Every component is responsive, themed by tokens, and carries its own ARIA semant
 ## The coin
 
 Migo's currency is **$MIG** — the one ticker this build recognises. In message text a
-word-bounded `$MIG` renders as a chip that opens the Wallet; the banner's balance pill and the
-coin badges carry the same mark.
+word-bounded `$MIG` renders as a chip that opens the Wallet; the status band's balance and the
+coin badges carry the same mark. A balance that failed to load says nothing rather than zero.
 
 ## Rules
 
 1. No random values: compose from the scales; a one-off number needs a reason in a comment.
 2. One icon family, one spacing language, one interaction pattern per concept.
-3. Compact beats airy: a row is 44px, the strip is 46px, the banner is 58px, a panel title is 18px.
-4. Dark is designed, not inverted. The banner and login gradients are designed once, not twice.
-5. Every screen works at 320px and at 1920px.
+3. Flat means flat: no gradient, no bevel, no glow, no text shadow. Two elevations, and a focus
+   ring is a ring.
+4. Nothing outside the token blocks names a colour. A raw hex in a component is a bug, and a
+   theme that only works in light is the bug it causes.
+5. Compact beats airy: a touch target is 44px, the strip is 46px, a list row is 58px, the me card
+   is 71px, a panel title is 16px.
+6. Dark is designed, not inverted. The me card and the auth screen are designed once, not twice.
+7. Every screen works at 320px and at 1920px.

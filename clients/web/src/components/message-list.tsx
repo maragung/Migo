@@ -186,6 +186,40 @@ export function senderNameOf(
   return profiles.get(senderId)?.displayName ?? 'Unknown';
 }
 
+/** How many nickname colours the transcript cycles through. */
+const NICK_COLOURS = 8;
+
+/**
+ * Which of the eight nickname colours a name gets — the transcript's one piece of colour logic.
+ *
+ * The hash is the design's exact polynomial (`h = h * 31 + charCode`, unsigned), so a given
+ * nickname lands on the same colour here, on Android and on the desktop client: a reader who knows
+ * "the green one is Bekti" in one client knows it in all three. The result is an *index*, not a hex
+ * value, because the eight hues have to be readable on a white transcript and on a dark one — the
+ * stylesheet owns which pair of ramps that means.
+ */
+export function nickIndex(name: string): number {
+  let h = 0;
+  for (let i = 0; i < name.length; i += 1) {
+    h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  }
+  return h % NICK_COLOURS;
+}
+
+/**
+ * The nickname that opens every line: bold, colour-keyed, and followed by its colon.
+ *
+ * The design's transcript is a script, not a stack of bubbles — the name repeats on every line
+ * rather than heading a run, which is what makes a busy room readable when six people are talking
+ * and the eye has to find one of them. Our own lines are the one exception to the hash: they get
+ * the fixed teal that every other "this is you" in the client uses.
+ */
+function SenderName({ name, mine }: { name: string; mine: boolean }): ReactNode {
+  return (
+    <span className={`sender-name ${mine ? 'nick-self' : `nick-${nickIndex(name)}`}`}>{name}:</span>
+  );
+}
+
 /** Two ticks for read, one for sent — text glyphs rather than emoji, so they render everywhere. */
 function ReadTicks({ read }: { read: boolean }): ReactNode {
   return (
@@ -203,7 +237,12 @@ export interface MessageListProps {
    */
   messages: readonly ThreadMessage[];
   selfId: Id;
-  /** Sender names and avatars are a group-conversation affordance; a 1:1 has only one peer. */
+  /**
+   * Whether the avatar gutter is drawn. The nickname opens every line either way — a transcript
+   * that reads as a script needs the name even in a 1:1 — but the 24px face column is a group
+   * affordance: in a 1:1 there is only one other person, and the same face on every inbound line
+   * is a column of noise.
+   */
   showSenders: boolean;
   /** Resolved sender profiles, for names and avatars. */
   profiles: ReadonlyMap<Id, UserProfile>;
@@ -408,11 +447,12 @@ export function MessageList({
         const showDivider = dayLabel !== lastDay;
         lastDay = dayLabel;
         const mine = message.senderId === selfId;
-        // A run of consecutive messages from one sender shows the name and avatar once, on the
-        // first; a day divider starts a new run because the block reads as a new conversation turn.
+        // A run of consecutive messages from one sender draws its avatar once, on the first; a day
+        // divider or an interleaved notice starts a new run, because either one reads as a new turn.
+        // The *name* is not run-gated — it opens every line, which is what makes a six-way room
+        // readable when the eye is hunting for one person's lines.
         const startsRun = showDivider || message.senderId !== lastSender;
         lastSender = message.senderId;
-        const showHeader = showSenders && !mine && startsRun;
         const senderName = senderNameOf(message.senderId, selfId, profiles);
 
         const quoted = message.replyTo ? (byId.get(message.replyTo) ?? null) : null;
@@ -426,13 +466,19 @@ export function MessageList({
           <div key={message.messageId}>
             {showDivider ? <div className="day-divider">{dayLabel}</div> : null}
             <div className={`bubble-row ${mine ? 'out' : 'in'}`}>
-              {showHeader ? (
-                <Avatar
-                  name={senderName}
-                  id={message.senderId}
-                  size={26}
-                  avatarUrl={profiles.get(message.senderId)?.avatarUrl}
-                />
+              {showSenders ? (
+                // The gutter is reserved on every line and filled only on a run head, so the text
+                // column starts at the same x whether or not this line carries a face.
+                <span className="msg-gutter">
+                  {startsRun ? (
+                    <Avatar
+                      name={senderName}
+                      id={message.senderId}
+                      size={22}
+                      avatarUrl={profiles.get(message.senderId)?.avatarUrl}
+                    />
+                  ) : null}
+                </span>
               ) : null}
               <div className="bubble-stack">
                 {message.deleted ? (
@@ -440,12 +486,12 @@ export function MessageList({
                   // row is the proof something was sent and then unsent, which is all a reader
                   // needs to know. No quote, no actions — there is nothing left to act on.
                   <div className="bubble tombstone">
+                    <SenderName name={senderName} mine={mine} />
                     <span className="tombstone-text">Message deleted</span>
                     <span className="meta">{formatClock(message.createdAt)}</span>
                   </div>
                 ) : (
                   <>
-                    {showHeader ? <div className="sender-name">{senderName}</div> : null}
                     {message.replyTo ? (
                       <div className="reply-quote">
                         <span className="reply-quote-name">
@@ -621,6 +667,7 @@ function BubbleLine({
   return (
     <div className="bubble-line">
       <div className={`bubble ${placeholder ? 'placeholder' : ''}`}>
+        <SenderName name={senderName} mine={mine} />
         {body}
         <span className="meta">
           {formatClock(message.createdAt)}

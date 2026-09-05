@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -55,7 +56,7 @@ fun ChatsScreen(
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 items(rows, key = { it.conversationId.value }) { row ->
                     ChatListRow(row = row, onOpen = { onOpenConversation(row) })
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                 }
                 item { Spacer(modifier = Modifier.height(16.dp)) }
             }
@@ -64,29 +65,29 @@ fun ChatsScreen(
 }
 
 /**
- * One conversation row: who it is, the last line, and the way in. Unread count outranks the
- * preview — a number the user is hunting for beats the text they have not read yet.
+ * One conversation row, in the reference list row's anatomy: the ringed avatar, the bold teal-head
+ * name, the last line under it, and — when there is one — the red unread pill on the end. Unread
+ * count outranks the preview as colour rather than as text now: a number the user is hunting for
+ * beats the words they have not read yet, and red is what they spot first.
  */
 @Composable
 private fun ChatListRow(row: ConversationRow, onOpen: () -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 58.dp)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Monogram(name = row.title, size = 36.dp)
+        ListRowAvatar(name = row.title)
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = row.title,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-            )
-            if (row.unread > 0) {
-                OneLine(text = "${row.unread} unread")
-            } else {
-                OneLine(text = row.preview ?: "Open the conversation")
-            }
+            ListRowName(text = row.title)
+            ListRowLine(text = row.preview ?: "Open the conversation")
+        }
+        if (row.unread > 0) {
+            UnreadPill(count = row.unread)
+            Spacer(modifier = Modifier.width(8.dp))
         }
         Button(onClick = onOpen) { Text("Open") }
     }

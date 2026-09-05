@@ -3,13 +3,15 @@
 /**
  * The messenger shell: two independent panels on a PC, one column on a phone.
  *
- * The new-ui-02 model (docs/design mockup `new-ui-02.tsx`) splits the app: a LEFT panel (~32% on
- * a PC, the whole screen on a phone) that owns the account's lists — its own teal tab strip
- * (Main, Chats, Rooms, Feed) over the orange profile banner — and a RIGHT panel that shows what
+ * The reference design splits the app: a LEFT panel (~32% on a PC, the whole screen on a phone)
+ * that owns the account's lists — its own deep-teal tab strip (Friends, Chats, Rooms, Feed) over
+ * the flat-orange profile banner — and a RIGHT panel that shows what
  * the left panel's clicks open, as tabs: one closable chip per open conversation and the
  * secondary panels the banner menu reaches, over a persistent Games chip that is the pane's
  * resting content — the arcade, what it shows when nothing is open. Clicking around the left
- * panel never disturbs the right, and that independence is the model's whole offer.
+ * panel never disturbs the right, and that independence is the model's whole offer. The left
+ * panel closes with the design's status band — the credit balance and what the open list responds
+ * to — because both windows in the reference end that way, and a list with no foot has no scale.
  *
  * Below the PC breakpoint the two panes take turns: the left panel is the app, and the right
  * pane covers it while it has something to show. The `showRight` flag is the layout's say in
@@ -26,6 +28,7 @@ import type { Id } from '@migo/sdk';
 
 import type { Theme } from '@/lib/theme.js';
 
+import { ListFooter } from './list-footer.js';
 import { ProfileBanner } from './profile-banner.js';
 import { RightTabBar } from './right-tab-bar.js';
 import type { RightTabChip, RightPaneTab } from './right-tab-bar.js';
@@ -119,6 +122,7 @@ export function AppShell({
         />
         <ProfileBanner onOpenPanel={onOpenPanel} theme={theme} onToggleTheme={onToggleTheme} />
         <div className="app-body">{leftContent}</div>
+        <ListFooter tab={leftTab} />
       </div>
       <div className="app-right">
         {rightBarOverride !== undefined ? (

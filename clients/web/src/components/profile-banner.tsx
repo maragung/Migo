@@ -1,14 +1,16 @@
 'use client';
 
 /**
- * The profile banner: the orange strip under the tabs that owns the account.
+ * The profile banner: the flat orange strip under the tabs that owns the account.
  *
- * The reference draws an orange-to-amber gradient carrying the avatar, the display name with a
- * presence dot, a mood line, and a counter chip. The real banner keeps the shape and swaps the
- * mockup's egg count for the account's honest $MIG balance (one read per session, the same
- * posture as the sidebar's coin badge), and the avatar becomes the menu the rail's foot used to
- * be: My Profile, My Credits & TopUp, Settings, and Exit/Logout — the panels that have no
- * system tab of their own.
+ * The design calls this the "me card": a solid orange band carrying the avatar in a
+ * presence-coloured ring, the display name with a blinking presence dot, the @handle, the
+ * account's own status line, and its action chips. The banner is who you are; what you *have*
+ * (the $MIG balance) belongs to the panel's footer band, which is where the reference puts it and
+ * where a status bar can be glanced at without reading a face.
+ *
+ * The avatar becomes the menu the rail's foot used to be: My Profile, My Credits & TopUp,
+ * Settings, and Exit/Logout — the panels that have no system tab of their own.
  */
 
 import { useEffect, useRef, useState } from 'react';
@@ -22,7 +24,7 @@ import { useProfile } from '@/lib/migo/use-profiles.js';
 import type { Theme } from '@/lib/theme.js';
 
 import { Avatar } from './avatar.js';
-import { CoinMark, Icon } from './icons.js';
+import { Icon } from './icons.js';
 import { PresenceSelect, StatusInput } from './presence-picker.js';
 import { ThemeToggle } from './theme-toggle.js';
 import type { PanelTab } from './tab-strip.js';
@@ -84,7 +86,6 @@ export function ProfileBanner({
   const { client, accountId, logout } = useMigo();
   const self = useProfile(accountId);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [coins, setCoins] = useState<number | null>(null);
   const [owner, setOwner] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   // The account's own presence, published from this banner: the state rides beside the coin
@@ -138,26 +139,6 @@ export function ProfileBanner({
     };
   }, [client]);
 
-  // The balance chip is the resting glance, not the ledger: one read per session, absent on
-  // failure rather than wrong — the same contract the sidebar's coin badge keeps.
-  useEffect(() => {
-    if (!client) {
-      return;
-    }
-    let cancelled = false;
-    client.economy
-      .getBalance()
-      .then((wallet) => {
-        if (!cancelled) {
-          setCoins(wallet.balance);
-        }
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [client]);
-
   // A click outside the dropdown closes it; the menu is a menu, not a mode.
   useEffect(() => {
     if (!menuOpen) {
@@ -177,7 +158,7 @@ export function ProfileBanner({
       <div className="banner-menu-anchor" ref={menuRef}>
         <button
           type="button"
-          className="banner-avatar"
+          className={`banner-avatar banner-avatar-${DOT_CLASS[myPresence]}`}
           aria-haspopup="menu"
           aria-expanded={menuOpen}
           aria-label="Open the account menu"
@@ -187,7 +168,7 @@ export function ProfileBanner({
           <Avatar
             name={self?.displayName ?? 'You'}
             id={accountId ?? 'self'}
-            size={32}
+            size={38}
             avatarUrl={self?.avatarUrl}
           />
         </button>
@@ -278,12 +259,6 @@ export function ProfileBanner({
 
       <div className="banner-actions">
         <PresenceSelect state={myPresence} onStateChange={(next) => publish(next, myStatus)} />
-        {coins !== null ? (
-          <span className="banner-chip" title="Coin balance" aria-label={`Coin balance: ${coins}`}>
-            <CoinMark size={14} />
-            <span>{coins.toLocaleString()}</span>
-          </span>
-        ) : null}
         <ThemeToggle theme={theme} onToggle={onToggleTheme} />
       </div>
     </header>

@@ -67,9 +67,11 @@ test('the status input is capped at its wire bound and seeded with the current s
     markup.includes('value="shipping the release"'),
     'the status input did not carry the current status',
   );
+  // The empty-state text is the design's own: an example of a status rather than an instruction
+  // to write one, which is what makes a new account's banner read like a person's and not a form's.
   assert.ok(
-    markup.includes('placeholder="Set a status…"'),
-    'the status input must say what it is for when it is empty',
+    markup.includes('placeholder="New here! Say hi :)"'),
+    'the status input must suggest what it is for when it is empty',
   );
 });
 

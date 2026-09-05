@@ -7,102 +7,188 @@
  *
  * Accent-derived tints (hovers, active fills, soft borders) are mixed from the accent at paint
  * time with `color-mix`, so they follow the accent across themes without a variable per tint.
+ *
+ * FLAT MODERN RESTYLE (the mig33-lineage skin). Solid colours only: no gradients, no glossy
+ * highlights, no inset or bevel shadows, no text shadows. Separation comes from 1px borders and a
+ * single soft elevation shadow — `--shadow`, used only by things that genuinely float (menus,
+ * sheets, dialogs, windows). The `--glow*` tokens survive as `none` rather than being deleted,
+ * because a hundred call sites list them in `box-shadow` and flat means they paint nothing.
+ *
+ * The three-stop banner and login gradients survive the same way: their stops are set to one
+ * colour each, so `var(--banner-gradient)` paints a flat orange band and `var(--login-gradient)`
+ * a flat turquoise ground without touching a single call site.
  */
 
 :root {
   color-scheme: light;
 
+  /*
+   * The canonical palette, named the way the design names it. Everything below this block is a
+   * mapping onto these — recolouring the client means editing these fourteen lines.
+   */
+  --migo-teal: #1287a0;
+  --migo-teal-hover: #1b99b3;
+  --migo-teal-active: #0e7189;
+  --migo-teal-dark: #0d4353;
+  --migo-teal-ink: #134e5e;
+  --migo-teal-head: #0d6373;
+  --migo-teal-line: #cfe3ea;
+  --migo-teal-soft: #eef7fa;
+  --migo-orange: #f5820c;
+  --migo-orange-hover: #e27406;
+  --migo-orange-active: #cd6805;
+  --migo-green: #3fce6b;
+  --migo-red: #e5503c;
+  --migo-gold: #f0a912;
+
   /* surfaces */
-  --bg: #fdfbf7;
-  --bg-body: radial-gradient(1200px 800px at 80% -10%, #f7f2e6 0%, var(--bg) 55%) fixed;
-  --bg-gradient: radial-gradient(500px 360px at 50% 8%, rgba(0, 131, 143, 0.05), transparent 70%);
+  --bg: #eef7fa;
+  --bg-body: var(--bg);
+  --bg-gradient: none;
   --bg-elevated: #ffffff;
   --panel: #ffffff;
-  --panel-alt: #f5f1e8;
-  --panel-overlay: rgba(255, 255, 255, 0.96);
+  --panel-alt: #eef7fa;
+  --panel-overlay: #ffffff;
   --input: #ffffff;
-  /* The tab strip is the teal of the new-client-ui reference: #00838F, solid, in both themes. */
-  --nav-bg: #00838f;
+  /* The tab strip is the deep teal the design puts behind its white active pill. */
+  --nav-bg: var(--migo-teal-dark);
+  --nav-ink: rgba(255, 255, 255, 0.92);
+  --nav-chip: rgba(255, 255, 255, 0.08);
+  --nav-chip-hover: rgba(255, 255, 255, 0.16);
+  --nav-active-bg: #ffffff;
+  --nav-active-ink: var(--migo-teal-head);
+  --tab-h: 46px;
 
   /* lines */
-  --border: #e8e2d4;
-  --border-strong: #d3cab4;
-  --border-soft: rgba(30, 43, 46, 0.08);
+  --border: var(--migo-teal-line);
+  --border-strong: #bfdfe6;
+  --border-soft: rgba(19, 78, 94, 0.1);
 
   /* ink */
-  --text: #1e2b2e;
-  --text-dim: #5c6a6d;
-  --text-faint: #9aa5a7;
+  --text: var(--migo-teal-ink);
+  --text-dim: #5f8a99;
+  --text-faint: #8fb0bb;
 
   /* accent */
-  --accent: #00838f;
-  --accent-strong: #00606b;
-  --accent-bright: #00acc1;
+  --accent: var(--migo-teal);
+  --accent-strong: var(--migo-teal-head);
+  --accent-bright: var(--migo-teal-hover);
   --accent-contrast: #ffffff;
-  --accent-glow: rgba(0, 131, 143, 0.25);
-  --accent-soft: rgba(0, 131, 143, 0.06);
-  --accent-soft-strong: rgba(0, 131, 143, 0.1);
-  --accent-border: rgba(0, 131, 143, 0.45);
-  --accent-border-soft: rgba(0, 131, 143, 0.3);
+  --accent-glow: rgba(18, 135, 160, 0.15);
+  --accent-soft: #eef7fa;
+  --accent-soft-strong: #d9eef3;
+  --accent-border: rgba(18, 135, 160, 0.45);
+  --accent-border-soft: var(--migo-teal-line);
 
-  /* the orange profile banner and the cyan login gradient — theme-independent */
-  --banner-a: #ea580c;
-  --banner-b: #f97316;
-  --banner-c: #f59e0b;
+  /*
+   * The orange banner and the turquoise auth ground — theme-independent, and flat: every stop of
+   * each "gradient" is the same colour, so the gradient call sites paint a solid band.
+   */
+  --banner-a: var(--migo-orange);
+  --banner-b: var(--migo-orange);
+  --banner-c: var(--migo-orange);
   --banner-ink: #ffffff;
-  --banner-gradient: linear-gradient(
-    90deg,
-    var(--banner-a) 0%,
-    var(--banner-b) 52%,
-    var(--banner-c) 100%
-  );
-  --login-a: #0093af;
-  --login-b: #00acc1;
-  --login-c: #00838f;
-  --login-gradient: linear-gradient(
-    180deg,
-    var(--login-a) 0%,
-    var(--login-b) 55%,
-    var(--login-c) 100%
-  );
+  --banner-gradient: var(--migo-orange);
+  --login-a: #0f96ad;
+  --login-b: #0f96ad;
+  --login-c: #0f96ad;
+  --login-gradient: #0f96ad;
+
+  /* the auth card that sits on that ground */
+  --auth-bg: #0f96ad;
+  --auth-card: #0b6f82;
+  --auth-line: rgba(255, 255, 255, 0.28);
+  --auth-ring: rgba(255, 255, 255, 0.25);
+  --auth-ink: #ffffff;
+  --auth-ink-dim: rgba(255, 255, 255, 0.82);
+  --auth-ink-error: #ffd9d2;
+  /*
+   * The auth surfaces keep their own teal in both themes — the card is a turquoise slab either
+   * way, so the ink and lines on it must not follow the theme's accent into the dark family.
+   */
+  --auth-accent: #1287a0;
+  --auth-input-ink: #0f4c5c;
+  --auth-input-line: rgba(18, 135, 160, 0.28);
+  --auth-input-soft: rgba(18, 135, 160, 0.12);
+
+  /* the banner's own chip: the darker orange the design puts behind its counters */
+  --banner-chip: #d2690b;
 
   /* status colours */
-  --positive: #059669;
-  --warning: #e67700;
-  --danger: #e03131;
-  --offline: #9aa5a7;
-  --positive-glow: rgba(5, 150, 105, 0.45);
-  --danger-glow: rgba(224, 49, 49, 0.3);
-  --danger-soft: rgba(224, 49, 49, 0.08);
-  --danger-border: rgba(224, 49, 49, 0.4);
-  --danger-text: #c92a2a;
-  --gold: #d97706;
+  --positive: var(--migo-green);
+  --warning: #f5b83d;
+  --danger: var(--migo-red);
+  --offline: #a8b8c2;
+  --invisible: #b9c9d1;
+  --positive-glow: rgba(63, 206, 107, 0.45);
+  --danger-glow: rgba(229, 80, 60, 0.3);
+  --danger-soft: rgba(229, 80, 60, 0.1);
+  --danger-border: rgba(229, 80, 60, 0.45);
+  --danger-text: #c3402d;
+  --gold: var(--migo-gold);
+
+  /* roster and transcript specifics the design spells out */
+  --row-hover: #e9f7fa;
+  --row-selected: #d9eef3;
+  --ring-online: #43c56b;
+  --ring-offline: #b9c7cf;
+  --dot-online: var(--migo-green);
+  --dot-offline: #a8b8c2;
+  --unread: var(--migo-red);
+  --sys-ink: #7ba3ad;
+  --self-name: var(--migo-teal-head);
+  --boost: #f07800;
+  --footer-bg: #e5f4f7;
+  --footer-line: #bfdfe6;
+  --footer-ink: #3f7386;
+
+  /* The eight nickname colours the transcript cycles through, keyed by a hash of the name (see
+     nickIndex in message-list.tsx). The hash is shared with Android and the desktop client so one
+     person is the same colour everywhere; only the ramp changes per theme, because the design's
+     hues are chosen against white and half of them vanish on a dark ground. */
+  --nick-0: #0e7490;
+  --nick-1: #7c3aed;
+  --nick-2: #0e9f6e;
+  --nick-3: #d97706;
+  --nick-4: #db2777;
+  --nick-5: #2563eb;
+  --nick-6: #b45309;
+  --nick-7: #0f766e;
+
+  /* The warning ink a nearly-full room's capacity pill takes; the fill and edge are mixed from the
+     orange against the panel, so only the text needs a per-theme value. */
+  --capacity-full-ink: #cd6805;
 
   /* bubbles */
   --bubble-in: #ffffff;
-  --bubble-out: #00838f;
+  --bubble-out: var(--migo-teal);
 
-  /* effects and overlays */
-  --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-  --glow: 0 0 12px rgba(0, 131, 143, 0.15);
-  --glow-strong: 0 0 16px rgba(0, 131, 143, 0.3);
-  --backdrop: rgba(15, 30, 32, 0.45);
-  --lightbox-bg: rgba(15, 30, 32, 0.9);
-  --overlay-bg: radial-gradient(900px 600px at 50% -10%, #f7f2e6 0%, rgba(253, 251, 247, 0.97) 60%);
-  --video-bg: #10202a;
+  /* effects and overlays — one elevation shadow, and no glows at all */
+  --shadow: 0 12px 32px rgba(4, 48, 60, 0.16);
+  /* Hover no longer glows (the skin is flat), but focus still has to be visible: keyboard users
+     lost their only cue when --glow became none, so the ring is its own token. Zero blur, zero
+     offset — a ring, not an elevation. Declared once: var() resolves at use, so the dark theme's
+     own --accent-glow feeds it without a second declaration. */
+  --focus-ring: 0 0 0 3px var(--accent-glow);
+  --glow: none;
+  --glow-strong: none;
+  --backdrop: rgba(4, 48, 60, 0.45);
+  --lightbox-bg: rgba(4, 48, 60, 0.92);
+  --overlay-bg: #eef7fa;
+  --video-bg: var(--migo-teal-dark);
   --ink-on-fill: #ffffff;
 
   /* browser chrome */
-  --scrollbar-thumb: rgba(0, 0, 0, 0.18);
-  --scrollbar-track: #f3efe4;
-  --selection-bg: rgba(0, 131, 143, 0.22);
+  --scrollbar-thumb: rgba(19, 78, 94, 0.22);
+  --scrollbar-track: #e5f4f7;
+  --selection-bg: rgba(18, 135, 160, 0.22);
 
   /* theme-independent tokens */
   --radius: 6px;
   --radius-sm: 4px;
-  --radius-lg: 8px;
-  --bubble-radius: 16px;
-  --font: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --radius-lg: 12px;
+  --bubble-radius: 10px;
+  --font: 'Segoe UI', Tahoma, Verdana, Geneva, sans-serif;
 
   /*
    * Design-system scales (see shared/design/tokens.json — the canonical cross-platform source).
@@ -121,14 +207,18 @@
   --sp-10: 40px;
   --sp-12: 48px;
 
-  /* typography scale */
-  --fs-micro: 11px;
-  --fs-meta: 12px;
-  --fs-body-sm: 13px;
-  --fs-body: 14px;
-  --fs-title-sm: 16px;
-  --fs-title: 18px;
-  --fs-display: 22px;
+  /*
+   * Typography scale. The design is dense the way a desktop messenger is dense — its own root sets
+   * 12px and its rows name 11.5/12.5/13.5px — so the scale sits a step below a web-default ramp.
+   * Touch targets do not follow it down: `--touch` is still 44px.
+   */
+  --fs-micro: 10.5px;
+  --fs-meta: 11.5px;
+  --fs-body-sm: 12px;
+  --fs-body: 13px;
+  --fs-title-sm: 14px;
+  --fs-title: 16px;
+  --fs-display: 20px;
 
   /* icon sizes and the minimum touch target every interactive element must clear */
   --icon-sm: 16px;
@@ -159,68 +249,116 @@
 [data-theme='dark'] {
   color-scheme: dark;
 
+  /* the same palette, one family deeper: teal surfaces instead of teal tints */
+  --migo-teal: #1fa5c0;
+  --migo-teal-hover: #34bfd8;
+  --migo-teal-active: #157e94;
+  --migo-teal-dark: #06222a;
+  --migo-teal-ink: #e6f4f8;
+  --migo-teal-head: #9fd8e6;
+  --migo-teal-line: #1a5866;
+  --migo-teal-soft: #114b5a;
+
   /* surfaces */
-  --bg: #0c1517;
-  --bg-body: radial-gradient(1200px 800px at 80% -10%, #0f1a1d 0%, var(--bg) 55%) fixed;
-  --bg-gradient: radial-gradient(500px 360px at 50% 8%, rgba(0, 188, 212, 0.06), transparent 70%);
-  --bg-elevated: #122023;
-  --panel: #122023;
-  --panel-alt: #1a2c30;
-  --panel-overlay: rgba(18, 32, 35, 0.94);
-  --input: #15262a;
-  --nav-bg: #0f3a40;
+  --bg: #072a33;
+  --bg-body: var(--bg);
+  --bg-gradient: none;
+  --bg-elevated: #0c3a46;
+  --panel: #0c3a46;
+  --panel-alt: #114b5a;
+  --panel-overlay: #0c3a46;
+  --input: #0a333e;
+  --nav-bg: var(--migo-teal-dark);
+  --nav-ink: rgba(255, 255, 255, 0.9);
+  --nav-chip: rgba(255, 255, 255, 0.08);
+  --nav-chip-hover: rgba(255, 255, 255, 0.16);
+  --nav-active-bg: #114b5a;
+  --nav-active-ink: #e6f4f8;
 
   /* lines */
-  --border: #24393e;
-  --border-strong: #355158;
-  --border-soft: rgba(36, 57, 62, 0.6);
+  --border: var(--migo-teal-line);
+  --border-strong: #2a7285;
+  --border-soft: rgba(230, 244, 248, 0.1);
 
   /* ink */
-  --text: #e9f4f5;
-  --text-dim: #9db4b8;
-  --text-faint: #64808a;
+  --text: var(--migo-teal-ink);
+  --text-dim: #a3c4cd;
+  --text-faint: #6f97a3;
 
   /* accent */
-  --accent: #00bcd4;
-  --accent-strong: #0093af;
-  --accent-bright: #26c6da;
-  --accent-contrast: #062a30;
-  --accent-glow: rgba(0, 188, 212, 0.28);
-  --accent-soft: rgba(0, 188, 212, 0.1);
-  --accent-soft-strong: rgba(0, 188, 212, 0.16);
-  --accent-border: rgba(0, 188, 212, 0.55);
-  --accent-border-soft: rgba(0, 188, 212, 0.35);
+  --accent: var(--migo-teal);
+  --accent-strong: var(--migo-teal-active);
+  --accent-bright: var(--migo-teal-hover);
+  --accent-contrast: #04222a;
+  --accent-glow: rgba(31, 165, 192, 0.2);
+  --accent-soft: rgba(31, 165, 192, 0.12);
+  --accent-soft-strong: rgba(31, 165, 192, 0.2);
+  --accent-border: rgba(31, 165, 192, 0.55);
+  --accent-border-soft: rgba(31, 165, 192, 0.35);
+
+  /* the auth card keeps its own turquoise ground in both themes */
+  --auth-input-ink: #0f4c5c;
 
   /* status colours */
-  --positive: #2fce7e;
-  --warning: #f59f00;
-  --danger: #ff5c7a;
-  --offline: #64808a;
-  --positive-glow: rgba(47, 206, 126, 0.4);
-  --danger-glow: rgba(255, 92, 122, 0.3);
-  --danger-soft: rgba(255, 92, 122, 0.1);
-  --danger-border: rgba(255, 92, 122, 0.45);
-  --danger-text: #ffc2cf;
-  --gold: #fcc419;
+  --positive: #3fce6b;
+  --warning: #f5b83d;
+  --danger: #ff6a54;
+  --offline: #5d7f8b;
+  --invisible: #557785;
+  --positive-glow: rgba(63, 206, 107, 0.4);
+  --danger-glow: rgba(255, 106, 84, 0.3);
+  --danger-soft: rgba(255, 106, 84, 0.14);
+  --danger-border: rgba(255, 106, 84, 0.5);
+  --danger-text: #ffc2b8;
+  --gold: #f7c13a;
+
+  /* roster and transcript specifics */
+  --row-hover: #10404e;
+  --row-selected: #14566a;
+  --ring-online: #43c56b;
+  --ring-offline: #4d6d78;
+  --dot-online: #3fce6b;
+  --dot-offline: #5d7f8b;
+  --unread: #ff6a54;
+  --sys-ink: #85adb8;
+  --self-name: #9fd8e6;
+  --boost: #ffa03d;
+  --footer-bg: #0a333e;
+  --footer-line: #1a5866;
+  --footer-ink: #a3c4cd;
+
+  /* The same eight nicknames, lifted to read on a deep-teal ground: the hue of each index is
+     preserved (0 stays cyan, 1 stays violet, …) so a person keeps their colour identity when the
+     reader flips the theme — only the lightness moves. */
+  --nick-0: #67e8f9;
+  --nick-1: #c4b5fd;
+  --nick-2: #6ee7b7;
+  --nick-3: #fcd34d;
+  --nick-4: #f9a8d4;
+  --nick-5: #93c5fd;
+  --nick-6: #fdba74;
+  --nick-7: #5eead4;
+
+  --capacity-full-ink: #ffb45e;
 
   /* bubbles */
-  --bubble-in: #1a2c30;
-  --bubble-out: #007e8f;
+  --bubble-in: #114b5a;
+  --bubble-out: #12708a;
 
-  /* effects and overlays */
-  --shadow: 0 0 14px rgba(0, 0, 0, 0.45);
-  --glow: 0 0 12px rgba(0, 188, 212, 0.18);
-  --glow-strong: 0 0 16px rgba(0, 188, 212, 0.35);
-  --backdrop: rgba(4, 10, 11, 0.72);
-  --lightbox-bg: rgba(4, 10, 11, 0.92);
-  --overlay-bg: radial-gradient(900px 600px at 50% -10%, #122023 0%, rgba(12, 21, 23, 0.98) 60%);
-  --video-bg: #0a1418;
+  /* effects and overlays — one elevation shadow, and no glows at all */
+  --shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  --glow: none;
+  --glow-strong: none;
+  --backdrop: rgba(2, 18, 23, 0.72);
+  --lightbox-bg: rgba(2, 18, 23, 0.94);
+  --overlay-bg: #072a33;
+  --video-bg: #04191f;
   --ink-on-fill: #ffffff;
 
   /* browser chrome */
-  --scrollbar-thumb: rgba(157, 180, 184, 0.35);
-  --scrollbar-track: #0c1517;
-  --selection-bg: rgba(0, 188, 212, 0.35);
+  --scrollbar-thumb: rgba(163, 196, 205, 0.35);
+  --scrollbar-track: #072a33;
+  --selection-bg: rgba(31, 165, 192, 0.35);
 }
 
 * {
@@ -259,8 +397,8 @@ body {
   background: var(--bg-body);
   color: var(--text);
   font-family: var(--font);
-  font-size: 14px;
-  line-height: 1.4;
+  font-size: var(--fs-body);
+  line-height: 1.45;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -311,7 +449,7 @@ main {
 .btn:focus-visible {
   outline: none;
   border-color: var(--accent);
-  box-shadow: var(--glow);
+  box-shadow: var(--focus-ring);
 }
 .btn:disabled {
   opacity: 0.55;
@@ -319,15 +457,13 @@ main {
 }
 .btn-primary {
   /* The reference's action colour: the orange of the profile banner, not the teal accent. */
-  background: linear-gradient(90deg, var(--banner-b), var(--banner-c));
+  background: var(--migo-orange);
   border-color: transparent;
   color: var(--banner-ink);
-  box-shadow: var(--glow);
 }
 .btn-primary:hover {
   border-color: transparent;
-  background: linear-gradient(90deg, var(--banner-a), var(--banner-b));
-  box-shadow: var(--glow-strong);
+  background: var(--migo-orange-hover);
 }
 .btn-ghost {
   background: transparent;
@@ -370,7 +506,7 @@ main {
 }
 .input:focus {
   border-color: var(--accent);
-  box-shadow: var(--glow);
+  box-shadow: var(--focus-ring);
 }
 .input::placeholder {
   color: var(--text-faint);
@@ -417,7 +553,7 @@ main {
 .theme-toggle:focus-visible {
   outline: none;
   border-color: var(--accent);
-  box-shadow: var(--glow);
+  box-shadow: var(--focus-ring);
 }
 
 /* --- centered auth screens --- */
@@ -445,12 +581,12 @@ main {
   background: var(--login-gradient);
   color: #ffffff;
 }
+/* A chip floating over the login sky, not an elevated card: the frame shadow is the window's. */
 .auth-theme-toggle {
   position: fixed;
   top: 16px;
   right: 16px;
   z-index: 10;
-  box-shadow: var(--shadow);
   background: rgba(255, 255, 255, 0.2);
   border-color: rgba(255, 255, 255, 0.4);
   color: #ffffff;
@@ -470,14 +606,12 @@ main {
      the card take the flex line's width; the links row below wraps so nothing inside needs the
      extra room. */
   min-width: 0;
-  background: rgba(255, 255, 255, 0.14);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.3);
+  background: var(--auth-card);
+  border: 1px solid var(--auth-line);
   border-radius: 16px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow);
   padding: 32px 28px;
-  color: #ffffff;
+  color: var(--auth-ink);
 }
 /* The brand is a compact wordmark row, not a stacked hero — the register card has real fields
    to fit and every 40px of decoration is 40px of scrolling on a phone. */
@@ -491,8 +625,7 @@ main {
 .auth-brand .brand-mark {
   font-size: 26px;
   line-height: 1;
-  color: #ffffff;
-  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+  color: var(--auth-ink);
 }
 .auth-brand h1 {
   font-size: 24px;
@@ -532,15 +665,23 @@ main {
 .auth-screen .field-label select,
 .auth-screen .field-label textarea {
   background: #ffffff;
-  border: 1px solid rgba(0, 172, 193, 0.35);
-  color: #1e2b2e;
+  border: 1px solid var(--auth-input-line);
+  color: var(--auth-input-ink);
+}
+/* On the turquoise ground a teal ring is invisible, so the auth fields focus in white — the
+   design's own login ring. */
+.auth-screen .field-label input:focus,
+.auth-screen .field-label select:focus,
+.auth-screen .field-label textarea:focus {
+  border-color: #ffffff;
+  box-shadow: 0 0 0 3px var(--auth-ring);
 }
 .auth-screen .field-label input::placeholder,
 .auth-screen .field-label textarea::placeholder {
-  color: #9aa5a7;
+  color: var(--text-faint);
 }
 .auth-screen .form-error {
-  color: #ffe3e3;
+  color: var(--auth-ink-error);
 }
 .auth-screen .muted {
   color: rgba(255, 255, 255, 0.75);
@@ -561,10 +702,10 @@ main {
   background: transparent;
   border: none;
   padding: 4px 0;
-  color: #e0f7fa;
+  color: var(--auth-ink-dim);
   font-size: 12px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  text-decoration: underline dotted rgba(224, 247, 250, 0.6);
+  text-decoration: underline dotted rgba(255, 255, 255, 0.5);
   text-underline-offset: 3px;
   cursor: pointer;
   white-space: nowrap;
@@ -631,7 +772,7 @@ main {
 }
 .keyfile-row.chosen {
   background: #ffffff;
-  border-color: #00acc1;
+  border-color: var(--auth-accent);
 }
 .keyfile-pick {
   flex: 1;
@@ -647,7 +788,7 @@ main {
   text-align: left;
 }
 .keyfile-row.chosen .keyfile-pick {
-  color: #1e2b2e;
+  color: var(--auth-input-ink);
 }
 .keyfile-pick .icon {
   flex: none;
@@ -683,7 +824,7 @@ main {
   cursor: pointer;
 }
 .keyfile-row.chosen .keyfile-clear {
-  background: rgba(0, 172, 193, 0.12);
+  background: var(--nav-chip);
 }
 .keyfile-clear:hover {
   background: rgba(0, 0, 0, 0.22);
@@ -712,20 +853,20 @@ main {
   padding: 12px 14px;
   border-radius: 10px;
   background: #ffffff;
-  border: 1px solid #00acc1;
-  color: #1e2b2e;
+  border: 1px solid var(--auth-accent);
+  color: var(--auth-input-ink);
 }
 .keyfile-imported-text {
   flex: 1;
   min-width: 0;
 }
 .keyfile-imported .keyfile-note {
-  color: #5b6b6e;
+  color: var(--text-dim);
   opacity: 1;
 }
 .keyfile-imported .keyfile-clear {
-  color: #1e2b2e;
-  background: rgba(0, 172, 193, 0.12);
+  color: var(--auth-input-ink);
+  background: var(--auth-input-soft);
 }
 
 /* --- app shell --- */
@@ -811,14 +952,18 @@ main {
   }
 }
 
-/* The strip: the reference's teal #00838F bar, chips rounded and scrollable. */
+/*
+ * The strip: the design's deep-teal bar (#0D4353), chips rounded and scrollable. The strip itself
+ * would be 46px in the design; ours is a touch taller because the chips keep `--touch` — a thumb
+ * has to land one tab rather than the gap between two, and that is worth four pixels.
+ */
 .tab-strip {
   display: flex;
   align-items: stretch;
   gap: 6px;
-  padding: 6px 8px;
+  padding: 3px 8px;
   background: var(--nav-bg);
-  border-bottom: 1px solid color-mix(in srgb, var(--bg) 35%, var(--nav-bg));
+  border-bottom: 1px solid color-mix(in srgb, #000000 25%, var(--nav-bg));
   overflow-x: auto;
   scrollbar-width: none;
   flex-shrink: 0;
@@ -827,17 +972,18 @@ main {
   display: none;
 }
 .tab-chip {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   /* The strip's chips clear the touch token so a thumb lands one tab, not the gap between two. */
   min-height: var(--touch);
-  padding: 6px 10px;
+  padding: 6px 12px;
   border: none;
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--bg) 20%, transparent);
-  color: color-mix(in srgb, #ffffff 82%, transparent);
-  font-size: var(--fs-body-sm);
+  border-radius: 9px;
+  background: var(--nav-chip);
+  color: var(--nav-ink);
+  font-size: var(--fs-body);
   font-weight: 600;
   white-space: nowrap;
   flex-shrink: 0;
@@ -846,33 +992,45 @@ main {
     color var(--motion-fast) var(--ease-standard);
 }
 .tab-chip:hover {
-  background: color-mix(in srgb, var(--bg) 32%, transparent);
+  background: var(--nav-chip-hover);
   color: #ffffff;
 }
 .tab-chip:focus-visible {
-  outline: 1px solid var(--accent-bright);
+  outline: 1px solid #ffffff;
   outline-offset: 1px;
 }
-/* The current tab: the brighter #00ACC1 teal over the orange underline — the reference's
- * pairing, carried by an inset shadow so it rides the rounded corners. */
+/*
+ * The current tab: a solid white pill with teal ink and a short underline inside it, near the
+ * bottom edge. The underline is a pseudo-element rather than an inset shadow — a bevel is a bevel
+ * however it is spelled, and this skin has none.
+ */
 .tab-chip.active {
-  background: var(--accent-bright);
-  color: #ffffff;
+  background: var(--nav-active-bg);
+  color: var(--nav-active-ink);
   font-weight: 700;
-  box-shadow: inset 0 -2px 0 var(--banner-b);
+}
+.tab-chip.active::after {
+  content: '';
+  position: absolute;
+  bottom: 3px;
+  left: 50%;
+  width: 16px;
+  height: 2.5px;
+  transform: translateX(-50%);
+  border-radius: 2px;
+  background: currentColor;
 }
 .tab-chip-icon {
   display: inline-flex;
   flex-shrink: 0;
 }
-/* The Chats chip's unread dot: the strip's one "somebody wrote you" mark, glowing whatever
- * tab is showing. Orange, to stand off the teal chips the way the banner stands off the nav. */
+/* The Chats chip's unread dot: the strip's one "somebody wrote you" mark, whatever tab is
+ * showing. The design's unread red, flat — it reads on the teal strip and on the white pill. */
 .tab-chip-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--banner-b);
-  box-shadow: 0 0 6px color-mix(in srgb, var(--banner-b) 70%, transparent);
+  background: var(--unread);
   flex-shrink: 0;
 }
 /* The chip's close control: a quiet ~20px glyph whose hit area reaches the 44px touch token
@@ -904,7 +1062,8 @@ main {
 }
 
 /*
- * The right pane's tab bar. The slate-800 strip: the compact back chevron (the single-column
+ * The right pane's tab bar. The same deep-teal band as the left strip: the compact back chevron
+ * (the single-column
  * story only — on a PC the left lists are always on screen beside the pane), the chevrons that
  * scroll the tab row, the persistent Games chip, and one closable chip per open thing. The
  * chips carry the left strip's exact metrics — min-height, padding, radius — because the two
@@ -914,9 +1073,9 @@ main {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 8px;
-  background: #1e293b;
-  border-bottom: 1px solid #0f172a;
+  padding: 3px 8px;
+  background: var(--nav-bg);
+  border-bottom: 1px solid color-mix(in srgb, #000000 25%, var(--nav-bg));
   flex-shrink: 0;
 }
 /* Icon-only, and gone at the PC split: closing tabs is the PC's way home. The hit area is the
@@ -931,15 +1090,16 @@ main {
   padding: 0;
   border: none;
   border-radius: 8px;
-  background: #0e7490;
-  color: #ffffff;
+  background: var(--nav-chip);
+  color: var(--nav-ink);
   flex-shrink: 0;
 }
 .chat-back:hover {
-  background: #0891b2;
+  background: var(--nav-chip-hover);
+  color: #ffffff;
 }
 .chat-back:focus-visible {
-  outline: 1px solid var(--accent-bright);
+  outline: 1px solid #ffffff;
   outline-offset: 1px;
 }
 @media (min-width: 1024px) {
@@ -957,11 +1117,11 @@ main {
   border: none;
   border-radius: 8px;
   background: transparent;
-  color: #cbd5e1;
+  color: var(--nav-ink);
   flex-shrink: 0;
 }
 .chat-scroll:hover {
-  background: #334155;
+  background: var(--nav-chip-hover);
   color: #ffffff;
 }
 .chat-tabs {
@@ -977,16 +1137,17 @@ main {
   display: none;
 }
 .chat-tab {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   /* The left strip's metrics, exactly: the two bars are one navigation language. */
   min-height: var(--touch);
-  padding: 6px 10px;
+  padding: 6px 12px;
   border: none;
-  border-radius: 12px;
-  background: #334155;
-  color: #cbd5e1;
+  border-radius: 9px;
+  background: var(--nav-chip);
+  color: var(--nav-ink);
   font-size: var(--fs-body-sm);
   font-weight: 600;
   white-space: nowrap;
@@ -996,58 +1157,91 @@ main {
     color var(--motion-fast) var(--ease-standard);
 }
 .chat-tab:hover {
-  background: #475569;
+  background: var(--nav-chip-hover);
   color: #ffffff;
 }
 .chat-tab:focus-visible {
-  outline: 1px solid var(--accent-bright);
+  outline: 1px solid #ffffff;
   outline-offset: 1px;
 }
 .chat-tab.active {
-  background: var(--accent-bright);
-  color: #ffffff;
+  background: var(--nav-active-bg);
+  color: var(--nav-active-ink);
   font-weight: 700;
+}
+.chat-tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: 3px;
+  left: 50%;
+  width: 16px;
+  height: 2.5px;
+  transform: translateX(-50%);
+  border-radius: 2px;
+  background: currentColor;
 }
 /* The one-window mode's title chip: a label, not a control — nothing to switch it with. */
 .chat-tab.pane-tab,
 .chat-tab.pane-tab:hover {
-  background: var(--accent-bright);
-  color: #ffffff;
+  background: var(--nav-active-bg);
+  color: var(--nav-active-ink);
   cursor: default;
 }
 
 /*
- * The banner: the orange-to-amber gradient that owns the account — avatar with its menu, the
- * name with a presence dot, the status line, the coin chip, the theme control.
+ * The banner: the flat orange band that owns the account — the avatar in its presence ring, the
+ * name with a blinking dot, the @handle, the account's own status line, the presence chip, the
+ * coin chip, the theme control. The design calls this the "me card", and it is the one place the
+ * skin lets a colour other than teal lead.
  */
 .profile-banner {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 6px 12px;
+  padding: 8px 12px;
   background: var(--banner-gradient);
   color: var(--banner-ink);
-  border-bottom: 1px solid var(--banner-a);
+  border-bottom: 1px solid color-mix(in srgb, #000000 12%, var(--migo-orange));
   flex-shrink: 0;
 }
 .banner-menu-anchor {
   position: relative;
 }
+/*
+ * The avatar sits in a presence-coloured ring with a white halo around it — the design's one
+ * ring-on-ring, spelled as a border plus a spread-only shadow because a 2px halo cannot be a
+ * border on an element that already has one.
+ */
 .banner-avatar {
   display: inline-flex;
-  padding: 2px;
-  border: 2px solid rgba(255, 255, 255, 0.65);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.92);
+  padding: 0;
+  border: 2.5px solid var(--ring-online);
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.85);
   cursor: pointer;
   transition: border-color var(--motion-fast) var(--ease-standard);
+}
+.banner-avatar-away {
+  border-color: var(--warning);
+}
+.banner-avatar-busy {
+  border-color: var(--danger);
+}
+.banner-avatar-offline,
+.banner-avatar-invisible {
+  border-color: var(--ring-offline);
 }
 .banner-avatar:hover {
   border-color: #ffffff;
 }
 .banner-avatar:focus-visible {
   outline: 1px solid #ffffff;
-  outline-offset: 2px;
+  outline-offset: 3px;
+}
+.banner-avatar .avatar {
+  border-radius: 999px;
+  overflow: hidden;
 }
 .banner-menu {
   position: absolute;
@@ -1125,18 +1319,36 @@ main {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: var(--fs-body-sm);
+  font-size: var(--fs-title-sm);
   font-weight: 700;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/*
+ * The presence dot blinks while the account is online — the design's one animated element, and
+ * the only thing in the banner that says "this session is live" without words. Every other state
+ * is still, because a blinking "away" would be saying the opposite of what it means.
+ */
 .banner-presence {
   width: 8px;
   height: 8px;
   border-radius: 999px;
-  background: var(--positive);
+  background: var(--dot-online);
   flex-shrink: 0;
+}
+.banner-presence-online {
+  animation: banner-blink 1400ms steps(1, end) infinite;
+}
+@keyframes banner-blink {
+  0%,
+  55% {
+    opacity: 1;
+  }
+  56%,
+  100% {
+    opacity: 0.35;
+  }
 }
 .banner-presence-away {
   background: var(--warning);
@@ -1144,12 +1356,15 @@ main {
 .banner-presence-busy {
   background: var(--danger);
 }
+.banner-presence-offline {
+  background: var(--ring-offline);
+}
 .banner-presence-invisible {
-  background: color-mix(in srgb, #ffffff 55%, transparent);
+  background: var(--invisible);
 }
 .banner-status {
   font-size: var(--fs-meta);
-  color: color-mix(in srgb, #ffffff 78%, var(--banner-a));
+  color: rgba(255, 255, 255, 0.85);
   font-style: italic;
   white-space: nowrap;
   overflow: hidden;
@@ -1164,14 +1379,14 @@ main {
   margin-top: 2px;
   padding: 2px 8px;
   border: 1px solid rgba(255, 255, 255, 0.35);
-  border-radius: 8px;
+  border-radius: 6px;
   background: rgba(255, 255, 255, 0.16);
   color: #ffffff;
   font-size: var(--fs-meta);
-  font-style: normal;
+  font-style: italic;
 }
 .banner-status-input::placeholder {
-  color: rgba(255, 255, 255, 0.65);
+  color: rgba(255, 255, 255, 0.72);
   font-style: italic;
 }
 .banner-status-input:focus {
@@ -1179,13 +1394,13 @@ main {
   border-color: #ffffff;
   background: rgba(255, 255, 255, 0.24);
 }
-/* The presence dropdown sits beside the coin chip: same glass as the chip, sized to the
+/* The presence dropdown sits beside the coin chip: the design's darker-orange chip, sized to the
    banner's tight rows rather than a form's input. */
 .banner-presence-select {
-  padding: 3px 6px;
+  padding: 3px 8px;
   border: 1px solid rgba(255, 255, 255, 0.4);
-  border-radius: 12px;
-  background: rgba(0, 0, 0, 0.18);
+  border-radius: 999px;
+  background: var(--banner-chip);
   color: #ffffff;
   font-size: var(--fs-meta);
   font-weight: 700;
@@ -1211,9 +1426,9 @@ main {
   gap: 4px;
   padding: 4px 10px;
   border: 1px solid rgba(255, 255, 255, 0.4);
-  border-radius: 12px;
-  background: rgba(0, 0, 0, 0.18);
-  color: #ffe3bd;
+  border-radius: 999px;
+  background: var(--banner-chip);
+  color: var(--banner-ink);
   font-size: var(--fs-meta);
   font-weight: 700;
 }
@@ -1418,40 +1633,51 @@ main {
   letter-spacing: 0.6px;
   color: var(--text-faint);
 }
+/* ── List rows ────────────────────────────────────────────────────────────────────────────────
+   The design's lists are flush rows on a white panel, separated by a single hairline — not cards
+   floating in a gapped column. A card list spends two borders and a gap on every row and still
+   reads as less scannable, because the eye has to re-find the left edge each time. So: no radius,
+   no per-row border except the divider under it, and the hover tint is the only state colour. */
 .person-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  gap: 9px;
+  min-height: 58px;
+  padding: 7px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
   background: var(--panel);
 }
 .person-row:hover {
-  background: var(--accent-soft);
-  border-color: var(--accent-border-soft);
+  background: var(--row-hover);
 }
 .person-main {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
+  gap: 1px;
 }
+/* The name carries the row: a shade heavier and darker than body text, so a list of thirty reads
+   as thirty names with detail attached rather than sixty lines of equal weight. */
 .person-name {
-  font-weight: 600;
+  font-size: var(--fs-title-sm);
+  font-weight: 700;
+  color: var(--accent-strong);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .person-sub {
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .person-note {
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--text-faint);
   white-space: nowrap;
   overflow: hidden;
@@ -1625,7 +1851,7 @@ main {
 .icon-btn:focus-visible {
   outline: none;
   border-color: var(--accent);
-  box-shadow: var(--glow);
+  box-shadow: var(--focus-ring);
 }
 
 .conversation-list {
@@ -1633,35 +1859,39 @@ main {
   flex: 1;
   min-height: 0;
 }
+/* The conversation list follows the same flush-row anatomy as the rosters: hairline dividers, no
+   floating card, and the selected row held in the selection tint rather than a rounded pill. */
 .conversation-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin: 0 6px;
-  padding: 8px 10px;
-  border-radius: 12px;
+  gap: 9px;
+  min-height: 58px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
   cursor: pointer;
   transition: background var(--motion-fast) var(--ease-standard);
 }
 .conversation-row:hover {
-  background: var(--accent-soft);
+  background: var(--row-hover);
 }
 .conversation-row.active {
-  background: var(--accent-soft-strong);
+  background: var(--row-selected);
 }
 .conversation-main {
   min-width: 0;
   flex: 1;
 }
 .conversation-name {
-  font-weight: 600;
+  font-size: var(--fs-title-sm);
+  font-weight: 700;
+  color: var(--accent-strong);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .conversation-sub {
-  font-size: 12px;
-  color: var(--text-faint);
+  font-size: var(--fs-meta);
+  color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1673,15 +1903,8 @@ main {
   gap: 5px;
 }
 .conversation-time {
-  font-size: 11px;
+  font-size: var(--fs-micro);
   color: var(--text-faint);
-}
-.unread-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 6px var(--accent-glow);
 }
 
 /* --- avatar --- */
@@ -1702,6 +1925,31 @@ main {
   height: 100%;
   object-fit: cover;
 }
+/* The design rings a list avatar in its presence colour — green for online, grey otherwise — with
+   a hairline of panel between ring and disc, so a scan down a roster reads who is there without
+   hunting for the corner dot. The ring is a zero-blur, zero-offset box-shadow, which is a ring and
+   not an elevation: the flat skin's one shadow is still the window frame's. Keyed off the dot the
+   avatar already renders, so no list has to plumb presence twice. */
+.avatar:has(.presence-dot) {
+  box-shadow:
+    0 0 0 1.5px var(--panel),
+    0 0 0 3.5px var(--ring-offline);
+}
+.avatar:has(.presence-online) {
+  box-shadow:
+    0 0 0 1.5px var(--panel),
+    0 0 0 3.5px var(--ring-online);
+}
+.avatar:has(.presence-away) {
+  box-shadow:
+    0 0 0 1.5px var(--panel),
+    0 0 0 3.5px var(--warning);
+}
+.avatar:has(.presence-busy) {
+  box-shadow:
+    0 0 0 1.5px var(--panel),
+    0 0 0 3.5px var(--danger);
+}
 .presence-dot {
   position: absolute;
   right: -1px;
@@ -1712,8 +1960,7 @@ main {
   border: 2px solid var(--panel);
 }
 .presence-online {
-  background: var(--positive);
-  box-shadow: 0 0 6px var(--positive-glow);
+  background: var(--dot-online);
 }
 .presence-away {
   background: var(--warning);
@@ -1722,40 +1969,73 @@ main {
   background: var(--danger);
 }
 .presence-offline {
-  background: var(--offline);
+  background: var(--dot-offline);
 }
 
 /* --- thread --- */
 
+/* The view header is the design's teal band: the room or peer's name in white on the nav colour,
+   with its controls as translucent chips. It reads as the window's title bar, which is what it is
+   — the transcript below is white, and the two need to be told apart at a glance. */
 .thread-header {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--panel);
+  padding: 8px 10px;
+  border-bottom: 1px solid color-mix(in srgb, #000000 18%, var(--nav-bg));
+  background: var(--nav-bg);
+  color: var(--nav-ink);
 }
 .thread-heading {
   min-width: 0;
 }
 .thread-heading .name {
+  font-size: var(--fs-title-sm);
   font-weight: 700;
+  color: #ffffff;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .thread-heading .status {
-  font-size: 12px;
-  color: var(--text-dim);
+  font-size: var(--fs-meta);
+  color: rgba(255, 255, 255, 0.78);
 }
 .thread-lock {
   margin-left: auto;
-  font-size: 12px;
-  color: var(--text-faint);
+  font-size: var(--fs-meta);
+  color: rgba(255, 255, 255, 0.72);
   display: flex;
   align-items: center;
   gap: 5px;
   text-align: right;
+}
+/* Header controls sit on the teal, so they cannot use the page's button palette: a translucent
+   chip on the band, brightening on hover — the same treatment the tab strip's chips take. */
+.thread-header .icon-btn,
+.thread-header .btn-ghost {
+  background: var(--nav-chip);
+  border-color: transparent;
+  color: var(--nav-ink);
+}
+.thread-header .icon-btn:hover:not(:disabled),
+.thread-header .btn-ghost:hover:not(:disabled) {
+  background: var(--nav-chip-hover);
+  color: #ffffff;
+}
+.thread-header .icon-btn:focus-visible,
+.thread-header .btn-ghost:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 1px;
+}
+/* The peer identity button is the header's own title, not a chip: no fill, white ink. */
+.thread-header .thread-identity {
+  background: transparent;
+  border: 0;
+  color: inherit;
+}
+.thread-header .thread-identity:hover {
+  background: var(--nav-chip);
 }
 /* In the single column the label is a guest of a crowded header: it ellipsises against the
    space the title leaves (the full wording stays on the title/tooltip) instead of pushing the
@@ -1782,67 +2062,127 @@ main {
   border: 0;
 }
 
+/* ── The transcript ───────────────────────────────────────────────────────────────────────────
+   The design's transcript is a script, not a stack of bubbles: one wrapping line per message,
+   opened by the sender's nickname and a colon, with a small avatar in a reserved gutter on the
+   first line of each run. That is the older and denser convention, and it is the right one for a
+   room where a dozen people talk at once — bubbles spend a third of the width on alignment and
+   tails, and alternating sides makes a six-way conversation a zigzag. The nickname repeats on
+   every line because that is what the eye scans for.
+
+   Three things Migo has that the design does not are kept, because they carry meaning the layout
+   cannot: a tombstone where a message was deleted, the read ticks on our own lines, and the quote
+   above a reply. They are styled as quiet inline marks rather than bubble furniture. */
 .message-list {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px clamp(10px, 5vw, 48px);
+  padding: 10px clamp(8px, 2.5vw, 20px);
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 1px;
 }
 .load-earlier {
   align-self: center;
   margin: 2px 0 8px;
   padding: 5px 12px;
-  font-size: 12px;
+  font-size: var(--fs-meta);
 }
+/* A day boundary is real information the design has no equivalent for, so it stays — as a
+   hairline with a label rather than a pill, which is as much furniture as a script tolerates. */
 .day-divider {
-  align-self: center;
-  margin: 10px 0 6px;
-  font-size: 12px;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 9px 0 5px;
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   color: var(--text-faint);
-  background: var(--panel-alt);
-  border: 1px solid var(--border);
-  padding: 2px 10px;
-  border-radius: 999px;
+}
+.day-divider::before,
+.day-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
 }
 .bubble-row {
   display: flex;
-  align-items: flex-end;
-  margin-top: 2px;
+  align-items: flex-start;
+  gap: 2px;
 }
-.bubble-row.out {
-  justify-content: flex-end;
+/* The gutter is reserved on every line and filled only on a run head, so the text column starts
+   at one x whether or not this line carries a face. */
+.msg-gutter {
+  flex: 0 0 24px;
+  width: 24px;
+  padding-top: 1px;
+  display: flex;
+  justify-content: flex-start;
 }
-/* The stack holds a run header (group sender name), an optional reply quote, and the bubble line,
-   and carries the width cap so every part of one message shares the same bound. */
+/* The line takes the width it needs: a script wraps, it does not sit in a column. The cap is
+   generous, and only there so a maximised window does not run text to 2000px. */
 .bubble-stack {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  max-width: min(680px, 70%);
+  flex: 1;
+  max-width: 960px;
 }
+/* The nickname: bold, colour-keyed by hash (see nickIndex in message-list.tsx), and inline with
+   the body — the colon is part of the element so the two never wrap apart. */
 .sender-name {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-dim);
-  margin: 5px 0 2px 3px;
+  font-weight: 700;
+  margin-right: 5px;
+  white-space: nowrap;
 }
+.nick-0 {
+  color: var(--nick-0);
+}
+.nick-1 {
+  color: var(--nick-1);
+}
+.nick-2 {
+  color: var(--nick-2);
+}
+.nick-3 {
+  color: var(--nick-3);
+}
+.nick-4 {
+  color: var(--nick-4);
+}
+.nick-5 {
+  color: var(--nick-5);
+}
+.nick-6 {
+  color: var(--nick-6);
+}
+.nick-7 {
+  color: var(--nick-7);
+}
+.nick-self {
+  color: var(--self-name);
+}
+/* A reply's quote sits above its line, indented to the text column and marked by a rule. */
 .reply-quote {
   display: flex;
-  flex-direction: column;
-  margin-bottom: 2px;
-  padding: 3px 8px;
-  border-left: 2px solid currentColor;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.08);
-  font-size: 12px;
+  gap: 6px;
   min-width: 0;
+  margin: 2px 0 1px;
+  padding-left: 7px;
+  border-left: 2px solid var(--accent-soft-strong);
+  font-size: var(--fs-meta);
 }
 .reply-quote-name {
   font-weight: 600;
   color: var(--text-dim);
+  white-space: nowrap;
+}
+.reply-quote-name:not(:empty)::after {
+  content: ':';
 }
 .reply-quote-text {
   color: var(--text-faint);
@@ -1850,69 +2190,63 @@ main {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* The line and its hover actions. The actions follow the text for everyone — there is no
+   outgoing side to mirror any more. */
 .bubble-line {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   min-width: 0;
 }
-/* Hover actions sit beside the bubble: after it for incoming, before it (row-reverse) for outgoing. */
-.bubble-row.out .bubble-line {
-  flex-direction: row-reverse;
-}
 .bubble {
-  max-width: 100%;
-  padding: 8px 12px;
-  border-radius: var(--bubble-radius, 16px);
+  min-width: 0;
+  flex: 1;
+  padding: 1px 0;
   word-wrap: break-word;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
-/* The bubble's tail is the small corner opposite its side: top-left for incoming, top-right for
-   outgoing — the reference messenger's bubble silhouette. Incoming bubbles keep a hairline so a
-   white-on-gray bubble holds its edge in the light theme; the tombstone is excluded because its
-   dashed border is its own statement. */
-.bubble-row.in .bubble:not(.tombstone) {
-  border-radius: 4px 16px 16px 16px;
-  background: var(--bubble-in);
-  border: 1px solid var(--border);
-}
-.bubble-row.out .bubble {
-  border-radius: 16px 4px 16px 16px;
-  background: var(--bubble-out);
-  color: var(--accent-contrast);
-}
-.bubble .meta {
+/* Media and voice notes are blocks inside the line: the nickname introduces them, then they take
+   their own row rather than trying to flow as text. */
+.bubble > .media-attachment,
+.bubble > .voice-note {
   display: block;
-  margin-top: 2px;
-  font-size: 10px;
-  opacity: 0.7;
-  text-align: right;
+  margin-top: 3px;
+}
+/* The timestamp trails the text on the same line, in the smallest ink the scale has: present for
+   the reader who wants it, invisible to the reader who does not. */
+.bubble .meta {
+  margin-left: 7px;
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+  white-space: nowrap;
 }
 .bubble.placeholder {
   font-style: italic;
-  opacity: 0.85;
+  color: var(--text-dim);
 }
-/* Read ticks share the meta line; bold and tight so the two glyphs read as one mark. */
+/* Read ticks share the meta run; bold and tight so the two glyphs read as one mark. */
 .bubble .meta .ticks {
   margin-left: 5px;
   font-weight: 700;
   letter-spacing: -1.5px;
 }
+.bubble .meta .ticks.read {
+  color: var(--accent);
+}
 .bubble .meta .ticks.sent {
   opacity: 0.75;
 }
-/* A tombstone is proof a message existed, not content: neutral, italic, dimmed. */
+/* A tombstone is proof a message existed, not content: the nickname still says who, and the rest
+   is one italic phrase. No box — a dashed frame in a script is louder than the fact it reports. */
 .bubble.tombstone {
-  background: transparent;
-  border: 1px dashed var(--border-strong);
-  border-radius: 6px;
-  color: var(--text-dim);
+  color: var(--text-faint);
   font-style: italic;
 }
-.bubble-row.out .bubble.tombstone {
-  background: transparent;
-  color: var(--text-dim);
+.bubble.tombstone .sender-name {
+  font-weight: 600;
+  font-style: normal;
+  opacity: 0.75;
 }
 /* Hover actions are invisible until the row is hovered or focused, so the transcript stays quiet. */
 .row-actions {
@@ -2043,26 +2377,70 @@ main {
 }
 
 /* The wrap stacks whatever sits above or below the input row: the reply bar, the upload line. */
+/* ── The list footer band ─────────────────────────────────────────────────────────────────────
+   Both windows in the reference close with the same pale band: the credit balance on the left, a
+   small lowercase hint on the right saying what the open list responds to. It is the composer's
+   band on the other panel — same tint, same hairline — which is what makes the two columns read
+   as one window rather than two apps side by side. Micro type, because a status bar that competes
+   with the list above it has stopped being a status bar. */
+.list-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 10px;
+  border-top: 1px solid var(--footer-line);
+  background: var(--footer-bg);
+  font-size: var(--fs-micro);
+  flex-shrink: 0;
+}
+.list-footer-credits {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 700;
+  color: var(--footer-ink);
+  white-space: nowrap;
+}
+/* The coin is the design's gold, the one warm mark on a cool band. */
+.list-footer-credits .coin-mark {
+  color: var(--gold);
+  flex-shrink: 0;
+}
+/* The hint is an aside, so it yields first: it truncates rather than pushing the balance out of
+   the band on a narrow phone, because the number is the half worth keeping. */
+.list-footer-hint {
+  color: var(--text-faint);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── The composer ─────────────────────────────────────────────────────────────────────────────
+   The design's composer is a footer band, not a floating pill: a tinted strip separated by a
+   hairline, holding a plain rounded-rect field between flat icon buttons and an orange Send. The
+   round-textarea-and-circular-FAB look belonged to the gradient skin; this one is a form. */
 .composer-wrap {
   display: flex;
   flex-direction: column;
   gap: 5px;
-  padding: 10px 12px;
-  border-top: 1px solid var(--border);
-  background: var(--panel);
+  padding: 7px 10px;
+  border-top: 1px solid var(--footer-line);
+  background: var(--footer-bg);
 }
 /* The reply bar quotes the message a send will answer; the X clears the target. */
 .reply-bar {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   color: var(--text-dim);
   min-width: 0;
   padding: 5px 8px;
   border-left: 2px solid var(--accent);
   border-radius: 4px;
-  background: var(--input);
+  background: var(--panel);
 }
 .reply-bar-label {
   flex: 1;
@@ -2080,64 +2458,71 @@ main {
 .reply-cancel {
   width: 28px;
   height: 28px;
-  font-size: 12px;
+  font-size: var(--fs-meta);
   flex-shrink: 0;
 }
 .composer {
   display: flex;
   align-items: flex-end;
-  gap: 8px;
+  gap: 6px;
 }
 .composer textarea {
   flex: 1;
   resize: none;
   max-height: 160px;
-  min-height: 44px;
-  background: var(--panel-alt);
-  border: 1px solid transparent;
-  border-radius: 999px;
-  padding: 10px 16px;
+  min-height: 40px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
   color: var(--text);
   outline: none;
-  transition: border-color var(--motion-fast) var(--ease-standard);
+  transition:
+    border-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
 }
 .composer textarea:focus {
-  border-color: var(--accent-border-soft);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
 }
+/* Send is the one orange thing in the thread, which is exactly why it is orange: in a window whose
+   every other control is teal chrome, the primary action should not have to compete. */
 .send-btn {
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
+  width: 46px;
+  height: 40px;
+  border-radius: 6px;
   border: none;
-  background: var(--accent);
-  color: var(--accent-contrast);
+  background: var(--migo-orange);
+  color: #ffffff;
   display: inline-grid;
   place-items: center;
   flex-shrink: 0;
-  box-shadow: var(--glow);
   transition: background var(--motion-fast) var(--ease-standard);
 }
 .send-btn:hover:not(:disabled) {
-  box-shadow: var(--glow-strong);
+  background: var(--migo-orange-hover);
+}
+.send-btn:active:not(:disabled) {
+  background: var(--migo-orange-active);
 }
 .send-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 .attach-btn {
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
+  width: 36px;
+  height: 40px;
+  border-radius: 6px;
   border: none;
   background: transparent;
-  color: var(--text-dim);
+  color: var(--accent);
   display: inline-grid;
   place-items: center;
   flex-shrink: 0;
+  transition: background var(--motion-fast) var(--ease-standard);
 }
 .attach-btn:hover:not(:disabled) {
-  border-color: var(--accent-border);
-  box-shadow: var(--glow);
+  background: var(--accent-soft-strong);
 }
 .attach-btn:disabled {
   opacity: 0.5;
@@ -2147,8 +2532,8 @@ main {
   display: flex;
   align-items: center;
   gap: 6px;
-  min-height: 20px;
-  font-size: 12px;
+  min-height: 18px;
+  font-size: var(--fs-meta);
   color: var(--text-dim);
   padding: 0 4px;
 }
@@ -2294,15 +2679,8 @@ main {
 .voice-bar.played {
   opacity: 1;
 }
-.bubble-row.out .voice-bar {
-  background: currentColor;
-}
-.bubble-row.out .voice-play-btn {
-  /* Mixed from the bubble's own ink so the control reads on the gradient in either theme. */
-  background: color-mix(in srgb, var(--accent-contrast) 14%, transparent);
-  border-color: color-mix(in srgb, var(--accent-contrast) 35%, transparent);
-  color: var(--accent-contrast);
-}
+/* The voice control needs no per-side override any more: the transcript has no coloured bubble
+   behind it, so one accent-on-panel treatment reads for every sender. */
 /* The fallback when a note carries no waveform: a plain progress track. */
 .voice-progress {
   width: 200px;
@@ -2371,8 +2749,8 @@ main {
   border: 1px solid var(--border);
   background: var(--bg-elevated);
   color: var(--text-dim);
-  font-size: 13px;
-  box-shadow: 0 6px 24px rgb(0 0 0 / 0.25);
+  font-size: var(--fs-meta);
+  box-shadow: var(--shadow);
 }
 .conn-snackbar .dot {
   flex: none;
@@ -2490,7 +2868,7 @@ main {
 .field-label select:focus,
 .field-label textarea:focus {
   border-color: var(--accent);
-  box-shadow: var(--glow);
+  box-shadow: var(--focus-ring);
 }
 .field-label input::placeholder,
 .field-label textarea::placeholder {
@@ -2747,7 +3125,7 @@ main {
 .progress-fill {
   height: 100%;
   border-radius: 999px;
-  background: linear-gradient(90deg, var(--accent), var(--accent-strong));
+  background: var(--accent);
   transition: width 0.25s ease;
 }
 .progression-label {
@@ -2917,13 +3295,24 @@ main {
   border: 1px solid var(--border);
   background: var(--panel-alt);
   color: var(--text-faint);
-  font-size: 12px;
+  font-size: var(--fs-meta);
   text-align: center;
 }
-/* A pill interleaved among the bubbles, rather than inside a .room-notices list: the same
-   centered treatment, with its own breathing room from the rows around it. */
+/* Inside the transcript a notice is not a pill: the design writes membership changes as plain
+   italic lines in the flow, which is why they read as part of the conversation rather than as
+   chrome laid over it. Outside the transcript (the .room-notices list) the pill still applies. */
 .message-list > .room-notice {
-  margin: 6px 0 0;
+  align-self: stretch;
+  max-width: none;
+  margin: 3px 0 2px;
+  padding: 0 0 0 26px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--sys-ink);
+  font-size: var(--fs-meta);
+  font-style: italic;
+  text-align: left;
 }
 .guess-card {
   align-self: stretch;
@@ -3275,10 +3664,11 @@ main {
   border-bottom: 1px solid var(--border);
   background: var(--panel);
 }
+/* A flush divider list, matching .person-row: the gap a card list needed is now the hairline. */
 .roster-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 0;
 }
 .role-badge {
   flex-shrink: 0;
@@ -3460,14 +3850,13 @@ main {
 /* Clickable person rows (friend list doors). */
 .person-row-clickable {
   cursor: pointer;
-  border-radius: var(--radius-sm);
 }
 .person-row-clickable:hover {
-  background: var(--panel-alt);
+  background: var(--row-hover);
 }
 .person-row-clickable:focus-visible {
   outline: 1px solid var(--accent);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 
 /* The peer identity button in a direct thread header. */
@@ -3715,13 +4104,16 @@ button.digest-row:focus-visible {
   font-weight: 700;
   color: var(--text-faint);
 }
+/* Unread is red in this design, not accent: the accent is everywhere (it is the chrome), so an
+   accent dot on an accent-tinted row says nothing. Red is reserved for "you have not read this".
+   The design's own mark is a counted pill; ours is a dot because the list carries a boolean, and a
+   dot that means "some" is honest where a "1" would be a guess. */
 .unread-dot {
-  width: 8px;
-  height: 8px;
+  width: 9px;
+  height: 9px;
   flex-shrink: 0;
   border-radius: 999px;
-  background: var(--accent);
-  box-shadow: var(--glow);
+  background: var(--unread);
 }
 .link-btn {
   border: none;
@@ -3752,18 +4144,21 @@ button.digest-row:focus-visible {
   flex-direction: column;
   gap: 6px;
 }
+/* A room row is taller than a person row because it carries a third line — topic and capacity —
+   and the same flush treatment: hairline under, no card. */
 .room-row {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  align-items: stretch;
+  min-height: 66px;
   padding: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
   background: var(--panel);
 }
 .room-row:hover {
-  border-color: var(--accent-border-soft);
-  background: var(--accent-soft);
+  background: var(--row-hover);
 }
 /* The whole row is the way in: a real button, so it is focusable, keyboard-activatable, and
    screen-reader-labelled — the Join/Open buttons it replaces were the same affordance split in
@@ -3774,7 +4169,7 @@ button.digest-row:focus-visible {
   align-items: center;
   gap: 10px;
   width: 100%;
-  padding: 8px;
+  padding: 8px 10px;
   border: 0;
   border-radius: inherit;
   background: transparent;
@@ -3792,7 +4187,7 @@ button.digest-row:focus-visible {
   margin-left: auto;
   color: var(--accent);
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--fs-body-sm);
 }
 .room-name {
   display: inline-flex;
@@ -3803,16 +4198,41 @@ button.digest-row:focus-visible {
   display: inline-flex;
   color: var(--accent);
 }
+/* Occupancy at a glance: the count in a tinted pill, which turns orange as the room fills. A
+   nearly-full room is the one piece of list detail a reader acts on before opening anything. */
 .capacity-badge {
   flex-shrink: 0;
   padding: 1px 7px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: var(--fs-meta);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
-  color: var(--text-dim);
-  border: 1px solid var(--border-strong);
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border: 1px solid var(--border);
+}
+.capacity-badge.capacity-full {
+  color: var(--capacity-full-ink);
+  background: color-mix(in srgb, var(--migo-orange) 12%, var(--panel));
+  border-color: color-mix(in srgb, var(--migo-orange) 32%, var(--panel));
+}
+/* The occupancy bar rides the row's bottom edge, doubling as the divider's inner half: a filling
+   room grows a coloured underline, and turns orange at the same threshold as its badge. */
+.room-occupancy {
+  flex-shrink: 0;
+  height: 3.5px;
+  margin-top: auto;
+  background: var(--accent-soft);
+  overflow: hidden;
+}
+.room-occupancy > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+.room-occupancy.capacity-full > span {
+  background: var(--migo-orange);
 }
 
 /* --- the activity stream (Space) --- */
@@ -3947,61 +4367,63 @@ button.activity-row-btn:focus-visible {
 }
 
 /* The auth variant: the register flow's key-file offer, dressed as the auth screen it follows.
-   The backdrop is the register screen's own cyan gradient (lightly veiled, so the card behind
-   still reads through it), and the sheet is the auth glass — frosted, white-inked, the same
-   border and radius the register card wears. White ink needs its own close affordance (the
-   plain sheet's icon button dims on a panel; here it reads as an afterthought on glass) and the
-   save sheet's own ghost button has to stay legible against the frosted card, so its border
-   rides the white-alpha the auth card's own inputs do. */
+   The backdrop is the auth screen's own teal ground under the standard scrim, and the sheet is
+   the auth card itself — the same solid fill, white-alpha edge and radius the register card
+   wears, so the offer reads as a second panel on the same screen rather than a different
+   surface. It was frosted glass before; flat means one fill and one edge, and the sheet gets
+   the system's single elevation shadow like every other lifted surface.
+
+   White ink needs its own close affordance (the plain sheet's icon button dims against a panel,
+   which reads as an afterthought here) and the save sheet's own ghost button has to stay legible
+   on the deep teal, so its border rides the white-alpha the auth card's inputs do. */
 .sheet-backdrop-auth {
-  background: linear-gradient(180deg, var(--login-a) 0%, var(--login-b) 55%, var(--login-c) 100%);
+  background: var(--login-gradient);
 }
 .sheet-backdrop-auth::before {
   content: '';
   position: absolute;
   inset: 0;
-  background: rgba(0, 30, 34, 0.35);
+  background: var(--backdrop);
 }
 .sheet-auth {
   position: relative;
-  border-color: rgba(255, 255, 255, 0.3);
-  background: rgba(255, 255, 255, 0.14);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
-  color: #ffffff;
+  border-color: var(--auth-line);
+  background: var(--auth-card);
+  box-shadow: var(--shadow);
+  color: var(--auth-ink);
 }
 .sheet-auth .sheet-handle {
-  background: rgba(255, 255, 255, 0.4);
+  background: var(--auth-line);
 }
 .sheet-auth .sheet-title {
-  color: #ffffff;
+  color: var(--auth-ink);
 }
 .sheet-auth .icon-btn {
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--auth-ink-dim);
 }
 .sheet-auth .icon-btn:hover {
-  background: rgba(255, 255, 255, 0.2);
-  color: #ffffff;
+  background: var(--nav-chip-hover);
+  color: var(--auth-ink);
 }
-/* The save sheet on glass: the lead reads as the register card's own copy — white, not the
-   panel's dimmed text, because dimming is a panel convention and glass diffuses enough. */
+/* The save sheet on the auth card: the lead reads as the register screen's own copy — white,
+   not the panel's dimmed text, because dimming is a light-panel convention that would sink into
+   the teal. */
 .sheet-auth .save-account-lead {
-  color: #ffffff;
+  color: var(--auth-ink);
 }
 .sheet-auth .save-account-sub {
-  color: rgba(255, 255, 255, 0.75);
+  color: var(--auth-ink-dim);
 }
 .sheet-auth .save-account .btn-ghost {
-  border-color: rgba(255, 255, 255, 0.4);
-  color: #ffffff;
+  border-color: var(--auth-line);
+  color: var(--auth-ink);
 }
 .sheet-auth .save-account .btn-ghost:hover {
-  background: rgba(255, 255, 255, 0.12);
-  border-color: rgba(255, 255, 255, 0.6);
+  background: var(--nav-chip);
+  border-color: var(--auth-ink);
 }
 .sheet-auth .form-error {
-  color: #ffe3e3;
+  color: var(--auth-ink-error);
 }
 
 /* --- the shared states: skeleton, empty, error --- */
@@ -4131,7 +4553,7 @@ button.activity-row-btn:focus-visible {
 }
 .search-box:focus-within {
   border-color: var(--accent-border);
-  box-shadow: var(--glow);
+  box-shadow: var(--focus-ring);
 }
 .search-box-icon {
   display: inline-flex;
@@ -4462,9 +4884,8 @@ button.activity-row-btn:focus-visible {
   width: 56px;
   height: 56px;
   border-radius: 16px;
-  background: var(--login-gradient);
-  color: #ffffff;
-  box-shadow: 0 6px 18px rgba(0, 131, 143, 0.35);
+  background: var(--accent);
+  color: var(--accent-contrast);
 }
 .save-account-lead {
   margin: 0;

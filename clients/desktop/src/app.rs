@@ -674,13 +674,10 @@ impl App {
         }
     }
 
-    /// The right pane's chat bar: the reference's slate strip — the cyan "‹ Panels" control that
-    /// hands the pane back from the thread to whatever is beneath it (an open panel, or the pane's
+    /// The right pane's chat bar: the teal strip — the cyan "‹ Panels" control that hands the
+    /// pane back from the thread to whatever is beneath it (an open panel, or the pane's
     /// resting state), and one closable chip per open conversation.
     fn chat_bar(&mut self, ui: &mut egui::Ui) {
-        // The reference's slate-800, worn in either theme: the bar is chrome, not surface, so it
-        // does not follow the palette's surfaces the way a panel does.
-        const BAR: egui::Color32 = egui::Color32::from_rgb(0x1e, 0x29, 0x3b);
         let colors = palette(self.theme);
         // Resolved before the panel closure so the chip loop never borrows the chat state it
         // mutates through the click handlers.
@@ -710,11 +707,13 @@ impl App {
         let mut chat_close: Option<migo_core::Id> = None;
 
         // The bar carries the Small-styled "‹ Panels" button and chips, so its height is that
-        // style's row plus breathing room — not a pixel count tuned to one font size.
+        // style's row plus breathing room — not a pixel count tuned to one font size. The fill is
+        // the palette's nav teal: the bar is chrome, so it takes the strip colour rather than the
+        // palette's surfaces the way a panel does.
         let bar = theme::bar_height(ui.text_style_height(&egui::TextStyle::Small), space::MD);
         egui::Panel::top("chat-bar")
             .exact_size(bar)
-            .frame(egui::Frame::new().fill(BAR))
+            .frame(egui::Frame::new().fill(colors.nav))
             .show(ui, |ui| {
                 ui.add_space(space::XS);
                 ui.horizontal_centered(|ui| {
@@ -778,9 +777,9 @@ impl App {
     /// is the bar's only button. That is the same slim bar the web client's one-window mode
     /// draws, because it is one product.
     fn panel_header(&mut self, ui: &mut egui::Ui, panel: Place) {
-        // The reference's slate-800, worn in either theme: the bar is chrome, not surface, so it
-        // does not follow the palette's surfaces the way a panel does.
-        const BAR: egui::Color32 = egui::Color32::from_rgb(0x1e, 0x29, 0x3b);
+        // The palette's nav teal, worn in either theme: the bar is chrome, so it takes the strip
+        // colour rather than the palette's surfaces the way a panel does — one teal family
+        // end to end.
         let colors = palette(self.theme);
 
         let mut close = false;
@@ -790,7 +789,7 @@ impl App {
         let bar = theme::bar_height(ui.text_style_height(&egui::TextStyle::Small), space::MD);
         egui::Panel::top("panel-header")
             .exact_size(bar)
-            .frame(egui::Frame::new().fill(BAR))
+            .frame(egui::Frame::new().fill(colors.nav))
             .show(ui, |ui| {
                 ui.add_space(space::XS);
                 ui.horizontal_centered(|ui| {

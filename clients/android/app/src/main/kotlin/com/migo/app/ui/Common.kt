@@ -2,16 +2,19 @@ package com.migo.app.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -29,10 +32,12 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.migo.core.ConnectionState
 import com.migo.core.protocol.RoomSummary
 import java.time.Instant
@@ -110,11 +115,14 @@ fun LoadingRow(modifier: Modifier = Modifier) {
 @Composable
 fun ConnectionBadge(state: ConnectionState, modifier: Modifier = Modifier) {
     val scheme = MaterialTheme.colorScheme
+    // The restyle's status hues: green for here, amber for on the way, red for a connection the
+    // client has given up on, grey for gone. Fixed values rather than scheme roles, because these
+    // four colours mean the same thing on every surface they sit on.
     val (label, tint) = when (state) {
-        ConnectionState.Online -> Pair("Online", scheme.secondary)
-        ConnectionState.Connecting -> Pair("Connecting", scheme.outline)
-        ConnectionState.Reconnecting -> Pair("Reconnecting", scheme.error)
-        ConnectionState.Closed -> Pair("Offline", scheme.outline)
+        ConnectionState.Online -> Pair("Online", Color(0xFF3FCE6B))
+        ConnectionState.Connecting -> Pair("Connecting", Color(0xFFF5B83D))
+        ConnectionState.Reconnecting -> Pair("Reconnecting", Color(0xFFE5503C))
+        ConnectionState.Closed -> Pair("Offline", Color(0xFFA8B8C2))
     }
     Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
         Box(modifier = Modifier.size(8.dp).background(tint, CircleShape))
@@ -160,11 +168,113 @@ fun Monogram(name: String, size: Dp = 44.dp, modifier: Modifier = Modifier) {
  */
 private fun tintFor(name: String): Color {
     val palette = listOf(
-        Color(0xFF00838F), Color(0xFF059669), Color(0xFFD97706), Color(0xFF9D174D),
-        Color(0xFF00ACC1), Color(0xFF15803D), Color(0xFF7E22CE), Color(0xFFC2410C),
+        Color(0xFF1287A0), Color(0xFF0D6373), Color(0xFF157A92), Color(0xFF1D9CB5),
+        Color(0xFF3FCE6B), Color(0xFFF5820C), Color(0xFF7C3AED), Color(0xFFE5503C),
     )
     val index = (name.hashCode().toLong() and 0xffffffffL).mod(palette.size.toLong()).toInt()
     return palette[index]
+}
+
+/**
+ * The reference list row's anatomy, shared by the Chats, Friends and Rooms lists: a 58dp row (66dp
+ * for rooms) whose avatar carries a presence ring and corner dot, a bold teal-head name, a quiet
+ * second line, and a red unread pill on the end. Everything flat — the ring is a background disc,
+ * not a stroke, and no row anywhere carries elevation.
+ */
+
+/** The list rows' ink pair: the teal-head name colour and the quieter second line's. */
+@Composable
+private fun rowInk(): Pair<Color, Color> =
+    if (isSystemInDarkTheme()) {
+        Color(0xFF9ADCE8) to Color(0xFFA3C4CD)
+    } else {
+        Color(0xFF0D6373) to Color(0xFF5F8A99)
+    }
+
+/**
+ * The row's avatar: the 38dp monogram, the 2dp presence ring around it (green when here, grey when
+ * not), and the 12dp corner dot with its white border pinned to the bottom end.
+ *
+ * The presence the ring reports is the caller's to state — the rows' data has no presence field of
+ * its own, so a list that knows nothing shows the online ring rather than dimming every row grey.
+ */
+@Composable
+fun ListRowAvatar(
+    name: String,
+    online: Boolean = true,
+    size: Dp = 38.dp,
+    modifier: Modifier = Modifier,
+) {
+    val ring = if (online) Color(0xFF43C56B) else Color(0xFFB9C7CF)
+    val dot = if (online) Color(0xFF3FCE6B) else Color(0xFFA8B8C2)
+    Box(modifier = modifier.size(size + 4.dp)) {
+        Box(
+            modifier = Modifier
+                .size(size + 4.dp)
+                .background(ring, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Monogram(name = name, size = size)
+        }
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .size(12.dp)
+                .background(Color.White, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(dot, CircleShape),
+            )
+        }
+    }
+}
+
+/** The row's name: 13.5sp bold, in the teal head. */
+@Composable
+fun ListRowName(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text = text,
+        fontSize = 13.5.sp,
+        fontWeight = FontWeight.Bold,
+        color = rowInk().first,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier,
+    )
+}
+
+/** The row's second line: 11.5sp, the quiet teal-grey the reference puts under a name. */
+@Composable
+fun ListRowLine(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text = text,
+        fontSize = 11.5.sp,
+        color = rowInk().second,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier,
+    )
+}
+
+/** The row's unread pill: red, fully rounded, the one number the reader is hunting for. */
+@Composable
+fun UnreadPill(count: Long, modifier: Modifier = Modifier) {
+    Surface(
+        color = Color(0xFFE5503C),
+        contentColor = Color.White,
+        shape = RoundedCornerShape(999.dp),
+        modifier = modifier,
+    ) {
+        Text(
+            text = count.toString(),
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+        )
+    }
 }
 
 /** A compact section label: the micro type step, uppercase, in the tertiary ink. */
@@ -262,19 +372,17 @@ fun PersonSummaryRow(
     onAction: () -> Unit,
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 58.dp)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Monogram(name = name, size = 36.dp)
+        ListRowAvatar(name = name)
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = name,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-            )
-            OneLine(text = "@" + handle + (note?.let { " · $it" } ?: ""))
+            ListRowName(text = name)
+            ListRowLine(text = "@" + handle + (note?.let { " · $it" } ?: ""))
         }
         TextButton(onClick = onAction) { Text(action) }
     }

@@ -107,7 +107,7 @@ export function StatusInput({
       className="banner-status-input"
       value={draft}
       maxLength={STATUS_MAX_CHARS}
-      placeholder="Set a status…"
+      placeholder="New here! Say hi :)"
       onChange={(event) => setDraft(event.target.value)}
       onBlur={commit}
       onKeyDown={(event) => {

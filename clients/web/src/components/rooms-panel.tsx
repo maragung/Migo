@@ -38,6 +38,27 @@ import { Spinner } from './spinner.js';
 /** The room page the panel browses; the server owns the ceiling it clamps this to. */
 const PAGE_SIZE = 30;
 
+/**
+ * How full a room has to be before the directory says so in orange rather than teal.
+ *
+ * Not "full": a room at capacity is a different message (the join will fail), and the server owns
+ * that answer. This is the warning shade — nearly full, decide now.
+ */
+const NEARLY_FULL = 0.85;
+
+/** Whether a room is close enough to its ceiling to warrant the warning colour. */
+function nearlyFull(online: number | undefined, max: number): boolean {
+  return max > 0 && (online ?? 0) / max >= NEARLY_FULL;
+}
+
+/** The occupancy bar's fill, clamped to the track: a server count above the cap is still 100%. */
+function occupancyPercent(online: number | undefined, max: number): number {
+  if (max <= 0) {
+    return 0;
+  }
+  return Math.min(100, Math.round(((online ?? 0) / max) * 100));
+}
+
 /** The search debounce: typing is not yet asking, but a pause is. */
 const SEARCH_DEBOUNCE_MS = 300;
 
@@ -387,7 +408,7 @@ function RoomRow({
             {room.name}
             {room.maxMembers !== undefined && room.maxMembers > 0 ? (
               <span
-                className="capacity-badge"
+                className={`capacity-badge${nearlyFull(room.onlineCount, room.maxMembers) ? ' capacity-full' : ''}`}
                 title={`${(room.onlineCount ?? 0).toLocaleString()} online of ${room.maxMembers.toLocaleString()} maximum`}
               >
                 {capacityLabel(room.onlineCount, room.maxMembers)}
@@ -412,6 +433,17 @@ function RoomRow({
           {joining ? <Spinner /> : joined ? 'Open' : 'Join'}
         </span>
       </button>
+      {/* The occupancy bar: the design puts the room's fullness on the row itself, because "is
+          there anyone in there" and "will I even get in" are the two questions a directory is
+          being asked. Decorative — the same numbers are in the badge's title and the sub-line. */}
+      {room.maxMembers !== undefined && room.maxMembers > 0 ? (
+        <span
+          className={`room-occupancy${nearlyFull(room.onlineCount, room.maxMembers) ? ' capacity-full' : ''}`}
+          aria-hidden="true"
+        >
+          <span style={{ width: `${occupancyPercent(room.onlineCount, room.maxMembers)}%` }} />
+        </span>
+      ) : null}
     </li>
   );
 }

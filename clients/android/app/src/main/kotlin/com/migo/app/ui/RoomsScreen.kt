@@ -1,5 +1,7 @@
 package com.migo.app.ui
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -35,8 +37,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.migo.app.model.AppState
 import com.migo.app.model.ConversationRow
 import com.migo.app.model.RoomLiveInfo
@@ -119,7 +124,7 @@ fun RoomsScreen(
                         val roomId = row.roomId
                         val live = if (roomId == null) null else liveCounts(roomId)
                         YourRoomRow(row = row, live = live, onOpen = { onOpenConversation(row) })
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                     }
                 }
                 if (state.rooms.rooms.orEmpty().isNotEmpty()) {
@@ -144,7 +149,7 @@ fun RoomsScreen(
                             joining = state.rooms.joining.contains(room.roomId),
                             onJoin = { onJoin(room) },
                         )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                     }
                 }
                 item(key = "tail") { Spacer(modifier = Modifier.height(16.dp)) }
@@ -167,32 +172,86 @@ fun RoomsScreen(
 private fun List<ConversationRow>.byRoomId(): Map<Id, ConversationRow> =
     mapNotNull { row -> row.roomId?.let { it to row } }.toMap()
 
-/** One of this account's own rooms: the name, the last line, and the way back in. */
+/**
+ * One of this account's own rooms: the 66dp room row — the ringed avatar, the bold name, the last
+ * line, the occupancy pill and its bar — and the way back in. Unread rides as the red pill rather
+ * than as the second line's words, the same mark the conversation list gives it.
+ */
 @Composable
 private fun YourRoomRow(row: ConversationRow, live: RoomLiveInfo?, onOpen: () -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 66.dp)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Monogram(name = row.title, size = 36.dp)
+        ListRowAvatar(name = row.title)
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = row.title,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-            )
+            ListRowName(text = row.title)
             // The preview line keeps its place; the live online count rides beside it, the same
             // "N online" the chat's own header states, so the list and the thread never disagree.
-            when {
-                row.unread > 0 -> OneLine(text = "${row.unread} unread")
-                live != null && live.memberCount > 0L ->
-                    OneLine(text = "${row.preview ?: "Open the room"} · ${live.onlineCount} online")
-                else -> OneLine(text = row.preview ?: "Open the room")
+            ListRowLine(
+                text = when {
+                    live != null && live.memberCount > 0L ->
+                        (row.preview ?: "Open the room") + " · ${live.onlineCount} online"
+                    else -> row.preview ?: "Open the room"
+                },
+            )
+            if (live?.maxMembers != null && live.maxMembers > 0L) {
+                OccupancyBar(current = live.onlineCount, capacity = live.maxMembers)
             }
         }
+        if (row.unread > 0) {
+            UnreadPill(count = row.unread)
+            Spacer(modifier = Modifier.width(8.dp))
+        }
         Button(onClick = onOpen) { Text("Open") }
+    }
+}
+
+/**
+ * The "bold users / capacity" pill a room row carries when the room declares a ceiling, and the
+ * 3.5dp occupancy bar under it. The two flip to the orange family once the room is 85% full: a
+ * room about to be full is the fact a join decision wants shouted, not whispered in teal.
+ */
+@Composable
+private fun OccupancyBar(current: Long, capacity: Long) {
+    val nearFull = capacity > 0L && current >= (capacity * 85L) / 100L
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Surface(
+            color = if (nearFull) Color(0xFFFDEEE0) else Color(0xFFEEF7FA),
+            contentColor = if (nearFull) Color(0xFFD95F07) else Color(0xFF157A92),
+            border = BorderStroke(1.dp, if (nearFull) Color(0xFFF6D4B4) else Color(0xFFCFE3EA)),
+            shape = RoundedCornerShape(999.dp),
+        ) {
+            Text(
+                text = "$current / $capacity",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 1.dp),
+            )
+        }
+        Spacer(modifier = Modifier.width(6.dp))
+        Box(
+            modifier = Modifier
+                .width(64.dp)
+                .height(3.5.dp)
+                .background(Color(0xFFE4F1F5), RoundedCornerShape(999.dp)),
+        ) {
+            if (capacity > 0L) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(current.toFloat() / capacity.toFloat())
+                        .height(3.5.dp)
+                        .background(
+                            if (nearFull) Color(0xFFF5820C) else Color(0xFF1993AB),
+                            RoundedCornerShape(999.dp),
+                        ),
+                )
+            }
+        }
     }
 }
 
@@ -320,40 +379,41 @@ private fun slugIsValid(slug: String): Boolean {
     return slug.all { it in 'a'..'z' || it in '0'..'9' || it == '-' }
 }
 
-/** One directory row: the facts of a join decision, and the way in. */
+/**
+ * One directory row: the 66dp room row — the facts of a join decision, the capacity pill and its
+ * occupancy bar — and the way in.
+ */
 @Composable
 private fun DirectoryRow(room: RoomSummary, joining: Boolean, onJoin: () -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 66.dp)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Monogram(name = room.name, size = 36.dp)
+        ListRowAvatar(name = room.name)
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = room.name,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-            )
-            OneLine(text = "${room.memberCount} members · ${room.onlineCount} online" + (room.category?.let { " · $it" } ?: ""))
+            ListRowName(text = room.name)
+            ListRowLine(text = "${room.memberCount} members · ${room.onlineCount} online" + (room.category?.let { " · $it" } ?: ""))
             // Read once: the topic is a property of another module, and a smart cast of it is
             // not something the compiler can promise across that boundary.
             val topic = room.topic
-            if (!topic.isNullOrBlank()) OneLine(text = topic)
-        }
-        // The capacity badge: live online count over the room's ceiling, "2/33" — the product's own
-        // shorthand for how full a room is. Read once, for the same cross-module smart-cast reason as
-        // the topic; a room that declares no ceiling simply shows no badge, and the count line above
-        // still carries the raw numbers.
-        val max = room.maxMembers
-        val full = max != null && max > 0L && room.memberCount >= max
-        if (max != null && max > 0L) {
-            CapacityBadge(online = room.onlineCount, max = max, full = full)
-            Spacer(modifier = Modifier.width(10.dp))
+            if (!topic.isNullOrBlank()) ListRowLine(text = topic)
+            // The occupancy pill and bar, under the counts: live online count over the room's
+            // ceiling, "2/33", the product's own shorthand for how full a room is. Read the
+            // ceiling once, for the same cross-module smart-cast reason as the topic; a room
+            // that declares no ceiling simply shows neither, and the count line above still
+            // carries the raw numbers.
+            val max = room.maxMembers
+            if (max != null && max > 0L) {
+                OccupancyBar(current = room.onlineCount, capacity = max)
+            }
         }
         // A full room is not joinable, and saying so here is kinder than letting the server refuse
-        // the tap: the badge above is already red, and the button names the fact.
+        // the tap: the pill above is already orange, and the button names the fact.
+        val full = max != null && max > 0L && room.memberCount >= max
         Button(onClick = onJoin, enabled = !joining && !full) {
             Text(when {
                 joining -> "…"
@@ -361,30 +421,6 @@ private fun DirectoryRow(room: RoomSummary, joining: Boolean, onJoin: () -> Unit
                 else -> "Join"
             })
         }
-    }
-}
-
-/** The "online/max" pill a directory row wears when its room declares a ceiling. */
-@Composable
-private fun CapacityBadge(online: Long, max: Long, full: Boolean) {
-    Surface(
-        color = if (full) {
-            MaterialTheme.colorScheme.errorContainer
-        } else {
-            MaterialTheme.colorScheme.secondaryContainer
-        },
-        contentColor = if (full) {
-            MaterialTheme.colorScheme.onErrorContainer
-        } else {
-            MaterialTheme.colorScheme.onSecondaryContainer
-        },
-        shape = RoundedCornerShape(percent = 50),
-    ) {
-        Text(
-            text = if (full) "$online/$max full" else "$online/$max",
-            style = MaterialTheme.typography.labelMedium,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-        )
     }
 }
 

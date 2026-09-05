@@ -274,10 +274,12 @@ pub struct ChipOutcome {
 
 /// One chip on the navigation strip.
 ///
-/// The strip is the teal `nav` fill and a chip is a rounded label on it: the active chip takes
-/// the brighter accent and the orange underline, exactly the pairing the reference draws. A
-/// closable chip (an open conversation, an open panel) carries an × that must not also select —
-/// the two responses are reported separately so a close never opens what it is closing.
+/// The strip is the dark teal `nav` fill and a chip is a rounded label on it: the active chip is
+/// the reference's white pill — solid `surface_raised` with accent ink and a short accent
+/// underline centred at its foot — while an idle chip is a faint translucent wash over the strip
+/// with muted ink. A closable chip (an open conversation, an open panel) carries an × that must
+/// not also select — the two responses are reported separately so a close never opens what it is
+/// closing.
 pub fn tab_chip(
     ui: &mut Ui,
     theme: Theme,
@@ -287,10 +289,16 @@ pub fn tab_chip(
     closable: bool,
 ) -> ChipOutcome {
     let colors = palette(theme);
+    // The chip's ink follows its state: accent on the white active pill, muted on the strip.
+    let ink = if active {
+        colors.accent
+    } else {
+        colors.text_muted
+    };
     let font = FontId::proportional(font::SMALL);
     let galley = ui
         .painter()
-        .layout_no_wrap(label.to_owned(), font.clone(), colors.banner_ink);
+        .layout_no_wrap(label.to_owned(), font.clone(), ink);
     let icon_room = if icon.is_some() { 26.0 } else { 0.0 };
     let close_room = if closable { 24.0 } else { 0.0 };
     let padding = Vec2::new(space::MD, 0.0);
@@ -308,22 +316,23 @@ pub fn tab_chip(
     }
 
     let fill = if active {
-        colors.accent_bright
+        colors.surface_raised
     } else {
-        // A translucent dark over the teal strip reads as the reference's idle chip in either
-        // theme: the strip is the same family of colour in both, so one overlay serves both.
-        Color32::from_black_alpha(70)
+        // A translucent white at 8% over the teal strip reads as the reference's idle chip in
+        // either theme: the strip is the same family of colour in both, so one overlay serves
+        // both.
+        Color32::from_white_alpha(20)
     };
     ui.painter()
         .rect_filled(rect, CornerRadius::same(radius::TAB), fill);
     if active {
-        // The orange underline: 3px of banner orange inset at the chip's foot.
+        // The underline: 16px of accent, 2.5px tall, centred under the pill.
         let bar = egui::Rect::from_min_max(
-            egui::pos2(rect.left() + space::SM, rect.bottom() - 3.0),
-            egui::pos2(rect.right() - space::SM, rect.bottom()),
+            egui::pos2(rect.center().x - 8.0, rect.bottom() - 2.5),
+            egui::pos2(rect.center().x + 8.0, rect.bottom()),
         );
         ui.painter()
-            .rect_filled(bar, CornerRadius::same(radius::SM), colors.banner_b);
+            .rect_filled(bar, CornerRadius::same(1), colors.accent);
     }
 
     let mut at = rect.left() + padding.x;
@@ -337,9 +346,10 @@ pub fn tab_chip(
                 .max_rect(icon_rect)
                 .layout(Layout::left_to_right(Align::Center)),
         );
-        // White on the strip whatever the theme: the chip's ink is the banner's ink.
+        // Ink on the strip whatever the theme: the chip's ink is drawn by the palette, so the
+        // icon follows the same state colours as the label beside it.
         inner.set_visuals(egui::Visuals {
-            override_text_color: Some(colors.banner_ink),
+            override_text_color: Some(ink),
             ..egui::Visuals::dark()
         });
         place_icon(&mut inner, theme, place, active);
@@ -348,12 +358,8 @@ pub fn tab_chip(
     ui.painter().galley(
         egui::pos2(at, rect.center().y - galley.size().y / 2.0),
         galley,
-        colors.banner_ink,
+        ink,
     );
-    if active {
-        // Stronger ink for the selected chip, so the strip's "you are here" is readable at a
-        // glance even among many open chats.
-    }
 
     if closable {
         let mark = egui::Rect::from_center_size(
@@ -373,7 +379,7 @@ pub fn tab_chip(
             ui.painter()
                 .rect_filled(mark, CornerRadius::same(radius::FULL), hover);
         }
-        let stroke = egui::Stroke::new(1.5, colors.banner_ink);
+        let stroke = egui::Stroke::new(1.5, ink);
         ui.painter().line_segment(
             [
                 egui::pos2(mark.left() + 5.0, mark.top() + 5.0),
@@ -396,8 +402,9 @@ pub fn tab_chip(
 /// Paints a horizontal three-stop gradient across a rect.
 ///
 /// egui has no gradient primitive, so this is the two-triangle mesh it decomposes to: `a` at the
-/// left edge, `b` at the middle, `c` at the right. Used by the profile banner, which is the one
-/// surface in the client that is a gradient rather than a fill.
+/// left edge, `b` at the middle, `c` at the right. Used by the profile banner, whose three stops
+/// are equal in every palette — the flat restyle passes one colour three times, so this paints a
+/// flat band, and the call sites need not know.
 pub fn gradient_rect(ui: &mut Ui, rect: egui::Rect, a: Color32, b: Color32, c: Color32) {
     let mut mesh = egui::Mesh::default();
     let (l, m, r) = (rect.left_top(), rect.center_top(), rect.right_top());
@@ -524,8 +531,8 @@ pub fn avatar(ui: &mut Ui, theme: Theme, seed: &str, diameter: f32) {
 }
 
 /// The avatar as it sits on the orange banner: the same monogram logic, drawn as a translucent
-/// white disc ringed in white, because the tinted avatar's hue would argue with the gradient
-/// behind it.
+/// white disc ringed in white, because the tinted avatar's hue would argue with the flat orange
+/// band behind it.
 pub fn banner_avatar(ui: &mut Ui, theme: Theme, seed: &str, diameter: f32) -> Response {
     let colors = palette(theme);
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(diameter), Sense::click());
@@ -563,22 +570,28 @@ fn tint(seed: &str, theme: Theme) -> Color32 {
         hash ^= u32::from(*byte);
         hash = hash.wrapping_mul(0x0100_0193);
     }
-    // Six hues, chosen to stay legible against white text in both themes.
-    const DARK: [Color32; 6] = [
-        Color32::from_rgb(0x3B, 0x6E, 0xD8),
-        Color32::from_rgb(0x2F, 0x8F, 0x6B),
-        Color32::from_rgb(0x9A, 0x5B, 0xD6),
-        Color32::from_rgb(0xC2, 0x6A, 0x3A),
-        Color32::from_rgb(0xC0, 0x4A, 0x6E),
-        Color32::from_rgb(0x2E, 0x7F, 0x99),
+    // Eight hues, the flat teal/orange family with two outliers kept for variety, chosen to stay
+    // legible against white text in both themes. The dark table is the same hues one step
+    // brighter, because a dark surface dims everything it sits beside.
+    const DARK: [Color32; 8] = [
+        Color32::from_rgb(0x1f, 0xa5, 0xc0),
+        Color32::from_rgb(0x17, 0x80, 0x9a),
+        Color32::from_rgb(0x2b, 0x9d, 0xbb),
+        Color32::from_rgb(0x34, 0xbf, 0xd8),
+        Color32::from_rgb(0x5c, 0xe1, 0x85),
+        Color32::from_rgb(0xff, 0x90, 0x20),
+        Color32::from_rgb(0x91, 0x60, 0xf5),
+        Color32::from_rgb(0xf0, 0x6a, 0x58),
     ];
-    const LIGHT: [Color32; 6] = [
-        Color32::from_rgb(0x2F, 0x5C, 0xC4),
-        Color32::from_rgb(0x24, 0x7A, 0x57),
-        Color32::from_rgb(0x82, 0x46, 0xBE),
-        Color32::from_rgb(0xAA, 0x55, 0x28),
-        Color32::from_rgb(0xA8, 0x38, 0x5A),
-        Color32::from_rgb(0x21, 0x69, 0x82),
+    const LIGHT: [Color32; 8] = [
+        Color32::from_rgb(0x12, 0x87, 0xa0),
+        Color32::from_rgb(0x0d, 0x63, 0x73),
+        Color32::from_rgb(0x15, 0x7a, 0x92),
+        Color32::from_rgb(0x1d, 0x9c, 0xb5),
+        Color32::from_rgb(0x3f, 0xce, 0x6b),
+        Color32::from_rgb(0xf5, 0x82, 0x0c),
+        Color32::from_rgb(0x7c, 0x3a, 0xed),
+        Color32::from_rgb(0xe5, 0x50, 0x3c),
     ];
     let table = if theme.is_dark() { DARK } else { LIGHT };
     table[(hash % table.len() as u32) as usize]
@@ -615,15 +628,16 @@ pub fn field(
     response
 }
 
-/// The one prominent action on a screen: the reference's orange — the banner's own gradient
-/// family, so every "Go" in the product is the same orange.
+/// The one prominent action on a screen: the reference's flat orange — the banner's own colour,
+/// so every "Go" in the product is the same orange. One solid fill per state, never a gradient.
 pub fn primary_button(ui: &mut Ui, theme: Theme, text: &str, enabled: bool) -> Response {
     let colors = palette(theme);
-    // Scoped so the three banner shades apply to this button and nothing after it.
+    // Scoped so the banner orange applies to this button and nothing after it.
     //
     // `Button::fill` is one colour for every state, so a filled button gets no hover and no press
     // feedback — which reads as disabled, on the one control the user is most likely to aim at.
-    // Writing the shades into the widget visuals instead lets egui pick the right one itself.
+    // Writing the shades into the widget visuals instead lets egui pick the right one itself. The
+    // banner triple is flat, so all three states paint the same solid orange.
     ui.scope(|ui| {
         {
             let w = &mut ui.style_mut().visuals.widgets;
@@ -803,17 +817,26 @@ pub fn conversation_row(ui: &mut Ui, theme: Theme, content: RowContent<'_>) -> R
 
 /// A message bubble.
 ///
-/// Outgoing bubbles are accent-filled and right-aligned, incoming ones surface-filled and left. The
-/// asymmetry is the whole point: a reader must be able to tell who said what without reading a name,
-/// and alignment does that at a glance in a way a label cannot.
+/// Outgoing bubbles are accent-filled and right-aligned, incoming ones white surface-filled with
+/// a 1px hairline and left. The asymmetry is the whole point: a reader must be able to tell who
+/// said what without reading a name, and alignment does that at a glance in a way a label cannot.
+/// The treatment is flat — solid fill, uniform medium corners, no shadow.
 pub fn bubble(ui: &mut Ui, theme: Theme, text: &str, meta: &str, outgoing: bool, tone: BubbleTone) {
     let colors = palette(theme);
-    let (fill, foreground) = match tone {
-        BubbleTone::Normal if outgoing => (colors.accent, colors.text_on_accent),
-        BubbleTone::Normal => (colors.surface_raised, colors.text),
+    let (fill, foreground, stroke) = match tone {
+        BubbleTone::Normal if outgoing => (colors.accent, colors.text_on_accent, Stroke::NONE),
+        BubbleTone::Normal => (
+            colors.surface_raised,
+            colors.text,
+            Stroke::new(1.0, colors.border),
+        ),
         // A failure is not styled like a message: it is a report about one, so it takes the muted
         // surface and the danger colour rather than pretending to be content.
-        BubbleTone::Problem => (colors.surface_raised, colors.danger),
+        BubbleTone::Problem => (
+            colors.surface_raised,
+            colors.danger,
+            Stroke::new(1.0, colors.border),
+        ),
     };
 
     let layout = if outgoing {
@@ -827,7 +850,8 @@ pub fn bubble(ui: &mut Ui, theme: Theme, text: &str, meta: &str, outgoing: bool,
         let max = (ui.available_width() * 0.68).max(140.0);
         egui::Frame::new()
             .fill(fill)
-            .corner_radius(CornerRadius::same(radius::LG))
+            .stroke(stroke)
+            .corner_radius(CornerRadius::same(radius::MD))
             .inner_margin(egui::Margin::symmetric(space::MD as i8, space::SM as i8))
             .show(ui, |ui| {
                 ui.set_max_width(max);

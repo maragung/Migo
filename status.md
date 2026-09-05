@@ -2614,3 +2614,92 @@ sehat (silence is the healthy state) maupun saat belum login (state
 connecting di layar auth milik tombol submitnya). Badge lama dihapus
 beserta CSS-nya; test `connection-snackbar.test.tsx` mem-pin
 disiplin itu.
+
+## 70. Restyle datar seluruh klien: skrip, bukan gelembung (v0.17.0)
+
+Referensi baru dari user (`migo-plan-ui-ux-design-for-pc-android-web.zip`,
+diekstrak ke `ui-ux-design-plan/`, tidak di-commit) adalah **flat modern
+restyle** turunan mig33 — dan ini restyle terbesar sejak repo berdiri:
+web, desktop, dan Android sekaligus. Aturannya satu kalimat, ada di
+`globals.css` sendiri: warna solid saja, tanpa gradient, tanpa kilap,
+tanpa bevel/inset shadow, tanpa text-shadow. Pemisah ruang adalah border
+1px dan **satu** elevation shadow.
+
+**Palet & tipografi.** `--migo-*` jadi sumber tunggal: teal `#1287a0`
+(head `#0d6373`, strip `#0d4353`, line `#cfe3ea`, soft `#eef7fa`),
+oranye `#f5820c`, hijau `#3fce6b`, merah `#e5503c`, gold `#f0a912`.
+Font `'Segoe UI', Tahoma, Verdana` 13px. Trik yang menghemat ratusan
+suntingan: **semua stop** `--banner-a/b/c` dan `--login-a/b/c` diisi satu
+warna yang sama, jadi setiap call site `linear-gradient` yang sudah ada
+otomatis melukis bidang rata — nol perubahan di pemakainya. Pola yang
+sama dipakai di `Palette` desktop dan `MigoExtra` Android.
+
+**Transkrip jadi skrip, bukan tumpukan gelembung.** Perubahan terbesar
+di `message-list.tsx`: setiap baris dibuka nickname + titik dua dengan
+warna hasil hash nama (`nickIndex`: `h = (h*31 + charCodeAt(i)) >>> 0`,
+`% 8`) — hash yang **identik byte-per-byte** dengan `nameColor` di
+Android dan desktop, supaya satu orang berwarna sama di mana pun. Yang
+di-gate per-run justru **avatar**: gutter 24px selalu dicadangkan, disc
+22px hanya digambar di baris pertama sebuah run, jadi kolom teks mulai di
+satu x entah ada muka atau tidak. Yang di-emit adalah kelas `nick-0..7`,
+bukan hex inline — supaya tema gelap punya ramp sendiri (hue tiap indeks
+dipertahankan, hanya lightness naik) tanpa mengubah identitas warna
+seseorang. Tiga hal yang tidak ada di mockup tetap dipertahankan karena
+membawa makna yang tak bisa diwakili layout: **tombstone tanpa isi**,
+**read tick** dari `seq <= readUpTo`, dan **reply quote** yang menulis
+`[deleted]` kalau targetnya hilang. Bukti konversinya tidak melemahkan
+kontrak: empat test korektnya lolos tanpa disentuh; hanya dua test
+konvensi-run yang ditulis ulang.
+
+**Baris daftar rata, kartu dibuang.** `.person-row`/`.conversation-row`
+jadi baris 58px berpembatas hairline tanpa radius (kartu = radius, dan
+daftar bukan tumpukan kartu), `.room-row` 66px dengan **bar okupansi**
+3.5px di kakinya (`nearlyFull` ≥85% → oranye) karena "ada orang di
+dalam?" dan "saya masih kebagian?" adalah dua pertanyaan yang memang
+ditanyakan ke direktori. `.unread-dot` pindah ke merah — dot beraksen di
+atas baris bertint aksen tidak mengatakan apa pun — dan tetap **dot**,
+bukan pill berangka seperti mockup, sebab `useConversations()` hanya
+memberi boolean dan angka "1" yang dikarang adalah kebohongan.
+
+**Band status di kaki panel** (`list-footer.tsx`, baru). Kedua jendela
+di referensi ditutup band pucat yang sama: saldo kredit di kiri, hint
+huruf kecil di kanan tentang apa yang direspons daftar yang terbuka.
+Saldo **dipindah ke sini** dari chip banner — di situlah referensi
+menaruhnya, dan angka yang disebut dua kali dalam satu kolom adalah
+angka yang harus direkonsiliasi. Saldo yang gagal dibaca menampilkan
+"Credits" tanpa angka, bukan nol: dompet yang gagal dimuat bukan dompet
+kosong.
+
+**Aksesibilitas yang nyaris hilang diam-diam.** Meratakan `--glow`
+jadi `none` ternyata menghapus **seluruh focus ring**, karena sebelas
+call site `box-shadow: var(--glow)` mencampur state hover dan focus.
+Ketemu lewat audit, bukan lewat test. Enam site focus dapat token baru
+`--focus-ring` (`0 0 0 3px var(--accent-glow)`, blur 0 offset 0 — sebuah
+_ring_, bukan elevation, preseden sahnya adalah halo avatar banner di
+desain itu sendiri); site hover tetap `none` sebab perubahan border-nya
+yang jadi isyarat.
+
+**Desktop & Android.** Desktop: `theme.rs`/`app.rs`/`ui/widgets.rs`/
+`ui/auth.rs` — palet rata di kedua tema, `radius::LG` 14→12, tiga test
+warna ditulis ulang (test yang meng-assert warna wajib berubah bersama
+palet). Android: `Theme.kt`, `TabStrip.kt` (strip 46dp, pill putih ink
+`#0D6373` + underline 16×2.5dp), `ProfileBanner.kt` (me card 71dp oranye
+rata, avatar bercincin + halo putih, dot hijau berdenyut, `@username`),
+`Common.kt` (`ListRowAvatar`/`ListRowName`/`ListRowLine`/`UnreadPill`),
+`ChatsScreen.kt`/`FriendsScreen.kt` (baris 58dp), `RoomsScreen.kt`
+(66dp + bar okupansi), `ChatScreen.kt` (`MessageBubble` → `MessageLine`,
+`nameColor` diport identik), `SignInScreen.kt`, `PanelBar.kt`.
+
+**Token kanonik ikut jujur.** `shared/design/tokens.json` naik ke
+**v4.0.0**: seluruh palet lama cyan/cream diganti palet datar yang
+benar-benar dilukis ketiga klien, plus bagian baru `color.nicknames`
+(hash + dua ramp), `metrics` (46/58/66/71dp dst), dan `elevation` yang
+menyebut dua shadow itu saja. `docs/design-system.md` ditulis ulang
+mengikutinya. Sebelumnya file yang mengaku "single source of truth" ini
+menjelaskan desain yang sudah tidak dipakai satu klien pun.
+
+Verifikasi lokal (build/test/release tetap di GitHub Actions):
+`pnpm typecheck` bersih, `pnpm test` 335/335, `make lint-js` bersih di
+luar direktori mockup yang tidak di-commit, `pnpm exec prettier --check`
+bersih, `make kotlin-check` 0 problem, desktop `cargo fmt`/`clippy`
+bersih dan `cargo test` 79 lolos.

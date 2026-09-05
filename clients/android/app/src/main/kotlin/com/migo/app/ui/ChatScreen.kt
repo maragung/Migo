@@ -2,20 +2,18 @@ package com.migo.app.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -35,12 +33,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.migo.app.model.ChatMessage
 import com.migo.app.model.ChatState
 import com.migo.app.model.RoomNotice
@@ -97,6 +100,25 @@ fun ChatScreen(
                 .sortedBy { it.at }
         }
     }
+    // Which lines are run heads: the first message of a consecutive run from one sender. The
+    // transcript draws the avatar only on a head, which is what makes a run read as a run without
+    // repeating the 22dp disc on every line -- the same job the bubble's square corner once did.
+    // A notice breaks the run, because a notice means time passed between the two messages.
+    val heads = remember(timeline) {
+        val marks = mutableMapOf<String, Boolean>()
+        var previous: Pair<Boolean, String>? = null
+        for (item in timeline) {
+            when (item) {
+                is TimelineItem.Message -> {
+                    val sender = item.message.mine to item.message.author
+                    marks[item.key] = sender != previous
+                    previous = sender
+                }
+                is TimelineItem.Notice -> previous = null
+            }
+        }
+        marks
+    }
     val lastKey = timeline.lastOrNull()?.key
 
     // Follow the end of the conversation as it grows, and only then. Keyed on the last line rather
@@ -131,7 +153,10 @@ fun ChatScreen(
                     ) {
                         items(timeline, key = { it.key }) { item ->
                             when (item) {
-                                is TimelineItem.Message -> MessageBubble(message = item.message)
+                                is TimelineItem.Message -> MessageLine(
+                                    message = item.message,
+                                    head = heads[item.key] == true,
+                                )
                                 is TimelineItem.Notice -> SystemNotice(text = item.notice.text)
                             }
                         }
@@ -241,68 +266,86 @@ private fun roomSubtitle(chat: ChatState): String {
 }
 
 /**
- * One message.
+ * One message, as the reference's IRC-style line: no bubble, just a reserved 24dp avatar column
+ * (the 22dp disc drawn only on a run head) and a single wrapping line whose bold sender name
+ * introduces the body. The timestamp and the delivery tick ride at the end of the same line as a
+ * quiet 9.5sp run, so a line carries everything it owns in one measure.
  *
- * Outgoing messages sit right in the primary colour, incoming ones sit left on the surface variant.
- * Both keep the corner on the speaker's side square, which is what makes a run of messages from one
- * person read as a run without a name on every line.
+ * The sender's name is coloured by a stable hash of the name, which keeps one speaker one colour
+ * for the length of a conversation; own messages are the exception, pinned to the teal head so
+ * one's own words are always the same colour to oneself.
  */
 @Composable
-private fun MessageBubble(message: ChatMessage) {
+private fun MessageLine(message: ChatMessage, head: Boolean) {
     val scheme = MaterialTheme.colorScheme
-    val shape = if (message.mine) {
-        RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp)
-    } else {
-        RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp)
-    }
-    val container = when {
-        message.unsupported -> scheme.surfaceVariant
-        message.mine -> scheme.primary
-        else -> scheme.surfaceVariant
-    }
-    val content = when {
-        message.unsupported -> scheme.onSurfaceVariant
-        message.mine -> scheme.onPrimary
-        else -> scheme.onSurfaceVariant
-    }
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 3.dp),
-        horizontalArrangement = if (message.mine) Arrangement.End else Arrangement.Start,
-    ) {
-        Surface(
-            color = container,
-            contentColor = content,
-            shape = shape,
-            modifier = Modifier.widthIn(max = 300.dp),
+    // The dark scheme's surfaces are too deep for the light ink the reference's name colours were
+    // measured against, so the own-message name and the body follow the theme and the hashed
+    // palette keeps its values in both -- the reference's own choice, ported as it stands.
+    val ownName = if (isSystemInDarkTheme()) Color(0xFF6FD0E6) else Color(0xFF0D6373)
+    val stampInk = LocalMigoExtra.current.faint
+    val name = if (message.mine) message.author.ifEmpty { "You" } else message.author
+    val line = buildAnnotatedString {
+        withStyle(
+            SpanStyle(
+                fontWeight = FontWeight.Bold,
+                color = if (message.mine) ownName else nameColor(name),
+            ),
         ) {
-            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                if (!message.mine) {
-                    Text(
-                        text = message.author,
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = scheme.primary,
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                }
-                Text(
-                    text = message.text,
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontStyle = if (message.unsupported) FontStyle.Italic else null,
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = if (message.pending) "Sending..." else clockTime(message.at),
-                    style = MaterialTheme.typography.labelSmall,
-                    textAlign = TextAlign.End,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+            append(name)
+            if (message.mine) append(" (me)")
+        }
+        withStyle(SpanStyle(color = scheme.onSurface)) { append(": ") }
+        withStyle(
+            SpanStyle(
+                color = scheme.onSurface,
+                fontStyle = if (message.unsupported) FontStyle.Italic else null,
+            ),
+        ) {
+            append(message.text)
+        }
+        // The trailing state: the clock when the server has accepted the line, the word while it
+        // has not, and the tick only on one's own messages -- the one delivery mark this build can
+        // honestly draw, because it has seen the acceptance.
+        val stamp = if (message.pending) "Sending…" else clockTime(message.at)
+        if (stamp.isNotEmpty() || message.mine) {
+            withStyle(SpanStyle(fontSize = 9.5.sp, color = stampInk)) {
+                if (stamp.isNotEmpty()) append("  $stamp")
+                if (message.mine && !message.pending) append(" ✓")
             }
         }
     }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 2.dp),
+    ) {
+        Box(modifier = Modifier.width(24.dp)) {
+            if (head) {
+                Monogram(name = name, size = 22.dp, modifier = Modifier.padding(top = 1.dp))
+            }
+        }
+        Text(
+            text = line,
+            fontSize = 12.sp,
+            lineHeight = 17.sp,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/**
+ * The hashed name colours for the transcript, ported from the reference as it stands: one of eight
+ * mid-saturation hues per name, stable for as long as the name is.
+ */
+private val NAME_COLORS = listOf(
+    0xFF0E7490, 0xFF7C3AED, 0xFF0E9F6E, 0xFFD97706,
+    0xFFDB2777, 0xFF2563EB, 0xFFB45309, 0xFF0F766E,
+)
+
+private fun nameColor(name: String): Color {
+    var h = 0
+    for (c in name) h = (h * 31 + c.code)
+    return Color(NAME_COLORS[((h.toLong() and 0xFFFFFFFFL) % NAME_COLORS.size).toInt()])
 }
 
 /**
@@ -383,16 +426,19 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGlyphSend(
 
 /**
  * One non-message line in a room's timeline: a join, a leave, a disconnect, a reconnect, a kick, a
- * ban. Centred and quiet, because it is context around the conversation rather than part of it.
+ * ban. A quiet italic full-width line, because it is context around the conversation rather than
+ * part of it. One grey-teal that holds on both the light ground and the dark surfaces, so the
+ * notice never competes with the transcript's coloured names.
  */
 @Composable
 private fun SystemNotice(text: String) {
     Text(
         text = text,
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 11.sp,
+        fontStyle = FontStyle.Italic,
+        color = Color(0xFF7BA3AD),
         textAlign = TextAlign.Center,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 6.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 4.dp),
     )
 }
 

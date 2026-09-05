@@ -3,15 +3,17 @@
 /**
  * The left panel's tab strip: the lists and streams a messenger lives in.
  *
- * The new-ui-02 model (docs/design mockup `new-ui-02.tsx`) splits the app into two independent
- * panels on a PC: the LEFT panel owns the account's lists — its tab bar carries Main (the
- * friends list), Chats (the conversations), Rooms, Feed — and the chat tabs that this
+ * The reference design splits the app into two independent panels on a PC: the LEFT panel owns the
+ * account's lists — its tab bar carries Friends, Chats, Rooms, Feed — and the chat tabs that this
  * strip used to carry have moved to the right panel's own bar, where a conversation actually
  * opens. Games is not a list but a place: it lives as the right pane's resting tab, so the
  * arcade sits one chip away from every thread instead of competing with the lists for the
- * left panel. The strip keeps the teal `#00838F`; the active chip is the brighter `#00ACC1`
- * over the orange underline, exactly the pairing the mockup draws. It scrolls horizontally
- * when it overflows rather than hiding anything: a tab that is off-screen is still a tab.
+ * left panel.
+ *
+ * The strip is the design's deep teal band; the current chip is a solid white pill with teal ink
+ * and a short underline drawn inside it. Flat throughout — the separation is the band's own
+ * colour and a hairline, not a bevel. It scrolls horizontally when it overflows rather than
+ * hiding anything: a tab that is off-screen is still a tab.
  *
  * The Chats chip carries the unread dot because it is the messenger's one list that exists to
  * answer "did somebody write me?" — without it, a message that arrives while another tab is

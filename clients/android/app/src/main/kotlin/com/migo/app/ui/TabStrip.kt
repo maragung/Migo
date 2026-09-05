@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -24,6 +23,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.migo.app.model.AppState
 
 /**
@@ -36,8 +36,9 @@ import com.migo.app.model.AppState
  * carrying its own way back, so the strip is the lists and nothing else — which is also why
  * it never has to stand down for a thread again.
  *
- * The strip scrolls horizontally rather than wrapping: the reference's strip is one row on every
- * screen size, and a second row would push the banner down by the height of a tab.
+ * The strip is the deep teal bar, one 46dp row that scrolls horizontally rather than wrapping:
+ * the reference's strip is one row on every screen size, and a second row would push the banner
+ * down by the height of a tab.
  */
 @Composable
 fun TabStrip(
@@ -46,7 +47,7 @@ fun TabStrip(
     modifier: Modifier = Modifier,
 ) {
     val extra = LocalMigoExtra.current
-    Surface(color = extra.nav, modifier = modifier.fillMaxWidth()) {
+    Surface(color = extra.nav, modifier = modifier.fillMaxWidth().height(46.dp)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -89,9 +90,10 @@ fun TabStrip(
 }
 
 /**
- * One chip: a glyph, a label, the active fill and underline. The rounded fill and the orange
- * underline are the two marks the reference puts on the chosen tab; an idle chip is the strip's
- * own ink on the strip's own surface.
+ * One chip: a 9dp-radius pill. The chosen tab is the one solid white fill in the design, carrying
+ * the teal-head ink and a short rounded underline set just above the pill's bottom edge; an idle
+ * chip is a faint white wash on the strip's own surface. Flat both ways — the fill is the mark, and
+ * there is no gradient or glow anywhere in it.
  */
 @Composable
 private fun StripChip(
@@ -101,44 +103,51 @@ private fun StripChip(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val extra = LocalMigoExtra.current
-    Column(
+    // The active pill's ink and underline: the teal head the reference puts on the white fill. The
+    // strip's own bar is the same colour in both themes, so these marks are too.
+    val activeInk = Color(0xFF0D6373)
+    val idleInk = Color.White.copy(alpha = 0.92f)
+    Box(
         modifier = modifier
             .padding(top = 6.dp, start = 6.dp)
             .clickable(onClick = onClick),
-        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(
-            modifier = Modifier
-                .background(
-                    color = if (active) extra.navActive else Color.Transparent,
-                    shape = RoundedCornerShape(12.dp),
-                )
-                .padding(horizontal = 14.dp, vertical = 7.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TabGlyph(kind = glyph, tint = extra.bannerInk)
-            Spacer(modifier = Modifier.width(7.dp))
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
-                color = extra.bannerInk,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.widthIn(max = 132.dp),
-            )
-        }
-        // The active tab's orange underline. Drawn (transparently) on every chip so the row's
-        // baselines stay level whether or not the chip is the chosen one.
         Box(
             modifier = Modifier
-                .width(26.dp)
-                .height(3.dp)
                 .background(
-                    color = if (active) extra.bannerB else Color.Transparent,
-                    shape = RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp),
-                ),
-        )
+                    color = if (active) LocalMigoExtra.current.navActive else Color.White.copy(alpha = 0.08f),
+                    shape = RoundedCornerShape(9.dp),
+                )
+                .padding(horizontal = 14.dp, vertical = 7.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TabGlyph(kind = glyph, tint = if (active) activeInk else idleInk)
+                Spacer(modifier = Modifier.width(7.dp))
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (active) activeInk else idleInk,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 132.dp),
+                )
+            }
+            // The active tab's underline: a centred 16x2.5dp rounded bar in the teal head, sitting
+            // 3dp above the pill's bottom edge. Drawn (transparently) on every chip so the pills
+            // keep one height whether or not the chip is the chosen one.
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 3.dp)
+                    .width(16.dp)
+                    .height(2.5.dp)
+                    .background(
+                        color = if (active) activeInk else Color.Transparent,
+                        shape = RoundedCornerShape(999.dp),
+                    ),
+            )
+        }
     }
 }

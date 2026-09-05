@@ -146,7 +146,15 @@ test('a reply whose target is gone, or since deleted, quotes "[deleted]"', () =>
   assert.ok(!markup.includes('was here'), 'a deleted target\u2019s text leaked into a quote');
 });
 
-test('a group thread names each sender once per run, with an avatar on the run head', () => {
+test('a group thread names every line, with an avatar only on the run head', () => {
+  // The transcript is a script, not a stack of bubbles: the design repeats the nickname on every
+  // line, because that is what a reader scans for in a room where six people are talking. What
+  // *is* run-gated is the avatar — the 24px gutter is reserved on every line and filled only on
+  // the first of a run, so the text column starts at one x either way.
+  //
+  // This deliberately inverts the older convention, where the name headed a run and our own
+  // messages carried no name at all. Both changed together: a self line reads "You: …" like
+  // everyone else's, in the fixed teal rather than a hashed colour.
   const run = [
     msg({ senderId: 'ada' as Id, text: 'first from Ada' }),
     msg({ senderId: 'ada' as Id, text: 'second from Ada' }),
@@ -154,13 +162,19 @@ test('a group thread names each sender once per run, with an avatar on the run h
   ];
   const markup = render(run, { showSenders: true });
 
-  const names = markup.match(/class="sender-name"/g) ?? [];
-  assert.equal(names.length, 1, 'a run from one sender should show the name exactly once');
+  const names = markup.match(/class="sender-name /g) ?? [];
+  assert.equal(names.length, 3, 'every line should open with its sender name');
   assert.ok(markup.includes('first from Ada'));
   assert.ok(markup.includes('second from Ada'));
-  // One avatar on the run head; our own messages never carry a sender header.
+  // Two run heads — Ada's first message and ours — so two avatars, not three.
   const avatars = markup.match(/class="avatar"/g) ?? [];
-  assert.equal(avatars.length, 1, 'exactly the run head should carry an avatar');
+  assert.equal(avatars.length, 2, 'exactly the run heads should carry an avatar');
+
+  // The name colour is a hash of the name, so one person keeps one colour down the transcript;
+  // our own lines take the fixed self colour instead of joining the cycle.
+  const adaColours = new Set(markup.match(/class="sender-name nick-\d"/g) ?? []);
+  assert.equal(adaColours.size, 1, 'one sender should hash to one colour');
+  assert.ok(markup.includes('class="sender-name nick-self"'), 'our own line should be self-marked');
 });
 
 test('an interleaved system row sits between the messages around it, in time order', () => {
@@ -198,21 +212,31 @@ test('an interleaved row older than every loaded message still renders, ahead of
 });
 
 test('an interleaved system line breaks the sender run', () => {
-  // A pill between two messages from one sender reads as a new turn: the sender's name shows
-  // again on the message after it, the way it does after a day divider.
+  // A notice between two messages from one sender reads as a new turn, so the message after it is
+  // a run head again. Now that the name repeats on every line, the run is visible in the *avatar*:
+  // without the notice Ada's second line would carry none, with it she carries a second face.
   const first = msg({ senderId: 'ada' as Id, text: 'first from Ada' });
   const second = msg({
     senderId: 'ada' as Id,
     text: 'second from Ada',
     createdAt: CREATED + 60_000,
   });
-  const markup = render([first, second], {
+  const unbroken = render([first, second], { showSenders: true });
+  const broken = render([first, second], {
     showSenders: true,
     interleaved: [{ at: CREATED + 30_000, key: 'room-1', node: 'Bekti left' }],
   });
 
-  const names = markup.match(/class="sender-name"/g) ?? [];
-  assert.equal(names.length, 2, 'a system line should break the sender run');
+  assert.equal(
+    (unbroken.match(/class="avatar"/g) ?? []).length,
+    1,
+    'an unbroken run should draw one avatar',
+  );
+  assert.equal(
+    (broken.match(/class="avatar"/g) ?? []).length,
+    2,
+    'a system line should break the sender run',
+  );
 });
 
 test('the load-earlier control appears only when history is missing, and shows its busy state', () => {

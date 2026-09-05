@@ -3,6 +3,7 @@ package com.migo.app.ui
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -25,9 +27,11 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextButtonDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -37,12 +41,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.migo.app.model.AppState
 import com.migo.core.store.GatewayScheme
 import com.migo.core.store.RestScheme
@@ -104,6 +110,10 @@ fun SignInScreen(
     }
     val extra = LocalMigoExtra.current
 
+    // The front door's ground: the reference's flat turquoise. It still goes through a brush
+    // because the tokens are three stops, but the three stops are equal now, so what lands on the
+    // screen is one flat colour — the restyle's rule, kept honest by the palette rather than by a
+    // rewrite of every front-door call site.
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -139,12 +149,15 @@ fun SignInScreen(
                 )
                 Spacer(modifier = Modifier.height(32.dp))
 
-                // The form sits on a card rather than on the gradient: a translucent-enough card to
-                // read as the reference's glass, opaque enough that the fields keep the contrast
-                // their labels were measured against.
+                // The form sits on a flat card: the reference's darker turquoise, separated from
+                // the ground by its own colour and a translucent 1px border rather than by any
+                // elevation. Everything inside inherits white ink from the card's content color,
+                // so the labels and the toggles need no colour of their own.
                 Surface(
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-                    shape = MaterialTheme.shapes.large,
+                    color = Color(0xFF0B6F82),
+                    contentColor = Color.White,
+                    shape = RoundedCornerShape(16.dp),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.28f)),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Column(modifier = Modifier.padding(20.dp)) {
@@ -155,20 +168,21 @@ fun SignInScreen(
                         )
                         Spacer(modifier = Modifier.height(12.dp))
 
+                        val identifierLabel = when {
+                            creating -> "Choose a username"
+                            restoring -> "Username (optional)"
+                            else -> "Username or email"
+                        }
+                        AuthLabel(text = identifierLabel)
+                        Spacer(modifier = Modifier.height(6.dp))
                         OutlinedTextField(
                             value = form.identifier,
                             onValueChange = onIdentifier,
-                            label = {
-                                Text(
-                                    when {
-                                        creating -> "Choose a username"
-                                        restoring -> "Username (optional)"
-                                        else -> "Username or email"
-                                    },
-                                )
-                            },
+                            placeholder = { Text(identifierLabel) },
                             singleLine = true,
                             enabled = !form.busy,
+                            shape = RoundedCornerShape(8.dp),
+                            colors = authFieldColors(),
                             keyboardOptions = KeyboardOptions(
                                 keyboardType = KeyboardType.Email,
                                 imeAction = ImeAction.Next,
@@ -177,15 +191,18 @@ fun SignInScreen(
                         )
                         Spacer(modifier = Modifier.height(12.dp))
 
+                        val passphraseLabel = if (restoring) "Recovery credential" else "Passphrase"
+                        AuthLabel(text = passphraseLabel)
+                        Spacer(modifier = Modifier.height(6.dp))
                         OutlinedTextField(
                             value = passphrase,
                             onValueChange = { passphrase = it },
-                            label = {
-                                Text(if (restoring) "Recovery credential" else "Passphrase")
-                            },
+                            placeholder = { Text(passphraseLabel) },
                             singleLine = true,
                             enabled = !form.busy,
                             visualTransformation = PasswordVisualTransformation(),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = authFieldColors(),
                             keyboardOptions = KeyboardOptions(
                                 keyboardType = KeyboardType.Password,
                                 imeAction = ImeAction.Done,
@@ -197,6 +214,10 @@ fun SignInScreen(
                             OutlinedButton(
                                 onClick = { pickContainer.launch(arrayOf("*/*")) },
                                 enabled = !form.busy,
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = Color.White,
+                                ),
+                                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.5f)),
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
                                 Text(
@@ -218,9 +239,12 @@ fun SignInScreen(
                                 }
                             },
                             enabled = !form.busy && (!restoring || containerUri != null),
+                            shape = RoundedCornerShape(8.dp),
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = extra.bannerB,
+                                containerColor = extra.bannerA,
                                 contentColor = extra.bannerInk,
+                                disabledContainerColor = Color(0xFF8A8C50),
+                                disabledContentColor = extra.bannerInk,
                             ),
                             modifier = Modifier.fillMaxWidth().height(52.dp),
                         ) {
@@ -250,6 +274,9 @@ fun SignInScreen(
                             creating -> TextButton(
                                 onClick = { creating = false },
                                 enabled = !form.busy,
+                                colors = TextButtonDefaults.textButtonColors(
+                                    contentColor = Color.White.copy(alpha = 0.9f),
+                                ),
                             ) {
                                 Text("I already have an account")
                             }
@@ -257,6 +284,9 @@ fun SignInScreen(
                             restoring -> TextButton(
                                 onClick = { restoring = false },
                                 enabled = !form.busy,
+                                colors = TextButtonDefaults.textButtonColors(
+                                    contentColor = Color.White.copy(alpha = 0.9f),
+                                ),
                             ) {
                                 Text("Sign in instead")
                             }
@@ -265,12 +295,18 @@ fun SignInScreen(
                                 TextButton(
                                     onClick = { creating = true },
                                     enabled = !form.busy,
+                                    colors = TextButtonDefaults.textButtonColors(
+                                        contentColor = Color.White.copy(alpha = 0.9f),
+                                    ),
                                 ) {
                                     Text("Create a new account")
                                 }
                                 TextButton(
                                     onClick = { restoring = true },
                                     enabled = !form.busy,
+                                    colors = TextButtonDefaults.textButtonColors(
+                                        contentColor = Color.White.copy(alpha = 0.9f),
+                                    ),
                                 ) {
                                     Text("Restore from a backup")
                                 }
@@ -282,8 +318,8 @@ fun SignInScreen(
                             Text(
                                 text = "Your identity key is generated here and never sent to the server. " +
                                     "Signing out destroys it.",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 12.sp,
+                                color = Color.White.copy(alpha = 0.82f),
                                 textAlign = TextAlign.Center,
                             )
                         }
@@ -291,8 +327,8 @@ fun SignInScreen(
                             Text(
                                 text = "The backup carries your account root. This device joins the account " +
                                     "as a new device, with a fresh identity of its own.",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 12.sp,
+                                color = Color.White.copy(alpha = 0.82f),
                                 textAlign = TextAlign.Center,
                             )
                         }
@@ -302,6 +338,42 @@ fun SignInScreen(
         }
     }
 }
+
+/** A form label on the auth card: white, 13sp, bold — the one weight the front door uses. */
+@Composable
+private fun AuthLabel(text: String) {
+    Text(
+        text = text,
+        fontSize = 13.sp,
+        fontWeight = FontWeight.Bold,
+        color = Color.White,
+    )
+}
+
+/**
+ * The white-filled input treatment the front door's fields share: an 8dp radius, the dark teal
+ * ink the reference puts on a white field, and the quiet border a flat input separates with. One
+ * declaration rather than five copies of the same colour block, kept next to the fields it serves.
+ */
+@Composable
+private fun authFieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedContainerColor = Color.White,
+    unfocusedContainerColor = Color.White,
+    disabledContainerColor = Color.White.copy(alpha = 0.85f),
+    focusedTextColor = Color(0xFF0F4C5C),
+    unfocusedTextColor = Color(0xFF0F4C5C),
+    disabledTextColor = Color(0xFF0F4C5C).copy(alpha = 0.7f),
+    focusedPlaceholderColor = Color(0xFF0F4C5C).copy(alpha = 0.55f),
+    unfocusedPlaceholderColor = Color(0xFF0F4C5C).copy(alpha = 0.55f),
+    disabledPlaceholderColor = Color(0xFF0F4C5C).copy(alpha = 0.45f),
+    focusedLabelColor = Color(0xFF0F4C5C),
+    unfocusedLabelColor = Color(0xFF0F4C5C).copy(alpha = 0.8f),
+    disabledLabelColor = Color(0xFF0F4C5C).copy(alpha = 0.55f),
+    focusedBorderColor = Color(0xFF0F4C5C).copy(alpha = 0.45f),
+    unfocusedBorderColor = Color(0xFF0F4C5C).copy(alpha = 0.28f),
+    disabledBorderColor = Color(0xFF0F4C5C).copy(alpha = 0.2f),
+    cursorColor = Color(0xFF0F4C5C),
+)
 
 /**
  * The "Server" disclosure, mirroring `clients/web/src/components/server-form.tsx`.
@@ -343,6 +415,10 @@ private fun ServerDisclosure(
         TextButton(
             onClick = { open = !open },
             enabled = enabled,
+            colors = TextButtonDefaults.textButtonColors(
+                contentColor = Color.White,
+                disabledContentColor = Color.White.copy(alpha = 0.6f),
+            ),
             modifier = Modifier.fillMaxWidth(),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -353,7 +429,7 @@ private fun ServerDisclosure(
                 Text(
                     text = serverSummary(host, port, gatewayPort, transport),
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = Color.White.copy(alpha = 0.82f),
                 )
             }
         }
@@ -363,7 +439,7 @@ private fun ServerDisclosure(
         Text(
             text = "Transport",
             style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = Color.White.copy(alpha = 0.82f),
         )
         TransportChoice(
             value = value.transport,
@@ -418,7 +494,7 @@ private fun ServerDisclosure(
                     "length-prefixed frames. If the server does not offer the TCP listener, " +
                     "this client falls back to WebSocket and says so.",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = Color.White.copy(alpha = 0.82f),
             )
         }
         if (value.transport == Transport.Quic) {
@@ -427,7 +503,7 @@ private fun ServerDisclosure(
                 text = "QUIC is a second option; it needs a server with the QUIC listener " +
                     "enabled. This build still connects over WebSocket.",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = Color.White.copy(alpha = 0.82f),
             )
         }
         if (open) {
@@ -441,6 +517,8 @@ private fun ServerDisclosure(
                     placeholder = { Text("migo.example.com") },
                     singleLine = true,
                     enabled = enabled,
+                    shape = RoundedCornerShape(8.dp),
+                    colors = authFieldColors(),
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Uri,
                         imeAction = ImeAction.Next,
@@ -456,6 +534,8 @@ private fun ServerDisclosure(
                         placeholder = { Text("18080") },
                         singleLine = true,
                         enabled = enabled,
+                        shape = RoundedCornerShape(8.dp),
+                        colors = authFieldColors(),
                         keyboardOptions = KeyboardOptions(
                             keyboardType = KeyboardType.Number,
                             imeAction = ImeAction.Next,
@@ -470,6 +550,8 @@ private fun ServerDisclosure(
                         placeholder = { Text("(REST + 1)") },
                         singleLine = true,
                         enabled = enabled,
+                        shape = RoundedCornerShape(8.dp),
+                        colors = authFieldColors(),
                         keyboardOptions = KeyboardOptions(
                             keyboardType = KeyboardType.Number,
                             imeAction = ImeAction.Next,
@@ -481,7 +563,7 @@ private fun ServerDisclosure(
                 Text(
                     text = "Scheme",
                     style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = Color.White.copy(alpha = 0.82f),
                 )
                 SchemeChoice(
                     transport = transport,
@@ -523,6 +605,10 @@ private fun ServerDisclosure(
                             }
                         },
                         enabled = enabled,
+                        colors = TextButtonDefaults.textButtonColors(
+                            contentColor = Color.White,
+                            disabledContentColor = Color.White.copy(alpha = 0.6f),
+                        ),
                     ) {
                         Text("Use this server")
                     }
@@ -576,7 +662,7 @@ private fun TransportChoice(
                 Text(
                     text = transportLabel(option),
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
+                    color = Color.White.copy(alpha = 0.9f),
                 )
             }
         }

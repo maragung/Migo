@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -97,7 +98,7 @@ fun FriendsScreen(
                             onAccept = { onRespond(entry.userId, true) },
                             onDecline = { onRespond(entry.userId, false) },
                         )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                     }
                     items(outgoing, key = { "out-" + it.userId.value }) { entry ->
                         PersonSummaryRow(
@@ -107,7 +108,7 @@ fun FriendsScreen(
                             action = "Message",
                             onAction = { onStartDirect(entry.userId) },
                         )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                     }
                 }
 
@@ -123,7 +124,7 @@ fun FriendsScreen(
                             action = "Message",
                             onAction = { onStartDirect(entry.userId) },
                         )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                     }
                 }
 
@@ -138,7 +139,7 @@ fun FriendsScreen(
                             onAdd = { onRequest(person.accountId) },
                             onStartDirect = { onStartDirect(person.accountId) },
                         )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                     }
                 }
 
@@ -151,7 +152,7 @@ fun FriendsScreen(
                             onAdd = { onRequest(person.accountId) },
                             onStartDirect = { onStartDirect(person.accountId) },
                         )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                     }
                 }
 
@@ -171,19 +172,17 @@ private fun RequestRow(
     onDecline: () -> Unit,
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 58.dp)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Monogram(name = userId.value, size = 36.dp)
+        ListRowAvatar(name = userId.value)
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = shortId(userId),
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-            )
-            OneLine(text = note)
+            ListRowName(text = shortId(userId))
+            ListRowLine(text = note)
         }
         TextButton(onClick = onDecline, enabled = !busy) { Text("Decline") }
         Button(onClick = onAccept, enabled = !busy) { Text("Accept") }
@@ -199,19 +198,17 @@ private fun SuggestionRow(
     onStartDirect: () -> Unit,
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 58.dp)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Monogram(name = person.displayName, size = 36.dp)
+        ListRowAvatar(name = person.displayName)
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = person.displayName,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-            )
-            OneLine(
+            ListRowName(text = person.displayName)
+            ListRowLine(
                 text = "@" + person.username +
                     (if (person.mutualFriends > 0) " · ${person.mutualFriends} mutual" else ""),
             )

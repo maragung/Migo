@@ -140,10 +140,11 @@ impl AuthState {
 
 /// Draws whichever auth screen is current.
 ///
-/// The v3 front door is the reference's: the cyan gradient fills the viewport in either theme —
-/// the sign-in screen is the one surface that ignores the theme, because it is the front door and
-/// the front door does not change with the lights — and the form sits on a card rather than on
-/// the gradient, so every field, label and hint keeps the palette ink it already had.
+/// The front door is the reference's: the flat turquoise ground fills the viewport in either
+/// theme — the sign-in screen is the one surface that ignores the theme, because it is the front
+/// door and the front door does not change with the lights — and the form sits on a flat deep-teal
+/// card with a translucent white hairline, so every field, label and hint keeps the palette ink it
+/// already had.
 pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState, screen: Screen) {
     let colors = palette(context.theme);
     widgets::gradient_rect_vertical(
@@ -154,9 +155,9 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState, scree
         colors.login_c,
     );
 
-    // The theme control, top-right on the gradient: the one setting available before a session
+    // The theme control, top-right on the ground: the one setting available before a session
     // exists. Sun while dark, moon while light — the glyph names the theme one click would arrive
-    // at, drawn as the gradient's own ink.
+    // at, drawn as the ground's own ink.
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         ui.add_space(space::MD);
         let glyph = if context.theme.is_dark() {
@@ -182,13 +183,15 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState, scree
     });
 
     // A fixed-width card centred in the window. A form stretched across a wide monitor puts the
-    // label a hand's width from its field, and the eye loses the pairing.
+    // label a hand's width from its field, and the eye loses the pairing. The card is the
+    // reference's flat deep teal with a translucent white hairline — the one colour the palettes
+    // do not name, because the front door is its own surface in either theme.
     let column = 380.0_f32.min(ui.available_width() - space::XL * 2.0);
     ui.vertical_centered(|ui| {
         ui.add_space((ui.available_height() * 0.08).min(64.0));
         egui::Frame::new()
-            .fill(colors.surface_raised)
-            .stroke(egui::Stroke::new(1.0, colors.border))
+            .fill(egui::Color32::from_rgb(0x0b, 0x6f, 0x82))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(71)))
             .corner_radius(egui::CornerRadius::same(crate::theme::radius::LG))
             .inner_margin(egui::Margin::same(space::XL as i8))
             .show(ui, |ui| {

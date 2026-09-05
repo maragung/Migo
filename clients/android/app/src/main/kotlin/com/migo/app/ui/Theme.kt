@@ -13,13 +13,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
 /**
- * The app's colours and type — the Migo design system, mapped to Material.
+ * The app's colours and type — the Migo flat design language, mapped to Material.
  *
- * The canonical source is `shared/design/tokens.json` (v3), mirrored into the web client's CSS
- * variables and the desktop client's `theme.rs`. The values here are that same palette: a teal
- * accent on a cream light surface, a cyan accent on a deep-teal dark surface, and the orange banner
- * and login gradients riding above both. Dynamic colour would hand the palette to whatever
- * wallpaper is set, and this app has one place where colour carries meaning rather than
+ * Solid colours only: no gradients, no glossy highlights, no inset shadows. Separation comes from
+ * 1px borders in the teal line colour and a single soft elevation shadow on floating surfaces.
+ * The light scheme is the canonical palette — a teal accent over a soft teal page ground, white
+ * cards, the flat orange banner above both — and the dark scheme is the same family carried into
+ * deep teal surfaces with a brighter teal accent. Dynamic colour would hand the palette to
+ * whatever wallpaper is set, and this app has one place where colour carries meaning rather than
  * decoration: an outgoing message is the primary colour and an incoming one is the surface, which
  * is how somebody reads a thread at a glance. A wallpaper that flattened that contrast would make
  * the conversation harder to read, so the two schemes are fixed here and checked against each
@@ -30,85 +31,85 @@ import androidx.compose.ui.unit.sp
  * [MigoExtra] carries the tokens the Material scheme has no role for — the faint ink, the gold the
  * badges and honours use, the tab strip's own surface — through a CompositionLocal, so a composable
  * reads them exactly like a `colorScheme` colour instead of reaching for a hardcoded value that
- * would not follow the theme. The banner and login gradients are the same values in both themes
- * (the front door does not change with the lights), but they live here rather than as loose
- * constants so every client of the palette reads them from one place.
+ * would not follow the theme. The banner and the login ground hold the same flat values in both
+ * themes (the front door does not change with the lights): the banner is the one flat orange, the
+ * login ground the one flat turquoise, each stated as three equal stops so the call sites that
+ * once painted a gradient now paint a flat field without needing edits of their own.
  */
 
-// The accent — the reference's teal in light, its cyan in dark. Both carry their contrast ink
-// (white in light, the deep teal #062a30 in dark) above 4.5:1.
-private val AccentLight = Color(0xFF00838F)
-private val AccentBrightLight = Color(0xFF00ACC1)
-private val AccentDark = Color(0xFF00BCD4)
-private val AccentBrightDark = Color(0xFF26C6DA)
+// The accent — the restyle's teal in light, its brighter twin in dark. Both carry white ink.
+private val AccentLight = Color(0xFF1287A0)
+private val AccentDark = Color(0xFF1FA5C0)
 
-// The Migo surfaces, straight from the token table: cream and white in light, deep teal in dark.
+// The Migo surfaces, straight from the restyle's palette: white cards on the soft teal page
+// ground in light; deep teal surfaces over a darker ground in dark.
 private val SurfaceLight = Color(0xFFFFFFFF)
-private val SurfaceDimLight = Color(0xFFFDFBF7)
-private val SurfaceSunkenLight = Color(0xFFF5F1E8)
-private val SurfaceDark = Color(0xFF122023)
-private val SurfaceDimDark = Color(0xFF0C1517)
-private val SurfaceSunkenDark = Color(0xFF1A2C30)
+private val PageGroundLight = Color(0xFFEEF7FA)
+private val SurfaceDark = Color(0xFF0C3A46)
+private val PageGroundDark = Color(0xFF072A33)
+private val SurfaceVariantDark = Color(0xFF114B5A)
 
 private val LightScheme = lightColorScheme(
     primary = AccentLight,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFCCE9ED),
-    onPrimaryContainer = Color(0xFF00363D),
-    secondary = Color(0xFF059669),
-    onSecondary = Color.White,
-    secondaryContainer = Color(0xFFD1F5E5),
-    onSecondaryContainer = Color(0xFF00391F),
-    tertiary = Color(0xFFD97706),
+    primaryContainer = Color(0xFFCDE9F0),
+    onPrimaryContainer = Color(0xFF0D4353),
+    secondary = Color(0xFF3FCE6B),
+    onSecondary = Color(0xFF06230F),
+    secondaryContainer = Color(0xFFD9F5E4),
+    onSecondaryContainer = Color(0xFF0B3D1F),
+    tertiary = Color(0xFFF5820C),
     onTertiary = Color.White,
-    tertiaryContainer = Color(0xFFFBEDD2),
-    onTertiaryContainer = Color(0xFF3F2400),
-    background = SurfaceDimLight,
-    onBackground = Color(0xFF1E2B2E),
+    tertiaryContainer = Color(0xFFFDEEE0),
+    onTertiaryContainer = Color(0xFF7A3D05),
+    background = PageGroundLight,
+    onBackground = Color(0xFF134E5E),
     surface = SurfaceLight,
-    onSurface = Color(0xFF1E2B2E),
-    surfaceVariant = SurfaceSunkenLight,
-    onSurfaceVariant = Color(0xFF5C6A6D),
-    outline = Color(0xFFD3CAB4),
-    outlineVariant = Color(0xFFE8E2D4),
-    error = Color(0xFFE03131),
+    onSurface = Color(0xFF134E5E),
+    surfaceVariant = PageGroundLight,
+    onSurfaceVariant = Color(0xFF5F8A99),
+    outline = Color(0xFFCFE3EA),
+    outlineVariant = Color(0xFFE3F0F4),
+    error = Color(0xFFE5503C),
     onError = Color.White,
-    errorContainer = Color(0xFFFFE1E1),
-    onErrorContainer = Color(0xFFC92A2A),
+    errorContainer = Color(0xFFFCE4E0),
+    onErrorContainer = Color(0xFF8A2A1E),
 )
 
 private val DarkScheme = darkColorScheme(
     primary = AccentDark,
-    onPrimary = Color(0xFF062A30),
-    primaryContainer = Color(0xFF0E4A52),
-    onPrimaryContainer = Color(0xFFCCEEF2),
-    secondary = Color(0xFF2FCE7E),
-    onSecondary = Color(0xFF00391D),
-    secondaryContainer = Color(0xFF005028),
-    onSecondaryContainer = Color(0xFFBDF5D6),
-    tertiary = Color(0xFFFCC419),
-    onTertiary = Color(0xFF332800),
-    tertiaryContainer = Color(0xFF55430F),
-    onTertiaryContainer = Color(0xFFFFE2A6),
-    background = SurfaceDimDark,
-    onBackground = Color(0xFFE9F4F5),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFF0E4A58),
+    onPrimaryContainer = Color(0xFFCDEEF5),
+    secondary = Color(0xFF52DE7E),
+    onSecondary = Color(0xFF06230F),
+    secondaryContainer = Color(0xFF0B4A26),
+    onSecondaryContainer = Color(0xFFC8F7D9),
+    tertiary = Color(0xFFF5820C),
+    onTertiary = Color.White,
+    tertiaryContainer = Color(0xFF5C3A10),
+    onTertiaryContainer = Color(0xFFFFE0B8),
+    background = PageGroundDark,
+    onBackground = Color(0xFFE6F4F8),
     surface = SurfaceDark,
-    onSurface = Color(0xFFE9F4F5),
-    surfaceVariant = SurfaceSunkenDark,
-    onSurfaceVariant = Color(0xFF9DB4B8),
-    outline = Color(0xFF355158),
-    outlineVariant = Color(0xFF24393E),
-    error = Color(0xFFFF5C7A),
-    onError = Color(0xFF2B060D),
-    errorContainer = Color(0xFF5C1120),
-    onErrorContainer = Color(0xFFFFC2CF),
+    onSurface = Color(0xFFE6F4F8),
+    surfaceVariant = SurfaceVariantDark,
+    onSurfaceVariant = Color(0xFFA3C4CD),
+    outline = Color(0xFF1A5866),
+    outlineVariant = Color(0xFF12414E),
+    error = Color(0xFFFF7A68),
+    onError = Color(0xFF3B0A05),
+    errorContainer = Color(0xFF5C1A12),
+    onErrorContainer = Color(0xFFFFD5CE),
 )
 
 /**
  * The tokens Material's scheme has no slot for, themed light and dark like the rest.
  *
- * The banner and login gradients hold the same values in both themes, so a screen that paints them
- * never has to ask which theme it is in — the front door is the one surface that ignores the lights.
+ * The banner and login grounds hold the same values in both themes, so a screen that paints them
+ * never has to ask which theme it is in — the front door is the one surface that ignores the
+ * lights. Each is stated as three equal stops because the call sites still paint a three-stop
+ * brush: equal stops make the brush flat, which is the restyle's rule.
  */
 data class MigoExtra(
     /** The tertiary ink: hints, placeholders, timestamps' fainter sibling. */
@@ -119,52 +120,52 @@ data class MigoExtra(
     val bubbleIn: Color,
     /** The $MIG coin accent on the wallet's cards. */
     val coin: Color,
-    /** The tab strip's surface: the reference's teal bar in light, its deepened twin in dark. */
+    /** The tab strip's surface: the deep teal bar, the same in both themes. */
     val nav: Color,
-    /** The active tab's fill: the accent-bright token, the cyan an active chip wears. */
+    /** The active tab's fill: a solid white pill, carrying the teal-head ink. */
     val navActive: Color,
-    /** The banner gradient, orange into amber — the profile banner's three stops. */
+    /** The banner band, flat orange — the profile banner's three equal stops. */
     val bannerA: Color,
     val bannerB: Color,
     val bannerC: Color,
-    /** The ink the banner gradient carries: white, on every stop. */
+    /** The ink the banner band carries: white, on every stop. */
     val bannerInk: Color,
-    /** The login gradient, the front door's three cyan stops. */
+    /** The login ground, flat turquoise — the front door's three equal stops. */
     val loginA: Color,
     val loginB: Color,
     val loginC: Color,
 )
 
 private val ExtraLight = MigoExtra(
-    faint = Color(0xFF9AA5A7),
-    gold = Color(0xFFD97706),
-    bubbleIn = SurfaceSunkenLight,
-    coin = Color(0xFFD97706),
-    nav = Color(0xFF00838F),
-    navActive = AccentBrightLight,
-    bannerA = Color(0xFFEA580C),
-    bannerB = Color(0xFFF97316),
-    bannerC = Color(0xFFF59E0B),
+    faint = Color(0xFF8FB0BB),
+    gold = Color(0xFFF0A912),
+    bubbleIn = PageGroundLight,
+    coin = Color(0xFFF0A912),
+    nav = Color(0xFF0D4353),
+    navActive = Color.White,
+    bannerA = Color(0xFFF5820C),
+    bannerB = Color(0xFFF5820C),
+    bannerC = Color(0xFFF5820C),
     bannerInk = Color.White,
-    loginA = Color(0xFF0093AF),
-    loginB = Color(0xFF00ACC1),
-    loginC = Color(0xFF00838F),
+    loginA = Color(0xFF0F96AD),
+    loginB = Color(0xFF0F96AD),
+    loginC = Color(0xFF0F96AD),
 )
 
 private val ExtraDark = MigoExtra(
-    faint = Color(0xFF64808A),
-    gold = Color(0xFFFCC419),
-    bubbleIn = SurfaceSunkenDark,
-    coin = Color(0xFFFCC419),
-    nav = Color(0xFF0F3A40),
-    navActive = AccentBrightDark,
-    bannerA = Color(0xFFEA580C),
-    bannerB = Color(0xFFF97316),
-    bannerC = Color(0xFFF59E0B),
+    faint = Color(0xFF7BA3AD),
+    gold = Color(0xFFF0A912),
+    bubbleIn = SurfaceVariantDark,
+    coin = Color(0xFFF0A912),
+    nav = Color(0xFF0D4353),
+    navActive = Color.White,
+    bannerA = Color(0xFFF5820C),
+    bannerB = Color(0xFFF5820C),
+    bannerC = Color(0xFFF5820C),
     bannerInk = Color.White,
-    loginA = Color(0xFF0093AF),
-    loginB = Color(0xFF00ACC1),
-    loginC = Color(0xFF00838F),
+    loginA = Color(0xFF0F96AD),
+    loginB = Color(0xFF0F96AD),
+    loginC = Color(0xFF0F96AD),
 )
 
 /** Reads the extra tokens like a `colorScheme` colour: `LocalMigoExtra.current.gold`. */
@@ -181,10 +182,10 @@ private val MigoTypography = Typography().let { base ->
     base.copy(
         // A conversation title is a name, and names read better slightly heavier than the default.
         titleMedium = base.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-        // Message text: the default body size, with the line height opened up, because a bubble is a
-        // narrow measure and tight leading is what makes long messages hard to scan.
+        // Message text: the default body size, with the line height opened up, because a transcript
+        // is a narrow measure and tight leading is what makes long messages hard to scan.
         bodyLarge = base.bodyLarge.copy(lineHeight = 22.sp),
-        // Timestamps and the sender name above a group bubble.
+        // Timestamps and the sender name on a transcript line.
         labelSmall = TextStyle(fontSize = 11.sp, lineHeight = 14.sp, fontWeight = FontWeight.Medium),
     )
 }
