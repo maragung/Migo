@@ -31,7 +31,6 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TextButtonDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -274,7 +273,7 @@ fun SignInScreen(
                             creating -> TextButton(
                                 onClick = { creating = false },
                                 enabled = !form.busy,
-                                colors = TextButtonDefaults.textButtonColors(
+                                colors = ButtonDefaults.textButtonColors(
                                     contentColor = Color.White.copy(alpha = 0.9f),
                                 ),
                             ) {
@@ -284,7 +283,7 @@ fun SignInScreen(
                             restoring -> TextButton(
                                 onClick = { restoring = false },
                                 enabled = !form.busy,
-                                colors = TextButtonDefaults.textButtonColors(
+                                colors = ButtonDefaults.textButtonColors(
                                     contentColor = Color.White.copy(alpha = 0.9f),
                                 ),
                             ) {
@@ -295,7 +294,7 @@ fun SignInScreen(
                                 TextButton(
                                     onClick = { creating = true },
                                     enabled = !form.busy,
-                                    colors = TextButtonDefaults.textButtonColors(
+                                    colors = ButtonDefaults.textButtonColors(
                                         contentColor = Color.White.copy(alpha = 0.9f),
                                     ),
                                 ) {
@@ -304,7 +303,7 @@ fun SignInScreen(
                                 TextButton(
                                     onClick = { restoring = true },
                                     enabled = !form.busy,
-                                    colors = TextButtonDefaults.textButtonColors(
+                                    colors = ButtonDefaults.textButtonColors(
                                         contentColor = Color.White.copy(alpha = 0.9f),
                                     ),
                                 ) {
@@ -415,7 +414,7 @@ private fun ServerDisclosure(
         TextButton(
             onClick = { open = !open },
             enabled = enabled,
-            colors = TextButtonDefaults.textButtonColors(
+            colors = ButtonDefaults.textButtonColors(
                 contentColor = Color.White,
                 disabledContentColor = Color.White.copy(alpha = 0.6f),
             ),
@@ -605,7 +604,7 @@ private fun ServerDisclosure(
                             }
                         },
                         enabled = enabled,
-                        colors = TextButtonDefaults.textButtonColors(
+                        colors = ButtonDefaults.textButtonColors(
                             contentColor = Color.White,
                             disabledContentColor = Color.White.copy(alpha = 0.6f),
                         ),

@@ -3,6 +3,7 @@ package com.migo.app.ui
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -394,19 +395,21 @@ private fun DirectoryRow(room: RoomSummary, joining: Boolean, onJoin: () -> Unit
     ) {
         ListRowAvatar(name = room.name)
         Spacer(modifier = Modifier.width(10.dp))
+        // Read once: the topic is a property of another module, and a smart cast of it is
+        // not something the compiler can promise across that boundary. The ceiling is read
+        // beside it because both the Column's occupancy bar and the join button below ask for
+        // it — a local declared inside the Column's content lambda is invisible to the row
+        // that holds the button.
+        val topic = room.topic
+        val max = room.maxMembers
         Column(modifier = Modifier.weight(1f)) {
             ListRowName(text = room.name)
             ListRowLine(text = "${room.memberCount} members · ${room.onlineCount} online" + (room.category?.let { " · $it" } ?: ""))
-            // Read once: the topic is a property of another module, and a smart cast of it is
-            // not something the compiler can promise across that boundary.
-            val topic = room.topic
             if (!topic.isNullOrBlank()) ListRowLine(text = topic)
             // The occupancy pill and bar, under the counts: live online count over the room's
-            // ceiling, "2/33", the product's own shorthand for how full a room is. Read the
-            // ceiling once, for the same cross-module smart-cast reason as the topic; a room
+            // ceiling, "2/33", the product's own shorthand for how full a room is. A room
             // that declares no ceiling simply shows neither, and the count line above still
             // carries the raw numbers.
-            val max = room.maxMembers
             if (max != null && max > 0L) {
                 OccupancyBar(current = room.onlineCount, capacity = max)
             }
