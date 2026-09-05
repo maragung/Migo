@@ -109,6 +109,11 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAnyServerCert {
 }
 
 /// Connects a quinn client to `addr`, skipping chain verification (see [`AcceptAnyServerCert`]).
+///
+/// The client endpoint binds to the loopback of the same family as the target: quinn does not
+/// translate families, so dialing an IPv6 server from an IPv4 client socket (or the reverse)
+/// fails at the OS layer before the handshake ever starts. A Migo client picks its local bind
+/// the same way.
 async fn connect(addr: SocketAddr) -> anyhow::Result<quinn::Connection> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut client_crypto = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
@@ -120,7 +125,12 @@ async fn connect(addr: SocketAddr) -> anyhow::Result<quinn::Connection> {
         .set_certificate_verifier(Arc::new(AcceptAnyServerCert { provider }));
 
     let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?;
-    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse()?)?;
+    let local: std::net::SocketAddr = if addr.is_ipv6() {
+        "[::1]:0".parse()?
+    } else {
+        "127.0.0.1:0".parse()?
+    };
+    let mut endpoint = quinn::Endpoint::client(local)?;
     endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(quic_config)));
     let connecting = endpoint.connect(addr, "migo-node")?;
     let connection = tokio::time::timeout(STEP, connecting)
@@ -193,6 +203,53 @@ async fn the_listener_accepts_a_stream_and_ends_the_session_on_an_invalid_frame(
     })
     .await
     .expect("the session ends promptly after an invalid frame");
+
+    let _ = send.finish();
+}
+
+/// IPv6 is not a second-class transport: a node bound to the IPv6 loopback serves the same
+/// TLS 1.3 handshake, stream framing, and session lifecycle over `::1` that it serves over
+/// `127.0.0.1`, and a deployment that binds `[::]` serves both families from the one listener.
+/// The client side of this test binds its local endpoint to the matching family, exactly the way
+/// a Migo client must when its operator hands it an IPv6 endpoint.
+#[tokio::test]
+async fn the_listener_serves_the_ipv6_loopback_the_same_way() {
+    let app = build_app(&[("MIGO_QUIC__BIND", "[::1]:0")]).await;
+    let addr = app.quic_bind.expect("the listener is bound");
+    assert!(
+        addr.is_ipv6(),
+        "an [::1] bind must report an IPv6 socket address, got {addr}"
+    );
+
+    let connection = connect(addr)
+        .await
+        .expect("the TLS 1.3 handshake completes over IPv6");
+
+    let (mut send, mut recv) = tokio::time::timeout(STEP, connection.open_bi())
+        .await
+        .expect("opening an IPv6 stream does not stall")
+        .expect("the stream opens");
+
+    // The same hostile prefix as the IPv4 test, on purpose: the codec and the session driver
+    // must not care which family the datagrams arrived on.
+    send.write_all(&u32::MAX.to_be_bytes())
+        .await
+        .expect("the hostile prefix is written");
+
+    tokio::time::timeout(STEP, async {
+        let mut scratch = [0u8; 8];
+        loop {
+            match recv.read(&mut scratch).await {
+                Ok(Some(0)) | Ok(None) => break,
+                Ok(Some(_)) => continue,
+                Err(quinn::ReadError::ConnectionLost(_)) => break,
+                Err(quinn::ReadError::Reset(_)) => break,
+                Err(error) => panic!("unexpected read error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("the IPv6 session ends promptly after an invalid frame");
 
     let _ = send.finish();
 }

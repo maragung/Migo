@@ -2,7 +2,13 @@ package com.migo.core.domain
 
 import com.migo.core.protocol.Acknowledged
 import com.migo.core.protocol.GameAction
+import com.migo.core.protocol.GameCatalogueEntry
+import com.migo.core.protocol.GameCatalogueResponse
 import com.migo.core.protocol.GameEvent
+import com.migo.core.protocol.GameId
+import com.migo.core.protocol.GameStart
+import com.migo.core.protocol.GameViewWire
+import com.migo.core.protocol.GiftCatalogueReq
 import com.migo.core.protocol.Op
 import com.migo.core.wire.Id
 import java.util.concurrent.ConcurrentHashMap
@@ -94,6 +100,60 @@ class GamesDomain(
      * generic room UI can still show something meaningful.
      */
     fun onEvent(listener: Listener<GameEvent>): Subscription = listeners.add(listener)
+
+    /**
+     * Reads the node's game catalogue: one entry per kind it can referee.
+     *
+     * The catalogue is the node's own and versionless — the same posture as the gift catalogue — so
+     * a client re-reads it to build its menu each session rather than caching it. Each entry carries
+     * the slug [startGame] accepts and the player counts a client needs to know which games it can
+     * even offer.
+     */
+    suspend fun getCatalogue(): List<GameCatalogueEntry> {
+        val request = GiftCatalogueReq()
+        val response = rpc.call(
+            Op.GAME_CATALOGUE,
+            { w -> request.encode(w) },
+            { r -> GameCatalogueResponse.decode(r) },
+        )
+        return response.games
+    }
+
+    /**
+     * Starts a game in a conversation and resolves with the opening view.
+     *
+     * `slug` is a catalogue entry's slug. The wire names no opponents, so in this build a start can
+     * open the single-player guessing game and nothing else — the server refuses a multi-player kind
+     * with "wrong number of players" rather than inventing an opponent on the caller's behalf, and
+     * that refusal surfaces here as a [com.migo.core.wire.WireError]. Nothing is published to the
+     * conversation on start: the reply carries the opening view to the caller alone, and the other
+     * members hear of the game when its first move publishes a [GameEvent].
+     */
+    suspend fun startGame(conversationId: Id, slug: String): GameViewWire {
+        val request = GameStart(conversationId, slug)
+        return rpc.call(
+            Op.GAME_START,
+            { w -> request.encode(w) },
+            { r -> GameViewWire.decode(r) },
+        )
+    }
+
+    /**
+     * Reads one game's current view, as the caller is allowed to see it.
+     *
+     * The view is redacted per viewer by the server, so this is also how a player learns the outcome
+     * of their own move: [submit]'s reply is a bare ack, and a move's substance — a guess's
+     * higher/lower, a board — lives in the fresh view, not in the published events, which say only
+     * *that* somebody moved.
+     */
+    suspend fun getView(gameId: Id): GameViewWire {
+        val request = GameId(gameId)
+        return rpc.call(
+            Op.GAME_VIEW,
+            { w -> request.encode(w) },
+            { r -> GameViewWire.decode(r) },
+        )
+    }
 
     /**
      * Submits an action to a game.

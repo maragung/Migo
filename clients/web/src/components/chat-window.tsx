@@ -373,8 +373,10 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
       }));
   }, [members, accountId, profiles]);
 
+  // The pane is a flex column (see .thread-pane): the transcript takes what is left and the
+  // composer stays pinned to the window's bottom edge.
   return (
-    <div className="thread-pane" style={{ height: '100%' }}>
+    <div className="thread-pane">
       <header className="thread-header">
         {isDirect && peerId !== null ? (
           <button

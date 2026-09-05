@@ -13,7 +13,7 @@
  *      that read the sign off anything else (or guessed a direction for `adjustment`) would show
  *      money moving the wrong way — invisible to any schema check, because the number is still
  *      there, just wrong.
- *   3. **The send flow never hides the price.** The picker states the gift's coin price beside
+ *   3. **The send flow never hides the price.** The picker states the gift's $MIG price beside
  *      the recipient choice, so the spend is agreed before the recipient is.
  */
 
@@ -79,7 +79,7 @@ test('the gift grid renders every catalogue entry with its price, category, and 
       disabled={false}
     />,
   );
-  for (const expect of ['Rose', 'Cake', '10 coins', '75 coins', 'flora', 'food']) {
+  for (const expect of ['Rose', 'Cake', '$MIG 10', '$MIG 75', 'flora', 'food']) {
     assert.ok(markup.includes(expect), `the catalogue card lost its "${expect}" line`);
   }
   // One Send control per gift, and each is clickable while no flow is in flight.
@@ -179,7 +179,7 @@ test('the recipient picker shows the price, the friends, and the username search
     />,
   );
   assert.ok(markup.includes('Send Rose'), 'the picker must name the gift being sent');
-  assert.ok(markup.includes('10 coins'), 'the picker must state the price before the recipient');
+  assert.ok(markup.includes('$MIG 10'), 'the picker must state the price before the recipient');
   // Friends by their display names, each with their own send control.
   assert.ok(markup.includes('Ada'));
   assert.ok(markup.includes('Grace'));

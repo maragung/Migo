@@ -570,12 +570,19 @@ export function MobileHome({
         />
         <SheetAction
           icon="settings"
-          label="Edit Profile & Settings"
+          label="Settings"
           onClick={() => fromSheet(() => onOpenWindow('settings'))}
         />
         <SheetAction
+          icon="shield"
+          label="My Account"
+          sub="Username · email · key file"
+          onClick={() => fromSheet(() => onOpenWindow('account'))}
+        />
+        <SheetAction
           icon="wallet"
-          label="My Credits & TopUp"
+          label="My Wallet"
+          sub="$MIG balance · gifts · AVAX"
           onClick={() => fromSheet(() => onOpenWindow('wallet'))}
         />
         <SheetAction

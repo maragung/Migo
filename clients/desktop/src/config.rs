@@ -90,10 +90,27 @@ pub struct ServerEndpoint {
 }
 
 /// The set of hosts the local-dev policy applies to: a plain WebSocket is allowed there.
+///
+/// An IPv6 loopback counts in both spellings — `::1` the way a user types it and `[::1]` the way
+/// [`parse_host`] stores it.
 #[allow(dead_code)] // Used once the auth form's "is this dev?" branch is wired.
 pub fn is_loopback_host(host: &str) -> bool {
     let lowered = host.to_ascii_lowercase();
-    lowered == "localhost" || lowered == "127.0.0.1" || lowered == "::1"
+    lowered == "localhost" || lowered == "127.0.0.1" || lowered == "::1" || lowered == "[::1]"
+}
+
+/// The host with any IPv6 brackets stripped, the form a socket or the OS resolver takes.
+///
+/// [`ServerEndpoint::host`] stores an IPv6 literal bracketed, because a bracket is the only way
+/// an IPv6 literal can sit next to a `:port` in a URL or an authority; the dial paths (TCP
+/// resolve, QUIC connect) need the bare address back, and they all come through here.
+pub fn dial_host(host: &str) -> &str {
+    if let Some(inner) = host.strip_prefix('[') {
+        if let Some(bare) = inner.strip_suffix(']') {
+            return bare;
+        }
+    }
+    host
 }
 
 /// The dev-policy default: plain TCP on plain HTTP, with the gateway on the next port.
@@ -152,10 +169,14 @@ impl std::error::Error for ServerEndpointError {}
 
 /// Parses a `host` or `host:port` shorthand into its parts.
 ///
-/// Three inputs are recognised:
+/// Four inputs are recognised:
 ///   - `host` -- bare, e.g. `migo.example.com`. The port is the `port_fallback`.
 ///   - `host:port` -- a single colon and a numeric port, e.g. `migo.example.com:8443`.
-///   - Anything else (multiple colons, non-numeric port) is rejected.
+///   - An IPv6 literal, bare (`::1`, `2a0a:4cc0::1`) or bracketed with a port
+///     (`[::1]:18081`). The bracket is the only delimiter that can sit an IPv6 literal
+///     next to a port, so the stored host keeps it: `[::1]`. A bare literal is stored
+///     bracketed too, for one shape everywhere downstream.
+///   - Anything else (unclosed bracket, non-numeric port) is rejected.
 ///
 /// Reserved for the desktop settings UI; not yet wired in this build. The flag is
 /// here so the public API does not get pruned.
@@ -165,11 +186,37 @@ pub fn parse_host(input: &str, port_fallback: u16) -> Result<(String, u16), Serv
     if trimmed.is_empty() {
         return Err(ServerEndpointError("host is required".to_owned()));
     }
+    // The bracketed IPv6 form: `[::1]` or `[::1]:18081`. Everything before the closing bracket is
+    // the literal; everything after it is empty or `:port`.
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        let close = rest.find(']').ok_or_else(|| {
+            ServerEndpointError(format!("an IPv6 literal must close its bracket: {trimmed}"))
+        })?;
+        let host = format!("[{}]", &rest[..close]).to_ascii_lowercase();
+        let tail = &rest[close + 1..];
+        let port = if tail.is_empty() {
+            port_fallback
+        } else {
+            let port_text = tail.strip_prefix(':').ok_or_else(|| {
+                ServerEndpointError(format!(
+                    "nothing may follow a bracketed host but a port: {trimmed}"
+                ))
+            })?;
+            parse_port(port_text)?
+        };
+        return Ok((host, port));
+    }
     let colon = trimmed.find(':');
     let (host, port) = match colon {
         None => (trimmed.to_ascii_lowercase(), port_fallback),
         Some(index) => {
             if trimmed[index + 1..].contains(':') {
+                // Multiple colons without brackets: a bare IPv6 literal, or a mistake. The
+                // address parser is the arbiter — it accepts `::1` and `2a0a:4cc0::1` and
+                // refuses everything a user meant as `host:port`.
+                if trimmed.parse::<std::net::IpAddr>().is_ok() {
+                    return Ok((format!("[{}]", trimmed.to_ascii_lowercase()), port_fallback));
+                }
                 return Err(ServerEndpointError(format!(
                     "host cannot contain more than one colon: {trimmed}"
                 )));
@@ -178,19 +225,24 @@ pub fn parse_host(input: &str, port_fallback: u16) -> Result<(String, u16), Serv
             if host.is_empty() {
                 return Err(ServerEndpointError(format!("host is empty: {trimmed}")));
             }
-            let port_text = &trimmed[index + 1..];
-            let port = port_text.parse::<u16>().map_err(|_| {
-                ServerEndpointError(format!("port is not a whole number: {port_text}"))
-            })?;
-            if port == 0 {
-                return Err(ServerEndpointError(format!(
-                    "port is out of range (1..65535): {port_text}"
-                )));
-            }
+            let port = parse_port(&trimmed[index + 1..])?;
             (host, port)
         }
     };
     Ok((host, port))
+}
+
+/// Parses the port text of a `host:port` shorthand, with the form-level message.
+fn parse_port(port_text: &str) -> Result<u16, ServerEndpointError> {
+    let port = port_text
+        .parse::<u16>()
+        .map_err(|_| ServerEndpointError(format!("port is not a whole number: {port_text}")))?;
+    if port == 0 {
+        return Err(ServerEndpointError(format!(
+            "port is out of range (1..65535): {port_text}"
+        )));
+    }
+    Ok(port)
 }
 
 /// Validates the numeric fields. Split out so the constructor and the parser share it.
@@ -274,18 +326,37 @@ pub fn server_endpoint_from_url(url: &str) -> ServerEndpoint {
         Some(pair) => pair,
         None => (rest, ""),
     };
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((host, port_text)) if !host.is_empty() && !port_text.is_empty() => {
-            let parsed = port_text.parse::<u16>().ok();
-            match parsed {
-                Some(0) | None => (host.to_ascii_lowercase(), default_port_for(rest_scheme)),
-                Some(value) => (host.to_ascii_lowercase(), value),
+    // A bracketed IPv6 authority is `[::1]` or `[::1]:8080`: the bracket closes before the port
+    // colon, so an rsplit on `:` cannot find the port (it would split inside the literal).
+    let (host, port) = if let Some(after_open) = authority.strip_prefix('[') {
+        let close = after_open.find(']').map(|index| index + 1);
+        let Some(close) = close else {
+            return default_loopback_server_endpoint("localhost", 18080);
+        };
+        let host = authority[..=close].to_ascii_lowercase();
+        let tail = &authority[close + 1..];
+        let port = match tail.strip_prefix(':') {
+            Some(port_text) => port_text
+                .parse::<u16>()
+                .unwrap_or(default_port_for(rest_scheme)),
+            None if tail.is_empty() => default_port_for(rest_scheme),
+            _ => default_port_for(rest_scheme),
+        };
+        (host, port)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port_text)) if !host.is_empty() && !port_text.is_empty() => {
+                let parsed = port_text.parse::<u16>().ok();
+                match parsed {
+                    Some(0) | None => (host.to_ascii_lowercase(), default_port_for(rest_scheme)),
+                    Some(value) => (host.to_ascii_lowercase(), value),
+                }
             }
+            _ => (
+                authority.to_ascii_lowercase(),
+                default_port_for(rest_scheme),
+            ),
         }
-        _ => (
-            authority.to_ascii_lowercase(),
-            default_port_for(rest_scheme),
-        ),
     };
     let scheme = match rest_scheme {
         RestScheme::Https => Scheme::Ws(WsScheme::Wss),
@@ -347,6 +418,54 @@ mod tests {
     }
 
     #[test]
+    fn parse_host_accepts_the_ipv6_forms() {
+        // A bare literal takes the fallback port and is stored bracketed — one shape everywhere
+        // downstream, whether the user typed the brackets or not.
+        let (host, port) = parse_host("::1", 18080).unwrap();
+        assert_eq!(host, "[::1]");
+        assert_eq!(port, 18080);
+        let (host, port) = parse_host("2a0a:4cc0:80:2bc8::1", 8080).unwrap();
+        assert_eq!(host, "[2a0a:4cc0:80:2bc8::1]");
+        assert_eq!(port, 8080);
+
+        // The bracketed forms: bracket closed, port split off it.
+        let (host, port) = parse_host("[::1]:18081", 18080).unwrap();
+        assert_eq!(host, "[::1]");
+        assert_eq!(port, 18081);
+        let (host, port) = parse_host("[::1]", 18080).unwrap();
+        assert_eq!(host, "[::1]");
+        assert_eq!(port, 18080);
+    }
+
+    #[test]
+    fn parse_host_rejects_a_broken_bracket() {
+        // Unclosed bracket, and something other than a port after the bracket.
+        assert!(parse_host("[::1", 18080).is_err());
+        assert!(parse_host("[::1]abc", 18080).is_err());
+        assert!(parse_host("[::1]:", 18080).is_err());
+    }
+
+    #[test]
+    fn dial_host_strips_the_ipv6_bracket_only() {
+        assert_eq!(dial_host("[::1]"), "::1");
+        assert_eq!(dial_host("localhost"), "localhost");
+        assert_eq!(dial_host("127.0.0.1"), "127.0.0.1");
+        // A bracket that is not a pair is left alone: it is not this helper's call.
+        assert_eq!(dial_host("[::1"), "[::1");
+    }
+
+    #[test]
+    fn is_loopback_recognises_the_three_loopback_spellings() {
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("::1"));
+        assert!(is_loopback_host("[::1]"));
+        assert!(is_loopback_host("LOCALHOST"));
+        assert!(!is_loopback_host("migo.example.com"));
+        assert!(!is_loopback_host("192.168.1.1"));
+    }
+
+    #[test]
     fn default_loopback_uses_plain_tcp_pair() {
         let endpoint = default_loopback_server_endpoint("localhost", 18080);
         assert_eq!(endpoint.host, "localhost");
@@ -369,16 +488,6 @@ mod tests {
     }
 
     #[test]
-    fn is_loopback_recognises_the_three_loopback_spellings() {
-        assert!(is_loopback_host("localhost"));
-        assert!(is_loopback_host("127.0.0.1"));
-        assert!(is_loopback_host("::1"));
-        assert!(is_loopback_host("LOCALHOST"));
-        assert!(!is_loopback_host("migo.example.com"));
-        assert!(!is_loopback_host("192.168.1.1"));
-    }
-
-    #[test]
     fn derived_urls_match_the_documented_shapes() {
         let endpoint = default_loopback_server_endpoint("localhost", 18080);
         assert_eq!(rest_base_url(&endpoint), "http://localhost:18080");
@@ -397,5 +506,30 @@ mod tests {
         let endpoint = default_internet_server_endpoint("migo.example.com", 443);
         assert_eq!(rest_base_url(&endpoint), "https://migo.example.com:443");
         assert_eq!(gateway_url(&endpoint), "wss://migo.example.com:443/ws");
+    }
+
+    #[test]
+    fn an_ipv6_url_parses_with_its_brackets_kept() {
+        // With a port: the bracket closes before the port colon.
+        let endpoint = server_endpoint_from_url("http://[::1]:8080");
+        assert_eq!(endpoint.host, "[::1]");
+        assert_eq!(endpoint.port, 8080);
+
+        // Without a port: an rsplit on `:` would split inside the literal — the bracketed branch
+        // is what keeps `::1` whole and supplies the default port.
+        let endpoint = server_endpoint_from_url("http://[::1]");
+        assert_eq!(endpoint.host, "[::1]");
+        assert_eq!(endpoint.port, 80);
+
+        // The derived URLs are valid as written: a bracketed host next to a port.
+        let endpoint = server_endpoint_from_url("http://[2a0a:4cc0:80:2bc8::1]:8080");
+        assert_eq!(
+            rest_base_url(&endpoint),
+            "http://[2a0a:4cc0:80:2bc8::1]:8080"
+        );
+        assert_eq!(
+            gateway_url(&endpoint),
+            "ws://[2a0a:4cc0:80:2bc8::1]:8081/ws"
+        );
     }
 }

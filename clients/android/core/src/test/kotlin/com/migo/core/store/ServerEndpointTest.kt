@@ -196,9 +196,33 @@ class ServerEndpointTest {
         assertTrue(ServerEndpoint.isLoopbackHost("localhost"))
         assertTrue(ServerEndpoint.isLoopbackHost("127.0.0.1"))
         assertTrue(ServerEndpoint.isLoopbackHost("::1"))
+        assertTrue(ServerEndpoint.isLoopbackHost("[::1]"))
         assertTrue(ServerEndpoint.isLoopbackHost("LOCALHOST"))
         assertTrue(!ServerEndpoint.isLoopbackHost("migo.example.com"))
         assertTrue(!ServerEndpoint.isLoopbackHost("192.168.1.1"))
+    }
+
+    @Test
+    fun fromRestUrl_parsesAnIpv6LiteralWithItsPort() {
+        // The bracket closes before the port colon; the host keeps the bracket so the derived
+        // URLs are valid as written.
+        val reparsed = ServerEndpoint.fromRestUrl("http://[::1]:8080")
+        assertEquals("[::1]", reparsed.host)
+        assertEquals(8080, reparsed.port)
+        assertEquals("http://[::1]:8080", reparsed.restBaseUrl())
+        assertEquals("ws://[::1]:8080/ws", reparsed.gatewayUrl())
+    }
+
+    @Test
+    fun fromRestUrl_parsesAnIpv6LiteralWithoutItsPort() {
+        // A plain `lastIndexOf(':')` would split inside the literal here — the bracket is the
+        // delimiter, and the default port arrives from the scheme.
+        val reparsed = ServerEndpoint.fromRestUrl("http://[::1]")
+        assertEquals("[::1]", reparsed.host)
+        assertEquals(80, reparsed.port)
+        val secure = ServerEndpoint.fromRestUrl("https://[2a0a:4cc0:80:2bc8::1]")
+        assertEquals("[2a0a:4cc0:80:2bc8::1]", secure.host)
+        assertEquals(443, secure.port)
     }
 
     @Test

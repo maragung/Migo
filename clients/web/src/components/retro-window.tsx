@@ -125,8 +125,10 @@ export function RetroWindow(p: RetroWindowProps): ReactNode {
     if (!r) {
       return;
     }
+    // The ceiling is the desk's own height — the viewport minus the taskbar's 34px — so a window
+    // can be resized to stand tall as the whole desk, not just most of it.
     const maxW = window.innerWidth - 30;
-    const maxH = window.innerHeight - 44;
+    const maxH = window.innerHeight - 34;
     setSize((prev) => {
       if (!prev) {
         return prev;

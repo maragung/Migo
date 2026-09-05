@@ -50,7 +50,8 @@ pub struct ProfileState {
     /// Why the last fetch or save was refused, in the server's own words. Filed rather than
     /// toasted because it belongs beside the form the user is looking at.
     failure: Option<String>,
-    /// The save was accepted: shown for one line's worth of frames, cleared by the next edit.
+    /// The last card arrived from a save rather than a fetch: the one-line "Profile saved."
+    /// is drawn on it, and the next save click clears it while the answer is in flight.
     saved: bool,
     /// The form's draft display name.
     display_name: String,
@@ -78,7 +79,11 @@ impl ProfileState {
     /// The drafts are re-seeded from the card because the card is the truth — the save reply
     /// is the same shape a fetch returns — and the privacy drafts reset to untouched, since
     /// the choice the user just made is now the current setting the server holds.
-    pub fn file(&mut self, profile: OwnProfile) {
+    ///
+    /// `saved` says which of the two the card is: a fetch must not claim "Profile saved." —
+    /// the pane would be praising the user for something they did not do, on a form they
+    /// have not touched yet.
+    pub fn file(&mut self, profile: OwnProfile, saved: bool) {
         self.display_name = profile.display_name.clone();
         self.bio = profile.bio.clone().unwrap_or_default();
         self.custom_status = profile.custom_status.clone().unwrap_or_default();
@@ -90,9 +95,23 @@ impl ProfileState {
         self.who_can_message = -1;
         self.who_can_add = -1;
         self.searchable = -1;
-        self.saved = true;
+        self.saved = saved;
         self.failure = None;
         self.profile = Some(profile);
+    }
+
+    /// The name the account goes by, for surfaces that are not this pane.
+    ///
+    /// `None` until a card has been read or saved, and `None` for a card with no display
+    /// name — in both cases the caller falls back to the username it already holds.
+    #[must_use]
+    pub fn shown_name(&self) -> Option<&str> {
+        let name = self
+            .profile
+            .as_ref()
+            .map(|profile| profile.display_name.as_str())
+            .unwrap_or_default();
+        (!name.is_empty()).then_some(name)
     }
 
     /// Files the reason a fetch or save was refused, keeping the form as it stands.

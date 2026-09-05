@@ -364,8 +364,8 @@ private fun MeCard(
 }
 
 /**
- * The account sheet: the avatar header with presence and credits, the presence pills, and the
- * panels the home tabs cannot carry — each a cover-the-screen panel with its own way back.
+ * The account sheet: the avatar header with presence and the $MIG balance, the presence pills, and
+ * the panels the home tabs cannot carry — each a cover-the-screen panel with its own way back.
  *
  * The presence pills publish straight through presence.set, keeping the status line; the log-out
  * row is the danger red and still asks before it acts.
@@ -472,7 +472,7 @@ private fun MeSheet(
         SheetAction(
             glyph = "$",
             label = "Store",
-            sub = "Credits, gifts and top-up",
+            sub = "The \$MIG wallet, gifts and on-chain AVAX",
             onClick = { onOpenSection(AppState.Section.WALLET) },
         )
         SheetAction(

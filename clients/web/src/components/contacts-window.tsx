@@ -6,7 +6,7 @@
  * The reference design does not give the messenger a fixed sidebar: the account's lists live in a
  * window of their own — a frame with the gloss title bar, teal nav pills (Friends, Rooms, Feed),
  * the orange me bar (avatar, blinking presence dot, click-to-edit status, presence dropdown, the
- * mail chip, the away moon), a frosted toolbar, and the credit band at the foot. It can be
+ * mail chip, the away moon), a frosted toolbar, and the balance band at the foot. It can be
  * minimized (its taskbar button restores it), maximized, resized from its edges, and closed —
  * closing it is asking to log out, because with the contacts window gone there is no desk left to
  * come back to.
@@ -53,11 +53,12 @@ const PRESENCE_OPTIONS: ReadonlyArray<PresenceStateValue> = [
 const MENU_ENTRIES: ReadonlyArray<{
   kind: Exclude<WinKind, 'chat'>;
   label: string;
-  icon: 'user' | 'settings' | 'wallet' | 'gift' | 'search' | 'game';
+  icon: 'user' | 'settings' | 'shield' | 'wallet' | 'gift' | 'search' | 'game';
 }> = [
   { kind: 'profile', label: 'My Profile', icon: 'user' },
-  { kind: 'settings', label: 'Edit Profile & Settings', icon: 'settings' },
-  { kind: 'wallet', label: 'My Credits & TopUp', icon: 'wallet' },
+  { kind: 'settings', label: 'Settings', icon: 'settings' },
+  { kind: 'account', label: 'My Account', icon: 'shield' },
+  { kind: 'wallet', label: 'My Wallet', icon: 'wallet' },
   { kind: 'search', label: 'Search', icon: 'search' },
   { kind: 'games', label: 'Games', icon: 'game' },
   { kind: 'store', label: 'Store', icon: 'gift' },
@@ -198,7 +199,9 @@ export function ContactsWindow({
       return;
     }
     const w = Math.min(Math.max(r.sw + (event.clientX - r.sx), 250), window.innerWidth - 24);
-    const h = Math.min(Math.max(r.sh + (event.clientY - r.sy), 400), window.innerHeight - 108);
+    // The height ceiling is the desk's own: the viewport minus the taskbar's 34px and the
+    // window's own margins, so the main window can be resized as tall as the screen.
+    const h = Math.min(Math.max(r.sh + (event.clientY - r.sy), 400), window.innerHeight - 58);
     onResize(w, h);
   }
   function onResizeUp(): void {
@@ -431,7 +434,7 @@ export function ContactsWindow({
         {tab === 'feed' ? <SpacePanel onOpenConversation={onOpenConversation} /> : null}
       </div>
 
-      {/* Footer credits */}
+      {/* Footer balance */}
       <ListFooter tab={tab} />
 
       {/* presence dropdown, portalled so the window never clips it */}

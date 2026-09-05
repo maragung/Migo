@@ -99,8 +99,9 @@ const CASCADE_SLOTS: usize = 8;
 /// Where a conversation window is born: clear of the Contacts window's default home on the
 /// left, near the top of the desktop — the reference's own first position.
 const CHAT_CASCADE_ORIGIN: Pos2 = Pos2::new(296.0, 54.0);
-/// The Contacts window's birthplace: the left edge, below the watermark the desktop carries.
-pub const CONTACTS_POS: Pos2 = Pos2::new(12.0, 64.0);
+/// The Contacts window's birthplace: the desk's top-left corner. The surface carries no mark of
+/// its own — the desk is plain teal, and the windows own the whole height.
+pub const CONTACTS_POS: Pos2 = Pos2::new(12.0, 12.0);
 /// The Contacts window's first size, the reference's own 360×560.
 pub const CONTACTS_SIZE: Vec2 = Vec2::new(360.0, 560.0);
 /// A conversation window's first size.
@@ -270,51 +271,6 @@ pub fn floating(
     .default_size(default_size)
     .min_size(min_size)
     .collapsible(true)
-}
-
-/// The desktop surface: the ground the windows float on, with the brand standing quietly in
-/// the corner the eye lands on first.
-///
-/// Subtle on purpose — this is a desktop, not a splash screen. The mark is the same diamond the
-/// taskbar and the auth screen carry, in translucent white so the surface says "Migo" without
-/// shouting it over the windows.
-pub fn surface(ui: &mut Ui) {
-    let at = ui.max_rect().min + Vec2::new(20.0, 12.0);
-    // The diamond, drawn faint.
-    let side = 24.0;
-    let half = side / 2.0;
-    let center = at + Vec2::new(half, half);
-    ui.painter().add(egui::Shape::convex_polygon(
-        vec![
-            egui::pos2(center.x, center.y - half),
-            egui::pos2(center.x + half, center.y),
-            egui::pos2(center.x, center.y + half),
-            egui::pos2(center.x - half, center.y),
-        ],
-        Color32::from_white_alpha(56),
-        Stroke::NONE,
-    ));
-    // The word beside it, and one honest line under both.
-    let word = ui.painter().layout_no_wrap(
-        "Migo".to_owned(),
-        FontId::proportional(font::SUBTITLE),
-        Color32::from_white_alpha(72),
-    );
-    ui.painter().galley(
-        at + Vec2::new(side + space::SM, center.y - word.size().y / 2.0),
-        word,
-        Color32::WHITE,
-    );
-    let line = ui.painter().layout_no_wrap(
-        "end-to-end encrypted".to_owned(),
-        FontId::proportional(font::TINY),
-        Color32::from_white_alpha(90),
-    );
-    ui.painter().galley(
-        at + Vec2::new(side + space::SM, center.y + font::SUBTITLE * 0.6),
-        line,
-        Color32::WHITE,
-    );
 }
 
 /// One button's-worth of window for the taskbar to draw.

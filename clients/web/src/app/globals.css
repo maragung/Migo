@@ -1319,11 +1319,23 @@ main {
 
 /* --- thread --- */
 
+/* The thread is a column: the transcript takes what is left and scrolls inside itself, and the
+   composer block is pinned to the window's bottom edge — the composer never scrolls away with the
+   history and never floats mid-window when the history is short, on the desk's windows and the
+   phone's full-bleed surface alike (see `.mtab-window`, which reaches the viewport's foot). */
+.thread-pane {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
 /* The view header is the design's teal band: the room or peer's name in white on the nav colour,
    with its controls as translucent chips. It reads as the window's title bar, which is what it is
    — the transcript below is white, and the two need to be told apart at a glance. */
 .thread-header {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
@@ -1624,6 +1636,7 @@ main {
 
 /* The in-thread search bar, dropped between the header and the transcript. */
 .thread-search {
+  flex-shrink: 0;
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--panel);
@@ -1683,6 +1696,7 @@ main {
 }
 
 .typing-indicator {
+  flex-shrink: 0;
   padding: 4px clamp(10px, 5vw, 48px) 0;
   height: 20px;
   font-size: 12px;
@@ -1723,7 +1737,7 @@ main {
 
 /* The wrap stacks whatever sits above or below the input row: the reply bar, the upload line. */
 /* ── The list footer band ─────────────────────────────────────────────────────────────────────
-   Both windows in the reference close with the same pale band: the credit balance on the left, a
+   Both windows in the reference close with the same pale band: the $MIG balance on the left, a
    small lowercase hint on the right saying what the open list responds to. It is the composer's
    band on the other panel — same tint, same hairline — which is what makes the two columns read
    as one window rather than two apps side by side. Micro type, because a status bar that competes
@@ -1739,7 +1753,7 @@ main {
   font-size: var(--fs-micro);
   flex-shrink: 0;
 }
-.list-footer-credits {
+.list-footer-balance {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -1748,7 +1762,7 @@ main {
   white-space: nowrap;
 }
 /* The coin is the design's gold, the one warm mark on a cool band. */
-.list-footer-credits .coin-mark {
+.list-footer-balance .coin-mark {
   color: var(--gold);
   flex-shrink: 0;
 }
@@ -1769,6 +1783,7 @@ main {
 .composer-wrap {
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
   gap: 5px;
   padding: 7px 10px;
   border-top: 1px solid var(--footer-line);
@@ -4360,14 +4375,13 @@ button.activity-row-btn:focus-visible {
  * The desktop-OS shell: the turquoise desk, the windows, the taskbar, and the
  * phone's strip-and-sheet world underneath it.
  *
- * The messenger stopped being two panes and became a desk: a turquoise ground,
- * a watermark brand, and windows — draggable, resizable, minimizable,
- * maximizable — stacked in a click-won z-order, with a taskbar at the screen's
- * edge keeping one button per window. Below the PC breakpoint the same shell is
- * a 46px tab strip and full-bleed surfaces. Everything here is the reference
- * design's own skin, composed from the token scales above; the deep-teal chrome
- * (taskbar, chips) names its ink directly because it is the same in both
- * themes, the way the auth card's turquoise is.
+ * The messenger stopped being two panes and became a desk: a turquoise ground and
+ * windows — draggable, resizable, minimizable, maximizable — stacked in a click-won
+ * z-order, with a taskbar at the screen's edge keeping one button per window. Below
+ * the PC breakpoint the same shell is a 46px tab strip and full-bleed surfaces.
+ * Everything here is the reference design's own skin, composed from the token scales
+ * above; the deep-teal chrome (taskbar, chips) names its ink directly because it is
+ * the same in both themes, the way the auth card's turquoise is.
  * ========================================================================= */
 
 /* --- the desk --- */
@@ -4391,19 +4405,6 @@ button.activity-row-btn:focus-visible {
 }
 .desk-boot-brand {
   opacity: 0.8;
-}
-/* The watermark: whose desk this is, before any window opens. It never intercepts a
-   pointer — it is a mark on the ground, not a control. */
-.desk-mark {
-  position: absolute;
-  left: 20px;
-  top: 12px;
-  z-index: 0;
-  opacity: 0.9;
-  pointer-events: none;
-}
-.desk-mark-top {
-  top: 44px;
 }
 .desk-home {
   display: contents;
@@ -4501,6 +4502,13 @@ button.activity-row-btn:focus-visible {
   min-height: 0;
   flex: 1;
   flex-direction: column;
+}
+/* A panel window's body: the panel is the window's own scroll owner, so it takes the height the
+   title bar leaves and scrolls inside the frame — without this a long panel overflows past the
+   window's bottom edge, where the frame's overflow:hidden makes the tail unreachable. */
+.win-content > .panel {
+  flex: 1;
+  min-height: 0;
 }
 .win-body {
   background: var(--panel);
@@ -5387,17 +5395,18 @@ button.activity-row-btn:focus-visible {
 
 /* --- the phone's window and home surfaces --- */
 
-/* The active window on a phone: full-bleed below the strip, floating on the turquoise with
-   the strip's gap still showing above it. */
+/* The active window on a phone: full-bleed from below the strip to the bottom of the viewport.
+   The window reaches the screen's foot by design — the thread's composer sits at the bottom edge
+   of the device, not floating mid-screen on a tall one — so the height is whatever the distance
+   from the strip to the foot is, with no cap to stop it short. */
 .mtab-window {
   top: calc(var(--mtab-h) + 7px);
-  bottom: auto;
+  bottom: 0;
   left: 50%;
   right: auto;
   width: 100vw;
-  border-radius: 12px 12px 0 0;
-  height: min(calc(100vh - var(--mtab-h) - 7px), 860px);
-  height: min(calc(100dvh - var(--mtab-h) - 7px), 860px);
+  border-radius: 0;
+  height: auto;
   transform: translateX(-50%);
 }
 .mhome {

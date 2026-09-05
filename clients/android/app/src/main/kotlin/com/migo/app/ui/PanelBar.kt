@@ -91,7 +91,7 @@ fun PanelBar(
 fun panelTitle(section: AppState.Section): String = when (section) {
     AppState.Section.ALERTS -> "Alerts"
     AppState.Section.SEARCH -> "Search"
-    AppState.Section.WALLET -> "TopUp"
+    AppState.Section.WALLET -> "Wallet"
     AppState.Section.PROFILE -> "Profile"
     AppState.Section.ADMINS -> "Admins"
     AppState.Section.GAMES -> "Games"

@@ -51,7 +51,7 @@ export function Taskbar({
 }): ReactNode {
   const { client } = useMigo();
   const [now, setNow] = useState<Date | null>(null);
-  const [credits, setCredits] = useState<number | null>(null);
+  const [balance, setBalance] = useState<number | null>(null);
 
   // The clock starts on mount (never during a static render) and drifts no further than a
   // minute between ticks.
@@ -74,7 +74,7 @@ export function Taskbar({
       .getBalance()
       .then((wallet) => {
         if (!cancelled) {
-          setCredits(wallet.balance);
+          setBalance(wallet.balance);
         }
       })
       .catch(() => {});
@@ -118,10 +118,11 @@ export function Taskbar({
         })}
       </div>
 
-      {credits !== null ? (
+      {/* The on-chain $MIG balance, in the Wallet window's own vocabulary. */}
+      {balance !== null ? (
         <span className="task-chip" title="$MIG balance">
           <CoinMark size={14} />
-          {credits.toLocaleString()}
+          $MIG {balance.toLocaleString()}
         </span>
       ) : null}
       <span className="task-chip" title="Session time">

@@ -66,6 +66,44 @@ test('parseHost rejects an empty host portion or an input that has more than one
   assert.throws(() => parseHost('a:b:c', 18080), ServerEndpointError);
 });
 
+test('parseHost accepts the IPv6 forms and stores the host bracketed', () => {
+  // A bare literal takes the fallback port and is stored bracketed — one shape everywhere
+  // downstream, whether the user typed the brackets or not.
+  assert.deepEqual(parseHost('::1', 18080), { host: '[::1]', port: 18080 });
+  assert.deepEqual(parseHost('2a0a:4cc0:80:2bc8::1', 8080), {
+    host: '[2a0a:4cc0:80:2bc8::1]',
+    port: 8080,
+  });
+  // The bracketed forms: bracket closed, port split off it.
+  assert.deepEqual(parseHost('[::1]:18081', 18080), { host: '[::1]', port: 18081 });
+  assert.deepEqual(parseHost('[::1]', 18080), { host: '[::1]', port: 18080 });
+});
+
+test('parseHost rejects a broken bracket or a non-port tail on a bracketed host', () => {
+  assert.throws(() => parseHost('[::1', 18080), ServerEndpointError);
+  assert.throws(() => parseHost('[::1]abc', 18080), ServerEndpointError);
+  assert.throws(() => parseHost('[::1]:', 18080), ServerEndpointError);
+});
+
+test('an IPv6 endpoint derives valid bracketed URLs', () => {
+  const endpoint = {
+    ...defaultLoopbackServerEndpoint('migo.example.com'),
+    host: '[2a0a:4cc0:80:2bc8::1]',
+  };
+  assert.equal(restBaseUrl(endpoint), 'http://[2a0a:4cc0:80:2bc8::1]:18080');
+  assert.equal(gatewayUrl(endpoint), 'ws://[2a0a:4cc0:80:2bc8::1]:18081/ws');
+});
+
+test('serverEndpointFromUrl keeps an IPv6 literal bracketed, with or without a port', () => {
+  const withPort = serverEndpointFromUrl('http://[::1]:8080');
+  assert.equal(withPort.host, '[::1]');
+  assert.equal(withPort.port, 8080);
+
+  const withoutPort = serverEndpointFromUrl('http://[::1]');
+  assert.equal(withoutPort.host, '[::1]');
+  assert.equal(withoutPort.port, 80);
+});
+
 test('validatePorts rejects out-of-range numeric fields', () => {
   assert.throws(() => validatePorts(0, 18081), ServerEndpointError);
   assert.throws(() => validatePorts(18080, 65536), ServerEndpointError);
@@ -101,6 +139,7 @@ test('isLoopbackHost recognises the three loopback spellings and not a real doma
   assert.equal(isLoopbackHost('localhost'), true);
   assert.equal(isLoopbackHost('127.0.0.1'), true);
   assert.equal(isLoopbackHost('::1'), true);
+  assert.equal(isLoopbackHost('[::1]'), true);
   assert.equal(isLoopbackHost('LOCALHOST'), true);
   assert.equal(isLoopbackHost('migo.example.com'), false);
   assert.equal(isLoopbackHost('192.168.1.1'), false);

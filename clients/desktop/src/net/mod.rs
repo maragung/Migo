@@ -3576,6 +3576,13 @@ impl Worker {
         if result.ok {
             self.sink.toast("Gift sent", ToastKind::Success);
             self.request_wallet().await;
+        } else {
+            // The server judged the send — an unknown gift, an unroutable recipient, a balance
+            // that does not cover it — and refused it. The wire carries only the refusal, not
+            // the reason, so the toast says the fact it can stand behind; a silent refusal
+            // would leave a closed picker and no word about why nothing arrived.
+            self.sink
+                .toast("The server refused the gift send", ToastKind::Error);
         }
     }
 

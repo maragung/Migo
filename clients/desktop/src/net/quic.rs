@@ -64,12 +64,17 @@ pub struct QuicGateway {
     next_correlation: u32,
 }
 
-/// Builds a client endpoint that accepts the server's self-signed leaf.
+/// Builds a client endpoint that accepts the server's self-signed leaf, bound to the loopback of
+/// the target's family.
 ///
 /// Chain verification would fail by design: the leaf has no chain. The session is authenticated
 /// by the token carried in the HELLO, the same way a WebSocket session proves itself, so the
 /// honest configuration here skips the check the deployment never promised.
-fn client_endpoint() -> anyhow::Result<quinn::Endpoint> {
+///
+/// The local bind matches the target's family because quinn does not translate families: a
+/// client socket bound to `0.0.0.0` cannot reach an IPv6 server, and one bound to `[::]` in the
+/// wrong environment cannot reach an IPv4 one. `target` decides, the way it does on the wire.
+fn client_endpoint(target: std::net::IpAddr) -> anyhow::Result<quinn::Endpoint> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut crypto = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
         .with_protocol_versions(&[&rustls::version::TLS13])?
@@ -88,7 +93,12 @@ fn client_endpoint() -> anyhow::Result<quinn::Endpoint> {
     transport.keep_alive_interval(Some(KEEP_ALIVE));
     quic.transport_config(Arc::new(transport));
 
-    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
+    let local: std::net::SocketAddr = if target.is_ipv6() {
+        "[::]:0".parse()?
+    } else {
+        "0.0.0.0:0".parse()?
+    };
+    let mut endpoint = quinn::Endpoint::client(local)?;
     endpoint.set_default_client_config(quic);
     Ok(endpoint)
 }
@@ -101,14 +111,15 @@ pub async fn connect(
     endpoint: &crate::config::ServerEndpoint,
     hello: migo_protocol::Hello,
 ) -> Result<(QuicGateway, migo_protocol::Welcome), QuicError> {
+    // The host may be a bracketed IPv6 literal (the form `parse_host` stores); the address parser
+    // takes it bare.
     let addr = SocketAddr::new(
-        endpoint
-            .host
+        crate::config::dial_host(&endpoint.host)
             .parse::<std::net::IpAddr>()
             .map_err(|_| QuicError::UnresolvedHost)?,
         endpoint.gateway_port,
     );
-    let quic = client_endpoint().map_err(|_| QuicError::Transport)?;
+    let quic = client_endpoint(addr.ip()).map_err(|_| QuicError::Transport)?;
     let connecting = quic
         .connect(addr, SERVER_NAME)
         .map_err(|_| QuicError::Transport)?;

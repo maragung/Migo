@@ -32,7 +32,7 @@ export type RestScheme = 'Http' | 'Https';
 export type Scheme = WsScheme | QuicScheme;
 
 /** Hosts that are exempt from the "always use TLS" default. */
-const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '::1']);
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
 /**
  * A parsed host, lowercased and with any inline `:port` already split off into {@link ServerEndpoint.port}.
@@ -132,19 +132,20 @@ export function defaultSchemesForHost(host: string): { scheme: WsScheme; restSch
 }
 
 /**
- * Parses the two shorthand shapes a user is likely to type, and the split form for everything else.
+ * Parses the shorthand shapes a user is likely to type, and the split form for everything else.
  *
- * Three inputs are recognised:
+ * Four inputs are recognised:
  *
  *   - `host` — bare, e.g. `migo.example.com`. The port defaults to {@link DEFAULT_REST_PORT}.
  *   - `host:port` — a single colon and a numeric port, e.g. `migo.example.com:8443`. Anything else
- *     (no colon, no number) is rejected.
+ *     with more than one colon and no brackets is rejected.
+ *   - An IPv6 literal, bare (`::1`, `2a0a:4cc0::1`) or bracketed with a port (`[::1]:18080`).
+ *     The bracket is the only delimiter that can sit an IPv6 literal next to a port, so the
+ *     returned host keeps it — `[::1]` — and a bare literal is bracketed on the way in, so
+ *     there is one stored shape and every derived URL (`ws://[::1]:18081/ws`) is valid as
+ *     written.
  *   - Two arguments, the host and the port. The form uses this when the user has typed the two
  *     fields separately.
- *
- * The IPv6 form (`[::1]:18080`) is intentionally not supported yet; the brief is dev/local, the
- * production path uses hostnames, and adding a parser for a case the form has no field for would
- * mean untested code in the hot path of a register screen.
  */
 export function parseHost(
   input: string,
@@ -154,12 +155,34 @@ export function parseHost(
   if (trimmed === '') {
     throw new ServerEndpointError('host is required');
   }
+  // The bracketed IPv6 form: `[::1]` or `[::1]:18080`. Everything before the closing bracket is
+  // the literal; everything after it is empty or `:port`.
+  if (trimmed.startsWith('[')) {
+    const close = trimmed.indexOf(']');
+    if (close < 0) {
+      throw new ServerEndpointError(`an IPv6 literal must close its bracket: ${trimmed}`);
+    }
+    const host = trimmed.slice(0, close + 1).toLowerCase();
+    const tail = trimmed.slice(close + 1);
+    let port = portFallback;
+    if (tail !== '') {
+      if (!tail.startsWith(':')) {
+        throw new ServerEndpointError(`nothing may follow a bracketed host but a port: ${trimmed}`);
+      }
+      port = parsePortText(tail.slice(1), trimmed);
+    }
+    return { host, port };
+  }
   const colon = trimmed.indexOf(':');
   if (colon < 0) {
     return { host: trimmed.toLowerCase(), port: portFallback };
   }
-  // Multiple colons that are not the IPv6 bracket form are not a host:port the form can take.
+  // Multiple colons that are not the IPv6 bracket form are not a host:port the form can take —
+  // unless the whole input parses as a bare IPv6 literal, which is stored bracketed.
   if (trimmed.indexOf(':', colon + 1) >= 0) {
+    if (isIpv6Literal(trimmed)) {
+      return { host: `[${trimmed.toLowerCase()}]`, port: portFallback };
+    }
     throw new ServerEndpointError(`host cannot contain more than one colon: ${trimmed}`);
   }
   const host = trimmed.slice(0, colon).toLowerCase();
@@ -167,15 +190,35 @@ export function parseHost(
   if (host === '') {
     throw new ServerEndpointError(`host is empty: ${trimmed}`);
   }
+  return { host, port: parsePortText(portText, trimmed) };
+}
+
+/** Parses the port text of a `host:port` shorthand, with the message the form shows. */
+function parsePortText(portText: string, whole: string): number {
   const port = Number.parseInt(portText, 10);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new ServerEndpointError(`port is out of range (1..65535): ${portText}`);
   }
   if (portText !== port.toString()) {
     // Reject `8080abc` and friends — `parseInt` would accept them.
-    throw new ServerEndpointError(`port is not a whole number: ${portText}`);
+    throw new ServerEndpointError(`port is not a whole number: ${portText} in ${whole}`);
   }
-  return { host, port };
+  return port;
+}
+
+/**
+ * True when the text is a bare IPv6 literal — many colons, and the browser's address parser
+ * accepts it. Kept narrow on purpose: this is the arbiter for the "many colons" branch of
+ * {@link parseHost}, not a general address library.
+ */
+function isIpv6Literal(text: string): boolean {
+  if (!text.includes(':')) return false;
+  try {
+    new URL(`http://[${text}]:1`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** The REST port used when none is supplied. Matches the dev policy default. */

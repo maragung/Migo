@@ -197,6 +197,10 @@ impl App {
                     // The taskbar carries the balance, so the session's first reads include the
                     // wallet the same way they include the conversation list.
                     self.commands.push(Command::Wallet);
+                    // The account bar shows the profile's display name once a card has been read,
+                    // and a save later in the session re-reads nothing — the save's own reply is
+                    // the card. So the first reads include the profile too.
+                    self.commands.push(Command::OwnProfile);
                     // The account menu's owner gate: one whoami read per session, so the admins
                     // window's existence is offered only to the account the deployment names.
                     // The whoami never fails on standing, so the non-owner's answer is a
@@ -367,10 +371,11 @@ impl App {
                 Event::OwnProfile(result) => {
                     // The fetch's own answer, arriving as either a card or the reason there is
                     // none. Filed rather than toasted: the pane is on screen when it asks, so the
-                    // sentence belongs beside the form that caused it.
+                    // sentence belongs beside the form that caused it. A fetch is not a save, so
+                    // the card files without the pane's "Profile saved." line.
                     match result {
                         Ok(profile) => {
-                            self.profile_panel.file(profile);
+                            self.profile_panel.file(profile, false);
                         }
                         Err(reason) => {
                             self.profile_panel.fail(reason);
@@ -378,7 +383,9 @@ impl App {
                     }
                 }
                 Event::ProfileSaved(profile) => {
-                    self.profile_panel.file(profile);
+                    // A save's answer: the card re-seeds the form, the saved line shows, and the
+                    // account bar picks the display name up on the same event.
+                    self.profile_panel.file(profile, true);
                 }
                 Event::AvatarChangeFailed { reason } => {
                     // The avatar button's own refusal: filed beside the form the person is
@@ -665,7 +672,7 @@ impl App {
         for place in &self.desktop.sides {
             entries.push(TaskEntry {
                 id: desktop::side_id(*place),
-                label: place.right_label().to_owned(),
+                label: place.label().to_owned(),
                 kind: "",
                 unread: 0,
             });
@@ -753,6 +760,14 @@ impl App {
             .as_ref()
             .map(|account| account.username.clone())
             .unwrap_or_default();
+        // The account goes by its display name once the profile card is in — the session reads
+        // one on sign-in, and every save files a fresh one — with the handle one hover away,
+        // because @username is still how the account is found and added.
+        let shown_name = self
+            .profile_panel
+            .shown_name()
+            .map(str::to_owned)
+            .unwrap_or_else(|| username.clone());
         let coins = self.wallet.coins;
         // The state word for the bar's dot, resolved here so the layout closure never borrows
         // the connection it is drawn beside.
@@ -775,15 +790,16 @@ impl App {
             .inner_margin(egui::Margin::same(space::SM as i8))
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    widgets::banner_avatar(ui, self.theme, &username, 32.0);
+                    widgets::banner_avatar(ui, self.theme, &shown_name, 32.0);
                     ui.add_space(space::SM);
                     ui.vertical(|ui| {
                         ui.label(
-                            egui::RichText::new(widgets::elide(&username, 20))
+                            egui::RichText::new(widgets::elide(&shown_name, 20))
                                 .font(egui::FontId::proportional(font::SUBTITLE))
                                 .color(colors.banner_ink)
                                 .strong(),
-                        );
+                        )
+                        .on_hover_text(format!("@{username}"));
                         // The connection dot travels with the name: the one live fact about the
                         // session, stated where the account is.
                         ui.horizontal(|ui| {
@@ -841,7 +857,7 @@ impl App {
                                         menu = Some(Place::Profile);
                                         ui.close();
                                     }
-                                    if ui.button("My Credits & TopUp").clicked() {
+                                    if ui.button("My Wallet ($MIG)").clicked() {
                                         menu = Some(Place::Wallet);
                                         ui.close();
                                     }
@@ -1006,7 +1022,7 @@ impl App {
         let mut open = true;
         desktop::floating(
             self.theme,
-            place.right_label(),
+            place.label(),
             desktop::side_id(place),
             Desktop::side_cascade(index),
             desktop::SIDE_SIZE,
@@ -1193,10 +1209,9 @@ impl eframe::App for App {
                 colors.surface
             }))
             .show(ui, |ui| {
-                if signed_in {
-                    // The desktop surface: the ground the windows float on, brand and all.
-                    desktop::surface(ui);
-                } else {
+                // Signed in, the surface draws nothing: the desk is plain teal, only the ground
+                // the windows float on, and the windows own its whole height.
+                if !signed_in {
                     // The server is cloned for the context because the auth screen holds the
                     // endpoint mutably (its form edits it) and the context must not — one small
                     // struct per frame on the one screen that has a form, rather than reworking

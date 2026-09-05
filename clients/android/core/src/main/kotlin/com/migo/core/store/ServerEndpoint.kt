@@ -180,10 +180,24 @@ data class ServerEndpoint(
                 else -> return loopbackDefault()
             }
             val hostAndPort = authority.substringBefore('/').substringBefore('?')
-            val (host, port) = when (val colon = hostAndPort.lastIndexOf(':')) {
-                -1 -> hostAndPort.lowercase() to if (restScheme == RestScheme.Https) 443 else 80
-                else -> hostAndPort.substring(0, colon).lowercase() to
-                    (hostAndPort.substring(colon + 1).toIntOrNull() ?: (if (restScheme == RestScheme.Https) 443 else 80))
+            // A bracketed IPv6 authority is `[::1]` or `[::1]:8080`: the bracket closes before
+            // the port colon, so a plain `lastIndexOf(':')` would split inside the literal when
+            // the port is absent. The bracket is the delimiter, not the last colon.
+            val (host, port) = if (hostAndPort.startsWith("[")) {
+                val close = hostAndPort.indexOf(']')
+                if (close < 0) {
+                    return loopbackDefault()
+                }
+                val host = hostAndPort.substring(0, close + 1).lowercase()
+                val tail = hostAndPort.substring(close + 1)
+                val port = tail.removePrefix(":").toIntOrNull()
+                host to (port ?: if (restScheme == RestScheme.Https) 443 else 80)
+            } else {
+                when (val colon = hostAndPort.lastIndexOf(':')) {
+                    -1 -> hostAndPort.lowercase() to if (restScheme == RestScheme.Https) 443 else 80
+                    else -> hostAndPort.substring(0, colon).lowercase() to
+                        (hostAndPort.substring(colon + 1).toIntOrNull() ?: (if (restScheme == RestScheme.Https) 443 else 80))
+                }
             }
             // The origin's own scheme decides the posture. A `https://` origin keeps the
             // TLS pair with the gateway on the same port; an `http://` origin keeps the
@@ -221,10 +235,11 @@ data class ServerEndpoint(
                 GatewayScheme.Wss to RestScheme.Https
             }
 
-        /** Hosts the dev policy exempts from the "always TLS" default. */
+        /** Hosts the dev policy exempts from the "always TLS" default. `[::1]` is the bracketed
+         *  IPv6 loopback — the form a [ServerEndpoint] built from a URL carries. */
         fun isLoopbackHost(host: String): Boolean {
             val lowered = host.lowercase()
-            return lowered == "localhost" || lowered == "127.0.0.1" || lowered == "::1"
+            return lowered == "localhost" || lowered == "127.0.0.1" || lowered == "::1" || lowered == "[::1]"
         }
     }
 }

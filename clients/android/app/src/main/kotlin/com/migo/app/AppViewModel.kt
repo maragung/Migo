@@ -12,6 +12,7 @@ import com.migo.app.model.ChainTxRow
 import com.migo.app.model.ChatMessage
 import com.migo.app.model.ChatState
 import com.migo.app.model.ConversationRow
+import com.migo.app.model.GAME_STATUS_OPEN
 import com.migo.app.model.PreparedChainTx
 import com.migo.app.model.RoomLiveInfo
 import com.migo.app.model.RoomNotice
@@ -19,6 +20,8 @@ import com.migo.app.model.RosterMember
 import com.migo.app.model.TrackingChainTx
 import com.migo.app.model.VoteTally
 import com.migo.app.model.WindowTab
+import com.migo.app.model.gameEventLine
+import com.migo.app.model.gameLabelOf
 import com.migo.app.model.parseAvaxAmount
 import com.migo.app.session.MigoSession
 import com.migo.app.session.SessionHooks
@@ -43,6 +46,7 @@ import com.migo.core.net.TrackOutcome
 import com.migo.core.net.TrackResult
 import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.ConversationSummary
+import com.migo.core.protocol.GameEvent
 import com.migo.core.protocol.InboxItem
 import com.migo.core.protocol.LedgerEntryWire
 import com.migo.core.protocol.MemberChange
@@ -391,6 +395,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 open = ChatState(
                     conversationId = conversationId,
                     title = title,
+                    kind = row?.kind ?: ConversationKind.Room,
                     roomId = row?.roomId,
                     room = row?.roomId?.let { liveInfoFor(it) },
                     loading = true,
@@ -590,7 +595,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             AppState.Section.ALERTS -> if (!alertsLoaded()) loadAlerts()
             AppState.Section.PROFILE -> if (signedInState?.devices?.devices == null) loadDevices()
             AppState.Section.ADMINS -> if (signedInState?.admins?.owner == false) loadAdmins()
-            AppState.Section.GAMES -> Unit
+            AppState.Section.GAMES -> if (signedInState?.games?.catalogue == null) loadGameCatalogue()
         }
     }
 
@@ -895,6 +900,154 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
+
+    // --- games ---
+
+    /**
+     * The Games panel's read: the node's own catalogue, re-read per session because it is
+     * versionless server-side. The chat header's game launcher shares the same state, so the first
+     * "Games" press anywhere pays for every menu after it.
+     */
+    fun loadGameCatalogue() {
+        val live = session ?: return
+        signedIn { it.copy(games = it.games.copy(loading = true, failure = null)) }
+        viewModelScope.launch {
+            try {
+                val catalogue = live.client.games.getCatalogue()
+                signedIn { it.copy(games = it.games.copy(loading = false, catalogue = catalogue)) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(games = it.games.copy(loading = false, failure = readable(failure))) }
+            }
+        }
+    }
+
+    /**
+     * Starts a game in the open conversation. The reply is the opening view, and the server
+     * publishes nothing on start — so the "started" line in the thread is this client's own
+     * synthesis from the reply, exactly as the web client synthesizes its local row.
+     */
+    fun startGame(conversationId: Id, slug: String) {
+        val live = session ?: return
+        val chat = (_state.value as? AppState.SignedIn)?.open ?: return
+        if (chat.conversationId != conversationId || chat.gameBusy) return
+        inChat(conversationId) { it.copy(gameBusy = true) }
+        viewModelScope.launch {
+            try {
+                val view = live.client.games.startGame(conversationId, slug)
+                val label = gameLabelOf(view.kind)
+                val notice = RoomNotice(
+                    key = "game-start-" + view.gameId.value,
+                    text = "🎮 $label started",
+                    at = System.currentTimeMillis(),
+                )
+                inChat(conversationId) {
+                    it.copy(
+                        gameBusy = false,
+                        game = view,
+                        notices = (it.notices.filterNot { line -> line.key == notice.key } + notice)
+                            .takeLast(NOTICE_CAP),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                inChat(conversationId) { it.copy(gameBusy = false) }
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Submits a guess for the open chat's active game, then re-reads the view that carries the
+     * feedback: the ack says only that the move was accepted, and the higher/lower/correct lives in
+     * the fresh board, not in the reply and not in the published events.
+     */
+    fun submitGuess(conversationId: Id, value: Long) {
+        val live = session ?: return
+        val chat = (_state.value as? AppState.SignedIn)?.open ?: return
+        if (chat.conversationId != conversationId || chat.gameBusy) return
+        val game = chat.game ?: return
+        inChat(conversationId) { it.copy(gameBusy = true) }
+        viewModelScope.launch {
+            try {
+                live.client.games.submit(game.gameId, conversationId, "guess", listOf(value.toString()))
+                try {
+                    val view = live.client.games.getView(game.gameId)
+                    inChat(conversationId) {
+                        if (it.game?.gameId == view.gameId) it.copy(game = view) else it
+                    }
+                } catch (_: Exception) {
+                    // The move itself was accepted; the feedback line catches up on the next event.
+                }
+                inChat(conversationId) { it.copy(gameBusy = false) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                inChat(conversationId) { it.copy(gameBusy = false) }
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * A published game event for the open conversation: a line in the thread, and a view refresh.
+     *
+     * The wire field is named `roomId`, but the server publishes the *conversation* id there — one
+     * subject, two names — so that is the thread's own filter. The line prefers the server's own
+     * pre-rendered text when it carries one; the local grammar is the fallback for the builds whose
+     * events arrive bare. The view refresh is best-effort and coarsely scoped: one game per chat is
+     * what this build's launcher can produce, so the held view is replaced by the event's game
+     * whenever they match or whenever the held one is no longer open.
+     */
+    private fun gameEvent(event: GameEvent) {
+        val state = _state.value as? AppState.SignedIn ?: return
+        val chat = state.open ?: return
+        if (event.roomId != chat.conversationId) return
+        val held = chat.game
+        val label = if (held != null && held.gameId == event.gameId) gameLabelOf(held.kind) else null
+        val who = event.actorId?.let { actor ->
+            if (actor == state.accountId) "You" else nameOf(actor) ?: "Someone"
+        }
+        val line = event.text?.takeIf { it.isNotBlank() } ?: gameEventLine(event.event, who, label)
+        val notice = RoomNotice(
+            key = "game-" + event.gameId.value + "-" + event.stateVersion + "-" + event.event,
+            text = line,
+            at = System.currentTimeMillis(),
+        )
+        inChat(chat.conversationId) {
+            it.copy(
+                notices = (it.notices.filterNot { row -> row.key == notice.key } + notice)
+                    .takeLast(NOTICE_CAP),
+            )
+        }
+        // `moved` and `finished` mean the board changed under the view we hold; an unknown game
+        // needs its first read to render anything but a nameless line.
+        if (event.event != "moved" && event.event != "finished" && held?.gameId == event.gameId) return
+        val live = session ?: return
+        viewModelScope.launch {
+            try {
+                val view = live.client.games.getView(event.gameId)
+                inChat(chat.conversationId) { current ->
+                    if (view.conversationId != current.conversationId) {
+                        current
+                    } else {
+                        val heldNow = current.game
+                        val adopt = heldNow == null ||
+                            heldNow.gameId == view.gameId ||
+                            (heldNow.status != GAME_STATUS_OPEN && view.status == GAME_STATUS_OPEN)
+                        if (adopt) current.copy(game = view) else current
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // The row already says the move happened; the next event retries the read.
+            }
+        }
+    }
+
     fun loadSpace() {
         val live = session ?: return
         signedIn { it.copy(space = it.space.copy(loading = true)) }
@@ -2115,6 +2268,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         subscriptions.add(opened.client.onRoomMember { roomMember(it) })
         subscriptions.add(opened.client.onRoomState { roomState(it) })
         subscriptions.add(opened.client.onRoomVote { roomVote(it) })
+        // The game stream: a published event becomes a line in the open thread and a fresh view of
+        // the game it moved. Added with the rest so a reconnect re-bridges it with them.
+        subscriptions.add(opened.client.onGameEvent { gameEvent(it) })
         refreshConversations()
         // The wallet's combined read also fills the banner's $MIG balance, so the session starts
         // with it -- the desktop client issues its wallet command at sign-in for the same reason.
@@ -2170,7 +2326,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         return ActivityRow(
             key = "ledger-" + entry.txId.value,
             category = ActivityCategory.ECONOMY,
-            title = label + " " + signed + entry.amount + " MIG",
+            title = label + " " + signed + entry.amount + " \$MIG",
             at = entry.at,
         )
     }

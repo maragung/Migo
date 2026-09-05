@@ -1,12 +1,15 @@
 'use client';
 
 /**
- * The list window's footer band: the account's credit balance and what the open list responds to.
+ * The list window's footer band: the account's $MIG balance and what the open list responds to.
  *
  * The reference design closes its windows — the phone's home and the PC's contacts panel — with
- * the same pale band: a gold coin and "Credits: N" on the left, a small grey hint on the right
+ * the same pale band: a gold coin and "$MIG N" on the left, a small grey hint on the right
  * that changes with the list ("double-click to chat", "Migo activity"). It is a status bar in the
  * oldest sense: the two things you want at a glance and never want to go looking for.
+ *
+ * The balance is on-chain $MIG — the same coin the Wallet window states — so the band speaks the
+ * wallet's own vocabulary; there is no separate credits economy to name.
  *
  * The balance lives *here* rather than in the me bar because that is where the design puts it, and
  * because a figure stated twice in one column is a figure someone has to reconcile. The me bar
@@ -48,7 +51,7 @@ const TAB_HINTS: Readonly<Record<ListTab, string>> = {
  */
 export function ListFooter({ tab, hint }: { tab: ListTab; hint?: string }): ReactNode {
   const { client } = useMigo();
-  const [coins, setCoins] = useState<number | null>(null);
+  const [balance, setBalance] = useState<number | null>(null);
 
   useEffect(() => {
     if (!client) {
@@ -59,7 +62,7 @@ export function ListFooter({ tab, hint }: { tab: ListTab; hint?: string }): Reac
       .getBalance()
       .then((wallet) => {
         if (!cancelled) {
-          setCoins(wallet.balance);
+          setBalance(wallet.balance);
         }
       })
       .catch(() => {});
@@ -70,11 +73,11 @@ export function ListFooter({ tab, hint }: { tab: ListTab; hint?: string }): Reac
 
   return (
     <div className="list-footer">
-      <span className="list-footer-credits">
+      <span className="list-footer-balance">
         <CoinMark size={14} />
         {/* An unread balance says nothing rather than zero: a wallet that failed to load is not an
             empty one, and the difference matters to whoever is about to spend. */}
-        <span>{coins !== null ? `Credits: ${coins.toLocaleString()}` : 'Credits'}</span>
+        <span>{balance !== null ? `$MIG ${balance.toLocaleString()}` : '$MIG'}</span>
       </span>
       <span className="list-footer-hint">{hint ?? TAB_HINTS[tab]}</span>
     </div>

@@ -102,13 +102,13 @@ export function GiftPicker({
         {gifts.map((gift) => (
           <div key={gift.sku} className="gift-card">
             <div className="gift-name">{gift.name}</div>
-            <div className="gift-price">{gift.price} coins</div>
+            <div className="gift-price">$MIG {gift.price}</div>
             <button
               type="button"
               className="btn btn-primary"
               disabled={busy || target === null}
               onClick={() => target !== null && onSend(gift, target)}
-              aria-label={`Send ${gift.name} for ${gift.price} coins`}
+              aria-label={`Send ${gift.name} for ${gift.price} $MIG`}
             >
               Send
             </button>

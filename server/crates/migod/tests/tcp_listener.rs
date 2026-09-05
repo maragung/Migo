@@ -113,6 +113,46 @@ async fn the_listener_accepts_a_connection_and_ends_the_session_on_a_hostile_pre
     .expect("the session ends promptly after a hostile prefix");
 }
 
+/// IPv6 is not a second-class transport: a node bound to the IPv6 loopback serves the same
+/// length-prefixed sessions over `::1` that it serves over `127.0.0.1`, and a deployment that
+/// binds `[::]` (the dual-stack wildcard, which Linux accepts IPv4-mapped connections on) serves
+/// both families from the one listener. This test pins the first half of that promise — the
+/// listener, the framing, and the session lifecycle are family-independent.
+#[tokio::test]
+async fn the_listener_serves_the_ipv6_loopback_the_same_way() {
+    let app = build_app(&[("MIGO_TCP__BIND", "[::1]:0")]).await;
+    let addr = app.tcp_bind.expect("the listener is bound");
+    assert!(
+        addr.is_ipv6(),
+        "an [::1] bind must report an IPv6 socket address, got {addr}"
+    );
+
+    let mut stream = tokio::time::timeout(STEP, tokio::net::TcpStream::connect(addr))
+        .await
+        .expect("connecting over IPv6 does not stall")
+        .expect("the IPv6 connection is accepted");
+
+    // The same hostile prefix as the IPv4 test, on purpose: the codec and the session driver
+    // must not care which family the socket arrived on.
+    stream
+        .write_all(&u32::MAX.to_be_bytes())
+        .await
+        .expect("the hostile prefix is written");
+
+    tokio::time::timeout(STEP, async {
+        let mut scratch = [0u8; 8];
+        loop {
+            match stream.read(&mut scratch).await {
+                Ok(0) => break,
+                Ok(_) => continue,
+                Err(error) => panic!("unexpected read error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("the IPv6 session ends promptly after a hostile prefix");
+}
+
 /// A full handshake against a live deployment, not one built in this process.
 ///
 /// The tests above prove the listener against an [`App`] assembled here; this one proves the node

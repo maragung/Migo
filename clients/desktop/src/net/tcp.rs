@@ -57,11 +57,16 @@ pub struct TcpGateway {
 /// Resolves the endpoint's host, preferring a literal address and falling back to the OS
 /// resolver for names — a native client's advantage over the browser, and the reason TCP can be
 /// the default here at all.
+///
+/// The host may be a bracketed IPv6 literal (the form [`crate::config::parse_host`] stores), so
+/// the brackets come off before the address parser or the resolver sees it — neither of them
+/// accepts brackets.
 async fn resolve(host: &str) -> Result<std::net::SocketAddr, TcpError> {
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+    let bare = crate::config::dial_host(host);
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
         return Ok(std::net::SocketAddr::new(ip, 0));
     }
-    let resolved = tokio::net::lookup_host(format!("{host}:0"))
+    let resolved = tokio::net::lookup_host(format!("{bare}:0"))
         .await
         .map_err(|_| TcpError::UnresolvedHost)?
         .next()

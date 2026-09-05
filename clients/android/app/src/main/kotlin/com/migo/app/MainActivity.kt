@@ -180,6 +180,12 @@ private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel) {
                         open.roomId?.let { roomId -> model.sanction(open.conversationId, roomId, target, action) }
                     },
                     onMuteForMe = { userId, on -> model.muteForMe(open.conversationId, userId, on) },
+                    gameCatalogue = state.games.catalogue,
+                    gamesLoading = state.games.loading,
+                    gamesFailure = state.games.failure,
+                    onLoadGames = model::loadGameCatalogue,
+                    onStartGame = { slug -> model.startGame(open.conversationId, slug) },
+                    onGuess = { value -> model.submitGuess(open.conversationId, value) },
                     selfId = state.accountId,
                     modifier = Modifier.weight(1f),
                 )
@@ -213,7 +219,11 @@ private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifie
         AppState.Section.FEED,
         -> Unit
 
-        AppState.Section.GAMES -> GamesScreen(modifier = modifier)
+        AppState.Section.GAMES -> GamesScreen(
+            state = state,
+            onRefresh = model::loadGameCatalogue,
+            modifier = modifier,
+        )
 
         AppState.Section.ALERTS -> AlertsScreen(
             state = state,

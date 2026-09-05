@@ -3,9 +3,9 @@
 /**
  * The Migo brand mark: the rotated-square diamond and the word beside it.
  *
- * The desktop shell stamps this over its turquoise ground (the watermark that says whose desk
- * this is before any window opens), and the taskbar carries the diamond alone at 16px — the
- * same mark the auth screens lead with, drawn once so the brand is one shape everywhere.
+ * The boot state carries the pair while the desk mounts, and the taskbar carries the diamond
+ * alone at 16px — the same mark the auth screens lead with, drawn once so the brand is one
+ * shape everywhere. The desk itself carries no watermark: its ground belongs to the windows.
  */
 
 import type { ReactNode } from 'react';

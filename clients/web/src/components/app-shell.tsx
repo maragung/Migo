@@ -144,14 +144,23 @@ export function AppShell(): ReactNode {
       setMounted(true);
       setIsMobile(window.innerWidth < MOBILE_BREAKPOINT);
       setOnlineSince(Date.now());
+      let pos: 'bottom' | 'top' = 'bottom';
       try {
         const saved = window.localStorage.getItem(TASKBAR_POS_KEY);
         if (saved === 'top' || saved === 'bottom') {
-          setTaskbarPos(saved);
+          pos = saved;
         }
       } catch {
         /* storage unavailable */
       }
+      setTaskbarPos(pos);
+      // The main window stands as tall as the device: the contacts window opens at the desk's
+      // own height — the viewport minus the taskbar and the window's margins — not a fixed 560px.
+      // The resize floor (400px) still holds on a short screen.
+      setContactsSize({
+        w: 360,
+        h: Math.max(400, window.innerHeight - (pos === 'top' ? 52 : 54)),
+      });
     }, 0);
     const onResize = (): void => setIsMobile(window.innerWidth < MOBILE_BREAKPOINT);
     window.addEventListener('resize', onResize);
@@ -617,16 +626,6 @@ export function AppShell(): ReactNode {
   return (
     <SectionNavProvider navigate={navigate}>
       <div className="desk-bg desk-root">
-        {/* watermark brand */}
-        {!isMobile ? (
-          <div
-            className={`desk-mark${taskbarPos === 'top' ? ' desk-mark-top' : ''}`}
-            aria-hidden="true"
-          >
-            <MigoBrand size={24} />
-          </div>
-        ) : null}
-
         {/* ===== the phone's home ===== */}
         {isMobile && visibleNavs.length > 0 ? (
           <div className={activeId !== null ? 'desk-home-hidden' : 'desk-home'}>
@@ -676,7 +675,14 @@ export function AppShell(): ReactNode {
                 ? taskbarPos === 'top'
                   ? { position: 'fixed', left: 0, top: 34, right: 0, bottom: 0, zIndex: 950 }
                   : { position: 'fixed', left: 0, top: 0, right: 0, bottom: 34, zIndex: 950 }
-                : { position: 'absolute', left: 12, top: 64, zIndex: contactsMenuOpen ? 1200 : 10 }
+                : {
+                    position: 'absolute',
+                    left: 12,
+                    // The desk's top edge: no watermark sits above the windows any more, so the
+                    // contacts window starts at the frame the taskbar-top leaves free.
+                    top: taskbarPos === 'top' ? 44 : 12,
+                    zIndex: contactsMenuOpen ? 1200 : 10,
+                  }
             }
           >
             <ContactsWindow

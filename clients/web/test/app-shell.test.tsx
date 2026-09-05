@@ -20,7 +20,12 @@
  *   5. **The vocabulary.** Every window kind has a label and an icon, and a chat window's id is
  *      its conversation's, so a thread can never open twice.
  *   6. **The contacts window.** A titled, pill-navigated window whose close control asks to log
- *      out — with the contacts window gone there is no desk left to come back to.
+ *      out — with the contacts window gone there is no desk left to come back to — and whose
+ *      footer band speaks the wallet's $MIG, never a credits economy.
+ *   7. **The layout contract.** The stylesheet pins the two rules the windows stand on: the phone's
+ *      window fills from below the strip to the viewport's foot (no height cap to stop it short),
+ *      and the thread is a flex column whose composer cannot scroll away — plus the desk carries
+ *      no watermark above the windows.
  *
  * `renderToStaticMarkup` runs no effects, so the shells that read providers are fed the same
  * provider stack the layout mounts, over a ready-session context double whose client is null —
@@ -28,6 +33,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -448,4 +454,45 @@ test('the contacts list is a window: titled, pill-navigated, and closing it asks
   assert.ok(markup.includes('hdr-orange'), 'the me bar is missing from the window');
   assert.ok(markup.includes('New here! Say hi :)'), 'the status line owes its placeholder');
   assert.ok(markup.includes('title="Menu"'), 'the gear menu button is missing');
+  // The footer band is the wallet's own vocabulary: the on-chain $MIG balance, never a credits
+  // economy. A wallet that has not answered owes the ticker, not a number it never reported.
+  assert.ok(markup.includes('list-footer'), 'the footer band is missing from the window');
+  assert.ok(markup.includes('$MIG'), 'the footer band must speak the wallet’s $MIG');
+  assert.ok(!markup.includes('Credits'), 'a credits economy has no place in the footer band');
+});
+
+// --- the layout contract the stylesheet carries ---
+
+/** One rule's block, so a test can pin what a selector declares without regexing the whole file. */
+function ruleOf(css: string, selector: string): string {
+  const at = css.indexOf(`${selector} {`);
+  assert.ok(at !== -1, `the "${selector}" rule is missing from the stylesheet`);
+  return css.slice(at, css.indexOf('}', at));
+}
+
+test('the phone’s window fills to the viewport’s foot; the composer chain pins it there', () => {
+  const css = readFileSync(new URL('../../src/app/globals.css', import.meta.url), 'utf8');
+
+  // The full-bleed window reaches the bottom of the screen: the composer sits at the device's
+  // foot on every tall screen, so the rule names a bottom edge, not a capped height.
+  const mtab = ruleOf(css, '.mtab-window');
+  assert.ok(mtab.includes('bottom: 0'), 'the phone window must reach the viewport’s foot');
+  assert.ok(!mtab.includes('860px'), 'no height cap may stop the phone window short of the foot');
+
+  // The chain that keeps the composer pinned: the pane is a column, the list takes what is left
+  // and scrolls inside itself, and the composer block never shrinks or scrolls away.
+  const pane = ruleOf(css, '.thread-pane');
+  assert.ok(pane.includes('flex-direction: column'), 'the thread pane must be a flex column');
+  assert.ok(pane.includes('min-height: 0'), 'the thread pane must be allowed to shrink');
+  const list = ruleOf(css, '.message-list');
+  assert.ok(list.includes('flex: 1'), 'the transcript must take the height the pane leaves');
+  assert.ok(list.includes('overflow-y: auto'), 'the transcript must scroll inside itself');
+  const composer = ruleOf(css, '.composer-wrap');
+  assert.ok(
+    composer.includes('flex-shrink: 0'),
+    'the composer block must never scroll away with the history',
+  );
+
+  // The watermark is gone: the desk's ground carries windows only, and nothing sits above them.
+  assert.ok(!css.includes('.desk-mark'), 'the desk must carry no watermark above its windows');
 });

@@ -80,7 +80,8 @@ pub enum Place {
     Alerts,
     /// One box, everything it can honestly find.
     Search,
-    /// The MIG balance, the gift shop, the statement, progression, badges, leaderboard.
+    /// The $MIG balance, the gift shop, the statement, progression, badges, leaderboard. $MIG
+    /// is the wallet's own unit — on-chain on Avalanche, no in-app credits beside it.
     Wallet,
     /// The account's own card: display name, bio, custom status, and the privacy of last-seen,
     /// messaging, and friend requests. The account menu's "My Profile".
@@ -111,15 +112,6 @@ impl Place {
             Self::Profile => "Profile",
             Self::Admins => "Admins",
             Self::Settings => "Settings",
-        }
-    }
-
-    /// The window title's own word — the reference calls the credits pane "TopUp".
-    #[must_use]
-    pub fn right_label(self) -> &'static str {
-        match self {
-            Self::Wallet => "TopUp",
-            other => other.label(),
         }
     }
 

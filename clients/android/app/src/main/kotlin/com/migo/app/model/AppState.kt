@@ -6,6 +6,8 @@ import com.migo.core.net.DeviceSummary
 import com.migo.core.net.WalletSummary
 import com.migo.core.protocol.BadgeWire
 import com.migo.core.protocol.ConversationKind
+import com.migo.core.protocol.GameCatalogueEntry
+import com.migo.core.protocol.GameViewWire
 import com.migo.core.protocol.GiftListing
 import com.migo.core.protocol.InboxItem
 import com.migo.core.protocol.LedgerEntryWire
@@ -108,6 +110,7 @@ sealed interface AppState {
         val profileEdit: ProfileEditState = ProfileEditState(),
         val accountSecurity: AccountSecurityState = AccountSecurityState(),
         val admins: AdminsState = AdminsState(),
+        val games: GamesState = GamesState(),
     ) : AppState
 
     /**
@@ -418,6 +421,22 @@ data class AdminsState(
     val failure: String? = null,
 )
 
+/**
+ * The Games panel's read: the node's own catalogue, held the session's life.
+ *
+ * The catalogue is versionless server-side, so it is re-read per session rather than cached across
+ * one — the same posture as the gift catalogue — and the null-before-first-read rule keeps "not
+ * checked yet" distinct from "this server referees nothing".
+ */
+data class GamesState(
+    /** The node's entries; null until the first read lands. */
+    val catalogue: List<GameCatalogueEntry>? = null,
+    /** True while the catalogue is being read. */
+    val loading: Boolean = false,
+    /** Why the last read could not answer. */
+    val failure: String? = null,
+)
+
 /** One row of the conversation list. */
 data class ConversationRow(
     val conversationId: Id,
@@ -454,6 +473,11 @@ data class ConversationRow(
 data class ChatState(
     val conversationId: Id,
     val title: String,
+    /**
+     * The conversation's kind. Games are offered only where a game has an audience — a room or a
+     * group, never a direct chat — mirroring the web client's rule, so the kind rides with the chat.
+     */
+    val kind: ConversationKind = ConversationKind.Room,
     /** The room behind a Room-kind chat, when the shell knows one; the Leave control needs it. */
     val roomId: Id? = null,
     /** Oldest first: the order they are drawn in, and the order history must be replayed in. */
@@ -488,6 +512,13 @@ data class ChatState(
     val membersOpen: Boolean = false,
     /** Accounts with a moderation or a mute action in flight, so only the pressed row shows it. */
     val acting: Set<Id> = emptySet(),
+    /**
+     * The chat's active game, as the server redacted it for this account. Session-scoped: the sync
+     * replay carries no game events, so a chat opens with none and learns of one from its moves.
+     */
+    val game: GameViewWire? = null,
+    /** True while a game start or a guess is in flight, so neither control can double-fire. */
+    val gameBusy: Boolean = false,
 )
 
 /**
@@ -602,4 +633,111 @@ fun parseAvaxAmount(text: String): BigInteger? {
         BigInteger(fraction, 10).multiply(BigInteger.TEN.pow(18 - fraction.length))
     }
     return wholeWei.add(fractionWei)
+}
+
+// --- the games vocabulary, as plain data ---
+
+/**
+ * The kind numbers this build's server referees (the games crate fixes them in code), mirrored
+ * rather than re-invented: an unknown value from a newer node still renders, under the generic
+ * label, rather than being mis-named or dropped.
+ */
+const val GAME_KIND_TIC_TAC_TOE = 0L
+const val GAME_KIND_ROCK_PAPER_SCISSORS = 1L
+const val GAME_KIND_GUESS_NUMBER = 2L
+
+/** The game statuses the store persists; OPEN is the only one a move may be applied to. */
+const val GAME_STATUS_OPEN = 0L
+
+/** The human label for a game kind; an unknown kind renders as a generic "Game". */
+fun gameLabelOf(kind: Long): String = when (kind) {
+    GAME_KIND_TIC_TAC_TOE -> "Tic-tac-toe"
+    GAME_KIND_ROCK_PAPER_SCISSORS -> "Rock paper scissors"
+    GAME_KIND_GUESS_NUMBER -> "Guess the number"
+    else -> "Game"
+}
+
+/**
+ * The player-count sentence for a catalogue entry, e.g. `1 player`, `2 players`, `2–4 players`.
+ *
+ * A range only reads as a range when the ends differ; a single-player game that said "1–1 players"
+ * would be arguing with itself.
+ */
+fun playerRangeLabel(minPlayers: Long, maxPlayers: Long): String =
+    if (maxPlayers != minPlayers) {
+        "$minPlayers–$maxPlayers players"
+    } else {
+        "$minPlayers " + (if (minPlayers == 1L) "player" else "players")
+    }
+
+/** One parsed guess: the number guessed and what the server said about it. */
+data class GuessEntry(
+    val value: Long,
+    /** `lower`, `higher`, or `correct` — the board's own words. */
+    val feedback: String,
+)
+
+/** The guessing game's board line, parsed. The hidden number appears in no field, by design. */
+data class GuessBoard(
+    val low: Long,
+    val high: Long,
+    val remaining: Long,
+    val guesses: List<GuessEntry>,
+)
+
+/**
+ * Parses the guessing game's `board` string: `low-high:remaining` followed by one ` guess:feedback`
+ * per guess, the feedback being `lower`, `higher`, or `correct`.
+ *
+ * Returns null for anything else — a board of a different game, or a grammar a newer server
+ * changed — so a caller falls back to saying nothing rather than mis-quoting the state. The
+ * parsing is strict on purpose: a number that "mostly" matched would invent a range the server
+ * never stated.
+ */
+fun parseGuessBoard(board: String): GuessBoard? {
+    val parts = board.trim().split(Regex("\\s+"))
+    val head = Regex("^(\\d+)-(\\d+):(\\d+)$").find(parts.firstOrNull() ?: return null) ?: return null
+    val guesses = ArrayList<GuessEntry>()
+    for (part in parts.drop(1)) {
+        val entry = Regex("^(\\d+):(lower|higher|correct)$").find(part) ?: return null
+        guesses.add(GuessEntry(entry.groupValues[1].toLong(), entry.groupValues[2]))
+    }
+    return GuessBoard(
+        low = head.groupValues[1].toLong(),
+        high = head.groupValues[2].toLong(),
+        remaining = head.groupValues[3].toLong(),
+        guesses = guesses,
+    )
+}
+
+/** The sentence the guess card shows about the newest guess, or null before the first one. */
+fun guessFeedbackLine(board: GuessBoard): String? {
+    val last = board.guesses.lastOrNull() ?: return null
+    return when (last.feedback) {
+        "lower" -> "The secret is lower."
+        "higher" -> "The secret is higher."
+        "correct" -> "Correct!"
+        else -> null
+    }
+}
+
+/**
+ * The one-line text a game event row shows, when the server did not pre-render one of its own.
+ *
+ * The row's grammar is fixed per event name: a start names the game, a move names only the mover
+ * (the published delta deliberately says nothing *about* the move, and the line must not either),
+ * a finish names the winner when there is one. An event name this build does not know renders as a
+ * neutral "Game update" rather than the raw wire word, which is server vocabulary a reader never
+ * chose to see. `who` is already the display name — "You" for ourselves — or null when the event
+ * names nobody.
+ */
+fun gameEventLine(event: String, who: String?, label: String?): String {
+    val name = label ?: "Game"
+    return when (event) {
+        "started" -> if (who != null) "🎮 $name started by $who" else "🎮 $name started"
+        "moved" -> (who ?: "Someone") + " made a move in $name"
+        "turn_changed" -> (who ?: "Someone") + "'s turn in $name"
+        "finished" -> if (who != null) "🏆 $who won $name!" else "$name ended"
+        else -> "Game update"
+    }
 }

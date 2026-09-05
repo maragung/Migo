@@ -173,7 +173,7 @@ export function GiftCard({
     <div className="gift-card">
       <div className="gift-name">{gift.name}</div>
       <div className="gift-category">{gift.category}</div>
-      <div className="gift-price">{gift.price} coins</div>
+      <div className="gift-price">$MIG {gift.price}</div>
       <button
         type="button"
         className="btn btn-primary"
@@ -362,7 +362,7 @@ export function RecipientPicker({
   return (
     <div className="recipient-picker" role="group" aria-label={`Send ${gift.name}`}>
       <p className="gift-price-line">
-        {gift.name} · <span className="gift-price">{gift.price} coins</span>
+        {gift.name} · <span className="gift-price">$MIG {gift.price}</span>
       </p>
       {error != null ? <p className="form-error">{error}</p> : null}
       <form

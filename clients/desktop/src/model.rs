@@ -344,12 +344,13 @@ pub struct EvmWalletRow {
 /// because a self-supplied RPC is the classic way a wallet gets shown a fake chain.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ChainNetwork {
-    /// Avalanche C-Chain mainnet. Real money; the build's default for *display*, with a clear
-    /// warning on the first send.
-    #[default]
+    /// Avalanche C-Chain mainnet. Real money; selectable, and the first send on it says so
+    /// before the button unlocks — but never the default, because the deployment's chain is
+    /// Fuji.
     Mainnet,
-    /// Avalanche Fuji testnet. The verification network — feature checks run here, never on
-    /// mainnet.
+    /// Avalanche Fuji testnet. The deployment's own chain — where the $MIG system actually
+    /// runs — and therefore the wallet surface's default network.
+    #[default]
     Fuji,
 }
 

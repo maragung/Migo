@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -19,6 +20,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
@@ -40,15 +42,25 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.migo.app.model.ChatMessage
 import com.migo.app.model.ChatState
+import com.migo.app.model.GAME_KIND_GUESS_NUMBER
+import com.migo.app.model.GAME_STATUS_OPEN
 import com.migo.app.model.RoomNotice
 import com.migo.app.model.RosterMember
 import com.migo.app.model.VoteTally
+import com.migo.app.model.gameLabelOf
+import com.migo.app.model.guessFeedbackLine
+import com.migo.app.model.parseGuessBoard
+import com.migo.app.model.playerRangeLabel
+import com.migo.core.protocol.ConversationKind
+import com.migo.core.protocol.GameCatalogueEntry
+import com.migo.core.protocol.GameViewWire
 import com.migo.core.protocol.RoomRole
 import com.migo.core.protocol.SanctionAction
 import com.migo.core.wire.Id
@@ -86,6 +98,18 @@ fun ChatScreen(
     onSanction: (Id, SanctionAction) -> Unit = { _, _ -> },
     /** Mutes or unmutes the given account for this device only. */
     onMuteForMe: (Id, Boolean) -> Unit = { _, _ -> },
+    /** The node's game catalogue, shared with the Games panel; null before the first read. */
+    gameCatalogue: List<GameCatalogueEntry>? = null,
+    /** True while the shared catalogue read is in flight. */
+    gamesLoading: Boolean = false,
+    /** Why the shared catalogue read could not answer. */
+    gamesFailure: String? = null,
+    /** Reads the game catalogue, on the launcher's first open and on a retry. */
+    onLoadGames: () -> Unit = {},
+    /** Starts a game by catalogue slug in this conversation. */
+    onStartGame: (String) -> Unit = {},
+    /** Submits a guess for the conversation's active game. */
+    onGuess: (Long) -> Unit = {},
     /** This account's own id, so the sheet never offers an action against oneself. */
     selfId: Id,
     modifier: Modifier = Modifier,
@@ -125,6 +149,17 @@ fun ChatScreen(
     }
     val lastKey = timeline.lastOrNull()?.key
 
+    // The game launcher's sheet state, owned here because the sheet is the header's own menu: the
+    // button opens it, and the catalogue it lists is the node's, shared with the Games panel.
+    val gamesOpen = remember { mutableStateOf(false) }
+
+    // The catalogue loads on first open and stays for the thread's life — a person who never
+    // touches the button never pays for its data, and a failure is retried by closing and
+    // reopening, which is cheaper to discover than a button that does nothing.
+    LaunchedEffect(gamesOpen.value) {
+        if (gamesOpen.value && gameCatalogue == null) onLoadGames()
+    }
+
     // Follow the end of the conversation as it grows, and only then. Keyed on the last line rather
     // than the count so an edit or a deletion does not yank the view away from whatever somebody is
     // reading further up.
@@ -136,7 +171,12 @@ fun ChatScreen(
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
-            ChatHeader(chat = chat, onLeave = onLeave, onOpenMembers = onOpenMembers)
+            ChatHeader(
+                chat = chat,
+                onLeave = onLeave,
+                onOpenMembers = onOpenMembers,
+                onOpenGames = { gamesOpen.value = true },
+            )
 
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 when {
@@ -177,6 +217,14 @@ fun ChatScreen(
                 )
             }
 
+            // The active guessing game's input, above the composer: it is the conversation's one
+            // live question, and a card that scrolled away inside the list would be a question the
+            // reader has to hunt for. Gated on the view's own yourTurn and open status — another
+            // member's solo game is theirs to play, and a finished game has no input left.
+            chat.game
+                ?.takeIf { it.kind == GAME_KIND_GUESS_NUMBER && it.status == GAME_STATUS_OPEN && it.yourTurn == true }
+                ?.let { active -> GuessCard(game = active, busy = chat.gameBusy, onGuess = onGuess) }
+
             Composer(
                 draft = chat.draft,
                 sending = chat.sending,
@@ -199,6 +247,26 @@ fun ChatScreen(
                 onMuteForMe = onMuteForMe,
             )
         }
+
+        // The game launcher: the node's catalogue as the sheet the header's Games control opens.
+        // Only single-player games are startable through this build's wire — GAME_START cannot name
+        // opponents, so the server refuses a two-player kind outright — and rather than send a
+        // request the protocol has already doomed, those entries render disabled with the reason
+        // beside them.
+        if (gamesOpen.value) {
+            GameLauncherSheet(
+                catalogue = gameCatalogue,
+                loading = gamesLoading,
+                failure = gamesFailure,
+                busy = chat.gameBusy,
+                onDismiss = { gamesOpen.value = false },
+                onRetry = onLoadGames,
+                onStart = { slug ->
+                    gamesOpen.value = false
+                    onStartGame(slug)
+                },
+            )
+        }
     }
 }
 
@@ -207,7 +275,11 @@ private fun ChatHeader(
     chat: ChatState,
     onLeave: (() -> Unit)?,
     onOpenMembers: (() -> Unit)?,
+    onOpenGames: () -> Unit,
 ) {
+    // Games are offered only where a game has an audience: a room or a group conversation, never a
+    // direct chat — the web client's own rule, because a game is the room's shared spectacle.
+    val supportsGames = chat.kind == ConversationKind.Room || chat.kind == ConversationKind.Group
     Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
@@ -229,6 +301,11 @@ private fun ChatHeader(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+            if (supportsGames) {
+                TextButton(onClick = onOpenGames) {
+                    Text("Games")
+                }
             }
             if (chat.roomId != null && onOpenMembers != null) {
                 TextButton(onClick = onOpenMembers) {
@@ -262,6 +339,154 @@ private fun roomSubtitle(chat: ChatState): String {
         "${room.onlineCount}/${room.maxMembers} online · $members"
     } else {
         "${room.onlineCount} online · $members"
+    }
+}
+
+/**
+ * The game launcher sheet: the node's catalogue, one row per kind it can referee.
+ *
+ * A solo entry starts the game on tap and closes the sheet; a multi-player entry is disabled with
+ * its reason on the row, because a button that fails after a round trip the protocol has already
+ * doomed is not an affordance, it is a lie with a spinner. The catalogue is the node's own and
+ * versionless, so it is read when the sheet first opens rather than cached across sessions.
+ */
+@Composable
+private fun GameLauncherSheet(
+    catalogue: List<GameCatalogueEntry>?,
+    loading: Boolean,
+    failure: String?,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    onRetry: () -> Unit,
+    onStart: (String) -> Unit,
+) {
+    MigoSheet(title = "Start a game", onDismiss = onDismiss) {
+        when {
+            catalogue == null -> Column(modifier = Modifier.fillMaxWidth()) {
+                if (loading) {
+                    LoadingRow()
+                } else {
+                    Text(
+                        text = failure ?: "The catalogue is not loaded.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    )
+                    TextButton(onClick = onRetry, modifier = Modifier.padding(start = 8.dp)) {
+                        Text("Try again")
+                    }
+                }
+            }
+
+            catalogue.isEmpty() -> Placeholder(text = "No games on this server.")
+
+            else -> {
+                for (entry in catalogue) {
+                    val solo = entry.minPlayers <= 1L
+                    SheetAction(
+                        glyph = "🎮",
+                        label = gameLabelOf(entry.kind),
+                        sub = if (solo) {
+                            playerRangeLabel(entry.minPlayers, entry.maxPlayers)
+                        } else {
+                            "Needs two players — this build cannot pick an opponent"
+                        },
+                        enabled = solo && !busy,
+                        onClick = { onStart(entry.slug) },
+                    )
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+    }
+}
+
+/**
+ * The inline guess input for the active game.
+ *
+ * Validation is local and lenient about *when* it blocks — the button disables until the field
+ * holds an integer inside the board's live range — but the range itself is read from the board,
+ * not hard-coded, so a server configured differently is obeyed rather than argued with. The
+ * server re-validates regardless; an out-of-range value that slipped through comes back as the
+ * shell's own failure banner.
+ */
+@Composable
+private fun GuessCard(
+    game: GameViewWire,
+    busy: Boolean,
+    onGuess: (Long) -> Unit,
+) {
+    val board = parseGuessBoard(game.board)
+    // Without a parsable board the card still offers the protocol's bound: a board this client
+    // cannot read is no reason to hide the input the game is waiting on.
+    val low = board?.low ?: 1L
+    val high = board?.high ?: 100L
+    val field = remember(game.gameId) { mutableStateOf("") }
+    val value = field.value.trim().toLongOrNull()
+    val valid = value != null && value >= low && value <= high
+    val feedback = board?.let { guessFeedbackLine(it) }
+
+    Surface(color = MaterialTheme.colorScheme.surfaceVariant, modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "🎯 " + gameLabelOf(game.kind),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f),
+                )
+                if (board != null) {
+                    Text(
+                        text = board.low.toString() + "–" + board.high + ", " +
+                            board.remaining + (if (board.remaining == 1L) " guess left" else " guesses left"),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            if (feedback != null) {
+                Text(
+                    text = feedback,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = field.value,
+                    onValueChange = { field.value = it },
+                    placeholder = { Text("Enter your guess ($low-$high)") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(14.dp),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number,
+                        imeAction = ImeAction.Send,
+                    ),
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Button(
+                    onClick = {
+                        val guess = value
+                        if (guess != null && valid && !busy) {
+                            onGuess(guess)
+                            field.value = ""
+                        }
+                    },
+                    enabled = valid && !busy,
+                ) {
+                    if (busy) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                        )
+                    } else {
+                        Text("Guess")
+                    }
+                }
+            }
+        }
     }
 }
 

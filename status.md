@@ -2778,3 +2778,80 @@ Verifikasi lokal (build/test/release tetap di GitHub Actions):
 `pnpm exec prettier --check .` bersih, `make kotlin-check` 0 problem,
 desktop `cargo fmt --check`/`clippy -D warnings` bersih dan `cargo test`
 81 lolos.
+
+## 72. Composer menempel bawah, jendela setinggi layar, $MIG di mana-mana, dan jaringan dual-stack (v0.19.0)
+
+Dua arahan user jadi satu rilis: perbaikan besar UX jendela
+chat, dan jaringan yang mendukung TCP + QUIC sekaligus IPv4 + IPv6.
+
+**Composer selalu di bawah.** Akar masalahnya cap 860px: `.mtab-window`
+punya `height: min(calc(100dvh - ...), 860px)` dan `bottom: auto`, jadi
+di layar tinggi jendela berhenti pendek dan composer mengambang di
+tengah. Sekarang jendela mobile mengisi `top: calc(var(--mtab-h) + 7px)`
+sampai `bottom: 0`, tanpa cap, tanpa radius atas. Rantai kolom dibuat
+eksplisit: `.win-content` → `.thread-pane` (flex column, `min-height: 0`
+— sebelumnya aturan CSS-nya **tidak ada sama sekali**, jadi `flex: 1` di
+`.message-list` mati) → `.message-list` (`flex: 1; overflow-y: auto`) →
+`.composer-wrap` (`flex-shrink: 0`). Di desktop (egui) composer diklaim
+dulu sebagai `Panel::bottom` per jendela percakapan dan ScrollArea
+mengisi sisanya — draf multiline memanjang memendekkan thread, bukan
+mendorong composer keluar layar. Di Android sudah benar oleh konstruksi
+(`weight(1f)` + `imePadding`); diverifikasi, tidak diubah.
+
+**Tidak ada brand di atas main window.** Watermark `.desk-mark` dihapus
+(CSS + div di web, `desktop::surface()` di egui). Jendela Contacts lahir
+di pojok `(12, 12)` dan setinggi perangkat; plafon resize naik ke tinggi
+meja penuh. Taskbar tetap memakai brandnya sendiri (satu-satunya yang
+diizinkan).
+
+**$MIG, bukan credits.** Saldo yang ditampilkan sudah lama saldo
+on-chain asli ($MIG); yang salah kosakatannya. Taskbar chip "⧫ $MIG
+1,234", footer band "$MIG N", menu "My Wallet" (bukan "My Credits &
+TopUp"), judul panel Wallet (bukan "TopUp"), semua harga gift "$MIG 10",
+desktop default chain selector pindah ke Avalanche Fuji. Tidak ada
+harga credits tersisa di klien mana pun.
+
+**Fitur yang tadinya mati, dihidupkan.** Web: jendela AccountPanel ada
+tapi tidak punya pintu — sekarang ada "My Account" di menu gear dan
+sheet me; label "Edit Profile & Settings" yang bohong jadi "Settings"
+yang jujur; panel-panel kini scroll di dalam jendela (perbaikan
+`flex: 1; min-height: 0` di `.win-content > .panel`). Desktop: bar akun
+memanggil fetch profile saat sign-in dan menampilkan nama tampilan
+(sebelumnya `@username` selamanya); fetch dan save profile kini
+berkasnya berbeda (dulu sekadar membuka jendela mengklaim "Profile
+saved."); gift send yang ditolak server kini memunculkan toast, bukan
+menutup picker diam-diam. Android: Games adalah satu-satunya affordance
+palsu — sekarang full stack (katalog/start/view via GAME_CATALOGUE/
+GAME_START/GAME_VIEW, launcher sheet di header chat Room/Group, event
+game jadi baris timeline, GuessCard playable dengan feedback server).
+Feed ledger "MIG" → "$MIG".
+
+**Jaringan: TCP dan QUIC, IPv4 dan IPv6.** Server sudah mendengar di
+kedua transport (TCP :18081, QUIC UDP :18443 di produksi); yang belum
+teruji adalah keluarga alamat. Test baru di `migod`:
+`tcp_listener.rs` dan `quic_listener.rs` masing-masing mengikat
+`[::1]:0` dan menjalankan siklus sesi yang sama dengan IPv4 (QUIC
+helper `connect()` kini mengikat endpoint klien sesuai family target —
+quinn tidak menerjemahkan keluarga), dan suite baru `http_serve.rs`
+menyajikan `App::serve` di kedua loopback dengan klien HTTP mentah:
+`/health` 200 dan upgrade `/ws` 101 di kedua keluarga. Klien: SDK web
+`parseHost` tadinya **menolak IPv6 secara eksplisit** — sekarang menerima
+`::1`, `2a0a:...::1`, `[::1]`, `[::1]:port` dan menyimpan host
+ter-bracket (satu bentuk; URL turunan valid apa adanya); desktop
+`parse_host`/`server_endpoint_from_url` sama, `dial_host()` melepas
+bracket untuk jalur socket, resolve TCP dan connect QUIC sadar family
+(endpoint klien QUIC dulu terikat `0.0.0.0:0` — tidak akan pernah
+menjangkau server IPv6); Android `fromRestUrl` kini memecah otoritas
+ber-bracket dengan benar (dulu `lastIndexOf(':')` membelah di dalam
+literal saat port absen) dan `isLoopbackHost` mengenali `[::1]`.
+`parseTcpAddress` Android sudah benar untuk `[::1]:port` (pemisah
+`substringBeforeLast` + `InetSocketAddress` menerima literal
+ber-bracket). Konvensi lintas klien: host IPv6 tersimpan bracketed,
+dial melepas bracket.
+
+Verifikasi lokal (build/test/release tetap di GitHub Actions):
+`cargo test -p migod --test tcp_listener --test quic_listener --test
+http_serve` 10/10 lolos, server `fmt`/`clippy -D warnings` bersih,
+desktop `cargo fmt`/`clippy`/`cargo test` 85 lolos (4 test IPv6 baru),
+SDK 162/162, web 335/335, `make lint-js` bersih, `prettier --check .`
+bersih, `make kotlin-check` 0 problem.

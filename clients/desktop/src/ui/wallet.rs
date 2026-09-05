@@ -1,9 +1,11 @@
-//! The Wallet place: the MIG balance, the gift shop, the statement, progression, badges, and
+//! The Wallet place: the $MIG balance, the gift shop, the statement, progression, badges, and
 //! the leaderboard — the caller's whole economy under one address.
 //!
-//! The coin is MIG. The balance leads; the statement states each line's signed amount from its
-//! reason (the wire's amount is a magnitude); the shop states its prices before its recipients,
-//! so the spend is agreed before the address is.
+//! The unit is $MIG, and the money is on-chain: the wallet's chain half reads and moves real
+//! Avalanche value straight from the account root, with no in-app credits in between. The
+//! balance leads; the statement states each line's signed amount from its reason (the wire's
+//! amount is a magnitude); the shop states its prices before its recipients, so the spend is
+//! agreed before the address is.
 
 use egui::{Align, FontId, Layout, RichText, Ui};
 
@@ -35,8 +37,8 @@ pub struct WalletState {
 /// The AVAX wallet surface's state (§184).
 #[derive(Debug, Default)]
 pub struct ChainWallet {
-    /// The network the surface is on. Mainnet by default — the brief's default is for *display*,
-    /// and the first send on mainnet says what mainnet means before the button unlocks.
+    /// The network the surface is on. Fuji by default — it is the chain the deployment's $MIG
+    /// system runs on — with mainnet one deliberate click away and its own first-send warning.
     pub network: ChainNetwork,
     /// The wallet's EIP-55 address, once a read discovered it. `None` until then, and `None`
     /// forever on a device without the root — the read's error carries that sentence instead.
@@ -87,7 +89,7 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut WalletState) {
             ui,
             context.theme,
             "Wallet",
-            Some("Your Migo coins, gifts, and standing"),
+            Some("Your $MIG, gifts, and standing"),
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(space::MD);
@@ -102,14 +104,14 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut WalletState) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            // The balance: the two facts, coins first, side by side.
+            // The balance: the two facts, $MIG first, side by side.
             ui.add_space(space::SM);
             ui.horizontal(|ui| {
                 ui.add_space(space::MD);
                 fact_card(
                     ui,
                     context.theme,
-                    "MIG COINS",
+                    "$MIG",
                     &state
                         .coins
                         .map(|v| v.to_string())
@@ -193,7 +195,7 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut WalletState) {
                         ui.add_space(space::MD);
                         ui.label(
                             RichText::new(format!(
-                                "{} · {} MIG · {}",
+                                "{} · {} $MIG · {}",
                                 gift.name, gift.price, gift.category
                             ))
                             .font(FontId::proportional(font::BODY))
@@ -258,7 +260,7 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut WalletState) {
             .resizable(false)
             .show(ui.ctx(), |ui| {
                 ui.label(
-                    RichText::new(format!("{} MIG", gift.price))
+                    RichText::new(format!("{} $MIG", gift.price))
                         .font(FontId::proportional(font::SUBTITLE))
                         .color(colors.accent),
                 );

@@ -110,7 +110,7 @@ fun WalletScreen(
                     ) {
                         BalanceFact(
                             amount = state.wallet.balance?.toString() ?: "…",
-                            unit = "MIG coins",
+                            unit = "\$MIG",
                             emphasise = true,
                         )
                         BalanceFact(
@@ -202,7 +202,7 @@ fun WalletScreen(
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(gift.name, style = MaterialTheme.typography.titleMedium)
-                                OneLine(text = "${gift.price} MIG · ${gift.category}")
+                                OneLine(text = "${gift.price} \$MIG · ${gift.category}")
                             }
                             Button(onClick = { picking = gift }) { Text("Send") }
                         }
@@ -250,7 +250,7 @@ fun WalletScreen(
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Text(
-                            text = "Send " + gift.name + " (" + gift.price + " MIG)",
+                            text = "Send " + gift.name + " (" + gift.price + " \$MIG)",
                             style = MaterialTheme.typography.titleMedium,
                         )
                         Spacer(modifier = Modifier.height(8.dp))

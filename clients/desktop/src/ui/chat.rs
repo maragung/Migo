@@ -240,7 +240,16 @@ pub fn open(context: &mut Context<'_>, state: &mut ChatState, conversation_id: I
     }
 }
 
-/// The open conversation: header, messages, composer.
+/// The open conversation: header, messages, composer — with the composer pinned.
+///
+/// The composer is laid out as a *bottom panel inside the window*, claimed before the thread
+/// is drawn, so it sits on the window's bottom edge whatever the history above it is doing. A
+/// composer laid out in sequence after the messages lands wherever the messages ended:
+/// mid-window on a short history, and below the window's bottom edge once a long draft grew
+/// the multiline field past the height a sequential layout had reserved for it. The panel
+/// settles the split by measurement every frame instead — the composer takes exactly what it
+/// needs, and the thread's scroll takes everything that remains, which is the whole Growing
+/// Area a chat window owes its history.
 fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conversation_id: Id) {
     thread_header(ui, context, state, conversation_id);
     widgets::divider(ui, context.theme);
@@ -265,21 +274,18 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
         })
         .flatten();
 
-    let composer_height = 64.0;
-    let typing_height = if state
-        .typing
-        .get(&conversation_id)
-        .is_some_and(|w| !w.is_empty())
-    {
-        18.0
-    } else {
-        0.0
-    };
-    let list_height = (ui.available_height() - composer_height - typing_height).max(0.0);
+    // The bottom edge first: the typing line, then the composer, pinned. The typing line draws
+    // itself only when someone is typing, so the composer is the panel's one permanent row.
+    egui::Panel::bottom(egui::Id::new("chat-composer").with(conversation_id))
+        .frame(egui::Frame::NONE)
+        .show(ui, |ui| {
+            typing_line(ui, context, state, conversation_id);
+            composer(ui, context, state, conversation_id);
+        });
 
+    // The thread: the growing area, in everything the window has left.
     egui::ScrollArea::vertical()
         .id_salt(("thread", conversation_id.to_string()))
-        .max_height(list_height)
         .auto_shrink([false, false])
         .stick_to_bottom(true)
         .show(ui, |ui| {
@@ -293,59 +299,52 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
                     "No messages yet",
                     "Anything you send here is encrypted on this device before it leaves.",
                 );
-                return;
-            }
-            let mut last_day: Option<String> = None;
-            for message in thread {
-                let day = day_label(message.sent_at);
-                if last_day.as_deref() != Some(day.as_str()) {
-                    day_separator(ui, context, &day);
-                    last_day = Some(day);
+            } else {
+                let mut last_day: Option<String> = None;
+                for message in thread {
+                    let day = day_label(message.sent_at);
+                    if last_day.as_deref() != Some(day.as_str()) {
+                        day_separator(ui, context, &day);
+                        last_day = Some(day);
+                    }
+                    // Only in a conversation with more than two people, and only for messages someone
+                    // else wrote. In a direct chat the header already names the one possible sender, and
+                    // repeating it above every bubble is noise that pushes the text further apart.
+                    let sender = (group && !message.outgoing).then(|| {
+                        state
+                            .names
+                            .get(&message.sender_id)
+                            .cloned()
+                            .unwrap_or_else(|| model::short_id(message.sender_id))
+                    });
+                    // An avatar on the incoming side only. Outgoing bubbles are already anchored by
+                    // their alignment and accent fill; a self-avatar beside them would be decoration.
+                    let avatar_seed = if message.outgoing {
+                        None
+                    } else if group {
+                        sender.as_deref()
+                    } else {
+                        peer_seed.as_deref()
+                    };
+                    // The read marker rides only outgoing messages with a server sequence: a peer's
+                    // watermark claims "I read through N", which a message still Sending has no seq
+                    // to be measured against yet.
+                    let read = message.outgoing
+                        && message.seq > 0
+                        && state
+                            .read_up_to
+                            .get(&conversation_id)
+                            .is_some_and(|mark| message.seq <= *mark);
+                    message_row(ui, context, message, sender.as_deref(), avatar_seed, read);
+                    ui.add_space(space::SM);
                 }
-                // Only in a conversation with more than two people, and only for messages someone
-                // else wrote. In a direct chat the header already names the one possible sender, and
-                // repeating it above every bubble is noise that pushes the text further apart.
-                let sender = (group && !message.outgoing).then(|| {
-                    state
-                        .names
-                        .get(&message.sender_id)
-                        .cloned()
-                        .unwrap_or_else(|| model::short_id(message.sender_id))
-                });
-                // An avatar on the incoming side only. Outgoing bubbles are already anchored by
-                // their alignment and accent fill; a self-avatar beside them would be decoration.
-                let avatar_seed = if message.outgoing {
-                    None
-                } else if group {
-                    sender.as_deref()
-                } else {
-                    peer_seed.as_deref()
-                };
-                // The read marker rides only outgoing messages with a server sequence: a peer's
-                // watermark claims "I read through N", which a message still Sending has no seq
-                // to be measured against yet.
-                let read = message.outgoing
-                    && message.seq > 0
-                    && state
-                        .read_up_to
-                        .get(&conversation_id)
-                        .is_some_and(|mark| message.seq <= *mark);
-                message_row(ui, context, message, sender.as_deref(), avatar_seed, read);
-                ui.add_space(space::SM);
             }
+            // The room's own life, as the scroll's final lines: who came, who went, who dropped.
+            // A live tail, not history — the notices arrived while the room was open, in arrival
+            // order, and a reader who wants the durable roster opens the rooms pane.
+            room_notices(ui, context, state, conversation_id);
             ui.add_space(space::SM);
         });
-
-    // The room's own life, after the messages: who came, who went, who dropped. A live tail, not
-    // history — the notices arrived while the room was open, in arrival order, and a reader who
-    // wants the durable roster opens the rooms pane.
-    room_notices(ui, context, state, conversation_id);
-
-    if typing_height > 0.0 {
-        typing_line(ui, context, state, conversation_id);
-    }
-
-    composer(ui, context, state, conversation_id);
 }
 
 /// The room membership tail: "Ana joined the room", "Bo disconnected", newest last.
