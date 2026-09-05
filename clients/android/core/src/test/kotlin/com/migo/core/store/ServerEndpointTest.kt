@@ -205,12 +205,14 @@ class ServerEndpointTest {
     @Test
     fun fromRestUrl_parsesAnIpv6LiteralWithItsPort() {
         // The bracket closes before the port colon; the host keeps the bracket so the derived
-        // URLs are valid as written.
+        // URLs are valid as written. The IPv6 loopback is still a loopback: the dev policy's
+        // native pair, with the gateway on the next port.
         val reparsed = ServerEndpoint.fromRestUrl("http://[::1]:8080")
         assertEquals("[::1]", reparsed.host)
         assertEquals(8080, reparsed.port)
         assertEquals("http://[::1]:8080", reparsed.restBaseUrl())
-        assertEquals("ws://[::1]:8080/ws", reparsed.gatewayUrl())
+        assertEquals(Transport.Tcp, reparsed.transport)
+        assertEquals("tcp://[::1]:8081/ws", reparsed.gatewayUrl())
     }
 
     @Test
