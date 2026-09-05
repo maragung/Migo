@@ -4405,6 +4405,14 @@ button.activity-row-btn:focus-visible {
   background: var(--nav-chip-hover);
   color: var(--auth-ink);
 }
+/* The file badge is normally the accent on a white panel, which on the auth card would be one
+   teal on a slightly darker teal — a 56px square that dissolves. Here it is the card's own
+   white-alpha inset, the same fill its inputs and its close button's hover wear, so the badge
+   reads as cut into the card rather than sitting invisibly on it. */
+.sheet-auth .save-account-badge {
+  background: var(--nav-chip-hover);
+  color: var(--auth-ink);
+}
 /* The save sheet on the auth card: the lead reads as the register screen's own copy — white,
    not the panel's dimmed text, because dimming is a light-panel convention that would sink into
    the teal. */
@@ -4424,6 +4432,18 @@ button.activity-row-btn:focus-visible {
 }
 .sheet-auth .form-error {
   color: var(--auth-ink-error);
+}
+/* The seal is Argon2id, so the spinner in both buttons is on screen for seconds, not frames —
+   the one moment the sheet is asking for patience, and its default teal-on-grey is invisible
+   here. Track and head come from the card's own white ink. */
+.sheet-auth .spinner {
+  border-color: var(--auth-line);
+  border-top-color: var(--auth-ink);
+}
+/* The device-holds-no-root branch is a single sentence of hint text, and it is the whole
+   explanation of why no file is on offer — the one place faint grey is not an option. */
+.sheet-auth .hint {
+  color: var(--auth-ink-dim);
 }
 
 /* --- the shared states: skeleton, empty, error --- */
