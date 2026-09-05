@@ -23,8 +23,8 @@ import com.migo.app.model.AppState
  * The menu panel's bar: the new-ui-02 right pane's header, as a phone wears it.
  *
  * On a PC the right pane is a second column with its own tab buttons; on a phone there is no
- * second column, so a menu panel (Alerts, Search, Wallet, Profile — opened from the banner's
- * avatar menu) covers the whole screen and carries its own way back. The bar keeps the model's
+ * second column, so a menu panel (Alerts, Search, Wallet, Profile, Games — opened from the me
+ * card's sheet) covers the whole screen and carries its own way back. The bar keeps the model's
  * shape: the teal strip, the cyan "‹ Menu Panel" control, and the title naming what is showing.
  *
  * Text characters rather than icons, for the same reason every glyph in this app is drawn: no
@@ -94,5 +94,6 @@ fun panelTitle(section: AppState.Section): String = when (section) {
     AppState.Section.WALLET -> "TopUp"
     AppState.Section.PROFILE -> "Profile"
     AppState.Section.ADMINS -> "Admins"
+    AppState.Section.GAMES -> "Games"
     else -> "Panel"
 }

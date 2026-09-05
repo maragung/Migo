@@ -38,3 +38,9 @@ LICENSE
 .tmp/
 .commandcode/
 var/
+
+# User-authored design references and notes dropped in at the root — untracked, unshipped,
+# and not ours to format (the same standing as migo.md above).
+new-ui-02.tsx
+ui-ux-design-plan/
+migo-update-1.md

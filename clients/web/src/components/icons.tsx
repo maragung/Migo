@@ -54,7 +54,19 @@ export type IconName =
   | 'user-plus'
   | 'block'
   | 'eye'
-  | 'eye-off';
+  | 'eye-off'
+  | 'minimize'
+  | 'maximize'
+  | 'restore'
+  | 'chevron-left'
+  | 'chevron-up'
+  | 'chevron-down'
+  | 'check'
+  | 'phone'
+  | 'video'
+  | 'clock'
+  | 'arrow-up'
+  | 'arrow-down';
 
 /** The drawn body of each icon, as `<path>`/`<circle>` elements under one `<g>`. */
 const GLYPHS: Readonly<Record<IconName, ReactNode>> = {
@@ -284,16 +296,82 @@ const GLYPHS: Readonly<Record<IconName, ReactNode>> = {
       <path d="M5 19.5h14" />
     </>
   ),
+  minimize: (
+    <>
+      <path d="M5 12h14" />
+    </>
+  ),
+  maximize: (
+    <>
+      <rect x="5.5" y="5.5" width="13" height="13" rx="1.5" />
+    </>
+  ),
+  restore: (
+    <>
+      <rect x="4.5" y="8.5" width="11" height="11" rx="1.5" />
+      <path d="M8.5 8.5V6A1.5 1.5 0 0 1 10 4.5h8A1.5 1.5 0 0 1 19.5 6v8a1.5 1.5 0 0 1-1.5 1.5h-2.5" />
+    </>
+  ),
+  'chevron-left': (
+    <>
+      <path d="m14.5 5.5-6.5 6.5 6.5 6.5" />
+    </>
+  ),
+  'chevron-up': (
+    <>
+      <path d="m5.5 14.5 6.5-6.5 6.5 6.5" />
+    </>
+  ),
+  'chevron-down': (
+    <>
+      <path d="m5.5 9.5 6.5 6.5 6.5-6.5" />
+    </>
+  ),
+  check: (
+    <>
+      <path d="m5 12.5 4.5 4.5L19 7.5" />
+    </>
+  ),
+  phone: (
+    <>
+      <path d="M5.5 4h3L10 8 8 9.5a12 12 0 0 0 6.5 6.5L16 14l4 1.5v3a2 2 0 0 1-2 2A14.5 14.5 0 0 1 3.5 6a2 2 0 0 1 2-2Z" />
+    </>
+  ),
+  video: (
+    <>
+      <rect x="3.5" y="6.5" width="12" height="11" rx="2" />
+      <path d="m15.5 10.5 5-3v9l-5-3" />
+    </>
+  ),
+  clock: (
+    <>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </>
+  ),
+  'arrow-up': (
+    <>
+      <path d="M12 19V5" />
+      <path d="m6.5 10.5 5.5-5.5 5.5 5.5" />
+    </>
+  ),
+  'arrow-down': (
+    <>
+      <path d="M12 5v14" />
+      <path d="m6.5 13.5 5.5 5.5 5.5-5.5" />
+    </>
+  ),
 };
 
-/** One icon of the family at a scale step, inheriting the current ink. */
+/** One icon of the family, inheriting the current ink. */
 export function Icon({
   name,
   size = 20,
   className,
 }: {
   name: IconName;
-  size?: 16 | 20 | 24;
+  /** Pixels; the family's scale steps are 16, 20, and 24, but the window chrome asks for 12–15. */
+  size?: number;
   className?: string;
 }): ReactNode {
   return (

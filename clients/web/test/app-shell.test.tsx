@@ -1,19 +1,30 @@
 /**
- * What the messenger shell offers as the app's navigation.
+ * What the window shell offers as the app's navigation.
  *
- * The right pane has one mode now, not two: a single tab bar whose first chip is the Games —
- * the pane's resting content, always present, never closable — followed by one closable chip
- * per open thing: a conversation, or a secondary panel the banner menu or a deep link reached.
- * The system tabs' content (Friends, Rooms, Games, Feed) never opens here: those live in the
- * left panel, so the pane cannot draw the same list twice. There is no "menu panel" to switch
- * back to: closing a chip falls through to the next one, and closing the last one leaves Games,
- * which is exactly the fallback an empty pane owes. The shell is the app's whole navigation, so
- * its offer is its contract.
+ * The messenger stopped being two panes and became a desk: every conversation and panel is a
+ * window of its own (draggable, resizable, minimizable), the contacts list is a window too
+ * rather than a fixed sidebar, and the taskbar — or, below the PC breakpoint, the tab strip —
+ * is the one inventory of what is open. The tests pin that offer at each layer:
  *
- * The shell reads the signed-in account from the Migo context, so the renderer is fed a minimal
- * context double the way `calls.test.tsx` feeds its manager; `renderToStaticMarkup` runs no
- * effects, so the profile lookup never fires and the name surfaces fall back to their "You"
- * labels.
+ *   1. **The shell's boot state.** Before the mount guard lifts, the desk shows only its
+ *      turquoise ground and the brand — no taskbar, no windows, nothing to mis-click.
+ *   2. **The window chrome.** A desk window names itself in a teal title bar with min/max/close
+ *      controls and resize handles; a phone window has none of it, because the strip's tab
+ *      already names it and closes it; a minimized window renders nothing at all.
+ *   3. **The taskbar.** One button per window, the focused one marked, a minimized window's
+ *      button kept with the pale dot, the balance chip silent until the wallet answers, and the
+ *      dock toggle that names the edge it will move to.
+ *   4. **The phone's strip.** Friends, Rooms, Feed in the reference order with only Feed
+ *      closable; the "+" that reopens a closed tab; one closable tab per window with its unread
+ *      badge capped at "9+".
+ *   5. **The vocabulary.** Every window kind has a label and an icon, and a chat window's id is
+ *      its conversation's, so a thread can never open twice.
+ *   6. **The contacts window.** A titled, pill-navigated window whose close control asks to log
+ *      out — with the contacts window gone there is no desk left to come back to.
+ *
+ * `renderToStaticMarkup` runs no effects, so the shells that read providers are fed the same
+ * provider stack the layout mounts, over a ready-session context double whose client is null —
+ * exactly the "connected, nothing fetched yet" moment every session really passes through.
  */
 
 import assert from 'node:assert/strict';
@@ -26,326 +37,415 @@ import type { ReactNode } from 'react';
 import type { Id } from '@migo/sdk';
 
 import { AppShell } from '../src/components/app-shell.js';
-import type { PanelTab, RightTabChip, SystemTab } from '../src/components/app-shell.js';
-import { PaneBar } from '../src/components/right-tab-bar.js';
+import { ContactsWindow } from '../src/components/contacts-window.js';
+import { MobileTabBar, MOBILE_NAV_ORDER } from '../src/components/mobile-tab-bar.js';
+import type { MobileNavTab } from '../src/components/mobile-tab-bar.js';
+import { RetroWindow } from '../src/components/retro-window.js';
+import { Taskbar } from '../src/components/desktop-taskbar.js';
+import {
+  chatWinId,
+  KIND_ICON,
+  KIND_LABEL,
+  STORE_WINDOW,
+  WINDOW_SIZES,
+} from '../src/components/window-types.js';
+import type { WinKind, WinState } from '../src/components/window-types.js';
+import { CallManagerProvider } from '../src/lib/migo/call-manager.js';
+import { ConversationsProvider } from '../src/lib/migo/conversations-provider.js';
+import { MutedProvider } from '../src/lib/migo/muted-provider.js';
 import { MigoContext } from '../src/lib/migo/provider.js';
+import type { MigoContextValue } from '../src/lib/migo/provider.js';
+import { RoomsProvider } from '../src/lib/migo/rooms-provider.js';
 
-/** The shell under a ready-session context double with a known account. */
-function render(shell: ReactNode): string {
+const ME = 'acct_self' as Id;
+
+/** The ready-session context double: connected, but with nothing fetched yet. */
+const CONTEXT: MigoContextValue = {
+  status: 'ready',
+  connectionState: 'ready',
+  accountId: ME,
+  deviceId: null,
+  error: null,
+  resetNonce: 0,
+  persistKeyStore: () => {},
+  client: null,
+  register: () => Promise.resolve(),
+  loginWithFile: () => Promise.resolve(),
+  logout: () => Promise.resolve(),
+};
+
+/** The provider stack the layout mounts, over the context double. */
+function sessionShell(node: ReactNode): string {
   return renderToStaticMarkup(
-    <MigoContext.Provider
-      value={{
-        status: 'ready',
-        connectionState: 'ready',
-        accountId: 'acct_self' as Id,
-        deviceId: null,
-        error: null,
-        resetNonce: 0,
-        persistKeyStore: () => {},
-        client: null,
-        register: () => Promise.resolve(),
-        loginWithFile: () => Promise.resolve(),
-        logout: () => Promise.resolve(),
-      }}
-    >
-      {shell}
+    <MigoContext.Provider value={CONTEXT}>
+      <ConversationsProvider>
+        <RoomsProvider>
+          <MutedProvider>
+            <CallManagerProvider>{node}</CallManagerProvider>
+          </MutedProvider>
+        </RoomsProvider>
+      </ConversationsProvider>
     </MigoContext.Provider>,
   );
 }
 
-/** The shell's no-op callbacks: the tests assert on structure, never on navigation. */
-const NOOP = {
-  onSelectSystem: (_: SystemTab) => {},
-  onSelectRight: (_: string) => {},
-  onCloseRight: (_: string) => {},
-  onBackToLists: () => {},
-  onOpenPanel: (_: PanelTab) => {},
-};
+/** The context double alone — for the chrome that reads only the session, not the lists. */
+function desk(node: ReactNode): string {
+  return renderToStaticMarkup(<MigoContext.Provider value={CONTEXT}>{node}</MigoContext.Provider>);
+}
 
-/**
- * The shell with the given right-pane tabs. `active` is the pane's active chip (`'feed'` or a
- * tab id); `activeChat` names the conversation whose thread the pane is showing, when the
- * active tab is a chat.
- */
-function shell(
-  tabs: readonly RightTabChip[],
-  active: string,
-  activeChat: Id | null = null,
-): ReactNode {
-  return (
-    <AppShell
-      leftTab="friends"
-      leftContent={<p>left</p>}
-      rightTabs={tabs}
-      activeRight={active}
-      activeChat={activeChat}
-      rightContent={<p>right</p>}
-      showRight={activeChat !== null}
-      {...NOOP}
+/** One window on the desk. */
+function win(fields: Partial<WinState> & { id: string; kind: WinKind; title: string }): WinState {
+  return { x: 40, y: 60, z: 21, minimized: false, ...fields };
+}
+
+const NOOP = () => {};
+
+// --- the shell's boot state ---
+
+test('the shell boots onto an empty desk: ground and brand, nothing to mis-click', () => {
+  const markup = sessionShell(<AppShell />);
+
+  assert.ok(markup.includes('desk-boot'), 'the boot state must paint the desk ground');
+  assert.ok(markup.includes('migo-brand'), 'the boot state must carry the brand');
+  assert.ok(!markup.includes('taskbar'), 'no taskbar may exist before the desk mounts');
+  assert.ok(!markup.includes('win-frame'), 'no window may exist before the desk mounts');
+});
+
+// --- the window chrome ---
+
+test('a desk window names itself and carries min, max, close, and resize handles', () => {
+  const markup = renderToStaticMarkup(
+    <RetroWindow
+      title="reason008"
+      x={40}
+      y={60}
+      z={21}
+      active
+      width={520}
+      height={460}
+      onFocus={NOOP}
+      onMinimize={NOOP}
+      onClose={NOOP}
+      onMove={NOOP}
     >
       <p>thread</p>
-    </AppShell>
+    </RetroWindow>,
+  );
+
+  assert.ok(markup.includes('win-draggable'), 'the desk window is a positioned, draggable frame');
+  assert.ok(markup.includes('win-title'), 'the title bar must name the window');
+  assert.ok(markup.includes('reason008'), 'the title bar must carry the window’s title');
+  assert.ok(markup.includes('aria-label="Minimize window"'), 'the minimize control is missing');
+  assert.ok(markup.includes('aria-label="Maximize window"'), 'the maximize control is missing');
+  assert.ok(markup.includes('aria-label="Close window"'), 'the close control is missing');
+  // A resizable window (numeric size) grows from three edges.
+  for (const handle of ['rz-e', 'rz-s', 'rz-se']) {
+    assert.ok(markup.includes(handle), `the ${handle} resize handle is missing`);
+  }
+  assert.ok(!markup.includes('win-inactive'), 'the focused window must not render as inactive');
+});
+
+test('a minimized window renders nothing; an unfocused one dims its bar', () => {
+  const minimized = renderToStaticMarkup(
+    <RetroWindow
+      title="a"
+      x={0}
+      y={0}
+      z={21}
+      active={false}
+      width={400}
+      height={320}
+      minimized
+      onFocus={NOOP}
+      onMinimize={NOOP}
+      onClose={NOOP}
+      onMove={NOOP}
+    >
+      <p>thread</p>
+    </RetroWindow>,
+  );
+  assert.equal(minimized, '', 'a minimized window renders nothing — its tab is what remains');
+
+  const inactive = renderToStaticMarkup(
+    <RetroWindow
+      title="a"
+      x={0}
+      y={0}
+      z={21}
+      active={false}
+      width={400}
+      height={320}
+      onFocus={NOOP}
+      onMinimize={NOOP}
+      onClose={NOOP}
+      onMove={NOOP}
+    >
+      <p>thread</p>
+    </RetroWindow>,
+  );
+  assert.ok(inactive.includes('win-inactive'), 'an unfocused window must render as inactive');
+});
+
+test('a phone window has no chrome: the strip’s tab already names and closes it', () => {
+  const markup = renderToStaticMarkup(
+    <RetroWindow
+      title="reason008"
+      x={0}
+      y={0}
+      z={21}
+      active
+      width={520}
+      height={460}
+      mobileFullscreen
+      onFocus={NOOP}
+      onMinimize={NOOP}
+      onClose={NOOP}
+      onMove={NOOP}
+    >
+      <p>thread</p>
+    </RetroWindow>,
+  );
+
+  assert.ok(markup.includes('mtab-window'), 'the phone window is the strip’s full-bleed surface');
+  assert.ok(!markup.includes('win-titlebar'), 'a phone window has no title bar');
+  assert.ok(!markup.includes('win-ctl'), 'a phone window has no window controls');
+  assert.ok(!markup.includes('rz-handle'), 'a phone window cannot be resized');
+});
+
+// --- the taskbar ---
+
+test('the taskbar offers one button per window, the focused one marked', () => {
+  const markup = desk(
+    <Taskbar
+      windows={[
+        win({ id: 'chat:c1', kind: 'chat', title: 'reason008' }),
+        win({ id: 'store', kind: 'store', title: 'Store' }),
+      ]}
+      activeId="chat:c1"
+      onlineSince={Date.now()}
+      onToggle={NOOP}
+      onRequestLogout={NOOP}
+      accountName="Ada"
+      pos="bottom"
+      onTogglePos={NOOP}
+    />,
+  );
+
+  const buttons = markup.match(/class="task-btn( task-btn-active)?"/g) ?? [];
+  assert.equal(buttons.length, 2, 'one button per open window, nothing else');
+  assert.equal(
+    (markup.match(/task-btn-active/g) ?? []).length,
+    1,
+    'exactly one button may carry the active mark',
+  );
+  assert.ok(markup.includes('reason008'), 'the window’s title must be on its button');
+  assert.ok(markup.includes('task-btn-kind'), 'the button names what kind of thing it opens');
+  assert.ok(markup.includes('taskbar-brand'), 'the taskbar carries the brand');
+});
+
+test('a minimized window keeps its button, with the pale dot', () => {
+  const markup = desk(
+    <Taskbar
+      windows={[win({ id: 'chat:c1', kind: 'chat', title: 'reason008', minimized: true })]}
+      activeId={null}
+      onlineSince={Date.now()}
+      onToggle={NOOP}
+      onRequestLogout={NOOP}
+      accountName="Ada"
+      pos="bottom"
+      onTogglePos={NOOP}
+    />,
+  );
+
+  assert.ok(markup.includes('task-dot-min'), 'the minimized window’s dot is the pale one');
+  assert.ok(!markup.includes('task-btn-active'), 'a minimized window is not the active one');
+});
+
+test('an unanswered balance stays silent; the clock and the logout are always there', () => {
+  const markup = desk(
+    <Taskbar
+      windows={[]}
+      activeId={null}
+      onlineSince={Date.now()}
+      onToggle={NOOP}
+      onRequestLogout={NOOP}
+      accountName="Ada"
+      pos="bottom"
+      onTogglePos={NOOP}
+    />,
+  );
+
+  // The balance is read once per mount; a wallet that has not answered says nothing — a
+  // silence the static render pins, because "0" would be a balance the wallet never reported.
+  assert.ok(!markup.includes('$MIG balance'), 'an unread balance must not render a chip');
+  assert.ok(markup.includes('aria-label="Clock"'), 'the clock is missing');
+  assert.ok(markup.includes('Logout'), 'the logout control is missing');
+  assert.ok(
+    markup.includes('aria-label="Move taskbar to top"'),
+    'the dock toggle must name the edge it moves to',
+  );
+});
+
+test('the taskbar can be docked to the top edge, and the toggle names the way back', () => {
+  const markup = desk(
+    <Taskbar
+      windows={[]}
+      activeId={null}
+      onlineSince={Date.now()}
+      onToggle={NOOP}
+      onRequestLogout={NOOP}
+      accountName="Ada"
+      pos="top"
+      onTogglePos={NOOP}
+    />,
+  );
+
+  assert.ok(markup.includes('taskbar-top'), 'the top dock must carry its variant class');
+  assert.ok(
+    markup.includes('aria-label="Move taskbar to bottom"'),
+    'the toggle must offer the way back down',
+  );
+});
+
+// --- the phone's strip ---
+
+/** The strip over the given home-tab state, with no windows unless a test adds them. */
+function strip(fields?: {
+  windows?: readonly WinState[];
+  activeId?: string | null;
+  unreadWin?: Readonly<Record<string, number>>;
+  navTab?: MobileNavTab;
+  hiddenNavs?: readonly MobileNavTab[];
+  navUnread?: Readonly<Record<MobileNavTab, number>>;
+}): string {
+  return renderToStaticMarkup(
+    <MobileTabBar
+      windows={fields?.windows ?? []}
+      activeId={fields?.activeId ?? null}
+      unreadWin={fields?.unreadWin ?? {}}
+      navTab={fields?.navTab ?? 'feed'}
+      hiddenNavs={fields?.hiddenNavs ?? []}
+      navUnread={fields?.navUnread ?? { friends: 0, rooms: 0, feed: 0 }}
+      onSelectNav={NOOP}
+      onCloseNav={NOOP}
+      onReopenNav={NOOP}
+      onSelectWindow={NOOP}
+      onCloseWindow={NOOP}
+    />,
   );
 }
 
-test('the left strip offers the system tabs in the reference order', () => {
-  const markup = render(shell([], 'feed'));
+test('the strip offers the home tabs in the reference order, and only Feed closes', () => {
+  const markup = strip();
 
-  // The pattern anchors on the whole class attribute so the icon/label spans inside a chip
-  // (tab-chip-icon, tab-chip-label) never count — only the chip buttons do. Four, not five:
-  // Games is the right pane's resting chip, not a list, so it is not on the strip.
-  const chips = markup.match(/class="tab-chip( active)?"/g) ?? [];
-  assert.equal(chips.length, 4, 'four system tabs on the left strip, nothing else');
   let at = -1;
-  for (const label of ['Friends', 'Chats', 'Rooms', 'Feed']) {
-    const found = markup.indexOf(`tab-chip-label">${label}</span>`);
-    assert.ok(found !== -1, `the "${label}" tab is missing from the strip`);
+  for (const label of MOBILE_NAV_ORDER.map(
+    (tab) => ({ friends: 'Friends', rooms: 'Rooms', feed: 'Feed' })[tab],
+  )) {
+    const found = markup.indexOf(`>${label}</button>`);
+    assert.ok(found !== -1, `the "${label}" home tab is missing from the strip`);
     assert.ok(found > at, `the "${label}" tab is out of the reference order`);
     at = found;
   }
+  // Friends and Rooms are the home itself: they ship without an X. Feed is one surface among
+  // three, so it is the one a person may close.
+  assert.ok(markup.includes('aria-label="Close Feed tab"'), 'the Feed tab must be closable');
+  assert.ok(!markup.includes('Close Friends'), 'the Friends tab must not be closable');
+  assert.ok(!markup.includes('Close Rooms'), 'the Rooms tab must not be closable');
+  assert.ok(!markup.includes('Reopen closed tabs'), 'no "+" while every home tab is open');
+  assert.ok(markup.includes('mtab-divider'), 'the divider between home and window tabs is missing');
 });
 
-test('the Chats chip carries the unread dot only when something is unread', () => {
-  const quiet = render(shell([], 'feed'));
-  assert.ok(!quiet.includes('tab-chip-dot'), 'no dot when every conversation is read');
+test('a closed home tab comes back through the "+"', () => {
+  const markup = strip({ hiddenNavs: ['feed'] });
 
-  const unread = render(
-    <AppShell
-      leftTab="friends"
-      leftContent={<p>left</p>}
-      rightTabs={[]}
-      activeRight="feed"
-      activeChat={null}
-      rightContent={<p>right</p>}
-      showRight={false}
-      chatsUnread
-      {...NOOP}
-    >
-      <p>thread</p>
-    </AppShell>,
+  assert.ok(markup.includes('aria-label="Reopen closed tabs"'), 'the "+" must offer the reopen');
+  assert.ok(
+    !markup.includes('aria-label="Close Feed tab"'),
+    'a closed tab is gone from the strip, not merely marked',
   );
-  assert.ok(unread.includes('class="tab-chip-dot"'), 'the dot marks unread messages');
-  assert.ok(unread.includes('aria-label="Unread messages"'), 'the dot says what it means');
 });
 
-test('an empty right pane still offers the Games chip, and never a menu panel', () => {
-  const markup = render(shell([], 'feed'));
+test('one closable tab per window, its unread badge capped at nine-plus', () => {
+  const markup = strip({
+    windows: [
+      win({ id: 'chat:c1', kind: 'chat', title: 'reason008' }),
+      win({ id: 'chat:c2', kind: 'chat', title: 'vela', minimized: true }),
+    ],
+    activeId: 'chat:c1',
+    unreadWin: { 'chat:c1': 12, 'chat:c2': 2 },
+  });
 
-  // The resting chip is the bar's own — an empty pane still owes the arcade.
-  assert.ok(
-    markup.includes('class="chat-tab active"'),
-    'the Games chip must be present and active when nothing is open',
-  );
-  assert.ok(markup.includes('aria-label="Open panels"'), 'the right pane must carry its tab bar');
-  assert.ok(!markup.includes('Menu Panel'), 'the menu panel is gone: the pane is tabs only');
-  assert.ok(!markup.includes('Panel: '), 'the pane no longer names a two-mode "panel" it shows');
-});
-
-test('every open thing is a closable chip beside the Games', () => {
-  const tabs: RightTabChip[] = [
-    { id: 'chat:c1', kind: 'chat', conversationId: 'c1' as Id, title: 'reason008' },
-    { id: 'search', kind: 'search', title: 'Search' },
-    { id: 'wallet', kind: 'wallet', title: 'TopUp' },
-  ];
-  const markup = render(shell(tabs, 'chat:c1', 'c1' as Id));
-
-  assert.ok(
-    markup.includes('tab-chip-label">reason008</span>'),
-    'the conversation chip must carry its title',
-  );
-  assert.ok(
-    markup.includes('aria-label="Close reason008"'),
-    'the conversation chip must be closable',
-  );
-  assert.ok(markup.includes('aria-label="Close TopUp"'), 'the panel chips must be closable too');
-  // The resting chip is never closable — closing everything must leave the Games.
-  assert.ok(
-    !markup.includes('Close Games'),
-    "the Games chip has no close control; it is the pane's fallback",
-  );
-  // The chat tab is the active one, so the pane shows the thread, not the right content.
-  assert.ok(markup.includes('class="thread-area"'), 'the active chat tab shows the thread');
-  assert.ok(!markup.includes('<p>right</p>'), 'the pane does not also render its fallback');
-});
-
-test('exactly one chip is active per pane, never more', () => {
-  const tabs: RightTabChip[] = [
-    { id: 'chat:c1', kind: 'chat', conversationId: 'c1' as Id, title: 'a' },
-    { id: 'chat:c2', kind: 'chat', conversationId: 'c2' as Id, title: 'b' },
-  ];
-  const markup = render(shell(tabs, 'chat:c2', 'c2' as Id));
-
-  // Two open conversations plus the bar's own Games chip.
-  const chatChips = markup.match(/class="chat-tab( active)?"/g) ?? [];
-  assert.equal(chatChips.length, 3, 'one chip per open thing, plus the Games');
-  assert.equal(markup.match(/class="chat-tab active"/g)?.length ?? 0, 1, 'one active chip');
+  assert.ok(markup.includes('aria-label="Close reason008"'), 'every window tab must be closable');
+  assert.ok(markup.includes('mtab-title'), 'the window tab must carry the window’s title');
+  assert.ok(markup.includes('>9+</span>'), 'a dozen unread reads as "many", not as arithmetic');
+  assert.ok(markup.includes('>2</span>'), 'a small unread count reads as itself');
+  assert.ok(markup.includes('task-dot-min'), 'a parked window’s tab shows the pale dot');
   assert.equal(
-    (markup.match(/aria-current="page"/g) ?? []).length,
-    2,
-    'exactly one current page per pane: the left strip tab and the active right chip',
+    (markup.match(/task-btn-active/g) ?? []).length,
+    1,
+    'exactly one tab may carry the active mark',
   );
 });
 
-test('the back control is icon-only and never says menu', () => {
-  const markup = render(shell([], 'feed'));
+// --- the vocabulary ---
 
-  assert.ok(
-    markup.includes('aria-label="Back to the lists"'),
-    'the single-column way home to the lists is on the bar',
-  );
-  assert.ok(!markup.includes('class="chat-back pane-back"'), 'the old two-mode back is gone');
+test('every window kind has a label and an icon, and a chat window ids by conversation', () => {
+  const kinds: readonly WinKind[] = [
+    'chat',
+    'notifications',
+    'search',
+    'wallet',
+    'profile',
+    'account',
+    'settings',
+    'admins',
+    'store',
+    'games',
+  ];
+  for (const kind of kinds) {
+    assert.ok(KIND_LABEL[kind].length > 0, `the "${kind}" window has no taskbar label`);
+    assert.ok(KIND_ICON[kind].length > 0, `the "${kind}" window has no tab icon`);
+  }
+  assert.equal(chatWinId('c1' as Id), 'chat:c1', 'a chat window’s id is its conversation’s');
+  assert.equal(WINDOW_SIZES.w, 400, 'the side window’s width is the design’s own');
+  assert.equal(STORE_WINDOW.w, 430, 'the store window keeps its wider cut');
 });
 
-test('the banner carries the account menu and the theme control', () => {
-  const markup = render(shell([], 'feed'));
+// --- the contacts window ---
 
-  const menuButtons = markup.match(/aria-label="Open the account menu"/g) ?? [];
-  assert.equal(menuButtons.length, 1, 'the banner must own exactly one account menu control');
+test('the contacts list is a window: titled, pill-navigated, and closing it asks to leave', () => {
+  const markup = sessionShell(
+    <ContactsWindow
+      tab="friends"
+      onTabChange={NOOP}
+      width={360}
+      height={560}
+      maximized={false}
+      onMinimize={NOOP}
+      onToggleMaximize={NOOP}
+      onClose={NOOP}
+      onResize={NOOP}
+      onOpenWindow={NOOP}
+      onOpenConversation={NOOP}
+    />,
+  );
+
+  assert.ok(markup.includes('contacts-frame'), 'the contacts list must be a window frame');
+  assert.ok(markup.includes('>Contacts</span>'), 'the title bar must name the window');
   assert.ok(
-    markup.includes('aria-label="Switch to light theme"'),
-    'the theme control is missing or mislabelled',
+    markup.includes('aria-label="Close and log out"'),
+    'the close control must ask to log out',
   );
-});
-
-test('the theme control follows the theme it is handed', () => {
-  const dark = render(
-    <AppShell
-      leftTab="friends"
-      leftContent={<p>left</p>}
-      rightTabs={[]}
-      activeRight="feed"
-      activeChat={null}
-      rightContent={<p>right</p>}
-      showRight={false}
-      theme="dark"
-      {...NOOP}
-    >
-      <p>thread</p>
-    </AppShell>,
-  );
-  const light = render(
-    <AppShell
-      leftTab="friends"
-      leftContent={<p>left</p>}
-      rightTabs={[]}
-      activeRight="feed"
-      activeChat={null}
-      rightContent={<p>right</p>}
-      showRight={false}
-      theme="light"
-      {...NOOP}
-    >
-      <p>thread</p>
-    </AppShell>,
-  );
-
-  assert.ok(
-    dark.includes('aria-label="Switch to light theme"'),
-    'the dark theme must offer the light one',
-  );
-  assert.ok(
-    light.includes('aria-label="Switch to dark theme"'),
-    'the light theme must offer the dark one',
-  );
-});
-
-test('the right-tabs mode hides the Chats chip from the side strip', () => {
-  const markup = render(
-    <AppShell
-      leftTab="friends"
-      leftContent={<p>left</p>}
-      rightTabs={[]}
-      activeRight="feed"
-      activeChat={null}
-      rightContent={<p>right</p>}
-      showRight={false}
-      chatsTabHidden
-      {...NOOP}
-    >
-      <p>thread</p>
-    </AppShell>,
-  );
-
-  // Three chips, not four: the right pane's tabs are the chats list in this mode, and a list
-  // and a tab bar showing the same conversations is the same door twice.
-  const chips = markup.match(/class="tab-chip( active)?"/g) ?? [];
-  assert.equal(chips.length, 3, 'the Chats chip must be gone when the pane holds the chats');
-  assert.ok(!markup.includes('tab-chip-label">Chats</span>'), 'no Chats chip may remain');
-  // The unread dot follows the chip it belongs to — with no chip, no dot.
-  assert.ok(!markup.includes('tab-chip-dot'), 'no orphan unread dot without its chip');
-});
-
-test('the one-window mode replaces the tab bar with the slim pane bar it is handed', () => {
-  const markup = render(
-    <AppShell
-      leftTab="friends"
-      leftContent={<p>left</p>}
-      rightTabs={[]}
-      activeRight="feed"
-      activeChat={'c1' as Id}
-      rightContent={<p>right</p>}
-      showRight
-      chatsTabHidden
-      rightBarOverride={<PaneBar title="reason008" onClose={() => {}} onBackToLists={() => {}} />}
-      {...NOOP}
-    >
-      <p>thread</p>
-    </AppShell>,
-  );
-
-  // No chip bar: the one-window mode's pane has no tabs to switch. (The left strip's own Feed
-  // tab is a different surface and stays, so the check anchors on the bar, not the word.)
-  assert.ok(
-    !markup.includes('aria-label="Open panels"'),
-    'the chip bar must be gone when the pane holds one window at a time',
-  );
-  assert.ok(
-    !markup.includes('class="chat-tab active"'),
-    'no chip may render — not even the resting Feed one',
-  );
-  // The slim bar carries the one open thing's name, and the controls to leave it.
-  assert.ok(markup.includes('pane-tab'), 'the pane bar must carry its title label');
-  assert.ok(markup.includes('reason008'), 'the pane bar must name what the pane is showing');
-  assert.ok(markup.includes('aria-label="Close reason008"'), 'the pane bar must offer a close');
-  assert.ok(
-    markup.includes('aria-label="Back to the lists"'),
-    'the single-column way home must survive the mode switch',
-  );
-});
-
-test('the one-window mode renders no bar at all when the pane rests on the Feed', () => {
-  const markup = render(
-    <AppShell
-      leftTab="friends"
-      leftContent={<p>left</p>}
-      rightTabs={[]}
-      activeRight="feed"
-      activeChat={null}
-      rightContent={<p>right</p>}
-      showRight
-      chatsTabHidden
-      rightBarOverride={null}
-      {...NOOP}
-    >
-      <p>thread</p>
-    </AppShell>,
-  );
-
-  assert.ok(!markup.includes('chat-tab-bar'), 'an idle pane must carry no bar');
-  assert.ok(!markup.includes('aria-label="Open panels"'), 'the chip bar must stay gone');
-});
-
-test('the pane bar title is a label, not a control', () => {
-  const markup = renderToStaticMarkup(
-    <PaneBar title="Wallet" onClose={() => {}} onBackToLists={() => {}} />,
-  );
-
-  // The title is a span, never a button: there is nothing to switch it with.
-  assert.ok(
-    markup.includes('<span class="chat-tab pane-tab active"'),
-    'the title must be a plain labelled span',
-  );
-  assert.ok(!markup.includes('class="chat-tab active"'), 'the title must not pose as a chip');
-  // The close is the bar's only way out besides back, and it names what it closes.
-  assert.ok(markup.includes('aria-label="Close Wallet"'), 'the close must name the panel');
+  let at = -1;
+  for (const label of ['Friends', 'Rooms', 'Feed']) {
+    const labelAt = markup.indexOf(`>${label}</button>`);
+    assert.ok(labelAt !== -1, `the "${label}" pill is missing from the nav`);
+    assert.ok(labelAt > at, `the "${label}" pill is out of the reference order`);
+    at = labelAt;
+  }
+  assert.ok(markup.includes('hdr-orange'), 'the me bar is missing from the window');
+  assert.ok(markup.includes('New here! Say hi :)'), 'the status line owes its placeholder');
+  assert.ok(markup.includes('title="Menu"'), 'the gear menu button is missing');
 });

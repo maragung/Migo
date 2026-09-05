@@ -1,4 +1,4 @@
-//! The chat screen: the open conversation as its own tab — header, thread, composer.
+//! The chat screen: one conversation's window — header, thread, composer.
 //!
 //! # Why the message store is a map, not a list
 //!
@@ -38,10 +38,14 @@ pub struct ChatState {
     pub names: HashMap<Id, String>,
     /// Who is currently typing, per conversation.
     pub typing: HashMap<Id, Vec<Id>>,
-    /// The composer's contents for the open conversation.
-    pub draft: String,
-    /// The last typing state reported, so a keystroke does not send one frame per character.
-    pub typing_sent: bool,
+    /// The composer's contents, per conversation. A conversation is a window of its own now
+    /// (see [`crate::ui::desktop`]), so a draft belongs to the conversation it was typed into —
+    /// switching windows must not carry half a sentence from one thread into another, and
+    /// closing a window must not cost the words someone was still composing in it.
+    pub drafts: HashMap<Id, String>,
+    /// The last typing state reported, per conversation, so a keystroke does not send one frame
+    /// per character. Keyed the same way the drafts are, for the same reason.
+    pub typing_sent: HashMap<Id, bool>,
     /// True until the first message that must be scrolled into view has been.
     pub scroll_to_end: bool,
     /// Room membership notices, keyed by room id: who came, who went, who was shown the door.
@@ -57,6 +61,11 @@ pub struct ChatState {
     /// else's read — which is exactly what an outgoing message's read marker claims. Monotonic:
     /// a receipt is a watermark, so an older one arriving late never drags it backwards.
     pub read_up_to: HashMap<Id, u64>,
+    /// How many times a conversation has been opened, ever. Incremented by [`open`] and read by
+    /// nobody but the shell, which compares it across a frame: a conversation can be opened from
+    /// places the shell does not control (a room row, a search hit), so this is the one honest
+    /// signal that *some* conversation asked to become a window during the frame.
+    pub open_seq: u64,
 }
 
 /// One room membership line in the thread's tail.
@@ -180,22 +189,27 @@ fn delivery_rank(state: Delivery) -> u8 {
     }
 }
 
-/// The open conversation as its own tab: header, messages, composer, with nothing beside them.
+/// One conversation's window: header, messages, composer, with nothing beside them.
 ///
-/// There is no conversation list pane any more — the reference's model is that a conversation
-/// opens as a closable tab on the right pane's bar (see the shell's chat bar) from wherever a
-/// person or room is found, so this thread is the whole of the chat surface.
-pub fn thread(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState) {
-    thread_pane(ui, context, state);
+/// The conversation is passed in explicitly rather than read from the state's `selected`,
+/// because a conversation is a window of its own now — several are on the desktop at once, and
+/// this thread is called once per open window with the id that window was minted for. The
+/// `selected` field is the *last* conversation any door opened, not the one being drawn, and
+/// reading it here would make every window show whichever thread was opened most recently.
+pub fn thread(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conversation_id: Id) {
+    thread_pane(ui, context, state, conversation_id);
 }
 
 /// Opens a conversation and asks for anything missing from its history.
 ///
 /// Public because the shell's other places are doors into threads too: a Home digest row, a
 /// joined room, a search hit. All of them open a conversation the one way there is.
+///
+/// The draft is deliberately left alone: drafts are per conversation now, so opening is not
+/// writing — the words someone had half-composed are still there when the window comes back.
 pub fn open(context: &mut Context<'_>, state: &mut ChatState, conversation_id: Id) {
     state.selected = Some(conversation_id);
-    state.draft.clear();
+    state.open_seq = state.open_seq.saturating_add(1);
     state.scroll_to_end = true;
     context.issue(Command::History {
         conversation_id,
@@ -227,17 +241,7 @@ pub fn open(context: &mut Context<'_>, state: &mut ChatState, conversation_id: I
 }
 
 /// The open conversation: header, messages, composer.
-fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState) {
-    let Some(conversation_id) = state.selected else {
-        widgets::empty_state(
-            ui,
-            context.theme,
-            "Nothing open",
-            "Open a friend from the Friends list, or join a room — the thread lands here.",
-        );
-        return;
-    };
-
+fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conversation_id: Id) {
     thread_header(ui, context, state, conversation_id);
     widgets::divider(ui, context.theme);
 
@@ -593,9 +597,12 @@ fn composer(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conve
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let send_width = 56.0;
+                // This conversation's own draft, born empty the first time it is typed into and
+                // left exactly as it stands when the window closes.
+                let draft = state.drafts.entry(conversation_id).or_default();
                 let response = ui.add_enabled(
                     online,
-                    egui::TextEdit::multiline(&mut state.draft)
+                    egui::TextEdit::multiline(draft)
                         .hint_text(if online {
                             "Write a message"
                         } else {
@@ -620,36 +627,65 @@ fn composer(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conve
                 let send_by_key = response.has_focus() && enter;
                 let send_by_click = widgets::send_button(ui, context.theme, online).clicked();
 
-                if (send_by_key || send_by_click) && !state.draft.trim().is_empty() && online {
-                    let text = state.draft.trim().to_owned();
-                    state.draft.clear();
+                // Every read of the draft from here on takes its own short borrow: the send and
+                // the typing report both write it, and one long borrow would have them fight.
+                let can_send = online
+                    && state
+                        .drafts
+                        .get(&conversation_id)
+                        .is_some_and(|draft| !draft.trim().is_empty());
+                if (send_by_key || send_by_click) && can_send {
+                    let text = state
+                        .drafts
+                        .get_mut(&conversation_id)
+                        .map(|draft| {
+                            let text = draft.trim().to_owned();
+                            draft.clear();
+                            text
+                        })
+                        .unwrap_or_default();
                     context.issue(Command::SendText {
                         conversation_id,
                         text,
                     });
-                    if state.typing_sent {
+                    if state
+                        .typing_sent
+                        .get(&conversation_id)
+                        .copied()
+                        .unwrap_or(false)
+                    {
                         context.issue(Command::Typing {
                             conversation_id,
                             typing: false,
                         });
-                        state.typing_sent = false;
+                        state.typing_sent.insert(conversation_id, false);
                     }
                     // Enter leaves a newline in the buffer on some platforms; clearing after the
                     // command is queued keeps the field empty either way.
-                    state.draft.clear();
+                    if let Some(draft) = state.drafts.get_mut(&conversation_id) {
+                        draft.clear();
+                    }
                     response.request_focus();
                 }
 
                 // Typing is reported on the transition, not per keystroke. A frame-rate stream of
                 // typing frames is bandwidth spent to say the same thing sixty times a second, and the
                 // server would rightly rate-limit it.
-                let has_text = !state.draft.trim().is_empty();
-                if has_text != state.typing_sent && online {
+                let has_text = state
+                    .drafts
+                    .get(&conversation_id)
+                    .is_some_and(|draft| !draft.trim().is_empty());
+                let sent = state
+                    .typing_sent
+                    .get(&conversation_id)
+                    .copied()
+                    .unwrap_or(false);
+                if has_text != sent && online {
                     context.issue(Command::Typing {
                         conversation_id,
                         typing: has_text,
                     });
-                    state.typing_sent = has_text;
+                    state.typing_sent.insert(conversation_id, has_text);
                 }
             });
         });

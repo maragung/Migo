@@ -18,6 +18,7 @@ pub mod alerts;
 pub mod auth;
 pub mod captcha;
 pub mod chat;
+pub mod desktop;
 pub mod friends;
 pub mod games;
 pub mod profile;
@@ -55,25 +56,24 @@ pub enum Screen {
     Chat,
 }
 
-/// Which pane a signed-in user is looking at, chosen from the tab strip.
+/// Which surface a signed-in user is looking at.
 ///
 /// Deliberately separate from [`Screen`]: the screens are the auth *pipeline* (which form, which
 /// gate), while a place is where a signed-in person already is. Folding friends into `Screen`
 /// would let the auth flow "navigate" to it, and a sign-out would have to remember to reset it
 /// rather than it simply being unreachable without an account.
 ///
-/// The order is the information architecture — the strip's tabs first (Friends, Rooms, Games,
-/// Feed), then the panels the account menu opens in the right pane (Alerts, Search, Wallet,
-/// Settings). It is the same split the web client's two panes and the Android client's
-/// covering screens draw, because it is one product.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The desktop-OS shell splits the places in two, the way the reference's window manager does:
+/// the first three are the Contacts window's own tabs (the social graph, the room directory, the
+/// activity stream — one floating window, three tabs), and the rest are the small side windows
+/// that open on their own when the account menu or the taskbar asks for them. A conversation is
+/// not a place at all: each one opens as its own closable window (see [`crate::ui::desktop`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Place {
     /// The social graph: friends, requests, adding by id.
     Friends,
     /// The public room directory and the way in.
     Rooms,
-    /// The games the server referees, and where they are played.
-    Games,
     /// The activity stream.
     Feed,
     /// The durable notification inbox.
@@ -83,19 +83,21 @@ pub enum Place {
     /// The MIG balance, the gift shop, the statement, progression, badges, leaderboard.
     Wallet,
     /// The account's own card: display name, bio, custom status, and the privacy of last-seen,
-    /// messaging, and friend requests. The account menu's "My Profile", on the right pane.
+    /// messaging, and friend requests. The account menu's "My Profile".
     Profile,
     /// The Owner/CEO's management page for the global admins — who may moderate every public
-    /// room. Offered by the banner menu only when the server says this account is the owner,
+    /// room. Offered by the account menu only when the server says this account is the owner,
     /// because the management page's whole point is that its existence is not public
     /// information.
     Admins,
+    /// The games the server referees, and where they are played.
+    Games,
     /// Server, theme, devices, sign-out.
     Settings,
 }
 
 impl Place {
-    /// The tab's own word, on the strip and nowhere else.
+    /// The surface's own word, on its window's title bar and nowhere else.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -112,7 +114,7 @@ impl Place {
         }
     }
 
-    /// The right pane's own word, on its menu bar — the reference calls the credits pane "TopUp".
+    /// The window title's own word — the reference calls the credits pane "TopUp".
     #[must_use]
     pub fn right_label(self) -> &'static str {
         match self {
@@ -121,18 +123,22 @@ impl Place {
         }
     }
 
-    /// The four places that are always on the strip, in the reference's order. A conversation
-    /// is not one of them: it opens as its own closable tab on the right pane's bar (see the
-    /// shell's chat bar), which is the reference's whole model. Feed and Games live here and
-    /// nowhere else — the left panel owns them, so the right pane can never draw the same
-    /// activity stream a second time. The right pane's panels (Alerts, Search, Wallet,
-    /// Settings) are not a strip at all: the banner's account menu opens each on its own.
-    pub const SYSTEM_TABS: [Self; 4] = [Self::Friends, Self::Rooms, Self::Games, Self::Feed];
+    /// The three tabs the Contacts window carries, in the reference's order. A conversation is
+    /// not one of them: it opens as its own closable window, which is the reference's whole
+    /// model. Games is not one of them either — it opens as a small side window of its own.
+    pub const CONTACTS_TABS: [Self; 3] = [Self::Friends, Self::Rooms, Self::Feed];
 
-    /// Whether the place is one of the strip's permanent four.
+    /// Whether the place is one of the Contacts window's tabs.
     #[must_use]
-    pub fn is_system_tab(self) -> bool {
-        Self::SYSTEM_TABS.contains(&self)
+    pub fn is_contacts_tab(self) -> bool {
+        Self::CONTACTS_TABS.contains(&self)
+    }
+
+    /// Whether the place opens as a small floating window of its own — everything that is not a
+    /// Contacts tab.
+    #[must_use]
+    pub fn is_side_window(self) -> bool {
+        !self.is_contacts_tab()
     }
 }
 

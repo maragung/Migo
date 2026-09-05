@@ -16,9 +16,10 @@ a card-based social clone.
 The v4 identity is a **flat modern restyle** of the mig33 lineage: solid colours only — no
 gradients, no glossy highlights, no bevels or inset shadows, no text shadows. Separation comes
 from 1px borders and a single soft elevation shadow, used only by things that genuinely float.
-A deep-teal tab strip sits over a flat-orange "me card"; lists are flush hairline rows rather
-than cards; the transcript is a script, not a stack of bubbles; each panel closes with a pale
-status band.
+The composition is a **desktop-OS windowing metaphor**: a turquoise desk, a Contacts window,
+one floating window per conversation, and a taskbar (a top tab strip on a phone). Lists are
+flush hairline rows rather than cards; the transcript is a script, not a stack of bubbles;
+each list closes with a pale status band. The base font size is **12px**.
 
 ## Colour
 
@@ -69,14 +70,14 @@ ground); each index keeps its hue, and only lightness moves. Your own lines take
 ## Typography
 
 `'Segoe UI', Tahoma, Verdana, Geneva, sans-serif` — the reference's own stack, no webfont. Base
-size 13px; the scale is small and dense on purpose.
+size 12px; the scale is small and dense on purpose.
 
 | Step     | Size                           | Use                           |
 | -------- | ------------------------------ | ----------------------------- |
 | micro    | 10.5px, 700, uppercase, +0.4px | section headings, status band |
+| body-sm  | 11px                           | secondary body, chips         |
 | meta     | 11.5px                         | timestamps, metadata          |
-| body-sm  | 12px                           | secondary body, chips         |
-| body     | 13px                           | messages, controls            |
+| body     | 12px                           | messages, controls            |
 | title-sm | 14px, 700                      | row names, banner name        |
 | title    | 16px, 700                      | panel titles                  |
 | display  | 20px, 700                      | the greeting                  |
@@ -102,30 +103,45 @@ with their own canvas (strokes, no icon dependency). Emoji are content (reaction
 
 ## Layout
 
-Two independent panels on a PC, one column on a phone:
+The reference is a **desktop-OS windowing metaphor**, and the clients now mean it literally.
+A PC is a desk; a phone is the same desk seen through one slot at a time.
 
-- The **tab strip** across the top of the left panel: the system tabs **Friends, Chats, Rooms,
-  Feed** on the deep-teal band. The active tab is a solid white pill with teal ink and a short
-  underline drawn inside it. The strip scrolls rather than hiding a tab.
-- The **me card** under it: the flat orange band, the avatar in a presence-coloured ring with a
-  white halo, the name with a blinking presence dot, the `@handle`, the account's editable status
-  line, the presence control — and the avatar's dropdown carrying **My Profile, My Credits &
-  TopUp, Store, Settings, Exit / Logout**.
-- The **list** below, as flush hairline rows (58px; rooms 66px, which carry an occupancy bar).
-- The **status band** at the foot: the credit balance on the left, a lowercase hint on the right
-  saying what the open list responds to.
-- The **right panel** carries its own bar in the same teal: a persistent Games chip and one
-  closable chip per open conversation or panel. Below the PC breakpoint the two panes take turns.
+On a PC (≥768px): the turquoise desk (`#0f96ad`, deep-teal in dark) carries a faint brand
+watermark top-left, and everything the user opens is a **window** — `.win-frame`: a 1px line
+border, 12px radius, white body, the teal gloss title bar with min/max/close controls, and
+cascade placement (~26×24px steps) for every window after the first. Windows drag by the
+title bar, resize from the east/south/south-east handles, and stack last-click-wins.
+
+- **Contacts is a window**, not a sidebar: teal nav pills (**Friends, Rooms, Feed**), the
+  orange me bar (avatar in a presence-coloured ring with a white halo, blinking dot,
+  click-to-edit status line, mail chip, away moon), then the flush hairline rows of the open
+  list (58px; rooms 66px, carrying the occupancy bar) and the status band at its foot.
+- **Every conversation, room and group chat is its own window** — one composer per window,
+  nothing shared. Panels — **Alerts, Search, Wallet, Profile, Account, Settings, Admins,
+  Store, Games** — are windows too (≈400×320; Store 430×386).
+- The **taskbar** (34px, deep teal, bottom by default and dockable to top — the position
+  persists) is the inventory: one button per window (green dot active, pale dot minimised),
+  the real $MIG balance, the session timer, the clock, the logout.
+
+On a phone (<768px) there is no taskbar and windows carry no chrome. A 46px scrollable strip
+at the top holds the home tabs **Friends, Rooms, Feed** (only Feed closes; "+" reopens it),
+a hairline divider, then one closable tab per window with an unread badge. The active window
+or home view fills the slot below. Home opens with the me card, then the list; tapping a
+friend or room raises a **bottom sheet** (18px top radius, drag handle, 54px action rows,
+the primary action in orange) that carries the intent — send a message, join the room —
+rather than navigating on the first touch.
 
 Breakpoints: 320 / 360 / 375 / 390 / 412 / 430 / 480 / 600 / 768 / 820 / 1024 / 1280 / 1440 / 1920+.
 
 ## Navigation
 
-Left-panel system tabs, in strip order: **Friends, Chats, Rooms, Feed.** The right pane's tabs:
-**Games** (its resting content) plus one closable chip per open conversation. Panels — **Alerts,
-Search, Wallet, Profile, Account, Settings, Admins, Store** — open from the me card's avatar menu
-as right-pane tabs. The same list on every platform, re-composed per size — never a different
-information architecture for a different device.
+The window list is the navigation. The Contacts window's tabs: **Friends, Rooms, Feed.**
+Everything else is a window minted by an intent — a conversation opened, a panel chosen from
+the me bar's menu — and closed by its own X or its taskbar/tab-strip control. The same
+model on every platform, re-composed per size: a PC shows many windows at once, a phone
+parks all but one. Escape closes the focused chat window; back on a phone closes the active
+tab. The information architecture never changes between devices — only how many windows are
+visible.
 
 ## The transcript
 
@@ -141,7 +157,8 @@ and **reply quotes** that render `[deleted]` when their target is gone.
 
 ## Components
 
-The shared vocabulary: TabStrip, RightTabBar, ProfileBanner, AvatarMenu, ListFooter, Avatar,
+The shared vocabulary: RetroWindow, ContactsWindow, Taskbar, MobileTabBar, MobileHome,
+IntentSheet (UserIntent, RoomIntent, Me), ConfirmDialog, MigoBrand, Avatar, ListFooter,
 PresenceIndicator, Badge, Button, IconButton, Input, SearchInput, UserRow, ConversationRow,
 MessageLine, MessageComposer, RoomRow, MemberList, ActivityRow, GamesPanel, TokenReference,
 ProfileHeader, NotificationRow, SettingsRow, ContextMenu, BottomSheet, Dialog, Toast, Tooltip,

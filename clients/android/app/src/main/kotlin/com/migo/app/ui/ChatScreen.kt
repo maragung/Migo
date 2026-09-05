@@ -54,7 +54,12 @@ import com.migo.core.protocol.SanctionAction
 import com.migo.core.wire.Id
 
 /**
- * One conversation: its messages, and the field for adding to them.
+ * One conversation, shown full-bleed beneath the window strip: its messages, and the field for
+ * adding to them.
+ *
+ * The strip is the chat's own way back — the conversation's tab is how the person arrived — so the
+ * header carries no back control of its own; the mobile reference's windows have no title bars. The
+ * member sheet keeps its own, because a sheet closes to the thread, not to the strip.
  *
  * # Why the list is not reversed
  *
@@ -67,7 +72,6 @@ import com.migo.core.wire.Id
 @Composable
 fun ChatScreen(
     chat: ChatState,
-    onBack: () -> Unit,
     onDraft: (String) -> Unit,
     onSend: () -> Unit,
     /** Leaves the room behind this chat, offered only when the chat is a room this shell knows. */
@@ -132,7 +136,7 @@ fun ChatScreen(
 
     Box(modifier = modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
-            ChatHeader(chat = chat, onBack = onBack, onLeave = onLeave, onOpenMembers = onOpenMembers)
+            ChatHeader(chat = chat, onLeave = onLeave, onOpenMembers = onOpenMembers)
 
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 when {
@@ -201,20 +205,16 @@ fun ChatScreen(
 @Composable
 private fun ChatHeader(
     chat: ChatState,
-    onBack: () -> Unit,
     onLeave: (() -> Unit)?,
     onOpenMembers: (() -> Unit)?,
 ) {
     Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(end = 16.dp, top = 8.dp, bottom = 8.dp),
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // A text arrow rather than an icon: this app declares no icon dependency, and a character
-            // scales with the system font size.
-            TextButton(onClick = onBack) {
-                Text(text = "<", style = MaterialTheme.typography.titleMedium)
-            }
+            // No back control: the window strip above is the chat's own way back, the mobile
+            // reference's windows having no title bars.
             Monogram(name = chat.title, size = 36.dp)
             Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {

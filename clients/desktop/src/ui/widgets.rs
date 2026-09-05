@@ -399,35 +399,6 @@ pub fn tab_chip(
     outcome
 }
 
-/// Paints a horizontal three-stop gradient across a rect.
-///
-/// egui has no gradient primitive, so this is the two-triangle mesh it decomposes to: `a` at the
-/// left edge, `b` at the middle, `c` at the right. Used by the profile banner, whose three stops
-/// are equal in every palette — the flat restyle passes one colour three times, so this paints a
-/// flat band, and the call sites need not know.
-pub fn gradient_rect(ui: &mut Ui, rect: egui::Rect, a: Color32, b: Color32, c: Color32) {
-    let mut mesh = egui::Mesh::default();
-    let (l, m, r) = (rect.left_top(), rect.center_top(), rect.right_top());
-    let (lb, mb, rb) = (
-        rect.left_bottom(),
-        rect.center_bottom(),
-        rect.right_bottom(),
-    );
-    let base = mesh.vertices.len() as u32;
-    for (pos, color) in [(l, a), (lb, a), (m, b), (mb, b)] {
-        mesh.colored_vertex(pos, color);
-    }
-    mesh.indices
-        .extend([base, base + 1, base + 2, base + 2, base + 1, base + 3]);
-    let base = mesh.vertices.len() as u32;
-    for (pos, color) in [(m, b), (mb, b), (r, c), (rb, c)] {
-        mesh.colored_vertex(pos, color);
-    }
-    mesh.indices
-        .extend([base, base + 1, base + 2, base + 2, base + 1, base + 3]);
-    ui.painter().add(egui::Shape::mesh(mesh));
-}
-
 /// Paints a vertical three-stop gradient across a rect, for the login screen.
 pub fn gradient_rect_vertical(ui: &mut Ui, rect: egui::Rect, a: Color32, b: Color32, c: Color32) {
     let mut mesh = egui::Mesh::default();

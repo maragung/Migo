@@ -29,6 +29,11 @@
 //! solid colours only, separation from 1px borders and one soft elevation shadow — never a
 //! gradient, a bevel or a text shadow. The banner and login triples are three equal stops, so
 //! the gradient call sites paint flat bands without knowing it.
+//!
+//! The signed-in shell extends the same idea to the desktop-OS metaphor: the desktop surface is
+//! the reference's turquoise (`#0F96AD`) in light and a deep teal of the same hue in dark, the
+//! taskbar is the nav teal (`#0D4353` in light), and every floating window's title bar is the
+//! accent teal with white bold text — the reference's `gloss-title`.
 
 use egui::{Color32, CornerRadius, FontFamily, FontId, Margin, Stroke, TextStyle, Vec2};
 use serde::{Deserialize, Serialize};
@@ -123,6 +128,14 @@ pub struct Palette {
     pub login_a: Color32,
     pub login_b: Color32,
     pub login_c: Color32,
+    /// The signed-in desktop surface — the ground the floating windows sit on. The reference's
+    /// flat turquoise in light; the same hue taken deep in dark, so the desktop reads as one
+    /// family with the taskbar in either theme.
+    pub desktop: Color32,
+    /// The wallet's coin colour, on the taskbar's balance chip and wherever a balance is stated.
+    /// Gold rather than the accent teal, because the balance is a number about money and the
+    /// teal is a colour about the interface.
+    pub gold: Color32,
     /// Success, and "connected".
     pub positive: Color32,
     /// A warning, and "connecting".
@@ -162,6 +175,8 @@ const DARK: Palette = Palette {
     login_a: Color32::from_rgb(0x0f, 0x96, 0xad),
     login_b: Color32::from_rgb(0x0f, 0x96, 0xad),
     login_c: Color32::from_rgb(0x0f, 0x96, 0xad),
+    desktop: Color32::from_rgb(0x0a, 0x3f, 0x4e),
+    gold: Color32::from_rgb(0xf0, 0xa9, 0x12),
     positive: Color32::from_rgb(0x3f, 0xce, 0x6b),
     warning: Color32::from_rgb(0xf5, 0xb8, 0x3d),
     danger: Color32::from_rgb(0xe5, 0x50, 0x3c),
@@ -197,6 +212,8 @@ const LIGHT: Palette = Palette {
     login_a: Color32::from_rgb(0x0f, 0x96, 0xad),
     login_b: Color32::from_rgb(0x0f, 0x96, 0xad),
     login_c: Color32::from_rgb(0x0f, 0x96, 0xad),
+    desktop: Color32::from_rgb(0x0f, 0x96, 0xad),
+    gold: Color32::from_rgb(0xf0, 0xa9, 0x12),
     positive: Color32::from_rgb(0x3f, 0xce, 0x6b),
     warning: Color32::from_rgb(0xf5, 0xb8, 0x3d),
     danger: Color32::from_rgb(0xe5, 0x50, 0x3c),
@@ -412,9 +429,14 @@ pub fn install(ctx: &egui::Context, theme: Theme) {
     w.active.fg_stroke = Stroke::new(1.0, p.text);
     w.active.corner_radius = CornerRadius::same(radius::SM);
     w.active.expansion = 0.0;
-    // Open: a combo box or menu that is showing its contents.
+    // Open: a combo box or menu that is showing its contents — and, by a coincidence egui's
+    // window machinery bakes in, the title bar of the top-most floating window: the active
+    // window's title bar is repainted in `widgets.open.weak_bg_fill`, over whatever the window's
+    // own title frame said. The accent is what that override wants to say — the active window
+    // wears the brighter teal, the inactive ones the frame's darker one — and an open combo box
+    // taking the same teal is the same family, not a clash.
     w.open.bg_fill = p.surface_overlay;
-    w.open.weak_bg_fill = p.surface_overlay;
+    w.open.weak_bg_fill = p.accent;
     w.open.bg_stroke = Stroke::new(1.0, p.border_strong);
     w.open.fg_stroke = Stroke::new(1.0, p.text);
     w.open.corner_radius = CornerRadius::same(radius::SM);
@@ -443,6 +465,8 @@ mod tests {
         assert_eq!(p.accent, Color32::from_rgb(0x1f, 0xa5, 0xc0));
         assert_eq!(p.accent_bright, Color32::from_rgb(0x34, 0xbf, 0xd8));
         assert_eq!(p.nav, Color32::from_rgb(0x06, 0x22, 0x2a));
+        assert_eq!(p.desktop, Color32::from_rgb(0x0a, 0x3f, 0x4e));
+        assert_eq!(p.gold, Color32::from_rgb(0xf0, 0xa9, 0x12));
         assert_eq!(p.positive, Color32::from_rgb(0x3f, 0xce, 0x6b));
         assert_eq!(p.danger, Color32::from_rgb(0xe5, 0x50, 0x3c));
         assert_eq!(p.text, Color32::from_rgb(0xe6, 0xf4, 0xf8));
@@ -459,6 +483,9 @@ mod tests {
         assert_eq!(p.surface_raised, Color32::from_rgb(0xff, 0xff, 0xff));
         assert_eq!(p.accent, Color32::from_rgb(0x12, 0x87, 0xa0));
         assert_eq!(p.accent_bright, Color32::from_rgb(0x1b, 0x99, 0xb3));
+        assert_eq!(p.nav, Color32::from_rgb(0x0d, 0x43, 0x53));
+        assert_eq!(p.desktop, Color32::from_rgb(0x0f, 0x96, 0xad));
+        assert_eq!(p.gold, Color32::from_rgb(0xf0, 0xa9, 0x12));
         assert_eq!(p.text, Color32::from_rgb(0x13, 0x4e, 0x5e));
         assert_eq!(p.danger, Color32::from_rgb(0xe5, 0x50, 0x3c));
     }

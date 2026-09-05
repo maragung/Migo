@@ -2,6 +2,7 @@ package com.migo.app.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,7 +22,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -52,25 +52,27 @@ import com.migo.core.wire.Id
 import kotlinx.coroutines.delay
 
 /**
- * The Rooms section: the rooms this account is in, and the public directory below them.
+ * The Rooms home view: the rooms this account is in, and the public directory below them.
  *
  * The query is debounced — typing is not yet asking, but a pause is — and the directory rows state
  * the facts a join decision needs: name, topic, members, live online count, and how full the room is
- * against its ceiling. A room already joined never offers Join again: it offers Open, which walks
- * straight into the conversation the join made, the same way a started chat opens. The create dialog
- * states the capacity rule the server enforces — a public room's 33 seats are fixed by the kind, so
- * the form says so rather than letting the user discover it by asking for more.
+ * against its ceiling. A row is tapped rather than buttoned, mobile-reference style: one of this
+ * account's own rooms walks straight into the conversation the join made, and a directory room
+ * opens the room intent sheet — occupancy in hand — whose orange primary is the join itself. The
+ * create dialog states the capacity rule the server enforces — a public room's 33 seats are fixed
+ * by the kind, so the form says so rather than letting the user discover it by asking for more.
  */
 @Composable
 fun RoomsScreen(
     state: AppState.SignedIn,
     onQuery: (String) -> Unit,
-    onJoin: (RoomSummary) -> Unit,
     onOpenConversation: (ConversationRow) -> Unit,
     onCreate: (slug: String, name: String, kind: RoomKind, topic: String?) -> Unit,
     onRefresh: () -> Unit,
-    /** The live record a room's event streams keep current, for the directory rows to count from. */
+    /** The live record a room's event streams keep current, for the rows to count from. */
     liveCounts: (Id) -> RoomLiveInfo? = { null },
+    /** What tapping a directory room opens: the room intent sheet. */
+    onOpenRoomIntent: (RoomSummary) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var field by rememberSaveable { mutableStateOf(state.rooms.query) }
@@ -147,8 +149,7 @@ fun RoomsScreen(
                         )
                         DirectoryRow(
                             room = counted,
-                            joining = state.rooms.joining.contains(room.roomId),
-                            onJoin = { onJoin(room) },
+                            onOpenIntent = { onOpenRoomIntent(room) },
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                     }
@@ -175,8 +176,9 @@ private fun List<ConversationRow>.byRoomId(): Map<Id, ConversationRow> =
 
 /**
  * One of this account's own rooms: the 66dp room row — the ringed avatar, the bold name, the last
- * line, the occupancy pill and its bar — and the way back in. Unread rides as the red pill rather
- * than as the second line's words, the same mark the conversation list gives it.
+ * line, the occupancy pill and its bar — tappable along its whole length to walk back in. Unread
+ * rides as the red pill rather than as the second line's words, the same mark the conversation list
+ * gives it.
  */
 @Composable
 private fun YourRoomRow(row: ConversationRow, live: RoomLiveInfo?, onOpen: () -> Unit) {
@@ -184,6 +186,7 @@ private fun YourRoomRow(row: ConversationRow, live: RoomLiveInfo?, onOpen: () ->
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 66.dp)
+            .clickable(onClick = onOpen)
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -208,7 +211,7 @@ private fun YourRoomRow(row: ConversationRow, live: RoomLiveInfo?, onOpen: () ->
             UnreadPill(count = row.unread)
             Spacer(modifier = Modifier.width(8.dp))
         }
-        Button(onClick = onOpen) { Text("Open") }
+        Text(text = "›", fontSize = 18.sp, color = LocalMigoExtra.current.faint)
     }
 }
 
@@ -216,9 +219,11 @@ private fun YourRoomRow(row: ConversationRow, live: RoomLiveInfo?, onOpen: () ->
  * The "bold users / capacity" pill a room row carries when the room declares a ceiling, and the
  * 3.5dp occupancy bar under it. The two flip to the orange family once the room is 85% full: a
  * room about to be full is the fact a join decision wants shouted, not whispered in teal.
+ *
+ * Not private: the room intent sheet draws the same pill and bar over the same numbers.
  */
 @Composable
-private fun OccupancyBar(current: Long, capacity: Long) {
+fun OccupancyBar(current: Long, capacity: Long) {
     val nearFull = capacity > 0L && current >= (capacity * 85L) / 100L
     Row(verticalAlignment = Alignment.CenterVertically) {
         Surface(
@@ -382,14 +387,15 @@ private fun slugIsValid(slug: String): Boolean {
 
 /**
  * One directory row: the 66dp room row — the facts of a join decision, the capacity pill and its
- * occupancy bar — and the way in.
+ * occupancy bar — tappable along its whole length to open the room intent sheet.
  */
 @Composable
-private fun DirectoryRow(room: RoomSummary, joining: Boolean, onJoin: () -> Unit) {
+private fun DirectoryRow(room: RoomSummary, onOpenIntent: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 66.dp)
+            .clickable(onClick = onOpenIntent)
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -397,9 +403,7 @@ private fun DirectoryRow(room: RoomSummary, joining: Boolean, onJoin: () -> Unit
         Spacer(modifier = Modifier.width(10.dp))
         // Read once: the topic is a property of another module, and a smart cast of it is
         // not something the compiler can promise across that boundary. The ceiling is read
-        // beside it because both the Column's occupancy bar and the join button below ask for
-        // it — a local declared inside the Column's content lambda is invisible to the row
-        // that holds the button.
+        // beside it because the Column's occupancy bar below asks for it.
         val topic = room.topic
         val max = room.maxMembers
         Column(modifier = Modifier.weight(1f)) {
@@ -414,16 +418,9 @@ private fun DirectoryRow(room: RoomSummary, joining: Boolean, onJoin: () -> Unit
                 OccupancyBar(current = room.onlineCount, capacity = max)
             }
         }
-        // A full room is not joinable, and saying so here is kinder than letting the server refuse
-        // the tap: the pill above is already orange, and the button names the fact.
-        val full = max != null && max > 0L && room.memberCount >= max
-        Button(onClick = onJoin, enabled = !joining && !full) {
-            Text(when {
-                joining -> "…"
-                full -> "Full"
-                else -> "Join"
-            })
-        }
+        // A full room's pill is already orange, and the sheet the row opens names the fact on
+        // its primary button rather than letting the server refuse the tap.
+        Text(text = "›", fontSize = 18.sp, color = LocalMigoExtra.current.faint)
     }
 }
 

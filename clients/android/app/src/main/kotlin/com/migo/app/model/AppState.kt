@@ -64,13 +64,16 @@ sealed interface AppState {
     ) : AppState
 
     /**
-     * Signed in. The conversation list is always present; [open] is the chat on top of it.
+     * Signed in. The conversation list is always present; [open] is the chat the window strip is
+     * showing, and [windows] is every conversation the strip holds a tab for.
      *
-     * The [section] is which destination the shell is showing — the new-ui-02 model's left panel:
-     * Chats, Friends, Rooms, Games and Feed as the system tabs, with the panels (Alerts, Search,
-     * Wallet, Profile) opened from the banner's avatar menu and covering the screen. Each section's
-     * data lives in its own holder below, loaded on first entry and reloaded on demand; a section
-     * never yet visited holds nulls, and its screen draws its skeleton.
+     * The mobile shell is a tab strip at the top: Friends, Rooms and Feed are the home tabs (Feed
+     * the only closable one, its X moving it to [hiddenNavs] until the "+" reopens it), and every
+     * open conversation is a window tab beside them. One window is visible at a time -- [open] --
+     * and a parked window keeps its tab, so switching back is one tap. The [section] is which home
+     * view shows when no window is visible; the panels (Alerts, Search, Wallet, Profile, Games,
+     * Admins) open from the me card's sheet and cover the screen the way they always did, each
+     * carrying its own way back to [stripSection].
      */
     data class SignedIn(
         val username: String,
@@ -79,16 +82,19 @@ sealed interface AppState {
         val conversations: List<ConversationRow> = emptyList(),
         /** True while the first page of conversations is loading. */
         val loading: Boolean = false,
-        /** The conversation the user is reading, or null when a section is on top. */
+        /** The conversation the window strip is showing, or null when a home view is on top. */
         val open: ChatState? = null,
+        /** The open conversation windows, in open order: one strip tab each. */
+        val windows: List<WindowTab> = emptyList(),
+        /** The home tabs closed from their X in the strip (only Feed is closable). */
+        val hiddenNavs: Set<Section> = emptySet(),
         /** A transient failure banner: a send that did not go, a page that did not load. */
         val failure: String? = null,
-        /** The destination on screen; Main (the friends list) is where a session starts, as on every client. */
+        /** The home view on screen when no window is visible; Friends is where a session starts. */
         val section: Section = Section.FRIENDS,
         /**
-         * The left panel's own tab, in the new-ui-02 model: the four system tabs drive the strip,
-         * while the panels (Alerts, Search, Wallet, Profile) cover the screen the way a chat does.
-         * A panel's back returns here, so covering the shell never disturbs what the strip shows.
+         * The home tab the strip shows, held while a panel covers the screen, so the panel's back
+         * returns to the view the strip still highlights.
          */
         val stripSection: Section = Section.FRIENDS,
         val rooms: RoomsState = RoomsState(),
@@ -105,18 +111,27 @@ sealed interface AppState {
     ) : AppState
 
     /**
-     * The shell's destinations. The first five are the reference's system tabs, in strip order; the
-     * rest are the panels the banner's avatar menu opens — they cover the screen rather than joining
-     * the strip, which is the new-ui-02 model's phone story.
+     * The shell's destinations. FRIENDS, ROOMS and FEED are the home tabs the strip carries; CHATS
+     * is the window tabs' own ground, held for the parts that still speak in section terms. The
+     * rest are the panels the me card's sheet opens — they cover the strip rather than joining it,
+     * which is how a phone wears a second pane.
      */
     enum class Section {
         CHATS, FRIENDS, ROOMS, GAMES, FEED, ALERTS, SEARCH, WALLET, PROFILE, ADMINS;
 
-        /** True for the panels the banner's menu opens, which cover the strip rather than join it. */
+        /** True for the panels the me sheet opens, which cover the strip rather than join it. */
         val isPanel: Boolean
-            get() = this == ALERTS || this == SEARCH || this == WALLET || this == PROFILE || this == ADMINS
+            get() = this == ALERTS || this == SEARCH || this == WALLET || this == PROFILE || this == ADMINS || this == GAMES
     }
 }
+
+/** One open conversation window, as the strip's tab holds it. */
+data class WindowTab(
+    val conversationId: Id,
+    val title: String,
+    /** The room behind a room-kind window, so a reopened tab can restore its live info. */
+    val roomId: Id? = null,
+)
 
 /** The Rooms directory: the server's catalogue plus the browsing state around it. */
 data class RoomsState(
@@ -421,6 +436,12 @@ data class ConversationRow(
      * conversation one.
      */
     val roomId: Id? = null,
+    /**
+     * The peer account behind a Direct conversation, when the row is built with the member list at
+     * hand. The friends list keys off it: a friend's row can then carry their chat's preview and
+     * unread badge, and the strip's Friends tab can sum the direct conversations' unread.
+     */
+    val peerId: Id? = null,
     /** The last message, as a short line. Null when the conversation has no readable message yet. */
     val preview: String? = null,
     /** `lastSeq - readSeq`, floored at zero. */

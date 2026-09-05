@@ -31,8 +31,6 @@ import type { AccountSession, DeviceSummary, Id } from '@migo/sdk';
 import { formatRelative } from '@/lib/format.js';
 import { getChoice, setChoice } from '@/lib/theme.js';
 import type { ThemeChoice } from '@/lib/theme.js';
-import { getChatTabsMode, setChatTabsMode } from '@/lib/chat-tabs-mode.js';
-import type { ChatTabsMode } from '@/lib/chat-tabs-mode.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 
@@ -189,20 +187,8 @@ export function SessionList({
 
 /**
  * The Settings tab panel: loads the device and session lists.
- *
- * The Chats Tabs section's choice arrives from the shell when the shell is the one holding it
- * (switching modes reshapes the pane on the spot); rendered without the props — the extracted,
- * testable story — it holds the choice itself, backed by the same storage.
  */
-export function SettingsPanel({
-  chatTabsMode,
-  onChatTabsMode,
-}: {
-  /** The display mode the shell is holding, when it is; omitted here means the section holds it. */
-  chatTabsMode?: ChatTabsMode;
-  /** The shell's write-through for a new choice, when there is one. */
-  onChatTabsMode?: (mode: ChatTabsMode) => void;
-}): ReactNode {
+export function SettingsPanel(): ReactNode {
   const { client } = useMigo();
 
   const [devices, setDevices] = useState<DeviceSummary[] | null>(null);
@@ -357,77 +343,8 @@ export function SettingsPanel({
       </section>
 
       <AppearanceSection />
-      <ChatsTabsSection mode={chatTabsMode} onPick={onChatTabsMode} />
       <AboutSection />
     </div>
-  );
-}
-
-/**
- * The Chats Tabs section: how the right pane holds the account's open chats.
- *
- * Two honest choices, each named for where the chats end up: "Right tabs" docks every open
- * chat as a closable chip in the right pane (the default — the side tabs don't need a Chats
- * section, the chips are the list), and "Chats list" puts Chats back among the side tabs,
- * drops the right pane's tab bar, and opens a chat as one full window at a time — back or
- * close returns to the list. Neither is a better way to chat; one is a better way to chat
- * for a given person, which is why it is a setting and not a decision.
- *
- * Exported as a controlled component over the shell's choice, so the rules (both options
- * offered, exactly one active, the active choice's story told) are testable without a shell.
- */
-export function ChatsTabsSection({
-  mode,
-  onPick,
-}: {
-  /** The mode the shell is holding, when it is; omitted here means this section holds it. */
-  mode?: ChatTabsMode;
-  /** The shell's write-through for a new choice, when there is one. */
-  onPick?: (mode: ChatTabsMode) => void;
-}): ReactNode {
-  const [held, setHeld] = useState<ChatTabsMode>(() => getChatTabsMode());
-  const current = mode ?? held;
-  function pick(next: ChatTabsMode): void {
-    setChatTabsMode(next);
-    if (onPick !== undefined) {
-      onPick(next);
-      return;
-    }
-    setHeld(next);
-  }
-  const options: ReadonlyArray<{ id: ChatTabsMode; label: string; blurb: string }> = [
-    {
-      id: 'right',
-      label: 'Right tabs',
-      blurb:
-        'Every open chat docks as a closable tab in the right pane, one beside another — the side tabs drop their Chats section.',
-    },
-    {
-      id: 'list',
-      label: 'Chats list',
-      blurb:
-        'Chats stays with the side tabs, the right pane drops its tab bar, and a chat opens as one full window at a time — close takes you back to the list.',
-    },
-  ];
-  const active = options.find((option) => option.id === current);
-  return (
-    <section className="panel-section" aria-label="Chats Tabs">
-      <h2 className="panel-heading">Chats Tabs</h2>
-      <div className="chip-row" role="group" aria-label="Chats Tabs">
-        {options.map((option) => (
-          <button
-            key={option.id}
-            type="button"
-            className={`chip ${current === option.id ? 'chip-active' : ''}`}
-            aria-pressed={current === option.id}
-            onClick={() => pick(option.id)}
-          >
-            {option.label}
-          </button>
-        ))}
-      </div>
-      <p className="muted">{active?.blurb}</p>
-    </section>
   );
 }
 

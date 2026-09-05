@@ -1,5 +1,6 @@
 package com.migo.app.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -29,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.migo.app.model.AppState
 import com.migo.core.protocol.RelationshipEntry
 import com.migo.core.protocol.RelationshipKind
@@ -36,11 +38,12 @@ import com.migo.core.protocol.SuggestedUser
 import kotlinx.coroutines.delay
 
 /**
- * The Friends section: the relationship graph, its pending requests, and the suggestions.
+ * The Friends home view: the relationship graph, its pending requests, and the suggestions.
  *
  * The graph is server-owned — every action here asks the server and the view model re-reads the
- * result, so this screen never holds a local mirror. A friend row is a door into a chat; a request
- * row carries its two answers; a suggestion carries its one.
+ * result, so this screen never holds a local mirror. A friend row is tapped along its whole length
+ * to open the friend intent sheet, whose primary act is the message; a request row carries its two
+ * answers; a suggestion carries its one.
  */
 @Composable
 fun FriendsScreen(
@@ -50,6 +53,10 @@ fun FriendsScreen(
     onRespond: (com.migo.core.wire.Id, Boolean) -> Unit,
     onStartDirect: (com.migo.core.wire.Id) -> Unit,
     onRefresh: () -> Unit,
+    /** The display name this shell has learned for an account, or null when it never heard one. */
+    nameOf: (com.migo.core.wire.Id) -> String? = { null },
+    /** What tapping a friend opens: the friend intent sheet. */
+    onOpenIntent: (UserTarget) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var field by rememberSaveable { mutableStateOf(state.search.query) }
@@ -117,12 +124,16 @@ fun FriendsScreen(
                     item { Placeholder(text = "No friends yet. Add someone below.", modifier = Modifier.fillMaxWidth()) }
                 } else {
                     items(friends, key = { it.userId.value }) { entry ->
-                        PersonSummaryRow(
-                            name = shortName(entry),
-                            handle = shortName(entry),
-                            note = null,
-                            action = "Message",
-                            onAction = { onStartDirect(entry.userId) },
+                        // The friend's display name where one was ever learned, and their direct
+                        // conversation's row where one exists — a friend's chat preview and unread
+                        // badge belong on their row, and the peer id on the row is what ties them.
+                        val name = nameOf(entry.userId) ?: shortId(entry.userId)
+                        val direct = state.conversations.firstOrNull { it.peerId == entry.userId }
+                        FriendRow(
+                            name = name,
+                            line = direct?.preview ?: "Tap to chat",
+                            unread = direct?.unread ?: 0L,
+                            onClick = { onOpenIntent(UserTarget(userId = entry.userId, name = name, friend = true)) },
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
                     }
@@ -159,6 +170,39 @@ fun FriendsScreen(
                 item { Spacer(modifier = Modifier.height(16.dp)) }
             }
         }
+    }
+}
+
+/**
+ * One friend: the presence-ringed avatar, the name, the line beneath, the unread pill, the chevron
+ * — tappable along its whole length to open the friend intent sheet.
+ */
+@Composable
+private fun FriendRow(
+    name: String,
+    line: String,
+    unread: Long,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 58.dp)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        ListRowAvatar(name = name)
+        Spacer(modifier = Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            ListRowName(text = name)
+            ListRowLine(text = line)
+        }
+        if (unread > 0) {
+            UnreadPill(count = unread)
+            Spacer(modifier = Modifier.width(8.dp))
+        }
+        Text(text = "›", fontSize = 18.sp, color = LocalMigoExtra.current.faint)
     }
 }
 

@@ -22,21 +22,16 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.migo.app.model.AppState
 import com.migo.app.ui.AdminsScreen
 import com.migo.app.ui.AlertsScreen
-import com.migo.app.ui.BannerAction
 import com.migo.app.ui.ChatScreen
-import com.migo.app.ui.ChatsScreen
 import com.migo.app.ui.ErrorBanner
-import com.migo.app.ui.FriendsScreen
 import com.migo.app.ui.GamesScreen
 import com.migo.app.ui.MigoTheme
+import com.migo.app.ui.MobileHome
+import com.migo.app.ui.MobileTabStrip
 import com.migo.app.ui.PanelBar
-import com.migo.app.ui.ProfileBanner
 import com.migo.app.ui.ProfileScreen
-import com.migo.app.ui.RoomsScreen
 import com.migo.app.ui.SearchScreen
 import com.migo.app.ui.SignInScreen
-import com.migo.app.ui.SpaceScreen
-import com.migo.app.ui.TabStrip
 import com.migo.app.ui.WalletScreen
 import com.migo.app.ui.panelTitle
 
@@ -45,14 +40,14 @@ import com.migo.app.ui.panelTitle
  *
  * One activity and a handful of composables rather than a navigation graph. Which screen is showing
  * is already decided by [AppState] -- signed out, or signed in -- and a nav graph would be a second
- * answer to that question, able to disagree with the first. The back gesture is handled where it
- * means something, which is the open chat.
+ * answer to that question, able to disagree with the first.
  *
- * The signed-in screen is the new-ui-02 left panel: a tab strip (Main, Rooms, Games, Feed) above
- * an orange profile banner whose avatar menu carries the panels and the way out. A
- * conversation and a menu panel both cover this shell rather than joining it -- on a PC they
- * would be the right pane -- and each carries its own way back, so the strip's navigation is
- * never taken away by reading a message.
+ * The signed-in screen is the mobile reference's windowing shell: a 46dp tab strip at the very top
+ * carrying the home tabs (Friends, Rooms, Feed) and one tab per open conversation, with the
+ * selected view showing full-bleed beneath it — a home view (the orange me card and its list), a
+ * conversation, or a panel the me card's sheet opened. The back gesture is handled where it means
+ * something: back closes the visible window's tab, backs a panel out of the way, and never exits
+ * the app while a window or a panel is showing.
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -108,57 +103,34 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
 }
 
 /**
- * The signed-in shell: the new-ui-02 model, as a phone wears it.
+ * The signed-in shell: the mobile reference's windowing model, as a phone wears it.
  *
- * The left panel is the app: the tab strip (Main, Rooms, Games, Feed) above the orange profile
- * banner whose avatar menu carries the panels and the way out. A conversation and a menu
- * panel (Alerts, Search, Wallet, Profile) both COVER the screen rather than joining the strip —
- * on a PC they would be the right pane — and each carries its own way back: the thread's header
- * and back gesture, the panel's "‹ Menu Panel" bar. Covering the shell never disturbs the strip:
- * a panel's back returns to the tab the strip still shows, held in [AppState.SignedIn.stripSection].
+ * The strip is always at the top — home tabs and a tab per open conversation — so the shell's
+ * navigation is never taken away by reading a message: a conversation shows full-bleed beneath the
+ * strip, with no title bar of its own, its tab being its way back. Selecting a home tab parks the
+ * visible window; the window's tab stays. A panel (Alerts, Search, Wallet, Profile, Games, Admins)
+ * is the one thing that covers the strip, carrying its own "‹ Menu Panel" bar back to the tab the
+ * strip still shows, held in [AppState.SignedIn.stripSection].
  */
 @Composable
 private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel) {
     val open = state.open
-    BackHandler(enabled = open != null, onBack = model::closeChat)
+    // Back means "close this, not the app", in the order a person reads the screen: the members
+    // sheet (handled inside the chat, composed deeper so it wins while it is up), then the visible
+    // window's tab, then a panel. The strip and the home screen are the resting state back stands
+    // on.
+    BackHandler(enabled = open != null, onBack = {
+        if (open != null) model.closeWindow(open.conversationId)
+    })
     BackHandler(
         enabled = open == null && state.section.isPanel,
         onBack = { model.selectSection(state.stripSection) },
     )
 
     when {
-        // The banner rides on top of the chat too: a failure raised while reading (a send that did
-        // not go, a room event the server refused) is news the reader should get where they are,
-        // not after they back out and the strip's copy of the banner finally appears.
-        open != null -> Column(modifier = Modifier.fillMaxSize()) {
-            ErrorBanner(message = state.failure, onDismiss = model::dismissFailure)
-            ChatScreen(
-                chat = open,
-                onBack = model::closeChat,
-                onDraft = model::setDraft,
-                onSend = model::send,
-                onLeave = open.roomId?.let { roomId ->
-                    { model.leaveRoom(open.conversationId, roomId) }
-                },
-                onOpenMembers = open.roomId?.let { roomId ->
-                    { model.openMembers(open.conversationId, roomId) }
-                },
-                onCloseMembers = { model.closeMembers(open.conversationId) },
-                onVoteKick = { target ->
-                    open.roomId?.let { roomId -> model.voteKick(open.conversationId, roomId, target) }
-                },
-                onSanction = { target, action ->
-                    open.roomId?.let { roomId -> model.sanction(open.conversationId, roomId, target, action) }
-                },
-                onMuteForMe = { userId, on -> model.muteForMe(open.conversationId, userId, on) },
-                selfId = state.accountId,
-                modifier = Modifier.weight(1f),
-            )
-        }
-
-        // A menu panel covers the screen, with the model's own bar as its way back. The banner
-        // comes too — a panel that swallows the failure message hides it from the only person
-        // who caused it.
+        // A menu panel covers the whole shell, with the model's own bar as its way back. The error
+        // banner comes too — a panel that swallows the failure message hides it from the only
+        // person who caused it.
         state.section.isPanel -> Column(modifier = Modifier.fillMaxSize()) {
             PanelBar(
                 title = panelTitle(state.section),
@@ -173,77 +145,75 @@ private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel) {
         }
 
         else -> Column(modifier = Modifier.fillMaxSize()) {
-            TabStrip(
+            MobileTabStrip(
                 section = state.section,
-                onSelect = model::selectSection,
+                windows = state.windows,
+                open = state.open,
+                hiddenNavs = state.hiddenNavs,
+                conversations = state.conversations,
+                onSelectNav = model::selectSection,
+                onCloseNav = model::closeNav,
+                onReopenNav = model::reopenNav,
+                onSelectWindow = { model.open(it.conversationId, it.title) },
+                onCloseWindow = model::closeWindow,
             )
-            ProfileBanner(
-                username = state.username,
-                connection = state.connection,
-                balance = state.wallet.balance,
-                owner = state.admins.owner,
-                onAction = { action ->
-                    when (action) {
-                        BannerAction.PROFILE -> model.selectSection(AppState.Section.PROFILE)
-                        BannerAction.WALLET -> model.selectSection(AppState.Section.WALLET)
-                        BannerAction.ALERTS -> model.selectSection(AppState.Section.ALERTS)
-                        BannerAction.SEARCH -> model.selectSection(AppState.Section.SEARCH)
-                        BannerAction.ADMINS -> model.selectSection(AppState.Section.ADMINS)
-                        BannerAction.SIGN_OUT -> model.signOut()
-                    }
-                },
-            )
+            // The banner rides on top of the chat too: a failure raised while reading (a send that
+            // did not go, a room event the server refused) is news the reader should get where
+            // they are, not after they back out.
             ErrorBanner(message = state.failure, onDismiss = model::dismissFailure)
-            // The gesture bar draws over the list's last row unless the section content stands
-            // above it — only the chat manages its own insets (its composer does), so every
-            // other destination pads here, once, at the edge that needs it.
-            SectionScreen(
-                state = state,
-                model = model,
-                modifier = Modifier.weight(1f).navigationBarsPadding(),
-            )
+            if (open != null) {
+                ChatScreen(
+                    chat = open,
+                    onDraft = model::setDraft,
+                    onSend = model::send,
+                    onLeave = open.roomId?.let { roomId ->
+                        { model.leaveRoom(open.conversationId, roomId) }
+                    },
+                    onOpenMembers = open.roomId?.let { roomId ->
+                        { model.openMembers(open.conversationId, roomId) }
+                    },
+                    onCloseMembers = { model.closeMembers(open.conversationId) },
+                    onVoteKick = { target ->
+                        open.roomId?.let { roomId -> model.voteKick(open.conversationId, roomId, target) }
+                    },
+                    onSanction = { target, action ->
+                        open.roomId?.let { roomId -> model.sanction(open.conversationId, roomId, target, action) }
+                    },
+                    onMuteForMe = { userId, on -> model.muteForMe(open.conversationId, userId, on) },
+                    selfId = state.accountId,
+                    modifier = Modifier.weight(1f),
+                )
+            } else {
+                // The home screen: the me card and the selected home view. The gesture bar draws
+                // over the list's last row unless the content stands above it — only the chat
+                // manages its own insets (its composer does), so the home screen pads here.
+                MobileHome(
+                    state = state,
+                    model = model,
+                    modifier = Modifier.weight(1f).navigationBarsPadding(),
+                )
+            }
         }
     }
 }
 
-/** The section screens, as the tab strip's five destinations and the banner's panels. */
+/**
+ * The panels the me sheet opens, each covering the screen with its own way back. The home views
+ * (Friends, Rooms, Feed) live in [MobileHome], and the conversation list is the window strip's own
+ * ground — so the router here is the panels, and the home sections stand down.
+ */
 @Composable
 private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifier: Modifier = Modifier) {
     when (state.section) {
-        AppState.Section.CHATS -> ChatsScreen(
-            state = state,
-            onOpenConversation = { model.open(it.conversationId, it.title) },
-            modifier = modifier,
-        )
-
-        AppState.Section.FRIENDS -> FriendsScreen(
-            state = state,
-            onQuery = model::setSearchQuery,
-            onRequest = model::friendRequest,
-            onRespond = model::friendRespond,
-            onStartDirect = model::startDirectWith,
-            onRefresh = model::loadFriends,
-            modifier = modifier,
-        )
-
-        AppState.Section.ROOMS -> RoomsScreen(
-            state = state,
-            onQuery = model::setRoomsQuery,
-            onJoin = model::joinRoom,
-            onOpenConversation = { model.open(it.conversationId, it.title) },
-            onCreate = model::createRoom,
-            onRefresh = model::loadRooms,
-            liveCounts = model::liveCountsFor,
-            modifier = modifier,
-        )
+        // The home views are [MobileHome]'s to draw; the router stands down here so there is one
+        // place each screen is wired.
+        AppState.Section.CHATS,
+        AppState.Section.FRIENDS,
+        AppState.Section.ROOMS,
+        AppState.Section.FEED,
+        -> Unit
 
         AppState.Section.GAMES -> GamesScreen(modifier = modifier)
-
-        AppState.Section.FEED -> SpaceScreen(
-            state = state,
-            onRefresh = model::loadSpace,
-            modifier = modifier,
-        )
 
         AppState.Section.ALERTS -> AlertsScreen(
             state = state,

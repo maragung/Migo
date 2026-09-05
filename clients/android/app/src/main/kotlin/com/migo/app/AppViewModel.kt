@@ -18,6 +18,7 @@ import com.migo.app.model.RoomNotice
 import com.migo.app.model.RosterMember
 import com.migo.app.model.TrackingChainTx
 import com.migo.app.model.VoteTally
+import com.migo.app.model.WindowTab
 import com.migo.app.model.parseAvaxAmount
 import com.migo.app.session.MigoSession
 import com.migo.app.session.SessionHooks
@@ -363,15 +364,29 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Opens a chat and loads its recent history.
+     * Opens a chat as the visible window and loads its recent history.
      *
-     * The catch-up call hands every event back through the SDK's decrypt path, so the messages arrive
-     * on the ordinary listener rather than as a return value. The screen shows a spinner until they do.
+     * Opening also mints the window's tab in the strip — or refreshes the tab a previous open left
+     * behind, because a title the list has since resolved to something better should not keep
+     * showing the short form. The catch-up call hands every event back through the SDK's decrypt
+     * path, so the messages arrive on the ordinary listener rather than as a return value. The
+     * screen shows a spinner until they do.
      */
     fun open(conversationId: Id, title: String) {
         val live = session ?: return
         signedIn { current ->
             val row = current.conversations.find { it.conversationId == conversationId }
+            val windows = if (current.windows.any { it.conversationId == conversationId }) {
+                current.windows.map {
+                    if (it.conversationId == conversationId) {
+                        it.copy(title = title, roomId = it.roomId ?: row?.roomId)
+                    } else {
+                        it
+                    }
+                }
+            } else {
+                current.windows + WindowTab(conversationId = conversationId, title = title, roomId = row?.roomId)
+            }
             current.copy(
                 open = ChatState(
                     conversationId = conversationId,
@@ -380,6 +395,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     room = row?.roomId?.let { liveInfoFor(it) },
                     loading = true,
                 ),
+                windows = windows,
                 conversations = current.conversations.map {
                     if (it.conversationId == conversationId) it.copy(unread = 0) else it
                 },
@@ -418,8 +434,49 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Closes the open chat, which is what drops its decrypted messages. */
-    fun closeChat() = signedIn { it.copy(open = null) }
+    /**
+     * Closes a window outright: the tab leaves the strip and the chat, if it is the one showing,
+     * goes with it — which is what drops its decrypted messages, per the no-store design.
+     */
+    fun closeWindow(conversationId: Id) {
+        signedIn { current ->
+            current.copy(
+                windows = current.windows.filterNot { it.conversationId == conversationId },
+                open = if (current.open?.conversationId == conversationId) null else current.open,
+            )
+        }
+    }
+
+    /**
+     * Closes a home tab from its X (only Feed is closable, and the strip only offers it there).
+     *
+     * If the closed tab is the view on screen, the strip falls back to the first home tab still
+     * open, in strip order — the reference's goHome fallback.
+     */
+    fun closeNav(section: AppState.Section) {
+        signedIn { current ->
+            val hidden = current.hiddenNavs + section
+            val showing = if (current.section == section) {
+                navOrder.firstOrNull { it !in hidden } ?: current.section
+            } else {
+                current.section
+            }
+            current.copy(
+                hiddenNavs = hidden,
+                section = showing,
+                stripSection = if (showing.isPanel) current.stripSection else showing,
+            )
+        }
+    }
+
+    /** Reopens a closed home tab from the strip's "+", and shows it, as the reference does. */
+    fun reopenNav(section: AppState.Section) {
+        signedIn { it.copy(hiddenNavs = it.hiddenNavs - section) }
+        selectSection(section)
+    }
+
+    /** The home tabs in strip order, for the fallback when the visible one is closed. */
+    private val navOrder = listOf(AppState.Section.FRIENDS, AppState.Section.ROOMS, AppState.Section.FEED)
 
     // --- composing ---
 
@@ -508,13 +565,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * section keeps what it holds (the conversations list refreshes through its own control), so a
      * tour through the tab strip costs one read per section, not one per visit.
      *
-     * The five system tabs also drive the left panel's own state; a panel covers the screen without
-     * disturbing it, so its back returns to the tab the strip still shows.
+     * A home tab parks the visible window — its tab stays in the strip, and one tap reopens the
+     * conversation. A panel covers the screen instead, so its back returns to the tab the strip
+     * still shows, with the window kept parked beneath.
      */
     fun selectSection(section: AppState.Section) {
         signedIn { state ->
             val strip = if (section.isPanel) state.stripSection else section
-            state.copy(section = section, stripSection = strip)
+            state.copy(
+                section = section,
+                stripSection = strip,
+                open = if (section.isPanel) state.open else null,
+            )
         }
         when (section) {
             // Chats reads the conversation list, which is loaded once at sign-in and kept live by
@@ -642,8 +704,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Leaves a room: the server closes the conversation for this account, and the list stops
-     * offering it. The open chat (if it is this room's) closes with it.
+     * Leaves a room: the server closes the conversation for this account, and the list — and the
+     * window strip — stop offering it. The open chat (if it is this room's) closes with it.
      *
      * The cached room summary goes too. The leave fan-out excludes this device, so no member or
      * state event will ever correct its counts — without the drop, the directory row keeps
@@ -659,6 +721,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 signedIn { current ->
                     current.copy(
                         conversations = current.conversations.filterNot { it.conversationId == conversationId },
+                        windows = current.windows.filterNot { it.conversationId == conversationId },
                         open = if (current.open?.conversationId == conversationId) null else current.open,
                     )
                 }
@@ -852,6 +915,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val entries = live.client.social.listAllRelationships()
                 val suggested = runCatching { live.client.social.suggestions(8) }.getOrDefault(emptyList())
+                // The graph carries ids only; a friend's row wants the name behind the id, and the
+                // profiles read is what learns it -- same batched fetch, same miss-is-not-failure
+                // rule, as the conversation list's own names.
+                learnAccountNames(
+                    live,
+                    entries.map { it.userId } + suggested.map { it.accountId },
+                )
                 signedIn { it.copy(friends = it.friends.copy(loading = false, entries = entries, suggestions = suggested)) }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -1630,7 +1700,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      *
      * Separate from [saveProfile] because the wire is separate: an empty line clears the status,
      * and the state the account is in right now is re-published unchanged so saving a sentence
-     * does not silently mark an away account online.
+     * does not silently mark an away account online. The held profile is updated on success too,
+     * because the me card reads its status from there, and a status the card would keep showing
+     * after the server accepted the new one would read as a lost save.
      */
     fun saveCustomStatus(status: String) {
         val live = session ?: return
@@ -1645,6 +1717,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(
                         profileEdit = it.profileEdit.copy(
                             busy = false,
+                            profile = it.profileEdit.profile?.copy(customStatus = status.trim().ifEmpty { null }),
                             notice = if (status.isBlank()) "Status cleared." else "Status saved.",
                         ),
                     )
@@ -1655,6 +1728,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 signedIn {
                     it.copy(profileEdit = it.profileEdit.copy(busy = false, failure = readable(failure)))
                 }
+            }
+        }
+    }
+
+    /**
+     * Publishes a presence state from the me sheet's pills, keeping the status line: presence.set
+     * replaces the whole presence record, and a pill that silently wiped a saved sentence would be
+     * a surprise.
+     */
+    fun setPresence(presence: PresenceState) {
+        val live = session ?: return
+        val status = (_state.value as? AppState.SignedIn)?.profileEdit?.profile?.customStatus
+        viewModelScope.launch {
+            try {
+                live.client.presence.set(presence, status)
+                signedIn { current ->
+                    current.copy(
+                        profileEdit = current.profileEdit.copy(
+                            profile = current.profileEdit.profile?.copy(presence = presence),
+                        ),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(failure = readable(failure)) }
             }
         }
     }
@@ -2025,6 +2124,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         // -- `owner: false` is the answer, not a refusal to catch -- so a non-owner costs one
         // cheap call and never sees the word.
         loadAdmins()
+        // The me card's own presence and status line come from the account's profile, which the
+        // Profile panel reads on demand; the card sits on the home screen, so the session starts
+        // with the read.
+        loadOwnProfile()
         // The AVAX Activity list rides the session's own tracked records: no read, no server call
         // -- the vault already answered it when it handed back the session.
         signedIn {
@@ -2315,11 +2418,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun learnNames(live: MigoSession, summaries: List<ConversationSummary>) {
-        val wanted = LinkedHashSet<Id>()
-        for (summary in summaries) {
-            summary.members?.forEach { if (!names.containsKey(it)) wanted.add(it) }
-            summary.lastMessage?.let { if (!names.containsKey(it.senderId)) wanted.add(it.senderId) }
-        }
+        learnAccountNames(
+            live,
+            buildList {
+                for (summary in summaries) {
+                    summary.members?.forEach { add(it) }
+                    summary.lastMessage?.let { add(it.senderId) }
+                }
+            },
+        )
+    }
+
+    /** The names behind a set of account ids, batched — the one profiles read behind every name shown. */
+    private suspend fun learnAccountNames(live: MigoSession, ids: List<Id>) {
+        val wanted = LinkedHashSet(ids.filter { !names.containsKey(it) })
         if (wanted.isEmpty()) return
         try {
             for (profile in live.client.profile.fetch(wanted.toList().take(PROFILE_BATCH))) {
@@ -2342,15 +2454,25 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun row(live: MigoSession, summary: ConversationSummary): ConversationRow {
         val preview = if (summary.lastMessage != null) "Encrypted message" else null
+        // The peer behind a direct conversation: the friends list keys off it, to carry a friend's
+        // chat preview and unread badge on their row. Null for everything else.
+        val peer = summary.members
+            ?.filter { it != live.client.accountId }
+            ?.singleOrNull()
+            ?.takeIf { summary.kind == ConversationKind.Direct }
         return ConversationRow(
             conversationId = summary.conversationId,
             title = title(live, summary),
             kind = summary.kind,
+            peerId = peer,
             preview = preview,
             unread = (summary.lastSeq - summary.readSeq).coerceAtLeast(0),
             updatedAt = summary.lastMessage?.createdAt ?: 0L,
         )
     }
+
+    /** The display name this shell has learned for an account, or null when it never heard one. */
+    fun nameOf(userId: Id): String? = names[userId]
 
     /**
      * The best name this client can give a conversation.

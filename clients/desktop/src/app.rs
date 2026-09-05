@@ -11,21 +11,25 @@
 //! # Repaints
 //!
 //! egui is a reactive UI: it repaints on input and otherwise sleeps. That is the right default for
-//! battery, but this application has two things that change without input. Arriving events are handled
-//! by the worker calling `request_repaint` on the context it was given. Toast fade-out is handled here,
-//! by requesting a repaint only while a toast is on screen.
+//! battery, but this application has three things that change without input. Arriving events are
+//! handled by the worker calling `request_repaint` on the context it was given. Toast fade-out is
+//! handled here, by requesting a repaint only while a toast is on screen. And the signed-in taskbar
+//! carries a clock and a session timer, so a signed-in frame asks for one repaint a second — coarse
+//! enough to be cheap, fine enough that the minute never reads stale.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::config::ServerEndpoint;
 use crate::model::{Account, Connection, Toast, ToastKind};
 use crate::net::{Command, Event, Net};
 use crate::settings::{self, Settings};
-use crate::theme::{self, palette, space, Theme};
+use crate::theme::{self, font, palette, radius, space, Theme};
 use crate::ui::alerts::AlertsState;
 use crate::ui::auth::AuthState;
 use crate::ui::chat::{ChatState, RoomNotice, MAX_ROOM_NOTICES};
+use crate::ui::desktop::{self, Desktop, TaskAction, TaskEntry};
 use crate::ui::friends::FriendsState;
 use crate::ui::rooms::RoomsState;
 use crate::ui::search::SearchState;
@@ -39,18 +43,10 @@ pub struct App {
     theme: Theme,
     net: Net,
     screen: Screen,
-    /// Which system tab the left panel is showing — the left pane's own state, never disturbed
-    /// by what the right pane does.
-    place: Place,
-    /// The panel the right pane is showing, when it is showing one — the pane's own state, never
-    /// disturbed by what the left panel does. None is the pane's resting state, which is the
-    /// honest default: the system tabs' content lives on the left, so an empty pane owes the lists
-    /// a quiet neighbour, not a second copy of the feed.
-    right_panel: Option<Place>,
-    /// The open conversation tabs, in open order — the right pane's closable chat chips.
-    open_chats: Vec<migo_core::Id>,
-    /// The conversation whose thread is showing, when a chat tab is the right pane's active one.
-    active_chat: Option<migo_core::Id>,
+    /// The signed-in shell's own state: which windows are open, which tab the Contacts window is
+    /// on, and when the session started. Everything else a window manager remembers — position,
+    /// size, stacking — is egui's, keyed by the window ids [`crate::ui::desktop`] mints.
+    desktop: Desktop,
     connection: Connection,
     account: Option<Account>,
     auth: AuthState,
@@ -120,10 +116,7 @@ impl App {
             theme,
             net,
             screen: Screen::Opening,
-            place: Place::Friends,
-            right_panel: None,
-            open_chats: Vec::new(),
-            active_chat: None,
+            desktop: Desktop::default(),
             connection: Connection::Offline,
             account: None,
             auth,
@@ -186,13 +179,10 @@ impl App {
                     // succeeded; the next sign-in starts from a fresh fetch, not a stale image.
                     self.auth.captcha.reset();
                     self.account = Some(account);
-                    // A session starts at its dashboard, and with none of the previous session's
-                    // graph or device list: those describe an account, and this may be a
-                    // different one signing in over the same window.
-                    self.place = Place::Friends;
-                    self.right_panel = None;
-                    self.open_chats.clear();
-                    self.active_chat = None;
+                    // A session starts with a fresh desktop, and with none of the previous
+                    // session's graph or device list: those describe an account, and this may be
+                    // a different one signing in over the same window.
+                    self.desktop = Desktop::new_session();
                     self.friends = FriendsState::default();
                     self.settings_panel = SettingsState::default();
                     self.profile_panel = crate::ui::profile::ProfileState::default();
@@ -204,11 +194,11 @@ impl App {
                     self.wallet = WalletState::default();
                     self.activity.clear();
                     self.screen = Screen::Chat;
-                    // The banner carries the balance, so the session's first reads include the
+                    // The taskbar carries the balance, so the session's first reads include the
                     // wallet the same way they include the conversation list.
                     self.commands.push(Command::Wallet);
-                    // The banner menu's owner gate: one whoami read per session, so the admins
-                    // pane's existence is offered only to the account the deployment names.
+                    // The account menu's owner gate: one whoami read per session, so the admins
+                    // window's existence is offered only to the account the deployment names.
                     // The whoami never fails on standing, so the non-owner's answer is a
                     // quiet `Closed` — a fact, not a refusal to catch.
                     self.commands.push(Command::Admins);
@@ -235,18 +225,18 @@ impl App {
                     self.search = SearchState::default();
                     self.wallet = WalletState::default();
                     self.activity.clear();
-                    self.place = Place::Friends;
-                    self.right_panel = None;
-                    self.open_chats.clear();
-                    self.active_chat = None;
+                    // The desktop goes with the session too: every window on it was the
+                    // account's, and the logout dialog is moot once the logout has happened.
+                    self.desktop = Desktop::default();
                     self.screen = Screen::Unlock;
                 }
                 Event::CaptchaChallenge(challenge) => self.auth.captcha.hold(challenge),
                 Event::CaptchaUnavailable { reason } => self.auth.captcha.unavailable(reason),
                 Event::CaptchaRefused => self.auth.captcha.refused(),
                 Event::Conversations(list) => self.chat.set_conversations(list),
-                // A conversation this client asked for: open it as a tab, the one way there is.
-                // The list refresh that follows will fill its row in; the tab does not wait for it.
+                // A conversation this client asked for: open it as a window, the one way there
+                // is. The list refresh that follows will fill its title in; the window does not
+                // wait for it.
                 Event::ConversationCreated { conversation_id } => {
                     self.open_conversation(conversation_id);
                 }
@@ -271,18 +261,21 @@ impl App {
                     {
                         conversation.preview = Some(preview);
                         conversation.updated_at = Some(at);
-                        // Only count it unread when the conversation is not the one being read. A badge
-                        // on the conversation someone is looking at is noise.
-                        if incoming && self.chat.selected != Some(conversation_id) {
+                        // Only count it unread when the conversation has no window on the
+                        // desktop. A badge on a window someone is reading is noise; a window
+                        // that is open but buried under another still counts as being read,
+                        // because the person chose to keep it open.
+                        if incoming && !self.desktop.chats.contains(&conversation_id) {
                             conversation.unread = conversation.unread.saturating_add(1);
                         }
-                        // A message for a conversation with no tab mints the tab — the user's rule
-                        // for chat windows: a room, group, or private chat's window comes into
-                        // being when a packet arrives for it, not only when someone clicks. The
-                        // mint does not steal the active surface: the unread badge is the
-                        // attention signal, and the person's click still activates.
+                        // A message for a conversation with no window mints the window — the
+                        // user's rule for chat windows: a room, group, or private chat's window
+                        // comes into being when a packet arrives for it, not only when someone
+                        // clicks. The mint does not steal the top spot: the taskbar button's
+                        // unread badge is the attention signal, and the person's click still
+                        // raises.
                         if incoming {
-                            self.activate_chat(conversation_id);
+                            self.desktop.open_chat(conversation_id);
                         }
                     } else {
                         // A message for a conversation not in the list yet: ask for the list rather
@@ -373,8 +366,8 @@ impl App {
                 }
                 Event::OwnProfile(result) => {
                     // The fetch's own answer, arriving as either a card or the reason there is
-                    // none. Filed rather than toasted: the pane is on screen when it asks, so
-                    // the sentence belongs beside the form that caused it.
+                    // none. Filed rather than toasted: the pane is on screen when it asks, so the
+                    // sentence belongs beside the form that caused it.
                     match result {
                         Ok(profile) => {
                             self.profile_panel.file(profile);
@@ -393,7 +386,7 @@ impl App {
                     self.profile_panel.fail(reason);
                 }
                 Event::Admins(answer) => {
-                    // The standing-and-list answer. The banner menu's gate reads it too: an
+                    // The standing-and-list answer. The account menu's gate reads it too: an
                     // answer that says the account holds neither role keeps the menu entry
                     // hidden, and one that arrives after the entry was opened files the
                     // sentence the pane draws.
@@ -623,215 +616,137 @@ impl App {
         !self.toasts.is_empty()
     }
 
-    /// The left panel's navigation strip: the five system tabs, and nothing else.
+    /// The taskbar's window list, in the order the windows were opened: the Contacts window,
+    /// then the conversation windows, then the side windows.
     ///
-    /// In the new-ui-02 model the strip belongs to the left panel alone — the conversation chips
-    /// moved to the right pane's own bar (see [`App::chat_bar`]), where a thread actually opens —
-    /// so the strip never stands down for a chat and the left panel's state is its own. It
-    /// scrolls horizontally rather than hiding anything, because a tab that is off-screen is
-    /// still a tab: hiding it would strand the surface it names behind no control at all.
-    fn tab_strip(&mut self, ui: &mut egui::Ui) {
+    /// Read-only on purpose — the list is a view of [`Desktop`], and building it from anything
+    /// else would give the taskbar a second opinion about what is open.
+    fn task_entries(&self) -> Vec<TaskEntry> {
+        let me = self.account.as_ref().map(|a| a.account_id);
+        let mut entries = Vec::new();
+        if self.desktop.contacts_open {
+            entries.push(TaskEntry {
+                id: desktop::contacts_id(),
+                label: "Contacts".to_owned(),
+                kind: "",
+                unread: 0,
+            });
+        }
+        for conversation_id in &self.desktop.chats {
+            let (label, kind, unread) = self
+                .chat
+                .conversations
+                .iter()
+                .find(|c| c.conversation_id == *conversation_id)
+                .map(|c| {
+                    let title = me
+                        .map(|me| c.display_title(me, &self.chat.names))
+                        .unwrap_or_else(|| crate::model::short_id(*conversation_id));
+                    // The kind word is the taskbar's own taxonomy: a room is what the server
+                    // names a room, a group is a conversation with more than two members, and
+                    // everything else is a private chat.
+                    let kind = if c.room_id.is_some() {
+                        "Room"
+                    } else if c.members.len() > 2 {
+                        "Group"
+                    } else {
+                        "Chat"
+                    };
+                    (title, kind, c.unread)
+                })
+                .unwrap_or_else(|| (crate::model::short_id(*conversation_id), "Chat", 0));
+            entries.push(TaskEntry {
+                id: desktop::chat_id(*conversation_id),
+                label,
+                kind,
+                unread,
+            });
+        }
+        for place in &self.desktop.sides {
+            entries.push(TaskEntry {
+                id: desktop::side_id(*place),
+                label: place.right_label().to_owned(),
+                kind: "",
+                unread: 0,
+            });
+        }
+        entries
+    }
+
+    /// The Contacts window: the account bar, the three tabs, and the tab's content — the
+    /// reference's left panel, promoted from a pane to a window of its own.
+    ///
+    /// The window's close button is allowed to close it, because the taskbar's Migo button is
+    /// the way back; a contacts list that cannot be got out of the way is not a window, it is a
+    /// wall.
+    fn contacts_window(
+        &mut self,
+        ctx: &egui::Context,
+        navigate: &mut Option<Screen>,
+        theme_choice: &mut Option<Theme>,
+        zoom_choice: &mut Option<f32>,
+    ) {
         let colors = palette(self.theme);
-        // Resolved before the panel closure so the chip loop never borrows the place it
-        // mutates through the click handlers.
-        let place = self.place;
+        let mut open = self.desktop.contacts_open;
+        let tab = self.desktop.contacts_tab;
+        let mut picked: Option<Place> = None;
 
-        let mut selected: Option<Place> = None;
-
-        // The strip's height follows the chip it carries, and the chip follows the type scale
-        // (see [`widgets::tab_chip`]), so a bigger font buys a taller strip rather than a
-        // clipped chip.
-        let chip_row = ui.text_style_height(&egui::TextStyle::Small) + 2.0 * space::SM;
-        egui::Panel::top("tab-strip")
-            .exact_size(theme::bar_height(chip_row, space::XS))
-            .frame(egui::Frame::new().fill(colors.nav))
-            .show(ui, |ui| {
-                ui.add_space(space::XS);
-                egui::ScrollArea::horizontal()
-                    .id_salt("tabs")
-                    .auto_shrink([false, false])
-                    .show_viewport(ui, |ui, _viewport| {
-                        ui.horizontal_centered(|ui| {
-                            for candidate in Place::SYSTEM_TABS {
-                                let outcome = widgets::tab_chip(
-                                    ui,
-                                    self.theme,
-                                    candidate.label(),
-                                    Some(candidate),
-                                    place == candidate,
-                                    false,
-                                );
-                                if outcome.clicked {
-                                    selected = Some(candidate);
-                                }
+        desktop::floating(
+            self.theme,
+            "Contacts",
+            desktop::contacts_id(),
+            desktop::CONTACTS_POS,
+            desktop::CONTACTS_SIZE,
+            egui::vec2(280.0, 360.0),
+        )
+        .open(&mut open)
+        .show(ctx, |ui| {
+            self.account_bar(ctx, ui, theme_choice);
+            ui.add_space(space::XS);
+            // The tab strip on the window's own nav teal — the same chip the old shell's strip
+            // drew, on the same fill, so the promotion from pane to window changed where the
+            // tabs live and nothing about how they read.
+            egui::Frame::new()
+                .fill(colors.nav)
+                .corner_radius(egui::CornerRadius::same(radius::SM))
+                .inner_margin(egui::Margin::same(space::XS as i8))
+                .show(ui, |ui| {
+                    ui.horizontal_centered(|ui| {
+                        for candidate in Place::CONTACTS_TABS {
+                            let outcome = widgets::tab_chip(
+                                ui,
+                                self.theme,
+                                candidate.label(),
+                                Some(candidate),
+                                tab == candidate,
+                                false,
+                            );
+                            if outcome.clicked {
+                                picked = Some(candidate);
                             }
-                        });
-                    });
-            });
-
-        if let Some(target) = selected {
-            self.select_place(target);
-        }
-    }
-
-    /// The right pane's chat bar: the teal strip — the cyan "‹ Panels" control that hands the
-    /// pane back from the thread to whatever is beneath it (an open panel, or the pane's
-    /// resting state), and one closable chip per open conversation.
-    fn chat_bar(&mut self, ui: &mut egui::Ui) {
-        let colors = palette(self.theme);
-        // Resolved before the panel closure so the chip loop never borrows the chat state it
-        // mutates through the click handlers.
-        let account_id = self.account.as_ref().map(|a| a.account_id);
-        let chat_tabs: Vec<(migo_core::Id, String)> = self
-            .open_chats
-            .iter()
-            .map(|id| {
-                let title = self
-                    .chat
-                    .conversations
-                    .iter()
-                    .find(|c| c.conversation_id == *id)
-                    .map(|c| {
-                        account_id
-                            .map(|me| c.display_title(me, &self.chat.names))
-                            .unwrap_or_else(|| crate::model::short_id(*id))
-                    })
-                    .unwrap_or_else(|| crate::model::short_id(*id));
-                (*id, title)
-            })
-            .collect();
-        let active_chat = self.active_chat;
-
-        let mut back = false;
-        let mut chat_pick: Option<migo_core::Id> = None;
-        let mut chat_close: Option<migo_core::Id> = None;
-
-        // The bar carries the Small-styled "‹ Panels" button and chips, so its height is that
-        // style's row plus breathing room — not a pixel count tuned to one font size. The fill is
-        // the palette's nav teal: the bar is chrome, so it takes the strip colour rather than the
-        // palette's surfaces the way a panel does.
-        let bar = theme::bar_height(ui.text_style_height(&egui::TextStyle::Small), space::MD);
-        egui::Panel::top("chat-bar")
-            .exact_size(bar)
-            .frame(egui::Frame::new().fill(colors.nav))
-            .show(ui, |ui| {
-                ui.add_space(space::XS);
-                ui.horizontal_centered(|ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                egui::RichText::new("\u{2039} Panels")
-                                    .font(egui::FontId::proportional(crate::theme::font::SMALL))
-                                    .color(colors.banner_ink)
-                                    .strong(),
-                            )
-                            .fill(colors.accent)
-                            .corner_radius(egui::CornerRadius::same(crate::theme::radius::SM)),
-                        )
-                        .clicked()
-                    {
-                        back = true;
-                    }
-                    egui::ScrollArea::horizontal()
-                        .id_salt("chat-tabs")
-                        .auto_shrink([false, false])
-                        .show_viewport(ui, |ui, _viewport| {
-                            ui.horizontal_centered(|ui| {
-                                for (conversation_id, title) in &chat_tabs {
-                                    let outcome = widgets::tab_chip(
-                                        ui,
-                                        self.theme,
-                                        title,
-                                        None,
-                                        active_chat == Some(*conversation_id),
-                                        true,
-                                    );
-                                    if outcome.clicked {
-                                        chat_pick = Some(*conversation_id);
-                                    }
-                                    if outcome.closed {
-                                        chat_close = Some(*conversation_id);
-                                    }
-                                }
-                            });
-                        });
-                });
-            });
-
-        if back {
-            // The chips stay; only the pane's mode changes, exactly as the reference composes it.
-            self.active_chat = None;
-        }
-        if let Some(conversation_id) = chat_pick {
-            self.select_chat(conversation_id);
-        }
-        if let Some(conversation_id) = chat_close {
-            self.close_chat(conversation_id);
-        }
-    }
-
-    /// The right pane's panel header: one name, one close, no chips.
-    ///
-    /// The pane holds a single panel at a time (the banner's account menu opens each on its own),
-    /// so there is nothing to switch the name with — it is a label, not a control, and the close
-    /// is the bar's only button. That is the same slim bar the web client's one-window mode
-    /// draws, because it is one product.
-    fn panel_header(&mut self, ui: &mut egui::Ui, panel: Place) {
-        // The palette's nav teal, worn in either theme: the bar is chrome, so it takes the strip
-        // colour rather than the palette's surfaces the way a panel does — one teal family
-        // end to end.
-        let colors = palette(self.theme);
-
-        let mut close = false;
-
-        // Same derivation as the chat bar: the header names the panel in Small text, and its
-        // height is that row plus breathing room.
-        let bar = theme::bar_height(ui.text_style_height(&egui::TextStyle::Small), space::MD);
-        egui::Panel::top("panel-header")
-            .exact_size(bar)
-            .frame(egui::Frame::new().fill(colors.nav))
-            .show(ui, |ui| {
-                ui.add_space(space::XS);
-                ui.horizontal_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!("\u{2726} {}", panel.right_label()))
-                            .font(egui::FontId::proportional(crate::theme::font::SMALL))
-                            .color(colors.banner_ink)
-                            .strong(),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new("\u{2715} Close")
-                                        .font(egui::FontId::proportional(crate::theme::font::SMALL))
-                                        .color(colors.banner_ink)
-                                        .strong(),
-                                )
-                                .fill(colors.accent)
-                                .corner_radius(egui::CornerRadius::same(crate::theme::radius::SM)),
-                            )
-                            .clicked()
-                        {
-                            close = true;
                         }
                     });
                 });
-            });
+            widgets::divider(ui, self.theme);
+            self.place_content(ui, tab, navigate, theme_choice, zoom_choice);
+        });
 
-        if close {
-            // Closing the only panel leaves the pane at its resting state — the same fallback
-            // the web client's Home chip is.
-            self.right_panel = None;
+        self.desktop.contacts_open = open;
+        if let Some(target) = picked {
+            self.desktop.contacts_tab = target;
+            self.entered_place(target);
         }
     }
 
-    /// The profile banner: the orange gradient that owns the account.
-    ///
-    /// The reference puts the avatar, the name, the balance and the way out here, and the account
-    /// menu is the honest mapping of what this client carries: profile facts live in settings,
-    /// credits live in the wallet, and the exit is the sign-out.
-    fn banner(&mut self, ui: &mut egui::Ui, theme_choice: &mut Option<Theme>) {
+    /// The account bar the Contacts window carries where the old shell had its banner: the
+    /// orange band that owns the account — avatar, name, the one live fact about the
+    /// connection, the balance, the theme toggle, and the menu that opens every side window.
+    fn account_bar(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        theme_choice: &mut Option<Theme>,
+    ) {
         let colors = palette(self.theme);
         let username = self
             .account
@@ -839,43 +754,33 @@ impl App {
             .map(|account| account.username.clone())
             .unwrap_or_default();
         let coins = self.wallet.coins;
-        // The state word for the banner's dot, resolved here so the panel closure never borrows
+        // The state word for the bar's dot, resolved here so the layout closure never borrows
         // the connection it is drawn beside.
-        let (dot_color, dot_label) = {
-            let colors_local = colors;
-            match &self.connection {
-                Connection::Online => (colors_local.positive, "Connected"),
-                Connection::Connecting => (colors_local.warning, "Connecting"),
-                Connection::Offline => (colors_local.banner_ink, "Offline"),
-                Connection::Fallback(_) => (colors_local.accent, "Connected"),
-                Connection::Failed(_) => (colors_local.danger, "Disconnected"),
-            }
+        let (dot_color, dot_label) = match &self.connection {
+            Connection::Online => (colors.positive, "Connected"),
+            Connection::Connecting => (colors.warning, "Connecting"),
+            Connection::Offline => (colors.banner_ink, "Offline"),
+            Connection::Fallback(_) => (colors.accent, "Connected"),
+            Connection::Failed(_) => (colors.danger, "Disconnected"),
         };
         let connection_detail = self.connection.label().to_owned();
 
-        let mut menu: Option<Place> = None;
-        let mut sign_out = false;
+        let mut opened: Option<Place> = None;
+        let mut logout = false;
         let mut flip_theme = false;
 
-        // The banner's content is two text rows — the name in TITLE, the connection line in
-        // CAPTION — beside a 32pt avatar. Both rows are asked for, so the banner grows and
-        // shrinks with the type scale rather than clipping the moment the fonts do.
-        let rows = ui.text_style_height(&theme::named(theme::text_style::TITLE))
-            + ui.text_style_height(&theme::named(theme::text_style::CAPTION));
-        egui::Panel::top("banner")
-            .exact_size(theme::bar_height(rows, space::MD))
-            .frame(egui::Frame::new())
+        egui::Frame::new()
+            .fill(colors.banner_b)
+            .corner_radius(egui::CornerRadius::same(radius::SM))
+            .inner_margin(egui::Margin::same(space::SM as i8))
             .show(ui, |ui| {
-                let rect = ui.max_rect();
-                widgets::gradient_rect(ui, rect, colors.banner_a, colors.banner_b, colors.banner_c);
                 ui.horizontal_centered(|ui| {
-                    ui.add_space(space::MD);
                     widgets::banner_avatar(ui, self.theme, &username, 32.0);
                     ui.add_space(space::SM);
                     ui.vertical(|ui| {
                         ui.label(
                             egui::RichText::new(widgets::elide(&username, 20))
-                                .font(egui::FontId::proportional(crate::theme::font::SUBTITLE))
+                                .font(egui::FontId::proportional(font::SUBTITLE))
                                 .color(colors.banner_ink)
                                 .strong(),
                         );
@@ -887,7 +792,7 @@ impl App {
                             ui.painter().circle_filled(dot.center(), 3.5, dot_color);
                             ui.label(
                                 egui::RichText::new(dot_label)
-                                    .font(egui::FontId::proportional(crate::theme::font::TINY))
+                                    .font(egui::FontId::proportional(font::TINY))
                                     .color(colors.banner_ink),
                             )
                             .on_hover_text(&connection_detail);
@@ -895,9 +800,8 @@ impl App {
                     });
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(space::MD);
                         // Sun while dark, moon while light: the glyph names the theme one click
-                        // would arrive at, drawn as ink on the banner.
+                        // would arrive at, drawn as ink on the band.
                         if ui
                             .add(
                                 egui::Button::new(
@@ -917,8 +821,8 @@ impl App {
                             flip_theme = true;
                         }
                         // The account menu, opened from the chevron beside the avatar — the
-                        // reference's dropdown, carrying the three things it offers.
-                        let mut opened = None;
+                        // reference's dropdown, carrying the side windows it offers.
+                        let mut menu = None;
                         let mut out = false;
                         ui.scope(|ui| {
                             let w = &mut ui.style_mut().visuals.widgets;
@@ -934,28 +838,29 @@ impl App {
                                     .strong(),
                                 |ui| {
                                     if ui.button("My Profile").clicked() {
-                                        opened = Some(Place::Profile);
+                                        menu = Some(Place::Profile);
                                         ui.close();
                                     }
                                     if ui.button("My Credits & TopUp").clicked() {
-                                        opened = Some(Place::Wallet);
+                                        menu = Some(Place::Wallet);
                                         ui.close();
                                     }
-                                    // The two panes the reference keeps off the strip: they
-                                    // arrive here as tabs of their own, the same chips a
-                                    // conversation opens.
                                     if ui.button("Alerts").clicked() {
-                                        opened = Some(Place::Alerts);
+                                        menu = Some(Place::Alerts);
                                         ui.close();
                                     }
                                     if ui.button("Search").clicked() {
-                                        opened = Some(Place::Search);
+                                        menu = Some(Place::Search);
+                                        ui.close();
+                                    }
+                                    if ui.button("Games").clicked() {
+                                        menu = Some(Place::Games);
                                         ui.close();
                                     }
                                     // Settings keeps its own entry now that "My Profile" opens the
-                                    // profile pane: server, theme, devices, and the way out.
+                                    // profile window: server, theme, devices, and the way out.
                                     if ui.button("Settings").clicked() {
-                                        opened = Some(Place::Settings);
+                                        menu = Some(Place::Settings);
                                         ui.close();
                                     }
                                     // The owner's own management page. Offered only when the
@@ -968,7 +873,7 @@ impl App {
                                         crate::net::AdminsAnswer::Owner(_)
                                     ) && ui.button("Global Admins").clicked()
                                     {
-                                        opened = Some(Place::Admins);
+                                        menu = Some(Place::Admins);
                                         ui.close();
                                     }
                                     if ui.button("Exit / Logout").clicked() {
@@ -978,9 +883,9 @@ impl App {
                                 },
                             );
                         });
-                        menu = opened;
-                        sign_out = out;
-                        // The balance chip: the session's real $MIG, dark on the gradient.
+                        opened = menu;
+                        logout = out;
+                        // The balance chip: the session's real $MIG, dark on the band.
                         if let Some(coins) = coins {
                             widgets::pill(
                                 ui,
@@ -993,68 +898,174 @@ impl App {
                 });
             });
 
-        if let Some(target) = menu {
-            self.select_place(target);
+        if let Some(target) = opened {
+            self.open_side(ctx, target);
         }
-        if sign_out {
-            self.commands.push(Command::SignOut);
+        if logout {
+            self.desktop.logout_dialog = true;
         }
         if flip_theme {
             *theme_choice = Some(self.theme.flipped());
         }
     }
 
-    /// Selects a place: the system tabs drive the left panel, the panels the right pane.
+    /// Opens a side window, giving the place its first reads exactly once.
     ///
-    /// The two panes are independent, so a system tab never disturbs a thread on the right, and
-    /// a panel never disturbs the strip — it hands the right pane back from any thread and shows
-    /// itself there.
-    fn select_place(&mut self, target: Place) {
-        if target.is_system_tab() {
-            self.place = target;
-        } else {
-            self.active_chat = None;
-            self.right_panel = Some(target);
-        }
-        self.entered_place(target);
-    }
-
-    /// Activates a conversation's tab, opening it if it is not open yet.
-    fn select_chat(&mut self, conversation_id: migo_core::Id) {
-        if self.chat.selected != Some(conversation_id) {
-            self.open_conversation(conversation_id);
+    /// A place that is already open is raised rather than re-read: the window is on the desktop,
+    /// so the facts it shows are the facts it asked for when it arrived, and what the menu click
+    /// owes the user is the window itself, on top.
+    ///
+    /// A Contacts tab has no window of its own to raise — it is a tab — so asking for one here is
+    /// routed to the Contacts window: the tab switches, the window comes up. Nothing in this shell
+    /// asks that way today, but the guard is what keeps the two window kinds from drifting into
+    /// one another as the menus grow.
+    fn open_side(&mut self, ctx: &egui::Context, place: Place) {
+        if !place.is_side_window() {
+            self.desktop.contacts_tab = place;
+            self.desktop.contacts_open = true;
+            self.entered_place(place);
+            desktop::focus(ctx, desktop::contacts_id());
             return;
         }
-        if !self.open_chats.contains(&conversation_id) {
-            self.open_chats.push(conversation_id);
+        if self.desktop.open_side(place) {
+            self.entered_place(place);
+        } else {
+            desktop::focus(ctx, desktop::side_id(place));
         }
-        self.active_chat = Some(conversation_id);
     }
 
-    /// Registers an open conversation as a tab and makes it the active one.
-    fn activate_chat(&mut self, conversation_id: migo_core::Id) {
-        if !self.open_chats.contains(&conversation_id) {
-            self.open_chats.push(conversation_id);
+    /// One conversation's window: the thread, the whole window.
+    ///
+    /// The title is resolved here rather than cached, because the names a title is made of can
+    /// arrive after the window is minted — a window titled by an id's tail that never improves
+    /// would read as a bug the server cannot fix.
+    fn chat_window(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        conversation_id: migo_core::Id,
+        navigate: &mut Option<Screen>,
+        theme_choice: &mut Option<Theme>,
+        zoom_choice: &mut Option<f32>,
+    ) {
+        let me = self.account.as_ref().map(|a| a.account_id);
+        let title = self
+            .chat
+            .conversations
+            .iter()
+            .find(|c| c.conversation_id == conversation_id)
+            .map(|c| {
+                me.map(|me| c.display_title(me, &self.chat.names))
+                    .unwrap_or_else(|| crate::model::short_id(conversation_id))
+            })
+            .unwrap_or_else(|| crate::model::short_id(conversation_id));
+
+        let mut open = true;
+        desktop::floating(
+            self.theme,
+            &title,
+            desktop::chat_id(conversation_id),
+            Desktop::chat_cascade(index),
+            desktop::CHAT_SIZE,
+            egui::vec2(380.0, 320.0),
+        )
+        .open(&mut open)
+        .show(ctx, |ui| {
+            let mut context = Context {
+                theme: self.theme,
+                connection: &self.connection,
+                account: self.account.as_ref(),
+                server: &self.auth.server,
+                commands: &mut self.commands,
+                navigate,
+                theme_choice,
+                zoom_choice,
+            };
+            crate::ui::chat::thread(ui, &mut context, &mut self.chat, conversation_id);
+        });
+
+        // The window's own close button: closing the window closes the conversation, which is
+        // the reference's whole model. The thread's history stays in the store, so reopening is
+        // one click away.
+        if !open {
+            self.desktop.close_chat(conversation_id);
         }
-        self.active_chat = Some(conversation_id);
     }
 
-    /// Closes a conversation's tab: the thread falls through to the most recently opened one, or
-    /// back to whatever place was showing beneath it.
-    fn close_chat(&mut self, conversation_id: migo_core::Id) {
-        self.open_chats.retain(|id| *id != conversation_id);
-        if self.active_chat == Some(conversation_id) {
-            match self.open_chats.last().copied() {
-                Some(next) => {
-                    self.active_chat = Some(next);
-                    self.open_conversation(next);
-                }
-                None => {
-                    self.active_chat = None;
-                    if self.chat.selected == Some(conversation_id) {
-                        self.chat.selected = None;
-                    }
-                }
+    /// One side window: a small floating pane opened from the account menu — profile, wallet,
+    /// alerts, search, games, settings, and the owner's admins page.
+    fn side_window(
+        &mut self,
+        ctx: &egui::Context,
+        index: usize,
+        place: Place,
+        navigate: &mut Option<Screen>,
+        theme_choice: &mut Option<Theme>,
+        zoom_choice: &mut Option<f32>,
+    ) {
+        let mut open = true;
+        desktop::floating(
+            self.theme,
+            place.right_label(),
+            desktop::side_id(place),
+            Desktop::side_cascade(index),
+            desktop::SIDE_SIZE,
+            egui::vec2(300.0, 240.0),
+        )
+        .open(&mut open)
+        .show(ctx, |ui| {
+            self.place_content(ui, place, navigate, theme_choice, zoom_choice);
+        });
+
+        if !open {
+            self.desktop.close_side(place);
+        }
+    }
+
+    /// One place's content, drawn into whatever surface is asking for it — the Contacts
+    /// window's active tab, or the side window the place opened as.
+    ///
+    /// The same `show` functions the old two-pane shell called, unchanged: the screens were
+    /// already pure functions of state, so moving them from panes into windows costs nothing
+    /// and changes nothing about how they behave.
+    fn place_content(
+        &mut self,
+        ui: &mut egui::Ui,
+        place: Place,
+        navigate: &mut Option<Screen>,
+        theme_choice: &mut Option<Theme>,
+        zoom_choice: &mut Option<f32>,
+    ) {
+        let mut context = Context {
+            theme: self.theme,
+            connection: &self.connection,
+            account: self.account.as_ref(),
+            server: &self.auth.server,
+            commands: &mut self.commands,
+            navigate,
+            theme_choice,
+            zoom_choice,
+        };
+        match place {
+            Place::Friends => crate::ui::friends::show(ui, &mut context, &mut self.friends),
+            Place::Rooms => {
+                crate::ui::rooms::show(ui, &mut context, &mut self.rooms, &mut self.chat)
+            }
+            Place::Feed => {
+                let activity = std::mem::take(&mut self.activity);
+                crate::ui::space::show(ui, &mut context, &mut self.space, &activity);
+                self.activity = activity;
+            }
+            Place::Alerts => crate::ui::alerts::show(ui, &mut context, &mut self.alerts),
+            Place::Search => {
+                crate::ui::search::show(ui, &mut context, &mut self.search, &mut self.chat)
+            }
+            Place::Wallet => crate::ui::wallet::show(ui, &mut context, &mut self.wallet),
+            Place::Profile => crate::ui::profile::show(ui, &mut context, &mut self.profile_panel),
+            Place::Admins => crate::ui::admins::show(ui, &mut context, &mut self.admins_panel),
+            Place::Games => crate::ui::games::show(ui, &context),
+            Place::Settings => {
+                crate::ui::settings::show(ui, &mut context, &mut self.settings_panel)
             }
         }
     }
@@ -1086,8 +1097,8 @@ impl App {
     ///
     /// The same [`crate::ui::chat::open`] the conversation list uses, driven with a scratch
     /// command buffer because the event that calls this arrives outside the frame that owns the
-    /// real one. Opening a conversation is opening a tab: the chip lands on the strip and the
-    /// thread becomes the active surface.
+    /// real one. Opening a conversation is opening a window: it lands on the desktop and, when
+    /// the frame is running, is raised to the top.
     fn open_conversation(&mut self, conversation_id: migo_core::Id) {
         let mut commands = std::mem::take(&mut self.commands);
         let mut navigate = None;
@@ -1106,7 +1117,7 @@ impl App {
         };
         crate::ui::chat::open(&mut context, &mut self.chat, conversation_id);
         self.commands = commands;
-        self.activate_chat(conversation_id);
+        self.desktop.open_chat(conversation_id);
     }
 
     /// Rebuilds the merged activity stream from its durable halves.
@@ -1119,11 +1130,15 @@ impl eframe::App for App {
     /// One frame.
     ///
     /// eframe 0.36 hands the application a [`egui::Ui`] covering the whole viewport rather than a
-    /// bare context, so panels are shown *inside* that ui. The consequence worth knowing is that the
-    /// order of the calls below is the layout: the left panel claims its third of the viewport
-    /// first — its tab strip at the top, the banner beneath it, the lists filling the rest — and
-    /// the central panel is the right pane, its own bar over the tab it names. Reversing them
-    /// would leave the strip floating over the screen it is supposed to sit beside.
+    /// bare context, so panels and windows are shown *inside* that ui. The signed-in frame is the
+    /// reference's desktop-OS shell in three passes, and the order is the layout: the taskbar
+    /// claims the bottom edge, the central panel paints the desktop surface (or the auth screen,
+    /// before there is a session to desktop), and then the floating windows are shown against the
+    /// context — above the panels, because every [`egui::Window`] lives on a layer above them.
+    ///
+    /// The windows are drawn before the frame's two key reads, so both see the frame they belong
+    /// to: the open-diff (a conversation opened by any door this frame becomes its window, raised)
+    /// and the Escape key (which closes the conversation window that is on top, and nothing else).
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain();
 
@@ -1133,7 +1148,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         let delta = ctx.input(|i| i.stable_dt).min(0.25);
         if self.age_toasts(delta) {
-            // The only unconditional repaint request in the program, and it is scoped to the one thing
+            // The one unconditional repaint request in the program, and it is scoped to the one thing
             // that animates without input.
             ctx.request_repaint();
         }
@@ -1145,163 +1160,42 @@ impl eframe::App for App {
         // Screens are handed a context and a command buffer; nothing below this point can reach the
         // worker directly.
         let mut navigate: Option<Screen> = None;
-        // A theme change requested by the banner's toggle or by a screen, applied after the frame.
+        // A theme change requested by the account bar's toggle or by a screen, applied after the frame.
         let mut theme_choice: Option<Theme> = None;
         // An interface-scale change requested from the settings panel, applied after the frame.
         let mut zoom_choice: Option<f32> = None;
         let screen = self.screen;
         let signed_in = screen == Screen::Chat && self.account.is_some();
-        // A conversation opened anywhere inside this frame — a list row, a search hit, a joined
-        // room — lands as a chat tab; the value is compared after the panes have drawn.
-        let selected_before = self.chat.selected;
+
         if signed_in {
-            // The signed-in shell is the reference's split: a left panel that owns the account's
-            // lists — its tab strip over the orange banner — and a right pane that runs on its
-            // own state, an open conversation, an open panel, or its resting state. The left
-            // panel claims its share of the window first; the central panel is the right pane
-            // and fills the rest.
-            //
-            // The floor has to stay below the share, or the formula inverts: the old 0.32 with
-            // a 300px floor meant every window under 937px drew the panel at *more* than its
-            // share, growing as the window shrank. 40% with a 280px floor keeps floor ≤ share
-            // down to a 700px window, which is narrower than the app is usable at.
-            let avail = ui.max_rect().width();
-            let width = (avail * 0.4).clamp(280.0, 540.0);
-            egui::Panel::left("left-pane")
-                .exact_size(width)
-                .frame(
-                    egui::Frame::new()
-                        .fill(colors.surface)
-                        .stroke(egui::Stroke::new(1.0, colors.border)),
-                )
-                .show(ui, |ui| {
-                    self.tab_strip(ui);
-                    self.banner(ui, &mut theme_choice);
-                    let mut context = Context {
-                        theme: self.theme,
-                        connection: &self.connection,
-                        account: self.account.as_ref(),
-                        server: &self.auth.server,
-                        commands: &mut self.commands,
-                        navigate: &mut navigate,
-                        theme_choice: &mut theme_choice,
-                        zoom_choice: &mut zoom_choice,
-                    };
-                    match self.place {
-                        Place::Rooms => crate::ui::rooms::show(
-                            ui,
-                            &mut context,
-                            &mut self.rooms,
-                            &mut self.chat,
-                        ),
-                        Place::Feed => {
-                            let activity = std::mem::take(&mut self.activity);
-                            crate::ui::space::show(ui, &mut context, &mut self.space, &activity);
-                            self.activity = activity;
-                        }
-                        Place::Games => crate::ui::games::show(ui, &context),
-                        Place::Friends => {
-                            crate::ui::friends::show(ui, &mut context, &mut self.friends)
-                        }
-                        // The panels are the right pane's tabs; the strip can never land here.
-                        Place::Alerts
-                        | Place::Search
-                        | Place::Wallet
-                        | Place::Profile
-                        | Place::Admins
-                        | Place::Settings => {}
-                    }
-                });
+            // The taskbar first, so the desktop surface and every window know where its edge is.
+            let entries = self.task_entries();
+            let coins = self.wallet.coins;
+            let session = self.desktop.session_start.map(|start| start.elapsed());
+            let contacts_open = self.desktop.contacts_open;
+            let actions = desktop::taskbar(ui, self.theme, contacts_open, &entries, coins, session);
+            for action in actions {
+                match action {
+                    TaskAction::Toggle(id) => desktop::toggle(&ctx, id),
+                    TaskAction::ShowContacts => self.desktop.contacts_open = true,
+                    TaskAction::Logout => self.desktop.logout_dialog = true,
+                }
+            }
+            // The taskbar carries a clock and a session timer, both of which move without input.
+            // One repaint a second keeps the minute honest without turning the sleep into a spin.
+            ctx.request_repaint_after(Duration::from_secs(1));
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(colors.surface))
+            .frame(egui::Frame::new().fill(if signed_in {
+                colors.desktop
+            } else {
+                colors.surface
+            }))
             .show(ui, |ui| {
                 if signed_in {
-                    if self.active_chat.is_some() {
-                        // A chat tab: the bar carries the chips, the thread is the whole pane.
-                        self.chat_bar(ui);
-                        let mut context = Context {
-                            theme: self.theme,
-                            connection: &self.connection,
-                            account: self.account.as_ref(),
-                            server: &self.auth.server,
-                            commands: &mut self.commands,
-                            navigate: &mut navigate,
-                            theme_choice: &mut theme_choice,
-                            zoom_choice: &mut zoom_choice,
-                        };
-                        crate::ui::chat::thread(ui, &mut context, &mut self.chat);
-                    } else if let Some(panel) = self.right_panel {
-                        // One open panel: the slim header names it and closes it, and the panel
-                        // is the whole pane. No chips, and none of the system tabs' content —
-                        // those live on the left, so this pane can never draw the same list
-                        // twice.
-                        self.panel_header(ui, panel);
-                        let mut context = Context {
-                            theme: self.theme,
-                            connection: &self.connection,
-                            account: self.account.as_ref(),
-                            server: &self.auth.server,
-                            commands: &mut self.commands,
-                            navigate: &mut navigate,
-                            theme_choice: &mut theme_choice,
-                            zoom_choice: &mut zoom_choice,
-                        };
-                        match panel {
-                            Place::Alerts => {
-                                crate::ui::alerts::show(ui, &mut context, &mut self.alerts)
-                            }
-                            Place::Search => crate::ui::search::show(
-                                ui,
-                                &mut context,
-                                &mut self.search,
-                                &mut self.chat,
-                            ),
-                            Place::Wallet => {
-                                crate::ui::wallet::show(ui, &mut context, &mut self.wallet)
-                            }
-                            Place::Profile => crate::ui::profile::show(
-                                ui,
-                                &mut context,
-                                &mut self.profile_panel,
-                            ),
-                            Place::Admins => crate::ui::admins::show(
-                                ui,
-                                &mut context,
-                                &mut self.admins_panel,
-                            ),
-                            Place::Settings => crate::ui::settings::show(
-                                ui,
-                                &mut context,
-                                &mut self.settings_panel,
-                            ),
-                            // The system tabs are the left panel's; only a panel ever reaches
-                            // this branch.
-                            Place::Friends
-                            | Place::Rooms
-                            | Place::Games
-                            | Place::Feed => {}
-                        }
-                    } else {
-                        // The pane at rest: no conversation, no panel. The lists are all on the
-                        // left, so the honest content is a mark and the one-line way in — the
-                        // desktop's own empty state, the same resting pane the web client's Home
-                        // chip shows.
-                        widgets::empty_state(
-                            ui,
-                            self.theme,
-                            "Nothing open",
-                            "Pick a conversation from the lists, or open a panel from the banner's menu.",
-                        );
-                    }
-                    // Whatever opened a conversation this frame opened a tab: the chip lands on
-                    // the right pane's bar and the thread becomes the active surface.
-                    if self.chat.selected != selected_before {
-                        if let Some(conversation_id) = self.chat.selected {
-                            self.activate_chat(conversation_id);
-                        }
-                    }
+                    // The desktop surface: the ground the windows float on, brand and all.
+                    desktop::surface(ui);
                 } else {
                     // The server is cloned for the context because the auth screen holds the
                     // endpoint mutably (its form edits it) and the context must not — one small
@@ -1322,13 +1216,84 @@ impl eframe::App for App {
                 }
             });
 
+        if signed_in {
+            // How many conversations have ever been opened, read before the windows draw: a
+            // conversation can be opened from places the shell does not control (a room row, a
+            // search hit — anything that calls `chat::open`), so the counter is the one honest
+            // signal that a window wants to exist when this frame is done.
+            let open_seq_before = self.chat.open_seq;
+
+            self.contacts_window(&ctx, &mut navigate, &mut theme_choice, &mut zoom_choice);
+            // The conversation windows are drawn in open order, which is the cascade: a window's
+            // index is its birthplace, and the list is cloned because closing one rewrites it.
+            let chats = self.desktop.chats.clone();
+            for (index, conversation_id) in chats.iter().copied().enumerate() {
+                self.chat_window(
+                    &ctx,
+                    index,
+                    conversation_id,
+                    &mut navigate,
+                    &mut theme_choice,
+                    &mut zoom_choice,
+                );
+            }
+            for (index, place) in self.desktop.sides.clone().iter().copied().enumerate() {
+                self.side_window(
+                    &ctx,
+                    index,
+                    place,
+                    &mut navigate,
+                    &mut theme_choice,
+                    &mut zoom_choice,
+                );
+            }
+
+            // Whatever door opened a conversation this frame opens its window and raises it.
+            if self.chat.open_seq != open_seq_before {
+                if let Some(conversation_id) = self.chat.selected {
+                    self.desktop.open_chat(conversation_id);
+                    desktop::focus(&ctx, desktop::chat_id(conversation_id));
+                }
+            }
+
+            // Escape closes the conversation window that is on top — the reference's windowing
+            // reflex, and the one key this shell owns. Only a conversation window: Escape in a
+            // menu belongs to the menu (any open popup keeps the key), Escape in the logout
+            // dialog cancels the dialog, and a side window or the Contacts window is closed by
+            // its own button, not by a key that could take the lists away by accident.
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+                && !self.desktop.logout_dialog
+                && !ctx.any_popup_open()
+            {
+                let top =
+                    ctx.memory_mut(|memory| memory.areas_mut().top_layer_id(egui::Order::Middle));
+                if let Some(layer) = top {
+                    let closed = self
+                        .desktop
+                        .chats
+                        .iter()
+                        .copied()
+                        .find(|id| desktop::chat_id(*id) == layer.id);
+                    if let Some(conversation_id) = closed {
+                        self.desktop.close_chat(conversation_id);
+                    }
+                }
+            }
+
+            // The logout confirmation, over everything: it gates the whole session, so it is
+            // drawn last and on the foreground layer, and its answer is the frame's last word.
+            if desktop::logout_dialog(&ctx, self.theme, &mut self.desktop.logout_dialog) {
+                self.commands.push(Command::SignOut);
+            }
+        }
+
         widgets::toasts(&ctx, self.theme, &self.toasts);
 
         if let Some(target) = navigate {
             self.screen = target;
         }
 
-        // A screen or the top bar asked for the other theme. Applied here rather than at the
+        // A screen or the account bar asked for the other theme. Applied here rather than at the
         // click so the whole frame is drawn in one palette — flipping mid-frame would show a
         // button drawn in the old colours sitting on a panel in the new ones. The choice is
         // written back to the settings file, so it outlives the window.

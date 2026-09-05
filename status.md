@@ -2703,3 +2703,78 @@ Verifikasi lokal (build/test/release tetap di GitHub Actions):
 luar direktori mockup yang tidak di-commit, `pnpm exec prettier --check`
 bersih, `make kotlin-check` 0 problem, desktop `cargo fmt`/`clippy`
 bersih dan `cargo test` 79 lolos.
+
+## 71. Metafora windowing desktop-OS: jendela sungguhan, taskbar, strip tab (v0.18.0)
+
+Rilis v0.17.0 ditolak user dengan alasan yang tepat: restyle datar itu
+hanya mengecat ulang shell lama, padahal identitas referensi
+(`ui-ux-design-plan/`) bukan paletnya melainkan **metafora desktop-OS** —
+contacts adalah jendela yang bisa di-drag, setiap percakapan adalah jendela
+MDI sendiri dengan cascade, taskbar jadi inventaris jendela, dan di ponsel:
+strip tab 46px dengan tab yang bisa ditutup plus bottom-sheet intent.
+Rilis ini memindahkan strukturnya, bukan lagi warnanya.
+
+**Web.** `app-shell.tsx` ditulis ulang menjadi window manager: mint/focus/
+minimize/maximize/close, z-order last-click-wins, cascade ~26×24, jendela
+baru lahir dari pesan masuk tanpa mencuri fokus, fragment `#conversation`
+kini membuka+fokus jendela. Komponen baru: `retro-window.tsx` (chrome
+gloss-title + drag pointer-capture + resize e/s/se; di ponsel permukaan
+penuh tanpa chrome), `contacts-window.tsx` (pills Friends/Rooms/Feed, bar
+me oranye dengan status click-to-edit, menu portalled), `desktop-taskbar.tsx`
+(34px, dockable atas/bawah via `migo.taskbarPos`, saldo $MIG asli, timer
+sesi, jam, logout), `mobile-tab-bar.tsx` (46px; Friends|Rooms|Feed dengan X
+hanya di Feed + "+", divider, satu tab per jendela dengan badge unread),
+`mobile-home.tsx` (kartu me + me-sheet dengan grid presence 2×2),
+`intent-sheet.tsx`, `confirm-dialog.tsx`, `migo-brand.tsx`,
+`window-types.ts`. Yang dihapus justru tulang punggung shell lama:
+`tab-strip`, `right-tab-bar`, `profile-banner`, `pane-empty`,
+`presence-picker`, `chat-tabs-mode` — percakapan tidak lagi punya "pane"
+tempat ia tinggal. Font dasar dikoreksi 13px → **12px** sesuai referensi
+(`--fs-body` 12, `--fs-body-sm` 11); seluruh `font-size: 13px` yang tersisa
+diarahkan ke token. Delapan belas test baru menguji penawaran shell;
+`pnpm test` 334/334.
+
+**Desktop.** `ui/desktop.rs` (baru): taskbar 34px (tombol jendela dengan dot
+status + badge unread, saldo emas, timer sesi, jam, logout dengan modal
+terpusat), desktop teal dengan watermark, krom `floating()` untuk semua
+jendela, cascade dengan test unit sendiri. `app.rs` ditulis ulang: Contacts
+window default (bar akun + pills Friends/Rooms/Feed), satu `egui::Window`
+per percakapan — draft dan typing kini per-percakapan (`HashMap<Id, _>`)
+supaya dua jendela tak pernah berbagi composer — panel samping ±420×340,
+Escape menutup jendela chat teratas. `Place` kini `Hash` karena menjadi
+kunci id jendela. `theme.rs` dapat token `desktop`/`gold`; test palet
+ditulis ulang mengikuti. `cargo test` 81 lolos.
+
+**Android.** `TabStrip.kt` menjadi `MobileTabStrip` (nav chips +
+conversation chips dengan X dan badge "9+", strip 46dp), `MobileHome.kt`
+(kartu me oranye dengan edit status inline via `presence.set`, me-sheet
+dengan pill presence 2×2 yang benar-benar menulis wire, action rows ke
+panel asli), `IntentSheets.kt` (`MigoSheet` 18dp, `UserIntentSheet`,
+`RoomIntentSheet` dengan bar okupansi). `MainActivity.ShellScreen` baru:
+back menutup tab jendela aktif, panel tetap menutupi dengan `PanelBar`.
+`ChatsScreen.kt` dan `ProfileBanner.kt` dihapus — daftar percakapan
+adalah tab jendela sekarang. `AppViewModel` belajar nama tampilan teman
+(batch profile fetch) supaya baris teman tidak lagi menyapa dengan handle.
+`make kotlin-check` 0 problem.
+
+**Yang sengaja tidak dipindah dari mockup.** Tombol panggilan suara/video
+di sheet intent Android (protokol belum punya call — di web baris call
+mengikuti `call-buttons` asli yang memang ada), "remove from friends"
+(tidak ada unfriend di wire; hanya Add yang ditawarkan), mail (dipetakan ke
+jendela Alerts), AvatarStudio/Smiley SVG/Photos/desktop promo (tidak ada
+pendukung protokol; avatar dan emoticon asli sudah mengisi permukaan yang
+sama). Tidak ada tombol yang berbohong tentang kemampuannya.
+
+**Token ikut jujur.** `tokens.json` naik ke **v4.1.0**: `baseSize` 12,
+body 12, bodySm 11. `docs/design-system.md` bagian Layout/Navigation/
+Components ditulis ulang — sebelumnya mendeskripsikan shell dua-panel yang
+sudah tidak dipakai satu klien pun. `eslint.config.mjs` dan `.prettierignore`
+mengabaikan `ui-ux-design-plan/` dengan preseden yang sama seperti
+`new-ui-02.tsx` (referensi user, untracked, di luar semua tsconfig; CI
+tidak pernah melihatnya).
+
+Verifikasi lokal (build/test/release tetap di GitHub Actions):
+`pnpm typecheck` bersih, `pnpm test` 334/334, `make lint-js` bersih,
+`pnpm exec prettier --check .` bersih, `make kotlin-check` 0 problem,
+desktop `cargo fmt --check`/`clippy -D warnings` bersih dan `cargo test`
+81 lolos.

@@ -37,6 +37,10 @@ export default tseslint.config(
       // A user-authored design reference kept at the root, outside every tsconfig (the same
       // reason as docs/design/**). Not tracked, not shipped; linting it only errors.
       'new-ui-02.tsx',
+      // The design-reference mockup the web rework was ported from. A standalone Next.js
+      // demo with its own dependencies that are not installed here, untracked and outside
+      // every tsconfig — the same standing as new-ui-02.tsx above.
+      'ui-ux-design-plan/**',
       // Vendored dependencies: the Foundry submodules under contracts/lib (OpenZeppelin,
       // forge-std). Pinned upstream sources, not ours to lint — the same standing as
       // node_modules, just checked in so CI can build without fetching.

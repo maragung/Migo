@@ -2,25 +2,14 @@
 
 import type { ReactNode } from 'react';
 
-import { ChatWindow } from '@/components/chat-window.js';
-import { useOpenConversation } from '@/lib/migo/use-open-conversation.js';
-
 /**
- * The thread pane: the open conversation.
+ * The chat route's page: nothing of its own.
  *
- * One route, not one route per conversation. The bundle is statically exported, so there is no server
- * to render `/chat/<id>` and no build-time list of conversation ids to prerender from. Which
- * conversation is open lives in the URL fragment instead, which also keeps it out of any static host's
- * access log — see `use-open-conversation.ts`.
- *
- * There is no empty state to draw here: the shell only mounts this page when a conversation is
- * open, and shows the pane's own resting content otherwise — an "empty thread" branch would be
- * a second, unreachable answer to the question the shell already answers.
+ * The shell is a window manager now (see components/app-shell.tsx) — a conversation opens as its
+ * own window, drawn by the shell from the URL fragment, not as this route's page. The route still
+ * exists so `/chat` is where a signed-in session lands; its layout carries the provider stack and
+ * the shell, and this page contributes only the route's own (empty) content.
  */
 export default function ChatPage(): ReactNode {
-  const conversationId = useOpenConversation();
-  if (conversationId !== null) {
-    return <ChatWindow conversationId={conversationId} />;
-  }
   return null;
 }
