@@ -3880,18 +3880,16 @@ Sisa frame, dienkode dengan MSE sesuai section 143.
 
 Header minimum adalah 4 byte, yaitu version, flags, opcode satu byte, correlation satu byte.
 
-Framing MWP/1 adalah TLV (Type-Length-Value). Type adalah opcode varint di header frame. Length adalah panjang frame yang disediakan transport: u32 big-endian di depan record pada TCP dan QUIC stream, atau batas pesan pada WebSocket dan QUIC datagram. Value adalah seluruh byte frame, header plus payload MSE. Header tidak membawa magic byte; byte pertama adalah version. Layout record TLV pada transport stream:
+Framing MWP/1 adalah TLV (Type-Length-Value). Type adalah opcode varint di header frame. Length adalah panjang frame yang disediakan transport: u32 big-endian di depan record pada TCP dan QUIC stream, atau batas pesan pada WebSocket dan QUIC datagram. Value adalah seluruh byte frame, header plus payload MSE. Header tidak membawa magic byte; byte pertama adalah version. Urutan field record TLV pada transport stream, tanpa nama field di kabel:
 
-```
- 0..4    length, u32 big-endian, panjang seluruh frame setelah prefix ini
- 4       version, u8, bernilai 1
- 5       flags, u8, lihat section 140
- 6..     opcode, varint LEB128 kanonik
- ..      correlation, varint, 0 untuk frame tanpa balasan
- ..      trace_id 16 byte lalu span_id 8 byte, hanya bila TRACED
- ..      fragment_index varint lalu fragment_total varint, hanya bila FRAGMENT
- ..akhir payload MSE, sisa byte frame
-```
+length, u32 big-endian, panjang seluruh frame setelah prefix ini
+version, u8, bernilai 1
+flags, u8, lihat section 140
+opcode, varint LEB128 kanonik
+correlation, varint, 0 untuk frame tanpa balasan
+trace_id, 16 byte, lalu span_id, 8 byte, hanya bila TRACED
+fragment_index, varint, lalu fragment_total, varint, hanya bila FRAGMENT
+payload MSE, sisa byte frame sampai akhir record
 
 Satu record TLV per satu satuan transport: satu length prefix per record di stream TCP dan QUIC stream, satu frame per satu binary WebSocket message, satu frame per satu QUIC datagram. Length prefix yang melebihi MAX_FRAME_BYTES WAJIB ditolak sebelum satu byte body pun di-buffer.
 
