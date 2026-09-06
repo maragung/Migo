@@ -5,6 +5,7 @@ import type { ChangeEvent, KeyboardEvent, ReactNode, RefObject } from 'react';
 
 import { VOICE_NOTE_MAX_MS } from '@/lib/migo/voice.js';
 import type { VoiceRecording } from '@/lib/migo/voice.js';
+import { friendlyError } from '@/lib/migo/errors.js';
 
 import { Icon } from './icons.js';
 import { Spinner } from './spinner.js';
@@ -70,6 +71,7 @@ export function MessageComposer({
 }: ComposerProps): ReactNode {
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [voiceRecording, setVoiceRecording] = useState(false);
@@ -140,12 +142,16 @@ export function MessageComposer({
       return;
     }
     setSending(true);
+    setSendError(null);
     stopTyping();
     try {
       await onSend(value);
       setText('');
-    } catch {
-      // Keep the text in the box so the user can retry.
+    } catch (cause) {
+      // The draft stays so the user can retry — but silence is not an option: a send that
+      // fails with nothing shown reads as "sent" to the sender and as silence to everyone
+      // else, which is exactly how a dead conversation goes unnoticed.
+      setSendError(friendlyError(cause));
     } finally {
       setSending(false);
     }
@@ -346,8 +352,19 @@ export function MessageComposer({
           </button>
         </div>
       )}
-      {uploading || sendingVoice || uploadError !== null || voiceError !== null ? (
+      {sending ||
+      uploading ||
+      sendingVoice ||
+      sendError !== null ||
+      uploadError !== null ||
+      voiceError !== null ? (
         <div className="composer-meta">
+          {sending ? (
+            <>
+              <Spinner />
+              <span>Sending…</span>
+            </>
+          ) : null}
           {uploading ? (
             <>
               <Spinner />
@@ -359,6 +376,19 @@ export function MessageComposer({
               <Spinner />
               <span>Sending voice note…</span>
             </>
+          ) : null}
+          {sendError !== null ? (
+            <span className="composer-error">
+              {sendError}
+              <button
+                type="button"
+                className="error-dismiss"
+                onClick={() => setSendError(null)}
+                aria-label="Dismiss error"
+              >
+                ✕
+              </button>
+            </span>
           ) : null}
           {uploadError !== null ? <span className="composer-error">{uploadError}</span> : null}
           {voiceError !== null ? (

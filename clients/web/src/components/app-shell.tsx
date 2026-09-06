@@ -18,7 +18,8 @@
  * The URL fragment stays the single source of truth for the open conversation (see
  * use-open-conversation.ts): every door into a thread is `openConversation(id)`, and the fragment
  * effect below opens or focuses that conversation's window — and takes it away again when the
- * fragment clears, leaving rooms and groups on the way out exactly as the previous shell did.
+ * fragment clears, closing the view without touching membership: leaving a room or a group is a
+ * decision made in the panel's own Leave confirmation, never a side effect of closing a window.
  * A message that arrives for a conversation with no window mints one (the session's own rule),
  * without stealing focus from whoever has it; the shell's own unread counts (not the provider's,
  * which a mounted thread's mark-read clears) drive the badges.
@@ -231,41 +232,17 @@ export function AppShell(): ReactNode {
   }, []);
 
   /**
-   * Leaves the conversation a closed chat window held, when leaving is what closing means.
+   * Closing a chat window closes the window — it does not leave the conversation.
    *
-   * Best-effort by design: the window is gone either way, and a leave the server refused (offline,
-   * already left) must not resurrect it.
+   * The closable-tab model once wired a leave into this close path (a room's `rooms.leave`, a
+   * group's `conversations.leave`), which made the X a one-way door: the membership row got its
+   * `left_at`, the next send came back `NOT_FOUND` (the server answers "not a member" with the
+   * same 404 it gives an unknown id, on purpose), and the composer swallowed the error — so a
+   * user who closed a tab and reopened it simply could not send, with nothing telling them why.
+   * Leaving is a membership decision, so it lives where the user makes one deliberately: the
+   * room panel's and the group panel's own Leave confirmations. Closing a tab keeps the
+   * membership; reopening the conversation is one click, and sending keeps working.
    */
-  const leaveWhenClosed = useCallback(
-    (conversationId: Id): void => {
-      if (client === null) {
-        return;
-      }
-      const summary = items.find((item) => item.conversationId === conversationId);
-      if (summary === undefined) {
-        return;
-      }
-      if (summary.kind === ConversationKind.Room) {
-        const room = rooms.infoFor(conversationId);
-        if (room !== null) {
-          void client.rooms
-            .leave(room.roomId)
-            .then(() => {
-              // The leaver's own device is excluded from the member fan-out, so nothing on the
-              // wire corrects the held record — drop it here.
-              rooms.forgetRoom(room.roomId);
-            })
-            .catch(() => undefined);
-        }
-        return;
-      }
-      if (summary.kind === ConversationKind.Group) {
-        void client.conversations.leave(conversationId).catch(() => undefined);
-      }
-    },
-    [client, items, rooms],
-  );
-
   const closeWindow = useCallback(
     (id: string): void => {
       const window = windows.find((w) => w.id === id);
@@ -273,15 +250,12 @@ export function AppShell(): ReactNode {
       setUnreadWin((u) => ({ ...u, [id]: 0 }));
       setActiveId((cur) => (cur === id ? null : cur));
       if (window?.kind === 'chat' && window.conversationId !== undefined) {
-        // Closing a room or group window is walking out of it; a direct chat is not membership —
-        // closing it is the whole goodbye.
-        leaveWhenClosed(window.conversationId);
         if (window.conversationId === openId) {
           closeConversation();
         }
       }
     },
-    [leaveWhenClosed, openId, windows],
+    [openId, windows],
   );
 
   /** The taskbar button's one-click cycle: restore, focus, or minimize. */
@@ -313,18 +287,16 @@ export function AppShell(): ReactNode {
       return;
     }
     if (prev !== null) {
-      // Back cleared the fragment: the thread's window goes with it, and the leave it owes (a
-      // room, a group) is paid on the way out. A window the close button already took — its own
-      // close path paid the leave and cleared the fragment — is no longer here to pay twice.
+      // Back cleared the fragment: the thread's window goes with it. Membership is untouched —
+      // closing the view is not leaving the conversation (see closeWindow's comment above).
       const gone = chatWinId(prev);
       if (winIdsRef.current.has(gone)) {
-        leaveWhenClosed(prev);
         setWindows((ws) => ws.filter((w) => w.id !== gone));
         setUnreadWin((u) => ({ ...u, [gone]: 0 }));
         setActiveId((cur) => (cur === gone ? null : cur));
       }
     }
-  }, [openId, openWindow, leaveWhenClosed]);
+  }, [openId, openWindow]);
 
   // ---- message arrival: mint windows, count attention ----
   winIdsRef.current = new Set(windows.map((w) => w.id));
