@@ -5,15 +5,20 @@ import android.os.Build
 import com.migo.core.ConnectionState
 import com.migo.core.MigoClient
 import com.migo.core.MigoClientOptions
+import com.migo.core.account.AccountError
+import com.migo.core.account.AccountFile
 import com.migo.core.account.DeviceCredential
 import com.migo.core.account.EvmWallet
 import com.migo.core.account.IdentityKey
 import com.migo.core.account.MigoRoot
 import com.migo.core.account.openContainer
+import com.migo.core.account.sealContainer
 import com.migo.core.domain.KeyStore
 import com.migo.core.domain.SdkError
+import com.migo.core.store.DeviceKeys
 import com.migo.core.store.GatewayScheme
 import com.migo.core.store.RestScheme
+import com.migo.core.store.SavedSession
 import com.migo.core.store.ServerEndpoint
 import com.migo.core.store.SessionStore
 import com.migo.core.store.Transport
@@ -200,7 +205,7 @@ class MigoSession private constructor(
         private var pendingRegistrationRoot: MigoRoot? = null
 
         /**
-         * Registers a new account and its founding device.
+         * Registers a new account and its founding device, and seals the `.migo` file.
          *
          * A registration is the founding device of a brand-new account (§182), so it mints the
          * account root and derives the E2EE identity from the root's E2EE domain — recoverable from
@@ -209,6 +214,15 @@ class MigoSession private constructor(
          * key travels with the request so the server can reconcile a retry whose first attempt
          * already landed. After the account exists, the root's public material is published and
          * wallet 0 registered, idempotently.
+         *
+         * The container is sealed here, from the *same* root that registered, before the root's
+         * home moves to the session vault — a container reconstructed later could only rebuild
+         * from the vault, and the whole guarantee of §12 is that this root and no other is the
+         * account. The registration passphrase is the recovery credential, exactly as the web
+         * client seals it: one secret to keep straight, and the file plus that passphrase is the
+         * account's whole recovery story. A seal the container format refuses costs only the
+         * offer — the account exists and the vault holds the root, and the Profile screen's
+         * backup flow can still seal one on demand.
          */
         suspend fun register(
             context: Context,
@@ -217,7 +231,7 @@ class MigoSession private constructor(
             username: String,
             passphrase: String,
             hooks: SessionHooks = SessionHooks(),
-        ): MigoSession {
+        ): RegisteredAccount {
             val (vault, store) = reset(context)
             val root = pendingRegistrationRoot ?: MigoRoot.generate().also { pendingRegistrationRoot = it }
             val client = build(endpoint, appVersion, null, KeyStore.founding(root), store, hooks)
@@ -226,7 +240,17 @@ class MigoSession private constructor(
             session.enrolAccountMaterial()
             session.persist()
             pendingRegistrationRoot = null
-            return session
+            val container = try {
+                val file = AccountFile
+                    .new(root, System.currentTimeMillis() / 1000)
+                    .forAccount(client.accountId.value)
+                // Argon2 at the container's own cost is CPU work, so the seal runs on the default
+                // dispatcher, exactly as the restore path's open does.
+                withContext(Dispatchers.Default) { sealContainer(passphrase, file) }
+            } catch (_: AccountError) {
+                null
+            }
+            return RegisteredAccount(session, container)
         }
 
         /**
@@ -286,20 +310,39 @@ class MigoSession private constructor(
         }
 
         /**
-         * Restores the account onto this device from a `.migo` container: the add-device
-         * ceremony, a new vault, and the session that follows.
+         * Restores the account onto this device from a `.migo` container, through one of two doors.
          *
-         * The restored device holds the root — it can sign future add-device ceremonies and
-         * derive the wallets — but its E2EE identity is fresh and random, not the founding
-         * device's: a restore is a new device, and new devices never inherit another device's
-         * ratchets. Only the founding device's E2EE history is a function of the root, and only
-         * its own backup restores onto it as itself.
+         * The known-device door comes first: when the container's account is the account this
+         * device's vault already holds, and the root in the file is the same root the vault sealed,
+         * this is not a new device at all — it is this device coming back with its account file.
+         * Nothing is reset. The stored identity, the ratchets and the device credential are reused
+         * and the login ceremony (not add-device) signs the device back in, which is what preserves
+         * the E2EE identity: a peer's safety number does not change because somebody re-signed in
+         * from their own backup. The device credential is the vault's own sealed copy
+         * ([com.migo.core.store.DeviceKeys.deviceCredential]) — the ceremony needs exactly the
+         * credential the server has on the device row, and the vault is where that credential has
+         * lived since the add-device ceremony that minted it.
          *
-         * The container opens *before* anything local is destroyed: a wrong recovery credential
-         * is a typo, and a typo must not wipe whatever device state was here. Only once the root
-         * is out and the account named does [reset] replace it — the same replacement a sign-in
-         * as a different account performs, and the explicit thing the person pressing "restore"
-         * asked for.
+         * The new-device door is the one a different account takes — restoring another account
+         * onto this phone is the explicit thing the person pressing "restore" asked for — and the
+         * one every miss falls back to: [reset] wipes this device's stores, a fresh credential is
+         * minted, and the add-device ceremony introduces a new device with a fresh, random E2EE
+         * identity; a restore is a new device, and new devices never inherit another device's
+         * ratchets. A vault that exists but will not load takes this door too, and the reset wipes
+         * it — the same replacement a sign-in as a different account performs — because a vault
+         * this build cannot open is not a device that can be signed back in as. So does a vault
+         * that names the account and holds the root but sealed no device credential: a founding
+         * device that registered with a passphrase has no credential to answer the login
+         * ceremony, and only the add-device door can take it.
+         *
+         * Either way the container opens *before* anything local is destroyed: a wrong recovery
+         * credential is a typo, and a typo must not wipe whatever device state was here. Only once
+         * the root is out and the account named does [reset] replace it — and on the known-device
+         * door nothing is destroyed at all. A login ceremony the server refuses (a device since
+         * revoked, say) propagates rather than falling through to the new-device door: the
+         * fall-through would reset the very identity the first door exists to preserve, and the
+         * honest answer to a revoked device is the server's own error, with the vault intact to
+         * sign in with the passphrase instead.
          *
          * [username] is the greeting and nothing more: the grant identifies the account by id,
          * and a blank field falls back to the account's public id text.
@@ -324,6 +367,63 @@ class MigoSession private constructor(
             val accountId = parseId(accountIdText)
             val root = file.root()
             val name = username.trim().ifEmpty { accountIdText }
+
+            // The known-device door, peeked before anything local is touched. The root comparison
+            // is by root bytes — the vault seals the raw 32 bytes
+            // ([com.migo.core.store.DeviceKeys.root]), so the file and the vault are compared on
+            // exactly the secret they share.
+            val stored = withContext(Dispatchers.IO) {
+                val vault = Vault.open(context)
+                val keys = if (vault.exists()) {
+                    try {
+                        vault.load()
+                    } catch (_: VaultError) {
+                        null
+                    }
+                } else {
+                    null
+                }
+                if (keys == null) {
+                    null
+                } else {
+                    val saved = keys.session
+                    val knownCredential = keys.deviceCredential
+                    val sameRoot = keys.root?.asBytes()?.contentEquals(root.asBytes()) == true
+                    if (saved != null && knownCredential != null &&
+                        saved.accountId == accountId && sameRoot
+                    ) {
+                        StoredVault(vault, keys, saved, knownCredential)
+                    } else {
+                        null
+                    }
+                }
+            }
+
+            if (stored != null) {
+                val store = withContext(Dispatchers.IO) { SessionStore.open(context) }
+                val client = build(
+                    endpoint,
+                    appVersion,
+                    stored.session.deviceId,
+                    KeyStore.restore(stored.keys),
+                    store,
+                    hooks,
+                )
+                val session = MigoSession(client, name, stored.vault, store)
+                session.trackedTxs.addAll(stored.keys.txs)
+                // The login ceremony, not add-device: this device is already on the account, and
+                // the stored credential — the one the vault sealed when the device joined — is the
+                // only credential that can answer for it.
+                client.identityLogin(
+                    stored.session.username,
+                    stored.session.deviceId,
+                    IdentityKey.fromRoot(root),
+                    stored.credential,
+                )
+                session.enrolAccountMaterial()
+                session.persist()
+                return session
+            }
 
             val (vault, store) = reset(context)
             val deviceCredential = DeviceCredential.generate()
@@ -436,3 +536,39 @@ class MigoSession private constructor(
             }
     }
 }
+
+/**
+ * What a registration hands back: the live session, and the sealed `.migo` container minted from
+ * the same root that registered.
+ *
+ * The container is sealed inside [MigoSession.register] rather than reconstructed later, because
+ * the root lives exactly there for exactly that long (§12) — by the time any caller might rebuild
+ * a container, the session vault is the root's home and a re-derivation is a second copy that can
+ * drift. [container] is null only when the seal itself refused; the account is real either way,
+ * and the Profile screen's backup flow can still seal one on demand.
+ */
+class RegisteredAccount(
+    /** The signed-in session the registration produced. */
+    val session: MigoSession,
+    /** The sealed container bytes, ciphertext under the registration passphrase, or null when the seal refused. */
+    val container: ByteArray?,
+) {
+    /** Ciphertext and counts only; the sealed bytes are never rendered. */
+    override fun toString(): String =
+        "RegisteredAccount(container: ${if (container != null) "${container.size} sealed bytes" else "none"})"
+}
+
+/**
+ * The known-device door's answer: the stored vault and the three things the door needs from it.
+ *
+ * Exists so [MigoSession.restore] can decide the whole question inside one dispatch — whether this
+ * vault names the container's account, holds the same root, and sealed a credential the login
+ * ceremony can answer with — and hand the answer out as one non-null object, rather than
+ * re-checking nullable fields across a module boundary the compiler cannot smart-cast through.
+ */
+private class StoredVault(
+    val vault: Vault,
+    val keys: DeviceKeys,
+    val session: SavedSession,
+    val credential: DeviceCredential,
+)

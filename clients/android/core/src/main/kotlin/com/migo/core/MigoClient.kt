@@ -531,6 +531,40 @@ class MigoClient private constructor(
     }
 
     /**
+     * Signs this device back in through the identity ceremony, then connects — the known-device
+     * door of a `.migo` container restore.
+     *
+     * Where [addDevice] introduces a device the account has never met, this re-presents one it
+     * already knows: [identifier] and [deviceId] name the stored device record, [identity] is the
+     * account's ML-DSA key the container carried, and [deviceCredential] is the *same* credential
+     * this device answered its own add-device ceremony with — the vault seals it for exactly this
+     * re-presentation, because the challenge is bound to the device row and only the credential
+     * registered on that row can answer it. A root that leaks from a backup alone has the
+     * account half of this ceremony and none of the device half, which is the same split
+     * [addDevice] enforces in the other direction.
+     */
+    suspend fun identityLogin(
+        identifier: String,
+        deviceId: Id,
+        identity: IdentityKey,
+        deviceCredential: DeviceCredential,
+    ): Grant {
+        val challenge = rest.identityLoginChallenge(identifier, deviceId)
+        val payload = try {
+            Base64.getDecoder().decode(challenge.payload)
+        } catch (_: IllegalArgumentException) {
+            throw SdkError("the server's challenge payload was not base64")
+        }
+        val grant = rest.identityLogin(
+            parseId(challenge.challengeId),
+            identity.signLogin(payload),
+            deviceCredential.signLogin(payload),
+        )
+        establish(grant)
+        return grant
+    }
+
+    /**
      * Connects with a grant persisted from a previous run, skipping bootstrap.
      *
      * Pair it with a restored [KeyStore] (through [MigoClientOptions.keyStore]) so the device keeps its

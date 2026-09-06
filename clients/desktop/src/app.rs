@@ -156,9 +156,12 @@ impl App {
             match event {
                 Event::Connection(state) => {
                     // A failure while a form is submitting has to release the form, or the button stays
-                    // disabled and the user is stuck looking at an error they cannot act on.
+                    // disabled and the user is stuck looking at an error they cannot act on. The form's
+                    // secrets go with it: whatever a submit was holding for the sign-in that will now
+                    // never arrive — a registration's account-file credential — is spent.
                     if matches!(state, Connection::Failed(_)) {
                         self.auth.busy = false;
+                        self.auth.clear_secrets();
                     }
                     self.connection = state;
                 }
@@ -173,6 +176,17 @@ impl App {
                     }
                 }
                 Event::SignedIn(account) => {
+                    // A founding registration ends with the account file (web parity: the web
+                    // client's register flow ends with a sheet offering the `.migo` container).
+                    // The passphrase it typed is taken now, before the form's secrets are wiped,
+                    // and becomes the credential the offer prefills — the same single secret the
+                    // web client seals under. Every other sign-in takes nothing and shows
+                    // nothing, and a registration whose device somehow holds no root has no
+                    // container to offer either.
+                    let backup_credential = self
+                        .auth
+                        .take_backup_credential()
+                        .filter(|_| account.holds_root);
                     self.auth.busy = false;
                     self.auth.clear_secrets();
                     // Whatever challenge the form was holding died with the submit that
@@ -183,6 +197,19 @@ impl App {
                     // session's graph or device list: those describe an account, and this may be
                     // a different one signing in over the same window.
                     self.desktop = Desktop::new_session();
+                    // Armed after the fresh desktop, so the offer belongs to this session alone.
+                    // The name comes back off the filed account: it was moved there two lines up,
+                    // and the offer wants the same spelling the account will be known by.
+                    if let Some(credential) = backup_credential {
+                        let username = self
+                            .account
+                            .as_ref()
+                            .expect("the account was just filed")
+                            .username
+                            .clone();
+                        self.desktop.backup_offer =
+                            Some(desktop::BackupOffer::new(&username, credential));
+                    }
                     self.friends = FriendsState::default();
                     self.settings_panel = SettingsState::default();
                     self.profile_panel = crate::ui::profile::ProfileState::default();
@@ -231,6 +258,12 @@ impl App {
                     self.activity.clear();
                     // The desktop goes with the session too: every window on it was the
                     // account's, and the logout dialog is moot once the logout has happened.
+                    // The account-file offer goes first and wiped, not merely dropped — a
+                    // credential it still held would be the registration passphrase sitting in
+                    // a dead session's memory.
+                    if let Some(mut offer) = self.desktop.backup_offer.take() {
+                        offer.wipe();
+                    }
                     self.desktop = Desktop::default();
                     self.screen = Screen::Unlock;
                 }
@@ -1274,10 +1307,12 @@ impl eframe::App for App {
             // Escape closes the conversation window that is on top — the reference's windowing
             // reflex, and the one key this shell owns. Only a conversation window: Escape in a
             // menu belongs to the menu (any open popup keeps the key), Escape in the logout
-            // dialog cancels the dialog, and a side window or the Contacts window is closed by
-            // its own button, not by a key that could take the lists away by accident.
+            // dialog cancels the dialog, Escape in the backup offer declines the offer, and a
+            // side window or the Contacts window is closed by its own button, not by a key that
+            // could take the lists away by accident.
             if ctx.input(|i| i.key_pressed(egui::Key::Escape))
                 && !self.desktop.logout_dialog
+                && self.desktop.backup_offer.is_none()
                 && !ctx.any_popup_open()
             {
                 let top =
@@ -1299,6 +1334,21 @@ impl eframe::App for App {
             // drawn last and on the foreground layer, and its answer is the frame's last word.
             if desktop::logout_dialog(&ctx, self.theme, &mut self.desktop.logout_dialog) {
                 self.commands.push(Command::SignOut);
+            }
+
+            // The registration backup offer, the same foreground anchor the logout question
+            // uses — the account file is the account's only recovery, so a founding
+            // registration is not allowed to end without it being asked once. The seal itself
+            // is the settings screen's own command and the worker's own sealing path; the
+            // offer only puts the form in the user's face, prefilled, and hands the answers
+            // over when they come.
+            if let Some((path, credential)) =
+                desktop::backup_offer_dialog(&ctx, self.theme, &mut self.desktop.backup_offer)
+            {
+                self.commands.push(Command::ExportContainer {
+                    path: PathBuf::from(path),
+                    credential,
+                });
             }
         }
 

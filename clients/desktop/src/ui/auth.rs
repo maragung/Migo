@@ -55,6 +55,16 @@ pub struct AuthState {
     pub restore_path: String,
     pub restore_credential: String,
     pub restore_username: String,
+    /// The account passphrase of the registration in flight, held from the submit that sent it
+    /// until the sign-in it earns.
+    ///
+    /// A founding registration ends with the account-file offer (web parity: the web client's
+    /// register flow ends with a sheet that seals the `.migo` container under the passphrase the
+    /// user just typed — one secret to keep straight, not two), and the container that offer seals
+    /// is prefilled with that same passphrase. It lives here for the length of one registration
+    /// attempt and no longer: wiped with the form's other secrets on every other path through
+    /// this screen, and taken the moment the sign-in arrives.
+    pub backup_credential: Option<String>,
 }
 
 impl Default for AuthState {
@@ -73,6 +83,7 @@ impl Default for AuthState {
             restore_path: String::new(),
             restore_credential: String::new(),
             restore_username: String::new(),
+            backup_credential: None,
         }
     }
 }
@@ -92,6 +103,20 @@ impl AuthState {
             field.replace_range(.., &filled);
             field.clear();
         }
+        // The registration's account passphrase is held for the sign-in that registration earns;
+        // any other path through this screen — a different submit, a failure, a screen change —
+        // means that sign-in is not coming, and the hold is over.
+        if let Some(mut secret) = self.backup_credential.take() {
+            let filled = "\0".repeat(secret.len());
+            secret.replace_range(.., &filled);
+            secret.clear();
+        }
+    }
+
+    /// Takes the account passphrase a registration submitted, for the account-file offer its
+    /// sign-in earns. `None` means the sign-in is not a registration's, and no offer is made.
+    pub fn take_backup_credential(&mut self) -> Option<String> {
+        self.backup_credential.take()
     }
 
     /// Updates the server endpoint from the disclosure widget, then re-seeds the form state so
@@ -126,9 +151,11 @@ impl AuthState {
 
     /// Whether the restore form is complete enough to submit.
     ///
-    /// The confirm field is required here unlike sign-in: a restore writes a brand-new vault, and a
-    /// passphrase mistyped on a one-shot form would seal the only copy of the account's keys under
-    /// something the user cannot reproduce.
+    /// The confirm field is required here unlike sign-in: a restore onto a device with no vault
+    /// writes a brand-new one, and a passphrase mistyped on a one-shot form would seal the only
+    /// copy of the account's keys under something the user cannot reproduce. On a device whose
+    /// vault is the container's own account the field is typed twice all the same — the tier-one
+    /// door below reads it as the existing vault's passphrase.
     fn restore_ready(&self) -> bool {
         !self.server.host.trim().is_empty()
             && !self.restore_path.trim().is_empty()
@@ -435,6 +462,10 @@ fn register(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
 
     let ready = state.register_ready() && !state.busy;
     if widgets::primary_button(ui, context.theme, "Create account", ready).clicked() {
+        // Held for the account-file offer the sign-in this earns will make (see
+        // [`AuthState::backup_credential`]); taken after the wipe below, which is what clears any
+        // stale hold a previous attempt left.
+        let account_passphrase = state.account_passphrase.clone();
         context.issue(Command::Register {
             server: state.server.clone(),
             username: state.identifier.trim().to_owned(),
@@ -444,6 +475,7 @@ fn register(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
         });
         state.busy = true;
         state.clear_secrets();
+        state.backup_credential = Some(account_passphrase);
     }
 
     ui.add_space(space::MD);
@@ -458,10 +490,15 @@ fn register(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
 
 /// The restore form: a `.migo` container plus its recovery credential, onto this device.
 ///
-/// The container holds the account root, so opening it *is* the sign-in — the ML-DSA add-device
-/// ceremony runs before a vault is written, and the passphrase below seals the new vault rather
-/// than opening anything. A restore is a new device: fresh E2EE keys, its own login credential,
-/// the account root the container carried.
+/// The container holds the account root, so opening it *is* the sign-in — the ceremony runs
+/// before any vault is written, and the passphrase below seals the new vault rather than opening
+/// anything. Which ceremony, and which vault, depends on the machine: a device with no vault gets
+/// the add-device ceremony, fresh E2EE keys, its own login credential, and the account root the
+/// container carried; a device whose vault is the container's own account — the same root — gets
+/// the login ceremony instead, and the passphrase below must be the *existing* vault's own,
+/// because that vault's keys are the device the file's account signs back in as. A vault for
+/// another account, or one this passphrase does not open, is refused: replacing a verified
+/// identity is a deliberate act, not a side effect of a restore.
 fn restore(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
     widgets::header(
         ui,
@@ -502,7 +539,7 @@ fn restore(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
         "New vault passphrase",
         &mut state.passphrase,
         true,
-        "at least 8 characters",
+        "new — or this device's existing one, if restoring back onto it",
     );
     widgets::field(
         ui,
@@ -519,7 +556,10 @@ fn restore(ui: &mut Ui, context: &mut Context<'_>, state: &mut AuthState) {
     hint(
         ui,
         context,
-        "The recovery credential opens the container and is never sent anywhere. The vault passphrase encrypts your keys on this computer and cannot be reset.",
+        "The recovery credential opens the container and is never sent anywhere. The vault \
+         passphrase encrypts your keys on this computer and cannot be reset. If this device \
+         already has a vault for the same account, type that vault's own passphrase and the \
+         restore signs back in as this device rather than adding a new one.",
     );
     ui.add_space(space::LG);
 

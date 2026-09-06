@@ -30,6 +30,7 @@ import com.migo.app.ui.MobileHome
 import com.migo.app.ui.MobileTabStrip
 import com.migo.app.ui.PanelBar
 import com.migo.app.ui.ProfileScreen
+import com.migo.app.ui.SaveAccountFileDialog
 import com.migo.app.ui.SearchScreen
 import com.migo.app.ui.SignInScreen
 import com.migo.app.ui.WalletScreen
@@ -200,6 +201,19 @@ private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel) {
                 )
             }
         }
+    }
+
+    // A registration ends with the account file offer: the `.migo` container the session layer
+    // sealed from the root that just registered, offered once, over whatever the shell is
+    // showing — the person presses Save where they are, not in a settings panel they have yet
+    // to find. A dialog rather than a sheet because it interrupts: there is no conversation to
+    // read underneath an account that has not been backed up yet.
+    if (state.accountFileOffer) {
+        SaveAccountFileDialog(
+            username = state.username,
+            onSave = model::saveAccountFile,
+            onDecline = model::declineAccountFile,
+        )
     }
 }
 

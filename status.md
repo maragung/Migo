@@ -3001,3 +3001,53 @@ Gerbang: desktop `cargo fmt`/`clippy -D warnings` bersih, `cargo
 test` 88/88 (2 live-socket test diabaikan sesuai aturan tanpa-server);
 Android `make kotlin-check` 14/14 selftest, 0 problem; `migo.md` dan
 `RELEASE-README.md` lolos prettier; YAML workflow tervalidasi.
+
+## 76. Login .migo di client native — pintu known-device dan file yang disimpan saat daftar
+
+Permintaan: porting login `.migo` ke desktop dan Android. Survei
+menemukan kedua client **sudah punya** fondasinya — register dengan
+root, restore tier-2 (addDevice), container open di core, dan
+(ternyata) backup export di Android Profile screen — sehingga yang
+benar-benar hilang adalah paritas dengan `loginWithFile` web: pintu
+tier-1 dan file yang ditawarkan saat registrasi.
+
+- **Pintu tier-1 (known device)**: restore `.migo` di kedua client
+  dulu selalu addDevice — memakan satu dari 8 slot device dan
+  mengganti identitas E2EE setiap re-login dengan file yang sama. Web
+  mencoba `identityLogin` dulu lewat device record di IndexedDB; di
+  client native **vault adalah device record-nya**. Kini: kalau vault
+  ada, terbuka dengan passphrase form, menyimpan account id dan root
+  bytes yang sama dengan container — device yang sama pulang membawa
+  filenya sendiri. Tidak ada reset, tidak ada slot baru; upacara
+  `identityLogin` menandatangani challenge dengan identity key +
+  device credential yang sudah disimpan vault, dan sesi berdiri di
+  keys lama (ratchet, safety number, semuanya utuh). Android
+  memakai `MigoClient.identityLogin` baru (mirror `addDevice`;
+  endpoint `identityLoginChallenge`/`identityLogin` sudah ada di
+  Rest.kt sejak lama, tak pernah dipanggil); desktop memakai kembali
+  disiplin `ceremony_login` milik jalur unlock, lalu
+  `resume_restored_device` — ekor jalur unlock itu sendiri.
+- **Keputusan sadar, sama di dua platform, dan didokumentasikan di
+  kode**: kegagalan upacara tier-1 TIDAK jatuh ke tier-2 seperti web.
+  Di web device record cuma kenyamanan; di client native vault adalah
+  identitas E2EE terverifikasi — fall-through akan menghabiskan slot
+  dan menggantinya. Kegagalan berdiri dengan kalimat jujur yang
+  mengarah ke unlock/sign-in passphrase, vault tetap utuh.
+- **Registrasi diakhiri file**: web mengakhiri register dengan
+  save-account-sheet. Kini Android menyegel container dari root yang
+  sama yang mendaftar (passphrase registrasi = recovery credential,
+  §182 satu rahasia) dan menawarkannya lewat dialog di atas shell —
+  SAF `CreateDocument`, bytes hanya hidup di view model, di-nol-kan
+  setelah disimpan/ditolak/sign-out. Desktop mengangkat modal
+  `backup_offer_dialog` (pola dialog logout) begitu `SignedIn`
+  pertama pasca-registrasi: path `~/migo-<nama>.migo`, credential
+  prefill passphrase akun, dua-duanya bisa ditimpa; "Seal backup"
+  memakai jalur `export_container` yang sudah ada.
+- **Hint form restore**: field passphrase desktop kini menjelaskan
+  bahwa memulihkan kembali ke device ini memakai passphrase vault
+  yang sudah ada — bukan passphrase vault baru.
+
+Gerbang: desktop `cargo fmt`/`clippy -D warnings` bersih, `cargo
+test` 95/95 (7 test baru: matcher `vault_holds_this_account`,
+folding nama file, offer prefill; 2 live test tetap diabaikan);
+Android `make kotlin-check` 14/14 selftest, 0 problem.

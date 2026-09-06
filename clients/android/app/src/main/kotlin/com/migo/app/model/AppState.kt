@@ -107,6 +107,14 @@ sealed interface AppState {
         val alerts: AlertsState = AlertsState(),
         val devices: DevicesState = DevicesState(),
         val backup: BackupState = BackupState(),
+        /**
+         * True while the shell owes a just-registered account its file offer: the sealed `.migo`
+         * container the session layer minted from the registration root is waiting to be saved,
+         * and no server holds a copy. Cleared the moment the file is written or the offer is
+         * declined; the sealed bytes themselves live in the view model, never on this object —
+         * the screens get the flag, and the write call is the only thing that needs the bytes.
+         */
+        val accountFileOffer: Boolean = false,
         val profileEdit: ProfileEditState = ProfileEditState(),
         val accountSecurity: AccountSecurityState = AccountSecurityState(),
         val admins: AdminsState = AdminsState(),

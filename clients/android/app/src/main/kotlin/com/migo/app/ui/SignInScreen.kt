@@ -21,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -346,6 +347,60 @@ private fun AuthLabel(text: String) {
         fontSize = 13.sp,
         fontWeight = FontWeight.Bold,
         color = Color.White,
+    )
+}
+
+/**
+ * The offer a fresh registration sees: the account file, sealed with the passphrase just typed.
+ *
+ * Registration made this device the account's founding device — the root was minted here, the E2EE
+ * identity is derived from it, and both are sealed in this device's vault. No server holds the
+ * root, so the `.migo` file is the only way the account can ever appear on another device, and
+ * the only way back in after this phone is lost. The session layer already sealed the container
+ * from the same root that registered, under the registration passphrase — one secret to keep
+ * straight, the same one that signs in — so the Save button only writes the bytes that exist;
+ * there is no second Argon2id run and no moment where a dismissed offer means a file that never
+ * existed.
+ *
+ * Skipping is an honest choice, made with the cost in the dialog's own words rather than
+ * discovered the day the phone goes missing. It is also final for this screen: the Profile
+ * panel's backup flow is the later door, and it needs this device — the one holding the root.
+ */
+@Composable
+fun SaveAccountFileDialog(
+    /** The account's username, for the suggested file name. */
+    username: String,
+    /** Writes the sealed container to the destination the picker named. */
+    onSave: (destination: Uri) -> Unit,
+    /** Drops the offer. Not revisitable from this screen. */
+    onDecline: () -> Unit,
+) {
+    val pickDestination = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { chosen ->
+        if (chosen != null) onSave(chosen)
+    }
+    AlertDialog(
+        // Outside-tap and back answer the same way Skip does — the offer is dropped — and the
+        // words the dialog carries are what dropping it means.
+        onDismissRequest = onDecline,
+        title = { Text("Save your account file") },
+        text = {
+            Text(
+                text = "Your account exists only on this device. The account file, sealed with " +
+                    "your passphrase, is the only way to move it to another device or recover it " +
+                    "if this phone is lost — no server holds a copy of your keys. Skipping cannot " +
+                    "be undone from here; without the file, the account cannot be restored.",
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { pickDestination.launch("$username.migo") }) {
+                Text("Save file")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDecline) { Text("Skip") }
+        },
     )
 }
 

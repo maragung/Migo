@@ -277,14 +277,40 @@ pub enum Command {
     /// secret, deliberately not the vault passphrase and not the account passphrase, because a
     /// backup sealed under either of those is a backup one breach opens.
     ExportContainer { path: PathBuf, credential: String },
-    /// Restore the account from a `.migo` container onto this device: the add-device ceremony,
-    /// a fresh vault, and the session that follows.
+    /// Restore the account from a `.migo` container onto this device, through one of two doors.
+    ///
+    /// The first door is the vault's. A device that already holds a vault for the *same* account —
+    /// the same account id in the saved session, the same root bytes the container carries — is
+    /// not a new device at all: it is the same device coming back with its own file, and it signs
+    /// in through the tier-one login ceremony, a KNOWN device proving itself with the identity key
+    /// and the device credential the vault already holds. No device slot is spent, and the device
+    /// keeps the E2EE identity, the ratchets and the safety number every peer has verified: the
+    /// vault's keys go back exactly as they came, carrying nothing but the refresh token the grant
+    /// rotated in — the unlock path's own shape. (Web parity: the browser client reads its
+    /// per-account device record and tries tier one first, silently; on desktop the vault *is* the
+    /// device record.) A vault that belongs to a different account, or that the form's passphrase
+    /// does not open, keeps the deliberate-removal refusal, because the keys inside an existing
+    /// vault are the identity every peer has verified and overwriting them is not something a
+    /// restore should be able to do in passing. A tier-one refusal is deliberately not allowed to
+    /// fall through to tier two, the way the web client's is: the add-device ceremony behind that
+    /// door would spend one of the account's eight device slots and replace this device's verified
+    /// identity, so on a device that already holds the account the failure stands and says so.
+    ///
+    /// The second door, taken when no vault exists, is the add-device ceremony: a fresh vault, and
+    /// the session that follows. The restored device holds the root — it can sign future
+    /// add-device ceremonies and derive the wallets — but its E2EE identity is fresh and random,
+    /// not the founding device's: a restore onto a bare machine is a new device, and new devices
+    /// never inherit another device's ratchets. Only the founding device's E2EE history is a
+    /// function of the root, and only its own backup restores onto it as itself.
     ImportContainer {
         /// The container file.
         path: PathBuf,
         /// The recovery credential the container was sealed with.
         credential: String,
-        /// The passphrase for the new vault this restore creates.
+        /// The passphrase for the vault: the new one this restore creates when the device has
+        /// none, or the existing vault's own when the container is the same account coming home —
+        /// the door is chosen by whether that passphrase opens a vault of the container's account
+        /// (see [`Worker::import_container`]).
         passphrase: String,
         /// The account's username, as the person knows it. The ceremony itself needs only the
         /// account id the container names; the username is stored beside the session so the
@@ -2889,14 +2915,8 @@ impl Worker {
         );
     }
 
-    /// Restores the account from a `.migo` container onto this device: the add-device ceremony,
-    /// a new vault, and the session that follows.
-    ///
-    /// The restored device holds the root — it can sign future add-device ceremonies and derive
-    /// the wallets — but its E2EE identity is fresh and random, not the founding device's: a
-    /// restore is a new device, and new devices never inherit another device's ratchets. Only the
-    /// founding device's E2EE history is a function of the root, and only its own backup restores
-    /// onto it as itself.
+    /// Restores the account from a `.migo` container onto this device, through one of two doors —
+    /// see [`Command::ImportContainer`] for which door opens when.
     async fn import_container(
         &mut self,
         path: PathBuf,
@@ -2905,16 +2925,6 @@ impl Worker {
         username: String,
         server: ServerEndpoint,
     ) {
-        // The ceremony writes a vault; a machine that already has one keeps it, because the keys
-        // inside it are the identity every peer has verified and overwriting them is not something
-        // a restore should be able to do in passing.
-        if vault::exists(&self.vault_path) {
-            return self.fail(
-                "this device already has a vault; remove it deliberately before restoring onto \
-                 this machine"
-                    .to_owned(),
-            );
-        }
         self.sink.send(Event::Connection(Connection::Connecting));
 
         let bytes = match std::fs::read(&path) {
@@ -2940,6 +2950,65 @@ impl Worker {
                     .to_owned(),
             );
         };
+        let root_bytes: [u8; 32] = root
+            .as_bytes()
+            .try_into()
+            .expect("the root is 32 bytes by construction");
+
+        // The vault decides the door. A vault the passphrase opens, holding the container's own
+        // account and root, is tier one: the same device returning with its file. A vault that
+        // opens as anything else keeps the refusal it has always had, and a vault the passphrase
+        // does not open gets the same refusal with the honest reason attached — another account's
+        // vault, or a passphrase typed for the new vault rather than the existing one, are both
+        // live possibilities and the sentence does not choose between them for the user.
+        if vault::exists(&self.vault_path) {
+            return match vault::load(&self.vault_path, &passphrase) {
+                Ok(keys) if vault_holds_this_account(&keys, account_id, root_bytes) => {
+                    // The matcher requires the saved session, so the device record tier one
+                    // names the device with is present by construction.
+                    let saved = keys
+                        .session
+                        .clone()
+                        .expect("the matcher requires a session");
+                    let rest = match Rest::new(&crate::config::rest_base_url(&server)) {
+                        Ok(rest) => rest,
+                        Err(error) => return self.fail(error.to_string()),
+                    };
+                    // The signing discipline is the unlock fallback's own: the challenge is
+                    // requested for the SAVED username and device id, the payload is signed
+                    // exactly as received with the identity key and the device credential the
+                    // vault already holds. `None` is this client's refusal to guess a reason —
+                    // the server answers an unknown device the way it answers a wrong
+                    // passphrase — so the sentence below stays on what actually failed.
+                    match self.ceremony_login(&rest, &keys, &saved).await {
+                        Some(grant) => {
+                            self.resume_restored_device(
+                                rest, keys, saved, grant, passphrase, server,
+                            )
+                            .await;
+                        }
+                        None => self.fail(
+                            "this device already holds this account's keys, but signing back in \
+                             as this device was refused; unlock the vault with its passphrase \
+                             instead"
+                                .to_owned(),
+                        ),
+                    }
+                }
+                Ok(_) => self.fail(
+                    "this device already has a vault; remove it deliberately before restoring \
+                     onto this machine"
+                        .to_owned(),
+                ),
+                Err(_) => self.fail(
+                    "this device already has a vault and this passphrase did not open it — the \
+                     vault may belong to another account, or the passphrase may be the one for \
+                     the new vault rather than the existing vault's own; remove the vault \
+                     deliberately before restoring onto this machine"
+                        .to_owned(),
+                ),
+            };
+        }
 
         let rest = match Rest::new(&crate::config::rest_base_url(&server)) {
             Ok(rest) => rest,
@@ -2948,11 +3017,7 @@ impl Worker {
 
         // The new device: fresh E2EE identity, fresh credential, plus the root the container carried.
         let mut keys = DeviceKeys::additional();
-        keys.root = Some(
-            root.as_bytes()
-                .try_into()
-                .expect("the root is 32 bytes by construction"),
-        );
+        keys.root = Some(root_bytes);
         let identity = migo_account::IdentityKey::from_root(&root);
         let device_credential = keys
             .device_credential()
@@ -3037,6 +3102,62 @@ impl Worker {
         .await;
         self.publish_root_material().await;
         self.sync_wallets().await;
+    }
+
+    /// The tier-one restore's second half: a session established on the keys the vault already
+    /// held, not on fresh ones.
+    ///
+    /// This is the unlock path's own tail, deliberately. The grant's rotated refresh token is the
+    /// only thing that changes inside the vault; the existing keys are re-sealed untouched — no
+    /// `DeviceKeys::additional`, no fresh identity, no device slot spent — and the session picks
+    /// up this device's ratchets where they left off. The new-device follow-ups of the tier-two
+    /// path (publishing the account material, syncing the wallets) are skipped for the same
+    /// reason: this is not a new device, and the login ceremony just proved the server already
+    /// knows its credential.
+    async fn resume_restored_device(
+        &mut self,
+        rest: Rest,
+        keys: DeviceKeys,
+        saved: SavedSession,
+        grant: Grant,
+        passphrase: String,
+        server: ServerEndpoint,
+    ) {
+        let mut keys = keys;
+        // The server rotates the refresh token on every exchange, so the vault has to be rewritten
+        // or the next unlock would present a token the server has already retired — which it
+        // treats as refresh reuse, and rightly so.
+        keys.session = Some(SavedSession {
+            refresh_token: grant.refresh_token.clone(),
+            ..saved.clone()
+        });
+        // As at unlock: this process's own record of the same account's transactions is the newer
+        // copy, and it is the one that gets sealed.
+        if self
+            .txs
+            .as_ref()
+            .is_some_and(|(id, _)| *id == grant.account_id)
+        {
+            keys.txs = self
+                .txs
+                .as_ref()
+                .map_or_else(Vec::new, |(_, txs)| txs.clone());
+        }
+        if let Err(error) = vault::save(&self.vault_path, &passphrase, &keys) {
+            return self.fail(error.to_string());
+        }
+
+        self.establish(
+            server,
+            rest,
+            keys,
+            grant.account_id,
+            grant.device_id,
+            grant.session_id,
+            saved.username,
+            grant.access_token,
+        )
+        .await;
     }
 
     /// Sends one text message: the sender-key path the web and Android clients speak.
@@ -4283,6 +4404,22 @@ impl Worker {
     }
 }
 
+/// Whether a vault's keys are the container's own account come home: the saved session names the
+/// same account, and the vault holds the same root bytes the container carries.
+///
+/// Both halves are required. The account id alone would let a container of the account's root and
+/// a vault of the account's passphrase-only device cross wires — the session would then be
+/// established for keys that are not the file's. The root alone says nothing about which device
+/// the vault is, and a vault with the root but no saved session has no device record to name the
+/// KNOWN device with, so tier one cannot run and the deliberate-removal refusal is the honest
+/// answer for it too.
+fn vault_holds_this_account(keys: &DeviceKeys, account_id: Id, root: [u8; 32]) -> bool {
+    keys.session
+        .as_ref()
+        .is_some_and(|saved| saved.account_id == account_id)
+        && keys.root == Some(root)
+}
+
 /// Decodes standard base64, as the challenge payloads and signature fields arrive.
 ///
 /// A challenge payload that does not decode is a server the client cannot talk to, so the caller
@@ -4325,5 +4462,94 @@ fn body_of(content: Content) -> Body {
         },
         Content::ControlEvent { .. } => Body::Unsupported { content_type: 5 },
         Content::Unsupported { content_type } => Body::Unsupported { content_type },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys_of(root: Option<&migo_account::MigoRoot>, account_id: Id) -> DeviceKeys {
+        let mut keys = match root {
+            Some(root) => DeviceKeys::founding(root),
+            None => DeviceKeys::additional(),
+        };
+        keys.session = Some(SavedSession {
+            server_url: "https://migo.example".to_owned(),
+            account_id,
+            device_id: Id::from_bytes([2; 16]),
+            username: "whoever".to_owned(),
+            refresh_token: "single-use".to_owned(),
+        });
+        keys
+    }
+
+    /// The tier-one door opens for the account's own root in the account's own vault — the
+    /// founding device returning with its file, ratchets and safety number intact.
+    #[test]
+    fn the_same_account_and_root_open_the_tier_one_door() {
+        let root = migo_account::MigoRoot::generate(&mut OsRandom);
+        let account_id = Id::from_bytes([1; 16]);
+        let keys = keys_of(Some(&root), account_id);
+        let root_bytes: [u8; 32] = root.as_bytes().try_into().expect("the root is 32 bytes");
+
+        assert!(vault_holds_this_account(&keys, account_id, root_bytes));
+    }
+
+    /// Another account's vault never opens the door, root or no root: the refusal is the point,
+    /// not an inconvenience on the way to overwriting a verified identity.
+    #[test]
+    fn a_different_account_does_not_open_the_tier_one_door() {
+        let root = migo_account::MigoRoot::generate(&mut OsRandom);
+        let keys = keys_of(Some(&root), Id::from_bytes([1; 16]));
+        let root_bytes: [u8; 32] = root.as_bytes().try_into().expect("the root is 32 bytes");
+
+        assert!(!vault_holds_this_account(
+            &keys,
+            Id::from_bytes([9; 16]),
+            root_bytes
+        ));
+    }
+
+    /// The same account id with a different root is a file that is not this account's at all —
+    /// the account id is the container's own claim, and the root is the thing this device can
+    /// actually check.
+    #[test]
+    fn a_different_root_does_not_open_the_tier_one_door() {
+        let root = migo_account::MigoRoot::generate(&mut OsRandom);
+        let account_id = Id::from_bytes([1; 16]);
+        let keys = keys_of(Some(&root), account_id);
+        let other: [u8; 32] = root.as_bytes().try_into().expect("the root is 32 bytes");
+        let mut other = other;
+        other[0] ^= 0xff;
+
+        assert!(!vault_holds_this_account(&keys, account_id, other));
+    }
+
+    /// An additional device's vault holds no root at all, so it cannot answer for the container's
+    /// one — the refusal keeps such a device's own verified identity in place.
+    #[test]
+    fn a_vault_without_a_root_does_not_open_the_tier_one_door() {
+        let account_id = Id::from_bytes([1; 16]);
+        let keys = keys_of(None, account_id);
+
+        assert!(!vault_holds_this_account(&keys, account_id, [7u8; 32]));
+    }
+
+    /// A vault with the root but no saved session has the account's material and no device
+    /// record: tier one has no username and device id to name the KNOWN device with, so it is
+    /// the refusal, not a guess.
+    #[test]
+    fn a_vault_without_a_session_does_not_open_the_tier_one_door() {
+        let root = migo_account::MigoRoot::generate(&mut OsRandom);
+        let mut keys = keys_of(Some(&root), Id::from_bytes([1; 16]));
+        keys.session = None;
+        let root_bytes: [u8; 32] = root.as_bytes().try_into().expect("the root is 32 bytes");
+
+        assert!(!vault_holds_this_account(
+            &keys,
+            Id::from_bytes([1; 16]),
+            root_bytes
+        ));
     }
 }

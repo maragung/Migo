@@ -122,6 +122,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val subscriptions = ArrayList<Subscription>()
 
     /**
+     * The sealed `.migo` container a registration minted and nobody has saved yet, or null.
+     *
+     * Held here rather than on [AppState] for the same reason every credential is: the screens get
+     * the offer flag and this class performs the write, so the bytes appear in no recomposition
+     * and no `toString`. Ciphertext, not plaintext — sealed under the registration passphrase —
+     * but a file that opens the account is still the last thing to hand around freely. Cleared by
+     * a successful save, a decline, or a sign-out.
+     */
+    private var registrationContainer: ByteArray? = null
+
+    /**
      * Display names by account id, filled as conversations and messages arrive.
      *
      * Concurrent because the SDK's listeners run on its own dispatcher while the UI thread reads it.
@@ -185,8 +196,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         signedOut { it.copy(busy = true, failure = null) }
         viewModelScope.launch {
             try {
-                val opened = if (create) {
-                    MigoSession.register(
+                val opened: MigoSession
+                if (create) {
+                    val registered = MigoSession.register(
                         getApplication(),
                         BuildConfig.VERSION_NAME,
                         endpoint,
@@ -194,8 +206,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         passphrase,
                         hooks(),
                     )
+                    // The sealed account file rides in the view model, not on the state: the
+                    // screens get the offer flag, and the write below is the only thing that
+                    // needs the bytes.
+                    registrationContainer = registered.container
+                    opened = registered.session
                 } else {
-                    MigoSession.signIn(
+                    opened = MigoSession.signIn(
                         getApplication(),
                         BuildConfig.VERSION_NAME,
                         endpoint,
@@ -206,6 +223,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 settings.update { it.copy(serverEndpoint = endpoint, onboardingComplete = true) }
                 attach(opened)
+                if (registrationContainer != null) {
+                    signedIn { it.copy(accountFileOffer = true) }
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
@@ -259,6 +279,49 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 signedOut { it.copy(busy = false, failure = readable(failure)) }
             }
         }
+    }
+
+    /**
+     * Writes the account file a registration sealed to the destination the picker named.
+     *
+     * The session layer sealed the container from the registration root before anything else had
+     * a chance to replace it; this is only the write. The offer leaves with success — the file is
+     * saved — and stays on a failure, so a picker that swallowed the write gets another press
+     * rather than an account left with no backup and no offer.
+     */
+    fun saveAccountFile(destination: Uri) {
+        val bytes = registrationContainer ?: return
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    getApplication<Application>().contentResolver.openOutputStream(destination)
+                        ?.use { it.write(bytes) }
+                        ?: throw IOException("the chosen account file could not be opened")
+                }
+                bytes.fill(0)
+                registrationContainer = null
+                signedIn { it.copy(accountFileOffer = false) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                // The offer stays: the save can be pressed again, and the banner says why it
+                // needs to be.
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Declines the registration file offer.
+     *
+     * An honest choice, made with the cost said out loud in the dialog — the bytes are dropped
+     * either way, so declining cannot be revisited from this screen. The Profile panel's backup
+     * flow is the later door, on the device that holds the root, which this one does.
+     */
+    fun declineAccountFile() {
+        registrationContainer?.fill(0)
+        registrationContainer = null
+        signedIn { it.copy(accountFileOffer = false) }
     }
 
     /**
@@ -329,6 +392,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun signOut() {
         val leaving = session ?: return
+        // A registration offer nobody answered does not survive the sign-out it preceded by
+        // seconds: the account is made, the file is its problem, and holding sealed bytes past
+        // the session that sealed them is a copy with no owner watching it.
+        registrationContainer?.fill(0)
+        registrationContainer = null
         session = null
         detach()
         _state.value = AppState.Starting

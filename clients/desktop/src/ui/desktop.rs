@@ -109,6 +109,94 @@ pub const CHAT_SIZE: Vec2 = Vec2::new(560.0, 480.0);
 /// A side window's first size — the small floating panes the account menu opens.
 pub const SIDE_SIZE: Vec2 = Vec2::new(420.0, 340.0);
 
+/// The account-file offer a founding registration earns: the same path-and-credential form the
+/// settings pane keeps, prefilled and put in the user's face once.
+///
+/// The credential is prefilled with the registration's own account passphrase — the web client's
+/// rule (§182's one-secret discipline: the file is sealed with the passphrase the user just typed
+/// and opened with the same, because a second secret to keep straight is a second secret to
+/// lose). A user who wants the settings form's stricter posture — a second secret, deliberately
+/// neither passphrase — can overtype both fields; the prefill is a default, not a lock. The
+/// fields are secrets, and are wiped the moment the offer is answered either way.
+pub struct BackupOffer {
+    /// Where the container will be written. Prefilled with the home directory and the same
+    /// `migo-<name>.migo` file name the web client's download offers.
+    pub path: String,
+    /// The recovery credential that will open the container.
+    pub credential: String,
+    /// The credential typed again, for the same reason every one-shot sealing form asks twice.
+    pub confirm: String,
+}
+
+impl BackupOffer {
+    /// The offer for a registration that just signed in: the account's name for the file, the
+    /// home directory for the place, and the account passphrase for the seal.
+    pub fn new(username: &str, account_passphrase: String) -> Self {
+        Self {
+            path: default_backup_path(username),
+            credential: account_passphrase.clone(),
+            confirm: account_passphrase,
+        }
+    }
+
+    /// Wipes the credential fields the way the auth form's `clear_secrets` does: overwrite, then
+    /// drop, so the bytes are not left sitting in a buffer the allocator may hand out unchanged.
+    pub fn wipe(&mut self) {
+        for field in [&mut self.credential, &mut self.confirm] {
+            let filled = "\0".repeat(field.len());
+            field.replace_range(.., &filled);
+            field.clear();
+        }
+    }
+}
+
+/// The `.migo` container's file name: `migo-<username>.migo`.
+///
+/// The username is lowercased, everything a file name cannot carry becomes a hyphen (one per
+/// run, the way a regular-expression replace would), and hyphens never survive at either end —
+/// the same shape the web client's download offers, so a backup made on either client is
+/// recognisably the same artefact. A username that sanitises to nothing still gets a name,
+/// because a file called `.migo` is invisible in most file managers.
+fn container_file_name(username: &str) -> String {
+    let mut folded = String::with_capacity(username.len());
+    let mut pending_hyphen = false;
+    for c in username.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() || c == '-' {
+            if pending_hyphen && !folded.is_empty() {
+                folded.push('-');
+            }
+            pending_hyphen = false;
+            folded.push(c);
+        } else {
+            pending_hyphen = true;
+        }
+    }
+    let trimmed = folded.trim_matches('-');
+    format!(
+        "migo-{}.migo",
+        if trimmed.is_empty() {
+            "account"
+        } else {
+            trimmed
+        }
+    )
+}
+
+/// The offer's default save path: the user's home directory, with the container's file name in
+/// it. A desktop machine's honest equivalent of the browser's download folder, and a place the
+/// person will actually look; a machine whose home directory cannot be named falls back to the
+/// file name alone, which lands wherever the process was started.
+fn default_backup_path(username: &str) -> String {
+    match directories::BaseDirs::new() {
+        Some(dirs) => dirs
+            .home_dir()
+            .join(container_file_name(username))
+            .display()
+            .to_string(),
+        None => container_file_name(username),
+    }
+}
+
 /// The whole window-manager state: which windows exist, and nothing about where egui put them.
 ///
 /// Position, size, collapsed-ness and stacking live in egui's memory, keyed by the stable window
@@ -130,6 +218,11 @@ pub struct Desktop {
     /// Whether the logout confirmation dialog is up. Logout is the one action the reference
     /// always confirms — the session is the whole state of the shell.
     pub logout_dialog: bool,
+    /// The account-file offer a founding registration earned, armed when that registration's
+    /// sign-in arrives and cleared the moment it is answered either way. `None` on every session
+    /// that did not just register: the offer is asked once, in the user's face, and the standing
+    /// form lives in Settings → Account backup.
+    pub backup_offer: Option<BackupOffer>,
     /// When this session started, for the taskbar's timer. `None` until sign-in.
     pub session_start: Option<Instant>,
 }
@@ -142,6 +235,7 @@ impl Default for Desktop {
             chats: Vec::new(),
             sides: Vec::new(),
             logout_dialog: false,
+            backup_offer: None,
             session_start: None,
         }
     }
@@ -692,6 +786,111 @@ pub fn logout_dialog(ctx: &egui::Context, theme: Theme, open: &mut bool) -> bool
     confirmed
 }
 
+/// The registration backup offer: the account-file dialog a founding sign-in just earned — this
+/// client's reading of the web client's save-account sheet.
+///
+/// The same centered, anchored, foreground shape as the logout question, for a heavier reason:
+/// the container is the account's only recovery — no server holds the root — so a registration
+/// is not allowed to end without the offer being in the user's face once. It is an offer rather
+/// than a question, so "Save it later" and Escape are honest declines rather than escapes from a
+/// gate: the lead line says what declining means, and the standing form waits in Settings →
+/// Account backup for whenever the person changes their mind.
+///
+/// Returns the path and credential on the frame the user sealed the backup; `None` on every
+/// other frame, including the frame the offer was declined. The offer is cleared and its
+/// secrets wiped here either way — the caller only has to send the command the seal asked for.
+pub fn backup_offer_dialog(
+    ctx: &egui::Context,
+    theme: Theme,
+    offer: &mut Option<BackupOffer>,
+) -> Option<(String, String)> {
+    // `None` in, `None` out: an offer that is not up is a dialog that draws nothing.
+    let state = offer.as_mut()?;
+    let colors = palette(theme);
+    let mut sealed: Option<(String, String)> = None;
+    let mut done = false;
+
+    floating(
+        theme,
+        "Your account key file",
+        Id::new("migo-backup-offer"),
+        Pos2::ZERO,
+        Vec2::new(440.0, 0.0),
+        Vec2::new(440.0, 0.0),
+    )
+    .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+    .order(Order::Foreground)
+    .resizable(false)
+    .collapsible(false)
+    .show(ctx, |ui| {
+        ui.add_space(space::SM);
+        ui.label(
+            egui::RichText::new(
+                "Your account exists only on this device — no server holds a copy of your keys.",
+            )
+            .font(FontId::proportional(font::BODY))
+            .color(colors.text)
+            .strong(),
+        );
+        ui.add_space(space::XS);
+        ui.label(
+            egui::RichText::new(
+                "The key file is the only way to move the account to another device, or to get it \
+                 back after this machine is lost. Seal it now and keep it somewhere safe — it opens \
+                 with the passphrase you signed up with.",
+            )
+            .font(FontId::proportional(font::SMALL))
+            .color(colors.text_muted),
+        );
+        ui.add_space(space::MD);
+        widgets::field(ui, theme, "Save as", &mut state.path, false, "e.g. migo-backup.migo");
+        widgets::field(
+            ui,
+            theme,
+            "Recovery credential",
+            &mut state.credential,
+            true,
+            "prefilled with your account passphrase; overtype to choose your own",
+        );
+        widgets::field(ui, theme, "Confirm credential", &mut state.confirm, true, "");
+        let mismatch = !state.confirm.is_empty() && state.credential != state.confirm;
+        if mismatch {
+            ui.label(
+                egui::RichText::new("The two credentials do not match.")
+                    .font(FontId::proportional(font::SMALL))
+                    .color(colors.danger),
+            );
+        }
+        ui.add_space(space::MD);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if widgets::ghost_button(ui, theme, "Save it later")
+                .on_hover_text("The same form waits in Settings \u{2192} Account backup.")
+                .clicked()
+            {
+                done = true;
+            }
+            ui.add_space(space::SM);
+            let ready = !state.credential.is_empty()
+                && state.credential == state.confirm
+                && !state.path.trim().is_empty();
+            if widgets::primary_button(ui, theme, "Seal backup", ready).clicked() {
+                sealed = Some((state.path.trim().to_owned(), state.credential.clone()));
+                done = true;
+            }
+        });
+    });
+
+    // Escape declines, the same honest answer "Save it later" gives.
+    let escaped = ctx.input(|input| input.key_pressed(egui::Key::Escape));
+    if done || escaped {
+        if let Some(state) = offer.as_mut() {
+            state.wipe();
+        }
+        *offer = None;
+    }
+    sealed
+}
+
 /// The confirm half of the dialog: the banner orange, because "yes" to leaving is still a
 /// primary action, and the palette already names that colour.
 fn confirm_button(ui: &mut Ui, theme: Theme, text: &str) -> egui::Response {
@@ -751,5 +950,36 @@ mod tests {
         assert_eq!(session_text(Duration::from_secs(59 * 60)), "59m");
         assert_eq!(session_text(Duration::from_secs(60 * 60)), "1h0m");
         assert_eq!(session_text(Duration::from_secs(61 * 60)), "1h1m");
+    }
+
+    /// The container's file name folds the username to what a file name can carry, exactly the
+    /// way the web client's download does — same lowercase, same hyphens, same "account" stand-in
+    /// — so a backup made on either client is recognisably the same artefact, and no username can
+    /// smuggle a path separator into the offer's default path.
+    #[test]
+    fn container_file_names_match_the_web_clients() {
+        assert_eq!(
+            container_file_name("Ada Lovelace"),
+            "migo-ada-lovelace.migo"
+        );
+        // One hyphen per disallowed run, not one per character — the replace the web client does.
+        assert_eq!(container_file_name("Íñigo M!"), "migo-igo-m.migo");
+        assert_eq!(container_file_name("a  b"), "migo-a-b.migo");
+        assert_eq!(container_file_name("---"), "migo-account.migo");
+        assert_eq!(container_file_name(""), "migo-account.migo");
+        // Nothing a username can contain becomes a path separator or a climb.
+        assert!(!container_file_name("a/b\\c:d").contains('/'));
+        assert!(!container_file_name("a/b\\c:d").contains('\\'));
+    }
+
+    /// The offer arrives ready to accept: the registration's passphrase is in both credential
+    /// fields, so the one action the offer exists for is one click away rather than gated behind
+    /// retyping a secret the user just typed twice on the register form.
+    #[test]
+    fn a_fresh_offer_is_prefilled_and_ready() {
+        let offer = BackupOffer::new("Ada Lovelace", "correct horse battery".to_owned());
+        assert_eq!(offer.credential, "correct horse battery");
+        assert_eq!(offer.confirm, offer.credential);
+        assert!(offer.path.ends_with("migo-ada-lovelace.migo"));
     }
 }
