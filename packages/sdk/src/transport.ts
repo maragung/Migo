@@ -256,6 +256,38 @@ export class GatewayTransport {
   }
 
   /**
+   * Cancels any pending reconnect backoff and attempts a reconnect immediately.
+   *
+   * The backoff is a `setTimeout`, and browsers throttle timers in hidden tabs down to once a
+   * minute or worse — so a socket that dropped while the tab was in the background can sit in
+   * `reconnecting` long after the network recovered, because both the heartbeat and the backoff
+   * timer stalled. Calling this the moment the tab becomes visible again turns that lingering
+   * wait into an immediate attempt.
+   *
+   * It does nothing unless a backoff is actually pending: a live connection, a handshake in
+   * flight, or a transport closed for good are all left alone. The backoff counter is reset, so
+   * a failure right after a user-visible attempt retries quickly instead of continuing the old
+   * exponential curve.
+   */
+  reconnectNow(): void {
+    if (!this.#shouldReconnect || this.#reconnectTimer === null) {
+      // Live, mid-handshake, shut down for good, or an attempt is already in flight — nothing
+      // to pull forward.
+      return;
+    }
+    clearTimeout(this.#reconnectTimer);
+    this.#reconnectTimer = null;
+    this.#reconnectAttempt = 0;
+    this.#open().catch(() => {
+      // A failed reconnect closes the socket, whose onclose schedules the next attempt; unless
+      // the failure was a terminal handshake rejection, which cleared #shouldReconnect.
+      if (this.#shouldReconnect) {
+        this.#scheduleReconnect();
+      }
+    });
+  }
+
+  /**
    * Sends a request and resolves with its reply frame.
    *
    * The caller decodes the reply body with the decoder for the opcode's response type. An

@@ -238,6 +238,85 @@ test('an idle, ready connection transmits nothing on its own', async () => {
   }
 });
 
+test('reconnectNow pulls a pending backoff forward instead of waiting out the timer', async () => {
+  // A socket that drops in a hidden tab schedules its next attempt on a setTimeout the browser
+  // throttles to a minute or worse; the user who returns to the tab sees "Offline" however long
+  // ago the network recovered. reconnectNow is the escape hatch: it cancels the pending timer
+  // and opens immediately. Here the drop leaves a backoff of at least 250 ms (base 500 ms,
+  // jitter 0.5–1.0) pending; nothing else in the test waits that long, so a second socket can
+  // only appear if reconnectNow pulled the attempt forward.
+  const sockets: FakeSocket[] = [];
+  const server: ServerEndpoint = {
+    host: 'node.example',
+    port: 443,
+    gatewayPort: 443,
+    transport: 'WebSocket',
+    scheme: 'Wss',
+    restScheme: 'Https',
+  };
+  const transport = new GatewayTransport({
+    server,
+    hello: {
+      platform: Platform.Web,
+      appVersion: '1.0.0',
+      locale: 'en',
+      bandwidthMode: BandwidthMode.Normal,
+      accessToken: 'test-token',
+      deviceId: idOf(11),
+      features: 0n,
+    },
+    heartbeatMs: 600_000,
+    webSocketFactory: (url: string) => {
+      const socket = new FakeSocket(url);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+  });
+
+  const ready = transport.connect();
+  const first = sockets[0];
+  assert.ok(first !== undefined, 'the transport did not build a socket synchronously');
+  first.fireOpen();
+  await tick();
+  first.deliver(welcomeFrame());
+  await ready;
+
+  // The network drops the socket: the transport goes to `reconnecting` with a backoff pending.
+  first.close(1006, 'network drop');
+  assert.equal(transport.state, 'reconnecting');
+
+  transport.reconnectNow();
+  await tick();
+  const second = sockets[1];
+  assert.ok(
+    second !== undefined,
+    'reconnectNow did not open a new socket before the backoff timer could fire',
+  );
+  second.fireOpen();
+  await tick();
+  second.deliver(welcomeFrame());
+  await tick();
+  assert.equal(transport.state, 'ready', 'the pulled-forward attempt did not reach Ready');
+  transport.close();
+});
+
+test('reconnectNow leaves a live connection and a shut-down transport alone', async () => {
+  const { transport, socket } = await connectReady();
+  try {
+    // Ready: nothing is pending, so this must not touch the socket at all.
+    transport.reconnectNow();
+    await tick();
+    assert.equal(transport.state, 'ready');
+    assert.equal(socket.readyState, FakeSocket.OPEN, 'reconnectNow disturbed a live socket');
+  } finally {
+    transport.close();
+  }
+  // Closed for good (close() cleared #shouldReconnect): reconnectNow must not resurrect it.
+  transport.reconnectNow();
+  await tick();
+  assert.equal(transport.state, 'closed', 'reconnectNow resurrected a closed transport');
+});
+
 test('the transport polls nothing on a timer and fetches no realtime data over HTTP', () => {
   // The one durable guard against reintroducing polling: the realtime path uses one-shot setTimeout
   // for the heartbeat, ACK coalescing, and reconnect backoff, but never a repeating setInterval, and

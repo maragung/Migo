@@ -583,6 +583,13 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
       if (!current) {
         return;
       }
+      if (document.visibilityState === 'visible') {
+        // Coming back to the tab is the one moment a stalled reconnect is guaranteed to be
+        // user-visible: browsers throttle timers in hidden tabs, so both the heartbeat and the
+        // backoff timer froze with the tab, and the snackbar still says "Offline" however long
+        // ago the network recovered. Pull the pending attempt forward before anything else.
+        current.reconnectNow();
+      }
       const next =
         document.visibilityState === 'visible' ? PresenceState.Online : PresenceState.Away;
       void current.presence.setPresence(next).catch(() => {});

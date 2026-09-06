@@ -258,6 +258,19 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     return this.#ctx !== null;
   }
 
+  /**
+   * Pulls a pending reconnect forward, attempting to reconnect immediately instead of waiting
+   * out the remaining backoff.
+   *
+   * Browsers throttle timers in hidden tabs, so a socket that dropped in the background can stay
+   * in `reconnecting` long after the network recovered — the heartbeat and the backoff timer both
+   * stall while hidden. Calling this when the page becomes visible again collapses that wait.
+   * It is a no-op when nothing is pending, so it is safe to call unconditionally.
+   */
+  reconnectNow(): void {
+    this.#ctx?.transport.reconnectNow();
+  }
+
   // --- domain accessors (throw until connected) ---
 
   /** The key-directory domain: publish our public keys, fetch peers'. */

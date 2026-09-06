@@ -2901,3 +2901,49 @@ settled (tanpa baris error, tanpa meta row) dan kontrak
 symbol-ke-kata-kata untuk error yang bisa dijumpai sebuah kirim
 (NOT_FOUND tidak boleh muncul sebagai simbol mentah). Web 338/338,
 typecheck dan prettier bersih.
+
+## 74. Reconnect instan saat tab kembali terlihat — "sering Offline" bukan bug server
+
+Laporan produksi: "tapi kok sering Offline. Migo reconnects
+automatically.?" Metrik gateway sejak restart 05 Sep 21:34 UTC
+menjawab siapa yang memutus: sesi dibuka 15, ditutup
+`transport_error` 8, `client_request` 5, `auth_expired` 2 — dan
+**nol** penutupan oleh server (`heartbeat_timeout` 0, `overloaded` 0,
+`rate_limited` 0). Server tidak pernah menjatuhkan satu sesi pun;
+socket-nya putus dari sisi jaringan (carrier NAT Telkomsel) dan dari
+sisi browser. Tiga dari upaya reconnect datang setelah jendela resume
+120 detik (`resume_total{outcome="unknown"}` 3) — handshake penuh,
+buffer replay hilang.
+
+Akar masalahnya di klien, dan mekanismenya dua lapis:
+
+- **Chrome men-throttle timer di tab tersembunyi** (menit sekali,
+  makin parah setelah 5 menit). Heartbeat 30 detik macet → PONG telat
+  → socket ditutup → banner "Offline". Yang paling terasa:
+  **timer backoff reconnect ikut macet**, jadi saat pengguna kembali
+  ke tab, banner masih "Offline" padahal jaringan sudah sehat —
+  reconnect menunggu timer yang di-throttle.
+- Handler `visibilitychange` web hanya mengatur presence
+  (Online/Away); tidak ada yang memicu reconnect.
+
+Perbaikan:
+
+- **`GatewayTransport.reconnectNow()`** (SDK): membatalkan backoff
+  yang tertunda dan membuka socket seketika; no-op saat koneksi
+  hidup, handshake in-flight, atau transport ditutup permanen.
+  Counter backoff di-reset supaya kegagalan setelah upaya yang
+  user-visible mencoba cepat lagi, bukan melanjutkan kurva
+  eksponensial lama. Diekspos sebagai `MigoClient.reconnectNow()`.
+- **Web provider**: `visibilitychange` → visible kini memanggil
+  `reconnectNow()` sebelum set presence — kembali ke tab adalah satu
+  momen reconnect yang tertunda dijamin terlihat pengguna.
+- **Produksi**: `MIGO_GATEWAY__RESUME_WINDOW_MS=300000` di
+  `.migod.env` (env-only, tanpa rilis server; migod restart
+  exact-PID) — reconnect lambat dari tab tersembunyi kini masih
+  bisa resume dan me-replay frame, bukan handshake penuh.
+
+Test baru `transport.test.ts`: `reconnectNow` menarik backoff maju
+(sebuah drop menyisakan backoff ≥250 ms; socket kedua hanya mungkin
+muncul jika upaya ditarik maju — dan mencapai Ready), serta no-op
+pada koneksi hidup dan transport yang ditutup. SDK 164/164, web
+338/338, typecheck + prettier bersih.
