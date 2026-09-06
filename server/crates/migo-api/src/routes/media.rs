@@ -111,8 +111,18 @@ async fn upload(State(state): State<ApiState>, Path(key): Path<String>, body: By
 /// The content type comes from the bytes' own magic, not from any claim the uploader
 /// made: a file served as `image/png` is a file whose bytes say PNG. Unidentified bytes
 /// are served as `application/octet-stream`, which is what a browser treats as
-/// "download, do not interpret", and the sniff's refusals (HTML, SVG) answer 404 — a
-/// file the scanner refuses is a file this node does not serve at all.
+/// "download, do not interpret", and the sniff's one outright refusal — polyglot HTML
+/// and SVG — answers 404, because a file the scanner refuses is a file this node does
+/// not serve at all.
+///
+/// Unidentified is the *expected* state of an end-to-end object, not an anomaly: the
+/// client seals media and voice notes before upload, the commit path for an
+/// end-to-end destination records the object without sniffing (section 122 — there is
+/// nothing to identify in ciphertext), and the bytes that reach this route are
+/// uniformly random to a sniffer. Serving them as an opaque download is the whole
+/// point of the exercise; a 404 here would break every sealed attachment at the
+/// moment of download while its upload had succeeded — the worst place to learn about
+/// it. The client, not this route, holds the key and opens what it fetched.
 async fn download(
     State(state): State<ApiState>,
     Path(key): Path<String>,
@@ -129,7 +139,12 @@ async fn download(
     })?;
     let content_type = match sniff::sniff(&bytes, bytes.len().min(migo_media::SNIFF_BYTES)) {
         sniff::Verdict::Identified(identity) => identity.mime(),
-        sniff::Verdict::Refused(_) => return Err(StatusCode::NOT_FOUND),
+        // Unrecognised bytes are served, not hidden: they are either an end-to-end
+        // object's ciphertext (above) or a document this table simply cannot name, and
+        // octet-stream keeps a browser from interpreting either. Only the refused
+        // polyglots answer as if they were not there.
+        sniff::Verdict::Refused(sniff::Refusal::Forbidden) => return Err(StatusCode::NOT_FOUND),
+        sniff::Verdict::Refused(_) => "application/octet-stream",
     };
     let mut headers = HeaderMap::new();
     headers.insert(

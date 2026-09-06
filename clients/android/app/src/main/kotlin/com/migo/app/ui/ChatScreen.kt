@@ -38,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -48,6 +49,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.migo.app.model.ChatMessage
+import com.migo.app.model.ChatSafety
 import com.migo.app.model.ChatState
 import com.migo.app.model.GAME_KIND_GUESS_NUMBER
 import com.migo.app.model.GAME_STATUS_OPEN
@@ -72,6 +74,13 @@ import com.migo.core.wire.Id
  * The strip is the chat's own way back — the conversation's tab is how the person arrived — so the
  * header carries no back control of its own; the mobile reference's windows have no title bars. The
  * member sheet keeps its own, because a sheet closes to the thread, not to the strip.
+ *
+ * # The verification surface
+ *
+ * A direct chat carries the pair's safety numbers (brief sections 47 and 164): a header control
+ * opens the sheet that shows them, and a peer's changed identity key is warned about in a banner
+ * above the thread rather than accepted silently — the acknowledgment that clears the banner is
+ * the person's press, never the read that raised it.
  *
  * # Why the list is not reversed
  *
@@ -112,6 +121,8 @@ fun ChatScreen(
     onGuess: (Long) -> Unit = {},
     /** This account's own id, so the sheet never offers an action against oneself. */
     selfId: Id,
+    /** Acknowledges a changed safety number for this conversation, from the warning itself. */
+    onAcknowledgeSafety: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -153,6 +164,10 @@ fun ChatScreen(
     // button opens it, and the catalogue it lists is the node's, shared with the Games panel.
     val gamesOpen = remember { mutableStateOf(false) }
 
+    // The verification sheet's own state, for the same reason: the header's Safety control opens
+    // it, and the warning banner reopens it, so the flag lives where both can reach it.
+    val safetyOpen = remember { mutableStateOf(false) }
+
     // The catalogue loads on first open and stays for the thread's life — a person who never
     // touches the button never pays for its data, and a failure is retried by closing and
     // reopening, which is cheaper to discover than a button that does nothing.
@@ -176,7 +191,19 @@ fun ChatScreen(
                 onLeave = onLeave,
                 onOpenMembers = onOpenMembers,
                 onOpenGames = { gamesOpen.value = true },
+                onOpenSafety = if (chat.peerId != null) {
+                    { safetyOpen.value = true }
+                } else {
+                    null
+                },
             )
+
+            // The change warning (§164) sits between the header and the thread, because it is about
+            // the conversation as a whole rather than any one message in it — and because a banner
+            // inside the scrolled list is a banner a screenful of history hides.
+            if (chat.safety?.changed == true) {
+                SafetyWarningBanner(onReview = { safetyOpen.value = true })
+            }
 
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 when {
@@ -267,6 +294,18 @@ fun ChatScreen(
                 },
             )
         }
+
+        // The verification sheet: the conversation's safety numbers, and — when an identity
+        // changed — the acknowledgment that clears the warning. Back closes it, for the same
+        // reason the member sheet below declares its own handler: the sheet covers the thread.
+        if (safetyOpen.value) {
+            BackHandler(onBack = { safetyOpen.value = false })
+            SafetySheet(
+                safety = chat.safety,
+                onDismiss = { safetyOpen.value = false },
+                onAcknowledge = onAcknowledgeSafety,
+            )
+        }
     }
 }
 
@@ -276,6 +315,7 @@ private fun ChatHeader(
     onLeave: (() -> Unit)?,
     onOpenMembers: (() -> Unit)?,
     onOpenGames: () -> Unit,
+    onOpenSafety: (() -> Unit)? = null,
 ) {
     // Games are offered only where a game has an audience: a room or a group conversation, never a
     // direct chat — the web client's own rule, because a game is the room's shared spectacle.
@@ -305,6 +345,16 @@ private fun ChatHeader(
             if (supportsGames) {
                 TextButton(onClick = onOpenGames) {
                     Text("Games")
+                }
+            }
+            // A direct chat's one header extra: the door to its safety numbers. It is the room
+            // chat's Members control in reverse — the room's security surface is who is in it, the
+            // direct chat's is who the other side turned out to be. Gated on the peer id rather
+            // than the room's absence, because the safety read itself needs that id: a chat with
+            // no peer to read offers no door.
+            if (chat.peerId != null && onOpenSafety != null) {
+                TextButton(onClick = onOpenSafety) {
+                    Text("Safety")
                 }
             }
             if (chat.roomId != null && onOpenMembers != null) {
@@ -339,6 +389,122 @@ private fun roomSubtitle(chat: ChatState): String {
         "${room.onlineCount}/${room.maxMembers} online · $members"
     } else {
         "${room.onlineCount} online · $members"
+    }
+}
+
+/**
+ * The change warning: the one thing a peer's rotated identity key must never be (§164) — silent.
+ *
+ * It names the fact and hands over the review door in the same breath, because the two halves
+ * separately are either an alarm with no way to answer it or a settings screen nobody opens. The
+ * warning does not block the conversation: messages still send and still decrypt, since a changed
+ * key is also what an honest reinstall looks like. What it refuses to do is let the change pass
+ * unremarked, which is the entire requirement.
+ */
+@Composable
+private fun SafetyWarningBanner(onReview: () -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(start = 16.dp, top = 4.dp, end = 8.dp, bottom = 4.dp),
+        ) {
+            Text(
+                text = "Your contact's identity key changed. Verify the safety number before " +
+                    "trusting this conversation.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onReview) {
+                Text("Review")
+            }
+        }
+    }
+}
+
+/**
+ * The verification surface for a direct conversation: one safety number per device the peer
+ * publishes, and the words that make the number mean something.
+ *
+ * A safety number is only worth the comparison behind it, so the explanation is the desktop
+ * client's own sentence — compare in a call or in person, and a mismatch means stop — rather than
+ * a softer paraphrase. The numbers are monospaced so two strings that differ in one digit differ
+ * *visibly*, which is the whole reason anyone reads them aloud.
+ *
+ * The acknowledgment button exists only while a change is unacknowledged: clearing the warning is
+ * the person's act, never the read's, and a button that offered to "acknowledge" an unchanged
+ * number would be teaching that the word means nothing.
+ */
+@Composable
+private fun SafetySheet(
+    safety: ChatSafety?,
+    onDismiss: () -> Unit,
+    onAcknowledge: () -> Unit,
+) {
+    MigoSheet(title = "Safety numbers", onDismiss = onDismiss) {
+        when {
+            // Null is the read in flight — and the honest state, because a number shown before
+            // the read lands is a number invented on the spot.
+            safety == null -> LoadingRow()
+
+            safety.failure != null -> Text(
+                text = safety.failure ?: "",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+
+            else -> {
+                for (number in safety.numbers) {
+                    // One block per device, labelled only when there is more than one to tell
+                    // apart: the single-device case is the common one, and "Device ab12cd" over a
+                    // lone number is chrome explaining itself.
+                    if (safety.numbers.size > 1) {
+                        Text(
+                            text = "Device ${number.deviceId.value.take(8)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 16.dp, top = 8.dp),
+                        )
+                    }
+                    Text(
+                        text = number.number,
+                        style = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
+                        color = if (number.changed) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        },
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                    )
+                    if (number.changed) {
+                        Text(
+                            text = "This device's identity key changed since this conversation " +
+                                "last saw it.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(horizontal = 16.dp),
+                        )
+                    }
+                }
+                Text(
+                    text = "Compare this with the other person, in a call or in person. If it " +
+                        "differs, stop and do not trust the conversation.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+                if (safety.changed) {
+                    Button(
+                        onClick = onAcknowledge,
+                        modifier = Modifier.padding(start = 8.dp, bottom = 8.dp),
+                    ) {
+                        Text("I've checked the new number")
+                    }
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
     }
 }
 

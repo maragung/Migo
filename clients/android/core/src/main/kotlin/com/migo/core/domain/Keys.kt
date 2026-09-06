@@ -1,6 +1,7 @@
 package com.migo.core.domain
 
 import com.migo.core.account.DeviceCredential
+import com.migo.core.account.IdentityKey
 import com.migo.core.account.MigoRoot
 import com.migo.core.account.foundingDeviceE2eeSeeds
 import com.migo.core.crypto.IdentityPublic
@@ -123,6 +124,17 @@ class KeyStore private constructor(
      * a passphrase sign-in, which registers no credential.
      */
     private val heldDeviceCredential: DeviceCredential?,
+    /**
+     * The account's identity key as rotated by *this* device, when it has rotated one. Null until
+     * the first rotation, and on every device that has not: before that the account's key is the
+     * root's identity domain, derived on demand.
+     *
+     * Var rather than val because a rotation installs it mid-session, under the lock, and the next
+     * [export] (the caller's persist after the ceremony) is what seals it into the vault. The
+     * seed lives only here and in the vault -- never in the `.migo` container, which seals the root
+     * and derives the *retired* key once a rotation has happened.
+     */
+    private var heldRotatedIdentity: IdentityKey? = null,
 ) : LocalKeyStore, IdentityProvider {
 
     private val lock = ReentrantLock()
@@ -145,6 +157,38 @@ class KeyStore private constructor(
      * only refresh until the day it cannot.
      */
     val deviceCredential: DeviceCredential? get() = heldDeviceCredential
+
+    /**
+     * The rotated identity key this device installed, or null while the account's key is still the
+     * root's derivation. Read under the lock because a rotation installs it mid-session.
+     */
+    val rotatedIdentity: IdentityKey? get() = lock.withLock { heldRotatedIdentity }
+
+    /**
+     * The account's identity key this device can answer a signing ceremony with, or null on a
+     * device that holds neither half of that story.
+     *
+     * The rotated key wins when one exists -- the root's derivation is *retired* the moment a
+     * rotation lands, and signing with it afterwards is signing with a key the account no longer
+     * trusts. Null covers an additional passphrase device, which holds no root and no rotated key,
+     * and can therefore neither rotate nor answer a challenge: the door to that is the root's.
+     */
+    fun accountIdentityKey(): IdentityKey? = lock.withLock {
+        heldRotatedIdentity ?: heldRoot?.let { IdentityKey.fromRoot(it) }
+    }
+
+    /**
+     * Installs a rotated identity key as the account's, after the server accepted the rotation.
+     *
+     * Called only from the rotation ceremony, in the narrow window between the server's acceptance
+     * and the caller's persist: the install makes the next [export] seal the successor's seed, and
+     * a persist that never happens leaves the account's active key one this device has lost -- which
+     * is why the ceremony's caller treats a failed persist after this call as a failure to report,
+     * not one to swallow.
+     */
+    fun installRotatedIdentity(successor: IdentityKey) {
+        lock.withLock { heldRotatedIdentity = successor }
+    }
 
     /**
      * This device's long-term identity secret. Backs both crypto layers.
@@ -274,6 +318,7 @@ class KeyStore private constructor(
             session = session,
             root = heldRoot,
             deviceCredential = heldDeviceCredential,
+            rotatedIdentity = heldRotatedIdentity,
             txs = txs,
         )
     }
@@ -368,6 +413,7 @@ class KeyStore private constructor(
                 keys.nextOneTimePrekeyId,
                 keys.root,
                 keys.deviceCredential,
+                keys.rotatedIdentity,
             )
             store.oneTimePrekeys.putAll(keys.oneTime)
             return store
@@ -390,6 +436,24 @@ class DeviceBundle(
 ) {
     /** Public key material only; safe to log. */
     override fun toString(): String = "DeviceBundle(device_id: $deviceId)"
+}
+
+/**
+ * A peer device's published identity, without the prekey material a full bundle carries.
+ *
+ * What the verification surface needs: a safety number is derived from identities, and an
+ * enumeration that fetched bundles to learn them has already spent the one-time prekeys those
+ * bundles held, so the identities are kept where the spend can at least be reused — see
+ * `MigoClient.peerIdentities`.
+ */
+class PeerIdentity(
+    /** The device the identity belongs to. */
+    val deviceId: Id,
+    /** Its published long-term identity. */
+    val identity: IdentityPublic,
+) {
+    /** Public key material only; safe to log. */
+    override fun toString(): String = "PeerIdentity(device_id: $deviceId)"
 }
 
 /**

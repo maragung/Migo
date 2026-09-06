@@ -108,7 +108,7 @@ export { ListenerSet } from './domains/listeners.js';
 export type { Listener } from './domains/listeners.js';
 
 export { KeyStore, KeysDomain } from './domains/keys.js';
-export type { KeyStoreSnapshot, DeviceBundle, TrackedTx } from './domains/keys.js';
+export type { KeyStoreSnapshot, DeviceBundle, TrackedTx, PeerIdentity } from './domains/keys.js';
 
 export { MessagingDomain } from './domains/messaging.js';
 export type {
@@ -163,6 +163,17 @@ export type {
 // Re-exported so the app packages need no direct dependency on @migo/crypto; the module is the
 // cross-language mirror of `server/crates/migo-account`, and this is the one door into it.
 export { account } from '@migo/crypto';
+
+// --- the safety-number surface the verification views draw on -------------------
+// The same door, for the same reason: the pair form is a cross-client contract (every client must
+// render the same two fingerprints as the same string), so it enters the app through one import.
+export { safetyNumber, pairSafetyNumber, pairFingerprint } from '@migo/crypto';
+
+// --- the object-sealing surface media, voice notes, and call signaling draw on ---
+// The same door, for the same reason: one place to audit for every caller that seals bytes for
+// storage or relay rather than for a ratchet session.
+export { aead, sealing } from '@migo/crypto';
+export type { SealedContent } from '@migo/crypto';
 
 // --- the two end-to-end crypto policy layers ---
 export {

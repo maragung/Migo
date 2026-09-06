@@ -6,19 +6,22 @@
  * Playback is imperative on purpose — a `new Audio(url)` created on click, never an `<audio>`
  * element in the tree. The element would have to render before any URL resolved, and, the sharper
  * edge, a voice note is sender-shaped content under section 122: the claimed `mimeType` is never
- * acted on and never printed, the waveform's *length* is normalised before it becomes DOM (a
- * hostile 100,000-bar blob must not render 100,000 elements), and the only server-controlled value
- * that touches this component is the media id, which goes to `resolveUrl` and comes back as a URL
- * that is set on the audio element and shown nowhere else — not in markup, not in an error, not in
- * a log line.
+ * printed and reaches no decoder except as the blob label the resolver chose, the waveform's
+ * *length* is normalised before it becomes DOM (a hostile 100,000-bar blob must not render
+ * 100,000 elements), and the sender-controlled values that leave this component are the message
+ * content's key, nonce, and claim — which go to `resolveUrl` and come back as one object URL that
+ * is set on the audio element and shown nowhere else — not in markup, not in an error, not in a
+ * log line.
  *
  * # URL expiry mid-playback
  *
- * A signed URL outlives its grant by nothing, and a note can play for longer than the grant
- * lasts. An audio error therefore re-resolves the URL and resumes from the last reported position,
- * once — the second failure is a real failure and shows the fallback label. (A URL near expiry is
- * normally replaced by the session cache before this ever bites; the retry is for the gap between
- * "near" and "past".)
+ * The signed URL the object is fetched through outlives its grant by nothing — but the object URL
+ * playback holds is the *decrypted* bytes already in hand, which never expire. An audio error is
+ * therefore retried by re-resolving the object (a re-download, and a second open of bytes this
+ * component may have already played) and resuming from the last reported position, once — the
+ * second failure is a real failure and shows the fallback label. (A blob URL is cached per media
+ * id for the session, so in practice the retry is for a browser that dropped the blob, not for
+ * the network.)
  *
  * # Duration
  *
@@ -35,14 +38,17 @@ import type { VoiceNoteRefContent } from '@migo/sdk';
 import { WAVEFORM_BARS, downsampleWaveform, formatDuration } from '@/lib/migo/voice.js';
 
 import { Spinner } from './spinner.js';
-import type { MediaUrlResolver } from './message-list.js';
+import type { MediaObjectResolver } from './message-list.js';
 
 type PlaybackStatus = 'idle' | 'loading' | 'playing' | 'paused' | 'failed';
 
 interface VoiceNoteBubbleProps {
   content: VoiceNoteRefContent;
-  /** Resolves the media id to a fetchable URL; `null` means the object cannot be resolved. */
-  resolveUrl: MediaUrlResolver;
+  /**
+   * Resolves the whole reference — download, open with the message's key slots for a sealed note,
+   * pass through for a legacy one — to an object URL; `null` means the object cannot be resolved.
+   */
+  resolveUrl: MediaObjectResolver;
 }
 
 export function VoiceNoteBubble({ content, resolveUrl }: VoiceNoteBubbleProps): ReactNode {
@@ -96,7 +102,7 @@ export function VoiceNoteBubble({ content, resolveUrl }: VoiceNoteBubbleProps): 
 
       let url: string | null;
       try {
-        url = await resolveUrl(content.mediaId);
+        url = await resolveUrl(content);
       } catch {
         url = null;
       }
@@ -165,7 +171,7 @@ export function VoiceNoteBubble({ content, resolveUrl }: VoiceNoteBubbleProps): 
         }
       }
     },
-    [content.mediaId, resolveUrl, teardownAudio, totalSecondsOf],
+    [content, resolveUrl, teardownAudio, totalSecondsOf],
   );
   playFreshRef.current = playFresh;
 

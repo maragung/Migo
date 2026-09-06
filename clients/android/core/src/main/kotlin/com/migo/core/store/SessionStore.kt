@@ -5,6 +5,7 @@ import com.migo.core.crypto.AEAD_KEY_LEN
 import com.migo.core.crypto.AEAD_NONCE_LEN
 import com.migo.core.crypto.AEAD_TAG_LEN
 import com.migo.core.crypto.Aead
+import com.migo.core.crypto.FINGERPRINT_LEN
 import com.migo.core.crypto.RatchetSession
 import com.migo.core.crypto.ReceiverKeyState
 import com.migo.core.crypto.SenderKeyState
@@ -131,6 +132,7 @@ class SessionStore private constructor(
             deletePrefix(PREFIX_PAIRWISE + conversation)
             deletePrefix(PREFIX_SENDING + conversation)
             deletePrefix(PREFIX_RECEIVER + conversation)
+            deletePrefix(PREFIX_IDENTITY + conversation)
         }
     }
 
@@ -151,7 +153,7 @@ class SessionStore private constructor(
         lock.withLock { writeEntry(name, encodeSending(state, epoch, distributed)) }
     }
 
-    override fun loadReceiver(conversationId: Id, senderDeviceId: Id): ReceiverKeyState? {
+    override fun deleteReceiver(conversationId: Id, senderDeviceId: Id): ReceiverKeyState? {
         val name = nameFor(PREFIX_RECEIVER, conversationId, senderDeviceId)
         return lock.withLock { rebuild(name) { ReceiverKeyState.restore(it) } }
     }
@@ -164,6 +166,50 @@ class SessionStore private constructor(
     override fun deleteReceiver(conversationId: Id, senderDeviceId: Id) {
         val name = nameFor(PREFIX_RECEIVER, conversationId, senderDeviceId)
         lock.withLock { deleteEntry(name) }
+    }
+
+    // -- Peer identity observations -----------------------------------------------------------------
+
+    /**
+     * The fingerprint this conversation last acknowledged for a peer device, or null when the
+     * conversation has never observed one.
+     *
+     * The last-seen fingerprint is what turns "the peer's identity changed" into a detectable
+     * event rather than a silent fact — brief sections 47 and 164. It is public key material and
+     * *not* a secret, but it lives in this store rather than a plain file for two plainer reasons:
+     * a plain file is a name-bound record of who this device talks to that any app with storage
+     * access could read, and the sealing machinery — the wrapped per-entry key, the
+     * name-authenticated associated data, the atomic rename — already exists here and would have
+     * to be reinvented to store it any other way. It is swept with the conversation's sessions by
+     * [deleteConversation], because the observation belongs to the conversation exactly as long as
+     * its ratchets do.
+     */
+    fun loadPeerIdentity(conversationId: Id, deviceId: Id): ByteArray? {
+        val name = nameFor(PREFIX_IDENTITY, conversationId, deviceId)
+        return lock.withLock {
+            rebuild(name) { stored ->
+                if (stored.size != FINGERPRINT_LEN) throw SessionStoreError.Unreadable
+                // A copy: `rebuild` zeroes the plaintext it handed us, and the caller compares
+                // against a live fingerprint long after this has returned.
+                stored.copyOf()
+            }
+        }
+    }
+
+    /**
+     * Records the fingerprint this conversation now treats as acknowledged for a peer device.
+     *
+     * Called on a first observation — where there is nothing to compare against and therefore
+     * nothing to warn about — and again when a change has been acknowledged, which is why the
+     * warning survives until a person has seen it rather than being cleared by the very read that
+     * detected it.
+     */
+    fun savePeerIdentity(conversationId: Id, deviceId: Id, fingerprint: ByteArray) {
+        if (fingerprint.size != FINGERPRINT_LEN) throw SessionStoreError.NotWritten
+        val name = nameFor(PREFIX_IDENTITY, conversationId, deviceId)
+        // A copy for the same reason every entry here is copied, in the other direction: the
+        // caller's fingerprint is live key material another path may still be reading.
+        lock.withLock { writeEntry(name, fingerprint.copyOf()) }
     }
 
     // -- Lifecycle --------------------------------------------------------------------------------
@@ -479,6 +525,9 @@ class SessionStore private constructor(
 
         /** A peer's sending chain as this device receives it, keyed by conversation and device. */
         private const val PREFIX_RECEIVER = "r_"
+
+        /** The last-acknowledged identity fingerprint for a peer device in a conversation. */
+        private const val PREFIX_IDENTITY = "i_"
 
         /** Magic, three length bytes, the GCM nonce, the wrapped key, and a non-empty sealed body. */
         private const val MIN_FILE_LEN =

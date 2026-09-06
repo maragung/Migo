@@ -39,6 +39,7 @@
  */
 
 import type { Id } from '@migo/wire';
+import { account } from '@migo/crypto';
 import type { PrekeyBundle } from '@migo/crypto';
 import {
   OP,
@@ -87,6 +88,7 @@ import { GroupCrypto } from './group-crypto.js';
 import { Rpc } from './domains/rpc.js';
 import type { EventErrorHandler } from './domains/rpc.js';
 import { KeysDomain, KeyStore } from './domains/keys.js';
+import type { PeerIdentity } from './domains/keys.js';
 import { MessagingDomain } from './domains/messaging.js';
 import type { CreateConversationOptions } from './domains/conversations.js';
 import { ConversationsDomain } from './domains/conversations.js';
@@ -208,6 +210,11 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   readonly #userDevices = new Map<Id, Id[]>();
   /** `${userId}|${deviceId}` to a bundle enumerated but not yet spent, served once to {@link fetchBundle}. */
   readonly #bundleCache = new Map<string, PrekeyBundle>();
+  /**
+   * Account id to its devices' published identities, so a conversation's verification surface does
+   * not re-enumerate — and re-spend the peer's one-time prekeys — every time it opens.
+   */
+  readonly #peerIdentitiesCache = new Map<Id, PeerIdentity[]>();
   /** Every topic we have an active subscription to, re-sent after a session reset. */
   readonly #subscribedTopics = new Map<string, Topic>();
 
@@ -424,6 +431,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     this.#members.clear();
     this.#userDevices.clear();
     this.#bundleCache.clear();
+    this.#peerIdentitiesCache.clear();
     this.#subscribedTopics.clear();
     return Promise.resolve();
   }
@@ -577,6 +585,13 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   /** Forgets a user's cached device list, so the next send re-enumerates it (e.g. after a key change). */
   invalidateDevices(userId: Id): void {
     this.#userDevices.delete(userId);
+    this.#peerIdentitiesCache.delete(userId);
+    const prefix = `${userId}|`;
+    for (const key of this.#bundleCache.keys()) {
+      if (key.startsWith(prefix)) {
+        this.#bundleCache.delete(key);
+      }
+    }
   }
 
   /** Forgets a conversation's cached membership, so the next send re-reads it. */
@@ -640,6 +655,42 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     return ctx.keys.fetchBundle(userId, deviceId);
   }
 
+  /**
+   * The identities a user's devices currently publish, for a conversation's verification surface.
+   *
+   * The enumeration is the same one the send path makes, and it costs the same: the server hands out
+   * each bundle with a one-time prekey already consumed, so every user enumerated here spends one
+   * prekey per device they publish. The result is cached for this client's life precisely so a
+   * safety-number view that opens on every conversation open does not turn into a prekey fire hose —
+   * and the bundles fetched on the way are parked in the same cache {@link fetchBundle} serves from,
+   * so the spend is not wasted: a later first message to any of these devices forms its session from
+   * the bundle this call already paid for. {@link invalidateDevices} drops the cache when a device
+   * is added or removed on that account.
+   *
+   * Identities here are *observations*, not attestations: the server chooses what to serve, and a
+   * safety number is only worth what the out-of-band comparison behind it is worth. What the number
+   * does give is stability — the same two identities always derive the same string — and a change
+   * in it is the visible signal brief section 164 asks for, whatever caused it.
+   */
+  async peerIdentities(userId: Id): Promise<PeerIdentity[]> {
+    const ctx = this.#requireConnected();
+    const cached = this.#peerIdentitiesCache.get(userId);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const bundles = await ctx.keys.fetchDeviceBundles(userId);
+    const identities: PeerIdentity[] = [];
+    const deviceIds: Id[] = [];
+    for (const entry of bundles) {
+      identities.push({ deviceId: entry.deviceId, identity: entry.bundle.identity });
+      deviceIds.push(entry.deviceId);
+      this.#bundleCache.set(bundleKey(userId, entry.deviceId), entry.bundle);
+    }
+    this.#userDevices.set(userId, deviceIds);
+    this.#peerIdentitiesCache.set(userId, identities);
+    return identities;
+  }
+
   // --- key material maintenance ---
 
   /** Publishes this device's current public key material. */
@@ -662,6 +713,63 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     this.#keyStore.replenishOneTimePrekeys(this.#replenishPolicy.batch);
     await ctx.keys.publish();
     return true;
+  }
+
+  // --- the account's ML-DSA identity ceremonies ---------------------------------
+  //
+  // The ceremonies a device that holds the account's key material runs against the account itself:
+  // the idempotent publish of the identity public key at sign-in, and the rotation that replaces it.
+  // Both sign with the key the *server* knows as active — {@link KeyStore.accountIdentityKey} —
+  // which is the caller's to read, because where its seed persists is the application's decision.
+
+  /**
+   * Publishes the account's ML-DSA identity key, idempotently.
+   *
+   * The legacy upgrade door (§182): a device that holds the root tells the server so on every
+   * sign-in. A server that already has the key reconciles to the same row; one that has never seen
+   * it records it now. The key published must be the *active* one — the rotated successor after a
+   * rotation, the root's derivation until then — because re-publishing the root's derivation after a
+   * rotation is the conflict the server answers with "rotate instead", and the idempotent-reconcile
+   * property this call exists for only holds for the key that is active.
+   */
+  async publishIdentityKey(identityPublicKey: Uint8Array): Promise<void> {
+    const ctx = this.#requireConnected();
+    await this.#bootstrap.publishIdentityKey(ctx.grant.accessToken, { identityPublicKey });
+  }
+
+  /**
+   * Rotates the account's ML-DSA-65 identity key, and returns the successor the caller must persist.
+   *
+   * The ceremony is the server's (migo-auth, purpose `rotate`): ask for a challenge as this
+   * authenticated device, sign the canonical payload with the *current* key under the rotate context
+   * — which no login signature can satisfy, so a leaked login signature cannot rotate anything — and
+   * introduce a successor minted here from fresh randomness. The server installs the successor as
+   * active and retires the predecessor in one store call; sessions, including this one, are
+   * unaffected.
+   *
+   * `current` is the account's key as this device holds it (the caller keeps it: this class
+   * transports bytes and runs the ceremony's shape, it does not hold account keys). `successor` may
+   * be supplied by a caller that wants to pre-commit its persistence before the call — the successor
+   * is minted inside otherwise. Either way it is *returned* rather than stored anywhere, because the
+   * one place it belongs — the caller's sealed local state — is the application's to write, and a
+   * ceremony that quietly lost the successor would leave an account whose active key exists nowhere.
+   *
+   * What does *not* change: the E2EE device identity (the ratchets, the safety numbers peers see),
+   * which is separate material this ceremony never touches.
+   */
+  async rotateIdentity(
+    current: account.IdentityKey,
+    successor?: account.IdentityKey,
+  ): Promise<account.IdentityKey> {
+    const ctx = this.#requireConnected();
+    const challenge = await this.#bootstrap.rotationChallenge(ctx.grant.accessToken);
+    const next = successor ?? account.IdentityKey.generate();
+    await this.#bootstrap.rotateIdentity(ctx.grant.accessToken, {
+      challengeId: challenge.challengeId,
+      signature: current.signRotate(challenge.payload),
+      newPublicKey: next.publicKey(),
+    });
+    return next;
   }
 
   // --- account management (REST over the live access token) ---

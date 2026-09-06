@@ -41,13 +41,29 @@ import {
   KeyFileFormView,
   MIN_PASSPHRASE_LENGTH,
   PassphraseFormView,
+  ROTATED_BACKUP_ADVICE,
+  ROTATED_NOTICE,
+  ROTATE_COSTLY_HALF,
+  ROTATE_EXPLANATION,
+  ROTATE_NO_ROOT,
+  ROTATE_QUIET_HALF,
+  RotateIdentityView,
   isLikelyEmail,
 } from '../src/components/account-panel.js';
+import type { RotationResult } from '../src/components/account-panel.js';
 import { MigoContext } from '../src/lib/migo/provider.js';
 
 /** How many `disabled` attributes the markup carries — a submit gate is a disabled button. */
 function disabledCount(markup: string): number {
   return (markup.match(/disabled/g) ?? []).length;
+}
+
+/**
+ * Static markup with React's entity escapes folded back to plain text, so a sentence containing an
+ * apostrophe can be compared with the sentence as it was written.
+ */
+function textOf(markup: string): string {
+  return markup.replaceAll('&#x27;', "'").replaceAll('&quot;', '"').replaceAll('&amp;', '&');
 }
 
 // --- isLikelyEmail: the local typo gate, not RFC validation -----------------------------------
@@ -424,4 +440,129 @@ test('the panel takes the honest no-root state when the device holds no account 
     'the control is present so the absence is legible',
   );
   assert.ok(markup.includes('disabled'), 'the no-root Download control is disabled');
+});
+
+// --- RotateIdentityView: the identity-key rotation's door, confirmation, and outcomes -----------
+
+test('the rotation confirmation states both halves before the button can be pressed', () => {
+  const markup = textOf(
+    renderToStaticMarkup(
+      <RotateIdentityView
+        busy={false}
+        result={null}
+        error={null}
+        onConfirm={() => {}}
+        onClose={() => {}}
+      />,
+    ),
+  );
+
+  assert.ok(
+    markup.includes(ROTATE_QUIET_HALF),
+    'the quiet half: nothing anyone has verified needs verifying again',
+  );
+  assert.ok(
+    markup.includes(ROTATE_COSTLY_HALF),
+    'the costly half: the new key lives only here, and an old backup will be refused',
+  );
+  assert.ok(markup.includes('Cancel'), 'the confirmation can be walked back');
+  assert.ok(
+    markup.includes('>Rotate identity key</button>'),
+    'the confirm names exactly what it does',
+  );
+  assert.equal(disabledCount(markup), 0, 'an idle confirmation leaves its buttons live');
+});
+
+test('an in-flight rotation disables both buttons rather than offering a second one', () => {
+  const markup = renderToStaticMarkup(
+    <RotateIdentityView
+      busy={true}
+      result={null}
+      error={null}
+      onConfirm={() => {}}
+      onClose={() => {}}
+    />,
+  );
+
+  assert.equal(disabledCount(markup), 2, 'Cancel and Rotate are both gated while busy');
+  assert.match(markup, /role="status"/, 'the busy state is a spinner, not silence');
+});
+
+test('a refusal is shown as the sentence it is, with the way back in', () => {
+  const markup = renderToStaticMarkup(
+    <RotateIdentityView
+      busy={false}
+      result={null}
+      error="The identity key was not rotated."
+      onConfirm={() => {}}
+      onClose={() => {}}
+    />,
+  );
+
+  assert.ok(markup.includes('The identity key was not rotated.'));
+  assert.ok(
+    markup.includes('Rotate identity key'),
+    'the confirm stays offered: a refused rotation costs nothing and may be retried',
+  );
+});
+
+test('a completed rotation carries the fresh-backup advice in the same breath as the notice', () => {
+  const markup = renderToStaticMarkup(
+    <RotateIdentityView
+      busy={false}
+      result={{ kind: 'done', message: ROTATED_NOTICE } satisfies RotationResult}
+      error={null}
+      onConfirm={() => {}}
+      onClose={() => {}}
+    />,
+  );
+
+  assert.ok(markup.includes(ROTATED_NOTICE));
+  assert.ok(
+    markup.includes(ROTATED_BACKUP_ADVICE),
+    'the one act a completed rotation asks for — seal a backup that can vouch for the account',
+  );
+  assert.ok(markup.includes('Done'));
+  assert.ok(!markup.includes('Rotate identity key</button>'), 'the confirmation is gone once done');
+});
+
+test('an unfinished rotation is its own state, not an error: the message, no backup advice', () => {
+  const markup = renderToStaticMarkup(
+    <RotateIdentityView
+      busy={false}
+      result={
+        {
+          kind: 'unfinished',
+          message: 'rotate again to finish the change',
+        } satisfies RotationResult
+      }
+      error={null}
+      onConfirm={() => {}}
+      onClose={() => {}}
+    />,
+  );
+
+  assert.ok(markup.includes('rotate again to finish the change'));
+  assert.ok(
+    !markup.includes(ROTATED_BACKUP_ADVICE),
+    'nothing was confirmed as rotated, so no backup advice is owed yet',
+  );
+});
+
+test('the panel carries the identity-key section, honestly, without a root to rotate from', () => {
+  const markup = textOf(renderPanel(<AccountPanel />));
+
+  assert.ok(markup.includes('>Identity key</h2>'), 'the rotation has its own section');
+  assert.ok(
+    markup.includes(ROTATE_EXPLANATION),
+    'the section says what the identity key is and is not — not sold as a privacy control',
+  );
+  assert.ok(
+    markup.includes(ROTATE_NO_ROOT),
+    'a device without the root says so rather than offering a rotation it cannot run',
+  );
+  assert.ok(
+    !markup.includes('>Rotate identity key</button>'),
+    'no rotation control renders where it could not work',
+  );
 });

@@ -10,6 +10,7 @@ import com.migo.app.model.AppState
 import com.migo.app.model.ChainNetworkChoice
 import com.migo.app.model.ChainTxRow
 import com.migo.app.model.ChatMessage
+import com.migo.app.model.ChatSafety
 import com.migo.app.model.ChatState
 import com.migo.app.model.ConversationRow
 import com.migo.app.model.GAME_STATUS_OPEN
@@ -40,7 +41,11 @@ import com.migo.core.domain.IncomingMessage
 import com.migo.core.domain.MessageDeletion
 import com.migo.core.domain.SendOptions
 import com.migo.core.domain.Subscription
+import com.migo.core.net.CaptchaChallenge
+import com.migo.core.net.CaptchaProof
 import com.migo.core.net.ChainClient
+import com.migo.core.net.Rest
+import com.migo.core.net.RestError
 import com.migo.core.net.TrackOptions
 import com.migo.core.net.TrackOutcome
 import com.migo.core.net.TrackResult
@@ -66,6 +71,7 @@ import com.migo.core.protocol.TypingState
 import com.migo.core.store.ServerEndpoint
 import com.migo.core.store.Settings
 import com.migo.core.store.TxRecord
+import com.migo.core.store.VaultError
 import com.migo.core.wire.Id
 import com.migo.core.wire.WireError
 import com.migo.core.wire.parseId
@@ -182,8 +188,56 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** Records what was typed in the account field. */
     fun setIdentifier(text: String) = signedOut { it.copy(identifier = text, failure = null) }
 
-    /** Signs in an existing account, or creates one when [create] is set. */
-    fun signIn(passphrase: String, create: Boolean) {
+    /**
+     * Fetches a fresh captcha challenge and puts it on the form.
+     *
+     * Called for the two moments a challenge becomes news: the register form appearing (the web
+     * client's fetch-on-mount, mirrored), and the refresh control under the picture -- a challenge
+     * nobody can read is a wrong answer waiting to happen, and the replacement must cost one tap
+     * rather than a whole failed submit. The sign-in form starts with no challenge, exactly as the
+     * web client's does; a `CAPTCHA_REQUIRED` refusal puts one there instead (see [signIn]).
+     *
+     * A fetch that fails says so through the form's own failure line rather than a silent blank:
+     * "could not get a challenge" and "no challenge needed" are different facts, and only one of
+     * them leaves the submit button enabled in good conscience.
+     */
+    fun refreshCaptcha() {
+        val form = _state.value as? AppState.SignedOut ?: return
+        if (form.busy) return
+        viewModelScope.launch {
+            try {
+                val challenge = Rest(form.serverEndpoint.restBaseUrl()).requestCaptcha()
+                signedOut {
+                    if (it.busy) it else it.copy(captcha = challenge, failure = null)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedOut { it.copy(captcha = null, failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Signs in an existing account, or creates one when [create] is set.
+     *
+     * [captchaAnswer] is the typing the form holds against the challenge on its screen, or null
+     * when no challenge is showing. It is normalised and shape-checked here rather than on the
+     * form: the rule is a property of what the proof is (five or six letters and digits, no
+     * whitespace, case-insensitive on the wire), and the proof is this class's to build. An answer
+     * that does not pass the shape check is treated as absent -- the server is the judge of a
+     * *wrong* answer, but a half-typed one is not an answer at all, and sending it would burn the
+     * challenge on a typo.
+     *
+     * A refusal that carries a replacement challenge swaps the form's picture on the spot: the
+     * proof this attempt spent is gone whatever the verdict, and the person's next step should be
+     * reading the new challenge, not finding the refresh control. A `CAPTCHA_REQUIRED` refusal
+     * without one (the gate fired before any proof existed) fetches a challenge, so the widget
+     * appears in the sign-in form too -- the one place this build goes further than the web
+     * client, whose sign-in page has no widget at all and whose users meet this refusal with
+     * nothing to answer it with.
+     */
+    fun signIn(passphrase: String, create: Boolean, captchaAnswer: String? = null) {
         val form = _state.value as? AppState.SignedOut ?: return
         if (form.busy) return
         val endpoint = form.serverEndpoint
@@ -192,6 +246,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             signedOut { it.copy(failure = "Fill in both fields first.") }
             return
         }
+        val proof = captchaProof(form.captcha, captchaAnswer)
 
         signedOut { it.copy(busy = true, failure = null) }
         viewModelScope.launch {
@@ -205,6 +260,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         identifier,
                         passphrase,
                         hooks(),
+                        proof,
                     )
                     // The sealed account file rides in the view model, not on the state: the
                     // screens get the offer flag, and the write below is the only thing that
@@ -219,6 +275,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         identifier,
                         passphrase,
                         hooks(),
+                        proof,
                     )
                 }
                 settings.update { it.copy(serverEndpoint = endpoint, onboardingComplete = true) }
@@ -230,8 +287,46 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 throw cancelled
             } catch (failure: Exception) {
                 signedOut { it.copy(busy = false, failure = readable(failure)) }
+                // After the busy flag clears, so the fetch path inside is not turned away by its
+                // own still-in-flight guard.
+                adoptRefusalCaptcha(failure)
             }
         }
+    }
+
+    /**
+     * The proof for the challenge on the form, or null when there is nothing worth sending.
+     *
+     * Normalisation is the web widget's own -- whitespace stripped, uppercased -- and the shape
+     * check is its own too (five or six alphanumerics), so a value this build sends is one the
+     * server's gate reads the way the web client's do. The challenge itself decides the rest: a
+     * form with no challenge has no proof to send, however much was typed.
+     */
+    private fun captchaProof(challenge: CaptchaChallenge?, answer: String?): CaptchaProof? {
+        if (challenge == null || answer == null) return null
+        val normalised = answer.replace(Regex("\\s+"), "").uppercase()
+        if (!Regex("^[A-Z0-9]{5,6}$").matches(normalised)) return null
+        return CaptchaProof(challenge.challengeId, normalised)
+    }
+
+    /**
+     * Puts a refused attempt's replacement challenge on the form, or fetches one when the refusal
+     * is the gate's own `CAPTCHA_REQUIRED` and arrived without one.
+     *
+     * The attach-and-adopt rule is the server's: a challenge rides the error envelope exactly when
+     * a captcha was on the person's screen (the attempt carried a proof, or the refusal is the
+     * gate's). The fetch path covers the one gap -- an old server, or a refusal this build met
+     * without a screen-held challenge -- and is deliberately fire-and-forget: the submit has
+     * already failed, and the fetch's own failure lands on the form's failure line through
+     * [refreshCaptcha].
+     */
+    private fun adoptRefusalCaptcha(failure: Exception) {
+        val server = failure as? RestError.Server ?: return
+        if (server.captcha != null) {
+            signedOut { it.copy(captcha = server.captcha) }
+            return
+        }
+        if (server.symbol == "CAPTCHA_REQUIRED") refreshCaptcha()
     }
 
     /**
@@ -446,26 +541,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun open(conversationId: Id, title: String) {
         val live = session ?: return
+        val row = signedInState?.conversations?.find { it.conversationId == conversationId }
         signedIn { current ->
-            val row = current.conversations.find { it.conversationId == conversationId }
+            val listed = current.conversations.find { it.conversationId == conversationId }
             val windows = if (current.windows.any { it.conversationId == conversationId }) {
                 current.windows.map {
                     if (it.conversationId == conversationId) {
-                        it.copy(title = title, roomId = it.roomId ?: row?.roomId)
+                        it.copy(title = title, roomId = it.roomId ?: listed?.roomId)
                     } else {
                         it
                     }
                 }
             } else {
-                current.windows + WindowTab(conversationId = conversationId, title = title, roomId = row?.roomId)
+                current.windows + WindowTab(conversationId = conversationId, title = title, roomId = listed?.roomId)
             }
             current.copy(
                 open = ChatState(
                     conversationId = conversationId,
                     title = title,
-                    kind = row?.kind ?: ConversationKind.Room,
-                    roomId = row?.roomId,
-                    room = row?.roomId?.let { liveInfoFor(it) },
+                    kind = listed?.kind ?: ConversationKind.Room,
+                    roomId = listed?.roomId,
+                    peerId = listed?.peerId,
+                    room = listed?.roomId?.let { liveInfoFor(it) },
                     loading = true,
                 ),
                 windows = windows,
@@ -487,6 +584,74 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             } catch (failure: Exception) {
                 inChat(conversationId) { it.copy(loading = false) }
                 signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+        // The verification surface rides along with the open, on its own coroutine: a safety read
+        // that had to wait for the history would leave a changed identity unmentioned through the
+        // whole catch-up, and one that failed with the history would take the history's failure
+        // message for its own.
+        val peerId = row?.peerId
+        if (row?.kind == ConversationKind.Direct && peerId != null) {
+            loadSafety(conversationId, peerId)
+        }
+    }
+
+    /**
+     * Reads the open direct conversation's safety numbers, as [open] and the chat's own retry drive
+     * it.
+     *
+     * A failure here is quiet by design: the conversation is fully usable, and a verification
+     * surface that announced itself with the shell's red failure banner would be crying about the
+     * wrong thing. It lands on the safety field, where the sheet can offer the retry.
+     */
+    private fun loadSafety(conversationId: Id, peerUserId: Id) {
+        val live = session ?: return
+        viewModelScope.launch {
+            try {
+                val numbers = live.safetyNumbers(conversationId, peerUserId)
+                inChat(conversationId) {
+                    it.copy(
+                        safety = ChatSafety(
+                            numbers = numbers,
+                            changed = numbers.any { number -> number.changed },
+                        ),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                inChat(conversationId) {
+                    it.copy(safety = ChatSafety(numbers = emptyList(), failure = readable(failure)))
+                }
+            }
+        }
+    }
+
+    /**
+     * Acknowledges a changed safety number for the open direct conversation, from the warning
+     * itself.
+     *
+     * Only the person clears it — never the read that raised it — because a warning a screen
+     * dismissed on its own is a warning nobody saw. A failure keeps the warning up and reports
+     * into the sheet, which is where the acknowledgment was pressed.
+     */
+    fun acknowledgeSafetyChange() {
+        val live = session ?: return
+        val chat = signedInState?.open ?: return
+        val peerId = chat.peerId ?: return
+        if (chat.safety?.changed != true) return
+        viewModelScope.launch {
+            try {
+                live.acknowledgeSafetyNumbers(chat.conversationId, peerId)
+                inChat(chat.conversationId) {
+                    it.copy(safety = it.safety?.copy(changed = false))
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                inChat(chat.conversationId) {
+                    it.copy(safety = it.safety?.copy(failure = readable(failure)))
+                }
             }
         }
     }
@@ -2041,6 +2206,63 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Rotates the account's ML-DSA identity key — the signing key the login and add-device
+     * ceremonies verify against, and deliberately not the E2EE device identity behind the
+     * conversations and safety numbers, which the ceremony never touches.
+     *
+     * The screen confirms before this runs, because the cost is permanent: the server retires the
+     * old key, and a `.migo` container made from the root — whose identity half is exactly that
+     * retired key — can no longer vouch for the account onto a new device. The successor is fresh
+     * randomness minted inside the ceremony, and the vault is the only place it is ever sealed.
+     *
+     * A failed vault save is the one failure worth its own words. The rotation already happened
+     * server-side when it occurs, and the successor exists only in this process's memory: it is
+     * lost when the app closes, and the passphrase still works only because sign-in falls back to
+     * the retired key's ceremonies — which the server will now refuse. That state is reported
+     * rather than hedged, because "try again later" is exactly what it is not.
+     */
+    fun rotateIdentity() {
+        val live = session ?: return
+        val form = _state.value as? AppState.SignedIn ?: return
+        if (form.accountSecurity.busy) return
+        signedIn { it.copy(accountSecurity = it.accountSecurity.copy(busy = true, failure = null, notice = null)) }
+        viewModelScope.launch {
+            try {
+                try {
+                    live.rotateIdentity()
+                } catch (saveFailure: VaultError) {
+                    signedIn {
+                        it.copy(
+                            accountSecurity = it.accountSecurity.copy(
+                                busy = false,
+                                failure = "The identity key was rotated, but the vault could not be saved: " +
+                                    "${readable(saveFailure)} The new key exists only in this app's " +
+                                    "memory and will be lost when it closes.",
+                            ),
+                        )
+                    }
+                    return@launch
+                }
+                signedIn {
+                    it.copy(
+                        accountSecurity = it.accountSecurity.copy(
+                            busy = false,
+                            notice = "Identity key rotated. Conversations, safety numbers and sessions " +
+                                "are unchanged.",
+                        ),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn {
+                    it.copy(accountSecurity = it.accountSecurity.copy(busy = false, failure = readable(failure)))
+                }
+            }
+        }
+    }
+
+    /**
      * Records (or replaces) the account's recovery contact.
      *
      * The one string is not a secret — the server shows it back through recovery — and a save is a
@@ -2815,13 +3037,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * A failure as the user reads it.
      *
-     * The two auth-side refusals a person can actually act on get plain words instead of the
-     * server's wire vocabulary, which the message either carries bare (`RATE_LIMITED`) or not
-     * at all (`CAPTCHA_REQUIRED`): a wait is a wait, and "the server asked for a human check"
-     * means "wait a moment and try again" on a build with no captcha UI yet.
+     * The auth-side refusals a person can actually act on get plain words instead of the server's
+     * wire vocabulary, which the message either carries bare (`RATE_LIMITED`) or not at all: a wait
+     * is a wait, and the captcha refusals describe the picture the form is showing -- the
+     * replacement challenge the refusal carried has already swapped it, so the words point at the
+     * new picture rather than telling the person to start over.
      */
     private fun readable(failure: Throwable): String {
-        if (failure is com.migo.core.net.RestError.Server) {
+        if (failure is RestError.Server) {
             if (failure.symbol == "AUTH_LOCKED") {
                 val seconds = failure.retryAfterMs?.div(1000)
                 return if (seconds != null && seconds > 0) {
@@ -2839,10 +3062,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             if (failure.symbol == "CAPTCHA_REQUIRED") {
-                return "Too many failed attempts from this network. Wait a moment and try again."
+                return "The server asks for a human check first. Read the code from the picture and try again."
             }
             if (failure.symbol == "INVALID_CAPTCHA" || failure.symbol == "CAPTCHA_EXPIRED") {
-                return "The human check was wrong or expired. Start the sign-up again."
+                return "That code did not match, or it expired. Read the new picture and try again."
             }
             // An answer without the envelope -- a proxy's error page, or a framework-level
             // rejection this server never wrote -- has no symbol and no public message. The

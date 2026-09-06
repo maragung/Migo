@@ -75,6 +75,23 @@ const FIELD_DEVICE_CREDENTIAL: u32 = 3;
 /// bytes, nothing the chain itself could not republish.
 const FIELD_TXS: u32 = 4;
 
+/// The optional-field id under which a rotated identity key's successor seed lives.
+///
+/// Present only on a device that has rotated (or pre-committed) the account's ML-DSA identity
+/// key. The successor is fresh random, not derived from the root — the reference crate defines
+/// no second derivation — so the vault is the only place it exists: without this field the
+/// account's identity key is gone with the device. Every vault that predates rotation simply
+/// omits it and keeps deriving from the root, which is exactly the shape those vaults had.
+const FIELD_ROTATED_IDENTITY: u32 = 5;
+
+/// The optional-field id under which the last-seen peer identity fingerprints live.
+///
+/// One entry per peer *device*: the identity key a key bundle carries belongs to a device, and
+/// the same person on a second device is a second fingerprint. This is the record a key-change
+/// warning is drawn from (§47/§164) — a bundle that arrives holding a fingerprint this map
+/// already had, only different, is the moment the interface has to say so.
+const FIELD_PEER_FINGERPRINTS: u32 = 6;
+
 /// One tracked AVAX transaction: what was sent, and how the tracker ended.
 ///
 /// Written at broadcast with the outcome it had then and updated when the tracker settles, so a
@@ -377,7 +394,9 @@ fn encode_keys(keys: &DeviceKeys) -> Result<Vec<u8>, VaultError> {
     let optionals = u32::from(keys.session.is_some())
         + u32::from(keys.root.is_some())
         + u32::from(keys.device_credential_seed.is_some())
-        + u32::from(!keys.txs.is_empty());
+        + u32::from(!keys.txs.is_empty())
+        + u32::from(keys.rotated_identity_seed.is_some())
+        + u32::from(!keys.peer_fingerprints.is_empty());
     w.write_u32(optionals);
     if let Some(saved) = &keys.session {
         w.optional(FIELD_SESSION, |w| {
@@ -403,6 +422,25 @@ fn encode_keys(keys: &DeviceKeys) -> Result<Vec<u8>, VaultError> {
             w.list_len(keys.txs.len())?;
             for record in &keys.txs {
                 write_tx(w, record)?;
+            }
+            Ok(())
+        })
+        .map_err(|_| VaultError::Malformed)?;
+    }
+    if let Some(seed) = &keys.rotated_identity_seed {
+        w.optional(FIELD_ROTATED_IDENTITY, |w| w.write_bytes(seed))
+            .map_err(|_| VaultError::Malformed)?;
+    }
+    // Sorted by device, for the same reason the prekey list above is: two saves of the same
+    // vault should produce the same bytes.
+    if !keys.peer_fingerprints.is_empty() {
+        w.optional(FIELD_PEER_FINGERPRINTS, |w| {
+            w.list_len(keys.peer_fingerprints.len())?;
+            let mut entries: Vec<(&Id, &[u8; 32])> = keys.peer_fingerprints.iter().collect();
+            entries.sort_unstable_by_key(|(device, _)| **device);
+            for (device, fingerprint) in entries {
+                w.write_id(device);
+                w.write_bytes(fingerprint)?;
             }
             Ok(())
         })
@@ -460,6 +498,8 @@ fn decode_keys(plaintext: &[u8]) -> Result<DeviceKeys, VaultError> {
     let mut root = None;
     let mut device_credential_seed = None;
     let mut txs = Vec::new();
+    let mut rotated_identity_seed = None;
+    let mut peer_fingerprints = std::collections::HashMap::new();
     for _ in 0..optionals {
         let (field, mut inner) = r.read_optional().map_err(|_| VaultError::Malformed)?;
         // An unknown id is skipped, not an error: the sub-reader is length-scoped, so a newer build's
@@ -478,6 +518,10 @@ fn decode_keys(plaintext: &[u8]) -> Result<DeviceKeys, VaultError> {
             device_credential_seed = Some(seed32(&mut inner)?);
         } else if field == FIELD_TXS {
             txs = read_txs(&mut inner)?;
+        } else if field == FIELD_ROTATED_IDENTITY {
+            rotated_identity_seed = Some(seed32(&mut inner)?);
+        } else if field == FIELD_PEER_FINGERPRINTS {
+            peer_fingerprints = read_peer_fingerprints(&mut inner)?;
         }
     }
     r.leave();
@@ -490,7 +534,25 @@ fn decode_keys(plaintext: &[u8]) -> Result<DeviceKeys, VaultError> {
         root,
         device_credential_seed,
         txs,
+        rotated_identity_seed,
+        peer_fingerprints,
     })
+}
+
+/// The entries inside FIELD_PEER_FINGERPRINTS. A malformed entry refuses the whole field, the
+/// same rule the Activity list holds itself to: a key-change memory that silently dropped its
+/// middle would re-fire warnings for devices that never changed, and warnings that lie are
+/// warnings nobody heeds.
+fn read_peer_fingerprints(
+    r: &mut Reader,
+) -> Result<std::collections::HashMap<Id, [u8; 32]>, VaultError> {
+    let count = r.read_list_len().map_err(|_| VaultError::Malformed)?;
+    let mut out = std::collections::HashMap::with_capacity(count);
+    for _ in 0..count {
+        let device = r.read_id().map_err(|_| VaultError::Malformed)?;
+        out.insert(device, fixed32(r)?);
+    }
+    Ok(out)
 }
 
 /// The records inside FIELD_TXS. A malformed record refuses the whole field rather than being
@@ -655,6 +717,8 @@ mod tests {
         assert!(keys.root.is_none());
         assert!(keys.device_credential_seed.is_none());
         assert!(keys.session.is_none());
+        assert!(keys.rotated_identity_seed.is_none());
+        assert!(keys.peer_fingerprints.is_empty());
         assert_eq!(keys.signed_prekey_id, 1);
         assert_eq!(
             keys.identity.expose_signing_seed(),
@@ -754,5 +818,44 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert!(opened.txs.is_empty());
+    }
+
+    /// A rotated device's vault carries the successor seed and the peer-fingerprint memory, and
+    /// both have to come back. The successor especially: it is random, not root-derived, so the
+    /// vault is the only place it exists — a round trip that lost it would strand the account
+    /// between a retired key and one nobody can sign with. The fingerprints matter for the
+    /// quieter reason that a device that forgot them would warn about peers that never changed.
+    #[test]
+    fn a_rotated_device_round_trips_its_successor_and_peer_fingerprints() {
+        let path = scratch("migo-vault-rotation-roundtrip.bin");
+        let root = migo_account::MigoRoot::from_bytes(&[7u8; 32]).expect("32 bytes is a root");
+        let mut keys = DeviceKeys::founding(&root);
+        keys.session = Some(saved_session());
+        keys.rotated_identity_seed = Some([0x5a; 32]);
+        keys.peer_fingerprints = {
+            let mut peers = std::collections::HashMap::new();
+            peers.insert(Id::from_bytes([3; 16]), [0x11; 32]);
+            peers.insert(Id::from_bytes([4; 16]), [0x22; 32]);
+            peers
+        };
+
+        save(&path, "correct horse battery", &keys).expect("saved");
+        let opened = load(&path, "correct horse battery").expect("opened");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(opened.rotated_identity_seed, Some([0x5a; 32]));
+        assert_eq!(opened.peer_fingerprints, keys.peer_fingerprints);
+        // The root stays beside the successor: wallets still derive from it, and a `.migo`
+        // container still seals it.
+        assert!(opened.root.is_some());
+        // And the successor is what the device now signs with, not the root's derivation.
+        let successor = migo_account::IdentityKey::from_seed(&[0x5a; 32]).expect("a seed is a key");
+        assert_eq!(
+            opened
+                .identity_key()
+                .expect("a root means an identity key")
+                .public_key(),
+            successor.public_key()
+        );
     }
 }

@@ -75,6 +75,19 @@ export interface KeyStoreSnapshot {
    * keeps the root the one secret a `.migo` container has to carry.
    */
   root?: Uint8Array;
+  /**
+   * The rotated account identity key's 32-byte seed, on a device that has rotated (or pre-committed
+   * a rotation of) the account's ML-DSA signing key. Absent until then: the root's own derivation
+   * is the account's identity until a rotation retires it, and a field that exists to say "not
+   * rotated" costs every reader a skip for no information.
+   *
+   * The successor is *fresh random* material, deliberately not derived from the root — the root
+   * defines no versioned identity derivation, and inventing one would fork the protocol from every
+   * other client. That is also why this seed is the successor's only home besides the device that
+   * minted it: a `.migo` container still carries only the root, whose identity half is the key the
+   * rotation retired.
+   */
+  rotatedIdentitySeed?: Uint8Array;
   /** The tracked AVAX transactions, newest first. Absent rather than empty when there are none. */
   trackedTxs?: TrackedTx[];
 }
@@ -126,6 +139,7 @@ export class KeyStore implements LocalKeyStore, IdentityProvider {
   #nextSignedPrekeyId: number;
   #nextOneTimePrekeyId: number;
   readonly #root: account.MigoRoot | null;
+  #rotatedIdentitySeed: Uint8Array | null;
   readonly #trackedTxs: TrackedTx[];
 
   private constructor(
@@ -134,6 +148,7 @@ export class KeyStore implements LocalKeyStore, IdentityProvider {
     nextSignedPrekeyId: number,
     nextOneTimePrekeyId: number,
     root: account.MigoRoot | null,
+    rotatedIdentitySeed: Uint8Array | null,
     trackedTxs: TrackedTx[],
   ) {
     this.#identity = identity;
@@ -141,6 +156,7 @@ export class KeyStore implements LocalKeyStore, IdentityProvider {
     this.#nextSignedPrekeyId = nextSignedPrekeyId;
     this.#nextOneTimePrekeyId = nextOneTimePrekeyId;
     this.#root = root;
+    this.#rotatedIdentitySeed = rotatedIdentitySeed;
     this.#trackedTxs = trackedTxs;
   }
 
@@ -152,7 +168,7 @@ export class KeyStore implements LocalKeyStore, IdentityProvider {
   static create(oneTimePrekeyCount: number = DEFAULT_ONE_TIME_PREKEYS): KeyStore {
     const identity = IdentitySecret.generate();
     const signedPrekey = buildSignedPrekey(identity, 1);
-    const store = new KeyStore(identity, signedPrekey, 2, 1, null, []);
+    const store = new KeyStore(identity, signedPrekey, 2, 1, null, null, []);
     store.replenishOneTimePrekeys(oneTimePrekeyCount);
     return store;
   }
@@ -170,7 +186,7 @@ export class KeyStore implements LocalKeyStore, IdentityProvider {
     const seeds = account.foundingDeviceE2eeSeeds(root);
     const identity = IdentitySecret.fromSeeds(seeds.signing, seeds.exchange);
     const signedPrekey = buildSignedPrekey(identity, 1);
-    const store = new KeyStore(identity, signedPrekey, 2, 1, root, []);
+    const store = new KeyStore(identity, signedPrekey, 2, 1, root, null, []);
     store.replenishOneTimePrekeys(oneTimePrekeyCount);
     return store;
   }
@@ -181,7 +197,8 @@ export class KeyStore implements LocalKeyStore, IdentityProvider {
    * Key pairs are reconstructed from their seeds, and the signed prekey's signature is recomputed
    * over the restored pair, so a snapshot round-trips to a byte-identical published bundle. The
    * root and the tracked transactions ride along when the snapshot carries them, which is only on
-   * the device that founded the account.
+   * the device that founded the account; the rotated identity seed rides along when the snapshot
+   * carries it, which is only on a device that has rotated the account's signing key.
    */
   static restore(snapshot: KeyStoreSnapshot): KeyStore {
     const identity = IdentitySecret.fromSeeds(
@@ -201,6 +218,9 @@ export class KeyStore implements LocalKeyStore, IdentityProvider {
       snapshot.nextSignedPrekeyId,
       snapshot.nextOneTimePrekeyId,
       root,
+      snapshot.rotatedIdentitySeed !== undefined
+        ? account.IdentityKey.fromSeed(snapshot.rotatedIdentitySeed).exposeSeed()
+        : null,
       snapshot.trackedTxs !== undefined ? [...snapshot.trackedTxs] : [],
     );
     for (const entry of snapshot.oneTimePrekeys) {
@@ -216,6 +236,54 @@ export class KeyStore implements LocalKeyStore, IdentityProvider {
    */
   root(): account.MigoRoot | null {
     return this.#root;
+  }
+
+  /**
+   * The account's ML-DSA identity key: the rotated successor's when this store holds one, else the
+   * root's derivation. `null` on a device that holds neither.
+   *
+   * This is the one accessor every account-level ceremony should sign with — the idempotent publish
+   * at sign-in, an identity login, the next rotation — because the server verifies against the
+   * *active* key and the root's derivation stops being it the moment a rotation retires it. (The
+   * E2EE identity behind conversations and safety numbers is separate material this accessor never
+   * touches; see {@link identity}.)
+   */
+  accountIdentityKey(): account.IdentityKey | null {
+    if (this.#rotatedIdentitySeed !== null) {
+      return account.IdentityKey.fromSeed(this.#rotatedIdentitySeed);
+    }
+    return this.#root !== null ? account.IdentityKey.fromRoot(this.#root) : null;
+  }
+
+  /**
+   * The rotated identity seed this store holds, or `null` before any rotation. The seed itself
+   * rather than a key, so a caller can persist or compare it; the copy means a caller clearing its
+   * reference cannot reach the store's.
+   */
+  rotatedIdentitySeed(): Uint8Array | null {
+    return this.#rotatedIdentitySeed === null ? null : this.#rotatedIdentitySeed.slice();
+  }
+
+  /**
+   * Installs a rotated identity key as the account's active one, from its key.
+   *
+   * From the moment this runs, {@link accountIdentityKey} hands out the successor and no longer the
+   * root's derivation — which is the property a rotation's pre-commit relies on: persisting the
+   * snapshot after this call seals the successor before the server is ever asked to accept it.
+   * Passing the key rather than the seed gives the length check for free.
+   */
+  installRotatedIdentity(key: account.IdentityKey): void {
+    this.#rotatedIdentitySeed = key.exposeSeed();
+  }
+
+  /**
+   * Removes the rotated identity seed, restoring the root's derivation as the active key.
+   *
+   * The rollback half of a refused rotation: a ceremony the server answered with a refusal changed
+   * nothing server-side, so this store must go on answering with the key the server still knows.
+   */
+  clearRotatedIdentity(): void {
+    this.#rotatedIdentitySeed = null;
   }
 
   /**
@@ -328,10 +396,13 @@ export class KeyStore implements LocalKeyStore, IdentityProvider {
       oneTimePrekeys,
       nextSignedPrekeyId: this.#nextSignedPrekeyId,
       nextOneTimePrekeyId: this.#nextOneTimePrekeyId,
-      // The root is present only on a device that holds it, and the tx list only when it has
-      // entries: a field that exists to say "nothing here" costs every reader a skip for no
-      // information.
+      // The root is present only on a device that holds it, the rotated identity seed only on a
+      // device that has rotated, and the tx list only when it has entries: a field that exists to
+      // say "nothing here" costs every reader a skip for no information.
       ...(this.#root !== null ? { root: this.#root.asBytes() } : {}),
+      ...(this.#rotatedIdentitySeed !== null
+        ? { rotatedIdentitySeed: this.#rotatedIdentitySeed.slice() }
+        : {}),
       ...(this.#trackedTxs.length > 0 ? { trackedTxs: [...this.#trackedTxs] } : {}),
     };
   }
@@ -347,6 +418,25 @@ function buildSignedPrekey(identity: IdentitySecret, keyId: number): SignedPreke
 export interface DeviceBundle {
   deviceId: Id;
   bundle: PrekeyBundle;
+}
+
+/**
+ * One peer device's published E2EE identity, as a conversation's verification surface reads it.
+ *
+ * An identity belongs to a *device*, not an account — a peer signed in on a phone and a laptop
+ * publishes two — so any report built from these is one per device, and a *change* is per device
+ * too: it says this device's fingerprint differs from the last one the conversation saw, which is
+ * the moment brief section 164 says must not pass silently.
+ *
+ * Identities here are *observations*, not attestations: the server chooses what to serve, and the
+ * verification a safety number offers is only worth the out-of-band comparison behind it. What it
+ * does give is stability — the same two identities always derive the same string.
+ */
+export interface PeerIdentity {
+  /** The peer device the identity belongs to. */
+  deviceId: Id;
+  /** The device's E2EE identity public key, whose fingerprint a safety number derives from. */
+  identity: IdentityPublic;
 }
 
 /**

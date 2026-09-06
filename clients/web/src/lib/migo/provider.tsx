@@ -22,7 +22,14 @@
 import { createContext, useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { BootstrapClient, KeyStore, MigoClient, PresenceState, account } from '@migo/sdk';
+import {
+  BootstrapClient,
+  KeyStore,
+  MigoClient,
+  PresenceState,
+  RemoteError,
+  account,
+} from '@migo/sdk';
 import type {
   CaptchaProof,
   ConnectionState,
@@ -246,17 +253,23 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
    * idempotent and the next resume tries again. Only a device that holds the root enrols at all;
    * every additional device signs in with a fresh identity and no root, and the address is a pure
    * function of the root, so "which wallets exist" is server state, not a matter of opinion.
+   *
+   * The identity key published is the *active* one — the rotated successor after this store has
+   * one, the root's derivation until then — because re-publishing the root's derivation after a
+   * rotation is exactly the conflict the server answers with "rotate instead", and the quiet
+   * reconcile this call exists for only holds for the key that is active.
    */
   const enrolAccountMaterial = useCallback(
     async (created: MigoClient, grant: Grant, server: ServerEndpoint): Promise<void> => {
       const root = created.keyStore.root();
-      if (root === null) {
+      const identity = created.keyStore.accountIdentityKey();
+      if (root === null || identity === null) {
         return;
       }
       try {
         const rest = new BootstrapClient(server);
         await rest.publishIdentityKey(grant.accessToken, {
-          identityPublicKey: account.IdentityKey.fromRoot(root).publicKey(),
+          identityPublicKey: identity.publicKey(),
         });
         const known = new Set(
           (await rest.wallets(grant.accessToken)).map((wallet) => wallet.address),
@@ -377,7 +390,6 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
         }
         const accountId = fileAccountId as Id;
         const bootstrap = new BootstrapClient(server);
-        const identity = account.IdentityKey.fromRoot(root);
 
         // Tier one: the device record. A browser that signed in from a file before answers the
         // login ceremony as the same device — the challenge is bound to it and to the username,
@@ -385,7 +397,20 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
         // device the server no longer knows (revoked, or the record is stale) falls through to
         // tier two, which is not a difference the user needs to be told about.
         const record = await loadDeviceRecord(accountId);
+        // The account's identity key this browser answers with: the rotated successor when this
+        // browser rotated (the record's copy is the half of the successor that survives a
+        // sign-out), the root's derivation until then. The file itself can only ever reproduce
+        // the root's derivation — the successor is fresh randomness — so a browser that rotated
+        // and then signed out would sign with the retired key and be refused without this.
+        const activeSeed = record?.rotatedIdentitySeed;
+        const identity =
+          activeSeed !== undefined
+            ? account.IdentityKey.fromSeed(activeSeed)
+            : account.IdentityKey.fromRoot(root);
         let grant: Grant | null = null;
+        // The successor seed this session adopts, which is the record's when the record's key
+        // answered for the account, and nothing when the root's derivation had to.
+        let sessionSeed = activeSeed;
         if (record !== undefined) {
           try {
             const challenge = await bootstrap.identityLoginChallenge({
@@ -404,8 +429,12 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
           }
         }
 
-        // Tier two: add-device. The file's root signs the challenge and vouches for a fresh
-        // device credential, whose seed is then recorded here — the next sign-in takes tier one.
+        // Tier two: add-device. The account's active key signs the challenge and vouches for a
+        // fresh device credential, whose seed is then recorded here — the next sign-in takes tier
+        // one. When the record's rotated successor was never accepted by the server (a rotation
+        // whose answer was lost, retried never), its signature is refused where the root's
+        // derivation is still the key the server knows — so that refusal falls back to the root
+        // once, rather than locking a browser out of its own account file.
         let username = record?.username ?? '';
         if (grant === null) {
           const credential = account.DeviceCredential.generate();
@@ -416,26 +445,52 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
               displayName: deviceDisplayName(),
             },
           });
-          grant = await bootstrap.addDevice({
-            challengeId: challenge.challengeId,
-            identitySignature: identity.signLogin(challenge.payload),
-            devicePublicKey: credential.publicKey(),
-            deviceSignature: credential.signLogin(challenge.payload),
-          });
+          const answerAddDevice = (key: account.IdentityKey): Promise<Grant> =>
+            bootstrap.addDevice({
+              challengeId: challenge.challengeId,
+              identitySignature: key.signLogin(challenge.payload),
+              devicePublicKey: credential.publicKey(),
+              deviceSignature: credential.signLogin(challenge.payload),
+            });
+          try {
+            grant = await answerAddDevice(identity);
+          } catch (cause) {
+            if (
+              cause instanceof RemoteError &&
+              cause.symbol === 'INVALID_CREDENTIALS' &&
+              activeSeed !== undefined
+            ) {
+              grant = await answerAddDevice(account.IdentityKey.fromRoot(root));
+              sessionSeed = undefined;
+            } else {
+              throw cause;
+            }
+          }
+          // Whichever key the server accepted is the account's active one; the fresh record keeps
+          // the successor only when the successor is what answered for it.
           await saveDeviceRecord({
             accountId,
             deviceId: grant.deviceId,
             username,
             credentialSeed: credential.exposeSeed(),
+            ...(sessionSeed !== undefined ? { rotatedIdentitySeed: sessionSeed } : {}),
             savedAt: Date.now(),
           });
         }
 
         // The file's root reproduces the founding identity deterministically, so the session runs
-        // as the account's founding device — root present, E2EE history readable.
+        // as the account's founding device — root present, E2EE history readable. When this
+        // browser rotated the account key, the root's derivation is no longer the active one, so
+        // the successor is adopted into the store before the snapshot below seals it: a session
+        // that quietly dropped it would publish the retired key on every resume and sign the next
+        // rotation with it.
+        const keyStore = KeyStore.founding(root);
+        if (sessionSeed !== undefined) {
+          keyStore.installRotatedIdentity(account.IdentityKey.fromSeed(sessionSeed));
+        }
         const created = buildClient({
           server,
-          keyStore: KeyStore.founding(root),
+          keyStore,
           deviceId: grant.deviceId,
         });
         await created.resume(grant);

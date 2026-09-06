@@ -1,10 +1,11 @@
 'use client';
 
 /**
- * The "My Account" panel: the account's own identity, its recovery email, its passphrase, and the
- * `.migo` key file — the four surfaces that are about *this account* rather than this device.
+ * The "My Account" panel: the account's own identity, its recovery email, its passphrase, the
+ * `.migo` key file, and the identity key's rotation — the five surfaces that are about *this
+ * account* rather than this device.
  *
- * Three of the four are things a person changes rarely and carefully, so each lives behind its own
+ * Four of the five are things a person changes rarely and carefully, so each lives behind its own
  * deliberate control rather than an always-live field:
  *
  *   - **Identity** is read-only on purpose. The username is chosen once and can never change (it is
@@ -22,6 +23,13 @@
  *   - **Key file** is the only way onto a new device, because no server holds the account root
  *     (§182). The download is offered only on a device that actually holds the root; a device that
  *     does not says so and offers no button that could not work.
+ *   - **Identity key rotation** (§2402) replaces only the ML-DSA signing identity — the key the login
+ *     and add-device ceremonies verify against — and nothing else: the E2EE device identity, the
+ *     ratchets, the safety numbers peers see, and this session are separate material the ceremony
+ *     never touches. The confirmation states both halves honestly, the quiet half (nothing anyone
+ *     has verified needs verifying again) and the costly one (the new key exists only here, so a
+ *     backup made before the rotation is no longer enough on its own), because a rotation sold as a
+ *     privacy control would be lying about what it does.
  *
  * The presentational halves are exported as controlled components over plain data, so the rules
  * (the submit gates, the honest no-root state, the post-change key-file offer) are testable without
@@ -34,6 +42,7 @@ import type { ReactNode } from 'react';
 import { account } from '@migo/sdk';
 
 import { containerFileName, credentialProblem, downloadAccountFile } from '@/lib/account-file.js';
+import { rotateAccountIdentity } from '@/lib/migo/identity-rotation.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { saveSession } from '@/lib/storage/session-store.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
@@ -334,8 +343,100 @@ export function KeyFileFormView({
   );
 }
 
+/** The rotation section's one-sentence scope: what the identity key is, and is not. */
+export const ROTATE_EXPLANATION =
+  'The identity key signs this account in — it is not the key behind your conversations or the safety numbers your contacts see, which rotation does not touch.';
+
+/** What a device without the root is told, mirroring the key-file section's honest no-root state. */
+export const ROTATE_NO_ROOT =
+  "Only a device that holds the account root can rotate the account's identity key. Seal or restore a backup on this device first.";
+
+/** The confirmation's quiet half: what does not change, which is most of it. */
+export const ROTATE_QUIET_HALF =
+  "A new ML-DSA signing identity key is generated on this device and becomes the account's; the old one is retired on the server. Your sessions, conversations, encryption keys and safety numbers continue unchanged — nothing anyone has verified needs verifying again.";
+
+/** The confirmation's costly half: where the new key lives, and what that costs an old backup. */
+export const ROTATE_COSTLY_HALF =
+  'The new key lives only on this device. Every other device that holds the account root — and any backup made before now — still carries the old key: a restore from an old backup will be refused until a fresh one is sealed here.';
+
+/** The success notice, the desktop client's own sentence. */
+export const ROTATED_NOTICE =
+  'Identity key rotated; sessions, chats and safety numbers continue unchanged.';
+
+/** The fresh-backup advice a completed rotation owes, in the same breath as the notice. */
+export const ROTATED_BACKUP_ADVICE =
+  'Seal a fresh key file now: a .migo backup made before the rotation carries the retired key, and a restore from it will be refused.';
+
+/** How a rotation attempt ended, for the view that reports it. */
+export interface RotationResult {
+  kind: 'done' | 'unfinished';
+  message: string;
+}
+
 /**
- * The "My Account" panel: identity, email, passphrase, and the account key file.
+ * The rotation sheet's content: the confirmation, the in-flight state, and every way the attempt
+ * can end.
+ *
+ * The confirmation states both halves before the button is pressed — the quiet half and the costly
+ * one — because the pane says what the button *is* and the sheet says what it *does*, and nobody
+ * should reach the button without both. The `unfinished` end (the server's answer was lost, the new
+ * key is sealed here) is reported as its own state rather than an error, which is what it is: the
+ * next attempt settles it either way. The `done` end carries the fresh-backup advice in the same
+ * breath as the notice, because the one act a completed rotation asks for is sealing a backup that
+ * can actually vouch for the account.
+ */
+export function RotateIdentityView({
+  busy,
+  result,
+  error,
+  onConfirm,
+  onClose,
+}: {
+  busy: boolean;
+  result: RotationResult | null;
+  error: string | null;
+  onConfirm: () => void;
+  onClose: () => void;
+}): ReactNode {
+  if (result !== null) {
+    return (
+      <div className="rotate-result">
+        <p className="hint">{result.message}</p>
+        {result.kind === 'done' ? <p className="hint">{ROTATED_BACKUP_ADVICE}</p> : null}
+        <button type="button" className="btn btn-primary" onClick={onClose}>
+          Done
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="rotate-form">
+      <p className="hint">{ROTATE_QUIET_HALF}</p>
+      <p className="hint">{ROTATE_COSTLY_HALF}</p>
+      {error !== null ? <p className="form-error">{error}</p> : null}
+      <div className="form-actions">
+        <button type="button" className="btn btn-ghost" disabled={busy} onClick={onClose}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="btn btn-danger"
+          disabled={busy}
+          onClick={() => {
+            if (!busy) {
+              onConfirm();
+            }
+          }}
+        >
+          {busy ? <Spinner /> : 'Rotate identity key'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The "My Account" panel: identity, email, passphrase, the account key file, and the identity key.
  *
  * The panel owns every draft and every in-flight flag; the four exported views above are the
  * presentation, controlled entirely from here. The two flows that touch the key file — the
@@ -377,6 +478,41 @@ export function AccountPanel(): ReactNode {
   const [sealing, setSealing] = useState(false);
   const [keyFileError, setKeyFileError] = useState<string | null>(null);
   const [keyFileSaved, setKeyFileSaved] = useState(false);
+
+  // --- identity-key rotation sheet ---
+  const [rotateOpen, setRotateOpen] = useState(false);
+  const [rotating, setRotating] = useState(false);
+  const [rotateResult, setRotateResult] = useState<RotationResult | null>(null);
+  const [rotateError, setRotateError] = useState<string | null>(null);
+
+  /**
+   * Runs the rotation. The ordering — pre-commit, ceremony, heal, rollback — is
+   * `rotateAccountIdentity`'s; the panel's own duty is only to report each end honestly: the
+   * notice and its fresh-backup advice, the unfinished state's "rotate again to finish", or the
+   * refusal's sentence.
+   */
+  const rotateIdentity = useCallback((): void => {
+    if (!client || rotating || accountId === null) {
+      return;
+    }
+    setRotating(true);
+    setRotateError(null);
+    setRotateResult(null);
+    void (async (): Promise<void> => {
+      try {
+        const outcome = await rotateAccountIdentity(client, accountId);
+        setRotateResult(
+          outcome.state === 'done'
+            ? { kind: 'done', message: ROTATED_NOTICE }
+            : { kind: 'unfinished', message: outcome.message },
+        );
+      } catch (cause) {
+        setRotateError(cause instanceof Error ? cause.message : friendlyError(cause));
+      } finally {
+        setRotating(false);
+      }
+    })();
+  }, [client, accountId, rotating]);
 
   const saveEmail = useCallback((): void => {
     if (!client || emailBusy) {
@@ -570,6 +706,18 @@ export function AccountPanel(): ReactNode {
         )}
       </section>
 
+      <section className="panel-section" aria-label="Identity key">
+        <h2 className="panel-heading">Identity key</h2>
+        <p className="hint">{ROTATE_EXPLANATION}</p>
+        {hasRoot ? (
+          <button type="button" className="btn btn-danger" onClick={() => setRotateOpen(true)}>
+            Rotate identity key
+          </button>
+        ) : (
+          <p className="hint">{ROTATE_NO_ROOT}</p>
+        )}
+      </section>
+
       {passphraseOpen ? (
         <BottomSheet
           title="Change passphrase"
@@ -621,6 +769,29 @@ export function AccountPanel(): ReactNode {
             saved={keyFileSaved}
             onChange={onKeyFileField}
             onSubmit={downloadKeyFile}
+          />
+        </BottomSheet>
+      ) : null}
+
+      {rotateOpen ? (
+        <BottomSheet
+          title="Rotate identity key"
+          onClose={() => {
+            setRotateOpen(false);
+            setRotateResult(null);
+            setRotateError(null);
+          }}
+        >
+          <RotateIdentityView
+            busy={rotating}
+            result={rotateResult}
+            error={rotateError}
+            onConfirm={rotateIdentity}
+            onClose={() => {
+              setRotateOpen(false);
+              setRotateResult(null);
+              setRotateError(null);
+            }}
           />
         </BottomSheet>
       ) : null}

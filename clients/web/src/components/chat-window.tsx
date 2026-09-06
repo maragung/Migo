@@ -4,7 +4,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import { ConversationKind, ContentType, EncryptionMode, MemberChange } from '@migo/sdk';
-import type { ConversationSummary, GiftListing, Id } from '@migo/sdk';
+import type {
+  ConversationSummary,
+  GiftListing,
+  Id,
+  MediaRefContent,
+  VoiceNoteRefContent,
+} from '@migo/sdk';
 
 import { messagePreview } from '@/lib/message-preview.js';
 import { useCall } from '@/lib/migo/call-manager.js';
@@ -13,11 +19,12 @@ import { useGameEvents } from '@/lib/migo/use-game-events.js';
 import { useRoomNotices } from '@/lib/migo/use-room-notices.js';
 import { useConversations } from '@/lib/migo/conversations-provider.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
+import { useSafety } from '@/lib/migo/safety.js';
 import { useSectionNav } from '@/lib/migo/section-nav.js';
 import { useGroupNotices } from '@/lib/migo/use-group-notices.js';
 import { useRooms, capacityLabel } from '@/lib/migo/rooms-provider.js';
 import { useMuted, muteFilter } from '@/lib/migo/muted-provider.js';
-import { resolveMediaUrl } from '@/lib/migo/media.js';
+import { resolveMediaObject } from '@/lib/migo/media.js';
 import { presenceLabel, usePresence } from '@/lib/migo/use-presence.js';
 import { useProfiles } from '@/lib/migo/use-profiles.js';
 import { closeConversation } from '@/lib/migo/use-open-conversation.js';
@@ -25,6 +32,7 @@ import { useOwnedPacks } from '@/lib/migo/use-owned-packs.js';
 
 import { Avatar } from './avatar.js';
 import { CallButtons } from './call-buttons.js';
+import { DirectInfoPanel, SafetyWarningBannerView } from './direct-info-panel.js';
 import { EmoticonPicker } from './emoticon-picker.js';
 import { GameEventList } from './game-events.js';
 import { GameLauncher } from './game-launcher.js';
@@ -89,6 +97,15 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   const navigate = useSectionNav();
   const { items, markRead, forgetConversation } = useConversations();
   const rooms = useRooms();
+
+  const summary = items.find((item) => item.conversationId === conversationId);
+  // Whether this thread's media is sealed before upload. Every direct conversation and group is
+  // end-to-end by construction; a public or managed room is `Transport`, and its content policy
+  // is the server's, so attachments there keep the legacy plaintext path (see `lib/migo/media.js`).
+  // A summary not yet loaded is treated as end-to-end — the honest default for the conversation
+  // kinds that carry no encryption field, and rooms always arrive with theirs.
+  const endToEnd = summary === undefined || summary.encryption === EncryptionMode.EndToEnd;
+
   const {
     messages,
     loading,
@@ -108,7 +125,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
     loadingEarlier,
     loadEarlier,
     sendVoiceNote,
-  } = useChat(conversationId);
+  } = useChat(conversationId, { endToEnd });
   const game = useGameEvents(conversationId);
   const { startCall } = useCall();
   const { muted } = useMuted();
@@ -120,6 +137,11 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   // The group's details — roster, invite, mute, kick, vote, rename, leave — behind the same ⓘ the
   // room uses, so a multi-party conversation always has one obvious way "into" its membership.
   const [groupInfoOpen, setGroupInfoOpen] = useState(false);
+  // The 1:1's details — the safety numbers — behind the same ⓘ again. The read that observes the
+  // peer's identities runs on conversation open (not panel open), because a changed identity key
+  // must be visible whether or not the person ever looks at the numbers; the panel is where the
+  // change is reviewed and acknowledged.
+  const [safetyOpen, setSafetyOpen] = useState(false);
   // The in-thread search: a filter over the transcript this session already holds. The spec's
   // room header carries a search control; a client-side filter over loaded messages is the
   // honest version of it, and it labels itself when it is only searching what is loaded.
@@ -139,25 +161,25 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   const emoticonInputRef = useRef<{ insert: (glyph: string) => void } | null>(null);
 
   /**
-   * The media resolver the message list embeds images through. A failure resolves to `null` rather
-   * than rejecting, so one unresolvable object degrades to its placeholder instead of taking the
-   * render path down; the session-wide cache behind it lives in `lib/migo/media.js`.
+   * The media resolver the message list embeds images and plays voice notes through: download,
+   * decrypt with the message's key slots (or pass legacy plaintext through), object URL. A failure
+   * resolves to `null` rather than rejecting, so one unopenable object degrades to its placeholder
+   * instead of taking the render path down; the session-wide cache behind it lives in
+   * `lib/migo/media.js`.
    */
-  const mediaUrlFor = useCallback(
-    async (mediaId: Id): Promise<string | null> => {
+  const mediaObjectFor = useCallback(
+    async (content: MediaRefContent | VoiceNoteRefContent): Promise<string | null> => {
       if (!client) {
         return null;
       }
       try {
-        return await resolveMediaUrl(client, mediaId);
+        return await resolveMediaObject(client, content);
       } catch {
         return null;
       }
     },
     [client],
   );
-
-  const summary = items.find((item) => item.conversationId === conversationId);
   const isDirect = summary?.kind === ConversationKind.Direct;
   const isRoom = summary?.kind === ConversationKind.Room;
   const isGroup = summary?.kind === ConversationKind.Group;
@@ -177,6 +199,10 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
     [isRoom, messages, muted],
   );
   const peerId = callPeerFor(summary, accountId);
+  // The pair safety numbers for this 1:1, one per device the peer publishes: read on open (the
+  // observation point for the key-change warning), cached in the SDK for this client's life so the
+  // panel costs no further prekeys. Idle for a non-direct or a note to self.
+  const safety = useSafety(conversationId, peerId);
   // The room behind this conversation, when the shell knows one (from this session's joins, or
   // the account's remembered rooms): the header's live counters and topic come from it, because
   // the conversation summary carries neither.
@@ -458,11 +484,31 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
             ⓘ
           </button>
         ) : null}
+        {isDirect && peerId !== null ? (
+          <button
+            type="button"
+            className={`icon-btn ${safetyOpen ? 'active' : ''}`}
+            onClick={() => setSafetyOpen((open) => !open)}
+            aria-label={safetyOpen ? 'Hide safety numbers' : 'Show safety numbers'}
+            aria-expanded={safetyOpen}
+            title="Safety numbers — verify this conversation"
+          >
+            ⓘ
+          </button>
+        ) : null}
         {/* A 1:1 is the one conversation this build can call: the wire's invite names a single
             callee, and a group call needs the SFU this build does not have. */}
         <CallButtons conversationId={conversationId} peerId={peerId} onStartCall={startCall} />
         {supportsGames ? <GameLauncher onStart={game.startGame} /> : null}
       </header>
+
+      {safety.changed ? (
+        <SafetyWarningBannerView
+          onReview={() => {
+            setSafetyOpen(true);
+          }}
+        />
+      ) : null}
 
       {searchOpen ? (
         <div className="thread-search">
@@ -485,6 +531,8 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
       {isGroup && groupInfoOpen ? (
         <GroupInfoPanel conversationId={conversationId} title={summary?.title ?? 'Group'} />
       ) : null}
+
+      {isDirect && safetyOpen ? <DirectInfoPanel safety={safety} /> : null}
 
       {loading && messages.length === 0 ? (
         <div className="center-fill">
@@ -524,7 +572,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
           hasEarlier={hasEarlier}
           loadingEarlier={loadingEarlier}
           onLoadEarlier={loadEarlier}
-          mediaUrlFor={mediaUrlFor}
+          mediaObjectFor={mediaObjectFor}
           interleaved={noticeRows}
           liveSlot={
             <>

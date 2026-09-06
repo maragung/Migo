@@ -66,6 +66,32 @@ pub struct ChatState {
     /// places the shell does not control (a room row, a search hit), so this is the one honest
     /// signal that *some* conversation asked to become a window during the frame.
     pub open_seq: u64,
+    /// The observed E2EE identity of every peer device the worker has reported, keyed by
+    /// account — §47/§164's verification surface, filed as the key-bundle fetches answer.
+    ///
+    /// One row per *device*: the identity key a bundle carries belongs to a device, so a peer
+    /// with a phone and a laptop shows two safety numbers, and both have to be verified with the
+    /// person. Each number is the *pair* number — this device's and their device's keys in one
+    /// value — so the same string is on the peer's own screen for this device, whatever client
+    /// they hold. Empty until a bundle fetch answers; the private thread draws its block only
+    /// then, because a placeholder that promised "safe" before any key was seen would be the
+    /// opposite of the block's purpose.
+    pub peers: HashMap<Id, Vec<PeerIdentity>>,
+}
+
+/// One peer device's observed E2EE identity, as the worker reported it from a bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerIdentity {
+    /// The device the identity key belongs to.
+    pub device_id: Id,
+    /// The pair safety number: this device's and that device's identity keys in one number,
+    /// already grouped for reading aloud. The same string the peer's screen shows for this
+    /// device, which is what makes reading it to each other a meaningful check.
+    pub safety_number: String,
+    /// Whether the identity key differed from the last one this vault sealed for the device
+    /// when it was observed. Sticky for the session once set: the sentence it draws — verify
+    /// before trusting — stays true until the person has actually done it.
+    pub changed: bool,
 }
 
 /// One room membership line in the thread's tail.
@@ -177,6 +203,41 @@ impl ChatState {
             .and_then(|thread| thread.iter().map(|m| m.seq).max())
             .unwrap_or(0)
     }
+
+    /// Files one observed peer device: an update for a device already known, a new row
+    /// otherwise, ordered by device id so the verification block reads the same from one frame
+    /// to the next.
+    ///
+    /// The change flag is sticky (`|=`), never cleared by a re-observation: the worker reports
+    /// a change once, when the fingerprint first differs, and a window closed and reopened
+    /// mid-change would otherwise drop the warning while the old number was still on somebody's
+    /// screen.
+    pub fn note_peer_identity(
+        &mut self,
+        user_id: Id,
+        device_id: Id,
+        safety_number: String,
+        changed: bool,
+    ) {
+        let devices = self.peers.entry(user_id).or_default();
+        match devices
+            .iter_mut()
+            .find(|device| device.device_id == device_id)
+        {
+            Some(known) => {
+                known.safety_number = safety_number;
+                known.changed |= changed;
+            }
+            None => {
+                devices.push(PeerIdentity {
+                    device_id,
+                    safety_number,
+                    changed,
+                });
+                devices.sort_unstable_by_key(|device| device.device_id);
+            }
+        }
+    }
 }
 
 /// Orders delivery states so a later one never overwrites an earlier one.
@@ -238,6 +299,25 @@ pub fn open(context: &mut Context<'_>, state: &mut ChatState, conversation_id: I
     {
         conversation.unread = 0;
     }
+
+    // A private conversation's window asks for the peer's key bundles the moment it opens, so
+    // their safety numbers are on screen before anything is sent — a verification surface that
+    // arrives after the conversation has started is a surface nobody looks at. The bundle
+    // response is also where a changed identity key is noticed, and that warning belongs to the
+    // window the conversation opens with, not to the first send.
+    if let (Some(me), Some(conversation)) = (
+        context.account.map(|account| account.account_id),
+        state
+            .conversations
+            .iter()
+            .find(|c| c.conversation_id == conversation_id),
+    ) {
+        if conversation.encrypted && conversation.members.len() == 2 {
+            if let Some(peer) = conversation.members.iter().find(|id| **id != me) {
+                context.issue(Command::PeerKeys { user_id: *peer });
+            }
+        }
+    }
 }
 
 /// The open conversation: header, messages, composer — with the composer pinned.
@@ -290,6 +370,7 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
         .stick_to_bottom(true)
         .show(ui, |ui| {
             ui.add_space(space::MD);
+            safety_block(ui, context, state, conversation_id);
             let empty = Vec::new();
             let thread = state.messages.get(&conversation_id).unwrap_or(&empty);
             if thread.is_empty() {
@@ -345,6 +426,92 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
             room_notices(ui, context, state, conversation_id);
             ui.add_space(space::SM);
         });
+}
+
+/// The verification block at the head of a private conversation's thread: the peer's safety
+/// number per device they hold, and — when a device's identity key differs from the last one
+/// this vault sealed for it — the warning that says so, above the number it is about.
+///
+/// §47/§164's own surface. The numbers are the peer's, one row per *device*, because the
+/// identity key a bundle carries belongs to a device: a peer with a phone and a laptop shows
+/// two, and both have to be verified with the person. Yours is in Settings, under Account, and
+/// the tiny line says where to find it — the numbers this block draws are theirs, not yours.
+///
+/// Drawn only for an encrypted conversation of exactly two members — by member count, the same
+/// rule the header's monogram follows, because a group of two reads like a direct chat and
+/// should verify like one — and only once a bundle fetch has answered. Before that there is
+/// nothing honest to show, and a placeholder that promised safety before any key was seen would
+/// be the opposite of the block's purpose.
+fn safety_block(ui: &mut Ui, context: &Context<'_>, state: &ChatState, conversation_id: Id) {
+    let colors = palette(context.theme);
+    let Some(me) = context.account.map(|account| account.account_id) else {
+        return;
+    };
+    let Some(conversation) = state
+        .conversations
+        .iter()
+        .find(|c| c.conversation_id == conversation_id)
+    else {
+        return;
+    };
+    if !conversation.encrypted || conversation.members.len() != 2 {
+        return;
+    }
+    let Some(peer) = conversation.members.iter().find(|id| **id != me) else {
+        return;
+    };
+    let Some(devices) = state.peers.get(peer) else {
+        return;
+    };
+    if devices.is_empty() {
+        return;
+    }
+    let who = state
+        .names
+        .get(peer)
+        .cloned()
+        .unwrap_or_else(|| model::short_id(*peer));
+
+    for device in devices {
+        if device.changed {
+            ui.label(
+                RichText::new(format!(
+                    "\u{26A0} {who}'s identity key changed since it was last seen. Verify the \
+                     safety number with them, in a call or in person, before trusting this \
+                     conversation."
+                ))
+                .font(egui::FontId::proportional(font::SMALL))
+                .color(colors.danger),
+            );
+            ui.add_space(space::XS);
+        }
+        ui.label(
+            RichText::new(format!(
+                "Safety number \u{00B7} their device {}",
+                model::short_id(device.device_id)
+            ))
+            .text_style(crate::theme::named(crate::theme::text_style::OVERLINE))
+            .color(colors.text_muted),
+        );
+        ui.add_space(space::XS);
+        ui.label(
+            RichText::new(&device.safety_number)
+                .font(egui::FontId::monospace(font::SMALL))
+                .color(colors.text),
+        );
+        ui.add_space(space::SM);
+    }
+    ui.label(
+        RichText::new(
+            "One number per device they hold. Each is this conversation between this device and \
+             theirs — the same number is on their screen for this device, whatever client they \
+             hold. Read them to each other, in a call or in person. If they differ, stop and do \
+             not trust the conversation.",
+        )
+        .font(egui::FontId::proportional(font::TINY))
+        .color(colors.text_muted),
+    );
+    ui.add_space(space::MD);
 }
 
 /// The room membership tail: "Ana joined the room", "Bo disconnected", newest last.
@@ -731,4 +898,43 @@ fn human_bytes(bytes: u64) -> String {
 fn human_duration(ms: u32) -> String {
     let total = ms / 1000;
     format!("{}:{:02}", total / 60, total % 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The verification block's own filing rules in one test: a peer's devices file by device,
+    /// the rows stay ordered by device id so the block never reorders itself while someone is
+    /// reading it, a re-observation updates the number, and the key-change warning is sticky —
+    /// the worker reports a change once, and a window that reopened mid-change must not drop
+    /// the sentence that says verify.
+    #[test]
+    fn peer_identities_file_by_device_and_keep_their_warnings_sticky() {
+        let mut state = ChatState::default();
+        let peer = Id::from_bytes([7; 16]);
+        let phone = Id::from_bytes([1; 16]);
+        let laptop = Id::from_bytes([2; 16]);
+
+        state.note_peer_identity(peer, laptop, "55555".to_owned(), false);
+        state.note_peer_identity(peer, phone, "44444".to_owned(), false);
+        let devices = state.peers.get(&peer).expect("the peer is filed");
+        assert_eq!(
+            devices.iter().map(|d| d.device_id).collect::<Vec<_>>(),
+            vec![phone, laptop]
+        );
+
+        state.note_peer_identity(peer, phone, "99999".to_owned(), true);
+        // The same new number again, reported unchanged — the warning stays anyway.
+        state.note_peer_identity(peer, phone, "99999".to_owned(), false);
+        let phone_row = state
+            .peers
+            .get(&peer)
+            .expect("the peer is filed")
+            .iter()
+            .find(|d| d.device_id == phone)
+            .expect("the device is filed");
+        assert_eq!(phone_row.safety_number, "99999");
+        assert!(phone_row.changed);
+    }
 }

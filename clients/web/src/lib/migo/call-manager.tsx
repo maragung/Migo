@@ -40,12 +40,19 @@
  * missed — because a screen that keeps ringing a dead call teaches its user to distrust every
  * ring after it.
  *
- * # The placeholder seal
+ * # The call key
  *
- * Every SDP and ICE blob this manager sends is wrapped by {@link sealCallSignal} — placeholder
- * key material behind a real envelope shape, the same posture image attachments use. The server
- * relays bytes it cannot read either way; swapping in real per-device sealing touches the seal
- * module alone.
+ * Every SDP and ICE blob this manager sends is sealed by {@link sealCallSignal} under a per-call
+ * key, and the server relays bytes it cannot read (§165). The key is minted here, by the caller,
+ * and reaches the conversation inside the E2EE message layer — a control event sent through the
+ * messaging domain *before* the invite, so every device that may answer holds the key by the time
+ * the ring arrives. The callee's side of that contract is the accept path's wait: a key that has
+ * not landed yet (the frames crossed, briefly) is waited for, not failed over.
+ *
+ * The key lives in a ref map for the session's calls and is forgotten when its call ends. Media
+ * content is never logged here — not the SDP, not the candidates, not the streams; failures are
+ * recorded as facts ("could not start the call"), not payloads. The key joins that rule: it is
+ * handed to the seal and shown nowhere else.
  *
  * Media content is never logged here — not the SDP, not the candidates, not the streams; failures
  * are recorded as facts ("could not start the call"), not payloads.
@@ -54,7 +61,14 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { CallDeclineReason, CallEndReason, CallMediaKind, CallState, newId } from '@migo/sdk';
+import {
+  CallDeclineReason,
+  CallEndReason,
+  CallMediaKind,
+  CallState,
+  ContentType,
+  newId,
+} from '@migo/sdk';
 import type {
   ActiveCall,
   CallInviteEvent,
@@ -66,16 +80,20 @@ import type {
 } from '@migo/sdk';
 
 import {
+  CALL_KEY_EVENT,
   INVITE_RINGING,
   answersRingingCall,
   callEndReasonOf,
   callMediaKindOf,
   callStateOf,
+  decodeCallKeyEvent,
   decodeIceBatch,
   decodeSdpDescription,
+  encodeCallKeyEvent,
   endsRingingCall,
   encodeIceBatch,
   encodeSdpDescription,
+  generateCallKey,
   incomingInviteDisposition,
   inviteEndReason,
   openCallSignal,
@@ -88,6 +106,15 @@ import { useMigo } from './use-migo.js';
 const ICE_LINGER_MS = 250;
 /** How long a disconnected transport gets before the call ends as a network failure. */
 const RECONNECT_WINDOW_MS = 30_000;
+/**
+ * How long an accept waits for the call's key before giving up on answering.
+ *
+ * The caller sends the key message and *then* the invite, so in the ordinary case the key is
+ * already here when the user clicks accept — the wait is for the frames crossing on a slow
+ * connection, not for the common path. Five seconds is far under the invite's own expiry and far
+ * over any honest reordering.
+ */
+const CALL_KEY_WAIT_MS = 5_000;
 /**
  * What the missed-call note says when an inbound ring retires because the call ended before it
  * was answered. Exported so the overlay can label its card with the same fact the manager states.
@@ -256,6 +283,14 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
   const endSentRef = useRef(false);
   /** When this side began setting the call up, for the one-time setupMs report. */
   const setupStartRef = useRef<number | null>(null);
+  /**
+   * The sealing key of each call this session has seen, keyed by call id. Written by the caller
+   * (which minted it) and by the message listener (which adopts the caller's key event); read by
+   * every seal and open. An entry leaves with its call.
+   */
+  const callKeysRef = useRef(new Map<Id, Uint8Array>());
+  /** Accepts waiting for a call's key, resolved the moment the message listener adopts one. */
+  const callKeyWaitersRef = useRef(new Map<Id, Array<(key: Uint8Array) => void>>());
 
   // --- tracked-state writers: ref first (handlers read it synchronously), then React state ---
 
@@ -301,6 +336,64 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     (): boolean => activeRef.current !== null && activeRef.current.state !== CallState.Ended,
     [],
   );
+
+  // --- the call key: adopt, forget, wait ---
+
+  /**
+   * Adopts a call's sealing key — minted here for a call we place, or arrived through the E2EE
+   * message layer for a call we are rung for — and wakes any accept waiting on it.
+   */
+  const adoptCallKey = useCallback((callId: Id, key: Uint8Array): void => {
+    callKeysRef.current.set(callId, key);
+    const waiters = callKeyWaitersRef.current.get(callId);
+    if (waiters === undefined) {
+      return;
+    }
+    callKeyWaitersRef.current.delete(callId);
+    for (const waiter of waiters) {
+      waiter(key);
+    }
+  }, []);
+
+  /**
+   * Waits for a call's key to arrive, resolving with it — or with `null` once `timeoutMs` has
+   * passed without one. The caller sends the key message before the invite, so a wait that runs
+   * its full course means the frames crossed badly; the accept path treats `null` as "cannot
+   * answer", exactly like any other unopenable call.
+   */
+  const waitForCallKey = useCallback(
+    (callId: Id, timeoutMs: number): Promise<Uint8Array | null> => {
+      const present = callKeysRef.current.get(callId);
+      if (present !== undefined) {
+        return Promise.resolve(present);
+      }
+      return new Promise((resolve) => {
+        const waiters = callKeyWaitersRef.current.get(callId) ?? [];
+        callKeyWaitersRef.current.set(callId, waiters);
+        const finish = (key: Uint8Array | null): void => {
+          clearTimeout(timer);
+          const remaining = callKeyWaitersRef.current.get(callId);
+          if (remaining !== undefined) {
+            remaining.splice(remaining.indexOf(waiter), 1);
+            if (remaining.length === 0) {
+              callKeyWaitersRef.current.delete(callId);
+            }
+          }
+          resolve(key);
+        };
+        const waiter = (key: Uint8Array): void => finish(key);
+        const timer = setTimeout(() => finish(null), timeoutMs);
+        waiters.push(waiter);
+      });
+    },
+    [],
+  );
+
+  /** Forgets a call's key. Called when the call ends — the key's only job was that call. */
+  const forgetCallKey = useCallback((callId: Id): void => {
+    callKeysRef.current.delete(callId);
+    callKeyWaitersRef.current.delete(callId);
+  }, []);
 
   // --- teardown ---
 
@@ -368,6 +461,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
         clientRef.current?.calls.end(callId, CallEndReason.Network).catch(() => {});
       }
       teardownMedia();
+      forgetCallKey(call.callId);
       const ended: ActiveCall = { ...call, state: CallState.Ended };
       if (reason !== undefined) {
         ended.endReason = reason;
@@ -375,7 +469,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
       setActive(ended);
       setEndedAt(Date.now());
     },
-    [setActive, teardownMedia],
+    [forgetCallKey, setActive, teardownMedia],
   );
 
   /**
@@ -426,17 +520,18 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
 
   // --- ICE, both directions ---
 
-  /** Sends the gathered candidate batch if it can be addressed; otherwise it stays queued. */
+  /** Sends the gathered candidate batch if it can be addressed and sealed; otherwise it stays queued. */
   const flushIce = useCallback((): void => {
     const call = activeRef.current;
     const target = peerDeviceRef.current;
     const batch = iceBatchRef.current;
-    if (call === null || target === null || batch.length === 0) {
+    const key = call === null ? undefined : callKeysRef.current.get(call.callId);
+    if (call === null || target === null || key === undefined || batch.length === 0) {
       return;
     }
     iceBatchRef.current = [];
     clientRef.current?.calls
-      .sendIce(call.callId, target, sealCallSignal(encodeIceBatch(batch)))
+      .sendIce(call.callId, target, sealCallSignal(encodeIceBatch(batch), key, call.callId))
       .catch(() => {
         // A lost batch is recovered by the next one (or the reconnect path); never fatal.
       });
@@ -590,6 +685,16 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
         // the call it belongs to: relays and credentials are for this call, and the peer
         // connection is built over them before it produces the offer the invite will carry.
         const callId = newId();
+        // The call's sealing key is minted alongside it and travels ahead of the invite, inside
+        // the E2EE message layer, so every device that may answer holds it before the ring. See
+        // the module doc: this send is awaited *before* the invite on purpose.
+        const callKey = generateCallKey();
+        await current.messaging.send(conversationId, {
+          type: ContentType.ControlEvent,
+          event: CALL_KEY_EVENT,
+          data: encodeCallKeyEvent(callId, callKey),
+        });
+        adoptCallKey(callId, callKey);
         const stream = await acquireMedia(mediaKind);
         localStreamRef.current = stream;
         setLocalStream(stream);
@@ -604,7 +709,11 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
           conversationId,
           calleeId,
           mediaKind,
-          sealCallSignal(encodeSdpDescription({ type: 'offer', sdp: offer.sdp ?? '' })),
+          sealCallSignal(
+            encodeSdpDescription({ type: 'offer', sdp: offer.sdp ?? '' }),
+            callKey,
+            callId,
+          ),
           callId,
         );
 
@@ -648,7 +757,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
         startingRef.current = false;
       }
     },
-    [armRingTimeout, callInProgress, createPeer, setActive, teardownMedia],
+    [adoptCallKey, armRingTimeout, callInProgress, createPeer, setActive, teardownMedia],
   );
 
   /**
@@ -680,6 +789,12 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     // The invite already named the calling device, so this side's relays have a target at once.
     peerDeviceRef.current = incoming.callerDevice;
     try {
+      // The call's key arrives through the message layer, sent before the invite; on the rare
+      // crossing it is waited for here rather than failed over (see {@link CALL_KEY_WAIT_MS}).
+      const callKey = await waitForCallKey(incoming.callId, CALL_KEY_WAIT_MS);
+      if (callKey === null) {
+        throw new Error('the call key has not arrived');
+      }
       const stream = await acquireAnswerMedia(mediaKind);
       localStreamRef.current = stream;
       setLocalStream(stream);
@@ -688,7 +803,9 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
       for (const track of stream.getTracks()) {
         pc.addTrack(track, stream);
       }
-      const offer = decodeSdpDescription(openCallSignal(incoming.sealedOffer));
+      const offer = decodeSdpDescription(
+        openCallSignal(incoming.sealedOffer, callKey, incoming.callId),
+      );
       await pc.setRemoteDescription(offer);
       remoteDescriptionSetRef.current = true;
       drainHeldIce();
@@ -696,12 +813,17 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       await answerCall(
-        sealCallSignal(encodeSdpDescription({ type: 'answer', sdp: answer.sdp ?? '' })),
+        sealCallSignal(
+          encodeSdpDescription({ type: 'answer', sdp: answer.sdp ?? '' }),
+          callKey,
+          incoming.callId,
+        ),
       );
       flushIce();
     } catch {
-      // Could not answer (permissions, malformed offer): give the caller their "no" and show the
-      // failure here — a ring that can never be picked up is worse than a decline.
+      // Could not answer (permissions, malformed or unopenable offer, a key that never arrived):
+      // give the caller their "no" and show the failure here — a ring that can never be picked up
+      // is worse than a decline.
       void current.calls.decline(incoming.callId, CallDeclineReason.Busy).catch(() => {});
       finishCall(CallEndReason.Failed);
     }
@@ -715,6 +837,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     flushIce,
     setActive,
     setIncoming,
+    waitForCallKey,
   ]);
 
   const declineCall = useCallback(async (): Promise<void> => {
@@ -875,7 +998,13 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
       }
       let description: { type: 'offer' | 'answer' | 'pranswer' | 'rollback'; sdp: string };
       try {
-        description = decodeSdpDescription(openCallSignal(sdp.sealedSdp));
+        const callKey = callKeysRef.current.get(call.callId);
+        if (callKey === undefined) {
+          // No key, no answer: the key message the caller sent before the invite was lost, and
+          // an answer we cannot open is worse than a call that fails loudly.
+          throw new Error('the call key is missing');
+        }
+        description = decodeSdpDescription(openCallSignal(sdp.sealedSdp, callKey, sdp.callId));
       } catch {
         finishCall(CallEndReason.Failed);
         return;
@@ -909,7 +1038,13 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     }
     let candidates: RTCIceCandidateInit[];
     try {
-      candidates = decodeIceBatch(openCallSignal(ice.sealedCandidates));
+      const callKey = callKeysRef.current.get(call.callId);
+      if (callKey === undefined) {
+        // Same rule as an unopenable batch: dropped, not fatal, while the connection's own
+        // gathering carries the call.
+        return;
+      }
+      candidates = decodeIceBatch(openCallSignal(ice.sealedCandidates, callKey, ice.callId));
     } catch {
       // One malformed batch is dropped, not fatal: the next batch or the connection's own
       // gathering carries the call.
@@ -932,7 +1067,21 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
       }
       return;
     }
+    // The call key rides the message layer, not the call streams, so its subscription lives
+    // beside them: a control event naming a call-key event adopts the key, waking an accept that
+    // is waiting on it. Anything else — every ordinary message — is not this manager's business.
+    const offKeyEvents = client.messaging.onMessage((message) => {
+      const content = message.content;
+      if (content.type !== ContentType.ControlEvent || content.event !== CALL_KEY_EVENT) {
+        return;
+      }
+      const decoded = content.data === undefined ? null : decodeCallKeyEvent(content.data);
+      if (decoded !== null) {
+        adoptCallKey(decoded.callId, decoded.key);
+      }
+    });
     const offs = [
+      offKeyEvents,
       client.calls.onIncomingCall(handleIncoming),
       client.calls.onCallState(handleStateEvent),
       client.calls.onSdp(handleSdp),
@@ -944,6 +1093,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
       }
     };
   }, [
+    adoptCallKey,
     client,
     callInProgress,
     finishCall,

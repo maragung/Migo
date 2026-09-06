@@ -5,7 +5,14 @@ import type { ChangeEvent, KeyboardEvent, ReactNode } from 'react';
 import { Fragment } from 'react';
 
 import { ContentType } from '@migo/sdk';
-import type { Id, IncomingMessage, MediaRefContent, MessageContent, UserProfile } from '@migo/sdk';
+import type {
+  Id,
+  IncomingMessage,
+  MediaRefContent,
+  MessageContent,
+  UserProfile,
+  VoiceNoteRefContent,
+} from '@migo/sdk';
 
 import { formatClock, formatDayLabel } from '@/lib/format.js';
 import { messagePreview } from '@/lib/message-preview.js';
@@ -29,11 +36,15 @@ const TICKER_EARLY = /\$mig\b/i;
 export const QUICK_REACTIONS: readonly string[] = ['👍', '❤️', '😂'];
 
 /**
- * Resolves a media object to a short-lived URL the list may embed, or `null` when the object has
- * none. Supplied by the chat window from the live client; absent in a context with no client, where
- * media falls back to its text placeholder.
+ * Resolves one media or voice reference to an object URL the list may embed — the decrypted bytes
+ * for a sealed upload, the stored bytes for a legacy one — or `null` when the object cannot be
+ * resolved. The whole message content travels in, not just the media id, because opening the bytes
+ * needs the key and nonce slots beside it. Supplied by the chat window from the live client; absent
+ * in a context with no client, where media falls back to its text placeholder.
  */
-export type MediaUrlResolver = (mediaId: Id) => Promise<string | null>;
+export type MediaObjectResolver = (
+  content: MediaRefContent | VoiceNoteRefContent,
+) => Promise<string | null>;
 
 /** The text a media message shows while (or instead of) its image: its caption, or a generic label. */
 export function mediaLabel(content: MediaRefContent): string {
@@ -41,12 +52,13 @@ export function mediaLabel(content: MediaRefContent): string {
 }
 
 /**
- * One media reference, resolved to a URL and rendered as an image.
+ * One media reference, resolved to a decrypted object URL and rendered as an image.
  *
  * The URL arrives asynchronously, so the first render is always the text placeholder and a
- * spinner — the list never blocks on the network. The sender's claimed `mimeType` is never acted
- * on: the frame embeds what the *server* serves at the URL, inside an `<img>`, where neither HTML
- * nor SVG scripts can execute, and the claim itself is never printed. Clicking opens a lightbox
+ * spinner — the list never blocks on the network, and what it is waiting for now includes the
+ * download *and* the open. The sender's claimed `mimeType` is never acted on beyond the blob label
+ * the resolver chose: the frame embeds the opened bytes inside an `<img>`, where neither HTML nor
+ * SVG scripts can execute, and the claim itself is never printed. Clicking opens a lightbox
  * overlay rather than navigating to the URL, which keeps the bytes in an image context even at
  * full size.
  */
@@ -55,7 +67,7 @@ function MediaAttachment({
   resolveUrl,
 }: {
   content: MediaRefContent;
-  resolveUrl: MediaUrlResolver;
+  resolveUrl: MediaObjectResolver;
 }): ReactNode {
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -63,7 +75,7 @@ function MediaAttachment({
 
   useEffect(() => {
     let cancelled = false;
-    resolveUrl(content.mediaId)
+    resolveUrl(content)
       .then((resolved) => {
         if (cancelled) {
           return;
@@ -82,7 +94,7 @@ function MediaAttachment({
     return () => {
       cancelled = true;
     };
-  }, [content.mediaId, resolveUrl]);
+  }, [content, resolveUrl]);
 
   const label = mediaLabel(content);
 
@@ -129,7 +141,7 @@ function MediaAttachment({
  */
 function renderBody(
   content: MessageContent,
-  mediaUrlFor: MediaUrlResolver | undefined,
+  mediaObjectFor: MediaObjectResolver | undefined,
   onOpenWallet: (() => void) | undefined,
 ): { node: ReactNode; placeholder: boolean } {
   switch (content.type) {
@@ -146,20 +158,20 @@ function renderBody(
         placeholder: false,
       };
     case ContentType.MediaRef:
-      return mediaUrlFor === undefined
+      return mediaObjectFor === undefined
         ? { node: `📎 ${mediaLabel(content)}`, placeholder: true }
         : {
-            node: <MediaAttachment content={content} resolveUrl={mediaUrlFor} />,
+            node: <MediaAttachment content={content} resolveUrl={mediaObjectFor} />,
             placeholder: false,
           };
     case ContentType.VoiceNoteRef:
-      return mediaUrlFor === undefined
+      return mediaObjectFor === undefined
         ? {
             node: `🎤 Voice note (${Math.round(content.durationMs / 1000)}s)`,
             placeholder: true,
           }
         : {
-            node: <VoiceNoteBubble content={content} resolveUrl={mediaUrlFor} />,
+            node: <VoiceNoteBubble content={content} resolveUrl={mediaObjectFor} />,
             placeholder: false,
           };
     case ContentType.Reaction:
@@ -274,7 +286,7 @@ export interface MessageListProps {
    * Resolves media references to embeddable URLs; when absent every media message stays its text
    * placeholder, which is how a context with no client renders.
    */
-  mediaUrlFor?: MediaUrlResolver;
+  mediaObjectFor?: MediaObjectResolver;
   /**
    * Live rows rendered inside the transcript after the messages — the thread's non-message
    * traffic, e.g. game activity. They scroll with the messages because they are part of the
@@ -338,7 +350,7 @@ export function MessageList({
   hasEarlier,
   loadingEarlier,
   onLoadEarlier,
-  mediaUrlFor,
+  mediaObjectFor,
   liveSlot,
   liveRowCount,
   interleaved,
@@ -458,7 +470,7 @@ export function MessageList({
         const quoted = message.replyTo ? (byId.get(message.replyTo) ?? null) : null;
         const quoteText =
           quoted && !quoted.deleted ? messagePreview(quoted.content, QUOTE_CHARS) : '[deleted]';
-        const { node, placeholder } = renderBody(message.content, mediaUrlFor, onOpenWallet);
+        const { node, placeholder } = renderBody(message.content, mediaObjectFor, onOpenWallet);
         const editable = mine && message.content.type === ContentType.Text && onEdit !== undefined;
         const editing = editingId === message.messageId && editable;
 

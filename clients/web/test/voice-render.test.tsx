@@ -44,7 +44,10 @@ function msg(content: MessageContent): IncomingMessage {
   };
 }
 
-function render(messages: IncomingMessage[], mediaUrlFor?: () => Promise<string | null>): string {
+function render(
+  messages: IncomingMessage[],
+  mediaObjectFor?: () => Promise<string | null>,
+): string {
   return renderToStaticMarkup(
     <MessageList
       messages={messages}
@@ -58,7 +61,7 @@ function render(messages: IncomingMessage[], mediaUrlFor?: () => Promise<string 
       hasEarlier={false}
       loadingEarlier={false}
       onLoadEarlier={() => {}}
-      mediaUrlFor={mediaUrlFor}
+      mediaObjectFor={mediaObjectFor}
     />,
   );
 }

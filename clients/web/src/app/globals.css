@@ -3009,6 +3009,74 @@ main {
   border-bottom: 1px solid var(--border);
   background: var(--panel);
 }
+
+/* ── The 1:1 verification surface ─────────────────────────────────────────────────────────────
+   The key-change warning rides the thread itself (danger tokens, the same vocabulary the error
+   banner uses), and the numbers are monospaced so two strings that differ in one digit differ
+   visibly — the whole reason anyone reads them aloud. */
+.safety-banner {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  background: var(--danger-soft);
+  border-bottom: 1px solid var(--danger-border);
+  color: var(--danger-text);
+  font-size: var(--fs-meta);
+}
+.safety-banner p {
+  margin: 0;
+  flex: 1;
+}
+.safety-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.safety-number {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.safety-number.changed .safety-digits {
+  color: var(--danger);
+}
+.safety-device {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.safety-digits {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--fs-body);
+  letter-spacing: 0.08em;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.safety-changed-note {
+  font-size: var(--fs-meta);
+  color: var(--danger-text);
+}
+.safety-loading,
+.safety-failure {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 0;
+}
+
+/* The identity-key rotation sheet's content: the two-halves confirmation, or the outcome. */
+.rotate-form,
+.rotate-result {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
 /* A flush divider list, matching .person-row: the gap a card list needed is now the hairline. */
 .roster-list {
   display: flex;

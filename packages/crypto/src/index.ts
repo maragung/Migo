@@ -14,6 +14,10 @@
  * * {@link x3dh} — asynchronous session setup, so a message can be sent to an offline device.
  * * {@link ratchet} — the Double Ratchet: a fresh key per message, forward secrecy, self-healing.
  * * {@link senderKey} — group messaging at O(1) per message instead of once per recipient.
+ * * {@link sealing} — per-object content keys for media, voice notes, and call signaling: the
+ *   layer that encrypts for storage rather than for a session.
+ * * `safetyNumber` — the readable comparison form of a device's identity fingerprint, and the pair
+ *   number two people read to each other to verify a conversation (§47, §164).
  *
  * And the account root, which extends the same promise from messages to the account itself:
  *
@@ -36,14 +40,26 @@
 export * as kdf from './kdf.js';
 export * as mac from './mac.js';
 export * as aead from './aead.js';
+export * as sealing from './sealing.js';
 export * as identity from './identity.js';
 export * as x3dh from './x3dh.js';
 export * as ratchet from './ratchet.js';
 export * as senderKey from './sender-key.js';
 export * as account from './account/index.js';
 
+// The safety-number surface is three functions over public fingerprints, so it exports by name
+// (the `identity.js` pattern) rather than as a namespace — a caller reads
+// `pairSafetyNumber(own, peer)`, not `safetyNumber.pairSafetyNumber(...)`.
+export {
+  safetyNumber,
+  pairSafetyNumber,
+  pairFingerprint,
+  FINGERPRINT_LEN,
+} from './safety-number.js';
+
 export { CryptoError } from './errors.js';
 export type { CryptoErrorKind, CryptoErrorDetail } from './errors.js';
+export type { SealedContent } from './sealing.js';
 export { AccountError } from './account/errors.js';
 export type { AccountErrorKind, AccountErrorDetail } from './account/errors.js';
 export { MacKey, TAG_LEN as MAC_TAG_LEN, MIN_TAG_LEN as MAC_MIN_TAG_LEN } from './mac.js';

@@ -83,6 +83,27 @@ pub struct DeviceKeys {
     /// passphrase is available — the same trade the one-time prekey pool makes, for the same
     /// reason: this process deliberately does not hold the passphrase after unlock.
     pub txs: Vec<crate::vault::TxRecord>,
+    /// The successor identity key's seed, set once this device has rotated the account's
+    /// ML-DSA identity key (or pre-committed the rotation).
+    ///
+    /// The root's identity derivation has no version, so a successor cannot be derived from it:
+    /// the reference crate would have to grow a `V2` domain, and every other client with it. A
+    /// rotation therefore mints a fresh random seed and stores it here, beside the root it
+    /// supersedes. [`Self::identity_key`] prefers it, which is what keeps every ceremony after
+    /// a rotation — the unlock fallback's login, the next rotation, a re-publish on the next
+    /// sign-in — signing with the key the server actually knows. The root stays: the wallets are
+    /// still derived from it, and `.migo` backups still seal it.
+    pub rotated_identity_seed: Option<[u8; 32]>,
+    /// The last-seen E2EE identity fingerprint of each peer device this account has spoken to,
+    /// sealed into the vault as FIELD_PEER_FINGERPRINTS.
+    ///
+    /// Keyed by device, not by conversation: the identity key a bundle carries belongs to a
+    /// device, and the same person on a second device is a second fingerprint — pinning it to
+    /// the conversation would store the same fact once per thread and warn per thread, while
+    /// keying it to the account would hide a device change behind a conversation that never
+    /// mentioned it. Mid-session updates live in the worker's memory and are re-sealed at the
+    /// next passphrase moment, the same trade the Activity list makes.
+    pub peer_fingerprints: HashMap<Id, [u8; 32]>,
 }
 
 impl DeviceKeys {
@@ -110,6 +131,8 @@ impl DeviceKeys {
             root: Some(root.as_bytes().try_into().expect("the root is 32 bytes")),
             device_credential_seed: Some(credential),
             txs: Vec::new(),
+            rotated_identity_seed: None,
+            peer_fingerprints: HashMap::new(),
         }
     }
 
@@ -134,6 +157,8 @@ impl DeviceKeys {
             root: None,
             device_credential_seed: Some(credential),
             txs: Vec::new(),
+            rotated_identity_seed: None,
+            peer_fingerprints: HashMap::new(),
         }
     }
 
@@ -145,13 +170,19 @@ impl DeviceKeys {
             .and_then(|bytes| MigoRoot::from_bytes(bytes).ok())
     }
 
-    /// The account's ML-DSA identity key, when this device holds the root.
+    /// The account's ML-DSA identity key: the rotated successor's when the vault holds one, else
+    /// the root's derivation.
     ///
-    /// Every ceremony — login, add-device, rotation — signs with this key, so a device without a
-    /// root has no `identity_key` and the worker refuses the ceremony locally rather than sending
-    /// the server a signature it cannot make.
+    /// Every ceremony — login, add-device, rotation — signs with this key, so a device with
+    /// neither a successor nor a root has no `identity_key` and the worker refuses the ceremony
+    /// locally rather than sending the server a signature it cannot make. The successor wins
+    /// over the root whenever both are present, because the root's derivation stopped being the
+    /// account's key the moment a rotation succeeded.
     #[must_use]
     pub fn identity_key(&self) -> Option<IdentityKey> {
+        if let Some(seed) = &self.rotated_identity_seed {
+            return IdentityKey::from_seed(seed).ok();
+        }
         self.root().map(|root| IdentityKey::from_root(&root))
     }
 
@@ -218,6 +249,16 @@ impl SessionStore {
     #[must_use]
     pub fn keys(&self) -> &DeviceKeys {
         &self.keys
+    }
+
+    /// Adopts the successor identity seed a completed rotation installed.
+    ///
+    /// The live store moves with the vault or not at all: every ceremony after a rotation signs
+    /// with the key the server now knows, and a store that went on deriving from the root would
+    /// sign each of them — the unlock fallback's login, the next rotation — with the retired key
+    /// and be refused as invalid credentials, with nothing in the message saying why.
+    pub fn adopt_rotated_identity_seed(&mut self, seed: [u8; 32]) {
+        self.keys.rotated_identity_seed = Some(seed);
     }
 
     /// Forgets every session.
@@ -506,6 +547,56 @@ mod tests {
         assert_eq!(
             identity.public_key(),
             migo_account::IdentityKey::from_root(&root).public_key()
+        );
+    }
+
+    /// A rotated seed supersedes the root's derivation the moment it is set, and the root stays
+    /// beside it. The order is the whole ceremony's consistency: sign with the successor after
+    /// the server accepted it, never before, and keep the root for the wallets and the container.
+    #[test]
+    fn a_rotated_seed_supersedes_the_root_derivation() {
+        let root = MigoRoot::from_bytes(&[12u8; 32]).expect("32 bytes is a root");
+        let mut keys = DeviceKeys::founding(&root);
+        let seed = [0x5au8; 32];
+
+        keys.rotated_identity_seed = Some(seed);
+        let identity = keys
+            .identity_key()
+            .expect("a successor means an identity key");
+        assert_eq!(
+            identity.public_key(),
+            IdentityKey::from_seed(&seed)
+                .expect("a seed is a key")
+                .public_key()
+        );
+        assert_ne!(
+            identity.public_key(),
+            IdentityKey::from_root(&root).public_key()
+        );
+        // The root is not consumed by the rotation: the wallet derivations still read it, and
+        // the crash-window heal of the next rotation attempt still signs with it.
+        assert!(keys.root().is_some());
+    }
+
+    /// Adoption moves the live store with the vault: after `adopt_rotated_identity_seed`, the
+    /// store hands out the successor exactly as a fresh unlock of the rotated vault would.
+    #[test]
+    fn adoption_moves_the_live_store_with_the_vault() {
+        let root = MigoRoot::from_bytes(&[13u8; 32]).expect("32 bytes is a root");
+        let keys = DeviceKeys::founding(&root);
+        let mut store = SessionStore::new(keys);
+        let seed = [0xa5u8; 32];
+
+        store.adopt_rotated_identity_seed(seed);
+        assert_eq!(
+            store
+                .keys()
+                .identity_key()
+                .expect("an identity key")
+                .public_key(),
+            IdentityKey::from_seed(&seed)
+                .expect("a seed is a key")
+                .public_key()
         );
     }
 }

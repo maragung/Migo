@@ -1,9 +1,11 @@
 package com.migo.app.ui
 
+import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -33,6 +35,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,6 +45,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -50,10 +55,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.migo.app.model.AppState
+import com.migo.core.net.CaptchaChallenge
 import com.migo.core.store.GatewayScheme
 import com.migo.core.store.RestScheme
 import com.migo.core.store.ServerEndpoint
 import com.migo.core.store.Transport
+import java.util.Base64
 
 /**
  * The sign-in and registration form, which are one screen because they differ by one button.
@@ -87,18 +94,33 @@ import com.migo.core.store.Transport
  * above the submit. The username field becomes the greeting only -- optional, and defaulted to
  * the account's public id by the session layer when left blank -- because the grant names the
  * account, not anything typed here.
+ *
+ * # The human check
+ *
+ * The server gates the public bootstrap surface behind an image captcha once a network has made
+ * enough attempts, so the form carries the challenge the same way the web client's register page
+ * does: the picture inline where the fields are, fetched when the register form appears, swapped
+ * for the replacement challenge a refused attempt carries (the proof was spent either way), and
+ * refreshed on one tap. The sign-in form starts with no challenge -- a fresh network owes no
+ * proof -- and shows one the moment the server's refusal puts it there.
  */
 @Composable
 fun SignInScreen(
     form: AppState.SignedOut,
     onServerEndpoint: (ServerEndpoint) -> Unit,
     onIdentifier: (String) -> Unit,
-    onSubmit: (passphrase: String, create: Boolean) -> Unit,
+    onSubmit: (passphrase: String, create: Boolean, captchaAnswer: String?) -> Unit,
     onRestore: (container: Uri, credential: String) -> Unit,
+    onRefreshCaptcha: () -> Unit,
     onDismissFailure: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var passphrase by remember { mutableStateOf("") }
+    // The captcha answer, held beside the passphrase for the same reason: it is the person's
+    // answer to a challenge, spent the moment it is submitted, and never a field on the state.
+    // Cleared when the picture changes, because typing against a spent challenge is typing the
+    // next refusal.
+    var captchaAnswer by remember { mutableStateOf("") }
     // Whether the person is registering does survive a rotation: it is a choice they made, and not a
     // credential. The restore mode's choice rides with it for the same reason; the chosen file's
     // Uri does not, because a picker grant does not survive the process either.
@@ -109,6 +131,19 @@ fun SignInScreen(
         if (chosen != null) containerUri = chosen
     }
     val extra = LocalMigoExtra.current
+
+    // The register form asks for its challenge the moment it appears, which is the web client's
+    // own fetch-on-mount rule: a registration is the one door the gate always guards eventually,
+    // and a challenge fetched now is a challenge the submit can carry rather than a refusal it has
+    // to come back from. The sign-in form does not -- a fresh network owes no proof -- and meets
+    // its challenge the moment the server says it needs one (the refusal puts it on the form).
+    LaunchedEffect(creating, restoring) {
+        if (creating && !restoring && form.captcha == null) onRefreshCaptcha()
+    }
+    // A new picture invalidates the typing against the old one, whatever swapped it -- a refresh,
+    // a refused attempt's replacement challenge -- and an answer left standing against a spent
+    // challenge is the next refusal already typed.
+    LaunchedEffect(form.captcha?.challengeId) { captchaAnswer = "" }
 
     // The front door's ground: the reference's flat turquoise. It still goes through a brush
     // because the tokens are three stops, but the three stops are equal now, so what lands on the
@@ -228,6 +263,22 @@ fun SignInScreen(
                                 )
                             }
                         }
+                        // The human check, shown whenever the form holds a challenge: asked for
+                        // up front when registering (the web client's rule), and arriving on a
+                        // refused sign-in the moment the server says this network owes a proof.
+                        // The restore path never shows it -- the container door is the identity
+                        // ceremony, not the passphrase gate, and the server asks no captcha there.
+                        val challenge = form.captcha
+                        if (challenge != null && !restoring) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            CaptchaField(
+                                challenge = challenge,
+                                answer = captchaAnswer,
+                                onAnswer = { captchaAnswer = it },
+                                enabled = !form.busy,
+                                onRefresh = onRefreshCaptcha,
+                            )
+                        }
                         Spacer(modifier = Modifier.height(24.dp))
 
                         Button(
@@ -235,7 +286,7 @@ fun SignInScreen(
                                 if (restoring) {
                                     containerUri?.let { onRestore(it, passphrase) }
                                 } else {
-                                    onSubmit(passphrase, creating)
+                                    onSubmit(passphrase, creating, captchaAnswer.ifBlank { null })
                                 }
                             },
                             enabled = !form.busy && (!restoring || containerUri != null),
@@ -348,6 +399,99 @@ private fun AuthLabel(text: String) {
         fontWeight = FontWeight.Bold,
         color = Color.White,
     )
+}
+
+/**
+ * The human check: the challenge's picture, the answer field beside the reading of it, and the one
+ * tap that replaces a picture nobody can read.
+ *
+ * Mirrors the web client's captcha widget — the picture rendered on white (a distorted code on the
+ * card's turquoise is unreadable in a way the challenge never intended), the answer capped at six
+ * characters because no challenge is longer, and a refresh control that asks for a new challenge
+ * rather than re-rendering the spent one. The picture is decoded once per challenge id: a decode
+ * that runs in the composition would re-run it on every scroll frame of this form.
+ *
+ * A challenge whose picture will not decode is said so in words rather than shown as a blank box:
+ * the answer field stays (the person may still read the code some other way) and the refresh
+ * control is the way out, but "nothing to read" and "could not show it" are different facts.
+ */
+@Composable
+private fun CaptchaField(
+    challenge: CaptchaChallenge,
+    answer: String,
+    onAnswer: (String) -> Unit,
+    enabled: Boolean,
+    onRefresh: () -> Unit,
+) {
+    val picture = remember(challenge.challengeId) {
+        try {
+            val bytes = Base64.getDecoder().decode(challenge.imagePngBase64)
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        AuthLabel(text = "Human check")
+        Spacer(modifier = Modifier.height(6.dp))
+        Surface(
+            color = Color.White,
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            if (picture != null) {
+                Image(
+                    bitmap = picture.asImageBitmap(),
+                    contentDescription = "the code to read and type below",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(56.dp)
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                )
+            } else {
+                Text(
+                    text = "The picture could not be shown. Ask for a new code.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF0F4C5C),
+                    modifier = Modifier.padding(10.dp),
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedTextField(
+                value = answer,
+                // Letters and digits only, six at most: that is the whole space a challenge's
+                // answer lives in, and anything else typed here is a space the proof has to be
+                // normalised out of later.
+                onValueChange = { typed -> onAnswer(typed.filter { it.isLetterOrDigit() }.take(6)) },
+                placeholder = { Text("Type the code") },
+                singleLine = true,
+                enabled = enabled,
+                shape = RoundedCornerShape(8.dp),
+                colors = authFieldColors(),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Ascii,
+                    imeAction = ImeAction.Done,
+                ),
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            TextButton(
+                onClick = onRefresh,
+                enabled = enabled,
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = Color.White.copy(alpha = 0.9f),
+                ),
+            ) {
+                Text("New code")
+            }
+        }
+    }
 }
 
 /**

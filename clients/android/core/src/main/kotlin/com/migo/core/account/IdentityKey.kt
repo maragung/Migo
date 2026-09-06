@@ -34,6 +34,15 @@ class IdentityKey private constructor(private val seedBytes: ByteArray) {
         /** Derives the identity key from a root secret. */
         fun fromRoot(root: MigoRoot): IdentityKey = fromSeed(root.domainSeed(AccountDomains.IDENTITY))
 
+        /**
+         * Generates a fresh identity key from the CSPRNG, rather than deriving one from a root.
+         *
+         * This is the rotation path's origin: a successor key is *new* material by definition --
+         * deriving it from the root would derive the very key it is meant to replace. Same shape and
+         * same wire forms as [DeviceCredential.generate]; only the origin differs.
+         */
+        fun generate(): IdentityKey = fromSeed(Csprng.bytes(MlDsa.SEED_LEN))
+
         /** Reconstructs the identity key from its 32-byte seed. */
         fun fromSeed(seed: ByteArray): IdentityKey {
             if (seed.size != MlDsa.SEED_LEN) {

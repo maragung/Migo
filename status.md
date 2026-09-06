@@ -3051,3 +3051,63 @@ Gerbang: desktop `cargo fmt`/`clippy -D warnings` bersih, `cargo
 test` 95/95 (7 test baru: matcher `vault_holds_this_account`,
 folding nama file, offer prefill; 2 live test tetap diabaikan);
 Android `make kotlin-check` 14/14 selftest, 0 problem.
+
+## 77. Lima prioritas audit dalam satu gelombang — captcha, media E2EE, rotasi identitas, CSP keystore, safety number
+
+Permintaan: kerjakan prioritas 1-5 dari audit proyek. Hasilnya lima
+fitur yang menyentuh ketiga client dan server, semuanya dengan
+kontrak lintas-platform yang dipinkan lewat test.
+
+- **Captcha di Android (prioritas 1)**: widget `CaptchaField` di
+  SignInScreen — PNG base64 dari `POST /v1/auth/captcha`, jawaban
+  6 karakter naik di field body register/login (`captcha`,
+  null-dihilangkan), tombol "New code" untuk refresh, dan challenge
+  pengganti yang datang di amplop penolakan server langsung diadopsi
+  tanpa memaksa ulang layar. Pesan CAPTCHA_REQUIRED yang dulu salah
+  teksnya ikut dibetulkan.
+- **Media, voice note, dan call-signal E2EE di web (prioritas 2)**:
+  `packages/crypto/src/sealing.ts` — house AEAD XChaCha20-Poly1305
+  (bukan AES-GCM; aead.ts menolak GCM, ADR-0003 mengikat primitive
+  teraudit), seal() = nonce‖ciphertext‖tag, key/nonce menumpang slot
+  envelope pesan yang sudah disegel lapisan E2EE. Call signaling:
+  per-call key dari caller, envelope v2 `[0x02]…`, AD
+  migo-call-signal:{callId}, key disebar lewat ControlEvent
+  'call-key' sebelum invite. Avatar dan media room publik tetap
+  plaintext — sengaja. Server ikut dibetulkan: unduhan media kini
+  menyajikan bytes yang tak dikenali sebagai 200 octet-stream (dulu
+  404 — jebakan produksi di mana upload ciphertext sukses tapi
+  unduhannya gagal); polyglot HTML/SVG tetap ditolak.
+- **Rotasi identity key di semua client (prioritas 3)**: hanya kunci
+  signing ML-DSA-65 yang berputar; identitas E2EE, ratchet, dan
+  safety number tak tersentuh. Successor dari randomness segar (bukan
+  turunan root) — seed-nya hidup di dua rumah: snapshot/vault dan
+  device record. Kontrak urutan desktop jadi acuan semua client:
+  pre-commit (install + seal) SEBELUM network call; jawaban yang
+  hilang (TransportError) mempertahankan pre-commit; penolakan dengan
+  seed prior memicu satu heal yang menandatangani ulang dengan kunci
+  root; gagal persist = tidak ada yang dikirim. Web menambah
+  fallback tier-2 sekali ke kunci root saat addDevice ditolak —
+  melindungi rotasi yang tak pernah mendarat.
+- **CSP + keystore non-extractable di web (prioritas 4)**: header CSP
+  meng-pin setiap inline script Next 15.5 dengan sha256 yang
+  dihitung serve.mjs saat startup dari out/ yang sebenarnya; meta CSP
+  subset stabil di layout; theme init pindah ke theme-init.js
+  eksternal. Keystore: master CryptoKey non-extractable HKDF di
+  IndexedDB, snapshot disegel AES-GCM turunannya
+  (migo-web-keystore-seal-v1) dengan migrasi dari plaintext lama —
+  API publik tidak berubah.
+- **Safety number pair di semua client (prioritas 5)**: derivasi
+  Android jadi definisi lintas-client — fingerprint 32 byte sendiri‖
+  lawan tersusun leksikografis, HKDF-SHA256 salt "migo-fingerprint"
+  info "migo-safety-number-v1", 8 blok 5 digit. Desktop memakai
+  kembali grouping yang ada (8×5 — 40 digit; komentar lama "60 digit"
+  salah dan dibetulkan, angka yang sudah dibaca orang tidak boleh
+  berubah antar versi), web port byte-per-byte. Paritas dipinkan dua
+  arah: KAT desktop dihitung ulang dengan implementasi web cocok
+  byte-per-byte; web meminkan vektor sendiri. Banner peringatan
+  key-change hanya hilang lewat acknowledgment eksplisit; pembacaan
+  pertama = baseline senyap.
+
+Gerbang: web 386/386, crypto 52/52, migo-api 75/75 termasuk test
+unduhan opaque baru, desktop cargo fmt/clippy/test 104/104, Android
+make kotlin-check 0 problem, lint-js bersih, prettier repo bersih.

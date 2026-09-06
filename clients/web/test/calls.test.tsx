@@ -4,10 +4,12 @@
  * The tests pin three layers, each against the rule that would silently regress under an
  * innocent-looking refactor:
  *
- *   1. **The signal helpers.** The placeholder seal is framing, not encryption — the test pins the
- *      envelope's exact shape (version byte, 32 zero key bytes, 12 zero nonce bytes, then the
- *      payload) so the day real key material lands, the swap is a deliberate change to this test
- *      and not a quiet drift. A malformed envelope must throw rather than hand WebRTC nonsense.
+ *   1. **The signal helpers.** The seal is real per-call encryption under the house AEAD, and the
+ *      key's channel is pinned with it: a call-key control event must round-trip the call id and
+ *      the key exactly, and refuse anything of the wrong width, because a malformed event on the
+ *      E2EE message layer is dropped like any other noise. A malformed envelope must throw rather
+ *      than hand WebRTC nonsense, and the legacy version-1 envelope — a pre-encryption build's
+ *      framing — must still open, so a peer that has not upgraded is served honestly.
  *   2. **The call screen, state by state.** Section 180 requires every state to name itself and
  *      the ended reasons to be told apart — "Declined" and "Connection lost" are different facts a
  *      user needs before calling back, and a screen that renders them all as "Call ended" throws
@@ -44,21 +46,25 @@ import {
 } from '../src/lib/migo/call-manager.js';
 import type { TurnClient } from '../src/lib/migo/call-manager.js';
 import {
+  CALL_KEY_EVENT,
   CallSignalFormatError,
   INVITE_BLOCKED,
   INVITE_DECLINED,
   INVITE_EXPIRED,
   INVITE_RINGING,
   answersRingingCall,
+  decodeCallKeyEvent,
   decodeIceBatch,
   decodeSdpDescription,
   displayStateOf,
+  encodeCallKeyEvent,
   encodeIceBatch,
   encodeSdpDescription,
   endedReasonLine,
   endsRingingCall,
   endReasonLabel,
   formatCallDuration,
+  generateCallKey,
   incomingInviteDisposition,
   inviteEndReason,
   mediaKindLabel,
@@ -72,6 +78,12 @@ import type { TurnServer } from '@migo/sdk';
 const ME = 'me' as Id;
 const ADA = 'ada' as Id;
 const CALL = 'call_1' as Id;
+/**
+ * A well-formed id for the key-event codec, which round-trips the call id through its 16 wire
+ * bytes — the fixture ids above are fine for the seal (its domain is the id as text) but not for
+ * a codec that must parse one.
+ */
+const CALL_ID = '0123456789ABCDEFGHJKMNPQRS' as Id;
 const CONVERSATION = 'conv_1' as Id;
 const NOW = Date.parse('2026-08-30T12:00:00Z');
 
@@ -125,33 +137,93 @@ function screen(overrides: Partial<CallScreenProps> = {}): string {
   return renderToStaticMarkup(<CallScreen {...props} />);
 }
 
-// --- the placeholder seal ---
+// --- the seal, its key, and the key's channel ---
 
-test('the placeholder seal frames a payload with version, zero key, zero nonce', () => {
+test('the seal is real per-call encryption: version 2, round-trip, fresh key every call', () => {
   const payload = new TextEncoder().encode('v=0\r\no=-...');
-  const sealed = sealCallSignal(payload);
+  const key = generateCallKey();
+  const sealed = sealCallSignal(payload, key, CALL);
 
-  assert.equal(sealed.length, 1 + 32 + 12 + payload.length);
-  assert.equal(sealed[0], 1, 'the envelope version byte');
-  assert.deepEqual(
-    sealed.slice(1, 33),
-    new Uint8Array(32),
-    'the key slot is placeholder zeros, the length the real crypto will use',
-  );
-  assert.deepEqual(sealed.slice(33, 45), new Uint8Array(12), 'the nonce slot likewise');
-  assert.deepEqual(openCallSignal(sealed), payload, 'the round trip is exact');
+  assert.equal(sealed[0], 2, 'the envelope version byte');
+  // The house AEAD's own output behind the version byte: 24-byte nonce, ciphertext, 16-byte tag.
+  assert.equal(sealed.length, 1 + 24 + payload.length + 16);
+  assert.deepEqual(openCallSignal(sealed, key, CALL), payload, 'the round trip is exact');
+
+  const secondKey = generateCallKey();
+  assert.equal(secondKey.length, 32, 'the key is the AEAD-width 32 bytes');
+  assert.notDeepEqual(key, secondKey, 'every call mints its own key');
 });
 
-test('the seal refuses to open anything that is not its own envelope', () => {
-  const tooShort = new Uint8Array(10);
-  assert.throws(() => openCallSignal(tooShort), CallSignalFormatError);
-  const wrongVersion = new Uint8Array(1 + 32 + 12 + 4);
+test('the seal refuses wrong keys, wrong calls, and anything that is not its own envelope', () => {
+  const payload = new TextEncoder().encode('candidate:1 1 udp 2130706431 192.168.1.4 54321');
+  const key = generateCallKey();
+  const sealed = sealCallSignal(payload, key, CALL);
+
+  assert.throws(() => openCallSignal(sealed, generateCallKey(), CALL), CallSignalFormatError);
+  // The call id is associated data: a blob sealed for one call must not open as another's.
+  assert.throws(
+    () => openCallSignal(sealed, key, 'call_other' as Id),
+    CallSignalFormatError,
+    'the envelope is bound to its call',
+  );
+  const edited = sealed.slice();
+  const last = edited.length - 1;
+  edited[last] = (edited[last] ?? 0) ^ 0x01;
+  assert.throws(() => openCallSignal(edited, key, CALL), CallSignalFormatError);
+
+  assert.throws(() => openCallSignal(new Uint8Array(10), key, CALL), CallSignalFormatError);
+  assert.throws(() => openCallSignal(new Uint8Array(0), key, CALL), CallSignalFormatError);
+  const wrongVersion = new Uint8Array(1 + 24 + 4 + 16);
   wrongVersion[0] = 99;
-  assert.throws(() => openCallSignal(wrongVersion), CallSignalFormatError);
+  assert.throws(() => openCallSignal(wrongVersion, key, CALL), CallSignalFormatError);
   // A future version must be refused, not best-effort parsed.
-  const future = sealCallSignal(new Uint8Array([9]));
-  future[0] = 2;
-  assert.throws(() => openCallSignal(future), CallSignalFormatError);
+  const future = sealCallSignal(new Uint8Array([9]), key, CALL);
+  future[0] = 3;
+  assert.throws(() => openCallSignal(future, key, CALL), CallSignalFormatError);
+});
+
+test('the legacy version-1 envelope still opens, and is never written', () => {
+  // An older build framed payloads with a version byte, zero key and nonce slots, and clear bytes
+  // behind them. A call from a peer still on that build must be readable — the payload was never
+  // encrypted, so any key opens it — while this build's own seal (the version byte above) never
+  // produces the shape again.
+  const payload = new TextEncoder().encode('v=0\r\no=- legacy');
+  const legacy = new Uint8Array(1 + 32 + 12 + payload.length);
+  legacy[0] = 1;
+  legacy.set(payload, 1 + 32 + 12);
+
+  assert.deepEqual(
+    openCallSignal(legacy, generateCallKey(), CALL),
+    payload,
+    'the legacy envelope carries no encryption to check',
+  );
+  assert.equal(sealCallSignal(payload, generateCallKey(), CALL)[0], 2);
+});
+
+test('a call key rides a control event as call id then key, or is dropped as noise', () => {
+  const key = generateCallKey();
+  const event = encodeCallKeyEvent(CALL_ID, key);
+  assert.equal(event.length, 16 + 32, 'the wire bytes of the id, then the key');
+
+  const decoded = decodeCallKeyEvent(event);
+  assert.ok(decoded !== null, 'a well-formed event decodes');
+  assert.equal(decoded?.callId, CALL_ID, 'the call id round-trips through its wire bytes');
+  assert.deepEqual(decoded?.key, key, 'the key arrives verbatim');
+
+  // The event name itself is part of the contract: the manager listens for exactly this string,
+  // the way the SDK's sender-key handling does.
+  assert.equal(CALL_KEY_EVENT, 'call-key');
+
+  assert.equal(
+    decodeCallKeyEvent(new Uint8Array(16)),
+    null,
+    'a too-short event is dropped, not thrown over',
+  );
+  assert.equal(
+    decodeCallKeyEvent(new Uint8Array(16 + 32 + 1)),
+    null,
+    'a too-long event is dropped likewise',
+  );
 });
 
 test('SDP descriptions and ICE batches round-trip through their codecs and refuse impostors', () => {

@@ -13,8 +13,11 @@ import com.migo.core.account.IdentityKey
 import com.migo.core.account.MigoRoot
 import com.migo.core.account.openContainer
 import com.migo.core.account.sealContainer
+import com.migo.core.crypto.PeerSafetyNumber
+import com.migo.core.crypto.pairSafetyNumber
 import com.migo.core.domain.KeyStore
 import com.migo.core.domain.SdkError
+import com.migo.core.net.CaptchaProof
 import com.migo.core.store.DeviceKeys
 import com.migo.core.store.GatewayScheme
 import com.migo.core.store.RestScheme
@@ -122,8 +125,14 @@ class MigoSession private constructor(
     }
 
     /**
-     * Publishes the root's account material: the ML-DSA identity key, and any of the root's first
+     * Publishes the account's material: the ML-DSA identity key, and any of the root's first
      * wallets the server does not know yet.
+     *
+     * The identity key is whichever one the account currently trusts: the rotated key when this
+     * device has rotated one, and the root's derivation until then. Re-publishing the root's
+     * derivation after a rotation is the conflict the server answers with "rotate instead" --
+     * quiet here, because this whole method is best-effort, but wrong on every sign-in, and the
+     * idempotent-reconcile property this call exists for only holds for the key that is active.
      *
      * Best-effort by design — a failure here is not a failed sign-in, because the passphrase already
      * worked and the calls are idempotent: the next sign-in tries again. The address is a pure
@@ -133,7 +142,8 @@ class MigoSession private constructor(
     private suspend fun enrolAccountMaterial() {
         val root = client.keyStore.root ?: return
         try {
-            client.publishIdentityKey(IdentityKey.fromRoot(root).publicKey())
+            val identity = client.keyStore.rotatedIdentity ?: IdentityKey.fromRoot(root)
+            client.publishIdentityKey(identity.publicKey())
             val known = client.registeredWallets().map { it.address }.toSet()
             val wallet = EvmWallet.fromRoot(root, 0)
             val address = wallet.addressChecksummed()
@@ -142,6 +152,99 @@ class MigoSession private constructor(
             }
         } catch (_: Exception) {
             // Deliberately quiet: the material publishes again on the next sign-in.
+        }
+    }
+
+    /**
+     * Rotates the account's ML-DSA-65 identity key, on the device that holds the key being
+     * retired.
+     *
+     * What rotates is the account's *signing* identity — the key the login and add-device
+     * ceremonies verify against. What deliberately does not: this device's E2EE identity, every
+     * ratchet, every safety number a peer sees (those are separate material the ceremony never
+     * touches), and this session itself (the server leaves sessions alone through a rotation).
+     *
+     * # The lifecycle this method is responsible for
+     *
+     * The successor is minted inside the ceremony, and the vault is the only home it will ever
+     * have: the `.migo` container seals the *root*, whose derivation is the key being retired, so
+     * after a rotation a container can still open but its identity half can no longer vouch for
+     * the account — restoring one onto a new device will be refused by the server, and only a
+     * device holding the sealed successor can answer the account's signing ceremonies. That cost
+     * is why the caller's confirmation dialog says it out loud before the button is pressed.
+     *
+     * The persist is the ceremony's last step and its most important one: an install without a
+     * save is an account whose active key exists nowhere. A [VaultError] from it therefore
+     * propagates rather than being swallowed, and the caller reports it as the serious state it
+     * is — the rotation *happened*, and this device failed to keep the proof.
+     */
+    suspend fun rotateIdentity() {
+        val current = client.keyStore.accountIdentityKey()
+            ?: throw SdkError("this device holds no account identity key to rotate")
+        val successor = client.rotateIdentity(current)
+        client.keyStore.installRotatedIdentity(successor)
+        persist()
+    }
+
+    /**
+     * Reads a direct conversation's safety numbers: one per device the peer currently publishes.
+     *
+     * A Migo identity belongs to a device, so a peer signed in twice publishes two of them, and
+     * the honest report is one number per device rather than one number blurred across them. Each
+     * is the pair number — this device's fingerprint and that peer device's, hashed together in a
+     * symmetric order — so both people read the same string off their own screens and an aloud
+     * comparison is meaningful.
+     *
+     * The changed flag is the whole point of the read. The store holds the last fingerprint this
+     * conversation *acknowledged* for each device: a first observation is recorded silently,
+     * because nothing changed, and a differing one is reported and deliberately left
+     * unacknowledged — which is what keeps the warning on the screen until a person has seen it,
+     * rather than clearing it in the same breath that detected it.
+     */
+    suspend fun safetyNumbers(conversationId: Id, peerUserId: Id): List<PeerSafetyNumber> {
+        val own = client.keyStore.identity().public().fingerprint()
+        // A plain loop rather than a map: the body suspends for the store reads, and `map`'s
+        // lambda is not a suspend context. (The reads would have to be gathered first and the
+        // comparisons done after, which is the same loop wearing two passes.)
+        val report = ArrayList<PeerSafetyNumber>()
+        for (peer in client.peerIdentities(peerUserId)) {
+            val fingerprint = peer.identity.fingerprint()
+            val stored = withContext(Dispatchers.IO) {
+                store.loadPeerIdentity(conversationId, peer.deviceId)
+            }
+            if (stored == null) {
+                withContext(Dispatchers.IO) {
+                    store.savePeerIdentity(conversationId, peer.deviceId, fingerprint)
+                }
+            }
+            report.add(
+                PeerSafetyNumber(
+                    deviceId = peer.deviceId,
+                    number = pairSafetyNumber(own, fingerprint),
+                    changed = stored != null && !stored.contentEquals(fingerprint),
+                ),
+            )
+        }
+        return report
+    }
+
+    /**
+     * Marks the peer's current identities as acknowledged for a conversation, clearing its change
+     * warnings.
+     *
+     * Called by the person, from the warning itself — never by the read that detected the change.
+     * The identities are re-read from the client's per-run cache, so an acknowledgment costs no
+     * prekeys; the trade is that a peer who rotated *again* between the report and this call has
+     * that newer key acknowledged unseen, and the next open will say nothing about it. That window
+     * is seconds wide and closes on the next conversation open, and the alternative — re-reporting
+     * a change the person is mid-way through acknowledging — warns about nothing usefully.
+     */
+    suspend fun acknowledgeSafetyNumbers(conversationId: Id, peerUserId: Id) {
+        for (peer in client.peerIdentities(peerUserId)) {
+            val fingerprint = peer.identity.fingerprint()
+            withContext(Dispatchers.IO) {
+                store.savePeerIdentity(conversationId, peer.deviceId, fingerprint)
+            }
         }
     }
 
@@ -223,6 +326,10 @@ class MigoSession private constructor(
          * account's whole recovery story. A seal the container format refuses costs only the
          * offer — the account exists and the vault holds the root, and the Profile screen's
          * backup flow can still seal one on demand.
+         *
+         * [captcha] is the human check's answer when the gate on this network demanded one; the
+         * form owns fetching and answering the challenge, and a refusal that carries a replacement
+         * challenge is retried through this same door with it.
          */
         suspend fun register(
             context: Context,
@@ -231,12 +338,13 @@ class MigoSession private constructor(
             username: String,
             passphrase: String,
             hooks: SessionHooks = SessionHooks(),
+            captcha: CaptchaProof? = null,
         ): RegisteredAccount {
             val (vault, store) = reset(context)
             val root = pendingRegistrationRoot ?: MigoRoot.generate().also { pendingRegistrationRoot = it }
             val client = build(endpoint, appVersion, null, KeyStore.founding(root), store, hooks)
             val session = MigoSession(client, username, vault, store)
-            client.register(username, passphrase, IdentityKey.fromRoot(root).publicKey())
+            client.register(username, passphrase, IdentityKey.fromRoot(root).publicKey(), captcha)
             session.enrolAccountMaterial()
             session.persist()
             pendingRegistrationRoot = null
@@ -268,6 +376,7 @@ class MigoSession private constructor(
             identifier: String,
             passphrase: String,
             hooks: SessionHooks = SessionHooks(),
+            captcha: CaptchaProof? = null,
         ): MigoSession {
             val stored = withContext(Dispatchers.IO) {
                 val vault = Vault.open(context)
@@ -291,7 +400,7 @@ class MigoSession private constructor(
                     build(endpoint, appVersion, deviceId, KeyStore.restore(keys), store, hooks)
                 val session = MigoSession(client, identifier, vault, store)
                 session.trackedTxs.addAll(keys.txs)
-                client.login(identifier, passphrase)
+                client.login(identifier, passphrase, captcha)
                 // A device that holds the root re-publishes its material on every sign-in: the
                 // call is idempotent, and it is the legacy upgrade door that makes an account
                 // created before the root existed ML-DSA-loginable the day its founding device
@@ -304,7 +413,7 @@ class MigoSession private constructor(
             val (vault, store) = reset(context)
             val client = build(endpoint, appVersion, null, KeyStore.create(), store, hooks)
             val session = MigoSession(client, identifier, vault, store)
-            client.login(identifier, passphrase)
+            client.login(identifier, passphrase, captcha)
             session.persist()
             return session
         }
@@ -413,11 +522,17 @@ class MigoSession private constructor(
                 session.trackedTxs.addAll(stored.keys.txs)
                 // The login ceremony, not add-device: this device is already on the account, and
                 // the stored credential — the one the vault sealed when the device joined — is the
-                // only credential that can answer for it.
+                // only credential that can answer for it. The identity half is whichever key the
+                // vault holds as the account's active one: the rotated key when this device
+                // rotated one (the root's derivation was retired by the very ceremony that minted
+                // it, and signing with it is refused), and the root's derivation until then. The
+                // add-device door below has no such choice — the container seals the root, and
+                // after a rotation that root's identity half can no longer vouch for the account,
+                // which is the documented cost of rotating.
                 client.identityLogin(
                     stored.session.username,
                     stored.session.deviceId,
-                    IdentityKey.fromRoot(root),
+                    stored.keys.rotatedIdentity ?: IdentityKey.fromRoot(root),
                     stored.credential,
                 )
                 session.enrolAccountMaterial()

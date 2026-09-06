@@ -50,12 +50,19 @@ sealed class RestError(message: String) : Exception(message) {
      * [message] is the server's own `public_message()`, which is the only string it ever puts on the
      * wire -- internal detail stays on the server by construction (brief section 161), so it is safe
      * to show verbatim. [retryAfterMs] is present only when the server said how long to wait.
+     *
+     * [captcha] is the replacement challenge the server attaches to a refused register or login when
+     * the refusal is one a captcha form will retry against -- a spent proof, a wrong answer, or the
+     * gate's own `CAPTCHA_REQUIRED`. A proof is consumed whatever the verdict, so this is the live
+     * challenge the next attempt must answer; null means the refusal came without one (a network
+     * hiccup, a malformed body) and the caller fetches a fresh challenge the ordinary way.
      */
     class Server(
         val code: Long,
         val symbol: String,
         val publicMessage: String,
         val retryAfterMs: Long?,
+        val captcha: CaptchaChallenge? = null,
     ) : RestError(publicMessage)
 
     /** A 2xx whose body was not the shape this client expects. */
@@ -106,6 +113,39 @@ data class DeviceRequest(
     }
 }
 
+/**
+ * An image captcha challenge, as the server hands it out for the public bootstrap surface.
+ *
+ * [imagePngBase64] is a standard-base64 PNG (padding included) that the caller renders for the
+ * person to read; the answer is whatever they read off that rendered image, and nothing about it
+ * crosses the wire here -- the challenge *is* the picture, and the proof is their typing bound to
+ * [challengeId]. [mode] echoes which rendering the server actually issued (`image` or `image_alt`),
+ * kept as a plain string rather than an enum because it is display metadata: the one decision a
+ * caller makes from it is which mode to ask for on the next refresh, and an unknown value from a
+ * newer server collapses to the default rendering rather than leaking a word the caller's types do
+ * not allow. [ttlSeconds] is how long the challenge stays answerable.
+ */
+@Serializable
+data class CaptchaChallenge(
+    @SerialName("challenge_id") val challengeId: String,
+    @SerialName("image_png_base64") val imagePngBase64: String,
+    val mode: String = "image",
+    @SerialName("ttl_seconds") val ttlSeconds: Long = 0L,
+)
+
+/**
+ * A person-supplied captcha answer, bound to the challenge it answers.
+ *
+ * [answer] travels exactly as the caller supplies it -- the server normalises (whitespace stripped,
+ * uppercased) on arrival, so the proof need not agree with a later build's idea of normalisation to
+ * verify. One-shot by construction: the challenge is consumed by the attempt, whatever the verdict.
+ */
+@Serializable
+data class CaptchaProof(
+    @SerialName("challenge_id") val challengeId: String,
+    val answer: String,
+)
+
 @Serializable
 private data class RegisterRequest(
     val username: String,
@@ -116,6 +156,10 @@ private data class RegisterRequest(
     // holds the account root (§12). Null by default and the Json instance skips it, so a
     // passphrase-only caller's wire shape is unchanged.
     @SerialName("identity_public_key") val identityPublicKey: String? = null,
+    // The captcha proof, when the gate demanded one and the person answered. Null by default and
+    // skipped on the wire, so a first attempt against a fresh network is exactly the body it always
+    // was.
+    val captcha: CaptchaProof? = null,
 )
 
 @Serializable
@@ -123,7 +167,14 @@ private data class LoginRequest(
     val identifier: String,
     val passphrase: String,
     val device: DeviceRequest,
+    // The captcha proof, present when the gate demanded one. The same absent-means-omitted rule as
+    // the register body's field.
+    val captcha: CaptchaProof? = null,
 )
+
+/** The request body of `POST /v1/auth/captcha`: absent, empty, or carrying a mode. */
+@Serializable
+private data class CaptchaRequest(val mode: String? = null)
 
 @Serializable
 private data class RefreshRequest(
@@ -267,6 +318,9 @@ private data class ErrorBody(
     val symbol: String,
     val message: String,
     @SerialName("retry_after_ms") val retryAfterMs: Long? = null,
+    // The replacement challenge the server attaches to a refused bootstrap attempt that a captcha
+    // form will retry against. Absent on every other refusal.
+    val captcha: CaptchaChallenge? = null,
 )
 
 /**
@@ -358,6 +412,10 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
      * holds the account root: it makes registration idempotent (§12), because a retry whose first
      * attempt already landed is answered with a reconciliation instead of USERNAME_TAKEN. Omitted
      * from the wire when null.
+     *
+     * [captcha] is the proof for the gate's answer to this network's recent attempts: present only
+     * once a challenge has been fetched and answered, and omitted from the wire when null so a
+     * first attempt from a fresh network is the same body it always was.
      */
     suspend fun register(
         username: String,
@@ -365,6 +423,7 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
         device: DeviceRequest,
         locale: String = "en",
         identityPublicKey: ByteArray? = null,
+        captcha: CaptchaProof? = null,
     ): Grant = post(
         "/v1/auth/register",
         RegisterRequest.serializer(),
@@ -374,6 +433,7 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
             locale,
             device,
             identityPublicKey?.let { Base64.getEncoder().encodeToString(it) },
+            captcha,
         ),
     )
 
@@ -382,9 +442,38 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
      *
      * One identifier field, not a username field and an email field, because a user does not think
      * of those as different kinds of thing. The server decides which it is.
+     *
+     * [captcha] carries the proof when the gate demands one for this network; omitted from the wire
+     * when null, exactly as the register body's field is.
      */
-    suspend fun login(identifier: String, passphrase: String, device: DeviceRequest): Grant =
-        post("/v1/auth/login", LoginRequest.serializer(), LoginRequest(identifier, passphrase, device))
+    suspend fun login(
+        identifier: String,
+        passphrase: String,
+        device: DeviceRequest,
+        captcha: CaptchaProof? = null,
+    ): Grant = post(
+        "/v1/auth/login",
+        LoginRequest.serializer(),
+        LoginRequest(identifier, passphrase, device, captcha),
+    )
+
+    /**
+     * Asks for a fresh image captcha challenge: `POST /v1/auth/captcha`.
+     *
+     * Anonymous, and rate-limited at the IP like the rest of the bootstrap surface. [mode] selects
+     * the rendering -- null (or `"image"`) asks for the ordinary distorted text, and `"image_alt"`
+     * asks for the gentler accessible alternative; the server issues a fresh challenge either way,
+     * answered and verified identically. Nothing about the answer crosses the wire here: the
+     * challenge is the picture, and the proof is the typing bound to its `challenge_id`.
+     */
+    suspend fun requestCaptcha(mode: String? = null): CaptchaChallenge = respond(
+        send(
+            "POST",
+            "/v1/auth/captcha",
+            json.encodeToString(CaptchaRequest.serializer(), CaptchaRequest(mode)),
+        ),
+        CaptchaChallenge.serializer(),
+    )
 
     /** Exchanges a saved refresh token for a fresh pair. */
     suspend fun refresh(refreshToken: String, deviceId: Id): Grant = post(
@@ -833,6 +922,7 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
                 envelope.error.symbol,
                 envelope.error.message,
                 envelope.error.retryAfterMs ?: retryHeader,
+                envelope.error.captcha,
             )
         } else {
             RestError.Server(response.code.toLong(), "", "", retryHeader)

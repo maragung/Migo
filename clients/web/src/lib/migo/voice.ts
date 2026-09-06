@@ -1,22 +1,32 @@
 'use client';
 
 /**
- * Voice notes in the web client: the pure half of record → upload → reference.
+ * Voice notes in the web client: the pure half of record → seal → upload → reference.
  *
- * The split mirrors `lib/migo/media.ts` (the image attachment path). An upload is one convenience
- * call — {@link uploadVoiceNote} hides begin/PUT/commit — and the message body that references the
- * object is built by a pure function, {@link voiceNoteContent}, a test can pin. The browser half
- * (MediaRecorder, the AudioContext sampler, the `Audio` element) cannot run under Node, so it stays
- * in the components, which call these helpers with the results; everything testable about a voice
- * note — the waveform fold, the duration format, the upload claim, the message shape — lives here.
+ * The split mirrors `lib/migo/media.ts` (the image attachment path) — including the sealing
+ * posture, which is why the two modules share their domain constant and their legacy rule. An
+ * upload is one convenience call — {@link uploadVoiceNote} hides seal/begin/PUT/commit — and the
+ * message body that references the object is built by a pure function, {@link voiceNoteContent},
+ * a test can pin. The browser half (MediaRecorder, the AudioContext sampler, the `Audio`
+ * element) cannot run under Node, so it stays in the components, which call these helpers with
+ * the results; everything testable about a voice note — the waveform fold, the duration format,
+ * the upload claim, the seal, the message shape — lives here.
  *
- * # The placeholder key material
+ * # The sealing
  *
- * Same rule as image attachments: a `VoiceNoteRefContent` carries the symmetric `key` and `nonce`
- * that will open the object once media sealing lands. Until then the bytes are stored as uploaded,
- * the player downloads by `mediaId` without decrypting, and the slots carry zero-filled placeholder
- * material so the message shape is already the final one. Swapping the placeholders for real key
- * material later touches nothing else here.
+ * Brief section 167's "no exception" is the rule for every end-to-end conversation: the recorder's
+ * output is sealed before any bytes cross the wire, under a fresh key the module's `sealing`
+ * primitive mints, and the key and nonce ride in the `VoiceNoteRefContent` slots *inside* the
+ * message — which the messaging layer seals end-to-end, so the server relays ciphertext it cannot
+ * open and the waveform it can never compute stays exactly where section 167 wants it: on the
+ * client, before encryption. The player never touches a URL directly: `resolveMediaObject` in
+ * `media.ts` fetches, opens, and hands back a blob URL the `Audio` element plays.
+ *
+ * The one destination that keeps the legacy plaintext path is the same one image attachments
+ * except: a public or managed room's conversation is server-readable, its content policy is the
+ * server's, and sealing into it would be refused at commit. See `media.ts`'s module doc for the
+ * full reasoning; every direct conversation and group is end-to-end, so in practice a voice note
+ * is sealed.
  *
  * # The five-minute cap
  *
@@ -26,10 +36,11 @@
  * the wire, so no other caller can regress the rule.
  */
 
-import { ContentType, MediaKind } from '@migo/sdk';
+import { ContentType, MediaKind, sealing } from '@migo/sdk';
 import type { Id, UploadResult, VoiceNoteRefContent } from '@migo/sdk';
 
-import type { MediaClient } from './media.js';
+import { LEGACY_PLAINTEXT_SLOTS, VOICE_SEAL_DOMAIN } from './media.js';
+import type { MediaClient, UploadDestination } from './media.js';
 
 /** The server's cap on a voice note; a longer recording is refused at upload. */
 export const VOICE_NOTE_MAX_MS = 300_000;
@@ -43,7 +54,8 @@ export const WAVEFORM_BARS = 50;
  * `mimeType` is what the browser actually produced (normalised, no codec parameters), never the
  * type it was merely asked for; `waveform` is optional because the analyser graph is best-effort —
  * a recording that never sampled amplitude still uploads, and the player falls back to a progress
- * bar. The blob itself is never given an object URL: its bytes go straight to `arrayBuffer()`.
+ * bar. The blob itself is never given an object URL: its bytes go straight to `arrayBuffer()`,
+ * then to the seal.
  */
 export interface VoiceRecording {
   blob: Blob;
@@ -120,29 +132,23 @@ export function pickRecorderMimeType(): string {
  * Normalises a recorded MIME type to its container claim: the type before any `;` parameters.
  *
  * `MediaRecorder.mimeType` reports e.g. `audio/webm;codecs=opus` — the parameter is true but noise
- * in a claim the server matches against the bytes at commit, and section 122 says receivers must
- * not act on the claim anyway. An empty input stays empty; {@link uploadVoiceNote} substitutes the
- * neutral claim image attachments use.
+ * in a claim the receiver labels the decrypted blob with (section 122 says receivers must not act
+ * on the claim beyond that anyway). An empty input stays empty; {@link uploadVoiceNote} substitutes
+ * the neutral claim image attachments use.
  */
 export function normalizeVoiceMime(mimeType: string): string {
   return (mimeType.split(';', 1)[0] ?? '').trim();
 }
 
 /**
- * Placeholder key material for the media key slots; see the module doc.
- *
- * Zero-filled and of the lengths the future encryption will use, so the message shape is final.
- */
-const PLACEHOLDER_VOICE_KEY = new Uint8Array(32);
-const PLACEHOLDER_VOICE_NONCE = new Uint8Array(12);
-
-/**
  * The message body for an uploaded voice note: the reference the receiver renders, in the sender's
- * claim of type and duration, with the placeholder key material (see the module doc).
+ * claim of type and duration, with the key material that opens the sealed recording.
  *
  * Extracted from {@link uploadVoiceNote} so the content shape is a pure function a test can pin —
- * the placeholder rule especially, since "these bytes are not really encrypted yet" is a fact a
- * future change must replace deliberately, not drift away from.
+ * the key and nonce the upload sealed under must land in the slots verbatim, because they are the
+ * only copies that ever reach the receiver. The legacy plaintext path passes {@link
+ * LEGACY_PLAINTEXT_SLOTS} from `media.ts`, which is also where the renderer's zero-key detection
+ * lives.
  */
 export function voiceNoteContent(
   uploaded: UploadResult,
@@ -152,6 +158,7 @@ export function voiceNoteContent(
     durationMs: number;
     waveform?: Uint8Array;
   },
+  keyMaterial: { key: Uint8Array; nonce: Uint8Array },
 ): VoiceNoteRefContent {
   const content: VoiceNoteRefContent = {
     type: ContentType.VoiceNoteRef,
@@ -159,8 +166,8 @@ export function voiceNoteContent(
     mimeType: claim.mimeType,
     sizeBytes: claim.sizeBytes,
     durationMs: claim.durationMs,
-    key: PLACEHOLDER_VOICE_KEY,
-    nonce: PLACEHOLDER_VOICE_NONCE,
+    key: keyMaterial.key,
+    nonce: keyMaterial.nonce,
   };
   if (claim.waveform !== undefined) {
     content.waveform = claim.waveform;
@@ -175,12 +182,18 @@ export function voiceNoteContent(
  * recording is refused before any bytes cross the wire (the server would refuse it at commit
  * anyway, and a failed five-minute upload is the worst possible place to learn that). The
  * recording's duration and waveform ride both the upload and the message, so the receiver can lay
- * out the player before downloading anything.
+ * out the player before downloading anything — and the waveform is sampled before the seal, which
+ * is the only moment the plaintext exists outside the recorder.
+ *
+ * In an end-to-end conversation (the default, and every direct conversation and group) the bytes
+ * are sealed before upload: the server stores ciphertext and the key rides inside the sealed
+ * message. A server-readable room keeps the legacy plaintext path; see the module doc.
  */
 export async function uploadVoiceNote(
   client: MediaClient,
   conversationId: Id,
   recording: VoiceRecording,
+  destination: UploadDestination = {},
 ): Promise<VoiceNoteRefContent> {
   if (recording.durationMs > VOICE_NOTE_MAX_MS) {
     throw new RangeError(`voice notes are capped at ${VOICE_NOTE_MAX_MS} ms`);
@@ -188,20 +201,39 @@ export async function uploadVoiceNote(
   const container = normalizeVoiceMime(recording.mimeType);
   const claim = container === '' ? 'application/octet-stream' : container;
   const bytes = new Uint8Array(await recording.blob.arrayBuffer());
-  const uploaded = await client.media.upload(
-    {
-      kind: MediaKind.VoiceNote,
-      contentType: claim,
-      size: bytes.length,
-      conversationId,
-      durationMs: recording.durationMs,
-    },
-    bytes,
-  );
-  return voiceNoteContent(uploaded, {
+  const claimFields = {
     mimeType: claim,
     sizeBytes: bytes.length,
     durationMs: recording.durationMs,
     ...(recording.waveform !== undefined ? { waveform: recording.waveform } : {}),
-  });
+  };
+
+  if (destination.endToEnd === false) {
+    const uploaded = await client.media.upload(
+      {
+        kind: MediaKind.VoiceNote,
+        contentType: claim,
+        size: bytes.length,
+        conversationId,
+        durationMs: recording.durationMs,
+      },
+      bytes,
+    );
+    return voiceNoteContent(uploaded, claimFields, LEGACY_PLAINTEXT_SLOTS);
+  }
+
+  const sealed = sealing.seal(bytes, VOICE_SEAL_DOMAIN);
+  const uploaded = await client.media.upload(
+    {
+      kind: MediaKind.VoiceNote,
+      // The stored object is opaque ciphertext; the honest claim for it is the neutral one. The
+      // message's own claim — the real container — is what the player labels the opened blob with.
+      contentType: 'application/octet-stream',
+      size: sealed.sealed.length,
+      conversationId,
+      durationMs: recording.durationMs,
+    },
+    sealed.sealed,
+  );
+  return voiceNoteContent(uploaded, claimFields, sealed);
 }

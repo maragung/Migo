@@ -102,6 +102,12 @@ pub struct SettingsState {
     pub passphrase_current: String,
     pub passphrase_next: String,
     pub passphrase_confirm: String,
+    /// The identity-rotation confirmation. Whether the dialog is open, and the vault passphrase
+    /// it collects — a secret, wiped the moment it leaves for the worker like every secret
+    /// field here, because the worker must re-seal the vault with the successor key in the same
+    /// breath as the ceremony and holds no passphrase of its own after unlock.
+    pub rotate_open: bool,
+    pub rotate_passphrase: String,
 }
 
 /// Draws the settings pane.
@@ -138,6 +144,10 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
                 });
             });
         });
+
+    // The rotation confirmation floats over the pane, in the foreground, whatever the scroll is
+    // doing — a question this consequential does not scroll away.
+    rotate_dialog(ui.ctx(), context, state);
 }
 
 /// The server this session lives on, and whether the socket to it is up.
@@ -361,9 +371,11 @@ fn account_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsS
 
     // --- safety number ---------------------------------------------------------
     // The fingerprint of this device's identity key, home here since the conversation list that
-    // used to carry it left the shell. Shown as a monospace block so a pair of people can read it
-    // to each other aloud and compare — that comparison is the only thing that detects a
-    // substituted identity key, and it is worth the four lines it costs.
+    // used to carry it left the shell. It is this device's *own* number — a name for its key, not
+    // the number a conversation is verified with: that is the pair number in the chat itself, one
+    // per peer device, the same string on both screens. Shown as a monospace block because a
+    // person comparing a device's key with what its owner expects still deserves something they
+    // can read digit by digit.
     if let Some(account) = context.account {
         ui.label(
             RichText::new("Safety number")
@@ -379,8 +391,8 @@ fn account_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsS
         ui.add_space(space::XS);
         ui.label(
             RichText::new(
-                "Compare this with the other person, in a call or in person. If it differs, \
-                 stop and do not trust the conversation.",
+                "This device's own identity number. A conversation is verified with the pair \
+                 number shown in the chat itself — the same number on both screens.",
             )
             .font(egui::FontId::proportional(font::TINY))
             .color(colors.text_muted),
@@ -506,6 +518,35 @@ fn account_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsS
                 context.issue(Command::ArchiveWallet { wallet_id });
             }
         }
+    }
+
+    ui.add_space(space::LG);
+
+    // --- identity key -----------------------------------------------------------
+    // Rotation's door, at the account section's end because it is the account's own key and the
+    // rarest thing here. A ghost button with the explanation one hover away, and the real
+    // consequences in the dialog rather than the pane: the pane says what the button is, the
+    // dialog says what it does, and nobody reaches the passphrase field without both.
+    let holds_root = context.account.is_some_and(|account| account.holds_root);
+    if holds_root {
+        if widgets::ghost_button(ui, context.theme, "Rotate identity key")
+            .on_hover_text(
+                "Replaces the account's ML-DSA identity key with a fresh one held only by this \
+                 device. The confirmation explains what that means before anything happens.",
+            )
+            .clicked()
+        {
+            state.rotate_open = true;
+        }
+    } else {
+        ui.label(
+            RichText::new(
+                "Only a device that holds the account root can rotate the account's identity \
+                 key. Seal or restore a backup on this device first.",
+            )
+            .font(egui::FontId::proportional(font::SMALL))
+            .color(colors.text_muted),
+        );
     }
 }
 
@@ -844,6 +885,105 @@ fn backup_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsSt
 fn sign_out_section(ui: &mut Ui, context: &mut Context<'_>) {
     if widgets::ghost_button(ui, context.theme, "Sign out").clicked() {
         context.issue(Command::SignOut);
+    }
+}
+
+/// The rotation confirmation: what changes, what does not, and the vault passphrase.
+///
+/// A floating window anchored over the pane rather than an inline form, the same shape the
+/// shell's logout question takes, because rotation is a one-way account-wide action and should
+/// be answered deliberately or not at all. The two paragraphs are the honest consequences — the
+/// quiet half first (nothing anyone verified has to be verified again), the costly half second
+/// (the new key exists only here, and everything else that holds the root still holds the old
+/// one) — and the passphrase is required because the successor key is sealed into the vault in
+/// the same breath as the ceremony: the worker holds no passphrase after unlock, by design.
+fn rotate_dialog(ctx: &egui::Context, context: &mut Context<'_>, state: &mut SettingsState) {
+    if !state.rotate_open {
+        return;
+    }
+    let colors = palette(context.theme);
+    let mut confirmed = false;
+    // A question, not a form: no close of its own — Cancel, Escape and the confirm are the whole
+    // answer set, and a question that can be X-ed away without being answered is a question that
+    // can be ignored.
+    let mut window_open = true;
+
+    crate::ui::desktop::floating(
+        context.theme,
+        "Rotate identity key",
+        egui::Id::new("migo-rotate-dialog"),
+        egui::Pos2::ZERO,
+        egui::vec2(420.0, 0.0),
+        egui::vec2(420.0, 0.0),
+    )
+    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+    .order(egui::Order::Foreground)
+    .resizable(false)
+    .collapsible(false)
+    .show(ctx, |ui| {
+        ui.add_space(space::SM);
+        ui.label(
+            RichText::new("Replace the account's identity key?")
+                .font(egui::FontId::proportional(font::BODY))
+                .color(colors.text)
+                .strong(),
+        );
+        ui.add_space(space::XS);
+        ui.label(
+            RichText::new(
+                "A new ML-DSA identity key is generated on this device and becomes the \
+                 account's; the old one is retired on the server. Your sessions, conversations, \
+                 encryption keys and safety numbers continue unchanged — nothing anyone has \
+                 verified needs verifying again.",
+            )
+            .font(egui::FontId::proportional(font::SMALL))
+            .color(colors.text_muted),
+        );
+        ui.add_space(space::XS);
+        ui.label(
+            RichText::new(
+                "The new key lives only in this device's vault. Every other device that holds \
+                 the account root — and any backup made before now — still carries the old key: \
+                 a restore from an old backup will be refused until a fresh one is sealed here.",
+            )
+            .font(egui::FontId::proportional(font::SMALL))
+            .color(colors.text_muted),
+        );
+        ui.add_space(space::SM);
+        widgets::field(
+            ui,
+            context.theme,
+            "Vault passphrase",
+            &mut state.rotate_passphrase,
+            true,
+            "the passphrase that unlocks this device",
+        );
+        ui.add_space(space::MD);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if widgets::ghost_button(ui, context.theme, "Cancel").clicked() {
+                window_open = false;
+            }
+            ui.add_space(space::SM);
+            let ready = !state.rotate_passphrase.is_empty();
+            if widgets::primary_button(ui, context.theme, "Rotate identity key", ready).clicked() {
+                confirmed = true;
+                window_open = false;
+            }
+        });
+    });
+
+    // Escape cancels, the same answer the logout question gives the key.
+    let escaped = ctx.input(|input| input.key_pressed(egui::Key::Escape));
+    if !window_open || escaped {
+        state.rotate_open = false;
+        if confirmed {
+            context.issue(Command::RotateIdentity {
+                passphrase: state.rotate_passphrase.clone(),
+            });
+        }
+        // Wiped whether it left or not: a dialog that kept a passphrase after closing would be a
+        // second copy of the vault's secret, on a pane that also shows the device list.
+        state.rotate_passphrase.clear();
     }
 }
 

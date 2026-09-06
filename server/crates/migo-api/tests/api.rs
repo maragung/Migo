@@ -1379,6 +1379,50 @@ async fn bytes_the_scanner_refuses_are_never_served() {
 }
 
 #[tokio::test]
+async fn sealed_media_bytes_are_served_as_an_opaque_download() {
+    // An end-to-end object's bytes: a real AEAD output is indistinguishable from random,
+    // and the sniff can name neither. The upload of such bytes succeeds (the commit path
+    // for an end-to-end destination never sniffs), so a 404 at download would strand
+    // every sealed attachment after a successful upload.
+    let (h, files) = media_harness();
+    let sealed: Vec<u8> = (0..96u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 7) as u8)
+        .collect();
+    let put = h
+        .send(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/media/c/2026/sealed.bin")
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from(sealed.clone()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(put.status, StatusCode::NO_CONTENT, "the ciphertext lands");
+
+    let got = h.send(get("/media/c/2026/sealed.bin")).await;
+    assert_eq!(
+        got.status,
+        StatusCode::OK,
+        "unrecognised bytes are served, not hidden — they are somebody's sealed media"
+    );
+    let content_type = got
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    assert_eq!(
+        content_type, "application/octet-stream",
+        "the honest type for bytes this node cannot name"
+    );
+    assert_eq!(got.bytes, sealed, "the bytes round-trip untouched");
+    assert!(
+        files.objects.lock().contains_key("c/2026/sealed.bin"),
+        "the object is still stored; only its serving changed"
+    );
+}
+
+#[tokio::test]
 async fn the_config_document_is_json_not_an_opaque_blob() {
     let h = Harness::new();
     let resp = h.send(get("/v1/config")).await;

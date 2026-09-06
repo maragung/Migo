@@ -18,6 +18,7 @@ import com.migo.core.domain.MediaDomain
 import com.migo.core.domain.MessageDeletion
 import com.migo.core.domain.MessagingDomain
 import com.migo.core.domain.NotificationsDomain
+import com.migo.core.domain.PeerIdentity
 import com.migo.core.domain.PresenceDomain
 import com.migo.core.domain.ProfileDomain
 import com.migo.core.domain.RoomsDomain
@@ -29,6 +30,7 @@ import com.migo.core.domain.SyncDomain
 import com.migo.core.domain.TypingDomain
 import com.migo.core.net.AdminStanding
 import com.migo.core.net.AdminView
+import com.migo.core.net.CaptchaProof
 import com.migo.core.net.DeviceRequest
 import com.migo.core.net.DeviceRevoked
 import com.migo.core.net.DeviceSummary
@@ -358,6 +360,12 @@ class MigoClient private constructor(
     /** `userId|deviceId` to a bundle enumerated but not yet spent, served once to [fetchBundle]. */
     private val bundleCache = HashMap<String, PrekeyBundle>()
 
+    /**
+     * Account id to its devices' published identities, so a conversation's verification surface
+     * does not re-enumerate — and re-spend the peer's one-time prekeys — every time it opens.
+     */
+    private val peerIdentitiesCache = HashMap<Id, List<PeerIdentity>>()
+
     /** Every topic with an active subscription, re-sent after a session reset. */
     private val subscribedTopics = HashMap<String, Topic>()
 
@@ -481,11 +489,24 @@ class MigoClient private constructor(
      *
      * [identityPublicKey] is the account identity's ML-DSA-65 public key when the caller already
      * holds the account root; it rides with the request so the server can reconcile a retry whose
-     * first attempt already landed (§12). Returns the grant so the caller can persist it, alongside
+     * first attempt already landed (§12). [captcha] is the human check's answer, present once the
+     * gate on this network has demanded one. Returns the grant so the caller can persist it, alongside
      * a [snapshot] of the key material, and later [resume] without registering again.
      */
-    suspend fun register(username: String, passphrase: String, identityPublicKey: ByteArray? = null): Grant {
-        val grant = rest.register(username, passphrase, deviceRequest(), options.locale, identityPublicKey)
+    suspend fun register(
+        username: String,
+        passphrase: String,
+        identityPublicKey: ByteArray? = null,
+        captcha: CaptchaProof? = null,
+    ): Grant {
+        val grant = rest.register(
+            username,
+            passphrase,
+            deviceRequest(),
+            options.locale,
+            identityPublicKey,
+            captcha,
+        )
         establish(grant)
         return grant
     }
@@ -494,10 +515,11 @@ class MigoClient private constructor(
      * Signs an existing account in on this device, then connects.
      *
      * [identifier] is a username, an email, or a public id: one field, because a user does not think of
-     * those as different kinds of thing, and the server decides which it is.
+     * those as different kinds of thing, and the server decides which it is. [captcha] is the human
+     * check's answer, present once the gate on this network has demanded one.
      */
-    suspend fun login(identifier: String, passphrase: String): Grant {
-        val grant = rest.login(identifier, passphrase, deviceRequest())
+    suspend fun login(identifier: String, passphrase: String, captcha: CaptchaProof? = null): Grant {
+        val grant = rest.login(identifier, passphrase, deviceRequest(), captcha)
         establish(grant)
         return grant
     }
@@ -629,6 +651,7 @@ class MigoClient private constructor(
             members.clear()
             userDevices.clear()
             bundleCache.clear()
+            peerIdentitiesCache.clear()
             subscribedTopics.clear()
         }
         setState(ConnectionState.Closed)
@@ -684,6 +707,44 @@ class MigoClient private constructor(
      */
     suspend fun publishIdentityKey(identityPublicKey: ByteArray) {
         rest.publishIdentityKey(requireConnected().grant.accessToken, identityPublicKey, null)
+    }
+
+    /**
+     * Rotates the account's ML-DSA-65 identity key, and returns the successor the caller must
+     * persist.
+     *
+     * The ceremony is the server's (migo-auth, purpose `rotate`): ask for a challenge as this
+     * authenticated device, sign the canonical payload with the *current* key under the rotate
+     * context -- which no login signature can satisfy, so a leaked login signature cannot rotate
+     * anything -- and introduce a successor key minted here from fresh randomness. The server
+     * installs the successor as active and retires the predecessor in one store call; sessions,
+     * including this one, are unaffected.
+     *
+     * [current] is the account's key as this device holds it, and the caller keeps it: this class
+     * transports bytes and runs the ceremony's shape, it does not hold account keys. The successor
+     * is returned rather than stored anywhere, because the one place it belongs -- the sealed
+     * vault -- is the application's to write, and a ceremony that quietly lost the successor would
+     * leave an account whose active key exists nowhere.
+     *
+     * What does *not* change: the E2EE device identity (the ratchets, the safety numbers peers
+     * see), which is separate material this ceremony never touches.
+     */
+    suspend fun rotateIdentity(current: IdentityKey): IdentityKey {
+        val session = requireConnected()
+        val challenge = rest.rotationChallenge(session.grant.accessToken)
+        val payload = try {
+            Base64.getDecoder().decode(challenge.payload)
+        } catch (_: IllegalArgumentException) {
+            throw SdkError("the server's challenge payload was not base64")
+        }
+        val successor = IdentityKey.generate()
+        rest.rotateIdentity(
+            session.grant.accessToken,
+            parseId(challenge.challengeId),
+            current.signRotate(payload),
+            successor.publicKey(),
+        )
+        return successor
     }
 
     /** The account's devices, as the server knows them — the owner's own security screen. */
@@ -948,6 +1009,7 @@ class MigoClient private constructor(
     suspend fun invalidateDevices(userId: Id) {
         cacheLock.withLock {
             userDevices.remove(userId)
+            peerIdentitiesCache.remove(userId)
             val prefix = "${userId.value}|"
             bundleCache.keys.filter { it.startsWith(prefix) }.forEach { bundleCache.remove(it) }
         }
@@ -1006,6 +1068,39 @@ class MigoClient private constructor(
         val cached = cacheLock.withLock { bundleCache.remove(key) }
         if (cached != null) return cached
         return session.keys.fetchBundle(userId, deviceId)
+    }
+
+    /**
+     * The identities a user's devices currently publish, for a conversation's verification surface.
+     *
+     * The enumeration is the same one the send path makes, and it costs the same: the server hands
+     * out each bundle with a one-time prekey already consumed, so every user enumerated here spends
+     * one prekey per device they publish. The result is cached for this client's life precisely so
+     * a safety-number view that opens on every conversation open does not turn into a prekey fire
+     * hose — and the bundles fetched on the way are parked in the same cache [fetchBundle] serves
+     * from, so the spend is not wasted: a later first message to any of these devices forms its
+     * session from the bundle this call already paid for.
+     *
+     * Identities here are *observations*, not attestations: the server chooses what to serve, and a
+     * safety number is only worth what the out-of-band comparison behind it is worth. What the
+     * number does give is stability — the same two identities always derive the same string — and
+     * a change in it is the visible signal brief section 164 asks for, whatever caused it.
+     */
+    suspend fun peerIdentities(userId: Id): List<PeerIdentity> {
+        val session = requireConnected()
+        cacheLock.withLock { peerIdentitiesCache[userId] }?.let { return it }
+
+        val bundles = session.keys.fetchDeviceBundles(userId)
+        val identities = ArrayList<PeerIdentity>(bundles.size)
+        cacheLock.withLock {
+            for (entry in bundles) {
+                identities.add(PeerIdentity(entry.deviceId, entry.bundle.identity))
+                bundleCache[bundleKey(userId, entry.deviceId)] = entry.bundle
+            }
+            userDevices[userId] = bundles.map { it.deviceId }
+            peerIdentitiesCache[userId] = identities
+        }
+        return identities
     }
 
     // --- key material maintenance ---

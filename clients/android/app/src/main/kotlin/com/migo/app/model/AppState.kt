@@ -1,7 +1,9 @@
 package com.migo.app.model
 
 import com.migo.core.ConnectionState
+import com.migo.core.crypto.PeerSafetyNumber
 import com.migo.core.net.AdminView
+import com.migo.core.net.CaptchaChallenge
 import com.migo.core.net.DeviceSummary
 import com.migo.core.net.WalletSummary
 import com.migo.core.protocol.BadgeWire
@@ -61,6 +63,20 @@ sealed interface AppState {
         val identifier: String = "",
         /** True while a register or sign-in call is in flight; the form is disabled. */
         val busy: Boolean = false,
+        /**
+         * The captcha challenge the form is showing, or null when it is showing none.
+         *
+         * Held here rather than in the screen because the server owns the timing: a challenge
+         * arrives either because the register form fetched one (the web client's fetch-on-mount,
+         * mirrored) or because a refused attempt came back carrying the replacement challenge
+         * already spent proof entitles the next attempt to. A null-to-non-null transition is the
+         * widget appearing; a value swap is the picture changing, without a round trip.
+         *
+         * The *answer* is not here: it is typing, held in the form's own local state beside the
+         * passphrase and passed to the submit call as an argument, so no credential-shaped string
+         * ever rides on this object.
+         */
+        val captcha: CaptchaChallenge? = null,
         /** What went wrong last time, already reduced to something worth showing a person. */
         val failure: String? = null,
     ) : AppState
@@ -488,6 +504,13 @@ data class ChatState(
     val kind: ConversationKind = ConversationKind.Room,
     /** The room behind a Room-kind chat, when the shell knows one; the Leave control needs it. */
     val roomId: Id? = null,
+    /**
+     * The peer account behind a Direct conversation, when the row it was opened from knew one.
+     * The safety numbers are a read against the peer's published identities, so the chat carries
+     * the id that read needs — null for a room chat, and for a direct chat whose row arrived
+     * without its member list, in which case there is simply no verification surface to show.
+     */
+    val peerId: Id? = null,
     /** Oldest first: the order they are drawn in, and the order history must be replayed in. */
     val messages: List<ChatMessage> = emptyList(),
     /** True while history is being fetched and decrypted. */
@@ -527,6 +550,32 @@ data class ChatState(
     val game: GameViewWire? = null,
     /** True while a game start or a guess is in flight, so neither control can double-fire. */
     val gameBusy: Boolean = false,
+    /**
+     * The direct conversation's verification surface: one safety number per device the peer
+     * publishes, and whether any of their identities changed since this conversation last
+     * acknowledged them. Null for a room chat, and for a direct chat until the read lands — which
+     * is the honest state, because a number that shows before the read is a number invented on the
+     * spot, the most reassuring thing a verification surface could wrongly display.
+     */
+    val safety: ChatSafety? = null,
+)
+
+/**
+ * A direct conversation's safety numbers, as the verification surface shows them.
+ *
+ * The numbers are per peer *device* — a Migo identity belongs to a device, so a peer signed in
+ * twice publishes two — and [changed] is true when any of them differs from the fingerprint this
+ * conversation last acknowledged. That flag is not cleared by the read that raised it: it stays
+ * until the person acknowledges it from the warning itself, which is brief section 164's
+ * "visible" done properly.
+ */
+data class ChatSafety(
+    /** One safety number per peer device, devices in the order the enumeration returned them. */
+    val numbers: List<PeerSafetyNumber>,
+    /** True while any observed identity is unacknowledged as changed. */
+    val changed: Boolean = false,
+    /** Why the read could not answer, when it could not. The numbers are then empty. */
+    val failure: String? = null,
 )
 
 /**

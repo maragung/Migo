@@ -9,29 +9,54 @@
  * split exists because the two halves fail differently — a wrong label is a wrong screen, a wrong
  * seal is a wire fault — and both are cheaper to hold apart.
  *
- * # The placeholder key material
+ * # The seal, and how the key reaches the peer
  *
  * Call signaling is end-to-end on the wire: the SDP and ICE blobs a client hands the SDK are
- * sealed for the peer's *device*, because an SDP body carries DTLS fingerprints and an ICE
- * candidate carries network addresses, and the signaling server must not read either. Real
- * per-device sealing rides the 1:1 session layer and is future work; until it lands the seal is
- * the same placeholder media attachments use — a framed envelope with a version byte, a 32-byte
- * zero key, and a 12-byte zero nonce, all of the lengths the real crypto will use, with the
- * payload riding after them in the clear. The signaling flow is already end-to-end correct *in
- * shape*: swapping the placeholder for real key material touches only {@link sealCallSignal} and
- * {@link openCallSignal}.
+ * sealed, because an SDP body carries DTLS fingerprints and an ICE candidate carries network
+ * addresses, and a signaling server that could read either (§165) would learn exactly what the
+ * end-to-end promise exists to protect. The server relays opaque blobs and nothing else.
+ *
+ * The key is *per call*, minted by the caller, and distributed inside the E2EE message layer:
+ * immediately before the invite, the caller sends the conversation a {@link
+ * ContentType.ControlEvent} whose data is {@link encodeCallKeyEvent}'s bytes — call id and key —
+ * sealed by the messaging domain's group crypto like any message content. Every device in the
+ * conversation can read it, which is the right audience, because the invite names the callee
+ * *account* and any of its devices may answer; the signaling server sees only another opaque
+ * message envelope. The ordering is the caller's half of the contract: the key message is sent
+ * and acknowledged *before* the invite, so the callee's devices hold the key before (or within
+ * moments of) the ring. The callee's half is the wait in the call manager: an accept that cannot
+ * yet find the key — the frames crossed, briefly — waits for it rather than failing the call.
+ *
+ * Why not derive the key from the pairwise session crypto instead? Because the pairwise channel
+ * (the Double Ratchet behind sender-key distribution) is per *device*, and an offer must be
+ * readable by whichever of the callee's devices answers — a key the caller cannot know in
+ * advance. Re-sealing per device would need one invite blob per device and a wire field for each;
+ * a per-call key in one E2EE message needs no new wire surface at all.
+ *
+ * Every envelope is bound to its call: the call id is the AEAD's associated data, so a blob
+ * sealed for one call cannot be replayed as another call's signaling.
+ *
+ * # The legacy envelope
+ *
+ * An older build sealed nothing: its envelope carried zero key and nonce slots with the payload
+ * in the clear behind them. This build still *opens* those (a call from a peer that has not
+ * upgraded is better served honestly than refused), and never writes them — an old envelope's
+ * payload was readable by the server, and that is a fact about the peer's build, not a format
+ * this side should keep producing.
  */
 
-import { CallEndReason, CallMediaKind, CallState } from '@migo/sdk';
+import { CallEndReason, CallMediaKind, CallState, aead, wire } from '@migo/sdk';
 import type { ActiveCall, CallInviteEvent, CallStateEvent, Id } from '@migo/sdk';
 
-/** The envelope version this build writes; an unknown version refuses to open rather than guessing. */
-const SEAL_VERSION = 1;
-/** Placeholder key material, zero-filled at the lengths the future real crypto will use. */
-const PLACEHOLDER_KEY = new Uint8Array(32);
-const PLACEHOLDER_NONCE = new Uint8Array(12);
-/** Bytes of envelope before the payload: version, key, nonce. */
-const ENVELOPE_PREFIX_BYTES = 1 + PLACEHOLDER_KEY.length + PLACEHOLDER_NONCE.length;
+/** The envelope version this build writes: real per-call encryption under the house AEAD. */
+const SEAL_VERSION = 2;
+/**
+ * The version an older build wrote: a framing envelope with zero key and nonce slots and the
+ * payload in the clear behind them. Opened, never written — see {@link openCallSignal}.
+ */
+const LEGACY_SEAL_VERSION = 1;
+/** Bytes of the legacy envelope before the payload: version, 32-byte key slot, 12-byte nonce slot. */
+const LEGACY_ENVELOPE_PREFIX_BYTES = 1 + 32 + 12;
 
 /** An envelope this build cannot read: wrong version, or too short to hold its own header. */
 export class CallSignalFormatError extends Error {
@@ -42,35 +67,123 @@ export class CallSignalFormatError extends Error {
 }
 
 /**
- * Seals one signaling payload (an SDP description or an ICE batch) into the placeholder envelope.
- *
- * See the module doc: this is framing, not encryption — the bytes ride in the clear behind key and
- * nonce slots that the real per-device sealing will fill. Both sides of a call run this build, so
- * the round trip is symmetric.
+ * The AEAD domain of one call's signaling: the call id, so a blob sealed for one call can never
+ * open as another's.
  */
-export function sealCallSignal(payload: Uint8Array): Uint8Array {
-  const out = new Uint8Array(ENVELOPE_PREFIX_BYTES + payload.length);
+function callSignalDomain(callId: Id): Uint8Array {
+  return new TextEncoder().encode(`migo-call-signal:${callId}`);
+}
+
+/**
+ * Mints the per-call sealing key: 32 random bytes from the platform CSPRNG.
+ *
+ * One key per call, minted by the caller and carried to the conversation inside the E2EE message
+ * layer (see the module doc). There is no key slot for it in the call wire frames — the frames
+ * carry only the sealed blobs — which is deliberate: the key's channel is the message layer,
+ * where it is already inside an end-to-end envelope, and not the relay the server owns.
+ */
+export function generateCallKey(): Uint8Array {
+  const key = aead.SymmetricKey.generate();
+  const bytes = key.expose().slice();
+  key.destroy();
+  return bytes;
+}
+
+/**
+ * Seals one signaling payload (an SDP description or an ICE batch) for one call.
+ *
+ * The envelope is `version || nonce || ciphertext || tag` — version 2, then the house AEAD's own
+ * output — under the call's key, with the call id as associated data. Every frame of the call
+ * (offer, answer, each ICE batch) seals independently under the same key with a fresh nonce, so
+ * two frames never share a nonce and one frame's exposure teaches nothing about another's.
+ */
+export function sealCallSignal(payload: Uint8Array, key: Uint8Array, callId: Id): Uint8Array {
+  const sealed = aead.seal(aead.SymmetricKey.fromBytes(key), callSignalDomain(callId), payload);
+  const out = new Uint8Array(1 + sealed.length);
   out[0] = SEAL_VERSION;
-  out.set(PLACEHOLDER_KEY, 1);
-  out.set(PLACEHOLDER_NONCE, 1 + PLACEHOLDER_KEY.length);
-  out.set(payload, ENVELOPE_PREFIX_BYTES);
+  out.set(sealed, 1);
   return out;
 }
 
 /**
  * Opens a sealed signaling payload; the inverse of {@link sealCallSignal}.
  *
- * A malformed or future-versioned envelope throws {@link CallSignalFormatError} rather than
- * returning nonsense bytes a WebRTC stack would choke on downstream with a worse error.
+ * A version this build does not know, an envelope too short to hold its own header, or a body that
+ * does not authenticate under the call's key throws {@link CallSignalFormatError} rather than
+ * returning nonsense bytes a WebRTC stack would choke on downstream with a worse error. The one
+ * exception is the legacy version-1 envelope (see the module doc): its payload was never
+ * encrypted, so it is handed back as it arrived.
  */
-export function openCallSignal(sealed: Uint8Array): Uint8Array {
-  if (sealed.length < ENVELOPE_PREFIX_BYTES) {
-    throw new CallSignalFormatError('shorter than its own header');
+export function openCallSignal(sealed: Uint8Array, key: Uint8Array, callId: Id): Uint8Array {
+  if (sealed.length < 1) {
+    throw new CallSignalFormatError('empty');
   }
-  if (sealed[0] !== SEAL_VERSION) {
-    throw new CallSignalFormatError(`version ${sealed[0]}`);
+  const version = sealed[0] ?? 0;
+  if (version === LEGACY_SEAL_VERSION) {
+    if (sealed.length < LEGACY_ENVELOPE_PREFIX_BYTES) {
+      throw new CallSignalFormatError('shorter than its own header');
+    }
+    return sealed.slice(LEGACY_ENVELOPE_PREFIX_BYTES);
   }
-  return sealed.slice(ENVELOPE_PREFIX_BYTES);
+  if (version !== SEAL_VERSION) {
+    throw new CallSignalFormatError(`version ${version}`);
+  }
+  try {
+    return aead.open(
+      aead.SymmetricKey.fromBytes(key),
+      callSignalDomain(callId),
+      sealed.subarray(1),
+    );
+  } catch {
+    // The AEAD refuses wrong key, wrong call, and edited bytes identically; the signaling caller
+    // needs one fact — this frame is not readable — not which of the three it was.
+    throw new CallSignalFormatError('body did not open under the call key');
+  }
+}
+
+// --- the call key's channel: the E2EE message layer ---
+
+/**
+ * The control-event name that carries a call's sealing key to the conversation.
+ *
+ * It rides a {@link ContentType.ControlEvent} sent through the messaging domain, so it is sealed
+ * by the group crypto like any message content and the server never sees the key. Only this exact
+ * event is treated as key material on receipt — the same rule the SDK applies to `sender-key`.
+ */
+export const CALL_KEY_EVENT = 'call-key';
+
+/**
+ * The bytes a call-key control event carries: the 16 wire bytes of the call id, then the 32-byte
+ * key. Fixed widths both, so decoding is two slices with no length prefix to parse.
+ */
+export function encodeCallKeyEvent(callId: Id, key: Uint8Array): Uint8Array {
+  const id = wire.idToBytes(callId);
+  const out = new Uint8Array(id.length + key.length);
+  out.set(id, 0);
+  out.set(key, id.length);
+  return out;
+}
+
+/**
+ * Decodes a call-key control event's data, or `null` when it is not one: wrong width, or a call id
+ * this build cannot parse.
+ *
+ * `null` rather than a throw, because the data arrives from a peer's client over the E2EE message
+ * layer and a malformed event is dropped like any other undecryptable noise — there is no call to
+ * fail over it, only a key that never arrives.
+ */
+export function decodeCallKeyEvent(data: Uint8Array): { callId: Id; key: Uint8Array } | null {
+  if (data.length !== wire.ID_BYTE_LEN + 32) {
+    return null;
+  }
+  try {
+    return {
+      callId: wire.idFromBytes(data.subarray(0, wire.ID_BYTE_LEN)),
+      key: data.slice(wire.ID_BYTE_LEN),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** A local or remote SDP description as it travels inside the seal: type plus the SDP text. */

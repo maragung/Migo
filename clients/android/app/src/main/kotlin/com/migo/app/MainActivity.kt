@@ -95,6 +95,7 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
                 onIdentifier = model::setIdentifier,
                 onSubmit = model::signIn,
                 onRestore = model::restoreFromBackup,
+                onRefreshCaptcha = model::refreshCaptcha,
                 onDismissFailure = model::dismissFailure,
             )
 
@@ -188,6 +189,7 @@ private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel) {
                     onStartGame = { slug -> model.startGame(open.conversationId, slug) },
                     onGuess = { value -> model.submitGuess(open.conversationId, value) },
                     selfId = state.accountId,
+                    onAcknowledgeSafety = model::acknowledgeSafetyChange,
                     modifier = Modifier.weight(1f),
                 )
             } else {
@@ -280,6 +282,7 @@ private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifie
             onSaveStatus = model::saveCustomStatus,
             onChangePassphrase = model::changePassphrase,
             onSaveContact = model::saveContact,
+            onRotateIdentity = model::rotateIdentity,
             onChangeAvatar = model::changeAvatar,
             modifier = modifier,
         )

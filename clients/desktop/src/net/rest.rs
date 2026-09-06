@@ -362,6 +362,13 @@ struct AddDeviceBody<'a> {
 }
 
 #[derive(Debug, Serialize)]
+struct RotateBody<'a> {
+    challenge_id: Id,
+    signature: &'a str,
+    new_public_key: &'a str,
+}
+
+#[derive(Debug, Serialize)]
 struct PublishKeyBody<'a> {
     identity_public_key: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -722,6 +729,52 @@ impl Rest {
         .await
     }
 
+    /// Asks for the rotation ceremony's payload: `POST /v1/auth/identity/rotate/challenge`.
+    ///
+    /// Unlike the login challenges this one is authenticated — the server already knows *whose*
+    /// key is being rotated from the bearer token, so it takes no body and answers with the
+    /// challenge bound to this account and this device. The payload is signed exactly as
+    /// received, under the rotation context, by the key that is *about to be retired*.
+    pub async fn identity_rotation_challenge(
+        &self,
+        access_token: &str,
+    ) -> Result<IdentityChallenge, RestError> {
+        self.auth_json::<(), IdentityChallenge>(
+            access_token,
+            "/v1/auth/identity/rotate/challenge",
+            reqwest::Method::POST,
+            &(),
+        )
+        .await
+    }
+
+    /// Answers a rotation challenge: `POST /v1/auth/identity/rotate`.
+    ///
+    /// `signature` is the current identity key's signature over the challenge payload; the
+    /// server verifies it against the *active* key before it consumes the challenge, so a
+    /// refused answer leaves the challenge answerable again. `new_public_key` is the successor
+    /// the account will rotate to, and the answer is deliberately empty — a rotation either
+    /// happened or was refused, and there is nothing further to read.
+    pub async fn identity_rotate(
+        &self,
+        access_token: &str,
+        challenge_id: Id,
+        signature: &[u8],
+        new_public_key: &[u8],
+    ) -> Result<(), RestError> {
+        self.auth_expect_empty(
+            access_token,
+            "/v1/auth/identity/rotate",
+            reqwest::Method::POST,
+            &RotateBody {
+                challenge_id,
+                signature: &b64(signature),
+                new_public_key: &b64(new_public_key),
+            },
+        )
+        .await
+    }
+
     /// Publishes the caller's identity (and optionally device) public key:
     /// `POST /v1/auth/identity/key`.
     ///
@@ -1062,5 +1115,25 @@ mod tests {
         )
         .expect("an envelope without a captcha parses");
         assert!(without.error.captcha.is_none());
+    }
+
+    /// The rotation answer carries exactly the three fields the server's `RotateBody` demands,
+    /// under its own names — the field names are the contract, and a client that renamed one
+    /// would be sending a body the server silently drops fields from.
+    #[test]
+    fn the_rotation_answer_carries_the_three_fields_the_server_demands() {
+        let body = RotateBody {
+            challenge_id: Id::from_bytes([5; 16]),
+            signature: "signed",
+            new_public_key: "successor",
+        };
+        let json = serde_json::to_value(&body).expect("the answer serialises");
+        assert_eq!(
+            json["challenge_id"],
+            serde_json::to_value(body.challenge_id).expect("id")
+        );
+        assert_eq!(json["signature"], "signed");
+        assert_eq!(json["new_public_key"], "successor");
+        assert_eq!(json.as_object().expect("an object").len(), 3);
     }
 }

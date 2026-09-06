@@ -49,6 +49,21 @@ function newRequest(): FakeRequest {
 }
 
 /**
+ * Whether a value is a WebCrypto key. Browsers structured-clone a `CryptoKey` into IndexedDB (that
+ * is how the key-store's master key persists); Node's own `structuredClone` may refuse one, so the
+ * double has to recognise keys and pass them through rather than let the engine's limits decide what
+ * the store can hold. The contract under test is that a stored key reads back usable — not how any
+ * particular engine moves the bytes.
+ */
+function isCryptoKey(value: unknown): value is CryptoKey {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as { [Symbol.toStringTag]?: string })[Symbol.toStringTag] === 'CryptoKey'
+  );
+}
+
+/**
  * An in-memory IndexedDB sufficient for `idb.ts`: one database, string keys, structured-clone values.
  *
  * Requests complete on a microtask, matching the real API's asynchrony — `idb.ts` assigns its
@@ -63,6 +78,10 @@ export interface FakeIndexedDb extends Restorable {
 export function installFakeIndexedDb(): FakeIndexedDb {
   const stores = new Map<string, Map<string, unknown>>();
 
+  /** Clones a stored value the way the real store would, with the CryptoKey exception above. */
+  const cloneForStore = (value: unknown): unknown =>
+    isCryptoKey(value) ? value : structuredClone(value);
+
   function makeStore(data: Map<string, unknown>, tx: FakeTx | null): FakeStore {
     const complete = (req: FakeRequest, apply: () => unknown): FakeRequest => {
       queueMicrotask(() => {
@@ -75,12 +94,13 @@ export function installFakeIndexedDb(): FakeIndexedDb {
     };
     return {
       // Real IndexedDB structured-clones on both write and read, so the fake does too: it makes the
-      // round-trip lossy in exactly the ways the real store is (a returned value is a fresh clone, not
-      // the stored reference) and rejects a value that is not structured-cloneable, as the store would.
-      get: (key) => complete(newRequest(), () => structuredClone(data.get(key))),
+      // round-trip lossy in exactly the ways the real store is (a returned value is a fresh clone,
+      // not the stored reference) and rejects a value that is not structured-cloneable, as the store
+      // would. A CryptoKey is the one exception — see `isCryptoKey` above.
+      get: (key) => complete(newRequest(), () => cloneForStore(data.get(key))),
       put: (value, key) =>
         complete(newRequest(), () => {
-          data.set(key, structuredClone(value));
+          data.set(key, cloneForStore(value));
           return undefined;
         }),
       delete: (key) =>

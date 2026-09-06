@@ -624,6 +624,15 @@ impl App {
                 Event::ChainActivity(rows) => {
                     self.wallet.chain.activity = rows;
                 }
+                Event::PeerIdentity {
+                    user_id,
+                    device_id,
+                    safety_number,
+                    changed,
+                } => {
+                    self.chat
+                        .note_peer_identity(user_id, device_id, safety_number, changed);
+                }
                 Event::People(rows) => {
                     if self.search.query.trim().is_empty() {
                         // The graph's own suggestions, kept for the pre-query state.

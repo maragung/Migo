@@ -176,6 +176,13 @@ pub enum Command {
     Conversations,
     /// Load history for one conversation, from `have_seq` upwards.
     History { conversation_id: Id, have_seq: u64 },
+    /// Fetch one account's key bundles, so a private conversation's window can show their safety
+    /// numbers before anything is sent.
+    ///
+    /// The bundle response is the only place a peer's identity key is ever observed; without this
+    /// ask the numbers would appear only after the first send, and a verification surface that
+    /// arrives after the conversation has started is a surface nobody looks at.
+    PeerKeys { user_id: Id },
     /// Encrypt and send text.
     SendText { conversation_id: Id, text: String },
     /// Start a direct conversation with one username.
@@ -330,6 +337,15 @@ pub enum Command {
     /// a person typing, and the worker is where "what they typed is not acceptable" becomes a
     /// sentence worth reading (the server's own validation message) instead of a parse error.
     ChangePassphrase { current: String, next: String },
+    /// Rotate the account's ML-DSA identity key, from this device.
+    ///
+    /// Carries the vault passphrase because the successor key must be sealed into the vault in
+    /// the same breath as the ceremony: the worker holds no passphrase after unlock, and a
+    /// successor that exists only in memory is a key nobody holds the moment the window closes.
+    /// The field is a person typing, and the worker is where "what they typed did not open the
+    /// vault" becomes a sentence worth reading — the same rule the passphrase change follows. The
+    /// settings pane confirms the consequences before sending, and wipes the secret on submit.
+    RotateIdentity { passphrase: String },
     /// Refresh the AVAX balance of the account's first wallet on one network.
     ///
     /// A pull, never a poll (§184): the wallet surface asks when the user asks, and the worker
@@ -591,6 +607,21 @@ pub enum Event {
     /// This account's tracked AVAX transactions (Activity), newest first. Sent at sign-in and
     /// after every send and settle, because the list is the worker's to keep, not the UI's.
     ChainActivity(Vec<ChainTxRow>),
+    /// One peer device's E2EE identity, as a key-bundle response observed it.
+    ///
+    /// Carries the *pair* safety number — this device's and that peer device's identity keys in
+    /// one number, [`model::pair_safety_number`]'s cross-client derivation, grouped for reading —
+    /// and whether the peer's fingerprint differed from the last one this vault sealed for that
+    /// device, which is the §47/§164 moment the conversation window has to draw a warning for.
+    /// Sent for every observed device, not only changed ones: the verification block shows the
+    /// numbers themselves, and a device that never changed is the baseline the reader is comparing
+    /// against.
+    PeerIdentity {
+        user_id: Id,
+        device_id: Id,
+        safety_number: String,
+        changed: bool,
+    },
     /// Something worth a line at the bottom of the window.
     Toast { text: String, kind: ToastKind },
 }
@@ -927,6 +958,14 @@ struct Worker {
     /// The account id rides along so a different account signing in over the same window never
     /// inherits another account's history.
     txs: Option<(Id, Vec<TxRecord>)>,
+    /// The last-seen E2EE identity fingerprint of every peer device this session has observed,
+    /// in memory between passphrase moments — the same trade the Activity list makes, for the
+    /// same reason. This is the map a key-change warning is decided against, so it has to
+    /// outlive the conversation window that observed the key: a fingerprint memory that died at
+    /// sign-out would warn about every peer, every session, and mean none of them.
+    ///
+    /// The account id rides along for the same reason the Activity list's does.
+    peers: Option<(Id, HashMap<Id, [u8; 32]>)>,
     /// One avatar upload between its BEGIN and the ticket's arrival. The bytes wait here
     /// because the worker never blocks on a reply; the frame arm completes the flow when the
     /// ticket lands. Replaced, never queued — a second pick while one is in flight refuses at
@@ -953,6 +992,7 @@ impl Worker {
             pending_leave: None,
             pending_registration: None,
             txs: None,
+            peers: None,
             avatar_pending: None,
             avatar_commit_pending: None,
             chain_http: reqwest::Client::new(),
@@ -1065,6 +1105,7 @@ impl Worker {
             } => {
                 self.request_history(conversation_id, have_seq).await;
             }
+            Command::PeerKeys { user_id } => self.fetch_peer_keys(user_id).await,
             Command::SendText {
                 conversation_id,
                 text,
@@ -1150,6 +1191,9 @@ impl Worker {
             }
             Command::ChangePassphrase { current, next } => {
                 self.change_passphrase(current, next).await;
+            }
+            Command::RotateIdentity { passphrase } => {
+                self.rotate_identity(passphrase).await;
             }
             Command::ChainBalance { network } => self.chain_balance(network).await,
             Command::ChainPrepare {
@@ -1301,18 +1345,10 @@ impl Worker {
             username: identifier.clone(),
             refresh_token: grant.refresh_token.clone(),
         });
-        // The Activity list this process already holds for this account is newer than whatever
-        // the vault last sealed; a different account's list never crosses over.
-        if self
-            .txs
-            .as_ref()
-            .is_some_and(|(id, _)| *id == grant.account_id)
-        {
-            keys.txs = self
-                .txs
-                .as_ref()
-                .map_or_else(Vec::new, |(_, txs)| txs.clone());
-        }
+        // The Activity list and peer-fingerprint memory this process already holds for this
+        // account are newer than whatever the vault last sealed; a different account's never
+        // cross over.
+        self.carry_live_records(&mut keys, grant.account_id);
         if let Err(error) = vault::save(&self.vault_path, &passphrase, &keys) {
             return self.fail(error.to_string());
         }
@@ -1404,18 +1440,9 @@ impl Worker {
             refresh_token: grant.refresh_token.clone(),
             ..saved.clone()
         });
-        // As at sign-in: this process's own record of the same account's transactions is the
-        // newer copy, and it is the one that gets sealed.
-        if self
-            .txs
-            .as_ref()
-            .is_some_and(|(id, _)| *id == grant.account_id)
-        {
-            keys.txs = self
-                .txs
-                .as_ref()
-                .map_or_else(Vec::new, |(_, txs)| txs.clone());
-        }
+        // As at sign-in: this process's own record of the same account's transactions and peer
+        // fingerprints is the newer copy, and it is the one that gets sealed.
+        self.carry_live_records(&mut keys, grant.account_id);
         if let Err(error) = vault::save(&self.vault_path, &passphrase, &keys) {
             return self.fail(error.to_string());
         }
@@ -1491,9 +1518,10 @@ impl Worker {
             safety_number,
             holds_root,
         };
-        // The Activity list is sealed with the keys it arrived with; it becomes the worker's to
-        // keep from here until the session ends.
+        // The Activity list and the peer-fingerprint memory are sealed with the keys they arrived
+        // with; they become the worker's to keep from here until the session ends.
         let txs = keys.txs.clone();
+        let peers = keys.peer_fingerprints.clone();
         let sessions = SessionStore::new(keys);
         // The group layer signs with the same identity the pairwise layer identifies with, so a
         // broadcast's signature is verifiable against the identity its distributions carried.
@@ -1520,10 +1548,33 @@ impl Worker {
             profile_presence: None,
         });
         self.txs = Some((account_id, txs));
+        self.peers = Some((account_id, peers));
 
         self.sink.send(Event::SignedIn(account));
         self.sink.send(Event::ChainActivity(self.chain_rows()));
         self.connect().await;
+    }
+
+    /// Folds this process's live account records — the Activity list, and the last-seen peer
+    /// identity fingerprints — into the keys a passphrase moment is about to seal.
+    ///
+    /// The worker deliberately holds no passphrase after unlock, so mid-session updates to these
+    /// lists live only in its memory and reach the vault only when a sign-in, a restore or a
+    /// rotation next opens it: this fold is that moment, at every door the vault is saved
+    /// through. A different account's records never cross over, so a second account signing in
+    /// over the same window inherits nothing — not another account's history, and not its
+    /// key-change memory.
+    fn carry_live_records(&self, keys: &mut DeviceKeys, account_id: Id) {
+        if let Some((id, txs)) = self.txs.as_ref() {
+            if *id == account_id {
+                keys.txs = txs.clone();
+            }
+        }
+        if let Some((id, peers)) = self.peers.as_ref() {
+            if *id == account_id {
+                keys.peer_fingerprints = peers.clone();
+            }
+        }
     }
 
     /// Connects the gateway, retrying with backoff until it succeeds or the session ends.
@@ -1766,6 +1817,21 @@ impl Worker {
             backwards: None,
         };
         self.request(Opcode::Sync, &message).await;
+    }
+
+    /// Fetches one account's key bundles, without sending anything.
+    ///
+    /// The send path asks for bundles only when it needs a session started; this is the ask a
+    /// conversation window makes so it can show the peer's safety numbers from the first frame
+    /// they are looked at, not from the first message. The bundles land in
+    /// [`Worker::on_bundles`] like any other fetch, and the identities they carry reach the UI
+    /// as [`Event::PeerIdentity`] entries.
+    async fn fetch_peer_keys(&mut self, user_id: Id) {
+        let request = migo_protocol::KeyBundleRequest {
+            user_id,
+            device_id: None,
+        };
+        self.request(Opcode::KeyBundleFetch, &request).await;
     }
 
     async fn start_direct(&mut self, username: String) {
@@ -2588,6 +2654,237 @@ impl Worker {
         }
     }
 
+    /// Rotates the account's ML-DSA identity key: mint a successor, seal it into the vault, then
+    /// ask the server to accept it.
+    ///
+    /// # What rotates, and what does not
+    ///
+    /// The server retires the account's active identity key and installs the successor the answer
+    /// carries, in one transaction: sessions are unaffected, and the E2EE layer is untouched — the
+    /// device credential, the Ed25519/X25519 identity, every ratchet and every safety number peers
+    /// have verified stay exactly as they were. The ceremony exists for the day the identity key
+    /// itself is the thing suspected, and it replaces nothing else.
+    ///
+    /// # The successor, and why it is not derived from the root
+    ///
+    /// The current key is the root's identity derivation, and the reference crate defines no
+    /// second derivation — there is no `V2` domain to derive a successor with, and inventing one
+    /// here would fork the protocol from the other three clients. So the successor is a fresh
+    /// random seed, `IdentityKey::from_seed`, sealed into the vault as FIELD_ROTATED_IDENTITY.
+    /// `DeviceKeys::identity_key` prefers that seed from the moment it is written, which is what
+    /// keeps every later ceremony — the unlock fallback's login, a container restore, the next
+    /// rotation — signing with the key the server actually knows.
+    ///
+    /// # The ordering, and the crash window it leaves
+    ///
+    /// The vault is re-sealed *before* the rotate call, not after. The other order has the worse
+    /// failure: a crash between the server's acceptance and the vault's save would retire the key
+    /// every copy of the vault still holds, and the retired key cannot sign for its own successor
+    /// — no rotation and no identity login, ever again from this device. Pre-committing inverts
+    /// the window: a crash between the save and the call leaves the vault holding a successor the
+    /// server never accepted, and the next attempt here signs with that successor and is refused
+    /// as invalid credentials. That window is healed below — the same challenge is answered again
+    /// under the root-derived key, which the refusal did not consume, because the server verifies
+    /// the signature *before* it retires the challenge. A device that can rotate always holds the
+    /// root: without one there is no key to sign with at all.
+    ///
+    /// A refusal the server actually answered rolls the vault back to what it held before the
+    /// attempt, so a refused rotation costs nothing. A failure with no answer at all — the
+    /// request may have landed and only its reply been lost — keeps the pre-commit sealed
+    /// instead, because rolling back then would strand the account: the next attempt signs with
+    /// the sealed successor, which resolves it in either direction. The one unrecoverable split
+    /// is another root-holding device rotating first: the server's active key becomes one this
+    /// vault never saw, both signatures are refused, and the rollback leaves this device signed
+    /// in but unable to run further identity ceremonies — the toast reports the refusal rather
+    /// than guessing which case it is.
+    ///
+    /// # What the successor does not fix
+    ///
+    /// A `.migo` container sealed before the rotation carries only the root, so restoring onto a
+    /// new device signs with the root-derived key and will be refused until a fresh container is
+    /// sealed on this device. Other root-holding devices are in the same position. Rotation is
+    /// real rotation exactly because it breaks the derivation, and the settings dialog says so
+    /// before the passphrase is ever asked for.
+    async fn rotate_identity(&mut self, passphrase: String) {
+        let Some(account_id) = self.signed.as_ref().map(|signed| signed.account.account_id) else {
+            return;
+        };
+
+        // The vault has to open: the successor is sealed under this passphrase, because the
+        // worker holds no passphrase after unlock, and a successor that never reached the vault
+        // is a key nobody holds the moment the window closes.
+        let mut keys = match vault::load(&self.vault_path, &passphrase) {
+            Ok(keys) => keys,
+            Err(error) => {
+                return self.sink.toast(
+                    format!("the vault did not open ({error}); the identity key was not rotated"),
+                    ToastKind::Error,
+                );
+            }
+        };
+        // The vault belongs to this session's account or the ceremony is not this device's to run.
+        if keys
+            .session
+            .as_ref()
+            .is_some_and(|saved| saved.account_id != account_id)
+        {
+            return self.sink.toast(
+                "this vault belongs to another account; the identity key was not rotated"
+                    .to_owned(),
+                ToastKind::Error,
+            );
+        }
+        let Some(current) = keys.identity_key() else {
+            return self.sink.toast(
+                "this device holds no identity key, so it cannot rotate one".to_owned(),
+                ToastKind::Error,
+            );
+        };
+
+        let challenge = {
+            let Some(signed) = self.signed.as_ref() else {
+                return;
+            };
+            signed
+                .rest
+                .identity_rotation_challenge(&signed.access_token)
+                .await
+        };
+        let challenge = match challenge {
+            Ok(challenge) => challenge,
+            Err(error) => return self.sink.toast(error.to_string(), ToastKind::Error),
+        };
+        // Signed exactly as received, never re-encoded — the same rule every ceremony holds.
+        let Some(payload) = base64_decode(&challenge.payload) else {
+            return self.sink.toast(
+                "the server's challenge payload was not base64".to_owned(),
+                ToastKind::Error,
+            );
+        };
+        let signature = match current.sign_rotate(&payload) {
+            Ok(signature) => signature,
+            Err(error) => return self.sink.toast(error.to_string(), ToastKind::Error),
+        };
+
+        // The successor: a fresh random seed, minted here. Sealed before the call, adopted after
+        // the server's acceptance — the order the doc comment above spends its paragraphs on.
+        let mut seed = [0u8; 32];
+        OsRandom.fill_bytes(&mut seed);
+        let successor = match migo_account::IdentityKey::from_seed(&seed) {
+            Ok(key) => key,
+            Err(error) => return self.sink.toast(error.to_string(), ToastKind::Error),
+        };
+
+        let prior_seed = keys.rotated_identity_seed;
+        keys.rotated_identity_seed = Some(seed);
+        self.carry_live_records(&mut keys, account_id);
+        if let Err(error) = vault::save(&self.vault_path, &passphrase, &keys) {
+            return self.sink.toast(
+                format!("the vault could not be re-sealed ({error}); nothing was rotated"),
+                ToastKind::Error,
+            );
+        }
+
+        let outcome = {
+            let Some(signed) = self.signed.as_ref() else {
+                return;
+            };
+            signed
+                .rest
+                .identity_rotate(
+                    &signed.access_token,
+                    challenge.challenge_id,
+                    &signature,
+                    &successor.public_key(),
+                )
+                .await
+        };
+        match outcome {
+            Ok(()) => {
+                if let Some(signed) = self.signed.as_mut() {
+                    signed.sessions.adopt_rotated_identity_seed(seed);
+                }
+                self.sink.toast(
+                    "Identity key rotated; sessions, chats and safety numbers continue unchanged",
+                    ToastKind::Success,
+                );
+            }
+            Err(error) => {
+                // A failure with no answer at all is not a refusal: the call may have landed and
+                // only its answer been lost, and rolling back then would strand the account — the
+                // vault would go on holding the retired root derivation while the successor it
+                // minted exists nowhere. The pre-commit stays sealed, and the next attempt
+                // resolves it either way: it signs with the sealed successor, which the server
+                // accepts if the call did land, and refuses invalid credentials otherwise — the
+                // heal below, which signs with the root.
+                if matches!(error, RestError::Transport) {
+                    return self.sink.toast(
+                        "the server's answer never arrived; the new key is sealed in this \
+                         vault — rotate again to finish the change",
+                        ToastKind::Info,
+                    );
+                }
+                // The crash-window heal: the vault already carried a successor this server never
+                // accepted, and the signature above was made with it. The root-derived key is
+                // the key the server still knows, and a refused signature did not consume the
+                // challenge — answer the same one again with the root's key.
+                let recoverable = matches!(
+                    &error,
+                    RestError::Server { symbol, .. } if symbol == "INVALID_CREDENTIALS"
+                ) && prior_seed.is_some();
+                if recoverable {
+                    if let Some(root) = keys.root() {
+                        let root_key = migo_account::IdentityKey::from_root(&root);
+                        if let Ok(retry) = root_key.sign_rotate(&payload) {
+                            let second = {
+                                let Some(signed) = self.signed.as_ref() else {
+                                    return;
+                                };
+                                signed
+                                    .rest
+                                    .identity_rotate(
+                                        &signed.access_token,
+                                        challenge.challenge_id,
+                                        &retry,
+                                        &successor.public_key(),
+                                    )
+                                    .await
+                            };
+                            if let Ok(()) = second {
+                                if let Some(signed) = self.signed.as_mut() {
+                                    signed.sessions.adopt_rotated_identity_seed(seed);
+                                }
+                                return self.sink.toast(
+                                    "Identity key rotated; sessions, chats and safety numbers \
+                                     continue unchanged",
+                                    ToastKind::Success,
+                                );
+                            }
+                        }
+                    }
+                }
+                // Rollback: the vault goes back to the seed it held before the attempt. The live
+                // records folded in above stay — they are this process's newer copies, exactly as
+                // at unlock — but the successor does not, and a refused rotation costs nothing.
+                keys.rotated_identity_seed = prior_seed;
+                if let Err(save_error) = vault::save(&self.vault_path, &passphrase, &keys) {
+                    self.sink.toast(
+                        format!(
+                            "the identity key was not rotated ({error}), and the vault could not \
+                             be restored: {save_error} — rotate again to retry the ceremony"
+                        ),
+                        ToastKind::Error,
+                    );
+                } else {
+                    self.sink.toast(
+                        format!("the identity key was not rotated: {error}"),
+                        ToastKind::Error,
+                    );
+                }
+            }
+        }
+    }
+
     // --- the chain wallet (§184) --------------------------------------------------
 
     /// What a device without the root is told, in one sentence, wherever the AVAX wallet is
@@ -3077,14 +3374,9 @@ impl Worker {
             username: username.clone(),
             refresh_token: grant.refresh_token.clone(),
         });
-        // A container restore onto the device that already tracked this account's transactions
-        // keeps the newer in-memory list; anything else keeps the vault's own.
-        if self.txs.as_ref().is_some_and(|(id, _)| *id == account_id) {
-            keys.txs = self
-                .txs
-                .as_ref()
-                .map_or_else(Vec::new, |(_, txs)| txs.clone());
-        }
+        // A container restore onto the device that already tracked this account's activity and
+        // peers keeps the newer in-memory copies; anything else keeps the vault's own.
+        self.carry_live_records(&mut keys, account_id);
         if let Err(error) = vault::save(&self.vault_path, &passphrase, &keys) {
             return self.fail(error.to_string());
         }
@@ -3131,18 +3423,9 @@ impl Worker {
             refresh_token: grant.refresh_token.clone(),
             ..saved.clone()
         });
-        // As at unlock: this process's own record of the same account's transactions is the newer
-        // copy, and it is the one that gets sealed.
-        if self
-            .txs
-            .as_ref()
-            .is_some_and(|(id, _)| *id == grant.account_id)
-        {
-            keys.txs = self
-                .txs
-                .as_ref()
-                .map_or_else(Vec::new, |(_, txs)| txs.clone());
-        }
+        // As at unlock: this process's own record of the same account's transactions and peer
+        // fingerprints is the newer copy, and it is the one that gets sealed.
+        self.carry_live_records(&mut keys, grant.account_id);
         if let Err(error) = vault::save(&self.vault_path, &passphrase, &keys) {
             return self.fail(error.to_string());
         }
@@ -4068,9 +4351,21 @@ impl Worker {
         let Ok(response) = gateway::decode::<migo_protocol::KeyBundleResponse>(frame) else {
             return;
         };
+        // This account's id, read before the mutable borrow below: own devices ride the same
+        // responses a peer's do (the send audience includes this account's other devices), and a
+        // key-change memory that counted them would warn this account about itself.
+        let me = self.signed.as_ref().map(|signed| signed.account.account_id);
+        // The peer identities this response observed, filed for the map update and the events
+        // after the loop — the borrow on `signed` outlives the iteration, and the fingerprint
+        // memory belongs to the worker, not to the session.
+        let mut observed: Vec<(Id, Id, [u8; 32])> = Vec::new();
         let Some(signed) = self.signed.as_mut() else {
             return;
         };
+        // This device's own E2EE fingerprint, read once before the loop: the safety number the
+        // UI shows for a peer device is a *pair* number — both sides' keys in one value — and the
+        // own half is this session's identity, constant for as long as the session lives.
+        let own = signed.sessions.keys().identity_public().fingerprint();
         for wire in response.bundles {
             let bundle = crate::crypto::session::bundle_from_wire(
                 &wire.identity_key,
@@ -4087,6 +4382,13 @@ impl Worker {
             );
             match bundle {
                 Ok(bundle) => {
+                    if Some(wire.user_id) != me {
+                        observed.push((
+                            wire.user_id,
+                            wire.device_id,
+                            bundle.identity.fingerprint(),
+                        ));
+                    }
                     signed.bundles.insert(wire.device_id, bundle);
                     let devices = signed.devices.entry(wire.user_id).or_default();
                     if !devices.contains(&wire.device_id) {
@@ -4097,6 +4399,27 @@ impl Worker {
                     "a key bundle from the server did not verify; not sending to that device",
                     ToastKind::Error,
                 ),
+            }
+        }
+        // §47/§164: every observed peer device moves the last-seen memory and tells the UI what
+        // it is — the pair safety number to read aloud, the same string the peer's own screen
+        // shows for this device (see [`model::pair_fingerprint`]'s symmetric order), and whether
+        // the fingerprint changed from the last one this vault sealed. First sight is not a
+        // change (see [`peer_fingerprint_changed`]).
+        if let Some(account_id) = me {
+            for (user_id, device_id, fingerprint) in observed {
+                let changed = match self.peers.as_mut() {
+                    Some((account, seen)) if *account == account_id => {
+                        peer_fingerprint_changed(seen, device_id, fingerprint)
+                    }
+                    _ => false,
+                };
+                self.sink.send(Event::PeerIdentity {
+                    user_id,
+                    device_id,
+                    safety_number: model::pair_safety_number(&own, &fingerprint),
+                    changed,
+                });
             }
         }
     }
@@ -4439,6 +4762,26 @@ fn hex_of(bytes: &[u8]) -> String {
     out
 }
 
+/// Files one observed peer fingerprint against the last-seen map, and says whether it changed.
+///
+/// First sight is not a change: a peer's second device is new, not suspicious, and a warning
+/// that fired for every new device would be a warning nobody read by the second week. Only a
+/// device whose fingerprint this map already held, holding a different one now, is the §47
+/// moment — and the map moves to the new fingerprint either way, so the change is reported
+/// once, not once per conversation or once per fetch. The old fingerprint is not kept: the
+/// last-seen number is on the screen to be compared against, and a memory of every prior key
+/// of every peer is a memory that outlives its usefulness the moment it is read.
+fn peer_fingerprint_changed(
+    seen: &mut HashMap<Id, [u8; 32]>,
+    device: Id,
+    fingerprint: [u8; 32],
+) -> bool {
+    match seen.insert(device, fingerprint) {
+        Some(previous) => previous != fingerprint,
+        None => false,
+    }
+}
+
 /// Projects decrypted [`Content`] onto the UI's [`Body`].
 fn body_of(content: Content) -> Body {
     match content {
@@ -4508,6 +4851,31 @@ mod tests {
             &keys,
             Id::from_bytes([9; 16]),
             root_bytes
+        ));
+    }
+
+    /// The fingerprint memory's whole judgement in one test: first sight is not a change, the
+    /// same key again is not a change, a different key for a device already known is the one
+    /// change worth warning about, and the map keeps the new fingerprint either way — so the
+    /// warning fires once for a real change, not once per conversation that notices it.
+    #[test]
+    fn a_peer_fingerprint_changes_only_when_a_known_device_changes_it() {
+        let mut seen: HashMap<Id, [u8; 32]> = HashMap::new();
+        let device = Id::from_bytes([3; 16]);
+
+        assert!(!peer_fingerprint_changed(&mut seen, device, [1; 32]));
+        assert!(!peer_fingerprint_changed(&mut seen, device, [1; 32]));
+        assert!(peer_fingerprint_changed(&mut seen, device, [2; 32]));
+        // The new fingerprint is what "last seen" now means.
+        assert_eq!(seen.get(&device), Some(&[2; 32]));
+        // And the change is not re-reported for the same new key.
+        assert!(!peer_fingerprint_changed(&mut seen, device, [2; 32]));
+
+        // A second device of the same peer is first sight, not a change.
+        assert!(!peer_fingerprint_changed(
+            &mut seen,
+            Id::from_bytes([4; 16]),
+            [3; 32]
         ));
     }
 

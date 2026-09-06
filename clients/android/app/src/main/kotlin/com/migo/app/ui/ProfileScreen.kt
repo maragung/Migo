@@ -83,6 +83,7 @@ fun ProfileScreen(
     onSaveStatus: (String) -> Unit,
     onChangePassphrase: (current: String, next: String) -> Unit,
     onSaveContact: (contact: String) -> Unit,
+    onRotateIdentity: () -> Unit,
     onChangeAvatar: (image: Uri, contentType: String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -175,6 +176,7 @@ fun ProfileScreen(
             security = state.accountSecurity,
             onChangePassphrase = onChangePassphrase,
             onSaveContact = onSaveContact,
+            onRotateIdentity = onRotateIdentity,
         )
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -471,25 +473,32 @@ private fun TriStateSwitch(choice: Int, onChoice: (Int) -> Unit, enabled: Boolea
 }
 
 /**
- * The account-security half of the Profile panel: the passphrase-change form and the
- * recovery-contact form.
+ * The account-security half of the Profile panel: the passphrase-change form, the
+ * recovery-contact form, and the identity-key rotation door.
  *
  * The two passphrase secrets and the contact string live in the composable's own state — not on
  * the [AccountSecurityState] object — because state objects survive recomposition and get logged
  * in bug reports, and a secret's only safe home is the field it is typed into, wiped the moment
  * the save takes it. They wipe on the success notice rather than on the click: a refused change
  * keeps its typed text (the person is mid-edit), a successful one starts fresh.
+ *
+ * The rotation door asks for confirmation for the same reason the device removal above does: it
+ * is a control that works, and its one permanent cost — a container's identity half retiring with
+ * the key it sealed — belongs in words the person reads before pressing the button, not in a
+ * surprise afterwards.
  */
 @Composable
 private fun AccountSecuritySection(
     security: AccountSecurityState,
     onChangePassphrase: (current: String, next: String) -> Unit,
     onSaveContact: (contact: String) -> Unit,
+    onRotateIdentity: () -> Unit,
 ) {
     var current by rememberSaveable { mutableStateOf("") }
     var next by rememberSaveable { mutableStateOf("") }
     var confirm by rememberSaveable { mutableStateOf("") }
     var contact by rememberSaveable { mutableStateOf("") }
+    var confirmRotate by rememberSaveable { mutableStateOf(false) }
 
     // A success notice is the one event that means the typed secrets are spent: the server has
     // taken them and the vault is re-sealed. Cleared here rather than in the click so a refusal
@@ -599,6 +608,53 @@ private fun AccountSecuritySection(
         modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 8.dp),
     ) {
         Text("Save contact")
+    }
+
+    Spacer(modifier = Modifier.padding(8.dp))
+
+    // The rotation door sits in the account's security half because what it rotates is the
+    // account's *signing* identity — the key the login and add-device ceremonies verify against.
+    // It is deliberately not sold as a privacy control: the E2EE identity behind the
+    // conversations, the safety numbers peers see, and this session are all separate material the
+    // ceremony never touches, and the confirmation says so before the button is pressed.
+    Text(
+        text = "The identity key signs this account in — it is not the key behind your " +
+            "conversations or the safety numbers your contacts see, which rotation does not touch.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+    )
+    OutlinedButton(
+        onClick = { confirmRotate = true },
+        enabled = !security.busy,
+        modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 8.dp),
+    ) {
+        Text("Rotate identity key", color = MaterialTheme.colorScheme.error)
+    }
+    if (confirmRotate) {
+        AlertDialog(
+            onDismissRequest = { confirmRotate = false },
+            title = { Text("Rotate the identity key?") },
+            text = {
+                Text(
+                    "A new signing key takes over this account's sign-in and add-device " +
+                        "ceremonies, and the old one is retired for good. Your conversations, " +
+                        "safety numbers and this session are untouched.\n\n" +
+                        "The cost is permanent: a .migo backup can no longer vouch for the " +
+                        "account onto a new device, because its identity half is the retired " +
+                        "key. The new key is sealed only in this device's vault.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmRotate = false
+                    onRotateIdentity()
+                }) { Text("Rotate", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmRotate = false }) { Text("Cancel") }
+            },
+        )
     }
 }
 

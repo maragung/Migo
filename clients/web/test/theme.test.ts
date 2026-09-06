@@ -13,10 +13,17 @@
  *   3. **The init script restores before paint.** It must read the same key, apply the same
  *      attribute, and fall back to dark — it is the thing that stops a light-theme visitor from
  *      seeing one dark frame on every load.
+ *
+ * The restore also exists as a file of its own — public/theme-init.js, loaded by the root layout —
+ * because the Content-Security-Policy admits no inline script. The last test runs the module's
+ * string and that file through the same harness on every path a visitor can take, so the two
+ * copies cannot disagree about anything a first paint depends on.
  */
 
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
 
 import {
   getChoice,
@@ -174,4 +181,68 @@ test('the pre-paint init script reads the same key and falls back to dark', () =
   // Both an unknown value and a throwing storage end dark — the default every path shares.
   const fallbacks = themeInitScript.match(/'dark'/g) ?? [];
   assert.ok(fallbacks.length >= 2, 'the script must fall back to dark on unknown and on failure');
+});
+
+/**
+ * What `localStorage.getItem` answers for one run: a stored value, an absent key, or `{ throws }`
+ * for a locked-down embedder where storage itself throws.
+ */
+type StoredAnswer = string | null | { throws: true };
+
+const STORAGE_REFUSED: StoredAnswer = { throws: true };
+
+/**
+ * Runs one init-script source against a minimal `window`/`document` double and returns the theme
+ * it applied. `systemLight` is `null` when `matchMedia` is absent.
+ */
+function runInitScript(source: string, stored: StoredAnswer, systemLight: boolean | null): string {
+  const applied: string[] = [];
+  const document = {
+    documentElement: {
+      setAttribute: (name: string, value: string): void => {
+        if (name === 'data-theme') {
+          applied.push(value);
+        }
+      },
+    },
+  };
+  const window = {
+    localStorage: {
+      getItem: (): string | null => {
+        if (typeof stored === 'object' && stored !== null) {
+          throw new Error('storage refused');
+        }
+        return stored;
+      },
+    },
+    matchMedia:
+      systemLight === null ? undefined : (): { matches: boolean } => ({ matches: systemLight }),
+  };
+  runInNewContext(source, { window, document });
+  assert.equal(applied.length, 1, 'the init script must apply the theme exactly once');
+  return applied[0] ?? '(none)';
+}
+
+test('the external init file restores the same theme as the module script on every path', async () => {
+  const external = await readFile(new URL('../../public/theme-init.js', import.meta.url), 'utf8');
+  const paths: Array<{ stored: StoredAnswer; systemLight: boolean | null; expected: string }> = [
+    { stored: 'light', systemLight: null, expected: 'light' },
+    { stored: 'dark', systemLight: null, expected: 'dark' },
+    { stored: 'system', systemLight: true, expected: 'light' },
+    { stored: 'system', systemLight: false, expected: 'dark' },
+    { stored: 'system', systemLight: null, expected: 'dark' },
+    { stored: 'blue', systemLight: null, expected: 'dark' },
+    { stored: null, systemLight: null, expected: 'dark' },
+    { stored: STORAGE_REFUSED, systemLight: null, expected: 'dark' },
+  ];
+  for (const { stored, systemLight, expected } of paths) {
+    const label =
+      typeof stored === 'object' && stored !== null ? 'storage throws' : `stored=${String(stored)}`;
+    assert.equal(runInitScript(themeInitScript, stored, systemLight), expected);
+    assert.equal(
+      runInitScript(external, stored, systemLight),
+      expected,
+      `the external file must agree with the module script when ${label} and systemLight=${String(systemLight)}`,
+    );
+  }
 });

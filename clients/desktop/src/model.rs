@@ -171,8 +171,9 @@ pub struct Account {
     pub device_id: Id,
     pub session_id: Id,
     pub username: String,
-    /// The safety number for this device's identity key: the fingerprint a user reads aloud to a
-    /// contact to confirm nobody is in the middle. Grouped for reading, never for parsing.
+    /// The safety number for this device's own identity key: a name for this device's key, shown
+    /// in Settings. A conversation is verified with the *pair* numbers instead — see
+    /// [`pair_safety_number`] — one per peer device, the same string on both screens.
     pub safety_number: String,
     /// Whether this device holds the account root: it can seal a `.migo` backup, sign future
     /// add-device ceremonies, and derive the wallet addresses. A passphrase-only device is a
@@ -750,20 +751,28 @@ pub fn short_id(id: Id) -> String {
     text[start..].to_string()
 }
 
-/// Groups a 32-byte fingerprint into a readable safety number: five-digit blocks, twelve of them.
+/// Groups a 32-byte fingerprint into the readable safety-number form: eight five-digit blocks,
+/// forty digits, joined by single spaces.
 ///
 /// The same presentation on every platform, because a user comparing this client's number against a
-/// phone's has to be able to read them as the same thing.
+/// phone's has to be able to read them as the same thing. Four bytes become one big-endian `u32`,
+/// taken modulo 100,000 and padded to five decimal digits, so thirty-two bytes are eight blocks.
+///
+/// A correction worth recording: this comment used to claim "twelve of them" and "sixty digits",
+/// while the code below — and therefore every number this client has ever shown — produces eight
+/// blocks and forty digits. The code is what a person might already have read aloud off this
+/// machine, and a safety number that quietly changes between versions is worse than no safety
+/// number at all, so the rendering stays and the comment now tells the truth about it.
 #[must_use]
 pub fn safety_number(fingerprint: &[u8; 32]) -> String {
-    let mut digits = String::with_capacity(64);
+    let mut digits = String::with_capacity(48);
     for chunk in fingerprint.chunks(4) {
         let mut value = 0u32;
         for byte in chunk {
             value = (value << 8) | u32::from(*byte);
         }
-        // Five decimal digits per four bytes: the whole 32 bytes become sixty digits, matching the
-        // grouping other clients use.
+        // Five decimal digits per four bytes: the whole 32 bytes become forty digits in eight
+        // blocks, matching the grouping every client uses.
         digits.push_str(&format!("{:05}", value % 100_000));
     }
     digits
@@ -772,6 +781,47 @@ pub fn safety_number(fingerprint: &[u8; 32]) -> String {
         .map(|c| String::from_utf8_lossy(c).to_string())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The salt for the pair safety number. The same salt the single-fingerprint derivation uses, so
+/// both live in one KDF family; the label below is what keeps them from ever meaning the same
+/// thing.
+const PAIR_SALT: &[u8] = b"migo-fingerprint";
+
+/// The HKDF label for the pair safety number.
+const PAIR_LABEL: &[u8] = b"migo-safety-number-v1";
+
+/// The 32-byte fingerprint of a *pair* — this device's E2EE identity and one peer device's, in one
+/// value neither side can influence alone.
+///
+/// The two fingerprints are concatenated in plain unsigned byte order, smallest first, so the
+/// number is symmetric: both people feed the same two values in the same order and read the same
+/// string off their own screens, which is the property that makes an aloud comparison meaningful.
+/// Sorting the fingerprints rather than the identity keys keeps this function about the bytes it
+/// was handed, agnostic of where they came from.
+///
+/// The salt, label, sort and `own || peer` input order are a cross-client contract, defined first
+/// by the Android client's `pairFingerprint`: an Android user and a desktop user comparing numbers
+/// for the same two devices must see the same string, and any client that changes one byte of this
+/// derivation breaks that without any test on its own machine noticing.
+#[must_use]
+pub fn pair_fingerprint(own: &[u8; 32], peer: &[u8; 32]) -> [u8; 32] {
+    let (first, second) = if own <= peer {
+        (own, peer)
+    } else {
+        (peer, own)
+    };
+    let mut input = [0u8; 64];
+    input[..32].copy_from_slice(first);
+    input[32..].copy_from_slice(second);
+    migo_crypto::kdf::derive(&input, Some(PAIR_SALT), PAIR_LABEL)
+}
+
+/// The pair safety number: [`pair_fingerprint`] rendered in the shared grouping.
+#[must_use]
+pub fn pair_safety_number(own: &[u8; 32], peer: &[u8; 32]) -> String {
+    let fingerprint = pair_fingerprint(own, peer);
+    safety_number(&fingerprint)
 }
 
 /// A local wall-clock rendering of a timestamp, `HH:MM`.
@@ -911,5 +961,78 @@ mod tests {
         );
         assert_eq!(Some(ChainNetwork::Fuji), ChainNetwork::of_chain_id(43113));
         assert_eq!(None, ChainNetwork::of_chain_id(1));
+    }
+
+    /// A safety number is eight five-digit blocks — forty digits — from a 32-byte fingerprint.
+    ///
+    /// The count is pinned because this comment's predecessor claimed twelve blocks and sixty
+    /// digits while the code produced eight and forty, and every client renders the code's answer.
+    /// A grouping test is what keeps the next rewrite from "fixing" the rendering out from under
+    /// numbers people have already compared aloud.
+    #[test]
+    fn a_safety_number_is_eight_five_digit_blocks() {
+        let mut fingerprint = [0u8; 32];
+        fingerprint[3] = 99; // 99 -> "00099"
+        fingerprint[4..8].copy_from_slice(&100_000u32.to_be_bytes()); // -> "00000"
+        fingerprint[8..12].copy_from_slice(&199_999u32.to_be_bytes()); // -> "99999"
+        let number = safety_number(&fingerprint);
+        let blocks: Vec<&str> = number.split(' ').collect();
+        assert_eq!(blocks.len(), 8);
+        assert!(blocks.iter().all(|block| block.len() == 5));
+        assert_eq!(blocks[0], "00099");
+        // 100,000 % 100,000 = 0: the modulo, not the value, is what a block shows.
+        assert_eq!(blocks[1], "00000");
+        assert_eq!(blocks[2], "99999");
+        assert_eq!(number, "00099 00000 99999 00000 00000 00000 00000 00000");
+    }
+
+    /// The pair number is symmetric — either side's "own" yields the same bytes — and never
+    /// collides with either single-fingerprint number, so the two forms cannot be confused for one
+    /// another on a screen that shows both.
+    #[test]
+    fn a_pair_number_is_symmetric_and_neither_party_alone() {
+        let own = [0x0a; 32];
+        let peer = [0xff; 32];
+        assert_eq!(pair_fingerprint(&own, &peer), pair_fingerprint(&peer, &own));
+        assert_ne!(pair_fingerprint(&own, &peer), own);
+        assert_ne!(pair_fingerprint(&own, &peer), peer);
+        assert_ne!(
+            pair_safety_number(&own, &peer),
+            safety_number(&peer),
+            "the pair number must not render as the peer's single number"
+        );
+    }
+
+    /// Byte-exact vectors for the pair derivation, computed against an independent HKDF-SHA256
+    /// implementation — the salt, label, sort and input order are the cross-client contract, and
+    /// only a known-answer test can tell that a refactor kept them byte-for-byte.
+    #[test]
+    fn the_pair_derivation_matches_the_cross_client_vectors() {
+        let own = [0x0a; 32];
+        let peer = [0x0b; 32];
+        assert_eq!(
+            pair_fingerprint(&own, &peer),
+            [
+                0xaf, 0x8e, 0x0e, 0x2e, 0xc7, 0x08, 0x97, 0x0d, 0x4f, 0xea, 0xe1, 0xc4, 0xa7, 0xb1,
+                0x4b, 0x50, 0x81, 0x62, 0xbf, 0x5e, 0xb2, 0x85, 0x49, 0x9d, 0xb1, 0xee, 0xee, 0xfb,
+                0x37, 0x32, 0x75, 0x1c,
+            ]
+        );
+        // The sort actually flips the concatenation when "own" is the larger fingerprint — the
+        // case where a side-dependent order would produce two different numbers.
+        let own = [0xff; 32];
+        let peer = [0x01; 32];
+        assert_eq!(
+            pair_fingerprint(&own, &peer),
+            [
+                0x27, 0x89, 0xc6, 0x16, 0xd3, 0xe2, 0x2f, 0x07, 0x8c, 0x8c, 0x57, 0xd1, 0x6a, 0x62,
+                0x97, 0x00, 0x00, 0x74, 0x5f, 0x5a, 0x88, 0x55, 0xee, 0x2d, 0x17, 0x61, 0x5d, 0xc3,
+                0xe8, 0x82, 0xfc, 0x93,
+            ]
+        );
+        assert_eq!(
+            pair_safety_number(&own, &peer),
+            "40566 15751 07761 46080 26586 32909 56963 98451"
+        );
     }
 }

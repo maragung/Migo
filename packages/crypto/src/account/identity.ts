@@ -111,6 +111,19 @@ export class IdentityKey {
   }
 
   /**
+   * Mints a fresh identity key from the platform CSPRNG.
+   *
+   * The key a rotation installs as the account's successor: deliberately *not* derived from the
+   * root, because the root defines no versioned identity derivation — there is no `V2` domain to
+   * derive a successor with, and inventing one here would fork the protocol from every other
+   * client. A fresh seed is the whole successor, and the device that minted it is the only place it
+   * exists until its caller seals it somewhere.
+   */
+  static generate(): IdentityKey {
+    return new IdentityKey(randomBytes(SEED_LEN));
+  }
+
+  /**
    * Reconstructs the identity key from its 32-byte seed, copying it.
    *
    * @throws {AccountError} `BadLength` if the seed is not exactly 32 bytes.

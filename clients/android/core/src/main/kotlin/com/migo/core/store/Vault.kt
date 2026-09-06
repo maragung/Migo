@@ -2,6 +2,7 @@ package com.migo.core.store
 
 import android.content.Context
 import com.migo.core.account.DeviceCredential
+import com.migo.core.account.IdentityKey
 import com.migo.core.account.MigoRoot
 import com.migo.core.crypto.AEAD_KEY_LEN
 import com.migo.core.crypto.AEAD_NONCE_LEN
@@ -179,6 +180,20 @@ class DeviceKeys(
      */
     val deviceCredential: DeviceCredential? = null,
     /**
+     * The account's identity key as rotated by this device, when it has rotated one. Null until
+     * then: before any rotation the account's key is a derivation of [root], which the vault
+     * already seals, and a second copy of derivable material is one more secret with no new
+     * property.
+     *
+     * After a rotation this is the *only* place the account's active signing key exists -- the
+     * `.migo` container still derives the retired one, and the root's derivation stops being the
+     * account's key the moment the server accepted the successor. Losing this field on a device
+     * that rotated is therefore not "re-derive it": it is an account whose signing ceremonies only
+     * the passphrase can no longer help with. The rotation flow treats a failed save after the
+     * ceremony as a failure to shout about, for exactly this reason.
+     */
+    val rotatedIdentity: IdentityKey? = null,
+    /**
      * This account's tracked AVAX transactions, newest first.
      *
      * Held by the caller between saves the same way the prekey pool is: the record list is the
@@ -193,7 +208,8 @@ class DeviceKeys(
         "DeviceKeys(identity: ${identity.public()}, signed_prekey_id: $signedPrekeyId, " +
             "one_time_count: ${oneTime.size}, session: ${session ?: "none"}, " +
             "root: ${if (root != null) "held" else "none"}, " +
-            "credential: ${if (deviceCredential != null) "held" else "none"}, tx_count: ${txs.size})"
+            "credential: ${if (deviceCredential != null) "held" else "none"}, " +
+            "rotated_identity: ${if (rotatedIdentity != null) "held" else "none"}, tx_count: ${txs.size})"
 
     /**
      * Drops the one-time prekeys.
@@ -402,6 +418,10 @@ class Vault private constructor(private val file: File, private val wrappingKey:
         if (deviceCredential != null) {
             w.optional(FIELD_DEVICE_CREDENTIAL) { sub -> sub.bytes(deviceCredential.seed()) }
         }
+        val rotatedIdentity = keys.rotatedIdentity
+        if (rotatedIdentity != null) {
+            w.optional(FIELD_ROTATED_IDENTITY) { sub -> sub.bytes(rotatedIdentity.seed()) }
+        }
         val txs = keys.txs
         if (txs.isNotEmpty()) {
             w.optional(FIELD_TXS) { sub ->
@@ -451,6 +471,7 @@ class Vault private constructor(private val file: File, private val wrappingKey:
         var nextOneTimePrekeyId: Long? = null
         var root: MigoRoot? = null
         var deviceCredential: DeviceCredential? = null
+        var rotatedIdentity: IdentityKey? = null
         var txs: List<TxRecord> = emptyList()
         val optionalCount = r.u32()
         for (i in 0L until optionalCount) {
@@ -477,6 +498,15 @@ class Vault private constructor(private val file: File, private val wrappingKey:
                     if (seed.size != MlDsa.SEED_LEN) throw VaultError.Unreadable
                     deviceCredential = DeviceCredential.fromSeed(seed)
                 }
+                FIELD_ROTATED_IDENTITY.toLong() -> {
+                    // Same length rule as the credential, for the same reason: the seed is one
+                    // fixed size by construction, and anything else is not material this build
+                    // can be responsible for -- least of all here, where the field is the only
+                    // copy of an account's active signing key.
+                    val seed = sub.bytes()
+                    if (seed.size != MlDsa.SEED_LEN) throw VaultError.Unreadable
+                    rotatedIdentity = IdentityKey.fromSeed(seed)
+                }
                 FIELD_TXS.toLong() -> {
                     val count = sub.listLen()
                     val records = ArrayList<TxRecord>(count)
@@ -502,6 +532,7 @@ class Vault private constructor(private val file: File, private val wrappingKey:
             session,
             root,
             deviceCredential,
+            rotatedIdentity,
             txs,
         )
     }
@@ -531,6 +562,9 @@ class Vault private constructor(private val file: File, private val wrappingKey:
 
         /** The optional-field id under which the device credential's seed lives. */
         private const val FIELD_DEVICE_CREDENTIAL = 5
+
+        /** The optional-field id under which a rotated identity key's seed lives. */
+        private const val FIELD_ROTATED_IDENTITY = 6
 
         /**
          * A ceiling on the one-time prekeys a vault may claim to hold.

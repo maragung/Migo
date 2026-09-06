@@ -31,6 +31,20 @@ export interface DeviceRecord {
   username: string;
   /** The device credential's 32-byte seed. Private key material; lives only in IndexedDB. */
   credentialSeed: Uint8Array;
+  /**
+   * The rotated account identity key's 32-byte seed, present only after this browser rotated the
+   * account's identity key (§2402) here.
+   *
+   * The rotation successor is a *fresh random* seed — deliberately not derived from the root — so a
+   * `.migo` file cannot reproduce it: this browser becomes one of only two places it exists, the
+   * other being the server's record of the public key. The key-store snapshot is the other home,
+   * but sign-out destroys the snapshot while the device record deliberately survives it, so the seed
+   * rides here too — without it, a sign-out would strand this browser's tier-1 file login signing
+   * with the retired key, which the server answers by refusing. The rotation path keeps the two in
+   * lockstep; `undefined` on a record this browser wrote before its first rotation, exactly like a
+   * snapshot written before it.
+   */
+  rotatedIdentitySeed?: Uint8Array;
   /** When the record was written, Unix milliseconds. Display material, not security material. */
   savedAt: number;
 }

@@ -88,7 +88,19 @@ export interface ChatThread {
   loadEarlier: () => void;
 }
 
-export function useChat(conversationId: Id): ChatThread {
+/**
+ * What the thread needs to know about where its media is going.
+ *
+ * `endToEnd` decides whether attachments and voice notes are sealed before upload — see
+ * `lib/migo/media.js`'s module doc for the rule and its one exception. Defaults to true (every
+ * direct conversation and group is end-to-end), so a caller that knows nothing sends sealed
+ * media, and the chat window passes the conversation summary's honest answer.
+ */
+export interface ChatCryptoOptions {
+  endToEnd?: boolean;
+}
+
+export function useChat(conversationId: Id, options: ChatCryptoOptions = {}): ChatThread {
   const { client, accountId, resetNonce } = useMigo();
 
   const [messages, setMessages] = useState<ThreadMessage[]>([]);
@@ -328,8 +340,8 @@ export function useChat(conversationId: Id): ChatThread {
       const content: TextContent = { type: ContentType.Text, text: trimmed };
       // A reply carries the target's id as a threading hint the server stores and replays; the
       // composer's preview state, not the message content, is what makes it a reply in the UI.
-      const options = replyTo ? { replyTo: replyTo.messageId } : {};
-      const accepted = await client.messaging.send(conversationId, content, options);
+      const sendOptions = replyTo ? { replyTo: replyTo.messageId } : {};
+      const accepted = await client.messaging.send(conversationId, content, sendOptions);
       // Optimistic local echo: the sender is excluded from the server's fan-out.
       upsert({
         messageId: accepted.messageId,
@@ -359,9 +371,9 @@ export function useChat(conversationId: Id): ChatThread {
       if (!client || !accountId) {
         return;
       }
-      const content = await uploadImageAttachment(client, conversationId, file);
-      const options = replyTo ? { replyTo: replyTo.messageId } : {};
-      const accepted = await client.messaging.send(conversationId, content, options);
+      const content = await uploadImageAttachment(client, conversationId, file, options);
+      const sendOptions = replyTo ? { replyTo: replyTo.messageId } : {};
+      const accepted = await client.messaging.send(conversationId, content, sendOptions);
       upsert({
         messageId: accepted.messageId,
         conversationId,
@@ -375,7 +387,7 @@ export function useChat(conversationId: Id): ChatThread {
       setReplyTo(null);
       void client.typing.setTyping(conversationId, TypingState.Stop).catch(() => {});
     },
-    [client, accountId, conversationId, upsert, replyTo],
+    [client, accountId, conversationId, options, upsert, replyTo],
   );
 
   /**
@@ -390,9 +402,9 @@ export function useChat(conversationId: Id): ChatThread {
       if (!client || !accountId) {
         return;
       }
-      const content = await uploadVoiceNote(client, conversationId, recording);
-      const options = replyTo ? { replyTo: replyTo.messageId } : {};
-      const accepted = await client.messaging.send(conversationId, content, options);
+      const content = await uploadVoiceNote(client, conversationId, recording, options);
+      const sendOptions = replyTo ? { replyTo: replyTo.messageId } : {};
+      const accepted = await client.messaging.send(conversationId, content, sendOptions);
       upsert({
         messageId: accepted.messageId,
         conversationId,
@@ -406,7 +418,7 @@ export function useChat(conversationId: Id): ChatThread {
       setReplyTo(null);
       void client.typing.setTyping(conversationId, TypingState.Stop).catch(() => {});
     },
-    [client, accountId, conversationId, upsert, replyTo],
+    [client, accountId, conversationId, options, upsert, replyTo],
   );
 
   /**
