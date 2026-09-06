@@ -96,9 +96,12 @@ data class ServerEndpoint(
 
         /**
          * The default endpoint for a host. A loopback gets the dev pair (plain TCP, plain HTTP,
-         * gateway on the next port), anything else gets the production pair (WSS over WebSocket,
-         * HTTPS, gateway on the same port) — the public deployment serves `/ws` on its single HTTP
-         * listener, so WebSocket stays its default until the TCP listener is enabled there.
+         * gateway on the next port), anything else gets the TLS pair (WSS over WebSocket, HTTPS,
+         * gateway on the same port) — an arbitrary host has no known TCP listener, so the one
+         * realtime shape a typed host can name by default is the WebSocket one. This deployment's
+         * own host is the exception, and [fromRestUrl] plus the settings healing both apply it:
+         * that host is ours, its TCP listener is live, and its one true endpoint is the
+         * TCP-first [publicDeploymentDefault].
          *
          * Splitting the rule from the constructor means a settings field that just lost focus can
          * rebuild the pair without re-running the whole endpoint construction.
@@ -135,17 +138,21 @@ data class ServerEndpoint(
             )
 
         /**
-         * The production default: WSS over HTTPS, with the gateway on the same port as
-         * REST. `https://migo.example.com:443` for REST, `wss://migo.example.com:443/ws`
-         * for the gateway.
+         * This deployment's single-host endpoint, matching the running migod: REST on plain HTTP
+         * at `:8080` and the native TCP listener at `:18081`, TCP-first with the honest fallback.
+         * A dial that fails or a WELCOME without the `TCP_TRANSPORT` bit lands the session on the
+         * WebSocket gateway riding the REST port (`ws://152.53.102.150:8080/ws`), and the
+         * connection state says which of the two is carrying it. The public IP is baked here so a
+         * fresh install talks to the live server on the native transport immediately; a later
+         * edit in the sign-in form persists under the settings' own endpoint field and wins on
+         * every future launch.
          */
-        /** The VPS deployment's single-host endpoint, matching the running migod. */
         fun publicDeploymentDefault(): ServerEndpoint = ServerEndpoint(
             host = "152.53.102.150",
             port = 8080,
-            gatewayPort = 8080,
-            transport = Transport.WebSocket,
-            gatewayScheme = GatewayScheme.Ws,
+            gatewayPort = 18081,
+            transport = Transport.Tcp,
+            gatewayScheme = GatewayScheme.Tcp,
             restScheme = RestScheme.Http,
         )
 
@@ -203,12 +210,19 @@ data class ServerEndpoint(
             // TLS pair with the gateway on the same port; an `http://` origin keeps the
             // plain pair, with the gateway on the next port only under the dev policy
             // (loopback) — a plain origin on a public host is a single-port deployment
-            // like this build's, which serves `/ws` on its HTTP listener.
+            // like this build's, which serves `/ws` on its HTTP listener. This deployment's
+            // own host is the exception, the same rule the settings healing applies: the
+            // host is ours, its TCP listener is live, and its one true endpoint is known
+            // (REST and the WebSocket fallback on :8080, the native listener on :18081),
+            // so an origin naming it resolves to [publicDeploymentDefault] rather than to
+            // a WebSocket guess at its ports.
             return when (restScheme) {
                 RestScheme.Https -> internetDefault(host, port)
                 RestScheme.Http ->
                     if (isLoopbackHost(host)) {
                         loopbackDefault(host, port)
+                    } else if (host == publicDeploymentDefault().host) {
+                        publicDeploymentDefault()
                     } else {
                         ServerEndpoint(
                             host = host,
@@ -224,9 +238,11 @@ data class ServerEndpoint(
 
         /**
          * Picks a default scheme pair for a host. Loopback defaults to the native plain pair
-         * (plain TCP, plain HTTP), anything else to the TLS pair (WSS, HTTPS) — the public
-         * deployment serves `/ws` on its HTTP listener, so WebSocket stays the non-loopback
-         * default until the TCP listener is enabled there.
+         * (plain TCP, plain HTTP), anything else to the TLS pair (WSS, HTTPS) — an arbitrary
+         * non-loopback host has no known TCP listener, so the one realtime shape a typed host can
+         * name by default is the WebSocket one. This deployment's own host carries its own
+         * known-good pair through [publicDeploymentDefault] instead, because its TCP listener is
+         * live and the host is ours.
          */
         fun defaultSchemesForHost(host: String): Pair<GatewayScheme, RestScheme> =
             if (isLoopbackHost(host)) {
@@ -272,15 +288,18 @@ enum class Transport {
 /** The TLS posture of the realtime gateway. */
 enum class GatewayScheme {
     /**
-     * Plain TCP. Allowed only for the dev-policy loopback (and a deployment's explicitly plain
-     * dev listener); a production TCP listener is fronted by TLS 1.3.
+     * Plain TCP. The dev-policy loopback's posture, and also this deployment's own production
+     * listener (`tcp://152.53.102.150:18081`): the host is ours and the node's ingress decides
+     * what TLS it terminates in front of. A self-hoster's public listener would front it with
+     * TLS 1.3 and spell itself [TcpTls] instead.
      */
     Tcp,
 
     /** TCP over TLS 1.3. The native transport's production posture. */
     TcpTls,
 
-    /** Plain WebSocket. Allowed only for loopback hosts; see [ServerEndpoint.defaultFor]. */
+    /** Plain WebSocket. The loopback's WebSocket posture, and the fallback listener a
+     *  plain-HTTP deployment serves `/ws` on. See [ServerEndpoint.defaultFor]. */
     Ws,
 
     /** WebSocket over TLS. The production form. */

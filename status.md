@@ -2947,3 +2947,57 @@ Test baru `transport.test.ts`: `reconnectNow` menarik backoff maju
 muncul jika upaya ditarik maju — dan mencapai Ready), serta no-op
 pada koneksi hidup dan transport yang ditutup. SDK 164/164, web
 338/338, typecheck + prettier bersih.
+
+## 75. Native client TCP-first, zip Windows yang sebenarnya zip, dan TLV di migo.md
+
+Permintaan: client native (desktop dan Android) harus memakai protokol
+binary TLV lewat TCP — bukan WebSocket — seperti web client secara
+fitur. Survei menemukan transport TCP-nya **sudah lengkap** di kedua
+client (`net/tcp.rs`, `TcpGateway`, u32 length-prefix + satu frame
+MWP); yang belum di-balik adalah defaultnya: semua jalur produksi
+masih membangun endpoint WebSocket (komentar kodenya sendiri: "until
+the TCP listener is enabled there" — padahal listener :18081 sudah
+hidup sejak v0.19.0).
+
+- **Desktop**: `default_production_server_endpoint()` kini TCP-first
+  (REST :8080, listener native :18081). `server_endpoint_from_url`
+  (jalur resume/unlock) dan env `MIGO_SERVER` me-resolve host
+  deployment ke endpoint yang sama — tidak ada jalur yang bisa
+  merekonstruksi tebakan WebSocket di port milik kita. Healing
+  settings ikut memigrasikan record lama era WebSocket.
+- **Android**: `publicDeploymentDefault()` TCP-first dengan port
+  terpisah; `fromRestUrl` (jalur resume) me-resolve host deployment
+  ke record yang sama; `DEFAULT_SERVER_ENDPOINT` 10.0.2.2 yang tak
+  terpakai dihapus.
+- **Bug laten yang ditemukan dua agent secara independen**: fallback
+  WebSocket untuk endpoint TCP membangun URL dari port gateway —
+  `tcp://host:18081/ws` / `ws://host:18081/ws` — padahal :18081 hanya
+  bicara framing length-prefixed dan route `/ws` menumpang di listener
+  REST (:8080). Tanpa perbaikan ini, membalik default ke TCP akan
+  mengubah setiap gangguan TCP menjadi "Disconnected" alih-alih
+  fallback jujur. Kini fallback dial `ws(s)://host:<rest_port>/ws` di
+  kedua platform (`websocket_origin_url` desktop, `wireGatewayUrl`
+  Android).
+- **Zip Windows yang sebenarnya tar**: laporan "app desktop tak bisa
+  dijalankan" berakar di packaging — `release.yml` memaket dengan
+  `tar -a -c -f …zip` di Git Bash, yang `tar`-nya GNU tar dan **tidak
+  bisa menulis zip**; hasilnya tar polos bernama `.zip` yang Windows
+  Explorer tolak ("The compressed (zipped) folder is invalid") —
+  diverifikasi pada aset v0.19.1 dan v0.19.2. Kini dikemas dengan
+  `powershell Compress-Archive`. `RELEASE-README.md` ikut di dalam
+  arsip kedua platform: cara ekstraksi, jalur SmartScreen "More info →
+  Run anyway" untuk build yang belum tersign, lantai glibc 2.39 di
+  Linux, dan lokasi settings/vault.
+- **migo.md**: MWP/1 kini didokumentasikan eksplisit sebagai struktur
+  **TLV** — type = opcode varint LEB128, length = prefix u32
+  big-endian di lapisan transport (menutup seluruh frame; WebSocket
+  memakai batas message), value = payload MSE (Migo Struct Encoding).
+  Layout byte lengkap ditulis di section 139, tanpa magic byte — byte
+  pertama adalah version. Section 1/56/57/138 diperbarui: TCP-first
+  adalah postur produksi native client, fallback WebSocket WAJIB
+  jujur (status koneksi menyebut transport yang benar-benar dipakai).
+
+Gerbang: desktop `cargo fmt`/`clippy -D warnings` bersih, `cargo
+test` 88/88 (2 live-socket test diabaikan sesuai aturan tanpa-server);
+Android `make kotlin-check` 14/14 selftest, 0 problem; `migo.md` dan
+`RELEASE-README.md` lolos prettier; YAML workflow tervalidasi.

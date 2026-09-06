@@ -126,22 +126,26 @@ pub fn default_loopback_server_endpoint(host: impl Into<String>, port: u16) -> S
 }
 
 /// This deployment's single-host endpoint. The public IP is baked here so a first-run install
-/// talks to the live server immediately: plain HTTP and plain WS on one port (this deployment).
-/// The local-dev policy (plain HTTP, gateway on the next port) now lives in the legacy
-/// `default_loopback_server_endpoint` for tests and as the fallback when a user's hand-typed
-/// `server_endpoint_from_url` parse fails.
+/// talks to the live server immediately: REST on plain HTTP at :8080 and the native TCP listener
+/// at :18081, TCP-first with the honest fallback — a dial that fails or a WELCOME without the
+/// `TCP_TRANSPORT` bit lands the session on the WebSocket gateway riding the REST port, and the
+/// connection state says which of the two is carrying it. The local-dev policy (plain HTTP,
+/// gateway on the next port) now lives in the legacy `default_loopback_server_endpoint` for
+/// tests and as the fallback when a user's hand-typed `server_endpoint_from_url` parse fails.
 pub fn default_production_server_endpoint() -> ServerEndpoint {
     ServerEndpoint {
         host: "152.53.102.150".to_owned(),
         port: 8080,
-        gateway_port: 8080,
-        transport: Transport::WebSocket,
-        scheme: Scheme::Ws(WsScheme::Ws),
+        gateway_port: 18081,
+        transport: Transport::Tcp,
+        scheme: Scheme::Tcp(TcpScheme::Tcp),
         rest_scheme: RestScheme::Http,
     }
 }
 
-/// The production default: WSS over HTTPS, with the gateway on the same port as REST.
+/// The public-internet pair for a host a user typed: WSS over HTTPS, with the gateway on the
+/// same port as REST. Not the deployment default — an arbitrary host has no known TCP listener,
+/// so the one realtime shape an origin can name is the WebSocket one.
 #[allow(dead_code)] // Used once the auth form's "this is a public host" branch is wired.
 pub fn default_internet_server_endpoint(host: impl Into<String>, port: u16) -> ServerEndpoint {
     ServerEndpoint {
@@ -285,6 +289,20 @@ pub fn gateway_url(endpoint: &ServerEndpoint) -> String {
     )
 }
 
+/// The WebSocket gateway over the REST origin, e.g. `ws://localhost:18080/ws` — the web client's
+/// posture, and every native client's fallback. The server serves the `/ws` upgrade on the same
+/// listener as REST, so an endpoint whose picked transport is TCP or QUIC — whose `gateway_port`
+/// names the native listener, not the WebSocket — still has a WebSocket at the origin, and the
+/// honest fallback dials it there rather than a scheme the gateway cannot speak at a port
+/// nothing answers.
+pub fn websocket_origin_url(endpoint: &ServerEndpoint) -> String {
+    let scheme = match endpoint.rest_scheme {
+        RestScheme::Http => "ws",
+        RestScheme::Https => "wss",
+    };
+    format!("{}://{}:{}/ws", scheme, endpoint.host, endpoint.port)
+}
+
 /// The REST scheme prefix, taking the `rest_scheme` field on its own.
 pub fn rest_scheme_prefix(endpoint: &ServerEndpoint) -> &'static str {
     match endpoint.rest_scheme {
@@ -307,7 +325,9 @@ pub fn gateway_scheme_prefix(endpoint: &ServerEndpoint) -> &'static str {
 }
 
 /// Resolves a `http(s)://host[:port]` string into a {@link ServerEndpoint}. The shape a user or an
-/// env var can supply, the form is the structured form the rest of the desktop speaks.
+/// env var can supply, the form is the structured form the rest of the desktop speaks. A URL
+/// names an HTTP origin, so an arbitrary host gets the WebSocket pair; this deployment's own host
+/// resolves to its TCP-first endpoint instead, the same rule the settings healing applies.
 pub fn server_endpoint_from_url(url: &str) -> ServerEndpoint {
     let trimmed = url.trim();
     if trimmed.is_empty() {
@@ -358,6 +378,15 @@ pub fn server_endpoint_from_url(url: &str) -> ServerEndpoint {
             ),
         }
     };
+    // A URL names an HTTP origin, so the realtime pair for an arbitrary host is the WebSocket
+    // one — the only realtime shape an origin can name at all. This deployment's own host is the
+    // exception, and by the same rule the settings healing applies: the host is ours, its one
+    // true endpoint is known (TCP-first, REST and the WebSocket fallback on :8080, the native
+    // listener on :18081), so a `server_url` naming it resolves to the production endpoint
+    // rather than to a WebSocket guess at its ports.
+    if host == default_production_server_endpoint().host {
+        return default_production_server_endpoint();
+    }
     let scheme = match rest_scheme {
         RestScheme::Https => Scheme::Ws(WsScheme::Wss),
         RestScheme::Http => Scheme::Ws(WsScheme::Ws),
@@ -474,6 +503,48 @@ mod tests {
         assert_eq!(endpoint.transport, Transport::Tcp);
         assert_eq!(endpoint.scheme, Scheme::Tcp(TcpScheme::Tcp));
         assert_eq!(endpoint.rest_scheme, RestScheme::Http);
+    }
+
+    #[test]
+    fn default_production_is_tcp_first_on_the_split_port_pair() {
+        let endpoint = default_production_server_endpoint();
+        assert_eq!(endpoint.host, "152.53.102.150");
+        assert_eq!(endpoint.port, 8080);
+        assert_eq!(endpoint.gateway_port, 18081);
+        assert_eq!(endpoint.transport, Transport::Tcp);
+        assert_eq!(endpoint.scheme, Scheme::Tcp(TcpScheme::Tcp));
+        assert_eq!(endpoint.rest_scheme, RestScheme::Http);
+    }
+
+    #[test]
+    fn a_url_naming_this_deployment_resolves_to_the_tcp_first_endpoint() {
+        // The `server_url` a sign-in seals is the REST origin; the endpoint it resolves back to
+        // must be the deployment's own TCP-first record, never a WebSocket guess at its ports.
+        let endpoint = server_endpoint_from_url("http://152.53.102.150:8080");
+        assert_eq!(endpoint, default_production_server_endpoint());
+
+        // Portless spelling too: the origin is the deployment either way.
+        let endpoint = server_endpoint_from_url("http://152.53.102.150");
+        assert_eq!(endpoint, default_production_server_endpoint());
+    }
+
+    #[test]
+    fn the_websocket_fallback_dials_the_rest_origin() {
+        // A TCP-picked endpoint's gateway port names the native listener; the server's WebSocket
+        // rides the REST listener, so the fallback URL is the origin's, never the listener's
+        // port or the native scheme.
+        let endpoint = default_production_server_endpoint();
+        assert_eq!(
+            websocket_origin_url(&endpoint),
+            "ws://152.53.102.150:8080/ws"
+        );
+
+        // The TLS posture follows the REST scheme, as on the web client.
+        let endpoint = default_internet_server_endpoint("migo.example.com", 443);
+        assert_eq!(
+            websocket_origin_url(&endpoint),
+            "wss://migo.example.com:443/ws"
+        );
     }
 
     #[test]

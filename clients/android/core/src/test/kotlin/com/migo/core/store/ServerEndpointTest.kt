@@ -153,13 +153,15 @@ class ServerEndpointTest {
     @Test
     fun fromRestUrl_honoursAPlainHttpOriginOnAPublicHost() {
         // The resume path bridges through here with the origin the session was saved
-        // against. This deployment's origin is plain HTTP, so the record must come back
-        // plain too — guessing TLS for a non-loopback host would break the resume
-        // handshake at the socket.
+        // against. This deployment's origin is plain HTTP and its TCP listener is live,
+        // so the record must come back TCP-first on the split ports — the native listener
+        // at :18081, not the WebSocket guess at the origin's own port. Guessing TLS for a
+        // non-loopback host would break the resume handshake at the socket just the same.
         val reparsed = ServerEndpoint.fromRestUrl("http://152.53.102.150:8080")
         assertEquals(ServerEndpoint.publicDeploymentDefault(), reparsed)
+        assertEquals(Transport.Tcp, reparsed.transport)
         assertEquals("http://152.53.102.150:8080", reparsed.restBaseUrl())
-        assertEquals("ws://152.53.102.150:8080/ws", reparsed.gatewayUrl())
+        assertEquals("tcp://152.53.102.150:18081/ws", reparsed.gatewayUrl())
     }
 
     @Test
@@ -378,13 +380,17 @@ class ServerEndpointTest {
 
     @Test
     fun defaultsPinTheNativePairPerPolicy() {
-        // The loopback dev policy speaks the native pair (plain TCP); the public deployment serves
-        // `/ws` on its single HTTP listener, so it stays on WebSocket until the TCP listener is
-        // enabled there; a TLS host's default is the WebSocket/TLS pair. QUIC stays opt-in only.
+        // The loopback dev policy speaks the native pair (plain TCP, gateway on the next port);
+        // the public deployment's TCP listener is live, so its default is the native pair on the
+        // split ports (REST :8080, TCP :18081); a TLS host a user typed has no known TCP listener,
+        // so its default stays the WebSocket/TLS pair. QUIC stays opt-in only.
         assertEquals(Transport.Tcp, ServerEndpoint.defaultFor("localhost").transport)
         assertEquals(Transport.Tcp, ServerEndpoint.loopbackDefault().transport)
         assertEquals(Transport.WebSocket, ServerEndpoint.defaultFor("migo.example.com").transport)
-        assertEquals(Transport.WebSocket, ServerEndpoint.publicDeploymentDefault().transport)
+        assertEquals(Transport.Tcp, ServerEndpoint.publicDeploymentDefault().transport)
+        assertEquals(GatewayScheme.Tcp, ServerEndpoint.publicDeploymentDefault().gatewayScheme)
+        assertEquals(8080, ServerEndpoint.publicDeploymentDefault().port)
+        assertEquals(18081, ServerEndpoint.publicDeploymentDefault().gatewayPort)
         assertEquals(Transport.WebSocket, ServerEndpoint.internetDefault("migo.example.com").transport)
     }
 
@@ -405,9 +411,10 @@ class ServerEndpointTest {
 
     /**
      * The deployment healing: a stored record naming this deployment's host with an older
-     * layout (the TLS pair the form's rule guesses for any non-loopback host, or the split
-     * ports an early default carried) is rewritten to the deployment's single-port endpoint,
-     * because that host is ours. Any other host is a self-hoster's record and stays as typed.
+     * layout (the TLS pair the form's rule guesses for any non-loopback host, the split
+     * ports an early default carried, or the WebSocket pair from before the TCP listener
+     * was enabled) is rewritten to the deployment's TCP-first endpoint, because that host
+     * is ours. Any other host is a self-hoster's record and stays as typed.
      */
     @Test
     fun healDeploymentEndpoint_rewritesAStaleRecordForTheDeploymentHost() {
@@ -421,8 +428,28 @@ class ServerEndpointTest {
         )
         val healed = healDeploymentEndpoint(stale, ServerEndpoint.publicDeploymentDefault())
         assertEquals(ServerEndpoint.publicDeploymentDefault(), healed)
+        assertEquals(Transport.Tcp, healed.transport)
         assertEquals("http://152.53.102.150:8080", healed.restBaseUrl())
-        assertEquals("ws://152.53.102.150:8080/ws", healed.gatewayUrl())
+        assertEquals("tcp://152.53.102.150:18081/ws", healed.gatewayUrl())
+    }
+
+    @Test
+    fun healDeploymentEndpoint_movesAWebSocketEraRecordOntoTheNativeTransport() {
+        // The pre-TCP default: WebSocket riding the REST port. The listener is live now, so
+        // the same healing moves a device that signed in before it existed onto the native
+        // transport — the record is ours to know better than.
+        val webSocketEra = ServerEndpoint(
+            host = "152.53.102.150",
+            port = 8080,
+            gatewayPort = 8080,
+            transport = Transport.WebSocket,
+            gatewayScheme = GatewayScheme.Ws,
+            restScheme = RestScheme.Http,
+        )
+        val healed = healDeploymentEndpoint(webSocketEra, ServerEndpoint.publicDeploymentDefault())
+        assertEquals(ServerEndpoint.publicDeploymentDefault(), healed)
+        assertEquals(Transport.Tcp, healed.transport)
+        assertEquals(18081, healed.gatewayPort)
     }
 
     @Test

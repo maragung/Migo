@@ -13,6 +13,7 @@ import com.migo.core.account.openContainer
 import com.migo.core.domain.KeyStore
 import com.migo.core.domain.SdkError
 import com.migo.core.store.GatewayScheme
+import com.migo.core.store.RestScheme
 import com.migo.core.store.ServerEndpoint
 import com.migo.core.store.SessionStore
 import com.migo.core.store.Transport
@@ -23,24 +24,6 @@ import com.migo.core.wire.Id
 import com.migo.core.wire.parseId
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-
-/**
- * The default server the form pre-fills with on first launch.
- *
- * Points at the emulator's route to the host machine (`10.0.2.2`) on `migod`'s default REST
- * port, with the gateway on the next one up. A user who has a server on the host picks
- * the same value by leaving the form at its defaults; a user with `migod` on a phone
- * changes the host to `127.0.0.1`. The form's "Use this server" button persists the
- * choice, so the defaults only ever show up on a fresh install.
- */
-val DEFAULT_SERVER_ENDPOINT: ServerEndpoint = ServerEndpoint(
-    host = "10.0.2.2",
-    port = 8080,
-    gatewayPort = 8081,
-    transport = com.migo.core.store.Transport.WebSocket,
-    gatewayScheme = com.migo.core.store.GatewayScheme.Ws,
-    restScheme = com.migo.core.store.RestScheme.Http,
-)
 
 /** What the app wants told about a connection, as it happens rather than when something asks. */
 class SessionHooks(
@@ -430,16 +413,21 @@ class MigoSession private constructor(
          * endpoint that is a `quic://` URL -- the realtime transport's second option, honoured by a
          * QUIC-capable client. This build has no Kotlin QUIC runtime, so its wire path always
          * connects over WebSocket: a QUIC endpoint keeps its TLS posture (QUIC-TLS -> wss, plain
-         * QUIC -> ws) but dials the WebSocket listener. A TCP endpoint's fallback is the plain
-         * WebSocket pair on the same host, because a server that is up but not speaking the native
-         * transport still serves `/ws` on its HTTP listener. The persisted record is untouched;
-         * only the socket this process opens is decided here, which is where the wire path is free
-         * to differ from the record the user typed.
+         * QUIC -> ws) but dials the WebSocket listener. A TCP endpoint's fallback also dials the
+         * WebSocket listener -- but on the *REST* port, not the record's gateway port: the native
+         * listener at the gateway port speaks only the length-prefixed framing and carries no
+         * WebSocket upgrade, while the server merges its gateway's `/ws` route into the HTTP
+         * listener that already serves REST (this deployment: `ws://152.53.102.150:8080/ws`). The
+         * posture follows the REST scheme, so a TLS-fronted deployment's fallback is `wss`. The
+         * persisted record is untouched; only the socket this process opens is decided here, which
+         * is where the wire path is free to differ from the record the user typed.
          */
         private fun wireGatewayUrl(endpoint: ServerEndpoint): String =
             when (endpoint.transport) {
-                Transport.Tcp ->
-                    "ws://${endpoint.host}:${endpoint.gatewayPort}/ws"
+                Transport.Tcp -> {
+                    val scheme = if (endpoint.restScheme == RestScheme.Https) "wss" else "ws"
+                    "$scheme://${endpoint.host}:${endpoint.port}/ws"
+                }
                 Transport.WebSocket -> endpoint.gatewayUrl()
                 Transport.Quic -> {
                     val scheme = if (endpoint.gatewayScheme == GatewayScheme.QuicTls) "wss" else "ws"

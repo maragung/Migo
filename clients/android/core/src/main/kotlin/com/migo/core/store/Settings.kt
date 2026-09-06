@@ -168,18 +168,16 @@ data class AppSettings(
     /**
      * The server this account belongs to, as the structured record the user picked.
      *
-     * Defaults to the dev policy's loopback: a plain WebSocket on `localhost:18080`, with the
-     * gateway on `18081`. The defaults are what the form is initialised with and what the
-     * bootstrap falls back to when nothing has been written yet, so an empty
+     * Defaults to the public deployment's TCP-first endpoint: REST on plain HTTP at
+     * `152.53.102.150:8080`, the native TCP listener at `:18081`, with the WebSocket fallback
+     * riding the REST port. A fresh install therefore talks to the live server on the native
+     * transport immediately, and a later edit in the sign-in form persists under this same field
+     * and wins on every future launch. The defaults are also what the form is initialised with
+     * and what the bootstrap falls back to when nothing has been written yet, so an empty
      * [ServerEndpoint.host] should not normally reach the SDK; the guard is here so a caller
      * that hands the record to `MigoClient.create` gets a clear failure rather than a
      * nonsense URL. The same record is persisted into [SavedSession] for a signed-in device,
      * and that copy is the authoritative one on the resume path.
-     */
-    /**
-     * This deployment's endpoint. A fresh install talks to the live server immediately;
-     * a later edit in the sign-in form persists under this same field and wins on
-     * every future launch.
      */
     val serverEndpoint: ServerEndpoint = ServerEndpoint.publicDeploymentDefault(),
 
@@ -422,7 +420,9 @@ private fun pairGatewaySchemeWithTransport(transport: Transport, scheme: Gateway
  * A record an earlier build saved may name the deployment host with the ports or TLS posture of
  * an older layout — the pre-form default was a loopback, and the form's own scheme rule guesses
  * TLS for any non-loopback host — and the REST call then goes to a socket nothing answers, which
- * the sign-in screen can only report as a generic failure. The rule is deliberately narrow: only
+ * the sign-in screen can only report as a generic failure. The rewrite is also what moves a
+ * WebSocket-era record (the pre-TCP default rode `/ws` on the REST port) onto the native
+ * transport now that the listener is live. The rule is deliberately narrow: only
  * a record naming *this deployment's host* is rewritten, because that host is ours and its one
  * true endpoint is known. A record naming any other host is a self-hoster's server and is kept
  * exactly as they typed it.

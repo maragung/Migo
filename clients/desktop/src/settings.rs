@@ -49,9 +49,10 @@ pub struct Settings {
 }
 
 impl Settings {
-    /// The default: the public deployment at `152.53.102.150:8080` (plain HTTP, single port).
-    /// A first-run install talks to the live server immediately, and a user who edits the field
-    /// later is overriding one stable default, not chasing one that moves each build.
+    /// The default: the public deployment at `152.53.102.150` — REST on plain HTTP at :8080 and
+    /// the native TCP listener at :18081, TCP-first with the WebSocket fallback riding the REST
+    /// port. A first-run install talks to the live server immediately, and a user who edits the
+    /// field later is overriding one stable default, not chasing one that moves each build.
     #[must_use]
     pub fn default_for_dev() -> Self {
         Self {
@@ -139,11 +140,12 @@ pub fn save(path: &Path, settings: &Settings) -> Result<(), SettingsError> {
 /// Reconciles a saved server endpoint with the deployment this build belongs to.
 ///
 /// A settings file written by an earlier build may name the deployment host with the ports or
-/// TLS posture of an older layout — the REST call then goes to a socket nothing answers and the
-/// sign-in form can only report a generic failure. The rule is deliberately narrow: only a
-/// record naming *this deployment's host* is rewritten, because that host is ours and its one
-/// true endpoint is known. A record naming any other host is a self-hoster's server and is kept
-/// exactly as they typed it.
+/// TLS posture of an older layout — the WebSocket pair riding the REST port, say, where this
+/// build's endpoint is TCP-first on the native listener's port — and the realtime dial then goes
+/// to a socket nothing answers while the sign-in form can only report a generic failure. The
+/// rule is deliberately narrow: only a record naming *this deployment's host* is rewritten,
+/// because that host is ours and its one true endpoint is known. A record naming any other host
+/// is a self-hoster's server and is kept exactly as they typed it.
 fn heal_stale_server(settings: Settings) -> Settings {
     let deployment = default_production_server_endpoint();
     if settings.server.host != deployment.host || settings.server == deployment {
@@ -228,26 +230,30 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
-    /// A record naming this deployment's host with an older layout (the TLS guesses and split
-    /// ports an early build could persist) is healed to the deployment's single-port endpoint:
-    /// the host is ours, so its one true address is known. Anything else a user typed is theirs.
+    /// A record naming this deployment's host with an older layout is healed to the deployment's
+    /// endpoint. Today that means the WebSocket record every earlier build wrote (the gateway
+    /// riding the REST port) becoming the TCP-first one with the native listener's port: the
+    /// host is ours, so its one true address is known. Anything else a user typed is theirs.
     #[test]
     fn stale_deployment_endpoint_is_healed() {
         let stale = Settings {
             version: SETTINGS_VERSION,
             server: ServerEndpoint {
                 host: "152.53.102.150".to_owned(),
-                port: 18080,
-                gateway_port: 18081,
+                port: 8080,
+                gateway_port: 8080,
                 transport: Transport::WebSocket,
-                scheme: Scheme::Ws(WsScheme::Wss),
-                rest_scheme: RestScheme::Https,
+                scheme: Scheme::Ws(WsScheme::Ws),
+                rest_scheme: RestScheme::Http,
             },
             theme: Some(Theme::Dark),
             ui_scale: None,
         };
         let healed = heal_stale_server(stale);
         assert_eq!(healed.server, default_production_server_endpoint());
+        // And the healed record really is TCP-first: the native listener's port and transport.
+        assert_eq!(healed.server.transport, Transport::Tcp);
+        assert_eq!(healed.server.gateway_port, 18081);
         // The theme is untouched: the healing is about the address, not the record.
         assert_eq!(healed.theme, Some(Theme::Dark));
     }

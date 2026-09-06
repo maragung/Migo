@@ -94,6 +94,12 @@ fn resolve_server_endpoint() -> ServerEndpoint {
 
 /// Parses the env-supplied URL into a {@link ServerEndpoint}. A malformed URL falls back to the
 /// default rather than refusing to start: the env is a developer convenience, not a contract.
+///
+/// A URL names an HTTP origin, so an arbitrary host gets the WebSocket pair — the one realtime
+/// shape an origin can name. This deployment's own host is the exception, and by the same rule
+/// the settings healing applies: the host is ours and its one true endpoint is known (TCP-first,
+/// REST and the WebSocket fallback on :8080, the native listener on :18081), so a `MIGO_SERVER`
+/// naming it is answered with the production endpoint rather than a guess at its ports.
 fn parse_env_server(raw: &str) -> Option<ServerEndpoint> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -106,6 +112,9 @@ fn parse_env_server(raw: &str) -> Option<ServerEndpoint> {
         _ => return None,
     };
     let host = url.host;
+    if host == crate::config::default_production_server_endpoint().host {
+        return Some(crate::config::default_production_server_endpoint());
+    }
     let port = url
         .port
         .unwrap_or(if rest_scheme == crate::config::RestScheme::Https {

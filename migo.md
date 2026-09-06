@@ -147,7 +147,8 @@ Async runtime tokio
 
 Protocol:
 Binary-first. Wire protocol realtime adalah MWP/1, sebuah binary framing dengan payload MSE. Lihat section 136 sampai 145.
-TCP sebagai transport realtime default untuk client native (Android dan desktop), dengan length prefix u32 big-endian diikuti satu frame MWP — struktur paket data biner seperti mig33v46. WebSocket sebagai transport realtime default untuk client web, dengan satu MWP frame per satu binary WebSocket message. Text frame TIDAK BOLEH digunakan. permessage-deflate WAJIB dimatikan karena kompresi diputuskan per frame oleh MWP sendiri.
+Struktur framing MWP/1 adalah TLV (Type-Length-Value). Type adalah opcode varint di header frame. Length adalah u32 big-endian di depan record pada transport stream, atau batas pesan transport pada WebSocket dan QUIC datagram. Value adalah byte frame MWP, yaitu header diikuti payload MSE. Layout byte lengkap ada di section 139.
+TCP sebagai transport realtime default untuk client native (Android dan desktop), dengan length prefix u32 big-endian diikuti satu frame MWP — struktur paket data biner seperti mig33v46. Listener TCP produksi hidup di 0.0.0.0:18081 sejak v0.19.0, sehingga TCP-first adalah postur produksi nyata untuk client native, dengan fallback jujur ke WebSocket yang selalu menyebut transport yang benar-benar dipakai. WebSocket sebagai transport realtime default untuk client web, dengan satu MWP frame per satu binary WebSocket message. Text frame TIDAK BOLEH digunakan. permessage-deflate WAJIB dimatikan karena kompresi diputuskan per frame oleh MWP sendiri.
 QUIC sebagai transport realtime kedua (opsi) untuk semua client yang mendukungnya, dinegosiasikan lewat feature bit QUIC. Server hanya mengiklankan bit QUIC bila listener QUIC diaktifkan. Framing di atas QUIC stream dan TCP memakai length prefix u32 big-endian.
 HTTPS di atas HTTP/1.1, HTTP/2, atau HTTP/3 hanya untuk REST dan public API, upload media, admin, dan health endpoint. Bukan untuk chat.
 Server-to-server federation memakai TLS 1.3 di atas TCP sebagai transport default, dengan QUIC/TLS 1.3 sebagai opsi kedua bila tersedia, membawa binary federation packet. Lihat section 169.
@@ -1804,8 +1805,8 @@ Voice note menggunakan codec speech dengan bitrate rendah
 
 Transport yang dipakai:
 
-TCP dengan binary frame length-prefixed sebagai transport realtime utama untuk client native
-WebSocket dengan binary frame sebagai transport realtime utama untuk client web
+TCP dengan binary frame length-prefixed sebagai transport realtime utama untuk client native. Framing-nya record TLV: type opcode, length prefix u32 big-endian, value frame MWP. Di produksi listener TCP hidup di :18081 sejak v0.19.0, dengan fallback jujur ke WebSocket
+WebSocket dengan binary frame sebagai transport realtime utama untuk client web, karena browser tidak menyediakan akses TCP socket
 QUIC bila dinegosiasikan
 HTTP/2 atau HTTP/3 untuk REST dan media
 
@@ -1845,7 +1846,7 @@ Room database
 WorkManager untuk retry upload dan outbox
 Foreground service hanya bila benar-benar diperlukan
 Android Keystore untuk key non-exportable
-Binary TCP client, MWP/1, dengan length prefix u32 big-endian — default. WebSocket untuk development, QUIC bila feature bit QUIC dinegosiasikan
+Binary TCP client, MWP/1, dengan length prefix u32 big-endian — default di produksi. Satu record TLV per length prefix: type opcode, length u32 big-endian, value frame MWP. WebSocket sebagai fallback jujur dan untuk development, QUIC bila feature bit QUIC dinegosiasikan
 WebRTC untuk voice dan video call
 Audio recorder untuk voice note
 
@@ -3812,8 +3813,9 @@ Federation antar node memakai TCP dengan TLS 1.3
 TCP (default untuk client native):
 
 Length prefix u32 big-endian diikuti frame MWP. Struktur paket data biner yang sama sejak mig33v46: socket stream, panjang didepan, frame setelahnya
+Framing TCP adalah record TLV (Type-Length-Value): type opcode, length prefix u32 big-endian, value byte frame MWP. Rincian layout ada di section 139
 Satu koneksi TCP per instance aplikasi, satu sesi per koneksi
-Diaktifkan di server lewat MIGO_TCP__BIND. Server mengiklankan bit TCP hanya saat listener TCP aktif
+Diaktifkan di server lewat MIGO_TCP__BIND. Server mengiklankan bit TCP hanya saat listener TCP aktif. Di produksi listener ini hidup di 0.0.0.0:18081 sejak v0.19.0, sehingga TCP adalah default native yang nyata, bukan rencana. Fallback client native ke WebSocket WAJIB jujur: status klien menyebut transport yang benar-benar dipakai, bukan mengklaim TCP
 TLS 1.3 di atas TCP wajib untuk deployment produksi (sama seperti federation); plaintext hanya untuk development loopback
 
 WebSocket (default untuk client web):
@@ -3877,6 +3879,21 @@ payload, bytes
 Sisa frame, dienkode dengan MSE sesuai section 143.
 
 Header minimum adalah 4 byte, yaitu version, flags, opcode satu byte, correlation satu byte.
+
+Framing MWP/1 adalah TLV (Type-Length-Value). Type adalah opcode varint di header frame. Length adalah panjang frame yang disediakan transport: u32 big-endian di depan record pada TCP dan QUIC stream, atau batas pesan pada WebSocket dan QUIC datagram. Value adalah seluruh byte frame, header plus payload MSE. Header tidak membawa magic byte; byte pertama adalah version. Layout record TLV pada transport stream:
+
+```
+ 0..4    length, u32 big-endian, panjang seluruh frame setelah prefix ini
+ 4       version, u8, bernilai 1
+ 5       flags, u8, lihat section 140
+ 6..     opcode, varint LEB128 kanonik
+ ..      correlation, varint, 0 untuk frame tanpa balasan
+ ..      trace_id 16 byte lalu span_id 8 byte, hanya bila TRACED
+ ..      fragment_index varint lalu fragment_total varint, hanya bila FRAGMENT
+ ..akhir payload MSE, sisa byte frame
+```
+
+Satu record TLV per satu satuan transport: satu length prefix per record di stream TCP dan QUIC stream, satu frame per satu binary WebSocket message, satu frame per satu QUIC datagram. Length prefix yang melebihi MAX_FRAME_BYTES WAJIB ditolak sebelum satu byte body pun di-buffer.
 
 Tentang payload length. Requirement meminta payload length di envelope, dan Migo memenuhinya dari transport, bukan dengan mengulang informasi yang sama di dalam frame:
 

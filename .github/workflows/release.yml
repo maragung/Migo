@@ -410,6 +410,10 @@ jobs:
           cp "$bin" "dist/${name}/migo-desktop"
           # LICENSE if the repository carries one at the root; harmless if it does not.
           cp LICENSE "dist/${name}/" 2>/dev/null || true
+          # The same README the Windows archive carries: extraction, the glibc floor, and
+          # where settings/vault land. A user who cannot start the app has no way to read
+          # release notes from inside the app, so the archive itself must answer.
+          cp clients/desktop/RELEASE-README.md "dist/${name}/README.md"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           ( cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" )
           ls -l dist
@@ -455,11 +459,11 @@ jobs:
         run: cargo build --release --locked
 
       # Bash on windows-latest is Git Bash: sha256sum and coreutils are present, and the
-      # repository's packaging steps stay one language across both desktop jobs. bsdtar (the
-      # tar.exe Windows ships) infers the archive format from the extension with -a, so the
-      # same command line that would produce a .tar.gz produces the .zip a Windows user
-      # expects. An explicit `shell: bash` on every step keeps the runner's default (pwsh)
-      # from reinterpreting them.
+      # repository's packaging steps stay one language across both desktop jobs. Git Bash's
+      # `tar` is GNU tar, which cannot write zip archives — a 2026-09-06 incident shipped
+      # v0.19.1/v0.19.2's ".zip" as a plain tar under a zip name, which Windows Explorer
+      # refuses to open. Compress-Archive always writes a real zip. An explicit `shell: bash`
+      # on every step keeps the runner's default (pwsh) from reinterpreting them.
       - name: Package the zip and checksum
         shell: bash
         run: |
@@ -472,8 +476,12 @@ jobs:
           cp "$bin" "dist/${name}/migo-desktop.exe"
           # LICENSE if the repository carries one at the root; harmless if it does not.
           cp LICENSE "dist/${name}/" 2>/dev/null || true
-          # -a makes the .zip extension (not .tar.gz) choose the archive format.
-          tar -a -c -f "dist/${name}.zip" -C dist "${name}"
+          # The same README the Linux tarball carries: extraction, the SmartScreen "More
+          # info → Run anyway" path for this unsigned build, and where settings/vault land.
+          cp clients/desktop/RELEASE-README.md "dist/${name}/README.md"
+          # A real zip, written by PowerShell — GNU tar (Git Bash's `tar`) cannot produce one.
+          powershell.exe -NoProfile -Command "Compress-Archive -Path 'dist/${name}' -DestinationPath 'dist/${name}.zip'"
+          test -f "dist/${name}.zip" || { echo "zip was not created" >&2; exit 1; }
           ( cd dist && sha256sum "${name}.zip" > "${name}.zip.sha256" )
           ls -l dist
 

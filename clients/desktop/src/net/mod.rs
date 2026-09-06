@@ -1641,8 +1641,9 @@ impl Worker {
         }
     }
 
-    /// Opens the default WebSocket path. Shared by the non-QUIC endpoint and by the fallback from
-    /// a QUIC endpoint that did not negotiate the bit, so both build the same URL and HELLO.
+    /// Opens the WebSocket path. Shared by the WebSocket-picked endpoint and by the fallbacks
+    /// from a TCP or QUIC endpoint that could not be taken (a failed dial, or a WELCOME without
+    /// the negotiated bit), so every path that lands here builds the same HELLO.
     async fn connect_websocket(
         &self,
         hello: migo_protocol::Hello,
@@ -1650,7 +1651,15 @@ impl Worker {
         let Some(signed) = self.signed.as_ref() else {
             return Err(GatewayError::Closed);
         };
-        let url = crate::config::gateway_url(&signed.server);
+        // A WebSocket-picked endpoint names its own gateway port and TLS posture, so it is
+        // dialled as typed. A TCP- or QUIC-picked endpoint's `gateway_port` names the *native*
+        // listener, and the server's WebSocket rides the REST listener (`/ws` on the same port),
+        // so the fallback dials the origin — the web client's posture — rather than the native
+        // scheme at a port nothing answers.
+        let url = match signed.server.transport {
+            Transport::WebSocket => crate::config::gateway_url(&signed.server),
+            _ => crate::config::websocket_origin_url(&signed.server),
+        };
         let (gateway, welcome) = Gateway::connect(&url, hello).await?;
         Ok((Realtime::WebSocket(Box::new(gateway)), welcome))
     }
