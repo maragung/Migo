@@ -153,7 +153,7 @@ class SessionStore private constructor(
         lock.withLock { writeEntry(name, encodeSending(state, epoch, distributed)) }
     }
 
-    override fun deleteReceiver(conversationId: Id, senderDeviceId: Id): ReceiverKeyState? {
+    override fun loadReceiver(conversationId: Id, senderDeviceId: Id): ReceiverKeyState? {
         val name = nameFor(PREFIX_RECEIVER, conversationId, senderDeviceId)
         return lock.withLock { rebuild(name) { ReceiverKeyState.restore(it) } }
     }
