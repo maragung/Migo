@@ -2855,3 +2855,49 @@ http_serve` 10/10 lolos, server `fmt`/`clippy -D warnings` bersih,
 desktop `cargo fmt`/`clippy`/`cargo test` 85 lolos (4 test IPv6 baru),
 SDK 162/162, web 335/335, `make lint-js` bersih, `prettier --check .`
 bersih, `make kotlin-check` 0 problem.
+
+## 73. Menutup tab chat tidak lagi keluar room — insiden "chat ga terkirim"
+
+Laporan produksi: akun `mylove` mengirim teks di room Jambi dan pesannya
+tidak sampai. Diagnosis dari sini (VPS = mesin ini): dua akun probe
+didaftarkan lewat SDK, satu percakapan langsung dibuat, satu pesan
+dikirim — dan **pesan itu masuk** (tabel `message` menerima seq 1
+dan 2; `sync.fetch` membacanya kembali). Jalur kirim server sehat;
+kesalahannya di klien.
+
+Bukti di basis data: baris membership `mylove` di room Jambi terisi
+`left_at` pada 02:40:37 UTC — persis saat pengiriman gagal. Server,
+sesuai desain, menjawab "bukan anggota" dengan `NOT_FOUND` yang sama
+seperti id tak dikenal (section 180: tidak membocorkan keberadaan), dan
+composer web **menelan** error itu (catch kosong) — jadi pengguna
+melihat pesan "terkirim" yang tidak pernah dikirim, tanpa satu baris
+error di UI mana pun.
+
+Akar masalahnya di kode: shell window v0.19.0 menghubungkan `leave` ke
+tombol tutup tab (`leaveWhenClosed` di `app-shell.tsx`): menekan X pada
+jendela chat room memanggil `rooms.leave`, X pada group memanggil
+`conversations.leave`. Menutup tab adalah kontrol jendela, bukan keputusan
+membership — dan back-navigation (fragment yang clear) ikut membayar
+"leave" yang sama lewat effect fragment.
+
+Dua perbaikan (commit `42cc037`):
+
+- **`closeWindow` dan effect fragment kini hanya menutup tampilan.**
+  Tidak ada panggilan `leave` di jalur tutup mana pun. Keluar dari
+  room/group tetap ada di tempat pengguna mengambil keputusan itu
+  secara sadar: dialog konfirmasi Leave di panel room dan panel group.
+  Membership bertahan saat tab ditutup; membuka kembali percakapan
+  satu klik, dan kirim terus bekerja. (Desktop dan Android sudah benar:
+  desktop `close_chat` hanya melepas id dari daftar; Android `onLeave`
+  adalah tombol "Leave" eksplisit di header, bukan efek samping tutup.)
+- **Composer menampilkan kegagalan kirim.** Catch path teks kini
+  memetakan error lewat `friendlyError` dan merendernya di baris meta
+  (`.composer-error` dengan tombol dismiss — bentuk yang sudah dipakai
+  voice recorder), plus spinner "Sending…" selama in-flight. Pesan
+  gagal tidak pernah lagi terbaca sebagai terkirim.
+
+Test baru `message-composer.test.tsx` mem-pin render composer saat
+settled (tanpa baris error, tanpa meta row) dan kontrak
+symbol-ke-kata-kata untuk error yang bisa dijumpai sebuah kirim
+(NOT_FOUND tidak boleh muncul sebagai simbol mentah). Web 338/338,
+typecheck dan prettier bersih.
