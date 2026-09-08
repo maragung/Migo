@@ -2256,6 +2256,36 @@ impl SocialStore for MemoryStore {
         Ok(edges)
     }
 
+    async fn relationships_after(
+        &self,
+        account_id: Id,
+        kind: RelationshipKind,
+        after: Option<(Timestamp, Id)>,
+        limit: u16,
+    ) -> Result<Vec<Relationship>> {
+        let limit = clamp_limit(limit);
+        let s = self.state.read();
+        let mut edges: Vec<Relationship> = s
+            .relationships
+            .values()
+            .filter(|r| r.account_id == account_id && r.kind == kind)
+            // Strictly after the position in the listing's own order — newer, or
+            // equally new and further along the id tiebreak — so paging never
+            // repeats a row nor steps over one.
+            .filter(|r| match after {
+                None => true,
+                Some((created_at, other_id)) => {
+                    (std::cmp::Reverse(r.created_at), r.other_id)
+                        > (std::cmp::Reverse(created_at), other_id)
+                }
+            })
+            .cloned()
+            .collect();
+        edges.sort_by_key(|r| (std::cmp::Reverse(r.created_at), r.other_id));
+        edges.truncate(limit);
+        Ok(edges)
+    }
+
     async fn count_relationships(&self, account_id: Id, kind: RelationshipKind) -> Result<u64> {
         let s = self.state.read();
         Ok(s.relationships

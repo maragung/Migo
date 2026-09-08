@@ -167,14 +167,14 @@ export class SocialDomain {
   /**
    * Reads the accounts the caller has muted, as a plain list of ids.
    *
-   * A thin projection over {@link listAllRelationships}: it reads the whole graph and keeps only the
-   * Mute edges, since the wire carries mutes mixed in with friends, blocks, and the rest rather than
-   * as a list of their own. The result is the set a client loads once at session start and consults
-   * to hide muted voices.
+   * Walks the Mute kind page by page ({@link pageAllRelationships}), so a mute list longer
+   * than the server's page is still read to its end — the set a client loads once at
+   * session start and consults to hide muted voices must be complete, or a muted account
+   * that happens to sit on page two keeps talking.
    */
   async mutedAccounts(): Promise<Id[]> {
     const KIND_MUTE: number = RelationshipKind.Mute;
-    const entries = await this.listAllRelationships();
+    const entries = await this.pageAllRelationships(RelationshipKind.Mute);
     return entries.filter((entry) => entry.kind === KIND_MUTE).map((entry) => entry.userId);
   }
 
@@ -197,6 +197,38 @@ export class SocialDomain {
       request,
     );
     return response.entries;
+  }
+
+  /**
+   * Walks one kind of the caller's graph across as many pages as it takes.
+   *
+   * The combined {@link listAllRelationships} listing is a snapshot bounded per kind, so a
+   * list longer than the server's page has no reachable end through it — this method is
+   * the way in: it names the `kind` on the same {@link RELATIONSHIP_LIST} opcode and follows
+   * the `nextCursor` the server hands back until it stops, which is the server saying the
+   * kind is exhausted. A rejected page propagates rather than being treated as the end of
+   * the walk, because ending early over an error would render "no more friends" over a list
+   * that was never fully read.
+   *
+   * The result is the same shape the combined listing yields for one kind, so a caller can
+   * use the two interchangeably and pay the same single listing charge per page.
+   */
+  async pageAllRelationships(kind: RelationshipKind): Promise<RelationshipEntry[]> {
+    const entries: RelationshipEntry[] = [];
+    let cursor: string | undefined;
+    do {
+      const request: RelationshipListReq =
+        cursor === undefined ? { limit: 0, kind } : { limit: 0, kind, cursor };
+      const response = await this.#rpc.call(
+        OP.RELATIONSHIP_LIST,
+        encodeRelationshipListReq,
+        decodeRelationshipList,
+        request,
+      );
+      entries.push(...response.entries);
+      cursor = response.nextCursor;
+    } while (cursor !== undefined);
+    return entries;
   }
 
   /**

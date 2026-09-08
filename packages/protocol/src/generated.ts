@@ -3811,12 +3811,19 @@ export function decodeFriendEvent(r: Reader): FriendEvent {
 
 export interface RelationshipListReq {
   limit: number;
+  kind?: number;
+  cursor?: string;
 }
 
 export function encodeRelationshipListReq(w: Writer, v: RelationshipListReq): void {
   w.enter();
   w.u32(v.limit);
-  w.u32(0);
+  let present = 0;
+  if (v.kind !== undefined) present++;
+  if (v.cursor !== undefined) present++;
+  w.u32(present);
+  if (v.kind !== undefined) { const value = v.kind; w.optional(1, (w) => { w.u32(value); }); }
+  if (v.cursor !== undefined) { const value = v.cursor; w.optional(2, (w) => { w.str(value); }); }
   w.leave();
 }
 
@@ -3825,9 +3832,14 @@ export function decodeRelationshipListReq(r: Reader): RelationshipListReq {
   const limit = r.u32();
   const out: RelationshipListReq = { limit } as RelationshipListReq;
   const optionalCount = r.u32();
-  // No optional fields in this version of the struct. Each entry is length-delimited,
-  // so reading it is skipping it, and a newer peer may well have sent one.
-  for (let i = 0; i < optionalCount; i++) r.optional();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.kind = sub.u32(); break;
+      case 2: out.cursor = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
   r.leave();
   return out;
 }
@@ -3860,12 +3872,16 @@ export function decodeRelationshipEntry(r: Reader): RelationshipEntry {
 
 export interface RelationshipList {
   entries: RelationshipEntry[];
+  nextCursor?: string;
 }
 
 export function encodeRelationshipList(w: Writer, v: RelationshipList): void {
   w.enter();
   { w.listLen(v.entries.length); for (const item of v.entries) { encodeRelationshipEntry(w, item); } }
-  w.u32(0);
+  let present = 0;
+  if (v.nextCursor !== undefined) present++;
+  w.u32(present);
+  if (v.nextCursor !== undefined) { const value = v.nextCursor; w.optional(1, (w) => { w.str(value); }); }
   w.leave();
 }
 
@@ -3874,9 +3890,13 @@ export function decodeRelationshipList(r: Reader): RelationshipList {
   const entries = ((): RelationshipEntry[] => { const n = r.listLen(); const v: RelationshipEntry[] = []; for (let i = 0; i < n; i++) v.push(decodeRelationshipEntry(r)); return v; })();
   const out: RelationshipList = { entries } as RelationshipList;
   const optionalCount = r.u32();
-  // No optional fields in this version of the struct. Each entry is length-delimited,
-  // so reading it is skipping it, and a newer peer may well have sent one.
-  for (let i = 0; i < optionalCount; i++) r.optional();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.nextCursor = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
   r.leave();
   return out;
 }

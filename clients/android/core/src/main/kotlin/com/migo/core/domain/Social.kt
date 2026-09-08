@@ -143,6 +143,33 @@ class SocialDomain(
     }
 
     /**
+     * Walks one kind of the caller's graph across as many pages as it takes.
+     *
+     * The combined [listAllRelationships] listing is a snapshot bounded per kind, so a list
+     * longer than the server's page has no reachable end through it -- this is the way in:
+     * it names the kind on the same RELATIONSHIP_LIST opcode and follows the nextCursor the
+     * server hands back until it stops, which is the server saying the kind is exhausted. A
+     * rejected page propagates rather than being treated as the end of the walk, because
+     * ending early over an error would render "no more friends" over a list that was never
+     * fully read.
+     */
+    suspend fun pageAllRelationships(kind: Long): List<RelationshipEntry> {
+        val entries = mutableListOf<RelationshipEntry>()
+        var cursor: String? = null
+        do {
+            val request = RelationshipListReq(limit = 0L, kind = kind, cursor = cursor)
+            val response = rpc.call(
+                Op.RELATIONSHIP_LIST,
+                { w -> request.encode(w) },
+                { r -> com.migo.core.protocol.RelationshipList.decode(r) },
+            )
+            entries.addAll(response.entries)
+            cursor = response.nextCursor
+        } while (cursor != null)
+        return entries
+    }
+
+    /**
      * Reads the caller's whole relationship graph in one unfiltered list.
      *
      * The wire is the same [listRelationships] call, but the client bounds nothing: `limit` rides as
@@ -156,13 +183,15 @@ class SocialDomain(
      * The accounts the caller has muted, drawn from the one relationship graph.
      *
      * There is no separate "list mutes" call: mutes ride the same graph as friends and blocks, tagged
-     * with [RelationshipKind.Mute], so this reads the whole graph through [listAllRelationships] and
-     * keeps only that kind. Each returned entry's `kind` is the mute discriminant and its `userId` is
-     * the muted account -- the field a caller drawing a Muted list actually wants.
+     * with [RelationshipKind.Mute], so this walks that one kind page by page through
+     * [pageAllRelationships] -- a mute list longer than the server's page is still read to its end,
+     * because the set the UI consults to hide muted voices must be complete, or a muted account that
+     * happens to sit on page two keeps talking. Each returned entry's `kind` is the mute discriminant
+     * and its `userId` is the muted account -- the field a caller drawing a Muted list actually wants.
      */
     suspend fun listMuted(): List<RelationshipEntry> {
         val muted = RelationshipKind.Mute.wire.toLong()
-        return listAllRelationships().filter { it.kind == muted }
+        return pageAllRelationships(muted).filter { it.kind == muted }
     }
 
     /**

@@ -58,6 +58,7 @@
 
 use async_trait::async_trait;
 use migo_core::{Id, Result};
+use migo_protocol::RelationshipKind;
 
 use crate::model::{
     Caller, Edge, Found, FriendOutcome, Interaction, Pending, ProfileCard, RespondOutcome,
@@ -226,6 +227,38 @@ pub trait Graph: Send + Sync {
     /// budget and made the endpoint's price depend on how many kinds happened to be
     /// non-empty.
     async fn list_relationships(&self, caller: &Caller, limit: Option<u16>) -> Result<Vec<Edge>>;
+
+    /// Pages one kind of the caller's graph by keyset.
+    ///
+    /// The companion of [`Graph::list_relationships`] for graphs longer than a
+    /// page. The combined listing is a snapshot, bounded per kind, and a caller
+    /// whose friend list is longer than [`MAX_PAGE`](crate::model::MAX_PAGE) can
+    /// never see its end through
+    /// it; this method walks one kind, newest first, with the caller holding the
+    /// cursor between pages.
+    ///
+    /// The cursor is opaque text the client stores and echoes back; a malformed
+    /// one is a client bug and answered `VALIDATION_FAILED`, not guessed at. It
+    /// names the last row the client holds, so rows that appear or disappear
+    /// between two pages are neither served twice nor skipped — the same keyset
+    /// rule the conversation list pages by.
+    ///
+    /// Returns the page and the cursor of the next one, which is `None` when the
+    /// page was not full. A full page may still name the end of the list; the
+    /// caller then makes one request that comes back empty, which is the price of
+    /// not fetching one row past the page on every request to answer a question
+    /// most callers never ask.
+    ///
+    /// Charged the same single listing price as the combined read. The kind is
+    /// part of the request, not a second answer, and a caller walking a long list
+    /// pays per page for the pages it actually reads.
+    async fn page_relationships(
+        &self,
+        caller: &Caller,
+        kind: RelationshipKind,
+        limit: Option<u16>,
+        cursor: Option<String>,
+    ) -> Result<(Vec<Edge>, Option<String>)>;
 
     /// What one account is to another, from the caller's side.
     ///

@@ -4052,6 +4052,42 @@ impl SocialStore for PostgresStore {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
+    async fn relationships_after(
+        &self,
+        account_id: Id,
+        kind: RelationshipKind,
+        after: Option<(Timestamp, Id)>,
+        limit: u16,
+    ) -> Result<Vec<Relationship>> {
+        let mut query = entity::relationship::Entity::find()
+            .filter(entity::relationship::Column::AccountId.eq(uuid_of(account_id)))
+            .filter(entity::relationship::Column::Kind.eq(wire_i16(kind.to_wire())));
+        if let Some((created_at, other_id)) = after {
+            // Strictly after the position in the listing's own order: newer than the
+            // row the caller holds, or equally new and further along the id tiebreak.
+            // The two branches are one condition on one query, so the page boundary
+            // cannot split a row of equal timestamps the way two sorted-then-merged
+            // reads could.
+            query = query.filter(
+                Condition::any()
+                    .add(entity::relationship::Column::CreatedAt.lt(stamp_of(created_at)))
+                    .add(
+                        Condition::all()
+                            .add(entity::relationship::Column::CreatedAt.eq(stamp_of(created_at)))
+                            .add(entity::relationship::Column::OtherId.gt(uuid_of(other_id))),
+                    ),
+            );
+        }
+        let rows = query
+            .order_by_desc(entity::relationship::Column::CreatedAt)
+            .order_by_asc(entity::relationship::Column::OtherId)
+            .limit(clamp_limit(limit) as u64)
+            .all(&self.db)
+            .await
+            .context("relationships_after")?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
     async fn count_relationships(&self, account_id: Id, kind: RelationshipKind) -> Result<u64> {
         // Served by the primary key's leading columns, so this is an index-only count
         // rather than a read of every edge the account owns.

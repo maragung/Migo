@@ -675,6 +675,26 @@ pub trait SocialStore: Send + Sync {
         limit: u16,
     ) -> Result<Vec<Relationship>>;
 
+    /// Lists edges of one kind that the account owns, after a keyset position.
+    ///
+    /// The companion of [`SocialStore::relationships`] for lists longer than a
+    /// page. `after` is the position of the last row the caller already holds —
+    /// the pair `(created_at, other_id)` the listing is ordered by, newest first
+    /// and then by id — and the rows returned resume strictly after it, in that
+    /// order. `None` is the first page.
+    ///
+    /// The position is a `where` clause and not an offset, so rows that move in or
+    /// out of the list between two pages are neither shown twice nor skipped: a
+    /// skipped friend is indistinguishable from a deleted one to whoever is
+    /// holding the list.
+    async fn relationships_after(
+        &self,
+        account_id: Id,
+        kind: RelationshipKind,
+        after: Option<(Timestamp, Id)>,
+        limit: u16,
+    ) -> Result<Vec<Relationship>>;
+
     /// How many edges of one kind the account owns.
     ///
     /// Separate from [`SocialStore::relationships`] because a ceiling cannot be

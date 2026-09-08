@@ -2711,6 +2711,65 @@ pub async fn pair_writes_and_pair_removals_leave_no_half_pair_behind(store: &Sha
         .is_some());
 }
 
+/// Keyset paging over one kind walks the whole list exactly once.
+///
+/// The page boundary is where paging bugs live, and the hardest of them is the tie:
+/// rows sharing a timestamp are ordered by id, and a page that resumed "after" only
+/// on time would either repeat or drop every row tied with the last one of the
+/// previous page. The walk below deliberately packs several rows into each
+/// timestamp so a wrong tiebreak cannot pass by luck of the data.
+pub async fn relationship_pages_resume_strictly_after_the_last_row_held(store: &SharedStore) {
+    let alice = seed_account(store, 1, "alice").await;
+    // Sixteen accounts under four timestamps, so every page boundary lands inside a
+    // tie group at least once.
+    for n in 2..=17u128 {
+        let other = seed_account(store, n, &format!("user{n}")).await;
+        store
+            .put_relationship(edge(
+                alice,
+                other,
+                RelationshipKind::Friend,
+                5_000 + (n % 4) as i64,
+            ))
+            .await
+            .unwrap();
+    }
+
+    let whole = store
+        .relationships(alice, RelationshipKind::Friend, u16::MAX)
+        .await
+        .unwrap();
+    assert_eq!(whole.len(), 16);
+
+    let mut walked: Vec<Relationship> = Vec::new();
+    let mut after: Option<(Timestamp, Id)> = None;
+    loop {
+        let page = store
+            .relationships_after(alice, RelationshipKind::Friend, after, 5)
+            .await
+            .unwrap();
+        if page.is_empty() {
+            break;
+        }
+        assert!(page.len() <= 5, "the limit is a ceiling");
+        walked.extend(page.iter().cloned());
+        let last = page.last().expect("a non-empty page has a last row");
+        after = Some((last.created_at, last.other_id));
+    }
+
+    let position = |row: &Relationship| (row.created_at, row.other_id);
+    assert_eq!(
+        walked.iter().map(position).collect::<Vec<_>>(),
+        whole.iter().map(position).collect::<Vec<_>>(),
+        "paging must produce the same rows in the same order as one whole read"
+    );
+    let mut seen = std::collections::HashSet::new();
+    for row in &walked {
+        assert!(seen.insert(row.other_id), "no row may be served twice");
+    }
+    assert_eq!(seen.len(), 16, "no row may be skipped");
+}
+
 pub async fn relationship_pages_are_newest_first_and_clamped(store: &SharedStore) {
     let alice = seed_account(store, 1, "alice").await;
     for n in 2..=(MAX_PAGE as u128 + 10) {
@@ -3380,6 +3439,7 @@ macro_rules! for_each_contract_case {
         $case!(accepting_a_friend_request_writes_both_sides);
         $case!(pair_writes_and_pair_removals_leave_no_half_pair_behind);
         $case!(relationship_pages_are_newest_first_and_clamped);
+        $case!(relationship_pages_resume_strictly_after_the_last_row_held);
         $case!(a_wallet_is_opened_once_however_often_it_is_asked_for);
         $case!(a_transfer_moves_value_without_creating_any);
         $case!(a_retried_payment_charges_once);

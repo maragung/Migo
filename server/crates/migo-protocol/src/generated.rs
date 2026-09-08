@@ -6167,13 +6167,28 @@ impl Decode for FriendEvent {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RelationshipListReq {
     pub limit: u32,
+    pub kind: Option<u32>,
+    pub cursor: Option<String>,
 }
 
 impl Encode for RelationshipListReq {
     fn encode(&self, w: &mut Writer) -> Result<()> {
         w.enter()?;
         w.write_u32(self.limit);
-        w.write_u32(0);
+        let present = usize::from(self.kind.is_some()) + usize::from(self.cursor.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.kind {
+            w.optional(1, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.cursor {
+            w.optional(2, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -6186,9 +6201,13 @@ impl Decode for RelationshipListReq {
         out.limit = r.read_u32()?;
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
-            // No optional fields are defined for this struct in this
-            // protocol build; a newer peer's fields are skipped by length.
-            let _ = r.read_optional()?;
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.kind = Some(sub.read_u32()?),
+                2 => out.cursor = Some(sub.read_string()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
         }
         r.leave();
         Ok(out)
@@ -6232,6 +6251,7 @@ impl Decode for RelationshipEntry {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RelationshipList {
     pub entries: Vec<RelationshipEntry>,
+    pub next_cursor: Option<String>,
 }
 
 impl Encode for RelationshipList {
@@ -6243,7 +6263,14 @@ impl Encode for RelationshipList {
                 item.encode(w)?;
             }
         }
-        w.write_u32(0);
+        let present = usize::from(self.next_cursor.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.next_cursor {
+            w.optional(1, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -6263,9 +6290,12 @@ impl Decode for RelationshipList {
         };
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
-            // No optional fields are defined for this struct in this
-            // protocol build; a newer peer's fields are skipped by length.
-            let _ = r.read_optional()?;
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.next_cursor = Some(sub.read_string()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
         }
         r.leave();
         Ok(out)

@@ -22,7 +22,10 @@
 //! favourites — under a single charge, applying the limit per kind so a full friends
 //! list can never starve the requests waiting behind it. The handler projects each
 //! [`Edge`](migo_social::model::Edge) onto a [`RelationshipEntry`], carrying the kind
-//! as the `u32` the wire enum encodes.
+//! as the `u32` the wire enum encodes. A request that names a `kind` instead walks
+//! that one kind with the cursor of the previous page, for graphs longer than the
+//! per-kind snapshot can hold; the answer then carries `next_cursor`, absent on the
+//! last page.
 //!
 //! # The other side of a friendship event
 //!
@@ -240,13 +243,39 @@ pub(crate) async fn handle_relationship_list(
     // A failed or rate-limited read is an error, not a silently shorter graph: a
     // caller that swallowed it would render "no pending requests" over a list it
     // never saw, and there is no way back from telling a user nobody asked.
-    let edges = svc.list_relationships(&caller, limit).await?;
-    let entries: Vec<RelationshipEntry> = edges
-        .into_iter()
-        .map(|edge| RelationshipEntry {
-            user_id: edge.other_id,
-            kind: edge.kind.to_wire(),
+    //
+    // Two shapes share this opcode. Without a `kind`, the caller wants the combined
+    // snapshot — every kind, bounded per kind, no cursor. With one, the caller is
+    // walking a list longer than a page and holds the cursor of the last page; the
+    // answer carries the next one, and `None` means the walk is over.
+    if let Some(kind) = request.kind {
+        let kind = migo_protocol::RelationshipKind::from_wire(kind);
+        let (edges, next_cursor) = svc
+            .page_relationships(&caller, kind, limit, request.cursor)
+            .await?;
+        let entries: Vec<RelationshipEntry> = edges
+            .into_iter()
+            .map(|edge| RelationshipEntry {
+                user_id: edge.other_id,
+                kind: edge.kind.to_wire(),
+            })
+            .collect();
+        ctx.reply(&RelationshipList {
+            entries,
+            next_cursor,
         })
-        .collect();
-    ctx.reply(&RelationshipList { entries })
+    } else {
+        let edges = svc.list_relationships(&caller, limit).await?;
+        let entries: Vec<RelationshipEntry> = edges
+            .into_iter()
+            .map(|edge| RelationshipEntry {
+                user_id: edge.other_id,
+                kind: edge.kind.to_wire(),
+            })
+            .collect();
+        ctx.reply(&RelationshipList {
+            entries,
+            next_cursor: None,
+        })
+    }
 }

@@ -1185,6 +1185,56 @@ where
         Ok(edges)
     }
 
+    async fn page_relationships(
+        &self,
+        caller: &Caller,
+        kind: RelationshipKind,
+        limit: Option<u16>,
+        cursor: Option<String>,
+    ) -> Result<(Vec<Edge>, Option<String>)> {
+        Self::require_identity(caller)?;
+        // The same single listing price as the combined read: one page of one kind is
+        // one answer to one request, and a caller walking a long list pays per page
+        // for the pages it actually reads.
+        self.charge(caller, LIST_COST).await?;
+        if kind == RelationshipKind::Unknown {
+            return Err(fault::validation(
+                "kind",
+                "the kind of edge to page must be named",
+            ));
+        }
+        let page = Self::page(limit);
+        let after = match cursor.as_deref() {
+            Some(text) => Some(crate::cursor::decode(text)?),
+            None => None,
+        };
+        let rows = self
+            .store
+            .relationships_after(caller.account_id, kind, after, page)
+            .await?;
+
+        // Fullness and the next cursor are decided on the rows the store returned,
+        // before any belt-and-braces filtering below: a page of fifty friend rows of
+        // which three lack an acceptance date must still page onwards, or the walk
+        // would stop early and the three-hundredth friend would be unreachable in a
+        // new way.
+        let next_cursor = (rows.len() == usize::from(page))
+            .then(|| {
+                rows.last()
+                    .map(|row| crate::cursor::encode((row.created_at, row.other_id)))
+            })
+            .flatten();
+        // The same belt-and-braces filter as the combined listing: a `Friend` row
+        // without an acceptance date is what a partially applied acceptance would
+        // leave, and it must not read as a friendship here any more than there.
+        let edges = rows
+            .iter()
+            .filter(|row| kind != RelationshipKind::Friend || row.accepted_at.is_some())
+            .map(Edge::of)
+            .collect();
+        Ok((edges, next_cursor))
+    }
+
     async fn standing(&self, caller: &Caller, subject_id: Id) -> Result<Standing> {
         Self::require_identity(caller)?;
         Self::require_other(caller, subject_id)?;

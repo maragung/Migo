@@ -248,3 +248,137 @@ async fn relationship_list_is_priced_as_one_listing() {
         "sixty-six listings at three each fit the two-hundred budget; seven per kind would have stopped at nine"
     );
 }
+
+/// The paged walk of one kind reaches every row, in order, exactly once.
+///
+/// The combined listing is bounded per kind, so a graph larger than one page has no
+/// reachable end through it; the walk is the way in, and its contract is the keyset:
+/// the cursor names the last row the caller holds, so a page boundary inside a group
+/// of equal timestamps — ordered by id — neither repeats a row nor steps over one.
+#[tokio::test]
+async fn a_paged_walk_of_one_kind_reaches_every_row_exactly_once() {
+    let (svc, store) = harness();
+    person(&store, 1, "alice").await;
+    // Ten friends under three timestamps, so a five-row page boundary lands inside a
+    // tie group at least once. Friendships through the service, so the rows carry
+    // the acceptance the listing filters on.
+    for n in 2..=11u128 {
+        person(&store, n, &format!("user{n}")).await;
+        let asker = Caller::new(
+            Id::from(n),
+            Id::from(1_000 + n),
+            TrustTier::Established,
+            Timestamp::from_millis(NOW + (n % 3) as i64),
+        );
+        let alice = Caller::new(
+            Id::from(1u128),
+            Id::from(101u128),
+            TrustTier::Established,
+            Timestamp::from_millis(NOW + 1 + (n % 3) as i64),
+        );
+        match svc.request_friend(&asker, Id::from(1u128)).await {
+            Ok(_) => {}
+            Err(error) => {
+                // A duplicate outcome is the request already waiting; anything else
+                // is a failure the test should not paper over.
+                assert!(
+                    error.code() == migo_protocol::generated::codes::VALIDATION_FAILED
+                        || error.code() == migo_protocol::generated::codes::RATE_LIMITED,
+                    "unexpected refusal: {error}"
+                );
+            }
+        }
+        svc.respond_friend(&alice, Id::from(n), true)
+            .await
+            .expect("the friendship is accepted");
+    }
+
+    let alice = Caller::new(
+        Id::from(1u128),
+        Id::from(101u128),
+        TrustTier::Established,
+        Timestamp::from_millis(NOW + 60_000),
+    );
+    let mut walked: Vec<migo_social::model::Edge> = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let (page, next) = svc
+            .page_relationships(
+                &alice,
+                migo_protocol::RelationshipKind::Friend,
+                Some(5),
+                cursor,
+            )
+            .await
+            .expect("the page is served");
+        if page.is_empty() {
+            assert!(
+                next.is_none(),
+                "an empty page never carries a cursor: {next:?}"
+            );
+            break;
+        }
+        assert!(page.len() <= 5, "the limit is a ceiling");
+        walked.extend(page);
+        cursor = next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    assert_eq!(walked.len(), 10, "every friend is reached");
+    let mut seen = std::collections::HashSet::new();
+    for edge in &walked {
+        assert!(seen.insert(edge.other_id), "no row may be served twice");
+    }
+    let mut held = walked
+        .iter()
+        .map(|edge| (edge.since, edge.other_id))
+        .collect::<Vec<_>>();
+    // Newest first, then by id ascending within a tie: the listing's own order,
+    // which is what the cursor's keyset is defined against.
+    held.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let served = walked
+        .iter()
+        .map(|edge| (edge.since, edge.other_id))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        served, held,
+        "the walk serves newest first, then by id, throughout"
+    );
+}
+
+/// A malformed cursor is refused, not guessed at.
+///
+/// A cursor that parses loosely pages from a position nobody chose, and the symptom
+/// is a client that skips friends — indistinguishable from data loss to whoever
+/// reports it.
+#[tokio::test]
+async fn a_malformed_cursor_is_refused_rather_than_guessed_at() {
+    let (svc, store) = harness();
+    person(&store, 1, "alice").await;
+    person(&store, 2, "bob").await;
+    let alice = Caller::new(
+        Id::from(1u128),
+        Id::from(101u128),
+        TrustTier::Established,
+        Timestamp::from_millis(NOW),
+    );
+
+    for text in ["", "v2.1", "v1.1", "v1.1.2", "v1.not-a-time.2"] {
+        let error = svc
+            .page_relationships(
+                &alice,
+                migo_protocol::RelationshipKind::Friend,
+                None,
+                Some(text.to_string()),
+            )
+            .await
+            .expect_err("a malformed cursor must not page");
+        assert_eq!(
+            error.code(),
+            migo_protocol::generated::codes::VALIDATION_FAILED,
+            "{text:?}: {error}"
+        );
+    }
+}

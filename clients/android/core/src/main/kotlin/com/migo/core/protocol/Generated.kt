@@ -4974,11 +4974,28 @@ data class FriendEvent(
 
 data class RelationshipListReq(
     val limit: Long,
+    val kind: Long? = null,
+    val cursor: String? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
         w.u32(limit)
-        w.u32(0)
+        var present = 0
+        if (kind != null) present++
+        if (cursor != null) present++
+        w.u32(present)
+        if (kind != null) {
+            val value = kind
+            w.optional(1) { w ->
+                w.u32(value)
+            }
+        }
+        if (cursor != null) {
+            val value = cursor
+            w.optional(2) { w ->
+                w.str(value)
+            }
+        }
         w.leave()
     }
 
@@ -4986,12 +5003,19 @@ data class RelationshipListReq(
         fun decode(r: Reader): RelationshipListReq {
             r.enter()
             val limit = r.u32()
+            var kind: Long? = null
+            var cursor: String? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
-                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> kind = sub.u32()
+                    2L -> cursor = sub.str()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
             }
             r.leave()
-            return RelationshipListReq(limit)
+            return RelationshipListReq(limit, kind, cursor)
         }
     }
 }
@@ -5025,12 +5049,21 @@ data class RelationshipEntry(
 
 data class RelationshipList(
     val entries: List<RelationshipEntry>,
+    val nextCursor: String? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
         w.listLen(entries.size)
         for (item in entries) { item.encode(w) }
-        w.u32(0)
+        var present = 0
+        if (nextCursor != null) present++
+        w.u32(present)
+        if (nextCursor != null) {
+            val value = nextCursor
+            w.optional(1) { w ->
+                w.str(value)
+            }
+        }
         w.leave()
     }
 
@@ -5038,12 +5071,17 @@ data class RelationshipList(
         fun decode(r: Reader): RelationshipList {
             r.enter()
             val entries = run { val n = r.listLen(); val acc = ArrayList<RelationshipEntry>(n); for (i in 0 until n) acc.add(RelationshipEntry.decode(r)); acc }
+            var nextCursor: String? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
-                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> nextCursor = sub.str()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
             }
             r.leave()
-            return RelationshipList(entries)
+            return RelationshipList(entries, nextCursor)
         }
     }
 }

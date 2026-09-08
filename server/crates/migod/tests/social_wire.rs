@@ -54,6 +54,15 @@ async fn build_app() -> App {
         &[
             ("MIGO_AUTH__TOKEN_KEY".to_string(), valid_token_key()),
             ("MIGO_TCP__BIND".to_string(), "127.0.0.1:0".to_string()),
+            // The paged-walk test opens six sessions against one listener, and the
+            // pre-auth HELLO bucket is shared per peer IP. The production refill
+            // still answers a reconnect storm; this suite's concern is the protocol,
+            // so the bucket is widened for the test app rather than each session
+            // sleeping the bucket back open.
+            (
+                "MIGO_RATE_LIMIT__ANONYMOUS_BURST".to_string(),
+                "80".to_string(),
+            ),
         ],
     )
     .expect("configuration should parse");
@@ -270,7 +279,11 @@ async fn a_full_friends_page_does_not_hide_the_request_behind_it() {
         .ask(
             Opcode::RelationshipList,
             13,
-            &RelationshipListReq { limit: 1 },
+            &RelationshipListReq {
+                limit: 1,
+                kind: None,
+                cursor: None,
+            },
         )
         .await;
     let kinds: Vec<(migo_core::Id, u32)> = listing
@@ -324,5 +337,73 @@ async fn a_crossing_request_is_announced_as_an_acceptance() {
     assert_eq!(
         accepted.state, "accepted",
         "a crossing request is an acceptance to the account that asked first"
+    );
+}
+
+/// A paged walk of one kind over TCP reaches the end of a friends list longer than
+/// a page, following the server's cursor between pages.
+///
+/// The combined listing bounds each kind at the server's page, so a caller with
+/// more friends than that has no reachable end through it — this is the path that
+/// reaches it, driven here over the same TCP frames a real client sends.
+#[tokio::test]
+async fn a_paged_walk_over_tcp_reaches_friends_beyond_the_first_page() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let alice_grant = registered_grant(&app, "alice").await;
+    let mut alice = LiveSession::connect(addr, &alice_grant).await;
+
+    // Five friends for Alice: one more than the four-row page the walk asks for, so
+    // the walk crosses exactly one page boundary and then reads the tail.
+    let mut correlation = 10u32;
+    for n in 0..5u32 {
+        let peer_grant = registered_grant(&app, &format!("peer{n}")).await;
+        alice
+            .friend_request(correlation, peer_grant.account_id)
+            .await;
+        correlation += 1;
+        // The peer accepts from their own session, which is the only way an
+        // acceptance can happen: the answer belongs to the account asked.
+        let mut peer = LiveSession::connect(addr, &peer_grant).await;
+        let _: Acknowledged = peer
+            .ask(
+                Opcode::FriendRespond,
+                correlation,
+                &FriendRespond {
+                    user_id: alice_grant.account_id,
+                    accept: true,
+                },
+            )
+            .await;
+        correlation += 1;
+    }
+
+    let kind = migo_protocol::RelationshipKind::Friend.to_wire();
+    let mut seen: Vec<migo_core::Id> = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let listing: RelationshipList = alice
+            .ask(
+                Opcode::RelationshipList,
+                correlation,
+                &RelationshipListReq {
+                    limit: 4,
+                    kind: Some(kind),
+                    cursor: cursor.clone(),
+                },
+            )
+            .await;
+        correlation += 1;
+        assert!(listing.entries.len() <= 4, "the limit is a ceiling");
+        seen.extend(listing.entries.iter().map(|entry| entry.user_id));
+        match listing.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(
+        seen.len(),
+        5,
+        "every friend is reached exactly once: {seen:?}"
     );
 }
