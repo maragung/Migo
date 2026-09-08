@@ -6593,6 +6593,7 @@ impl WalletStore for PostgresStore {
                 entity::wallet::Column::Label,
                 entity::wallet::Column::DerivationIndex,
                 entity::wallet::Column::Status,
+                entity::wallet::Column::ArchivedAt,
             ])
             .to_owned(),
         )

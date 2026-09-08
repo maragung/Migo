@@ -1857,6 +1857,83 @@ async fn wallets_register_idempotently_and_archive_quietly() {
     assert_eq!(list.len(), 1, "the archived wallet stays in the history");
     assert_eq!(list[0].status, "archived", "but it is marked as such");
     assert!(list[0].archived_at.is_some(), "with the time it happened");
+
+    // A deliberate re-registration — not the enrolment compare, which treats
+    // an archived row as known and skips the call — must resurrect the wallet
+    // completely: Active, with no archive timestamp still attached. A stale
+    // `archived_at` next to an active status is a lie both displays read.
+    let revived = harness
+        .auth
+        .register_wallet(&identity, register("main"), &ceremony_context(10_000, 12))
+        .await
+        .expect("an explicit re-registration revives the wallet");
+    assert_eq!(revived.wallet_id, first.wallet_id, "still the same wallet");
+    assert_eq!(revived.status, "active");
+    assert_eq!(
+        revived.archived_at, None,
+        "the archive is undone, not just the status"
+    );
+
+    let list = harness
+        .auth
+        .wallets(&identity, &ceremony_context(11_000, 13))
+        .await
+        .expect("the wallet list reads once more");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].status, "active");
+    assert_eq!(
+        list[0].archived_at, None,
+        "no stale timestamp survives the revival"
+    );
+}
+
+#[tokio::test]
+async fn a_wallet_registration_claims_a_reproducible_derivation_index() {
+    let harness = Harness::new();
+    let grant = harness.register_at("dana", 1_000).await;
+    let identity = identify(&harness.auth, &grant, 2_000)
+        .await
+        .expect("signed in");
+    let with_index = |index: i32| migo_auth::WalletRegistration {
+        address: "0xAb8482F84dD2dDec36209d36B85D89Aa3D5f14c8".to_string(),
+        chain_type: "evm".to_string(),
+        label: Some("main".to_string()),
+        derivation_index: index,
+    };
+
+    // The boundaries are the honest claims: index 0 and index 100 both name a
+    // path this root can actually derive. A minute between calls keeps the
+    // authenticate metering out of the picture — this test is about the index
+    // rule, not the bucket.
+    let mut now = 3_000i64;
+    let mut seq = 5u8;
+    for honest in [0, 100] {
+        harness
+            .auth
+            .register_wallet(&identity, with_index(honest), &ceremony_context(now, seq))
+            .await
+            .unwrap_or_else(|_| panic!("index {honest} is within the range"));
+        now += MINUTE;
+        seq += 1;
+    }
+
+    // Outside the range the index is not a derivation this root can reproduce —
+    // it only steers every honest client's "next index" arithmetic past the
+    // cap. Refused, with the field named so a client can fix the request.
+    for hostile in [-1, 101, i32::MAX] {
+        let error = harness
+            .auth
+            .register_wallet(&identity, with_index(hostile), &ceremony_context(now, seq))
+            .await
+            .expect_err(&format!("index {hostile} must be refused"));
+        assert_eq!(error.code(), codes::VALIDATION_FAILED);
+        assert!(
+            error.to_string().contains("derivation_index"),
+            "the refusal names the field: {error}"
+        );
+        now += MINUTE;
+        seq += 1;
+    }
 }
 
 // ---------------------------------------------------------------------------

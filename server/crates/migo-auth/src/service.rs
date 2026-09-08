@@ -83,8 +83,8 @@ use crate::model::{
     DeviceClaim, DeviceSummary, Grant, IdentityChallengeRequest, IdentityChallengeScope,
     IdentityPublication, Refresh, Registration, RequestContext, RotationAnswer, SessionSummary,
     SignIn, WalletRegistration, WalletSummary, IDENTITY_CHALLENGE_TTL_MS, MAX_APP_VERSION_CHARS,
-    MAX_CHAIN_TYPE_CHARS, MAX_DEVICE_DETAIL_CHARS, MAX_DEVICE_NAME_CHARS, MAX_WALLET_ADDRESS_CHARS,
-    MAX_WALLET_LABEL_CHARS,
+    MAX_CHAIN_TYPE_CHARS, MAX_DERIVATION_INDEX, MAX_DEVICE_DETAIL_CHARS, MAX_DEVICE_NAME_CHARS,
+    MAX_WALLET_ADDRESS_CHARS, MAX_WALLET_LABEL_CHARS,
 };
 use crate::tier;
 use crate::token::{Claims, Signer};
@@ -2609,6 +2609,15 @@ where
             return Err(fault::validation(
                 "address",
                 "must be a 40-character hex EVM address",
+            ));
+        }
+        // The index is client-claimed metadata, but it steers the replace
+        // flow's "next index" arithmetic on every client; outside the range
+        // a registration is not a derivation this root can reproduce.
+        if !(0..=MAX_DERIVATION_INDEX).contains(&registration.derivation_index) {
+            return Err(fault::validation(
+                "derivation_index",
+                "must be between 0 and 100",
             ));
         }
         let mut chain_type = registration.chain_type.trim().to_ascii_lowercase();

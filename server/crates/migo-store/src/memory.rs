@@ -3741,13 +3741,16 @@ impl WalletStore for MemoryStore {
         }) {
             let existing_id = existing.wallet_id;
             let existing_created = existing.created_at;
-            let existing_archived = existing.archived_at;
             let target = s.wallets.get_mut(&existing_id).expect("found above");
             target.label = row.label;
             target.derivation_index = row.derivation_index;
             target.status = row.status;
             target.created_at = existing_created;
-            target.archived_at = existing_archived;
+            // The incoming row carries the truth about archived_at: a
+            // registration writes Active/None, an archive writes Archived/Some.
+            // Preserving the old value instead left a re-registered wallet
+            // Active with a stale archive timestamp still attached.
+            target.archived_at = row.archived_at;
             return Ok(());
         }
         s.wallets.insert(row.wallet_id, row);

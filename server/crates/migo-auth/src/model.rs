@@ -175,6 +175,13 @@ pub const MAX_CHAIN_TYPE_CHARS: usize = 16;
 /// Longest wallet label.
 pub const MAX_WALLET_LABEL_CHARS: usize = 60;
 
+/// The highest wallet derivation index a registration may claim: the `i` in
+/// `m/44'/60'/0'/0/i`. The web client's replace flow caps at the same number
+/// (`MAX_DERIVATION_INDEX` in `checkup.ts`); the server refuses outside the
+/// range so a hostile client cannot register index `i32::MAX` and push every
+/// honest client past the cap into its "index capped" refusal.
+pub const MAX_DERIVATION_INDEX: i32 = 100;
+
 /// A new account.
 #[derive(Debug)]
 pub struct Registration {
