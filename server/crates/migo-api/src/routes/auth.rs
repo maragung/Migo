@@ -31,6 +31,58 @@ use crate::ApiState;
 /// One unit charged against the caller's network bucket per bootstrap attempt.
 const BOOTSTRAP_COST: u32 = 1;
 
+/// The delivery channel a recovery row travels to its account's owner.
+///
+/// The recovery flow's shape: `request_recovery` mints a row holding the
+/// token id and the HMAC tag the owner later proves possession of. Neither
+/// half may cross the response wire — the caller at that point is an
+/// unauthenticated stranger, and handing them the tag hands them the
+/// account-reset token itself — so the row leaves through this port instead,
+/// to wherever the deployment can actually reach the owner: an email
+/// channel, a push provider, an operator console. What the port must NOT do
+/// is write the tag into a log or a metric; the doc comment on
+/// [`RecoveryDelivery::deliver`] carries the constraint the same way
+/// `migo_notify`'s `Wakeup` does.
+///
+/// `None` in [`ApiServices`](crate::ApiServices) means the deployment has
+/// no channel, and the request route refuses with `FEATURE_DISABLED`
+/// rather than minting a row nobody can ever confirm — the honest refusal
+/// the dead-end audit finding asked for.
+#[async_trait::async_trait]
+pub trait RecoveryDelivery: Send + Sync {
+    /// Carries one freshly-minted row to the account behind it.
+    ///
+    /// Returns `Err` only when the channel is down — the caller surfaces
+    /// that to the requester, because a row that was not delivered is a
+    /// flow that cannot complete. Success means handed to the channel,
+    /// not read by the human; the row's own one-hour expiry is what bounds
+    /// the ambiguity. Implementations must never place the tag in a log,
+    /// a metric label, or any store the owner can be probed through.
+    async fn deliver(&self, row: &migo_auth::RecoveryRow) -> migo_core::Result<()>;
+}
+
+/// A delivery channel that accepts every row and tells nobody.
+///
+/// The default handle for a deployment that has not configured a channel
+/// — the stand-in the composition root uses for local development, where
+/// the recovery flow is exercised end to end through a test seam rather
+/// than an inbox. Reports success so the route's `ok` reflects the row
+/// existing, which is the honest answer for a dev machine; production
+/// either wires a real channel or leaves the port `None` and gets the
+/// refusal.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SinkDelivery;
+
+#[async_trait::async_trait]
+impl RecoveryDelivery for SinkDelivery {
+    async fn deliver(&self, _row: &migo_auth::RecoveryRow) -> migo_core::Result<()> {
+        Ok(())
+    }
+}
+
+/// The shared, erased form the API state holds.
+pub type SharedRecoveryDelivery = std::sync::Arc<dyn RecoveryDelivery>;
+
 /// The default locale assumed when a client discloses none.
 fn default_locale() -> String {
     "en".to_string()
@@ -591,12 +643,38 @@ async fn recovery_request(
             ))
         })?;
     let context = facts.context(now);
-    if let Err(error) = state
+    // The row the service mints is the delivery envelope: the token id the
+    // user comes back with and the tag they must prove possession of. It is
+    // never put on this wire — a response carrying the tag would make the
+    // unauthenticated caller the owner of an account-reset token, which is
+    // account takeover by construction — so the route hands the envelope to
+    // the delivery port the composition root wired. The port is exactly the
+    // seam the audit's dead-end finding named: without it the row is minted,
+    // persisted, and known to nobody, and the confirm route demands a tag
+    // that was never delivered. A deployment with no port refuses here, at
+    // the request, rather than answering `ok` over a flow that cannot
+    // complete — an honest refusal instead of a dead end.
+    let Some(delivery) = state.recovery_delivery() else {
+        return Err(crate::ApiError::from(
+            migo_protocol::fault::feature_disabled("recovery delivery"),
+        ));
+    };
+    let row = match state
         .authenticator()
         .request_recovery(&body.identifier, &captcha, &context)
         .await
     {
-        return Err(with_fresh_captcha(&state, true, error).await);
+        Ok(row) => row,
+        Err(error) => return Err(with_fresh_captcha(&state, true, error).await),
+    };
+    // A row for an unknown identifier never persisted — `request_recovery`
+    // mints it to keep the work identical — but a real one is already in the
+    // store, so a delivery failure must not leave the answer `ok` over a
+    // token the user will never see. The map is one arm: the row is either
+    // delivered and the request answers `ok`, or the request fails and the
+    // row expires on its own within the hour.
+    if let Err(error) = delivery.deliver(&row).await {
+        return Err(crate::ApiError::from(error));
     }
     Ok(Json(RecoveryRequestResponse { ok: true }))
 }
@@ -613,6 +691,13 @@ async fn recovery_confirm(
     facts: RequestFacts,
     Json(body): Json<RecoveryConfirmBody>,
 ) -> Result<Json<RecoveryRequestResponse>, crate::ApiError> {
+    // The edge charge the service's own attempt price stacks on: the route
+    // is an unauthenticated bootstrap surface, and every other one charges
+    // this cost before the domain call. The service charges the attempt
+    // (and the failure surcharge) itself, so a confirm costs an
+    // attempt-shaped price the way a sign-in does — both on the shared
+    // network bucket this charges and on the per-network anonymous surface.
+    charge_ip(&state, facts.ip, BOOTSTRAP_COST).await?;
     let now = state.now();
     let context = facts.context(now);
     let tag = hex::decode(&body.tag).map_err(|_| {

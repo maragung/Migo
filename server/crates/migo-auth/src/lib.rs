@@ -111,3 +111,7 @@ pub use migo_captcha::CaptchaProof;
 /// The gender enumeration, re-exported so the REST layer can parse the wire
 /// number without taking a dependency on the store crate for one type.
 pub use migo_store::model::Gender;
+/// The recovery row, re-exported for the REST surface's delivery port: the
+/// route layer hands this envelope to the channel that reaches the owner,
+/// and needs the type without depending on the store crate itself.
+pub use migo_store::traits::RecoveryRow;

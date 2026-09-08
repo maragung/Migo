@@ -647,6 +647,14 @@ impl App {
                 node,
                 features,
                 media_files,
+                // No delivery channel is wired yet: no email sender, no
+                // operator console. `None` is the honest posture here — the
+                // recovery-request route refuses with `FEATURE_DISABLED`
+                // rather than minting a row whose tag reaches nobody, which
+                // was the dead end the auth audit flagged. A deployment that
+                // gains a channel sets this to the sender and the flow
+                // completes end to end.
+                recovery_delivery: None,
             },
         );
 

@@ -166,6 +166,10 @@ impl Harness {
             },
             features: FEATURES,
             media_files,
+            // The recovery surface is not what this suite exercises; the
+            // no-channel refusal the production posture produces is pinned
+            // in auth-flow.rs, which is the suite that cares.
+            recovery_delivery: None,
         };
         let app = router(&config, services);
         Self {

@@ -8,7 +8,7 @@
 
 mod account;
 mod admins;
-mod auth;
+pub mod auth;
 mod config;
 mod health;
 pub mod media;

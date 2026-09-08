@@ -68,6 +68,7 @@
 //!         node,
 //!         features: 0,
 //!         media_files: None,
+//!         recovery_delivery: None,
 //!     },
 //! );
 //! // migod serves `app` on its HTTP listener, e.g. `axum::serve(listener, app)`.
@@ -101,6 +102,7 @@ use migo_ratelimit::SharedRateLimiter;
 pub use crate::error::ApiError;
 pub use crate::extract::{Authenticated, IdempotencyKey, RequestFacts};
 pub use crate::pagination::{Page, PageParams, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE};
+pub use crate::routes::auth::{RecoveryDelivery, SharedRecoveryDelivery, SinkDelivery};
 pub use crate::routes::media::{MediaFiles, SharedMediaFiles};
 
 /// The collaborators the REST surface needs, gathered so [`router`] takes one bundle rather than
@@ -126,6 +128,11 @@ pub struct ApiServices {
     /// storage serves its own bytes (the S3 backend): the routes answer `404` rather
     /// than pretending to be an object store they are not.
     pub media_files: Option<SharedMediaFiles>,
+    /// The channel recovery rows travel to their account's owner. `None` when the
+    /// deployment has none, in which case the recovery-request route refuses with
+    /// `FEATURE_DISABLED` rather than minting a row nobody can confirm — a dead end
+    /// dressed as success. See [`RecoveryDelivery`].
+    pub recovery_delivery: Option<crate::routes::auth::SharedRecoveryDelivery>,
 }
 
 /// The shared state every handler borrows, behind one [`Arc`] so the router is cheap to clone.
@@ -151,6 +158,10 @@ struct Inner {
     /// every request is answered with its own socket address.
     trusted_proxies: Vec<std::net::IpAddr>,
     media_files: Option<SharedMediaFiles>,
+    /// The recovery-row delivery channel, or `None` when the deployment has
+    /// none. Held behind the same `Arc` as every other service handle so
+    /// cloning state stays a refcount bump.
+    recovery_delivery: Option<crate::routes::auth::SharedRecoveryDelivery>,
 }
 
 /// The configuration-derived values the REST surface reports and enforces.
@@ -214,8 +225,15 @@ impl ApiState {
                 policy,
                 trusted_proxies,
                 media_files: services.media_files,
+                recovery_delivery: services.recovery_delivery,
             }),
         }
+    }
+
+    /// The recovery-row delivery channel, for the recovery-request handler.
+    /// `None` is the no-channel refusal the handler surfaces.
+    pub(crate) fn recovery_delivery(&self) -> Option<&crate::routes::auth::SharedRecoveryDelivery> {
+        self.inner.recovery_delivery.as_ref()
     }
 
     /// Whether the captcha service is on, for the config document.

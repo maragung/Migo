@@ -1932,6 +1932,13 @@ where
         captcha: &CaptchaProof,
         context: &RequestContext,
     ) -> Result<RecoveryRow> {
+        // An attempt is charged the way a sign-in attempt is: before any
+        // credential is checked, so a flood pays even when it carries
+        // garbage. The captcha proof gates the row mint, but the captcha
+        // route is priced for a picture, not for a recovery write, and
+        // this method is the write.
+        self.charge_stranger(context, Opcode::Authenticate, self.prices.attempt)
+            .await?;
         // The captcha proof is consumed on the way in: a flood of recovery
         // requests cannot spend the captcha store's budget without a valid
         // challenge, and a captured proof cannot be replayed to mint a
@@ -1997,6 +2004,14 @@ where
         new_passphrase: &Secret,
         context: &RequestContext,
     ) -> Result<()> {
+        // Charged the way a sign-in attempt is charged: an attempt price
+        // up front — a brute-force loop pays even when every tag is
+        // wrong — and the failure surcharge when the tag does not verify,
+        // so a failed confirm costs the whole attempt-plus-penalty a
+        // failed sign-in does. The row is left in place either way, so
+        // an honest user's typo costs budget, not the flow.
+        self.charge_stranger(context, Opcode::Authenticate, self.prices.attempt)
+            .await?;
         let Some(recovery_key) = self.recovery.as_ref() else {
             return Err(fault::error(
                 codes::RECOVERY_NOT_FOUND,
@@ -2010,6 +2025,7 @@ where
             .verify_parts(&[token_id.as_bytes(), LABEL_RECOVERY], tag)
             .is_err()
         {
+            self.charge_penalty(context, Opcode::Authenticate).await;
             return Err(fault::error(
                 codes::RECOVERY_NOT_FOUND,
                 "the recovery tag did not verify",

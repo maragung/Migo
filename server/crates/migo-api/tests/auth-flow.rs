@@ -140,6 +140,9 @@ struct Harness {
     /// verifies against — the only way to learn the answer, since nothing on the wire
     /// carries it anymore.
     captcha_service: Arc<CaptchaService>,
+    /// The recording delivery channel the recovery-request route hands rows to, shared
+    /// with the router so a test reads exactly what left through the port.
+    delivery: Arc<RecordingDelivery>,
 }
 
 impl Harness {
@@ -150,8 +153,21 @@ impl Harness {
         Self::with(|_| {})
     }
 
+    /// A surface with no recovery delivery channel wired — the production
+    /// posture, where the request route must refuse rather than mint a
+    /// row nobody can confirm.
+    fn with_no_delivery() -> Self {
+        Self::build(|_| {}, None)
+    }
+
     /// A surface built from a caller-mutated base config.
     fn with(mutate: impl FnOnce(&mut Config)) -> Self {
+        Self::build(mutate, Some(Arc::new(RecordingDelivery::default())))
+    }
+
+    /// The one constructor: a mutated config and a delivery channel (or
+    /// `None`), assembled exactly as `with` always built it.
+    fn build(mutate: impl FnOnce(&mut Config), delivery: Option<Arc<RecordingDelivery>>) -> Self {
         let mut config = Config::default();
         config.auth.token_key = Some(Secret::new(TEST_KEY));
         config.auth.captcha_threshold = Some(CAPTCHA_THRESHOLD);
@@ -208,6 +224,10 @@ impl Harness {
 
         let authenticator: SharedAuth = Arc::new(auth);
         let edge: SharedRateLimiter = real_limiter as SharedRateLimiter;
+        // The channel the recovery tests observe, when the test wants one:
+        // shared with the Harness so a test reads exactly what the route
+        // handed the port. `None` is the no-channel posture.
+        let harness_delivery = delivery.clone();
         let services = ApiServices {
             authenticator,
             rate_limiter: edge,
@@ -221,6 +241,11 @@ impl Harness {
             features: 0b101,
             // The tests exercise the auth bootstrap surface, not the media byte routes.
             media_files: None,
+            // The delivery channel the recovery tests observe: it records
+            // every row handed to it, so a test can pin what left the
+            // server (a token id and a tag, never on the wire) without
+            // trusting the row the service minted internally.
+            recovery_delivery: delivery.map(|channel| channel as migo_api::SharedRecoveryDelivery),
         };
         let app = router(&config, services);
         Self {
@@ -228,6 +253,7 @@ impl Harness {
             clock,
             captcha_store,
             captcha_service,
+            delivery: harness_delivery.unwrap_or_default(),
         }
     }
 
@@ -335,6 +361,39 @@ impl Harness {
 struct CaptchaIssued {
     challenge_id: migo_core::Id,
     answer: String,
+}
+
+/// A delivery channel that records what it was handed, for the recovery
+/// tests.
+///
+/// The rows are the secret halves of account-reset tokens, so the recording
+/// is a `Mutex<Vec<..>>` the test reads directly — never printed, never
+/// asserted with formatting that would land a tag in a failure message, and
+/// compared by bytes.
+#[derive(Default)]
+struct RecordingDelivery {
+    rows: std::sync::Mutex<Vec<(migo_core::Id, Vec<u8>)>>,
+}
+
+impl RecordingDelivery {
+    /// The rows delivered so far, as (token id, tag) pairs.
+    fn delivered(&self) -> Vec<(migo_core::Id, Vec<u8>)> {
+        self.rows
+            .lock()
+            .expect("the delivery log is not poisoned")
+            .clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl migo_api::RecoveryDelivery for RecordingDelivery {
+    async fn deliver(&self, row: &migo_auth::RecoveryRow) -> migo_core::Result<()> {
+        self.rows
+            .lock()
+            .expect("the delivery log is not poisoned")
+            .push((row.token_id, row.tag.clone()));
+        Ok(())
+    }
 }
 
 // --- request/response helpers ------------------------------------------------------------
@@ -617,6 +676,35 @@ async fn the_full_flow_captcha_register_login_and_recovery() {
         recovery_resp.json(),
         "the two responses are byte-identical: the route is enumeration-safe"
     );
+    // The delivered rows are the flow's real output: exactly one per
+    // request, each carrying the token id and the tag the confirm route
+    // will demand. The wire carried neither — the assertions above read
+    // the whole response body — so what the port received is the only
+    // place either half exists outside the server.
+    let delivered = h.delivery.delivered();
+    assert_eq!(
+        delivered.len(),
+        2,
+        "each request handed the port exactly one row"
+    );
+    let alice_row = &delivered[0];
+    assert!(
+        !alice_row.1.is_empty(),
+        "the delivered row carries the tag the confirm route verifies"
+    );
+    let stranger_row = &delivered[1];
+    assert_ne!(
+        alice_row.1, stranger_row.1,
+        "every row carries its own tag: an unknown identifier's row is not a copy of a real one"
+    );
+    // And the response body never carried either half.
+    for resp in [&recovery_resp, &other_resp] {
+        let text = resp.text();
+        assert!(
+            !text.contains("token_id") && !text.contains("tag"),
+            "the response body carries no delivery field: {text}"
+        );
+    }
 }
 
 /// Sign-in is never captcha-gated, whatever the gate's state.
@@ -1149,6 +1237,11 @@ async fn a_recovery_confirm_with_an_unknown_token_id_is_not_an_oracle() {
     // minted. Both must answer with the same body and the same code, so
     // the response is not a way to tell whether a recovery flow is in
     // progress.
+    // Different /24s on purpose: the limiter truncates an address to a network
+    // class, and the confirm now costs the full attempt-plus-penalty price, so
+    // two requests from one /24 would race the shared bucket instead of
+    // answering the question this test asks — whether two unknown token ids
+    // look identical to a caller each spending fresh budget.
     let id1 = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
     let id2 = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
     let body1 = json!({
@@ -1171,7 +1264,7 @@ async fn a_recovery_confirm_with_an_unknown_token_id_is_not_an_oracle() {
     let resp2 = h
         .send(post_json(
             "/v1/auth/recovery/confirm",
-            Some("198.51.100.41"),
+            Some("198.52.100.41"),
             &body2,
         ))
         .await;
@@ -1191,6 +1284,291 @@ async fn a_recovery_confirm_with_an_unknown_token_id_is_not_an_oracle() {
             "the response echoes the tag back"
         );
     }
+}
+
+/// The recovery flow completes end to end when the delivery port is wired:
+/// the tag the port received — and only the port received — confirms the
+/// row, sets the new passphrase, and kills the account's sessions.
+///
+/// This is the regression test for the audit's dead-end finding: the route
+/// used to mint the row and tell nobody, so the confirm route demanded a
+/// tag that never existed anywhere a user could reach. The delivery port is
+/// the fix, and this test is the proof the halves connect: register →
+/// request → (delivered tag) → confirm → sign in with the new passphrase.
+#[tokio::test]
+async fn a_delivered_recovery_tag_confirms_and_resets_the_passphrase() {
+    let h = Harness::new();
+
+    // An account with a known passphrase, and a live session the recovery
+    // must revoke.
+    let captcha = h.issue_captcha().await;
+    let register_body = json!({
+        "username": "wren",
+        "passphrase": GOOD_PASSPHRASE,
+        "device": { "display_name": "Wren's laptop" },
+        "captcha": {
+            "challenge_id": captcha.challenge_id,
+            "answer": captcha.answer,
+        },
+    });
+    let register_resp = h
+        .send(post_json(
+            "/v1/auth/register",
+            Some("203.0.113.60"),
+            &register_body,
+        ))
+        .await;
+    assert_eq!(
+        register_resp.status,
+        StatusCode::CREATED,
+        "register should succeed; body={}",
+        register_resp.text()
+    );
+    let grant = register_resp.json();
+    let old_token = grant["access_token"].as_str().expect("token").to_string();
+
+    // The user forgets the passphrase and starts a recovery.
+    let captcha = h.issue_captcha().await;
+    let request_body = json!({
+        "identifier": "wren",
+        "captcha": {
+            "challenge_id": captcha.challenge_id,
+            "answer": captcha.answer,
+        },
+    });
+    let request_resp = h
+        .send(post_json(
+            "/v1/auth/recovery/request",
+            Some("203.0.113.61"),
+            &request_body,
+        ))
+        .await;
+    assert_eq!(
+        request_resp.status,
+        StatusCode::OK,
+        "the recovery request succeeds; body={}",
+        request_resp.text()
+    );
+
+    // The delivered row is what the user's out-of-band channel received.
+    let delivered = h.delivery.delivered();
+    assert_eq!(delivered.len(), 1, "exactly one row was delivered");
+    let (token_id, tag) = &delivered[0];
+    let tag_hex = hex::encode(tag);
+
+    // The confirm spends the delivered halves and sets the new passphrase.
+    let confirm_body = json!({
+        "token_id": token_id.to_string(),
+        "tag": tag_hex,
+        "new_passphrase": "a passphrase nobody has used before",
+    });
+    let confirm_resp = h
+        .send(post_json(
+            "/v1/auth/recovery/confirm",
+            Some("203.0.113.62"),
+            &confirm_body,
+        ))
+        .await;
+    assert_eq!(
+        confirm_resp.status,
+        StatusCode::OK,
+        "the delivered tag confirms; body={}",
+        confirm_resp.text()
+    );
+
+    // The row is one-shot: a second confirm with the same halves is refused.
+    let replay_resp = h
+        .send(post_json(
+            "/v1/auth/recovery/confirm",
+            Some("203.0.113.63"),
+            &confirm_body,
+        ))
+        .await;
+    expect_error(
+        &replay_resp,
+        StatusCode::NOT_FOUND,
+        codes::RECOVERY_NOT_FOUND,
+    );
+
+    // The old session died with the recovery.
+    let me_resp = h
+        .send(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/auth/contact")
+                .header(header::AUTHORIZATION, format!("Bearer {old_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_ne!(
+        me_resp.status,
+        StatusCode::OK,
+        "the pre-recovery session no longer authenticates"
+    );
+
+    // And the new passphrase signs in — the flow's whole point.
+    let captcha = h.issue_captcha().await;
+    let login_body = json!({
+        "identifier": "wren",
+        "passphrase": "a passphrase nobody has used before",
+        "device": { "display_name": "Wren's laptop" },
+        "captcha": {
+            "challenge_id": captcha.challenge_id,
+            "answer": captcha.answer,
+        },
+    });
+    let login_resp = h
+        .send(post_json(
+            "/v1/auth/login",
+            Some("203.0.113.64"),
+            &login_body,
+        ))
+        .await;
+    assert_eq!(
+        login_resp.status,
+        StatusCode::OK,
+        "the new passphrase signs in; body={}",
+        login_resp.text()
+    );
+}
+
+/// A deployment with no delivery channel refuses the recovery request up
+/// front rather than minting a row nobody can confirm.
+///
+/// The refusal is `FEATURE_DISABLED` (503), the same code every absent
+/// feature on the surface answers with, and it fires before the captcha is
+/// consumed: the honest refusal costs the caller one rate-limit charge and
+/// nothing else, not a burned captcha they would have to re-solve.
+#[tokio::test]
+async fn a_recovery_request_without_a_delivery_channel_is_refused_honestly() {
+    let h = Harness::with_no_delivery();
+
+    let captcha = h.issue_captcha().await;
+    let body = json!({
+        "identifier": "whoever",
+        "captcha": {
+            "challenge_id": captcha.challenge_id,
+            "answer": captcha.answer,
+        },
+    });
+    let resp = h
+        .send(post_json(
+            "/v1/auth/recovery/request",
+            Some("203.0.113.70"),
+            &body,
+        ))
+        .await;
+    expect_error(
+        &resp,
+        StatusCode::SERVICE_UNAVAILABLE,
+        codes::FEATURE_DISABLED,
+    );
+    // No row was minted, so nothing was delivered.
+    assert!(
+        h.delivery.delivered().is_empty(),
+        "no row exists to deliver"
+    );
+    // The captcha was not consumed by a refusal: the challenge still
+    // verifies. (The route checks the channel before the service mints.)
+    let check = h
+        .send(post_json(
+            "/v1/auth/register",
+            Some("203.0.113.71"),
+            &json!({
+                "username": "post.refusal",
+                "passphrase": GOOD_PASSPHRASE,
+                "device": { "display_name": "d" },
+                "captcha": {
+                    "challenge_id": captcha.challenge_id,
+                    "answer": captcha.answer,
+                },
+            }),
+        ))
+        .await;
+    assert_eq!(
+        check.status,
+        StatusCode::CREATED,
+        "the captcha survives the refusal and still opens a register; body={}",
+        check.text()
+    );
+}
+
+/// A failed confirm costs the caller the attempt-plus-penalty a failed
+/// sign-in costs: the confirm route was the one unauthenticated surface
+/// that did an Argon2id-priced operation with no charge at all, so a
+/// brute-force loop over tags was free.
+///
+/// The harness's anonymous burst is generous (1000) with a fast refill,
+/// so exhausting it takes many full-price failures from the one network —
+/// which is exactly the condition under test: each wrong tag costs
+/// attempt-plus-penalty, and the bucket drains at the rate the pricing
+/// table says it must.
+#[tokio::test]
+async fn a_wrong_recovery_tag_pays_the_full_attempt_price() {
+    let h = Harness::new();
+
+    // Register so the account exists; the tag under attack is forged, so
+    // no request is needed.
+    let captcha = h.issue_captcha().await;
+    let register_resp = h
+        .send(post_json(
+            "/v1/auth/register",
+            Some("203.0.113.80"),
+            &json!({
+                "username": "finch",
+                "passphrase": GOOD_PASSPHRASE,
+                "device": { "display_name": "Finch's laptop" },
+                "captcha": {
+                    "challenge_id": captcha.challenge_id,
+                    "answer": captcha.answer,
+                },
+            }),
+        ))
+        .await;
+    assert_eq!(register_resp.status, StatusCode::CREATED);
+
+    // Fire wrong-tag confirms from the one network until the limiter
+    // refuses. Each costs BOOTSTRAP_COST (edge) + attempt + penalty
+    // (service) against that network's anonymous buckets.
+    let mut refused_at: Option<usize> = None;
+    for attempt in 0..40 {
+        let body = json!({
+            "token_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "tag": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "new_passphrase": "some new passphrase that is long",
+        });
+        let resp = h
+            .send(post_json(
+                "/v1/auth/recovery/confirm",
+                Some("203.0.113.81"),
+                &body,
+            ))
+            .await;
+        if resp.status == StatusCode::TOO_MANY_REQUESTS {
+            refused_at = Some(attempt);
+            break;
+        }
+        assert_eq!(
+            resp.status,
+            StatusCode::NOT_FOUND,
+            "a wrong tag answers NOT_FOUND until the budget runs out; body={}",
+            resp.text()
+        );
+    }
+    assert!(
+        refused_at.is_some(),
+        "the wrong-tag loop must exhaust the budget: an unmetered confirm was the audit's finding"
+    );
+    // The refusal arrived well before the 40 requests the loop allows: the
+    // anonymous endpoint bucket is 1000 tokens and each failed attempt
+    // costs attempt-plus-penalty (the whole bucket), so the second attempt
+    // from the same network is already priced out — the budget surviving
+    // dozens of attempts would mean the charge is not landing.
+    assert!(
+        refused_at.expect("checked above") <= 20,
+        "the budget drained at the priced rate, not the unmetered one"
+    );
 }
 
 // --- the account security surface -------------------------------------------------------
