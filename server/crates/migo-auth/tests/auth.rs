@@ -444,6 +444,214 @@ async fn a_suspended_account_is_only_told_so_after_its_passphrase_verifies() {
     assert_eq!(with_right_passphrase.code(), codes::ACCOUNT_SUSPENDED);
 }
 
+/// A config with the anonymous buckets wide enough that the lockout tests never
+/// meet the rate limiter first. A failed sign-in prices itself against the
+/// anonymous endpoint bucket (attempt plus a penalty four times the attempt —
+/// both scale with the configured burst) *and* the shared per-network bucket,
+/// and the tests draw every failure from one /24, so both surfaces have to hold
+/// the whole ladder with room to spare — the ladder under test is the lockout's
+/// own, not the flood pricing's. Real deployments see the limiter as
+/// configured; these tests keep the two refusals distinguishable by capacity.
+fn no_anonymous_limit() -> Config {
+    let mut config = Config::default();
+    config.rate_limit.anonymous_burst = 1_000_000;
+    config.rate_limit.anonymous_refill_per_second = 1_000_000;
+    // The shared per-network bucket is sized from the user budget whoever is
+    // asking, so it has to grow with the anonymous one or `register` — priced
+    // from the same anonymous endpoint bucket — costs more than the network
+    // surface can ever hold, and `Policies::validate` rightly refuses to boot.
+    config.rate_limit.user_burst = 2_000_000;
+    config.rate_limit.user_refill_per_second = 1_000_000;
+    config
+}
+
+/// A wrong passphrase for the account, at `millis`, from a fresh address so the
+/// anonymous flood pricing never stacks between attempts — the ladder under test
+/// is the lockout's, not the rate limiter's.
+async fn failed_attempt(
+    auth: &TestAuth,
+    identifier: &str,
+    millis: i64,
+    attempt: u8,
+) -> migo_core::Error {
+    let mut request = sign_in(identifier);
+    request.passphrase = Secret::new("not the right passphrase");
+    // A fresh /24, not just a fresh address: the anonymous flood pricing is
+    // per network, and a failed attempt spends attempt-plus-penalty — the
+    // whole anonymous endpoint bucket — on its /24. Sharing one /24 between
+    // failures would meet the flood limiter long before the ladder under test
+    // climbs anywhere.
+    auth.sign_in(
+        request,
+        &context_from(millis, &format!("198.51.{attempt}.4")),
+    )
+    .await
+    .expect_err("the passphrase is wrong")
+}
+
+#[tokio::test]
+async fn five_wrong_passphrases_lock_the_account_whatever_name_it_was_called_by() {
+    let harness = Harness::with_config(no_anonymous_limit());
+    let grant = harness.register_at("ada", 1_000).await;
+    // The account has two spellings on file; the guesser rotates them so no one
+    // spelling reaches the ladder's fifth rung on its own.
+    harness
+        .store
+        .set_contact(
+            grant.account_id,
+            "ada@example.com",
+            Timestamp::from_millis(1_500),
+        )
+        .await
+        .expect("the email spelling is added");
+
+    for (attempt, identifier) in ["ada", "ada@example.com", "ada", "ada@example.com", "ada"]
+        .into_iter()
+        .enumerate()
+    {
+        let error = failed_attempt(
+            &harness.auth,
+            identifier,
+            2_000 + attempt as i64 * 100,
+            attempt as u8,
+        )
+        .await;
+        assert_eq!(error.code(), codes::INVALID_CREDENTIALS);
+    }
+
+    // The sixth attempt — the correct passphrase, the owner this time — is refused
+    // because the *account* is locked: the five failures shared one ladder keyed
+    // by the account's id, not three keyed by the spellings it was named by.
+    let locked = harness
+        .auth
+        .sign_in(sign_in("ada"), &context_from(3_000, "198.51.100.9"))
+        .await
+        .expect_err("the account is locked after five wrong passphrases");
+    assert_eq!(locked.code(), codes::AUTH_LOCKED);
+
+    // After the minute runs out the owner signs in, and the ladder is gone — a
+    // stale record would lock the account again on the very next failure.
+    harness
+        .auth
+        .sign_in(
+            sign_in("ada"),
+            &context_from(2_000 + 61_000, "198.51.100.9"),
+        )
+        .await
+        .expect("the lockout expires and the passphrase is right");
+}
+
+#[tokio::test]
+async fn a_successful_sign_in_clears_the_ladder_under_every_spelling() {
+    let harness = Harness::with_config(no_anonymous_limit());
+    let grant = harness.register_at("ada", 1_000).await;
+    harness
+        .store
+        .set_contact(
+            grant.account_id,
+            "ada@example.com",
+            Timestamp::from_millis(1_500),
+        )
+        .await
+        .expect("the email spelling is added");
+
+    // Four failures under the username — one short of the lock — then the owner
+    // signs in through the email spelling and succeeds.
+    for attempt in 0..4u8 {
+        failed_attempt(&harness.auth, "ada", 2_000 + attempt as i64 * 100, attempt).await;
+    }
+    harness
+        .auth
+        .sign_in(
+            sign_in("ada@example.com"),
+            &context_from(3_000, "203.0.113.5"),
+        )
+        .await
+        .expect("the owner's passphrase is right, so the four failures are forgiven");
+
+    // A fresh failure does not start from five: the success cleared the record,
+    // so it is failure one of a new count, not the rung that locks.
+    let error = failed_attempt(&harness.auth, "ada", 4_000, 9).await;
+    assert_eq!(error.code(), codes::INVALID_CREDENTIALS);
+    harness
+        .auth
+        .sign_in(sign_in("ada"), &context_from(5_000, "203.0.113.6"))
+        .await
+        .expect("one failure after a cleared ladder does not lock the account");
+}
+
+#[tokio::test]
+async fn a_locked_account_is_refused_before_its_passphrase_is_even_checked() {
+    let harness = Harness::with_config(no_anonymous_limit());
+    harness.register_at("ada", 1_000).await;
+
+    for attempt in 0..5u8 {
+        failed_attempt(&harness.auth, "ada", 2_000 + attempt as i64 * 100, attempt).await;
+    }
+    // Wrong passphrase again while locked: the ladder was told not to count it,
+    // and the account must not climb to the next rung from inside a lockout.
+    // The lock began at the fifth failure (t=2_400) and runs sixty seconds, so
+    // at t=2_500 it has 59_900 left — the exact number, not a round one, is the
+    // assertion that the ladder refused to count a failure inside a lockout.
+    let error = failed_attempt(&harness.auth, "ada", 2_500, 7).await;
+    assert_eq!(error.code(), codes::AUTH_LOCKED);
+    assert_eq!(
+        error.retry_after(),
+        Some(59_900),
+        "the lock began at the fifth failure and runs one minute"
+    );
+
+    // The failure during the lockout bought nothing: after the lock expires, the
+    // count is still five, and the ladder's next rung is three failures away —
+    // the sixth and seventh fail without locking, the eighth crosses rung two
+    // (the crossing attempt itself still answers INVALID_CREDENTIALS; the lock
+    // governs the attempts after it).
+    let error = failed_attempt(&harness.auth, "ada", 2_000 + 61_000, 8).await;
+    assert_eq!(error.code(), codes::INVALID_CREDENTIALS);
+    let error = failed_attempt(&harness.auth, "ada", 2_000 + 61_100, 10).await;
+    assert_eq!(error.code(), codes::INVALID_CREDENTIALS);
+    let error = failed_attempt(&harness.auth, "ada", 2_000 + 61_200, 11).await;
+    assert_eq!(
+        error.code(),
+        codes::INVALID_CREDENTIALS,
+        "the crossing attempt still answers invalid credentials; the lock is for \
+         the attempts after it"
+    );
+    let error = failed_attempt(&harness.auth, "ada", 2_000 + 61_300, 12).await;
+    assert_eq!(
+        error.code(),
+        codes::AUTH_LOCKED,
+        "the eighth failure landed the second rung, and the ninth meets it"
+    );
+    // The second rung began at t=63_200 and runs 180 s, so at t=63_300 it has
+    // 179_900 left.
+    assert_eq!(error.retry_after(), Some(179_900), "60 + 2×120 seconds");
+}
+
+#[tokio::test]
+async fn an_unknown_identifier_still_climbs_its_own_ladder() {
+    let harness = Harness::with_config(no_anonymous_limit());
+
+    // Enumeration of a name that belongs to nobody: each guess must cost the
+    // guesser the ladder the identifier's own record keeps.
+    for attempt in 0..5u8 {
+        let error = failed_attempt(
+            &harness.auth,
+            "ghost",
+            2_000 + attempt as i64 * 100,
+            attempt,
+        )
+        .await;
+        assert_eq!(error.code(), codes::INVALID_CREDENTIALS);
+    }
+    let error = failed_attempt(&harness.auth, "ghost", 2_600, 7).await;
+    assert_eq!(
+        error.code(),
+        codes::AUTH_LOCKED,
+        "a nonexistent identifier locks its own ladder, so enumeration cannot ride for free"
+    );
+}
+
 #[tokio::test]
 async fn the_device_limit_is_enforced_and_named() {
     let mut config = Config::default();

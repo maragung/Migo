@@ -176,7 +176,8 @@ pub struct Auth<S: ?Sized = dyn Store, L: ?Sized = dyn RateLimiter> {
     /// whole process and the auth path skips the checks entirely.
     captcha: Option<Arc<CaptchaGate>>,
     /// The sign-in lockout, when the deployment has it turned on (the default).
-    /// Keyed by account id and holding the whole ladder — see [`LockoutGate`].
+    /// The lockout key for a resolved account, shared by every spelling of it — see
+    /// [`LockoutGate`] and [`Auth::lockout_key_of`].
     lockout: Option<Arc<LockoutGate>>,
     /// The recovery MAC key, when the deployment has passphrase-recovery
     /// turned on. `None` means the recovery endpoints are not mounted
@@ -821,6 +822,17 @@ where
         }
     }
 
+    /// The lockout key that belongs to the account itself, shared by every
+    /// spelling the account can be named by.
+    ///
+    /// The gate holds its records in a map keyed by text, so the id is rendered
+    /// rather than passed as an [`Id`]; the rendering is namespaced to keep an
+    /// account id from ever colliding with a username-shaped key (usernames
+    /// cannot contain `=` or `:`, so `acct:` cannot be typed by a user).
+    fn lockout_key_of(account: &Account) -> String {
+        format!("acct:{}", account.account_id)
+    }
+
     /// Builds and stores one challenge, bound to an account, a device, and
     /// a purpose. The payload is the canonical MSE encoding the client will
     /// sign, stored exactly as issued so the answer is verified against the
@@ -1267,20 +1279,35 @@ where
     }
 
     async fn sign_in(&self, request: SignIn, context: &RequestContext) -> Result<Grant> {
-        // The progressive lockout leads: five wrong passphrases for one identifier buy a
-        // minute, every further three buy two more, capped. The key is the identifier the
-        // attempt named (folded), so the lock follows the account's username across every
-        // network — the product decision, with its trade accepted. The check runs before
-        // the attempt is priced, so a locked-out guesser spends nothing and learns nothing.
+        // The progressive lockout leads: five wrong passphrases for one account buy a
+        // minute, every further three buy two more, capped. The key is the identifier
+        // the attempt named (folded) at the door, because the account behind the
+        // identifier is not known yet — the check runs before the attempt is priced,
+        // so a locked-out guesser spends nothing and learns nothing. Once the
+        // identifier resolves, the ladder the attempt climbed is the account's own:
+        // the failure below records under the account id, so username, email, and
+        // phone are three spellings of one ladder, not three ladders to climb one at
+        // a time.
+        let folded = request
+            .identifier
+            .trim()
+            .trim_start_matches('@')
+            .to_ascii_lowercase();
         if let Some(gate) = self.lockout.as_ref() {
-            let key = request
-                .identifier
-                .trim()
-                .trim_start_matches('@')
-                .to_ascii_lowercase();
-            if let Err(remaining_ms) = gate.check(context.now, &key) {
+            if let Err(remaining_ms) = gate.check(context.now, &folded) {
                 self.meters.signin(SignInOutcome::RateLimited);
                 return Err(error_locked(remaining_ms));
+            }
+            // A resolved account may already be locked under its id from an attempt
+            // that named a different spelling. Re-checking here, after the store
+            // lookup and before the passphrase, keeps the promise the id-keyed
+            // ladder makes without pricing the lookup for a guesser.
+            if let Some(account) = self.find_account(&folded).await? {
+                if let Err(remaining_ms) = gate.check(context.now, &Self::lockout_key_of(&account))
+                {
+                    self.meters.signin(SignInOutcome::RateLimited);
+                    return Err(error_locked(remaining_ms));
+                }
             }
         }
 
@@ -1316,8 +1343,7 @@ where
             // enumeration attempt from riding the ladder for free.
             if let Some(gate) = self.lockout.as_ref() {
                 let now = context.now;
-                let key = identifier.trim_start_matches('@').to_ascii_lowercase();
-                if let Some(seconds) = gate.record_failure(now, &key) {
+                if let Some(seconds) = gate.record_failure(now, &folded) {
                     tracing::warn!(seconds, "sign-in lockout engaged for an identifier");
                 }
             }
@@ -1335,12 +1361,20 @@ where
         let Some(verification) = verification else {
             self.charge_penalty(context, Opcode::Authenticate).await;
             self.note_captcha_failure(context);
+            // A wrong passphrase for an account that exists climbs that account's own
+            // ladder, keyed by its id — so a guesser rotating the account's spellings
+            // (username, email, phone) is still climbing the same ladder, and the
+            // fifth wrong passphrase locks the account however it was named. The
+            // identifier-text ladder the attempt was checked against at the door
+            // keeps its record too: an account that later deletes or renames away
+            // the spelling does not leave the text free for another round.
             if let Some(gate) = self.lockout.as_ref() {
                 let now = context.now;
-                let key = identifier.trim_start_matches('@').to_ascii_lowercase();
+                let key = Self::lockout_key_of(&account);
                 if let Some(seconds) = gate.record_failure(now, &key) {
-                    tracing::warn!(seconds, "sign-in lockout engaged for an identifier");
+                    tracing::warn!(seconds, "sign-in lockout engaged for an account");
                 }
+                let _ = gate.record_failure(now, &folded);
             }
             self.meters.signin(SignInOutcome::BadPassphrase);
             return Err(fault::invalid_credentials());
@@ -1397,10 +1431,24 @@ where
         // proved they own the account, so the suspicion is over.
         self.note_captcha_success(context);
         // …and the lockout ladder with it: the owner proved themselves, so the guessing
-        // attack the ladder was pricing is over.
+        // attack the ladder was pricing is over — for every spelling of the account,
+        // so the id-keyed record and the identifier the attempt named are cleared,
+        // along with every other spelling the account answers to (an earlier failure
+        // under the username would otherwise keep its count and lock the owner out on
+        // the next sign-in through the email).
         if let Some(gate) = self.lockout.as_ref() {
-            let key = identifier.trim_start_matches('@').to_ascii_lowercase();
-            gate.record_success(&key);
+            gate.record_success(&Self::lockout_key_of(&account));
+            gate.record_success(&folded);
+            // Every other spelling the account answers to, folded the way
+            // `find_account` folds them when it counts a failure: the username,
+            // the email, and the phone.
+            gate.record_success(&account.username.to_ascii_lowercase());
+            if let Some(email) = account.email.as_deref() {
+                gate.record_success(&email.to_ascii_lowercase());
+            }
+            if let Some(phone) = account.phone.as_deref() {
+                gate.record_success(&phone.to_ascii_lowercase());
+            }
         }
         self.meters.signin(SignInOutcome::Success);
         // The effective server the request reached. Recorded for
