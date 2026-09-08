@@ -239,6 +239,82 @@ async fn an_on_chain_claim_is_refused_before_anything_is_written() {
     );
 }
 
+/// The overdraft floor: a spend the balance cannot cover is refused whole —
+/// `INSUFFICIENT_BALANCE`, nothing written, the balance unmoved at zero. The floor is the
+/// ledger's, not the caller's arithmetic: a buyer with nothing is refused exactly like a
+/// buyer five coins short of a ten-coin gift.
+#[tokio::test]
+async fn a_spend_beyond_the_balance_is_refused_whole() {
+    let (svc, store) = harness();
+    seed_account(&store, 1, "poor-buyer").await;
+    seed_account(&store, 2, "recipient").await;
+    let buyer = caller(1, 101);
+    let sku = migo_economy::Sku::parse("gift.rose").expect("the default catalogue prices it");
+
+    // Zero coins: the purchase is refused before anything is written.
+    let error = svc
+        .purchase(&buyer, &sku, "spec:broke", None)
+        .await
+        .expect_err("a purchase without the balance is refused");
+    assert_eq!(error.code(), migo_protocol::codes::INSUFFICIENT_BALANCE);
+    assert_eq!(
+        svc.wallet(&buyer).await.expect("wallet read").coins,
+        0,
+        "a refused purchase moves no money"
+    );
+    assert!(
+        svc.entitlements(&buyer)
+            .await
+            .expect("entitlements read")
+            .is_empty(),
+        "a refused purchase grants no entitlement"
+    );
+
+    // Five of ten coins: short is short, whatever the shortfall.
+    svc.grant(Grant {
+        account_id: Id::from(1u128),
+        currency: Currency::Coins,
+        amount: 5,
+        reason: Reason::Grant,
+        ref_id: None,
+        idempotency_key: "seed:short".to_string(),
+        created_by: None,
+        at: Timestamp::from_millis(NOW),
+    })
+    .await
+    .expect("grant succeeds");
+    let error = svc
+        .purchase(&buyer, &sku, "spec:short", None)
+        .await
+        .expect_err("a five-coin wallet does not cover a ten-coin gift");
+    assert_eq!(error.code(), migo_protocol::codes::INSUFFICIENT_BALANCE);
+    assert_eq!(
+        svc.wallet(&buyer).await.expect("wallet read").coins,
+        5,
+        "the refusal leaves the five coins alone"
+    );
+
+    // A gift send meets the same floor, on the sender's side.
+    let error = svc
+        .send_gift(
+            &buyer,
+            SendGift {
+                recipient_id: Id::from(2u128),
+                gift: Gift::Rose,
+                conversation_id: None,
+                client_key: "spec:broke-gift".to_string(),
+            },
+        )
+        .await
+        .expect_err("a gift the sender cannot afford is refused");
+    assert_eq!(error.code(), migo_protocol::codes::INSUFFICIENT_BALANCE);
+    assert_eq!(
+        svc.wallet(&buyer).await.expect("wallet read").coins,
+        5,
+        "the refused gift leaves the balance unmoved"
+    );
+}
+
 /// One XP award intent, shared by the cap tests below.
 fn xp_award(amount: i64, key: &str, at: i64) -> migo_economy::Award {
     migo_economy::Award {
