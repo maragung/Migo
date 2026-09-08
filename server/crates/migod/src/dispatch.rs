@@ -400,8 +400,35 @@ impl Dispatcher for AppDispatcher {
                     now,
                 );
                 let request: ReactionSet = from_frame(frame).map_err(fault::from_wire)?;
+                // The message id is derived, not minted. A client that retries a
+                // REACTION_SET after a timeout re-sends byte-identical fields, and a
+                // fresh random id would store the reaction twice — the send path's
+                // idempotency is client-chosen ids, so the translation has to choose
+                // one deterministically. Hashing the caller and the whole request
+                // gives that: a retry maps to the same id and converges on the
+                // stored row, while a genuinely different reaction (another emoji,
+                // or the same one on a different message) differs in the hashed
+                // bytes and gets its own id. Every id bit is derived — a timestamp
+                // prefix would defeat the point, since a retry is sampled at a new
+                // `now`. Nothing reads a message id's embedded time; ids are
+                // identity here, not clock.
+                let mut hasher = DefaultHasher::new();
+                identity.account_id().hash(&mut hasher);
+                identity.device_id().hash(&mut hasher);
+                request.conversation_id.hash(&mut hasher);
+                request.target_message_id.hash(&mut hasher);
+                request.envelope.hash(&mut hasher);
+                let first = hasher.finish();
+                // A second round over the first: 16 derived bytes from a 64-bit
+                // core, so the full id is set without trusting one hash's width.
+                let mut second = DefaultHasher::new();
+                first.hash(&mut second);
+                let mut derived = [0u8; 16];
+                derived[..8].copy_from_slice(&first.to_le_bytes());
+                derived[8..].copy_from_slice(&second.finish().to_le_bytes());
+                let message_id = Id::from_bytes(derived);
                 let send = MessageSend {
-                    message_id: migo_core::Id::generate_at(now, &mut migo_core::OsRandom),
+                    message_id,
                     conversation_id: request.conversation_id,
                     kind: MessageKind::Text, // reactions ride a Text envelope; the Reaction discriminator is inside the ciphertext (SDK kindForContent)
                     envelope: request.envelope,
