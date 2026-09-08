@@ -435,6 +435,7 @@ mod tests {
     use super::*;
     use crate::root::MigoRoot;
     use migo_core::OsRandom;
+    use proptest::prelude::*;
 
     /// Fast parameters inside the accepted floor, so the test suite does not
     /// pay 64 MiB of Argon2 per case.
@@ -652,5 +653,131 @@ mod tests {
                 .expect("opens"),
             root
         );
+    }
+
+    // --- property tests --------------------------------------------------------
+    //
+    // The examples above pin specific vectors; these pin the container's
+    // general promises over arbitrary payload, credential, and corruption —
+    // the fuzz-shaped half of the audit, on proptest rather than cargo-fuzz
+    // because fuzzing needs a nightly toolchain. Every seal and every open
+    // runs Argon2id, and the validator's 8 MiB memory floor is the cheapest
+    // container this build will open (see `fast_params`), so each case costs
+    // one or two real KDF runs; cases are capped to keep `cargo test` quick.
+
+    /// Any 32-byte root — every byte pattern is a valid root, which is the
+    /// point of `MigoRoot::from_bytes` accepting arbitrary entropy.
+    fn any_root() -> impl Strategy<Value = [u8; 32]> {
+        proptest::array::uniform32(any::<u8>())
+    }
+
+    /// Any credential inside the accepted length range. Arbitrary
+    /// characters, because a recovery credential is whatever a user chose
+    /// and the format asks nothing of it but its length.
+    fn any_credential() -> impl Strategy<Value = String> {
+        proptest::collection::vec(any::<char>(), 8..=48)
+            .prop_map(|chars| chars.into_iter().collect())
+    }
+
+    /// Seals `file` with fresh caller-supplied salt and nonce at the test
+    /// floor, so every case is a genuinely different container rather than
+    /// the shared deterministic one `seal_fast` mints.
+    fn seal_varied(
+        credential: &str,
+        file: &AccountFile,
+        salt: &[u8; SALT_LEN],
+        nonce: &[u8; NONCE_LEN],
+    ) -> Vec<u8> {
+        seal_container_with(credential, file, fast_params(), salt, nonce)
+            .expect("sealing with in-range parameters works")
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(16))]
+
+        /// seal→open recovers exactly the file that was sealed, for any
+        /// payload and any in-range credential. The container is the only
+        /// backup of the whole account, so one class of input that does not
+        /// survive its own round trip — a multi-byte credential, an
+        /// account_id of an awkward shape — is the one bug this crate must
+        /// not have, and the one a hand-written vector never proves absent.
+        #[test]
+        fn seal_open_roundtrips(
+            root in any_root(),
+            created_at in any::<u64>(),
+            account_id in proptest::option::of(".*"),
+            credential in any_credential(),
+            salt in proptest::array::uniform16(any::<u8>()),
+            nonce in proptest::array::uniform24(any::<u8>()),
+        ) {
+            let migo_root = MigoRoot::from_bytes(&root).expect("any 32 bytes are a root");
+            let mut file = AccountFile::new(&migo_root, created_at);
+            if let Some(account_id) = &account_id {
+                file = file.for_account(account_id);
+            }
+            let container = seal_varied(&credential, &file, &salt, &nonce);
+            let opened = open_container(&credential, &container)
+                .expect("what this build seals, this build opens");
+            prop_assert_eq!(opened, file);
+        }
+
+        /// Flipping any single bit anywhere — header or body — makes the
+        /// open fail, never succeed, never panic. The AEAD tag covers the
+        /// header as associated data and the body as ciphertext, so no edit
+        /// can both change bytes and keep the tag; the header's own gates
+        /// (magic, versions, KDF id, parameter range) refuse the rest even
+        /// earlier. One flipped bit per case, not all of them, because each
+        /// open pays a full Argon2id run at the 8 MiB floor.
+        #[test]
+        fn a_flipped_bit_never_opens(
+            root in any_root(),
+            credential in any_credential(),
+            position in 0..2048usize,
+            bit in 0..8usize,
+        ) {
+            let migo_root = MigoRoot::from_bytes(&root).expect("any 32 bytes are a root");
+            let file = AccountFile::new(&migo_root, 1_700_000_000);
+            let container = seal_varied(
+                &credential,
+                &file,
+                &[1u8; SALT_LEN],
+                &[3u8; NONCE_LEN],
+            );
+            let position = position % container.len();
+            let mut tampered = container;
+            tampered[position] ^= 1 << bit;
+            prop_assert!(
+                open_container(&credential, &tampered).is_err(),
+                "a bit flip at byte {} must not open the container",
+                position
+            );
+        }
+
+        /// No truncated container opens, and none of them panics. A cut
+        /// below the header length is not a container at all; a cut inside
+        /// the body leaves the AEAD tag unverifiable. One cut length per
+        /// case for the same reason as above: each open past the header is a
+        /// full Argon2id run.
+        #[test]
+        fn a_truncated_container_never_opens(
+            root in any_root(),
+            credential in any_credential(),
+            cut in 0..2048usize,
+        ) {
+            let migo_root = MigoRoot::from_bytes(&root).expect("any 32 bytes are a root");
+            let file = AccountFile::new(&migo_root, 1_700_000_000);
+            let container = seal_varied(
+                &credential,
+                &file,
+                &[1u8; SALT_LEN],
+                &[3u8; NONCE_LEN],
+            );
+            let cut = cut % container.len();
+            prop_assert!(
+                open_container(&credential, &container[..cut]).is_err(),
+                "a {}-byte prefix must not open the container",
+                cut
+            );
+        }
     }
 }

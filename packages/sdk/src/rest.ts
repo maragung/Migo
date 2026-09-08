@@ -658,6 +658,19 @@ export class BootstrapClient {
     return { ok: true };
   }
 
+  /**
+   * `GET /v1/auth/contact` — whether the caller has a recovery contact on record.
+   *
+   * The address itself is deliberately not returned (there is no "what is my contact" read, so a
+   * stolen session token cannot enumerate it): the boolean is the whole answer, which is exactly
+   * what a security-checkup row needs. An account with no contact recorded answers
+   * `{ configured: false }` — that is the answer, not an error.
+   */
+  async recoveryContact(accessToken: string): Promise<{ configured: boolean }> {
+    const body = (await this.#get('/v1/auth/contact', accessToken)) as Record<string, unknown>;
+    return { configured: Boolean(body['configured']) };
+  }
+
   /** `POST /v1/auth/refresh` — exchange a refresh token for a fresh session. */
   async refresh(params: RefreshParams): Promise<Grant> {
     const body = { refresh_token: params.refreshToken, device_id: params.deviceId };

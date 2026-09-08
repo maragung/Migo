@@ -2790,6 +2790,27 @@ export function decodePushRegister(r: Reader): PushRegister {
   return out;
 }
 
+/** Empty on purpose: the registration affected is the calling device's own, taken from the session's identity. The reply is Acknowledged. */
+export interface PushUnregister {
+}
+
+export function encodePushUnregister(w: Writer, _v: PushUnregister): void {
+  w.enter();
+  w.u32(0);
+  w.leave();
+}
+
+export function decodePushUnregister(r: Reader): PushUnregister {
+  r.enter();
+  const out: PushUnregister = {  } as PushUnregister;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
 export interface InboxReq {
   limit: number;
   cursor?: string;
@@ -6761,6 +6782,10 @@ export const OP = {
   NOTIFICATION_EVENT: 144,
   NOTIFICATION_ACK: 145,
   NOTIFICATION_LIST: 146,
+  /** Hands the calling device's push token to the server. The provider field is advisory only; the server derives the push service from the platform recorded at sign-in. */
+  PUSH_REGISTER: 147,
+  /** Forgets the calling device's push registration. Priced like an ack rather than given a zero cost: the free-opcode flood exemption is reserved for frames the wire itself depends on, and a sign-out that cannot afford it falls back to simply dropping the registration. */
+  PUSH_UNREGISTER: 148,
   GIFT_SEND: 160,
   BALANCE_FETCH: 161,
   ECONOMY_EVENT: 162,
@@ -6921,6 +6946,8 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   144: { code: 144, name: 'NOTIFICATION_EVENT', cost: 0, cls: 'Droppable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'NotificationEvent' },
   145: { code: 145, name: 'NOTIFICATION_ACK', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'NotificationAck', response: 'Acknowledged' },
   146: { code: 146, name: 'NOTIFICATION_LIST', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'InboxReq', response: 'InboxResponse' },
+  147: { code: 147, name: 'PUSH_REGISTER', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'PushRegister', response: 'Acknowledged' },
+  148: { code: 148, name: 'PUSH_UNREGISTER', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'PushUnregister', response: 'Acknowledged' },
   160: { code: 160, name: 'GIFT_SEND', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GiftSend', response: 'GiftSendResult' },
   161: { code: 161, name: 'BALANCE_FETCH', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'WalletReq', response: 'WalletView' },
   162: { code: 162, name: 'ECONOMY_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'EconomyEvent' },

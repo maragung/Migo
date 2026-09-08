@@ -401,6 +401,18 @@ impl App {
                 Event::Wallets(result) => {
                     self.settings_panel.wallets = crate::ui::settings::Fetch::from_result(result);
                 }
+                // The checkup's backup row. Arrives at sign-in from the vault and again after
+                // every export and rotation — the only moments the local fact moves.
+                Event::BackupState { last_backup_at } => {
+                    self.settings_panel.last_backup_at = last_backup_at;
+                }
+                // The checkup's recovery row: the server's yes/no, or the reason it would not
+                // say — filed rather than toasted, like every other checkup input, because the
+                // row is on screen when it asks.
+                Event::ContactStanding(result) => {
+                    self.settings_panel.recovery =
+                        crate::ui::settings::RecoveryView::from_result(result);
+                }
                 Event::OwnProfile(result) => {
                     // The fetch's own answer, arriving as either a card or the reason there is
                     // none. Filed rather than toasted: the pane is on screen when it asks, so the

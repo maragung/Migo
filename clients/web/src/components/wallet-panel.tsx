@@ -50,6 +50,7 @@ import { AvaxSection } from './avax-section.js';
 import { BottomSheet } from './bottom-sheet.js';
 import { CoinMark } from './icons.js';
 import { Spinner } from './spinner.js';
+import { WalletRegistrySection } from './wallet-registry.js';
 
 /**
  * The relationship kinds this panel files people under, as the plain numbers the wire carries.
@@ -593,6 +594,10 @@ export function WalletPanel(): ReactNode {
           {/* The chain side of the wallet (§184): a separate conversation with a separate
               network, and its own record of tracked sends. */}
           <AvaxSection />
+
+          {/* The account-level registry (§21): which addresses the account has registered with
+              the server, and the replace flow that succeeds the active one (§22). */}
+          <WalletRegistrySection />
 
           {progression !== null ? (
             <section className="panel-section" aria-label="Progression">

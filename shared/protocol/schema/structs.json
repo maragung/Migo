@@ -1554,6 +1554,11 @@
       ]
     },
     {
+      "name": "PushUnregister",
+      "doc": "Empty on purpose: the registration affected is the calling device's own, taken from the session's identity. The reply is Acknowledged.",
+      "fields": []
+    },
+    {
       "name": "InboxReq",
       "fields": [
         {

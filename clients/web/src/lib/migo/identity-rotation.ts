@@ -45,6 +45,7 @@ import { RemoteError, TransportError, account } from '@migo/sdk';
 import type { Id, MigoClient } from '@migo/sdk';
 
 import { friendlyError } from '@/lib/migo/errors.js';
+import { markBackupOutdated } from '@/lib/storage/backup-state-store.js';
 import { loadDeviceRecord, saveDeviceRecord } from '@/lib/storage/device-record-store.js';
 import { saveKeyStoreSnapshot } from '@/lib/storage/keystore-store.js';
 
@@ -139,7 +140,7 @@ export async function rotateAccountIdentity(
 
   try {
     await client.rotateIdentity(active, successor);
-    return { state: 'done', successor };
+    return doneOutcome(accountId, successor);
   } catch (cause) {
     // No answer is not a refusal: the call may have landed, and the pre-commit must survive the
     // ambiguity. The next attempt signs with the sealed successor, which the server accepts if the
@@ -157,7 +158,7 @@ export async function rotateAccountIdentity(
     ) {
       try {
         await client.rotateIdentity(account.IdentityKey.fromRoot(root), successor);
-        return { state: 'done', successor };
+        return doneOutcome(accountId, successor);
       } catch (healed) {
         if (healed instanceof TransportError) {
           return { state: 'unfinished', message: ROTATION_UNFINISHED };
@@ -167,6 +168,29 @@ export async function rotateAccountIdentity(
     }
     throw await refusedAfterRollback(client, accountId, priorSeed, cause);
   }
+}
+
+/**
+ * The `done` end of a rotation: the successor is returned to the caller, and the backup record is
+ * marked outdated on this browser before that.
+ *
+ * A `.migo` file sealed before the rotation carries the retired root derivation, so the checkup's
+ * "Backed up" line would quietly keep vouching for a file the server now refuses — the mark is
+ * what turns it into the warning it became. Only the confirmed end marks it: an `unfinished`
+ * attempt may or may not have landed, and a warning we cannot confirm is a lie in the other
+ * direction (the next attempt settles the rotation, and marks the backup if it lands). The mark
+ * itself is bookkeeping, so a failure to write it never rewrites the rotation's own outcome.
+ */
+async function doneOutcome(
+  accountId: Id,
+  successor: account.IdentityKey,
+): Promise<IdentityRotationOutcome> {
+  await markBackupOutdated(accountId).catch(() => {
+    // Best-effort by design: the rotation is done and reported as done; the stale backup line is
+    // the cost of a failed bookkeeping write, not a failed rotation, and the fresh-backup advice
+    // the panel already shows covers the act either way.
+  });
+  return { state: 'done', successor };
 }
 
 /**

@@ -365,6 +365,17 @@ data class WalletSummary(
 )
 
 /**
+ * The answer to `GET /v1/auth/contact`: whether the account holds a recovery contact.
+ *
+ * One boolean and deliberately not the contact's value. The security checkup's row needs
+ * existence only, and a response this client echoes is a response that can end up rendered on
+ * every screen the row does; the contact's string belongs to the recovery surface, which the
+ * account owner already reaches through their own authenticated form.
+ */
+@Serializable
+data class ContactStatus(val configured: Boolean = false)
+
+/**
  * An HTTP client bound to one server.
  *
  * One [OkHttpClient] per instance, and it is meant to be long-lived: OkHttp's connection and thread
@@ -732,6 +743,16 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
             accessToken,
         ).use { if (!it.isSuccessful) throw failure(it) }
     }
+
+    /**
+     * Whether the caller's account holds a recovery contact: `GET /v1/auth/contact`.
+     *
+     * The read behind the security checkup's Recovery row. The answer is a fact either way —
+     * `configured: false` is the warning the row shows, not a failure to catch — so a caller
+     * that lands here has a row to draw whatever the boolean says.
+     */
+    suspend fun contactStatus(accessToken: String): ContactStatus =
+        respond(send("GET", "/v1/auth/contact", null, accessToken), ContactStatus.serializer())
 
     // --- the admin surface ------------------------------------------------------------
     //

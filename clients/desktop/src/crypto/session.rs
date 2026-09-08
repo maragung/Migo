@@ -83,6 +83,15 @@ pub struct DeviceKeys {
     /// passphrase is available — the same trade the one-time prekey pool makes, for the same
     /// reason: this process deliberately does not hold the passphrase after unlock.
     pub txs: Vec<crate::vault::TxRecord>,
+    /// When this device last sealed a `.migo` container, in unix seconds, sealed into the vault
+    /// as FIELD_LAST_BACKUP_AT.
+    ///
+    /// The security checkup's backup row is drawn from it. A rotation clears it — a container
+    /// sealed before the rotation cannot vouch an account whose identity half it no longer
+    /// holds — and the worker's memory of the date is cleared with it, at the same ceremony.
+    /// Mid-session updates live in the worker's memory and are re-sealed at the next passphrase
+    /// moment, the same trade the Activity list makes.
+    pub last_backup_at: Option<u64>,
     /// The successor identity key's seed, set once this device has rotated the account's
     /// ML-DSA identity key (or pre-committed the rotation).
     ///
@@ -133,6 +142,7 @@ impl DeviceKeys {
             txs: Vec::new(),
             rotated_identity_seed: None,
             peer_fingerprints: HashMap::new(),
+            last_backup_at: None,
         }
     }
 
@@ -159,6 +169,7 @@ impl DeviceKeys {
             txs: Vec::new(),
             rotated_identity_seed: None,
             peer_fingerprints: HashMap::new(),
+            last_backup_at: None,
         }
     }
 

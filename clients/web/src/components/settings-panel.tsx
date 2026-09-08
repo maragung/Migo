@@ -1,7 +1,8 @@
 'use client';
 
 /**
- * The Settings tab: the account's devices and its live sessions.
+ * The Settings tab: the account's devices and its live sessions, and the door to the Security
+ * Checkup (§50).
  *
  * Devices and sessions are two views of the same security question, and both are
  * server-owned facts — the lists, each revocation, and the bulk sign-out all ask the
@@ -16,7 +17,9 @@
  * itself, and a button that always errors is a lie.
  *
  * The account's identity, email, passphrase, and key file live in the "My Account" panel
- * (account-panel.tsx), not here — Settings is the device and session security surface.
+ * (account-panel.tsx), not here — Settings is the device and session security surface, plus the
+ * one door §50 names for it: Settings → Security Checkup, the six fixed rows that read every
+ * security surface at once.
  *
  * The presentational halves are exported as controlled components over plain data, so the rules
  * (the current-session badge, the disabled self-revoke) are testable without a live client,
@@ -186,9 +189,15 @@ export function SessionList({
 }
 
 /**
- * The Settings tab panel: loads the device and session lists.
+ * The Settings tab panel: loads the device and session lists, and carries the Security
+ * Checkup door (§50's own path: Settings → Security Checkup).
  */
-export function SettingsPanel(): ReactNode {
+export function SettingsPanel({
+  onOpenCheckup,
+}: {
+  /** Opens the Security Checkup panel. Optional so tests can render the panel bare. */
+  onOpenCheckup?: () => void;
+}): ReactNode {
   const { client } = useMigo();
 
   const [devices, setDevices] = useState<DeviceSummary[] | null>(null);
@@ -340,6 +349,19 @@ export function SettingsPanel(): ReactNode {
             </button>
           </>
         )}
+      </section>
+
+      <section className="panel-section" aria-label="Security checkup">
+        <h2 className="panel-heading">Security Checkup</h2>
+        <p className="hint">
+          Six standing checks — identity, devices, wallets, backup, recovery, E2EE — each read from
+          real state.
+        </p>
+        {onOpenCheckup !== undefined ? (
+          <button type="button" className="btn btn-primary" onClick={onOpenCheckup}>
+            Open Security Checkup
+          </button>
+        ) : null}
       </section>
 
       <AppearanceSection />

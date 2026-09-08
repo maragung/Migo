@@ -34,6 +34,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -44,7 +45,13 @@ import com.migo.app.model.AppState
 import com.migo.app.model.BackupState
 import com.migo.app.model.DevicesState
 import com.migo.app.model.ProfileEditState
+import com.migo.app.model.SecurityCheckupState
 import com.migo.core.net.DeviceSummary
+import com.migo.core.net.WalletSummary
+import com.migo.core.security.BackupFreshness
+import com.migo.core.security.backupDateLabel
+import com.migo.core.security.backupFreshness
+import com.migo.core.security.oldActiveDevices
 
 /**
  * The Profile section: the account, in the owner's own words.
@@ -61,7 +68,8 @@ import com.migo.core.net.DeviceSummary
  * that works — which is exactly why it asks for confirmation first. The backup is the other
  * exception: sealing the account into a container the person can carry to another device is a
  * control that works, and its recovery credential lives in the form that uses it, never on the
- * state object.
+ * state object. The security checkup (§50) sits after the controls it reports on: six fixed rows,
+ * each a fact the session or this device already holds, each warning that fact's honest negative.
  */
 @Composable
 fun ProfileScreen(
@@ -177,6 +185,15 @@ fun ProfileScreen(
             onChangePassphrase = onChangePassphrase,
             onSaveContact = onSaveContact,
             onRotateIdentity = onRotateIdentity,
+        )
+
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+        SectionLabel(text = "Security checkup")
+        SecurityCheckupSection(
+            checkup = state.securityCheckup,
+            devices = state.devices,
+            registrations = state.wallet.registrations,
         )
 
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -659,6 +676,172 @@ private fun AccountSecuritySection(
 }
 
 /**
+ * The security checkup (§50): six fixed rows — Identity, Devices, Wallets, Backup, Recovery,
+ * E2EE — the same set every client builds, so a person who reads it on the web reads the same
+ * account story here.
+ *
+ * A row states a fact; a warning is the fact's honest negative, never a guess. What this build
+ * cannot know account-wide it says so about rather than inventing: the E2EE row carries no
+ * conversation count, because the changed-identity flag lives per conversation (in the open
+ * chat's own state, against the fingerprints that conversation last acknowledged) and a number
+ * aggregated from the conversations that happen to be open would be a number about the screen,
+ * not the account.
+ */
+@Composable
+private fun SecurityCheckupSection(
+    checkup: SecurityCheckupState,
+    devices: DevicesState,
+    registrations: List<WalletSummary>?,
+) {
+    if (checkup.failure != null) {
+        Text(
+            text = checkup.failure,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+        )
+    }
+
+    // The rows. Identity first, because the checkup reads top-down the way a person worries.
+    CheckupRow(
+        label = "Identity",
+        status = "✓ Active",
+        note = "The signing key sign-in and add-device verify against; rotate it in Account " +
+            "security above.",
+    )
+
+    // Devices: the counts from the server's own list, and the one warning the list can honestly
+    // raise — a device that can still authenticate and has not been seen for a month.
+    val rows = devices.devices
+    if (rows == null) {
+        CheckupRow(
+            label = "Devices",
+            note = if (checkup.loading || devices.loading) "Checking…" else "Not checked yet.",
+        )
+    } else {
+        val active = rows.count { it.status == "active" }
+        val revoked = rows.count { it.status == "revoked" }
+        CheckupRow(
+            label = "Devices",
+            status = "✓ $active of ${rows.size} active" + (if (revoked > 0) ", $revoked revoked" else ""),
+        )
+        // Measured against `now` captured per list, not per frame: the row's answer should not
+        // flicker as recomposition runs, and it should not drift mid-render either.
+        val now = remember(rows) { System.currentTimeMillis() }
+        val old = oldActiveDevices(rows, now)
+        when (old.size) {
+            0 -> Unit
+            1 -> CheckupWarning(
+                text = "“${old.first().displayName}” is still active but was last seen over " +
+                    "30 days ago.",
+            )
+            else -> CheckupWarning(text = "${old.size} devices are still active but were last " +
+                "seen over 30 days ago.")
+        }
+    }
+
+    // Wallets: the registry the server holds, archived rows counted rather than hidden.
+    if (registrations == null) {
+        CheckupRow(
+            label = "Wallets",
+            note = if (checkup.loading) "Checking…" else "Not checked yet.",
+        )
+    } else {
+        val active = registrations.count { it.status == "active" }
+        val archived = registrations.count { it.status == "archived" }
+        CheckupRow(
+            label = "Wallets",
+            status = "✓ $active registered" + (if (archived > 0) ", $archived archived" else ""),
+        )
+    }
+
+    // Backup: from the two timestamps this device persists — when a container last landed, and
+    // when the identity key last rotated.
+    when (val freshness = backupFreshness(checkup.lastBackupExportMs, checkup.lastIdentityRotationMs)) {
+        BackupFreshness.NeverBackedUp -> {
+            CheckupRow(label = "Backup")
+            CheckupWarning(text = "Never backed up on this device.")
+        }
+        is BackupFreshness.BackedUp ->
+            CheckupRow(label = "Backup", status = "✓ Backed up " + backupDateLabel(freshness.atMs))
+        is BackupFreshness.Outdated -> {
+            CheckupRow(label = "Backup", status = "✓ Backed up " + backupDateLabel(freshness.atMs))
+            CheckupWarning(
+                text = "Backup outdated — the identity key was rotated after this backup was " +
+                    "made, so it can no longer vouch for the account onto a new device.",
+            )
+        }
+    }
+
+    // Recovery: existence only; the contact's value belongs to the form in Account security.
+    when (val configured = checkup.recoveryConfigured) {
+        null -> CheckupRow(label = "Recovery", note = if (checkup.loading) "Checking…" else "Not checked yet.")
+        true -> CheckupRow(label = "Recovery", status = "✓ Recovery contact set")
+        false -> CheckupWarning(text = "Recovery contact not set — save one in Account security above.")
+    }
+
+    // E2EE: on, with the verification surface named honestly. No account-wide count is
+    // derivable without inventing one (see the comment on this section), so the row points at
+    // the place the warnings actually live.
+    CheckupRow(
+        label = "E2EE",
+        status = "✓ On",
+        note = "Verification warnings appear in each conversation, beside its safety numbers.",
+    )
+}
+
+/**
+ * One checkup row: the label, the answer when there is one, and the quieter sentence under it.
+ *
+ * A null status is the honest "not checked yet" — the label still shows, because a row that
+ * vanished before its read landed would look like a fact this account lacks.
+ */
+@Composable
+private fun CheckupRow(label: String, status: String? = null, note: String? = null) {
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            if (status != null) {
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.bodySmall,
+                    // The restyle's status green, the same value the connection dot carries: a
+                    // fixed hue, because "fine" means the same colour on every surface.
+                    color = Color(0xFF3FCE6B),
+                )
+            }
+        }
+        if (note != null) {
+            Text(
+                text = note,
+                style = MaterialTheme.typography.labelSmall,
+                color = LocalMigoExtra.current.faint,
+            )
+        }
+    }
+}
+
+/**
+ * A checkup warning: the row's honest negative, in the error colour, on the row's own line
+ * rather than replacing its answer — "Backed up, but outdated" is a sentence with two halves,
+ * and only one of them is the warning.
+ */
+@Composable
+private fun CheckupWarning(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.error,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+    )
+}
+
+/**
  * The account's devices: one row per device, the current one marked. (A revoked
  * device no longer appears — the server's list only holds devices that may still
  * authenticate — so a row is always live.)
@@ -761,6 +944,20 @@ private fun BackupSection(
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+    )
+    // The destinations named out loud, because the spec's "Back up to Google Drive" is already
+    // true here and a person who does not know it is a person who thinks they need another app
+    // (and a Google login) to get their backup into the cloud. The system picker lists every
+    // DocumentsProvider this device carries — Google Drive included — and Migo holds no Google
+    // credentials and connects no Google account: Drive receives the encrypted container as a
+    // file, the same bytes Downloads or a USB drive would, and nothing else.
+    Text(
+        text = "Save it wherever the picker offers — Downloads, a USB drive, Google Drive. " +
+            "Google Drive only ever receives the encrypted .migo container; Migo connects no " +
+            "Google account.",
+        style = MaterialTheme.typography.labelSmall,
+        color = LocalMigoExtra.current.faint,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
     )
 
     OutlinedTextField(

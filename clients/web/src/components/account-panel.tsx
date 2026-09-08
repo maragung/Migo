@@ -45,6 +45,7 @@ import { containerFileName, credentialProblem, downloadAccountFile } from '@/lib
 import { rotateAccountIdentity } from '@/lib/migo/identity-rotation.js';
 import { friendlyError } from '@/lib/migo/errors.js';
 import { saveSession } from '@/lib/storage/session-store.js';
+import { recordBackupExport } from '@/lib/storage/backup-state-store.js';
 import { useMigo } from '@/lib/migo/use-migo.js';
 import { useProfile } from '@/lib/migo/use-profiles.js';
 
@@ -597,6 +598,10 @@ export function AccountPanel(): ReactNode {
       try {
         const bytes = await sealKeyFileBytes(live.asBytes(), String(accountId), next);
         downloadAccountFile(bytes, fileName);
+        // The export is what the checkup's Backup row vouches for, so the download is the moment
+        // the record is written — best-effort, because a failed bookkeeping write must not turn a
+        // completed download into a reported failure.
+        await recordBackupExport(accountId).catch(() => {});
         setRefreshSaved(true);
       } catch (cause) {
         setRefreshError(
@@ -639,6 +644,8 @@ export function AccountPanel(): ReactNode {
       try {
         const bytes = await sealKeyFileBytes(live.asBytes(), String(accountId), credential);
         downloadAccountFile(bytes, fileName);
+        // Same rule as the post-passphrase re-seal: the export is the event the Backup row records.
+        await recordBackupExport(accountId).catch(() => {});
         setKeyFileSaved(true);
       } catch (cause) {
         setKeyFileError(

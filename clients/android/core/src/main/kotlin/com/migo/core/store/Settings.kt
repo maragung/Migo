@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStoreFile
 import com.migo.core.protocol.BandwidthMode
@@ -234,6 +235,28 @@ data class AppSettings(
 
     /** Whether the first-run flow has been completed, so it is not shown again. */
     val onboardingComplete: Boolean = false,
+
+    /**
+     * Unix milliseconds of this device's last successful `.migo` export, or 0 when none.
+     *
+     * Lives in this store rather than the vault or a file of its own because it is the same
+     * kind of fact as every other field here: device-scoped, not a secret (a timestamp vouches
+     * for nothing and opens nothing — the container's recovery credential is the secret, and it
+     * never touches this store), and readable before any screen draws. The vault would be the
+     * wrong home outright — an encrypted store for a number the security checkup reads in the
+     * clear — and a second DataStore would be new machinery for one Long. The fact is
+     * deliberately *not* cleared on sign-out: "never backed up on this device" is a statement
+     * about the device, not about whoever is signed in on it.
+     */
+    val lastBackupExportMs: Long = 0L,
+
+    /**
+     * Unix milliseconds of the last successful identity-key rotation on this account, or 0 when
+     * none. A rotation retires the identity half of every `.migo` container sealed before it,
+     * so the checkup compares this against [lastBackupExportMs] to say whether the last backup
+     * can still vouch for the account — the "Backup outdated" warning.
+     */
+    val lastIdentityRotationMs: Long = 0L,
 )
 
 // The preference keys. Private to this file: a key is a storage detail, and anything outside that could
@@ -257,6 +280,8 @@ private val KEY_SEND_TYPING = booleanPreferencesKey("send_typing_indicators")
 private val KEY_SHARE_PRESENCE = booleanPreferencesKey("share_presence")
 private val KEY_MEDIA_AUTO_DOWNLOAD = stringPreferencesKey("media_auto_download")
 private val KEY_ONBOARDING_COMPLETE = booleanPreferencesKey("onboarding_complete")
+private val KEY_LAST_BACKUP_EXPORT_MS = longPreferencesKey("last_backup_export_ms")
+private val KEY_LAST_IDENTITY_ROTATION_MS = longPreferencesKey("last_identity_rotation_ms")
 
 /**
  * Reads a snapshot, substituting the default for anything absent or unrecognised.
@@ -284,6 +309,8 @@ private fun Preferences.toAppSettings(): AppSettings {
             defaults.mediaAutoDownload,
         ),
         onboardingComplete = this[KEY_ONBOARDING_COMPLETE] ?: defaults.onboardingComplete,
+        lastBackupExportMs = this[KEY_LAST_BACKUP_EXPORT_MS] ?: defaults.lastBackupExportMs,
+        lastIdentityRotationMs = this[KEY_LAST_IDENTITY_ROTATION_MS] ?: defaults.lastIdentityRotationMs,
     )
 }
 
@@ -305,6 +332,8 @@ private fun AppSettings.writeTo(preferences: MutablePreferences) {
     preferences[KEY_SHARE_PRESENCE] = sharePresence
     preferences[KEY_MEDIA_AUTO_DOWNLOAD] = mediaAutoDownload.name
     preferences[KEY_ONBOARDING_COMPLETE] = onboardingComplete
+    preferences[KEY_LAST_BACKUP_EXPORT_MS] = lastBackupExportMs
+    preferences[KEY_LAST_IDENTITY_ROTATION_MS] = lastIdentityRotationMs
 }
 
 /**

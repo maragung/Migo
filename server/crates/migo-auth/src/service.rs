@@ -1852,6 +1852,21 @@ where
         Ok(())
     }
 
+    async fn has_contact(&self, identity: &Identity, _context: &RequestContext) -> Result<bool> {
+        // Same posture as `sessions`, the neighbouring read: the caller was
+        // charged by authentication itself, and reading one flag of the
+        // caller's own account is not an operation worth a second charge.
+        // `live_account` rather than a raw lookup so a deleted or suspended
+        // account fails the way every other authenticated route fails.
+        let account = self.live_account(identity.account_id()).await?;
+        // An email or phone recorded at registration lands on the same
+        // columns `set_contact` writes and the recovery flow resolves, so
+        // the flag reads the columns rather than tracking which route
+        // wrote them — one source of truth, no "registered-but-not-set"
+        // state for a UI to get wrong.
+        Ok(account.email.is_some() || account.phone.is_some())
+    }
+
     async fn request_recovery(
         &self,
         identifier: &str,

@@ -73,6 +73,7 @@ import type {
   Grant,
   LoginParams,
   RegisterParams,
+  WalletSummary,
 } from './rest.js';
 import { DEFAULT_CLIENT_FEATURES, GatewayTransport } from './transport.js';
 import type {
@@ -824,6 +825,48 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   async revokeDevice(params: { device_id: Id }): Promise<{ revoked: number }> {
     const ctx = this.#requireConnected();
     return this.#bootstrap.revokeDevice(ctx.grant.accessToken, params.device_id);
+  }
+
+  /**
+   * Lists the account's registered wallet addresses — the account-level registry (§21), which is
+   * the truth a wallet surface shows: the root this device holds can *derive* any index, but only
+   * the registry says which addresses the account has actually registered.
+   */
+  async wallets(): Promise<WalletSummary[]> {
+    const ctx = this.#requireConnected();
+    return this.#bootstrap.wallets(ctx.grant.accessToken);
+  }
+
+  /**
+   * Registers (or idempotently re-registers) a wallet address on the account.
+   *
+   * `derivationIndex` is the `i` in `m/44'/60'/0'/0/i` the address was derived at, so a later
+   * restore re-registers in order. The private key behind the address never crosses the wire.
+   */
+  async registerWallet(params: {
+    address: string;
+    derivationIndex: number;
+    chainType?: string;
+    label?: string;
+  }): Promise<WalletSummary> {
+    const ctx = this.#requireConnected();
+    return this.#bootstrap.registerWallet(ctx.grant.accessToken, params);
+  }
+
+  /** Archives one of the account's wallets (§22's "old wallet ARCHIVED"). Answers `ok`. */
+  async archiveWallet(params: { wallet_id: Id }): Promise<{ ok: true }> {
+    const ctx = this.#requireConnected();
+    await this.#bootstrap.archiveWallet(ctx.grant.accessToken, params.wallet_id);
+    return { ok: true };
+  }
+
+  /**
+   * Whether a recovery contact is recorded on the account — the boolean, never the address
+   * (§48: the contact is write-only, so it cannot be enumerated back).
+   */
+  async recoveryContact(): Promise<{ configured: boolean }> {
+    const ctx = this.#requireConnected();
+    return this.#bootstrap.recoveryContact(ctx.grant.accessToken);
   }
 
   // --- the global-admin management surface -----------------------------------

@@ -4,7 +4,8 @@
 //! twenty-one crates into one connected system ([`App`]), the dispatcher that routes opcodes into
 //! the domain ([`dispatch`]), the deployment ports the domain leaves open ([`ports`]) — lives here,
 //! so the integration harness can build an [`App`] against in-memory backends and drive it without
-//! ever opening a socket. `main` only initialises logging and calls [`run_blocking`].
+//! ever opening a socket. `main` loads the configuration, initialises logging from it, and
+//! calls [`run_blocking`].
 //!
 //! # Layering
 //!
@@ -34,26 +35,26 @@ use anyhow::Context;
 
 use migo_core::Config;
 
-/// Loads configuration, builds the [`App`], and serves it until shutdown. Blocks the caller.
+/// Serves the configuration the caller already loaded until shutdown. Blocks the caller.
 ///
-/// This is the whole of what the binary does: it builds a multi-threaded runtime, loads the
-/// [`Config`] from the environment, constructs the [`App`], installs the signal handler that turns
-/// SIGTERM and SIGINT into a graceful shutdown, and serves until that shutdown completes. The
-/// signal handler is installed from inside the runtime because it spawns a task to watch for the
-/// signal.
+/// This is the whole of what the binary does after startup: it builds a multi-threaded
+/// runtime, takes the [`Config`] that `main` loaded (and initialised logging from — see
+/// `main.rs` for why the load happens there rather than here), constructs the [`App`],
+/// installs the signal handler that turns SIGTERM and SIGINT into a graceful shutdown, and
+/// serves until that shutdown completes. The signal handler is installed from inside the
+/// runtime because it spawns a task to watch for the signal.
 ///
 /// # Errors
 ///
-/// Returns an error if the runtime cannot be built, the configuration cannot be loaded or is
-/// invalid, the [`App`] cannot be constructed, or the server terminates abnormally.
-pub fn run_blocking() -> anyhow::Result<()> {
+/// Returns an error if the runtime cannot be built, the [`App`] cannot be constructed, or
+/// the server terminates abnormally.
+pub fn run_blocking(config: Config) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("cannot build the async runtime")?;
 
     runtime.block_on(async {
-        let config = Config::load().context("cannot load configuration")?;
         let app = App::build(&config).await?;
         app.shutdown.install_signal_handler();
         app.serve().await

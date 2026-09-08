@@ -53,6 +53,11 @@ W3C trace context, sampled at 1 % by default and 100 % for errors. The `TRACED` 
 flag carries the context across the WebSocket boundary, so a client-reported "message was
 slow" is a searchable trace, not a guess.
 
+Not implemented in this build: no OTLP exporter is compiled in, so sampled trace
+context exists in logs only. The sampling knobs were removed from the config rather
+than left as dead fields; this section remains the design target for when an exporter
+lands.
+
 ## 5. SLOs
 
 | SLO                                              | Target            |

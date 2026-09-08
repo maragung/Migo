@@ -92,6 +92,19 @@ const FIELD_ROTATED_IDENTITY: u32 = 5;
 /// already had, only different, is the moment the interface has to say so.
 const FIELD_PEER_FINGERPRINTS: u32 = 6;
 
+/// The optional-field id under which this device's last successful backup seal lives.
+///
+/// The unix-seconds instant the worker finished writing a `.migo` container, so the settings
+/// screen's security checkup can say "Backed up {date}" instead of nothing at all. A timestamp,
+/// never a path or a credential: the field's whole job is to answer *when*, and anything about
+/// *what* or *where* would be a second copy of information the container already owns.
+///
+/// Absent means never — and rotation deliberately makes it absent again (see
+/// [`crate::net::Worker::rotate_identity`]): a container sealed before the rotation carries the
+/// retired key's root half, so the last thing a security checkup should do is vouch for it with
+/// a fresh date.
+const FIELD_LAST_BACKUP_AT: u32 = 7;
+
 /// One tracked AVAX transaction: what was sent, and how the tracker ended.
 ///
 /// Written at broadcast with the outcome it had then and updated when the tracker settles, so a
@@ -396,7 +409,8 @@ fn encode_keys(keys: &DeviceKeys) -> Result<Vec<u8>, VaultError> {
         + u32::from(keys.device_credential_seed.is_some())
         + u32::from(!keys.txs.is_empty())
         + u32::from(keys.rotated_identity_seed.is_some())
-        + u32::from(!keys.peer_fingerprints.is_empty());
+        + u32::from(!keys.peer_fingerprints.is_empty())
+        + u32::from(keys.last_backup_at.is_some());
     w.write_u32(optionals);
     if let Some(saved) = &keys.session {
         w.optional(FIELD_SESSION, |w| {
@@ -442,6 +456,14 @@ fn encode_keys(keys: &DeviceKeys) -> Result<Vec<u8>, VaultError> {
                 w.write_id(device);
                 w.write_bytes(fingerprint)?;
             }
+            Ok(())
+        })
+        .map_err(|_| VaultError::Malformed)?;
+    }
+    // The backup stamp rides last, so a vault diff reads oldest-fact to newest.
+    if let Some(at) = keys.last_backup_at {
+        w.optional(FIELD_LAST_BACKUP_AT, |w| {
+            w.write_u64(at);
             Ok(())
         })
         .map_err(|_| VaultError::Malformed)?;
@@ -500,6 +522,7 @@ fn decode_keys(plaintext: &[u8]) -> Result<DeviceKeys, VaultError> {
     let mut txs = Vec::new();
     let mut rotated_identity_seed = None;
     let mut peer_fingerprints = std::collections::HashMap::new();
+    let mut last_backup_at = None;
     for _ in 0..optionals {
         let (field, mut inner) = r.read_optional().map_err(|_| VaultError::Malformed)?;
         // An unknown id is skipped, not an error: the sub-reader is length-scoped, so a newer build's
@@ -522,6 +545,8 @@ fn decode_keys(plaintext: &[u8]) -> Result<DeviceKeys, VaultError> {
             rotated_identity_seed = Some(seed32(&mut inner)?);
         } else if field == FIELD_PEER_FINGERPRINTS {
             peer_fingerprints = read_peer_fingerprints(&mut inner)?;
+        } else if field == FIELD_LAST_BACKUP_AT {
+            last_backup_at = Some(inner.read_u64().map_err(|_| VaultError::Malformed)?);
         }
     }
     r.leave();
@@ -536,6 +561,7 @@ fn decode_keys(plaintext: &[u8]) -> Result<DeviceKeys, VaultError> {
         txs,
         rotated_identity_seed,
         peer_fingerprints,
+        last_backup_at,
     })
 }
 
@@ -857,5 +883,33 @@ mod tests {
                 .public_key(),
             successor.public_key()
         );
+    }
+
+    /// The backup stamp round trips, and clearing it is a clear rather than a stale echo: the
+    /// checkup's "Backed up {date}" row is drawn from this field, and a rotation that invalidates
+    /// a container must be able to make the vault forget the date the dead container was sealed.
+    /// The stamp starts absent on every new vault — a fresh device has never sealed one — and a
+    /// vault written before the field existed decodes the same absence, which is the honest
+    /// "Never backed up" rather than a guess.
+    #[test]
+    fn the_last_backup_stamp_round_trips_and_a_clear_is_a_clear() {
+        let path = scratch("migo-vault-backup-stamp.bin");
+        let root = migo_account::MigoRoot::from_bytes(&[9u8; 32]).expect("32 bytes is a root");
+        let mut keys = DeviceKeys::founding(&root);
+
+        // A new vault has never backed anything up.
+        assert_eq!(keys.last_backup_at, None);
+
+        keys.last_backup_at = Some(1_800_000_000);
+        save(&path, "correct horse battery", &keys).expect("saved");
+        let opened = load(&path, "correct horse battery").expect("opened");
+        assert_eq!(opened.last_backup_at, Some(1_800_000_000));
+
+        // The clear — what a successful rotation writes — survives its own round trip.
+        keys.last_backup_at = None;
+        save(&path, "correct horse battery", &keys).expect("re-saved");
+        let reopened = load(&path, "correct horse battery").expect("re-opened");
+        assert_eq!(reopened.last_backup_at, None);
+        let _ = std::fs::remove_file(&path);
     }
 }

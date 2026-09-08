@@ -1740,3 +1740,77 @@ async fn a_contact_put_records_an_email_and_refuses_what_is_neither_email_nor_ph
         .await;
     expect_error(&resp, StatusCode::UNAUTHORIZED, 1100);
 }
+
+#[tokio::test]
+async fn the_contact_flag_flips_when_a_contact_is_recorded_and_never_carries_the_value() {
+    let h = Harness::new();
+    let grant = h.account(Some("203.0.113.80"), "rowan").await;
+    let token = grant["access_token"].as_str().unwrap().to_string();
+
+    // A fresh account registered without an email or phone: the security
+    // screen has something to nag about, and the flag says so.
+    let resp = h
+        .send(build_req(
+            Method::GET,
+            "/v1/auth/contact",
+            Some("203.0.113.80"),
+            Some(&token),
+            None,
+        ))
+        .await;
+    assert_eq!(resp.status, StatusCode::OK, "body={}", resp.text());
+    let body = resp.json();
+    assert_eq!(body["configured"], json!(false));
+
+    // Record one, and the flag flips — with the body still exactly one
+    // field. The contact itself must never appear here: "your current email
+    // is never shown here" is the surface's standing promise, and a leak of
+    // the address into this body would break it in the one place designed
+    // to ask.
+    let resp = h
+        .send(build_req(
+            Method::PUT,
+            "/v1/auth/contact",
+            Some("203.0.113.80"),
+            Some(&token),
+            Some(&json!({ "email_or_phone": "rowan@example.org" })),
+        ))
+        .await;
+    assert_eq!(resp.status, StatusCode::NO_CONTENT, "body={}", resp.text());
+    let resp = h
+        .send(build_req(
+            Method::GET,
+            "/v1/auth/contact",
+            Some("203.0.113.80"),
+            Some(&token),
+            None,
+        ))
+        .await;
+    assert_eq!(resp.status, StatusCode::OK, "body={}", resp.text());
+    let body = resp.json();
+    assert_eq!(body["configured"], json!(true));
+    assert_eq!(
+        body.as_object().map(|fields| fields.len()),
+        Some(1),
+        "the body is the flag and nothing else: {}",
+        resp.text()
+    );
+    assert!(
+        !resp.text().contains("rowan@example.org"),
+        "the contact value never crosses: {}",
+        resp.text()
+    );
+
+    // And the read is authenticated like every other /v1/auth route: a
+    // stranger's GET is nobody's flag, not a public one.
+    let resp = h
+        .send(build_req(
+            Method::GET,
+            "/v1/auth/contact",
+            Some("203.0.113.81"),
+            None,
+            None,
+        ))
+        .await;
+    expect_error(&resp, StatusCode::UNAUTHORIZED, 1100);
+}

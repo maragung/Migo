@@ -16,7 +16,7 @@
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -47,7 +47,7 @@ pub(crate) fn routes() -> Router<ApiState> {
             .route("/refresh", post(refresh))
             .route("/logout", post(logout))
             .route("/passphrase", post(change_passphrase))
-            .route("/contact", put(set_contact))
+            .route("/contact", get(contact_flag).put(set_contact))
             .route("/sessions", get(list_sessions))
             .route("/sessions/revoke-others", post(revoke_other_sessions))
             .route("/sessions/{session_id}/revoke", post(revoke_one_session))
@@ -665,6 +665,32 @@ async fn change_passphrase(
 #[derive(Deserialize)]
 struct ContactBody {
     email_or_phone: String,
+}
+
+/// The response of `GET /v1/auth/contact`: one flag, and nothing else.
+#[derive(Serialize)]
+struct ContactFlagResponse {
+    configured: bool,
+}
+
+/// `GET /v1/auth/contact` — whether a recovery contact is set on the
+/// caller's account.
+///
+/// Deliberately a boolean and never the contact itself: the web UI's
+/// standing line is "your current email is never shown here", and the
+/// screen asking this question needs to know whether to nag, not what it
+/// would nag about. The value stays server-side; only the fact crosses.
+async fn contact_flag(
+    State(state): State<ApiState>,
+    auth: Authenticated,
+) -> Result<Json<ContactFlagResponse>, crate::ApiError> {
+    let now = state.now();
+    let context = auth.facts.context(now);
+    let configured = state
+        .authenticator()
+        .has_contact(&auth.identity, &context)
+        .await?;
+    Ok(Json(ContactFlagResponse { configured }))
 }
 
 /// `PUT /v1/auth/contact` — record (or replace, or clear) the caller's

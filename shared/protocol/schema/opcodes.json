@@ -732,6 +732,28 @@
       "class": "Critical"
     },
     {
+      "name": "PUSH_REGISTER",
+      "code": 147,
+      "direction": "client_to_server",
+      "payload": "PushRegister",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 5,
+      "class": "Critical",
+      "doc": "Hands the calling device's push token to the server. The provider field is advisory only; the server derives the push service from the platform recorded at sign-in."
+    },
+    {
+      "name": "PUSH_UNREGISTER",
+      "code": 148,
+      "direction": "client_to_server",
+      "payload": "PushUnregister",
+      "response": "Acknowledged",
+      "auth": "User",
+      "cost": 1,
+      "class": "Critical",
+      "doc": "Forgets the calling device's push registration. Priced like an ack rather than given a zero cost: the free-opcode flood exemption is reserved for frames the wire itself depends on, and a sign-out that cannot afford it falls back to simply dropping the registration."
+    },
+    {
       "name": "GIFT_SEND",
       "code": 160,
       "direction": "client_to_server",

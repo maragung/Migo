@@ -1915,6 +1915,7 @@ dependencies = [
  "migo-core",
  "migo-crypto",
  "ml-dsa",
+ "proptest",
  "secp256k1",
  "serde",
  "serde_json",
@@ -2350,7 +2351,6 @@ dependencies = [
  "tokio",
  "tower-http",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -495,20 +495,23 @@ impl Default for CaptchaConfig {
     }
 }
 
-/// Logging, metrics, tracing.
+/// Logging: the two telemetry knobs this build actually honours.
+///
+/// There used to be more — `metrics_bind`, `otlp_endpoint`,
+/// `trace_sample_ratio` — and the audit found no reader for any of them:
+/// there is no OpenTelemetry crate in the tree, and metrics are served on
+/// the REST router at `GET /metrics`, not on a separate socket. Dead
+/// config is worse than absent config because a reader cannot tell an
+/// unset field from an ignored one, so they were removed rather than
+/// documented as inert.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct TelemetryConfig {
-    /// `RUST_LOG`-style filter directives.
+    /// `RUST_LOG`-style filter directives, honoured by `migod`'s subscriber
+    /// unless the `RUST_LOG` environment variable itself is set.
     pub log_level: String,
     /// Output shape.
     pub log_format: LogFormat,
-    /// Socket for the Prometheus scrape endpoint.
-    pub metrics_bind: Option<String>,
-    /// OTLP collector endpoint. Disabled when absent.
-    pub otlp_endpoint: Option<String>,
-    /// Fraction of traces sampled, 0.0 to 1.0.
-    pub trace_sample_ratio: f64,
 }
 
 impl Default for TelemetryConfig {
@@ -516,9 +519,6 @@ impl Default for TelemetryConfig {
         Self {
             log_level: "info,migo=debug".to_string(),
             log_format: LogFormat::Pretty,
-            metrics_bind: Some("127.0.0.1:9090".to_string()),
-            otlp_endpoint: None,
-            trace_sample_ratio: 0.01,
         }
     }
 }
@@ -798,8 +798,7 @@ impl Config {
             .join(",");
         format!(
             "node={} env={} region={} roles=[{}] store={:?} cache={:?} media={:?} http={} tcp={} \
-             quic={}
-             metrics={} compression={}",
+             quic={} log_format={} compression={}",
             self.node.id,
             self.node.environment.as_str(),
             self.node.region,
@@ -810,7 +809,10 @@ impl Config {
             self.http.bind,
             self.tcp.bind.as_deref().unwrap_or("disabled"),
             self.quic.bind.as_deref().unwrap_or("disabled"),
-            self.telemetry.metrics_bind.as_deref().unwrap_or("disabled"),
+            match self.telemetry.log_format {
+                LogFormat::Json => "json",
+                LogFormat::Pretty => "pretty",
+            },
             self.gateway.compression_enabled,
         )
     }
@@ -836,9 +838,6 @@ impl Config {
         }
         if let Some(bind) = &self.tcp.bind {
             check_socket_addr("tcp.bind", bind, &mut problems);
-        }
-        if let Some(bind) = &self.telemetry.metrics_bind {
-            check_socket_addr("telemetry.metrics_bind", bind, &mut problems);
         }
 
         if self.http.public_url.trim().is_empty() {
@@ -982,12 +981,9 @@ impl Config {
         }
 
         // --- telemetry ---
-        if !(0.0..=1.0).contains(&self.telemetry.trace_sample_ratio) {
-            problems.push(format!(
-                "telemetry.trace_sample_ratio must be between 0.0 and 1.0, got {}",
-                self.telemetry.trace_sample_ratio
-            ));
-        }
+        // `log_level` is parsed by `migod`'s subscriber, not here: EnvFilter's
+        // error is the one that names the offending directive, and validating
+        // twice would give two different messages for one bad value.
 
         // --- federation ---
         if self.has_role(Role::Federation) && !self.federation.enabled {
@@ -1328,7 +1324,7 @@ mod tests {
                 ("MIGO_HTTP__BIND", "127.0.0.1:9999"),
                 ("MIGO_STORE__MAX_CONNECTIONS", "48"),
                 ("MIGO_GATEWAY__COMPRESSION_ENABLED", "false"),
-                ("MIGO_TELEMETRY__TRACE_SAMPLE_RATIO", "0.25"),
+                ("MIGO_TELEMETRY__LOG_LEVEL", "warn,migo=trace"),
             ]),
         )
         .expect("builds");
@@ -1336,7 +1332,7 @@ mod tests {
         assert_eq!(config.http.bind, "127.0.0.1:9999");
         assert_eq!(config.store.max_connections, 48);
         assert!(!config.gateway.compression_enabled);
-        assert!((config.telemetry.trace_sample_ratio - 0.25).abs() < f64::EPSILON);
+        assert_eq!(config.telemetry.log_level, "warn,migo=trace");
     }
 
     #[test]

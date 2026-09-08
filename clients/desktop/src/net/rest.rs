@@ -435,6 +435,18 @@ pub struct AdminStanding {
     pub admin: bool,
 }
 
+/// Whether the caller has a recovery contact on file: `GET /v1/auth/contact`.
+///
+/// One bit, and the server does not echo the contact back to its owner here — the value itself
+/// is shown through recovery, not through this surface — so the security checkup asks only the
+/// yes/no and never holds a string it would have to treat as private. A struct rather than a
+/// bare `bool` so the wire's field name stays the contract, the same compromise every summary
+/// struct in this file makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct ContactStanding {
+    pub configured: bool,
+}
+
 /// Standard base64 with padding, the form every account-root endpoint speaks.
 fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -911,6 +923,17 @@ impl Rest {
         .await
     }
 
+    /// Reads back the caller's recoverable contact as one bit: `GET /v1/auth/contact`.
+    ///
+    /// The security checkup's row. Authenticated like every account-root read, and never
+    /// failing on "no": an unconfigured account is the answer `configured: false`, not a
+    /// refusal to catch — the same shape rule `admin_standing` follows, so the panel decides
+    /// on the fact rather than on an error.
+    pub async fn contact_standing(&self, access_token: &str) -> Result<ContactStanding, RestError> {
+        self.auth_json(access_token, "/v1/auth/contact", reqwest::Method::GET, &())
+            .await
+    }
+
     /// What the caller may open of the admin surface: `GET /v1/admins/whoami`.
     ///
     /// Never fails on standing — an account that is neither owner nor admin gets
@@ -1115,6 +1138,20 @@ mod tests {
         )
         .expect("an envelope without a captcha parses");
         assert!(without.error.captcha.is_none());
+    }
+
+    /// The recovery-contact answer carries exactly the one field the contract fixes, under the
+    /// wire's own name — a rename here would silently read every server answer as the default
+    /// `false`, which is the warning firing for people whose contact is set.
+    #[test]
+    fn the_contact_standing_answer_parses_the_one_field_the_contract_fixes() {
+        let set = serde_json::from_str::<ContactStanding>(r#"{"configured":true}"#)
+            .expect("a configured answer parses");
+        assert!(set.configured);
+
+        let unset = serde_json::from_str::<ContactStanding>(r#"{"configured":false}"#)
+            .expect("an unconfigured answer parses");
+        assert!(!unset.configured);
     }
 
     /// The rotation answer carries exactly the three fields the server's `RotateBody` demands,

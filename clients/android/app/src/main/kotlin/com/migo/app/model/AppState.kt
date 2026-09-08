@@ -133,6 +133,7 @@ sealed interface AppState {
         val accountFileOffer: Boolean = false,
         val profileEdit: ProfileEditState = ProfileEditState(),
         val accountSecurity: AccountSecurityState = AccountSecurityState(),
+        val securityCheckup: SecurityCheckupState = SecurityCheckupState(),
         val admins: AdminsState = AdminsState(),
         val games: GamesState = GamesState(),
     ) : AppState
@@ -415,6 +416,30 @@ data class AccountSecurityState(
     /** The sentence the last save answered with, shown once. */
     val notice: String? = null,
     /** Why the last save could not answer. */
+    val failure: String? = null,
+)
+
+/**
+ * The Profile panel's security checkup (§50): six fixed rows — Identity, Devices, Wallets,
+ * Backup, Recovery, E2EE — the same set every client builds.
+ *
+ * The rows that answer from state the shell already holds (the device list, the wallet
+ * registrations) do not copy it here; this holder carries only the checkup's own facts: the
+ * recovery contact's existence, and the two persisted timestamps that make the Backup row
+ * honest. A null [recoveryConfigured] is "not checked yet" — kept distinct from false, which is
+ * the warning, so a panel that showed them the same would say "Recovery contact not set"
+ * before it had ever asked.
+ */
+data class SecurityCheckupState(
+    /** Whether the account holds a recovery contact; null before the first read lands. */
+    val recoveryConfigured: Boolean? = null,
+    /** Unix ms of this device's last successful .migo export, or 0 when never (from Settings). */
+    val lastBackupExportMs: Long = 0L,
+    /** Unix ms of the last identity-key rotation, or 0 when never (from Settings). */
+    val lastIdentityRotationMs: Long = 0L,
+    /** True while the checkup's own reads are in flight. */
+    val loading: Boolean = false,
+    /** Why the last checkup read could not answer; the rows then say "not checked" honestly. */
     val failure: String? = null,
 )
 

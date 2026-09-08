@@ -46,6 +46,7 @@ import { NotificationsPanel } from './notifications-panel.js';
 import { ProfilePanel } from './profile-panel.js';
 import { RetroWindow } from './retro-window.js';
 import { SearchPanel } from './search-panel.js';
+import { SecurityCheckupPanel } from './security-checkup-panel.js';
 import { SettingsPanel } from './settings-panel.js';
 import { StorePanel } from './store-panel.js';
 import { Taskbar } from './desktop-taskbar.js';
@@ -572,7 +573,17 @@ export function AppShell(): ReactNode {
       case 'account':
         return <AccountPanel />;
       case 'settings':
-        return <SettingsPanel />;
+        return <SettingsPanel onOpenCheckup={() => openPanelWindow('checkup')} />;
+      case 'checkup':
+        // The checkup's rows open the surfaces their warnings are resolved in — the doors are
+        // the shell's, because the panels are windows here.
+        return (
+          <SecurityCheckupPanel
+            onOpenAccount={() => openPanelWindow('account')}
+            onOpenSettings={() => openPanelWindow('settings')}
+            onOpenConversation={openChat}
+          />
+        );
       case 'admins':
         return <AdminsPanel />;
       case 'store':

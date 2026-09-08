@@ -4763,6 +4763,34 @@ impl Decode for PushRegister {
     }
 }
 
+/// Empty on purpose: the registration affected is the calling device's own, taken from the session's identity. The reply is Acknowledged.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PushUnregister {}
+
+impl Encode for PushUnregister {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for PushUnregister {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let out = Self::default();
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct InboxReq {
     pub limit: u32,
@@ -10217,6 +10245,10 @@ pub enum Opcode {
     NotificationEvent = 144,
     NotificationAck = 145,
     NotificationList = 146,
+    /// Hands the calling device's push token to the server. The provider field is advisory only; the server derives the push service from the platform recorded at sign-in.
+    PushRegister = 147,
+    /// Forgets the calling device's push registration. Priced like an ack rather than given a zero cost: the free-opcode flood exemption is reserved for frames the wire itself depends on, and a sign-out that cannot afford it falls back to simply dropping the registration.
+    PushUnregister = 148,
     GiftSend = 160,
     BalanceFetch = 161,
     EconomyEvent = 162,
@@ -10372,6 +10404,8 @@ impl Opcode {
             144 => Self::NotificationEvent,
             145 => Self::NotificationAck,
             146 => Self::NotificationList,
+            147 => Self::PushRegister,
+            148 => Self::PushUnregister,
             160 => Self::GiftSend,
             161 => Self::BalanceFetch,
             162 => Self::EconomyEvent,
@@ -10495,6 +10529,8 @@ impl Opcode {
             Self::NotificationEvent => "NOTIFICATION_EVENT",
             Self::NotificationAck => "NOTIFICATION_ACK",
             Self::NotificationList => "NOTIFICATION_LIST",
+            Self::PushRegister => "PUSH_REGISTER",
+            Self::PushUnregister => "PUSH_UNREGISTER",
             Self::GiftSend => "GIFT_SEND",
             Self::BalanceFetch => "BALANCE_FETCH",
             Self::EconomyEvent => "ECONOMY_EVENT",
@@ -10618,6 +10654,8 @@ impl Opcode {
             Self::NotificationEvent => 0,
             Self::NotificationAck => 1,
             Self::NotificationList => 3,
+            Self::PushRegister => 5,
+            Self::PushUnregister => 1,
             Self::GiftSend => 20,
             Self::BalanceFetch => 3,
             Self::EconomyEvent => 0,
@@ -10740,6 +10778,8 @@ impl Opcode {
             Self::NotificationEvent => DeliveryClass::Droppable,
             Self::NotificationAck => DeliveryClass::Critical,
             Self::NotificationList => DeliveryClass::Critical,
+            Self::PushRegister => DeliveryClass::Critical,
+            Self::PushUnregister => DeliveryClass::Critical,
             Self::GiftSend => DeliveryClass::Critical,
             Self::BalanceFetch => DeliveryClass::Critical,
             Self::EconomyEvent => DeliveryClass::Critical,
@@ -10862,6 +10902,8 @@ impl Opcode {
             Self::NotificationEvent => AuthLevel::User,
             Self::NotificationAck => AuthLevel::User,
             Self::NotificationList => AuthLevel::User,
+            Self::PushRegister => AuthLevel::User,
+            Self::PushUnregister => AuthLevel::User,
             Self::GiftSend => AuthLevel::User,
             Self::BalanceFetch => AuthLevel::User,
             Self::EconomyEvent => AuthLevel::User,
@@ -10984,6 +11026,8 @@ impl Opcode {
             Self::NotificationEvent => Direction::ServerToClient,
             Self::NotificationAck => Direction::ClientToServer,
             Self::NotificationList => Direction::ClientToServer,
+            Self::PushRegister => Direction::ClientToServer,
+            Self::PushUnregister => Direction::ClientToServer,
             Self::GiftSend => Direction::ClientToServer,
             Self::BalanceFetch => Direction::ClientToServer,
             Self::EconomyEvent => Direction::ServerToClient,
@@ -11107,6 +11151,8 @@ impl Opcode {
             Self::NotificationEvent => false,
             Self::NotificationAck => false,
             Self::NotificationList => false,
+            Self::PushRegister => false,
+            Self::PushUnregister => false,
             Self::GiftSend => false,
             Self::BalanceFetch => false,
             Self::EconomyEvent => false,
@@ -11237,6 +11283,8 @@ impl Opcode {
         Self::NotificationEvent,
         Self::NotificationAck,
         Self::NotificationList,
+        Self::PushRegister,
+        Self::PushUnregister,
         Self::GiftSend,
         Self::BalanceFetch,
         Self::EconomyEvent,

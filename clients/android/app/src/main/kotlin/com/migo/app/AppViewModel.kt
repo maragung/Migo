@@ -395,7 +395,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 bytes.fill(0)
                 registrationContainer = null
-                signedIn { it.copy(accountFileOffer = false) }
+                // A saved registration file is a `.migo` container landing on disk, so it counts
+                // as this device's last backup exactly as the Profile panel's export does — the
+                // checkup row asks "when was a container last written here", not "which flow
+                // wrote it".
+                val written = System.currentTimeMillis()
+                settings.update { it.copy(lastBackupExportMs = written) }
+                signedIn {
+                    it.copy(
+                        accountFileOffer = false,
+                        securityCheckup = it.securityCheckup.copy(lastBackupExportMs = written),
+                    )
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
@@ -466,7 +477,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             ?.use { it.write(bytes) }
                             ?: throw IOException("the chosen backup file could not be opened")
                     }
-                    signedIn { it.copy(backup = it.backup.copy(sealing = false, notice = "Backup written.")) }
+                    // The write landing is the moment the checkup's Backup row can vouch: the
+                    // timestamp is persisted (the row's home across launches) and copied onto
+                    // the state (the row's answer this session). A rotation earlier than this
+                    // moment stops mattering — the fresh container seals the rotated key.
+                    val written = System.currentTimeMillis()
+                    settings.update { it.copy(lastBackupExportMs = written) }
+                    signedIn {
+                        it.copy(
+                            backup = it.backup.copy(sealing = false, notice = "Backup written."),
+                            securityCheckup = it.securityCheckup.copy(lastBackupExportMs = written),
+                        )
+                    }
                 } finally {
                     bytes.fill(0)
                 }
@@ -826,7 +848,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             AppState.Section.SEARCH -> Unit
             AppState.Section.WALLET -> if (!walletLoaded()) loadWallet()
             AppState.Section.ALERTS -> if (!alertsLoaded()) loadAlerts()
-            AppState.Section.PROFILE -> if (signedInState?.devices?.devices == null) loadDevices()
+            AppState.Section.PROFILE -> {
+                if (signedInState?.devices?.devices == null) loadDevices()
+                if (!checkupLoaded()) loadSecurityCheckup()
+            }
             AppState.Section.ADMINS -> if (signedInState?.admins?.owner == false) loadAdmins()
             AppState.Section.GAMES -> if (signedInState?.games?.catalogue == null) loadGameCatalogue()
         }
@@ -1964,6 +1989,64 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Reads the security checkup's own facts (§50): the persisted backup timestamps, the
+     * recovery contact's existence, and the wallet registrations when the Wallet surface has
+     * not already read them.
+     *
+     * The persisted halves are applied before the network read runs, so a server that cannot be
+     * reached leaves the Backup row with its honest answer rather than with "not checked": the
+     * timestamps are this device's own memory and need nobody's permission. The recovery read's
+     * failure is the checkup's failure line — it is the one row whose answer only the server
+     * holds — while the registrations read stays best-effort, because the Wallet surface re-reads
+     * them with its own failure handling whenever it opens.
+     */
+    fun loadSecurityCheckup() {
+        val live = session ?: return
+        signedIn { it.copy(securityCheckup = it.securityCheckup.copy(loading = true, failure = null)) }
+        viewModelScope.launch {
+            val stored = settings.current()
+            signedIn {
+                it.copy(
+                    securityCheckup = it.securityCheckup.copy(
+                        lastBackupExportMs = stored.lastBackupExportMs,
+                        lastIdentityRotationMs = stored.lastIdentityRotationMs,
+                    ),
+                )
+            }
+            try {
+                val configured = live.client.contactConfigured()
+                val registrations = signedInState?.wallet?.registrations
+                    ?: runCatching { live.client.registeredWallets() }.getOrNull()
+                signedIn {
+                    it.copy(
+                        securityCheckup = it.securityCheckup.copy(
+                            loading = false,
+                            recoveryConfigured = configured,
+                        ),
+                        wallet = if (registrations != null && it.wallet.registrations == null) {
+                            it.wallet.copy(registrations = registrations)
+                        } else {
+                            it.wallet
+                        },
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn {
+                    it.copy(
+                        securityCheckup = it.securityCheckup.copy(
+                            loading = false,
+                            recoveryConfigured = null,
+                            failure = readable(failure),
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    /**
      * Reads the caller's own profile for the Profile panel's editable form.
      *
      * The same fetch the member lists use, pointed at this account's own id — one read primes both
@@ -2231,6 +2314,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 try {
                     live.rotateIdentity()
                 } catch (saveFailure: VaultError) {
+                    // The rotation timestamp is recorded even here: the server has already
+                    // retired the old key, so every container sealed before this moment is
+                    // outdated *now*, whatever happens to the successor this device failed to
+                    // keep. The checkup row must not wait on a save that already failed.
+                    val rotated = System.currentTimeMillis()
+                    settings.update { it.copy(lastIdentityRotationMs = rotated) }
                     signedIn {
                         it.copy(
                             accountSecurity = it.accountSecurity.copy(
@@ -2239,10 +2328,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                                     "${readable(saveFailure)} The new key exists only in this app's " +
                                     "memory and will be lost when it closes.",
                             ),
+                            securityCheckup = it.securityCheckup.copy(lastIdentityRotationMs = rotated),
                         )
                     }
                     return@launch
                 }
+                // The moment that retires the identity half of every container sealed before it.
+                // Persisted in the settings store (the checkup row's home across launches) and
+                // copied onto the state, so the Backup row flips to "outdated" in the same
+                // breath as the notice below says the rotation happened.
+                val rotated = System.currentTimeMillis()
+                settings.update { it.copy(lastIdentityRotationMs = rotated) }
                 signedIn {
                     it.copy(
                         accountSecurity = it.accountSecurity.copy(
@@ -2250,6 +2346,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             notice = "Identity key rotated. Conversations, safety numbers and sessions " +
                                 "are unchanged.",
                         ),
+                        securityCheckup = it.securityCheckup.copy(lastIdentityRotationMs = rotated),
                     )
                 }
             } catch (cancelled: CancellationException) {
@@ -2284,7 +2381,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 live.client.setContact(trimmed)
                 signedIn {
-                    it.copy(accountSecurity = it.accountSecurity.copy(busy = false, notice = "Recovery contact saved."))
+                    it.copy(
+                        accountSecurity = it.accountSecurity.copy(busy = false, notice = "Recovery contact saved."),
+                        // The save's 204 is the server's own confirmation that a contact now
+                        // exists, so the checkup's Recovery row answers in the same breath
+                        // rather than repeating its warning until the panel is re-entered.
+                        securityCheckup = it.securityCheckup.copy(recoveryConfigured = true),
+                    )
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -2486,6 +2589,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun friendsLoaded(): Boolean = signedInState?.friends?.loading == false && signedInState?.friends?.entries?.isNotEmpty() == true
 
     private fun walletLoaded(): Boolean = signedInState?.wallet?.balance != null
+
+    private fun checkupLoaded(): Boolean = signedInState?.securityCheckup?.recoveryConfigured != null
 
     private fun alertsLoaded(): Boolean = signedInState?.alerts?.loading == false && signedInState?.alerts?.items?.isNotEmpty() == true
 

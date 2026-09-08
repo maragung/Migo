@@ -813,6 +813,15 @@ class MigoClient private constructor(
     }
 
     /**
+     * Whether the account holds a recovery contact — the security checkup's question, asked as
+     * a boolean because the row needs existence only. The contact's value is the recovery
+     * surface's business, and a caller that could echo it here would be a caller that could
+     * render it by accident.
+     */
+    suspend fun contactConfigured(): Boolean =
+        rest.contactStatus(requireConnected().grant.accessToken).configured
+
+    /**
      * What the caller may open of the admin surface. The one route any signed-in account may
      * call: a client asks it on sign-in to decide whether the owner surface exists at all,
      * because the whoami never fails on standing -- `owner: false` is the answer, not a

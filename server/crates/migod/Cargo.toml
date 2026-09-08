@@ -65,8 +65,6 @@ tracing      = { workspace = true }
 quinn        = { workspace = true }
 rustls       = { workspace = true }
 rcgen        = { workspace = true }
-# The binary chooses how logs are formatted and filtered; the library stays subscriber-agnostic.
-tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

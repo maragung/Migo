@@ -575,6 +575,12 @@ export function MobileHome({
         />
         <SheetAction
           icon="shield"
+          label="Security Checkup"
+          sub="Identity · devices · backup · E2EE"
+          onClick={() => fromSheet(() => onOpenWindow('checkup'))}
+        />
+        <SheetAction
+          icon="shield"
           label="My Account"
           sub="Username · email · key file"
           onClick={() => fromSheet(() => onOpenWindow('account'))}

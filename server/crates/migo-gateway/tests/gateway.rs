@@ -257,6 +257,14 @@ impl Authenticator for FakeAuth {
         unimplemented!("the gateway never changes the contact record")
     }
 
+    async fn has_contact(
+        &self,
+        _identity: &Identity,
+        _context: &RequestContext,
+    ) -> migo_core::Result<bool> {
+        unimplemented!("the gateway never reads a contact flag")
+    }
+
     fn issue_captcha<'a>(
         &'a self,
         _mode: migo_captcha::CaptchaMode,

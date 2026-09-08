@@ -3835,6 +3835,28 @@ data class PushRegister(
     }
 }
 
+/** Empty on purpose: the registration affected is the calling device's own, taken from the session's identity. The reply is Acknowledged. */
+class PushUnregister(
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): PushUnregister {
+            r.enter()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return PushUnregister()
+        }
+    }
+}
+
 data class InboxReq(
     val limit: Long,
     val cursor: String? = null,
@@ -8264,6 +8286,10 @@ object Op {
     const val NOTIFICATION_EVENT: Long = 144L
     const val NOTIFICATION_ACK: Long = 145L
     const val NOTIFICATION_LIST: Long = 146L
+    /** Hands the calling device's push token to the server. The provider field is advisory only; the server derives the push service from the platform recorded at sign-in. */
+    const val PUSH_REGISTER: Long = 147L
+    /** Forgets the calling device's push registration. Priced like an ack rather than given a zero cost: the free-opcode flood exemption is reserved for frames the wire itself depends on, and a sign-out that cannot afford it falls back to simply dropping the registration. */
+    const val PUSH_UNREGISTER: Long = 148L
     const val GIFT_SEND: Long = 160L
     const val BALANCE_FETCH: Long = 161L
     const val ECONOMY_EVENT: Long = 162L
@@ -8424,6 +8450,8 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     144L to OpcodeMeta(144L, "NOTIFICATION_EVENT", 0, DeliveryClass.Droppable, AuthLevel.User, Direction.ServerToClient, false, "NotificationEvent", null, null),
     145L to OpcodeMeta(145L, "NOTIFICATION_ACK", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "NotificationAck", "Acknowledged", null),
     146L to OpcodeMeta(146L, "NOTIFICATION_LIST", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "InboxReq", "InboxResponse", null),
+    147L to OpcodeMeta(147L, "PUSH_REGISTER", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "PushRegister", "Acknowledged", null),
+    148L to OpcodeMeta(148L, "PUSH_UNREGISTER", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "PushUnregister", "Acknowledged", null),
     160L to OpcodeMeta(160L, "GIFT_SEND", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GiftSend", "GiftSendResult", null),
     161L to OpcodeMeta(161L, "BALANCE_FETCH", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "WalletReq", "WalletView", null),
     162L to OpcodeMeta(162L, "ECONOMY_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "EconomyEvent", null, null),

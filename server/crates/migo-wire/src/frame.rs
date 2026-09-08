@@ -474,6 +474,7 @@ impl Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn trace() -> TraceContext {
         TraceContext {
@@ -711,5 +712,155 @@ mod tests {
             decoded.payload.as_ptr(),
             encoded[encoded.len() - 6..].as_ptr()
         );
+    }
+
+    // --- property tests ---------------------------------------------------------
+    //
+    // The example-based tests above pin specific bytes; these pin the codec's
+    // general promises over arbitrary input — the fuzz-shaped half of the
+    // audit. proptest rather than cargo-fuzz because fuzzing needs a nightly
+    // toolchain and these suites must run on the stable CI lane.
+
+    /// Any trace context, including the all-zero one (which `with_trace`
+    /// drops on its own — the round trip then compares a frame that never
+    /// carried it).
+    fn any_trace() -> impl Strategy<Value = TraceContext> {
+        (
+            proptest::array::uniform16(any::<u8>()),
+            proptest::array::uniform8(any::<u8>()),
+        )
+            .prop_map(|(trace_id, span_id)| TraceContext { trace_id, span_id })
+    }
+
+    /// Any fragment pair `encode` will accept: a total of at least one and an
+    /// index strictly below it. Impossible pairs are already covered by the
+    /// example test above; here the generator stays on the encodable side.
+    fn any_fragment() -> impl Strategy<Value = Fragment> {
+        (1u32..=4096)
+            .prop_flat_map(|total| (0..total).prop_map(move |index| Fragment { index, total }))
+    }
+
+    /// Any frame this build can build and encode: arbitrary opcode and
+    /// correlation, a bounded payload, the optional blocks present or absent.
+    /// The payload stays small because the properties below iterate over
+    /// every byte of it; `MAX_FRAME_BYTES` and the compression paths have
+    /// their own example tests.
+    fn any_frame() -> impl Strategy<Value = Frame> {
+        (
+            any::<u32>(),
+            any::<u32>(),
+            proptest::collection::vec(any::<u8>(), 0..=128),
+            proptest::option::of(any_trace()),
+            proptest::option::of(any_fragment()),
+            any::<bool>(),
+            any::<bool>(),
+        )
+            .prop_map(
+                |(opcode, correlation, payload, trace, fragment, ack, error)| {
+                    let mut header = FrameHeader::new(opcode, correlation);
+                    if ack {
+                        header = header.ack_required();
+                    }
+                    if error {
+                        header = header.error();
+                    }
+                    if let Some(trace) = trace {
+                        header = header.with_trace(trace);
+                    }
+                    if let Some(fragment) = fragment {
+                        header = header.with_fragment(fragment);
+                    }
+                    Frame::new(header, Bytes::from(payload))
+                },
+            )
+    }
+
+    proptest! {
+        // Cases bounded because three of the four properties loop over every
+        // byte (and every bit) of each case's encoding; the default 256 would
+        // spend minutes to no extra coverage.
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// encode→decode is the identity on every frame this build can
+        /// construct. The codec sits on both ends of every message on every
+        /// transport, so one class of frame that does not survive its own
+        /// round trip is a wire-format bug that no hand-written example
+        /// happened to construct.
+        #[test]
+        fn roundtrip_is_the_identity(frame in any_frame()) {
+            let encoded = frame.encode().expect("a well-formed frame always encodes");
+            let decoded = Frame::decode(encoded).expect("what this build encodes it decodes");
+            prop_assert_eq!(decoded, frame);
+        }
+
+        /// No strict prefix of a valid frame panics the decoder. A transport
+        /// hands the codec partial bytes whenever a read boundary or a dropped
+        /// datagram lands mid-frame, and a panic here takes the whole listener
+        /// down — the outcome must be an error or a frame, never a crash.
+        /// MWP/1 frames carry no length of their own (the transport frames
+        /// the message), so a cut inside the payload is not the codec's to
+        /// detect: what is asserted of that cut is the honest half — the same
+        /// header, and a payload that is a prefix of the original.
+        #[test]
+        fn any_prefix_decodes_without_panicking(frame in any_frame()) {
+            let encoded = frame.encode().expect("a well-formed frame always encodes");
+            for cut in 0..encoded.len() {
+                // An `Err` is a rejection and needs no assertion of its own:
+                // the property's ceiling is "no panic", which `Frame::decode`
+                // returning at all already satisfies for that cut.
+                if let Ok(decoded) = Frame::decode(encoded.slice(..cut)) {
+                    prop_assert_eq!(decoded.header, frame.header);
+                    prop_assert_eq!(
+                        &decoded.payload[..],
+                        &frame.payload[..decoded.payload.len()]
+                    );
+                }
+            }
+        }
+
+        /// Flipping any single bit of a valid frame leaves the decoder two
+        /// honest outcomes — an error, or a frame — and never a panic. Which
+        /// one arrives depends on where the bit lands (version byte, flags,
+        /// varint, trace block, fragment pair, payload); the property pins
+        /// that ceiling rather than re-deriving every branch.
+        #[test]
+        fn a_flipped_bit_never_panics(frame in any_frame()) {
+            let encoded = frame.encode().expect("a well-formed frame always encodes");
+            for position in 0..encoded.len() {
+                for bit in 0..8 {
+                    let mut corrupted = encoded.to_vec();
+                    corrupted[position] ^= 1 << bit;
+                    // The assertion is the absence of a panic: any outcome is
+                    // acceptable, so the result is deliberately dropped.
+                    let _ = Frame::decode(Bytes::from(corrupted));
+                }
+            }
+        }
+
+        /// The length-prefixed form closes the gap the bare frame leaves:
+        /// with an authoritative length up front, every strict prefix of a
+        /// complete frame is `Ok(None)` — "not enough bytes yet", the normal
+        /// state of a stream reader — and the complete buffer is exactly one
+        /// frame consuming exactly its own bytes. A prefix that decoded as a
+        /// frame would desynchronise the stream mid-message.
+        #[test]
+        fn length_prefixed_prefixes_are_incomplete(frame in any_frame()) {
+            let encoded = frame
+                .encode_length_prefixed()
+                .expect("a well-formed frame always encodes");
+            for cut in 0..encoded.len() {
+                prop_assert_eq!(
+                    Frame::decode_length_prefixed(&encoded.slice(..cut)),
+                    Ok(None),
+                    "a {}-byte prefix must be incomplete, not a frame or an error",
+                    cut
+                );
+            }
+            let (decoded, used) = Frame::decode_length_prefixed(&encoded)
+                .expect("the complete buffer decodes")
+                .expect("a complete frame is present");
+            prop_assert_eq!(used, encoded.len());
+            prop_assert_eq!(decoded, frame);
+        }
     }
 }

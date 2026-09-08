@@ -8,6 +8,14 @@
 //! account, and where the door is. Everything else the client decides for itself, because
 //! presenting a knob for it would be promising a tuning that does not exist.
 //!
+//! # The checkup is a summary, not a second opinion
+//!
+//! The security checkup (§50) draws one line per fixed row — Identity, Devices, Wallets, Backup,
+//! Recovery, E2EE — from facts the pane's own sections already own or can ask for, and every
+//! verdict is one the data can back. A row that had its own idea of "secure" would be two
+//! security stories in one window, disagreeing with each other the first time one of them got
+//! behind.
+//!
 //! # The session list is honest about not knowing
 //!
 //! `GET /v1/auth/sessions` is not offered by every deployment, and a panel that showed an empty
@@ -16,9 +24,9 @@
 //! sentence, and only a successful empty answer gets to say "this is the only session".
 
 use egui::{Align, Layout, RichText, Ui};
-use migo_core::Id;
+use migo_core::{Id, Timestamp};
 
-use crate::model::{Connection, SessionRow};
+use crate::model::{Connection, DeviceRow, EvmWalletRow, SessionRow};
 use crate::net::Command;
 use crate::theme::{font, palette, space, text_style};
 use crate::ui::widgets;
@@ -76,6 +84,90 @@ impl<T> Fetch<T> {
     }
 }
 
+/// What the recovery-contact answer currently shows — the same four states as [`SessionsView`],
+/// over one bit instead of a list, because the honest-uncertainty rule is about answers, not
+/// about their size: "could not check" and "not configured" are different sentences, and only
+/// the second one is advice.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum RecoveryView {
+    #[default]
+    NotAsked,
+    Loading,
+    Ready(bool),
+    Unavailable(String),
+}
+
+impl RecoveryView {
+    /// Files a REST outcome. Pure, for the same reason [`SessionsView::from_result`] is.
+    pub fn from_result(result: Result<bool, String>) -> Self {
+        match result {
+            Ok(configured) => Self::Ready(configured),
+            Err(reason) => Self::Unavailable(reason),
+        }
+    }
+}
+
+/// The window after which an active device the account has not heard from becomes the checkup's
+/// business: thirty days, in milliseconds. Long enough that a phone on a shelf for a fortnight
+/// is nobody's warning, short enough that a credential nobody has used for a month is.
+const OLD_DEVICE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// Whether one device row is the "Old device active" warning: an active device whose last
+/// sighting is more than [`OLD_DEVICE_MS`] behind `now`.
+///
+/// Revoked devices never qualify — a machine the account has already removed is not a live
+/// credential however long ago it was seen. A row with no last-seen does not qualify either:
+/// that is "not disclosed", not "not seen", and a warning built on a guess is the first warning
+/// nobody heeds. The device asking gets no exemption: its last-seen is this session's, and if
+/// the server's own row disagrees, that is a discrepancy worth surfacing, not one to define
+/// away.
+fn is_old_active_device(row: &DeviceRow, now: Timestamp) -> bool {
+    row.status == "active" && row.last_seen.is_some_and(|seen| now - seen > OLD_DEVICE_MS)
+}
+
+/// The device the "Old device active" warning names, when there is one: the oldest qualifying
+/// row, because with several candidates the one silent longest is the one the sentence is about.
+fn old_active_device(rows: &[DeviceRow], now: Timestamp) -> Option<&DeviceRow> {
+    rows.iter()
+        .filter(|row| is_old_active_device(row, now))
+        .min_by_key(|row| row.last_seen)
+}
+
+/// The checkup's vocabulary for the backup row — three answers, each one a fact rather than a
+/// guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackupCheck {
+    /// This device holds no account root, so it has nothing to seal: the row says where backups
+    /// live rather than pretending one is missing here.
+    NoRoot,
+    /// The device holds the root and no container it sealed still counts — it never sealed one,
+    /// or a rotation retired the last.
+    Never,
+    /// A container was sealed from this device at this unix-seconds instant.
+    BackedUp(u64),
+}
+
+/// Reduces the two facts the backup row has — whether this device holds the root, and when it
+/// last sealed a container — to the answer it draws. Pure, so the transitions the row promises
+/// (a seal dates it; a rotation undates it; a passenger device is not accused) are pinned by
+/// tests rather than implied by the section that draws them.
+fn backup_check(holds_root: bool, last_backup_at: Option<u64>) -> BackupCheck {
+    match (holds_root, last_backup_at) {
+        (false, _) => BackupCheck::NoRoot,
+        (true, Some(at)) => BackupCheck::BackedUp(at),
+        (true, None) => BackupCheck::Never,
+    }
+}
+
+/// The wallet row's two counts, by the statuses the wallet listing itself uses. A status this
+/// build has no name for is counted nowhere rather than guessed at — the row's arithmetic must
+/// not be the place a server's new status silently becomes "archived".
+fn wallet_counts(rows: &[EvmWalletRow]) -> (usize, usize) {
+    let active = rows.iter().filter(|row| row.status == "active").count();
+    let archived = rows.iter().filter(|row| row.status == "archived").count();
+    (active, archived)
+}
+
 /// Everything the settings pane holds between frames.
 #[derive(Default)]
 pub struct SettingsState {
@@ -108,6 +200,13 @@ pub struct SettingsState {
     /// breath as the ceremony and holds no passphrase of its own after unlock.
     pub rotate_open: bool,
     pub rotate_passphrase: String,
+    /// When this device last sealed a `.migo` container, as the worker reported it: from the
+    /// vault at sign-in, refreshed after every export, cleared by every rotation. Unix seconds,
+    /// the same form the container's own timestamp and the vault's stamp field speak, so the
+    /// checkup's date and the container's idea of its birthday can never disagree.
+    pub last_backup_at: Option<u64>,
+    /// The recovery-contact answer, for the checkup's Recovery row.
+    pub recovery: RecoveryView,
 }
 
 /// Draws the settings pane.
@@ -131,6 +230,8 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
                     server_section(ui, context);
                     ui.add_space(space::LG);
                     appearance_section(ui, context);
+                    ui.add_space(space::LG);
+                    security_checkup_section(ui, context, state);
                     ui.add_space(space::LG);
                     sessions_section(ui, context, state);
                     ui.add_space(space::LG);
@@ -229,6 +330,333 @@ fn appearance_section(ui: &mut Ui, context: &mut Context<'_>) {
         .font(egui::FontId::proportional(font::TINY))
         .color(colors.text_muted),
     );
+}
+
+/// The security checkup (§50): one line per fixed row — Identity, Devices, Wallets, Backup,
+/// Recovery, E2EE — the same six on every client, because a person who checks the account on
+/// their phone in the morning and this window at night should meet the same questions twice.
+///
+/// # What a row may honestly say
+///
+/// Each row draws from a fact this pane actually holds or can ask for: the identity key and the
+/// rotation door, the device and wallet listings, the vault's backup stamp, the server's
+/// recovery-contact bit. The E2EE row reports no account-wide "needs verification" count, and
+/// that absence is the honest part: a peer's current identity key is observed only when a
+/// conversation fetches its key bundles, so what this session has seen is a sample, not a
+/// census, and a count over it would be a number pretending otherwise. The per-conversation
+/// warning in the chat — beside the safety numbers it is verified with — is the real surface.
+///
+/// The Check button asks the three network facts together because they are asked together, and
+/// a person pressing one button expects one round trip's worth of answers, not three rows that
+/// refresh at three different moments.
+fn security_checkup_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
+    let colors = palette(context.theme);
+    widgets::subheader(ui, context.theme, "Security checkup");
+
+    let Some(account) = context.account else {
+        // Signed out, there is no account to check: a sentence, not six rows of dashes that
+        // would each imply a verdict waiting on a sign-in.
+        ui.label(
+            RichText::new("Sign in to check this account's security.")
+                .font(egui::FontId::proportional(font::SMALL))
+                .color(colors.text_muted),
+        );
+        return;
+    };
+
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("The six things that keep the account safe, one line each.")
+                .font(egui::FontId::proportional(font::SMALL))
+                .color(colors.text_muted),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let busy = matches!(state.devices, Fetch::Loading)
+                || matches!(state.wallets, Fetch::Loading)
+                || matches!(state.recovery, RecoveryView::Loading);
+            if ui
+                .add_enabled(!busy, egui::Button::new("Check"))
+                .on_hover_text("Asks the server for the device, wallet and recovery facts.")
+                .clicked()
+            {
+                state.devices = Fetch::Loading;
+                state.wallets = Fetch::Loading;
+                state.recovery = RecoveryView::Loading;
+                context.issue(Command::Devices);
+                context.issue(Command::Wallets);
+                context.issue(Command::ContactStanding);
+            }
+        });
+    });
+    ui.add_space(space::SM);
+
+    // --- identity ---------------------------------------------------------------
+    // The key is active by the fact of being signed in: every ceremony since the session began
+    // was signed with it, or none of this pane's data would have arrived. The only variable is
+    // where rotation can happen from, which is exactly what the row's tail names.
+    let rotation = if account.holds_root {
+        "rotation available from this device"
+    } else {
+        "rotation needs a device holding the root"
+    };
+    checkup_row(
+        ui,
+        context,
+        "Identity",
+        &format!("Identity key active \u{00B7} {rotation}"),
+        colors.positive,
+        None,
+    );
+
+    // --- devices ----------------------------------------------------------------
+    match &state.devices {
+        Fetch::NotAsked => checkup_row(
+            ui,
+            context,
+            "Devices",
+            "Not checked yet",
+            colors.text_muted,
+            None,
+        ),
+        Fetch::Loading => checkup_row(
+            ui,
+            context,
+            "Devices",
+            "Checking\u{2026}",
+            colors.text_muted,
+            None,
+        ),
+        Fetch::Unavailable(reason) => checkup_row(
+            ui,
+            context,
+            "Devices",
+            &format!("Could not check: {reason}"),
+            colors.warning,
+            None,
+        ),
+        Fetch::Ready(rows) => {
+            if rows.is_empty() {
+                checkup_row(
+                    ui,
+                    context,
+                    "Devices",
+                    "The server listed no devices.",
+                    colors.text_muted,
+                    None,
+                );
+            } else if let Some(old) = old_active_device(rows, Timestamp::now()) {
+                let verdict = format!(
+                    "Old device active \u{2014} {}, last seen {}",
+                    widgets::elide(&old.display_name, 24),
+                    crate::model::date(
+                        old.last_seen
+                            .expect("the overdue rule only fires on a row with a last-seen"),
+                    ),
+                );
+                checkup_row(ui, context, "Devices", &verdict, colors.warning, Some(
+                    "An active credential nobody has used in thirty days is either a forgotten \
+                     device or somebody else's. Remove it from the device list below.",
+                ));
+            } else {
+                let active = rows.iter().filter(|row| row.status == "active").count();
+                checkup_row(
+                    ui,
+                    context,
+                    "Devices",
+                    &format!("{active} active, none overdue"),
+                    colors.positive,
+                    None,
+                );
+            }
+        }
+    }
+
+    // --- wallets ----------------------------------------------------------------
+    match &state.wallets {
+        Fetch::NotAsked => checkup_row(
+            ui,
+            context,
+            "Wallets",
+            "Not checked yet",
+            colors.text_muted,
+            None,
+        ),
+        Fetch::Loading => checkup_row(
+            ui,
+            context,
+            "Wallets",
+            "Checking\u{2026}",
+            colors.text_muted,
+            None,
+        ),
+        Fetch::Unavailable(reason) => checkup_row(
+            ui,
+            context,
+            "Wallets",
+            &format!("Could not check: {reason}"),
+            colors.warning,
+            None,
+        ),
+        Fetch::Ready(rows) => {
+            if rows.is_empty() {
+                checkup_row(
+                    ui,
+                    context,
+                    "Wallets",
+                    "No wallet addresses are registered.",
+                    colors.text_muted,
+                    None,
+                );
+            } else {
+                let (active, archived) = wallet_counts(rows);
+                checkup_row(
+                    ui,
+                    context,
+                    "Wallets",
+                    &format!("{active} active \u{00B7} {archived} archived"),
+                    colors.positive,
+                    None,
+                );
+            }
+        }
+    }
+
+    // --- backup -----------------------------------------------------------------
+    match backup_check(account.holds_root, state.last_backup_at) {
+        BackupCheck::NoRoot => checkup_row(
+            ui,
+            context,
+            "Backup",
+            "Backups are sealed on a device that holds the account root",
+            colors.text_muted,
+            None,
+        ),
+        BackupCheck::Never => checkup_row(
+            ui,
+            context,
+            "Backup",
+            "Never backed up on this device",
+            colors.warning,
+            Some(
+                "Seal one under Account backup below. The container is what carries the account \
+                 onto a new device \u{2014} root, identity key and the wallet addresses it derives.",
+            ),
+        ),
+        BackupCheck::BackedUp(at) => {
+            // Saturating twice over: a stamp this client wrote is unix seconds and small, but the
+            // field is read back from a file, and a corrupted future date should render, not
+            // panic.
+            let when = crate::model::date(Timestamp::from_unix_ms(
+                i64::try_from(at).unwrap_or(i64::MAX).saturating_mul(1000),
+            ));
+            checkup_row(
+                ui,
+                context,
+                "Backup",
+                &format!("Backed up {when}"),
+                colors.positive,
+                None,
+            );
+        }
+    }
+
+    // --- recovery ---------------------------------------------------------------
+    match &state.recovery {
+        RecoveryView::NotAsked => checkup_row(
+            ui,
+            context,
+            "Recovery",
+            "Not checked yet",
+            colors.text_muted,
+            None,
+        ),
+        RecoveryView::Loading => checkup_row(
+            ui,
+            context,
+            "Recovery",
+            "Checking\u{2026}",
+            colors.text_muted,
+            None,
+        ),
+        RecoveryView::Unavailable(reason) => checkup_row(
+            ui,
+            context,
+            "Recovery",
+            &format!("Could not check: {reason}"),
+            colors.warning,
+            None,
+        ),
+        RecoveryView::Ready(true) => checkup_row(
+            ui,
+            context,
+            "Recovery",
+            "Recovery contact set",
+            colors.positive,
+            None,
+        ),
+        RecoveryView::Ready(false) => checkup_row(
+            ui,
+            context,
+            "Recovery",
+            "Recovery contact not set",
+            colors.warning,
+            Some(
+                "Set one under Sign-in below \u{2014} an email or a phone, and it is where a \
+                 recovery starts.",
+            ),
+        ),
+    }
+
+    // --- e2ee -------------------------------------------------------------------
+    checkup_row(
+        ui,
+        context,
+        "E2EE",
+        "On for every conversation",
+        colors.positive,
+        Some(
+            "A peer's identity key changing is flagged in the conversation itself, beside the \
+             safety numbers it is verified with.",
+        ),
+    );
+}
+
+/// One checkup line: the fixed row name on the left, the verdict on the right, with the verdict's
+/// colour carrying the row's whole range — positive for a fact worth knowing, warning for one
+/// worth acting on, muted for "not checked" or "not this device's to do".
+///
+/// The detail line, when there is one, points at where the action is: a warning that does not
+/// name its own remedy is anxiety with a rounded corner.
+fn checkup_row(
+    ui: &mut Ui,
+    context: &Context<'_>,
+    name: &str,
+    verdict: &str,
+    color: egui::Color32,
+    detail: Option<&str>,
+) {
+    let colors = palette(context.theme);
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(name)
+                .font(egui::FontId::proportional(font::BODY))
+                .color(colors.text),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(
+                RichText::new(verdict)
+                    .text_style(crate::theme::named(text_style::CAPTION))
+                    .color(color),
+            );
+        });
+    });
+    if let Some(text) = detail {
+        ui.label(
+            RichText::new(text)
+                .font(egui::FontId::proportional(font::TINY))
+                .color(colors.text_muted),
+        );
+    }
 }
 
 /// The session list, its refresh, and per-row revoke.
@@ -1024,5 +1452,144 @@ mod tests {
     fn the_pane_starts_not_asking() {
         // A fresh pane must not claim to be loading anything: the fetch is the user's click.
         assert_eq!(SettingsState::default().sessions, SessionsView::NotAsked);
+        assert_eq!(SettingsState::default().recovery, RecoveryView::NotAsked);
+        // And it must not claim a backup it has not been told about.
+        assert_eq!(SettingsState::default().last_backup_at, None);
+    }
+
+    /// A device row for the age rule, parameterised by exactly the fields the rule reads.
+    fn device(n: u8, status: &str, days_since_seen: Option<i64>) -> DeviceRow {
+        let last_seen = days_since_seen.map(|days| {
+            // The 2026-09-01 epoch of these tests, offset in whole days.
+            let now = Timestamp::from_unix_ms(1_800_000_000_000);
+            Timestamp::from_unix_ms(now.as_unix_ms() - days * 86_400_000)
+        });
+        DeviceRow {
+            device_id: Id::from_bytes([n; 16]),
+            display_name: format!("Device {n}"),
+            platform: "desktop".to_owned(),
+            status: status.to_owned(),
+            created_at: None,
+            last_seen,
+            has_credential: true,
+            is_current: n == 0,
+        }
+    }
+
+    /// The age rule's whole judgement in one test: only an *active* device gone quiet past the
+    /// window is the warning — a revoked one is history, an undisclosed last-seen is not a
+    /// silence, and exactly thirty days is inside the window, because the rule says "older
+    /// than", not "as old as".
+    #[test]
+    fn the_device_age_rule_flags_only_longsilent_active_devices() {
+        let now = Timestamp::from_unix_ms(1_800_000_000_000);
+        let silent = |days: i64| device(1, "active", Some(days));
+
+        assert!(is_old_active_device(&silent(31), now));
+        assert!(!is_old_active_device(&silent(30), now));
+        assert!(!is_old_active_device(&silent(29), now));
+        // Revoked: the account already dealt with it, whenever it was last seen.
+        assert!(!is_old_active_device(&device(2, "revoked", Some(400)), now));
+        // Pending: never held a live credential to warn about.
+        assert!(!is_old_active_device(&device(3, "pending", Some(400)), now));
+        // No last-seen at all: "not disclosed", not "not seen".
+        assert!(!is_old_active_device(&device(4, "active", None), now));
+
+        // The device asking is subject to the same rule as any other — its last-seen is this
+        // session's, and a row that says otherwise is a discrepancy, not an exemption.
+        assert!(is_old_active_device(&device(0, "active", Some(31)), now));
+    }
+
+    /// With several overdue devices the warning names the one silent longest, because that is
+    /// the machine the sentence is about — not merely the first one the listing happened to
+    /// order.
+    #[test]
+    fn the_old_device_warning_names_the_silent_longest() {
+        let now = Timestamp::from_unix_ms(1_800_000_000_000);
+        let rows = vec![
+            device(1, "active", Some(31)),
+            device(2, "active", Some(200)),
+            device(3, "active", Some(45)),
+        ];
+        let named = old_active_device(&rows, now).expect("three overdue rows");
+        assert_eq!(named.display_name, "Device 2");
+
+        // And nothing to name when nothing qualifies.
+        let quiet = vec![
+            device(1, "active", Some(5)),
+            device(2, "revoked", Some(200)),
+        ];
+        assert!(old_active_device(&quiet, now).is_none());
+    }
+
+    /// The backup row's three answers and the transitions between them: a seal dates it, a
+    /// rotation undates it — a container sealed before the rotation cannot vouch the account,
+    /// so the row must forget the date the dead container was made — and a device without the
+    /// root is told where backups live rather than accused of missing one.
+    #[test]
+    fn the_backup_row_transitions_through_seal_rotation_and_rootlessness() {
+        // A root-holding device that never sealed: the warning.
+        assert_eq!(backup_check(true, None), BackupCheck::Never);
+
+        // The export lands: dated, with the instant the container was sealed.
+        assert_eq!(
+            backup_check(true, Some(1_800_000_000)),
+            BackupCheck::BackedUp(1_800_000_000)
+        );
+
+        // The rotation retires that container's right to vouch: back to never, not to a date.
+        assert_eq!(backup_check(true, None), BackupCheck::Never);
+
+        // A passenger device has nothing to seal, however the fields line up.
+        assert_eq!(backup_check(false, None), BackupCheck::NoRoot);
+        assert_eq!(
+            backup_check(false, Some(1_800_000_000)),
+            BackupCheck::NoRoot
+        );
+    }
+
+    /// The recovery row keeps "could not check" and "not configured" apart, because only the
+    /// second one is advice.
+    #[test]
+    fn the_recovery_view_files_outcomes_honestly() {
+        assert_eq!(
+            RecoveryView::from_result(Ok(true)),
+            RecoveryView::Ready(true)
+        );
+        assert_eq!(
+            RecoveryView::from_result(Ok(false)),
+            RecoveryView::Ready(false)
+        );
+        assert_eq!(
+            RecoveryView::from_result(Err("cannot reach the server".to_owned())),
+            RecoveryView::Unavailable("cannot reach the server".to_owned())
+        );
+    }
+
+    /// The wallet row counts by the listing's own statuses, and a status this build has no name
+    /// for counts nowhere — the row's arithmetic is not where a new server status quietly
+    /// becomes "archived".
+    #[test]
+    fn the_wallet_row_counts_the_two_statuses_it_names() {
+        fn wallet(n: u8, status: &str) -> EvmWalletRow {
+            EvmWalletRow {
+                wallet_id: Id::from_bytes([n; 16]),
+                address: format!("{n:040x}"),
+                derivation_index: i32::from(n),
+                status: status.to_owned(),
+                label: None,
+            }
+        }
+
+        assert_eq!(
+            wallet_counts(&[
+                wallet(1, "active"),
+                wallet(2, "active"),
+                wallet(3, "archived")
+            ]),
+            (2, 1)
+        );
+        assert_eq!(wallet_counts(&[]), (0, 0));
+        assert_eq!(wallet_counts(&[wallet(9, "frozen")]), (0, 0));
     }
 }

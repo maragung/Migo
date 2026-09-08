@@ -20,6 +20,10 @@
  *   5. **A heal that is refused too** rolls back to the seed the store held before the attempt.
  *   6. **A successor that cannot be persisted aborts before anything is sent** — the one ordering
  *      rule that makes the whole ceremony crash-safe.
+ *   7. **A confirmed rotation retires this browser's backup record** — a `.migo` file sealed
+ *      before the rotation carries the retired key, so the checkup's "Backed up" line must not
+ *      keep vouching for it. An `unfinished` attempt does not mark it: the call may never have
+ *      landed, and a warning we cannot confirm is a lie in the other direction.
  */
 
 import assert from 'node:assert/strict';
@@ -33,6 +37,7 @@ import {
   ROTATION_UNFINISHED,
   rotateAccountIdentity,
 } from '../src/lib/migo/identity-rotation.js';
+import { loadBackupState, recordBackupExport } from '../src/lib/storage/backup-state-store.js';
 import { loadDeviceRecord, saveDeviceRecord } from '../src/lib/storage/device-record-store.js';
 import { loadKeyStoreSnapshot } from '../src/lib/storage/keystore-store.js';
 import { installFakeIndexedDb } from './support/dom-stubs.js';
@@ -148,6 +153,54 @@ test('a completed rotation pre-commits, signs with the root key, and seals the s
       new Uint8Array(record.rotatedIdentitySeed ?? new Uint8Array(0)),
       keyStore.rotatedIdentitySeed(),
       'the device record mirrors the successor, so a sign-out does not strand the file login',
+    );
+  } finally {
+    fake.restore();
+  }
+});
+
+test("a confirmed rotation retires this browser's backup record: the sealed file now carries a dead key", async () => {
+  const fake = installFakeIndexedDb();
+  try {
+    const keyStore = await seededStore();
+    await recordBackupExport(ACCOUNT_ID);
+    const { client } = rotationClient(keyStore, () => {});
+
+    const outcome = await rotateAccountIdentity(client, ACCOUNT_ID);
+
+    assert.equal(outcome.state, 'done');
+    const state = await loadBackupState(ACCOUNT_ID);
+    assert.ok(state !== undefined, 'the record survives: its facts survive');
+    assert.ok(
+      state.invalidatedAtMs !== undefined,
+      'the rotation stamped the record, so the checkup warns instead of vouching',
+    );
+    assert.ok(
+      state.lastExportAtMs > 0,
+      'the export time is kept: the file exists, and saying when it stopped being good news is the truer line',
+    );
+  } finally {
+    fake.restore();
+  }
+});
+
+test('an unfinished rotation does not retire the backup record — it cannot confirm the rotation landed', async () => {
+  const fake = installFakeIndexedDb();
+  try {
+    const keyStore = await seededStore();
+    await recordBackupExport(ACCOUNT_ID);
+    const { client } = rotationClient(keyStore, () => {
+      throw new TransportError('the answer was lost');
+    });
+
+    const outcome = await rotateAccountIdentity(client, ACCOUNT_ID);
+
+    assert.equal(outcome.state, 'unfinished');
+    const state = await loadBackupState(ACCOUNT_ID);
+    assert.equal(
+      state?.invalidatedAtMs,
+      undefined,
+      'the call may never have landed, and a backup warning we cannot confirm is its own kind of lie',
     );
   } finally {
     fake.restore();

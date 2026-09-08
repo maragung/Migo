@@ -44,3 +44,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 hex.workspace = true
+# Property tests for the container parser: arbitrary payload, credential,
+# and corruption, on the stable lane where cargo-fuzz (nightly) cannot run.
+proptest = { workspace = true }

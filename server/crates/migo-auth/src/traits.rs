@@ -256,6 +256,15 @@ pub trait Authenticator: Send + Sync {
         context: &RequestContext,
     ) -> Result<()>;
 
+    /// Whether the caller's account carries a recoverable contact at all.
+    ///
+    /// A boolean and nothing else: the contact's value never crosses this
+    /// seam. The one surface that asks (`GET /v1/auth/contact`) is the place
+    /// the web UI's standing line "your current email is never shown here"
+    /// must hold — the settings screen needs to know whether to nag, and a
+    /// nag does not need the address.
+    async fn has_contact(&self, identity: &Identity, context: &RequestContext) -> Result<bool>;
+
     /// Mints a captcha challenge in the requested mode and returns its public view.
     /// Returns `None` when the gate is not wired, which the route layer surfaces as
     /// `FEATURE_DISABLED`.

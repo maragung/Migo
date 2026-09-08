@@ -21,6 +21,7 @@ export type WinKind =
   | 'profile'
   | 'account'
   | 'settings'
+  | 'checkup'
   | 'admins'
   | 'store'
   | 'games';
@@ -52,6 +53,7 @@ export const KIND_LABEL: Readonly<Record<WinKind, string>> = {
   profile: 'Profile',
   account: 'Account',
   settings: 'Settings',
+  checkup: 'Security',
   admins: 'Admins',
   store: 'Store',
   games: 'Games',
@@ -66,6 +68,7 @@ export const KIND_ICON: Readonly<Record<WinKind, IconName>> = {
   profile: 'user',
   account: 'shield',
   settings: 'settings',
+  checkup: 'shield',
   admins: 'shield',
   store: 'gift',
   games: 'game',

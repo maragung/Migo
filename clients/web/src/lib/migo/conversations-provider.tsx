@@ -111,7 +111,9 @@ export interface ConversationsContextValue {
   lastPreviews: ReadonlyMap<Id, IncomingMessage>;
 }
 
-const ConversationsContext = createContext<ConversationsContextValue | null>(null);
+// Exported for the checkup panel's tests, which mount a Provider over static markup; the rest of
+// the app reaches the same handle through `useConversations`.
+export const ConversationsContext = createContext<ConversationsContextValue | null>(null);
 
 export function ConversationsProvider({ children }: { children: ReactNode }): ReactNode {
   const { client, accountId, resetNonce } = useMigo();

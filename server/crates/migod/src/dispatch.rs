@@ -756,6 +756,10 @@ impl Dispatcher for AppDispatcher {
             // --- notify ---
             Opcode::NotificationAck => notify::handle_ack(context, frame, &self.notify).await,
             Opcode::NotificationList => notify::handle_list(context, frame, &self.notify).await,
+            Opcode::PushRegister => {
+                notify::handle_register(context, frame, &self.store, &self.notify).await
+            }
+            Opcode::PushUnregister => notify::handle_unregister(context, frame, &self.notify).await,
 
             // --- economy ---
             Opcode::GiftSend => economy::handle_gift_send(context, frame, &self.economy).await,

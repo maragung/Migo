@@ -3111,3 +3111,82 @@ kontrak lintas-platform yang dipinkan lewat test.
 Gerbang: web 386/386, crypto 52/52, migo-api 75/75 termasuk test
 unduhan opaque baru, desktop cargo fmt/clippy/test 104/104, Android
 make kotlin-check 0 problem, lint-js bersih, prettier repo bersih.
+
+## 78. Sisa audit gelombang kedua — security checkup, wallet registry, telemetry jujur, PUSH_REGISTER, proptest, migo.md
+
+Permintaan: lanjutkan sisa temuan audit. Enam jalur dikerjakan
+paralel dengan kontrak lintas-client yang dikunci lebih dulu (enam
+baris checkup sama di ketiga client; GET /v1/auth/contact mengembalikan
+configured boolean tanpa pernah membocorkan kontaknya).
+
+- **Security Checkup (§50) di ketiga client**: baris Identity,
+  Devices, Wallets, Backup, Recovery, E2EE. Devices memperingatkan
+  device aktif yang last seen-nya lewat 30 hari (batas hari ke-30
+  tepat tidak menyala, revoked/pending diabaikan). Backup kini
+  berstempel: web memakai IndexedDB backup-state-store per akun,
+  Android dua Long di DataStore Settings, desktop FIELD_LAST_BACKUP_AT
+  (id 7) di vault dengan nilai detik unix yang sama dengan birthday
+  container — dan rotasi identitas sukses membatalkannya di ketiganya
+  (container pra-rotasi tidak bisa lagi meng-vouch akun). Recovery
+  membaca endpoint baru; E2EE jujur: web mengagregasi percakapan
+  direct yang berubah setelah di-acknowledge, Android/desktop
+  menyatakan bahwa peringatan verifikasi hidup per percakapan dan
+  tidak memalsukan angka akun-wide.
+- **GET /v1/auth/contact**: satu bit — configured true/false,
+  autentikasi seperti route auth lain, tidak pernah membawa nilai
+  kontaknya; Authenticator::has_contact dibaca dari email.is_some atau
+  phone.is_some sehingga register dan set_contact satu sumber
+  kebenaran. Test memastikan body tepat satu field.
+- **Wallet registry + replace (§21-22) di web**: daftar lengkap dari
+  GET /v1/wallets (alamat monospace, label, Active/Archived saja —
+  status tidak diciptakan), alur replace: turunkan indeks berikutnya
+  (maks tertinggi +1, cap 100) → register dengan label → archive yang
+  lama, dengan alamat EIP-55 lama/baru ditampilkan sebelum konfirmasi
+  dan kegagalan setengah jalan dinyatakan apa adanya.
+- **Telemetry jujur**: otlp_endpoint, trace_sample_ratio, dan
+  metrics_bind dihapus dari config (field mati lebih buruk daripada
+  field tidak ada; metrik sudah lama dilayani GET /metrics di router
+  REST) dan log_level/log_format kini benar-benar dijalankan migod
+  lewat migo_core::telemetry::init — presedensi RUST_LOG >
+  telemetry.log_level > default. docs/09 diberi kalimat eksplisit
+  bahwa tracing belum punya exporter di build ini.
+- **PUSH_REGISTER 147 / PUSH_UNREGISTER 148 (§44-45 plumbing)**:
+  struct PushRegister sudah lama digenerate tapi tak ada opcode yang
+  membawanya — Notifier::register/unregister tak terjangkau di
+  produksi. Kini opcode + dispatch handler: platform dibaca dari baris
+  device (field provider di wire sengaja dibaca lalu dibuang — client
+  tidak boleh menamai penyedia push deployment), provider diturunkan
+  dari platform, token disegel TokenKeeper. Cost 147=5 (sama dengan
+  REGISTER_COST), 148=1 bukan 0 karena test migo-protocol menolak
+  opcode client gratis selain ACK. Empat test lewat TCP native sungguhan.
+  Delivery nyata tetap menunggu akun penyedia push — NoPush masih
+  implementasi yang dipasang.
+- **Google Drive tanpa kredensial**: SAF CreateDocument Android sudah
+  lama meng-cover Drive; yang hilang cuma pengakuannya — helper text
+  BackupSection kini menyebut Drive sebagai tujuan picker dan bahwa
+  Drive hanya pernah menerima container terenkripsi.
+- **Property test (§172)**: proptest kini benar-benar dipakai — 4
+  properti Frame (roundtrip identitas, prefix terpotong tak pernah
+  panic, bit terbalik tak pernah panic, length-prefix = incomplete) 64
+  case masing-masing, dan 3 properti container .migo (roundtrip, tamper
+  selalu gagal, truncation selalu gagal) 16 case masing-masing di jalur
+  fast_params Argon2id yang sama dengan unit test existing.
+- **Drift migo.md (§145, §148, §164-§176, §177)**: registry §145
+  menerima PUSH_REGISTER/UNREGISTER (brief-check menangkapnya lebih
+  dulu); §148 bit feature ditulis ulang sesuai kenyataan (masking
+  negosiasi BUILT, CALLS/QUIC/TCP_TRANSPORT behavioral, empat bit
+  sisanya bukan saklar); §164-§176 yang mengaku SPEC padahal sudah
+  dibangun dibetulkan (client key storage, signaling call 1-on-1, media
+  WebRTC web, voice note web, media server, mesh federation, FED_DIRECTORY,
+  exporter metrik, infra dasar) dan yang memang belum ditegaskan
+  perbatasannya (multi-region, rollout bertahap, latensi gateway
+  terdekat); §177 angka dihitung ulang: 193 struct, 19 enum, 118
+  opcode, 77 error, 73 test vektor TS, sdk 167, web 416, crypto 21
+  vektor, desktop 35 berkas ~23.800 baris 111 test (pindah ke BUILT),
+  Android 16 berkas domain 45 opcode c2s 20 berkas app 68 test,
+  dispatcher 91 arm, tanggal per 2026-09-08.
+
+Gerbang: server workspace cargo fmt/clippy/test 1863 lolos, desktop
+111/111, web 416/416, sdk 167/167, kotlin-check 0 problem,
+protocol-check/entity-check/brief-check/vector-check bersih, lint-js
+bersih, prettier bersih.

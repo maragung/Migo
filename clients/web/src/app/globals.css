@@ -2961,6 +2961,83 @@ main {
   color: var(--text-faint);
 }
 
+/* --- the security checkup: six fixed rows, every mark earned from real state (§50) --- */
+/* The mark is a pill, not a colour swap on the line: a ✓ must be legible as a ✓ at any zoom,
+   and the row's line stays ordinary ink so a warning reads as its sentence first. */
+.checkup-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.checkup-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+.checkup-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.checkup-title {
+  font-size: var(--fs-body-sm);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.checkup-line {
+  font-size: var(--fs-body);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.checkup-mark {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-faint);
+  background: var(--panel-alt);
+}
+.checkup-ok .checkup-mark {
+  color: var(--positive);
+  background: color-mix(in srgb, var(--positive) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--positive) 45%, transparent);
+}
+.checkup-warning .checkup-mark {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 55%, transparent);
+}
+.checkup-warning {
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
+}
+
+/* --- the wallet registry and the replace flow's OLD/NEW lines --- */
+/* Addresses are monospace and wrap anywhere: a truncated address is a copy of half a key. */
+.wallet-address {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.wallet-row .person-actions {
+  flex: none;
+}
+.replace-wallet .avax-prepared {
+  margin-bottom: 12px;
+}
+
 /* The password form stacks its three fields. */
 .password-form {
   display: flex;

@@ -59,7 +59,7 @@ refresh_ttl_seconds = 2592000
 allow_registration = true
 
 [telemetry]
-log_level = "info"
-log_format = "pretty"                 # pretty | json
-trace_sample_ratio = 0.01
-# otlp_endpoint = "http://127.0.0.1:4317"
+log_level = "info"                 # RUST_LOG-style directives; RUST_LOG itself wins
+log_format = "pretty"              # pretty | json
+# Metrics are scraped at GET /metrics on the HTTP router — there is no
+# separate bind, and no OTLP/tracing exporter in this build.

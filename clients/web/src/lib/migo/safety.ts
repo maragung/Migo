@@ -84,8 +84,13 @@ export function reconcileSafety(
   return { report, firstSeen };
 }
 
-/** Whether two byte strings are the same length and the same bytes. */
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+/**
+ * Whether two byte strings are the same length and the same bytes.
+ *
+ * Exported because the security checkup's aggregate read asks the same question of the same
+ * fingerprints, and two implementations of a comparison a warning stands on is one too many.
+ */
+export function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   if (left.length !== right.length) {
     return false;
   }

@@ -331,6 +331,12 @@ pub enum Command {
     /// Record (or replace) the account's recoverable contact — one string, an email or a phone,
     /// and the server is the judge of the shape.
     SetContact { email_or_phone: String },
+    /// Read whether the account *has* a recoverable contact: `GET /v1/auth/contact`.
+    ///
+    /// The security checkup's Recovery row. Separate from [`Command::SetContact`] for the same
+    /// reason the session list is separate from sign-out: the checkup only looks, and a surface
+    /// that writes while pretending to read would be a surprise to anyone watching the account.
+    ContactStanding,
     /// Change the account's sign-in passphrase.
     ///
     /// Carries both secrets as raw strings for the same reason the auth forms do: the fields are
@@ -583,6 +589,17 @@ pub enum Event {
     AdminChangeFailed { reason: String },
     /// The account's registered wallet addresses.
     Wallets(Result<Vec<EvmWalletRow>, String>),
+    /// When this device last sealed a `.migo` container, in unix seconds — `None` when it never
+    /// has, or when a rotation retired the last container's right to vouch the account.
+    ///
+    /// Sent once at sign-in (from the vault, so the checkup's Backup row is honest before any
+    /// click) and again after every export and every completed rotation, because those are the
+    /// only two moments the fact moves. A local fact, not a server one: it rides no wire.
+    BackupState { last_backup_at: Option<u64> },
+    /// Whether the account has a recovery contact on file, or the reason the server would not
+    /// say. The same honest-uncertainty shape the device list pins: "could not check" and
+    /// "not configured" are different sentences, and only the second one is advice.
+    ContactStanding(Result<bool, String>),
     /// The AVAX balance of the account's first wallet, in wei, on the network asked.
     ///
     /// The EIP-55 address rides along because the same read is what discovers it. A `None`
@@ -966,6 +983,16 @@ struct Worker {
     ///
     /// The account id rides along for the same reason the Activity list's does.
     peers: Option<(Id, HashMap<Id, [u8; 32]>)>,
+    /// When this device last sealed a `.migo` container, in memory between passphrase moments —
+    /// the same trade again, and for the same reason: the export path holds the container's own
+    /// credential, never the vault passphrase, so the stamp reaches the vault only when a
+    /// sign-in, a restore or a rotation next opens it. A crash before that door loses the date
+    /// and the checkup says "Never backed up", which understates what exists and never
+    /// overstates it — the direction a security surface is allowed to be wrong in.
+    ///
+    /// The inner `Option` is the fact itself: `None` is "never, or invalidated by a rotation",
+    /// not "unknown". The account id rides along for the same reason the Activity list's does.
+    last_backup_at: Option<(Id, Option<u64>)>,
     /// One avatar upload between its BEGIN and the ticket's arrival. The bytes wait here
     /// because the worker never blocks on a reply; the frame arm completes the flow when the
     /// ticket lands. Replaced, never queued — a second pick while one is in flight refuses at
@@ -993,6 +1020,7 @@ impl Worker {
             pending_registration: None,
             txs: None,
             peers: None,
+            last_backup_at: None,
             avatar_pending: None,
             avatar_commit_pending: None,
             chain_http: reqwest::Client::new(),
@@ -1188,6 +1216,9 @@ impl Worker {
             }
             Command::SetContact { email_or_phone } => {
                 self.set_contact(email_or_phone).await;
+            }
+            Command::ContactStanding => {
+                self.fetch_contact_standing().await;
             }
             Command::ChangePassphrase { current, next } => {
                 self.change_passphrase(current, next).await;
@@ -1522,6 +1553,7 @@ impl Worker {
         // with; they become the worker's to keep from here until the session ends.
         let txs = keys.txs.clone();
         let peers = keys.peer_fingerprints.clone();
+        let last_backup_at = keys.last_backup_at;
         let sessions = SessionStore::new(keys);
         // The group layer signs with the same identity the pairwise layer identifies with, so a
         // broadcast's signature is verifiable against the identity its distributions carried.
@@ -1549,21 +1581,26 @@ impl Worker {
         });
         self.txs = Some((account_id, txs));
         self.peers = Some((account_id, peers));
+        self.last_backup_at = Some((account_id, last_backup_at));
 
         self.sink.send(Event::SignedIn(account));
+        // After SignedIn, which resets the panes: the stamp is a session-start fact the checkup
+        // owns, and an event filed before the reset would be an event nobody kept.
+        self.sink.send(Event::BackupState { last_backup_at });
         self.sink.send(Event::ChainActivity(self.chain_rows()));
         self.connect().await;
     }
 
-    /// Folds this process's live account records — the Activity list, and the last-seen peer
-    /// identity fingerprints — into the keys a passphrase moment is about to seal.
+    /// Folds this process's live account records — the Activity list, the last-seen peer
+    /// identity fingerprints, and the last-backup stamp — into the keys a passphrase moment is
+    /// about to seal.
     ///
     /// The worker deliberately holds no passphrase after unlock, so mid-session updates to these
     /// lists live only in its memory and reach the vault only when a sign-in, a restore or a
     /// rotation next opens it: this fold is that moment, at every door the vault is saved
     /// through. A different account's records never cross over, so a second account signing in
-    /// over the same window inherits nothing — not another account's history, and not its
-    /// key-change memory.
+    /// over the same window inherits nothing — not another account's history, not its key-change
+    /// memory, and not its backup date.
     fn carry_live_records(&self, keys: &mut DeviceKeys, account_id: Id) {
         if let Some((id, txs)) = self.txs.as_ref() {
             if *id == account_id {
@@ -1573,6 +1610,11 @@ impl Worker {
         if let Some((id, peers)) = self.peers.as_ref() {
             if *id == account_id {
                 keys.peer_fingerprints = peers.clone();
+            }
+        }
+        if let Some((id, at)) = self.last_backup_at.as_ref() {
+            if *id == account_id {
+                keys.last_backup_at = *at;
             }
         }
     }
@@ -2622,6 +2664,29 @@ impl Worker {
         }
     }
 
+    /// Reads whether the account has a recoverable contact, for the checkup's Recovery row.
+    ///
+    /// Reduced to the one bit the row asks: the standing struct carries nothing else today, and
+    /// a worker that passed it through whole would be promising a surface the server does not
+    /// offer. A save through [`Self::set_contact`] does not refresh the row — the server's 204
+    /// says nothing about the value's shape, so the row re-checks on its own click, the same
+    /// rule the device list holds after a revoke.
+    async fn fetch_contact_standing(&mut self) {
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let outcome = signed
+            .rest
+            .contact_standing(&signed.access_token)
+            .await
+            .map(|standing| standing.configured);
+        let event = match outcome {
+            Ok(configured) => Event::ContactStanding(Ok(configured)),
+            Err(error) => Event::ContactStanding(Err(error.to_string())),
+        };
+        self.sink.send(event);
+    }
+
     /// Changes the account's sign-in passphrase.
     ///
     /// The server ends every session of the account — this one included — and answers with a
@@ -2704,7 +2769,9 @@ impl Worker {
     /// new device signs with the root-derived key and will be refused until a fresh container is
     /// sealed on this device. Other root-holding devices are in the same position. Rotation is
     /// real rotation exactly because it breaks the derivation, and the settings dialog says so
-    /// before the passphrase is ever asked for.
+    /// before the passphrase is ever asked for. The checkup's backup date is retired with the
+    /// same stroke ([`Self::retire_backup_stamp`]): a row that dated a container the account can
+    /// no longer restore from would be the one lie a security screen must never tell.
     async fn rotate_identity(&mut self, passphrase: String) {
         let Some(account_id) = self.signed.as_ref().map(|signed| signed.account.account_id) else {
             return;
@@ -2808,6 +2875,9 @@ impl Worker {
                     "Identity key rotated; sessions, chats and safety numbers continue unchanged",
                     ToastKind::Success,
                 );
+                // The rotation is accepted, so every container sealed before it is dead as a
+                // vouch: the stamp that dated one must go, in the vault and in the checkup.
+                self.retire_backup_stamp(account_id, &mut keys, &passphrase);
             }
             Err(error) => {
                 // A failure with no answer at all is not a refusal: the call may have landed and
@@ -2818,6 +2888,12 @@ impl Worker {
                 // accepts if the call did land, and refuses invalid credentials otherwise — the
                 // heal below, which signs with the root.
                 if matches!(error, RestError::Transport) {
+                    // The stamp retires here too, even though the rotation's landing is unknown:
+                    // a checkup must fail closed, and "Never backed up on this device" is true in
+                    // both branches of the unknown — either the container is dead, or the account
+                    // sits mid-rotation with a fresh one owed. A date kept here would vouch for a
+                    // backup the rotation may already have retired.
+                    self.retire_backup_stamp(account_id, &mut keys, &passphrase);
                     return self.sink.toast(
                         "the server's answer never arrived; the new key is sealed in this \
                          vault — rotate again to finish the change",
@@ -2854,11 +2930,14 @@ impl Worker {
                                 if let Some(signed) = self.signed.as_mut() {
                                     signed.sessions.adopt_rotated_identity_seed(seed);
                                 }
-                                return self.sink.toast(
+                                self.sink.toast(
                                     "Identity key rotated; sessions, chats and safety numbers \
                                      continue unchanged",
                                     ToastKind::Success,
                                 );
+                                // The heal is an acceptance like any other: the stamp goes.
+                                self.retire_backup_stamp(account_id, &mut keys, &passphrase);
+                                return;
                             }
                         }
                     }
@@ -2883,6 +2962,32 @@ impl Worker {
                 }
             }
         }
+    }
+
+    /// Retires the last-backup stamp everywhere it lives, because a rotation just made every
+    /// container sealed before it unable to vouch the account.
+    ///
+    /// Three places hold the date: the vault (which this re-seals with the stamp gone, the
+    /// passphrase still in hand from the ceremony), the worker's live record (so the next
+    /// passphrase moment does not fold a dead date back in), and the checkup row (the event).
+    /// A re-seal failure is reported but changes nothing about the rotation, which already
+    /// happened: the worker's cleared live record wins at the next door over whatever the vault
+    /// kept, which is exactly why the record exists.
+    fn retire_backup_stamp(&mut self, account_id: Id, keys: &mut DeviceKeys, passphrase: &str) {
+        keys.last_backup_at = None;
+        self.last_backup_at = Some((account_id, None));
+        if let Err(error) = vault::save(&self.vault_path, passphrase, keys) {
+            self.sink.toast(
+                format!(
+                    "the rotation stands, but the vault could not be re-sealed to forget the old \
+                     backup date: {error}"
+                ),
+                ToastKind::Error,
+            );
+        }
+        self.sink.send(Event::BackupState {
+            last_backup_at: None,
+        });
     }
 
     // --- the chain wallet (§184) --------------------------------------------------
@@ -3206,6 +3311,14 @@ impl Worker {
         if let Err(error) = std::fs::write(&path, &container) {
             return self.sink.toast(error.to_string(), ToastKind::Error);
         }
+        // The stamp is the worker's until the next passphrase moment re-seals the vault — the
+        // export path holds the container's credential, never the vault's passphrase — and the
+        // same instant the container itself was stamped with, so the checkup's date and the
+        // container's own idea of its birthday can never disagree.
+        self.last_backup_at = Some((account_id, Some(now)));
+        self.sink.send(Event::BackupState {
+            last_backup_at: Some(now),
+        });
         self.sink.toast(
             format!("account backup written to {}", path.display()),
             ToastKind::Success,

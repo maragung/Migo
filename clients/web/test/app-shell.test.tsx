@@ -406,6 +406,7 @@ test('every window kind has a label and an icon, and a chat window ids by conver
     'profile',
     'account',
     'settings',
+    'checkup',
     'admins',
     'store',
     'games',

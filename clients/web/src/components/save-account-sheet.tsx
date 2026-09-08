@@ -27,6 +27,7 @@ import { account } from '@migo/sdk';
 import type { Id } from '@migo/sdk';
 
 import { containerFileName, downloadAccountFile } from '@/lib/account-file.js';
+import { recordBackupExport } from '@/lib/storage/backup-state-store.js';
 import { keyFileId, saveKeyFile } from '@/lib/storage/key-file-store.js';
 
 import { Icon } from './icons.js';
@@ -106,6 +107,10 @@ export function SaveAccountSheet({
       return;
     }
     downloadAccountFile(sealed, fileName);
+    // The download is the account's first backup leaving this device — the moment the checkup's
+    // Backup row starts being able to say "Backed up". Best-effort: the download itself is the
+    // event, and bookkeeping must not report it as failed.
+    void recordBackupExport(accountId as Id).catch(() => {});
     setSaved(true);
   }
 
