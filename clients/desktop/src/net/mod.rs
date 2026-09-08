@@ -2023,7 +2023,11 @@ impl Worker {
 
     /// Requests the account's whole social graph.
     async fn request_relationships(&mut self) {
-        let message = RelationshipListReq { limit: 200 };
+        let message = RelationshipListReq {
+            limit: 200,
+            kind: None,
+            cursor: None,
+        };
         self.request(Opcode::RelationshipList, &message).await;
     }
 
