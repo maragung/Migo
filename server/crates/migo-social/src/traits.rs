@@ -199,6 +199,26 @@ pub trait Graph: Send + Sync {
     /// Accounts this one has marked as favourites.
     async fn favorites(&self, caller: &Caller, limit: Option<u16>) -> Result<Vec<Edge>>;
 
+    /// Every relationship the caller owns, gathered in one answer.
+    ///
+    /// The listing behind `RELATIONSHIP_LIST`: the screen that asks for it renders
+    /// friends, waiting requests, follows, followers, blocks, mutes, and favourites
+    /// from the same read, so the graph gathers every kind at once rather than making
+    /// the client ask seven times.
+    ///
+    /// `limit` bounds **each kind**, never the concatenated whole. A combined cap is
+    /// how a hidden request ships: the friends fill it and every kind gathered after
+    /// them is silently dropped, so a user with a full list reads "no pending
+    /// requests" while requests sit unanswered. Pending requests are gathered before
+    /// friends so even a future cap that misfired would starve the least harmful
+    /// kind first.
+    ///
+    /// Charged once, however many kinds it gathers. The opcode is one user action
+    /// over one answer; charging per kind made one refresh cost seven listings'
+    /// budget and made the endpoint's price depend on how many kinds happened to be
+    /// non-empty.
+    async fn list_relationships(&self, caller: &Caller, limit: Option<u16>) -> Result<Vec<Edge>>;
+
     /// What one account is to another, from the caller's side.
     ///
     /// Never reports the subject's block of the caller. See [`Standing`].

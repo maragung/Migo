@@ -580,12 +580,45 @@ where
     ) -> Result<Vec<Edge>> {
         Self::require_identity(caller)?;
         self.charge(caller, LIST_COST).await?;
+        self.own_page(caller.account_id, kind, Self::page(limit))
+            .await
+    }
+
+    /// One kind's own page, projected, with neither the identity check nor the
+    /// charge: those belong to the listing a client asked for, and the combined
+    /// listing charges once for all of its kinds rather than once per kind.
+    async fn own_page(
+        &self,
+        account_id: Id,
+        kind: RelationshipKind,
+        page: u16,
+    ) -> Result<Vec<Edge>> {
         Ok(self
             .store
-            .relationships(caller.account_id, kind, Self::page(limit))
+            .relationships(account_id, kind, page)
             .await?
             .iter()
             .map(Edge::of)
+            .collect())
+    }
+
+    /// The followers page, projected from the far end of the edge.
+    ///
+    /// `other_id` on an inbound row is the account being followed, so the projection
+    /// names the row's owner — reusing `Edge::of` here would return the caller's own
+    /// id once per follower.
+    async fn follower_page(&self, account_id: Id, page: u16) -> Result<Vec<Edge>> {
+        Ok(self
+            .store
+            .inbound_relationships(account_id, RelationshipKind::Follow, page)
+            .await?
+            .iter()
+            .map(|row| Edge {
+                other_id: row.account_id,
+                kind: row.kind,
+                since: row.created_at,
+                accepted: true,
+            })
             .collect())
     }
 }
@@ -1039,25 +1072,8 @@ where
         // The one listing read from the other side of the edge, and the reason the
         // store keeps a reverse index: without it this is a scan of every follow in
         // the system to answer "who follows me".
-        Ok(self
-            .store
-            .inbound_relationships(
-                caller.account_id,
-                RelationshipKind::Follow,
-                Self::page(limit),
-            )
-            .await?
-            .iter()
-            // `other_id` on an inbound row is the caller, so the projection has to name
-            // the owner instead. Reusing `Edge::of` here would return the caller's own
-            // id N times.
-            .map(|row| Edge {
-                other_id: row.account_id,
-                kind: row.kind,
-                since: row.created_at,
-                accepted: true,
-            })
-            .collect())
+        self.follower_page(caller.account_id, Self::page(limit))
+            .await
     }
 
     async fn blocked(&self, caller: &Caller, limit: Option<u16>) -> Result<Vec<Edge>> {
@@ -1066,6 +1082,47 @@ where
 
     async fn favorites(&self, caller: &Caller, limit: Option<u16>) -> Result<Vec<Edge>> {
         self.owned(caller, RelationshipKind::Favorite, limit).await
+    }
+
+    async fn list_relationships(&self, caller: &Caller, limit: Option<u16>) -> Result<Vec<Edge>> {
+        Self::require_identity(caller)?;
+        // One charge for the whole answer. Seven per-kind reads are the shape of one
+        // listing, not seven listings: a client refreshing its friends screen makes
+        // one request and pays one price, whatever the graph happens to hold.
+        self.charge(caller, LIST_COST).await?;
+        let page = Self::page(limit);
+        let account_id = caller.account_id;
+
+        // Requests first, friends second, everything else after. With the limit
+        // applied per kind the order is not load-bearing, but it stays requests-first
+        // on purpose: if a future change ever caps the combined answer again, the
+        // kind it starves first should be the one whose absence costs the least.
+        let mut edges = Vec::new();
+        for kind in [
+            RelationshipKind::PendingIncoming,
+            RelationshipKind::PendingOutgoing,
+        ] {
+            edges.extend(self.own_page(account_id, kind, page).await?);
+        }
+        // The same belt-and-braces filter as `friends`: a `Friend` row without an
+        // acceptance date is what a partially applied acceptance would leave, and it
+        // must not read as a friendship here any more than there.
+        edges.extend(
+            self.own_page(account_id, RelationshipKind::Friend, page)
+                .await?
+                .into_iter()
+                .filter(|edge| edge.accepted),
+        );
+        for kind in [
+            RelationshipKind::Follow,
+            RelationshipKind::Block,
+            RelationshipKind::Mute,
+            RelationshipKind::Favorite,
+        ] {
+            edges.extend(self.own_page(account_id, kind, page).await?);
+        }
+        edges.extend(self.follower_page(account_id, page).await?);
+        Ok(edges)
     }
 
     async fn standing(&self, caller: &Caller, subject_id: Id) -> Result<Standing> {

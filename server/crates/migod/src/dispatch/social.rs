@@ -15,12 +15,14 @@
 //! | `FRIEND_REQUEST`  | `FriendTarget`   | `Graph::request_friend`   | `Acknowledged`     |
 //! | `FRIEND_RESPOND`  | `FriendRespond`  | `Graph::respond_friend`   | `Acknowledged`     |
 //! | `BLOCK_SET`       | `FriendTarget`   | `Graph::block`            | `Acknowledged`     |
-//! | `RELATIONSHIP_LIST` | `RelationshipListReq` | `Graph::friends`/`pending`/… | `RelationshipList` |
+//! | `RELATIONSHIP_LIST` | `RelationshipListReq` | `Graph::list_relationships` | `RelationshipList` |
 //!
-//! `RELATIONSHIP_LIST` has no single method behind it: the graph keeps each kind of edge
-//! in its own listing, so the handler gathers them and projects each
-//! [`Edge`](migo_social::model::Edge) onto a [`RelationshipEntry`], carrying the kind as
-//! the `u32` the wire enum encodes.
+//! `RELATIONSHIP_LIST` is one read of the whole graph the caller owns: the service
+//! gathers every kind — requests, friends, follows, followers, blocks, mutes,
+//! favourites — under a single charge, applying the limit per kind so a full friends
+//! list can never starve the requests waiting behind it. The handler projects each
+//! [`Edge`](migo_social::model::Edge) onto a [`RelationshipEntry`], carrying the kind
+//! as the `u32` the wire enum encodes.
 //!
 //! # The other side of a friendship event
 //!
@@ -42,7 +44,7 @@ use migo_protocol::{
     fault, from_frame, Acknowledged, Frame, FriendEvent, FriendRespond, FriendTarget, MuteSet,
     Opcode, RelationshipEntry, RelationshipList, RelationshipListReq, Topic, TopicKind,
 };
-use migo_social::model::{Edge, MAX_PAGE};
+use migo_social::model::{FriendOutcome, MAX_PAGE};
 use migo_social::notice::Notice;
 use migo_social::Caller as SocialCaller;
 use migo_social::SharedSocial;
@@ -123,10 +125,18 @@ pub(crate) async fn handle_friend_request(
         ctx.now(),
     );
     let request: FriendTarget = from_frame(frame).map_err(fault::from_wire)?;
-    let (_outcome, notice) = svc.request_friend(&caller, request.user_id).await?;
+    let (outcome, notice) = svc.request_friend(&caller, request.user_id).await?;
     ctx.reply(&Acknowledged { ok: true })?;
     if let Some(notice) = notice {
-        deliver_notice(ctx, notifier, &notice, STATE_REQUESTED).await;
+        // A crossing request accepts the one already waiting, so the audience is
+        // holding an acceptance, not a second request — and the hint must say which,
+        // or a client that starts trusting it draws the wrong screen.
+        let state = if matches!(outcome, FriendOutcome::Accepted) {
+            STATE_ACCEPTED
+        } else {
+            STATE_REQUESTED
+        };
+        deliver_notice(ctx, notifier, &notice, state).await;
     }
     Ok(())
 }
@@ -203,12 +213,13 @@ pub(crate) async fn handle_mute_set(
 
 /// Lists the caller's relationships and replies with them.
 ///
-/// There is no single `relationships` listing on the graph — friendships, pending
-/// requests, follows, followers, blocks, and favourites are each their own method — so
-/// the handler fans out to each, projecting every [`Edge`] onto a
-/// [`RelationshipEntry`]. `kind` is the `u32` encoding of [`RelationshipKind`]; an unknown
-/// edge kind collapses to `0` (`RelationshipKind::Unknown`) by the protocol's own `from_wire`
-/// contract, so the projection is total without a fallback branch.
+/// One read of the whole graph the caller owns: the service gathers every kind under
+/// a single charge and applies the limit **per kind**, so a caller whose friends fill
+/// the page still sees the requests waiting behind them. The handler projects each
+/// [`Edge`] onto a [`RelationshipEntry`]; `kind` is the `u32` encoding of
+/// [`RelationshipKind`], and an unknown edge kind collapses to `0`
+/// (`RelationshipKind::Unknown`) by the protocol's own `from_wire` contract, so the
+/// projection is total without a fallback branch.
 pub(crate) async fn handle_relationship_list(
     ctx: &ClientContext<'_>,
     frame: &Frame,
@@ -226,56 +237,16 @@ pub(crate) async fn handle_relationship_list(
     } else {
         Some(request.limit.clamp(1, u32::from(MAX_PAGE)) as u16)
     };
-    let entries = collect_relationships(svc, &caller, limit).await;
-    ctx.reply(&RelationshipList { entries })
-}
-
-/// Gathers every relationship edge the caller owns into wire entries.
-///
-/// Kind by kind, because the graph stores each as a separate listing; `kind` comes from
-/// [`RelationshipKind::to_wire`], an exhaustive mapping with no unknown case to handle.
-/// `limit`, when present, bounds the combined result so a large graph cannot flood a frame.
-async fn collect_relationships(
-    svc: &SharedSocial,
-    caller: &SocialCaller,
-    limit: Option<u16>,
-) -> Vec<RelationshipEntry> {
-    // Each relationship kind lives in its own listing on the graph, so gather them all and
-    // project every `Edge` onto a wire `RelationshipEntry`. A listing that errors (for
-    // example a limiter rejection) is skipped rather than aborting the whole response, so
-    // one failed read cannot blank the rest of the list.
-    let mut edges: Vec<Edge> = Vec::new();
-    if let Ok(list) = svc.friends(caller, limit).await {
-        edges.extend(list);
-    }
-    if let Ok(pending) = svc.pending(caller, limit).await {
-        edges.extend(pending.incoming);
-        edges.extend(pending.outgoing);
-    }
-    if let Ok(list) = svc.following(caller, limit).await {
-        edges.extend(list);
-    }
-    if let Ok(list) = svc.followers(caller, limit).await {
-        edges.extend(list);
-    }
-    if let Ok(list) = svc.blocked(caller, limit).await {
-        edges.extend(list);
-    }
-    if let Ok(list) = svc.muted(caller, limit).await {
-        edges.extend(list);
-    }
-    if let Ok(list) = svc.favorites(caller, limit).await {
-        edges.extend(list);
-    }
-    let mut entries: Vec<RelationshipEntry> = edges
+    // A failed or rate-limited read is an error, not a silently shorter graph: a
+    // caller that swallowed it would render "no pending requests" over a list it
+    // never saw, and there is no way back from telling a user nobody asked.
+    let edges = svc.list_relationships(&caller, limit).await?;
+    let entries: Vec<RelationshipEntry> = edges
         .into_iter()
         .map(|edge| RelationshipEntry {
             user_id: edge.other_id,
             kind: edge.kind.to_wire(),
         })
         .collect();
-    if let Some(limit) = limit {
-        entries.truncate(usize::from(limit));
-    }
-    entries
+    ctx.reply(&RelationshipList { entries })
 }

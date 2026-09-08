@@ -151,3 +151,100 @@ async fn an_empty_graph_suggests_nobody_and_profiles_refuses_an_empty_batch() {
         "the refusal must be the field-required fault the handler guards against"
     );
 }
+
+/// The path the `RELATIONSHIP_LIST` handler drives: one read of the whole graph, with
+/// the limit bounding **each kind** rather than the concatenated list. A caller whose
+/// friends fill the page still sees the request waiting behind it — a combined cap is
+/// how "no pending requests" gets rendered over a graph that was never fully read.
+#[tokio::test]
+async fn relationship_list_serves_each_kind_its_own_page() {
+    let (svc, store) = harness();
+    person(&store, 1, "alice").await;
+    person(&store, 2, "bob").await;
+    person(&store, 3, "carol").await;
+    let alice = Caller::new(
+        Id::from(1u128),
+        Id::from(101u128),
+        TrustTier::Established,
+        Timestamp::from_millis(NOW),
+    );
+    let bob = Caller::new(
+        Id::from(2u128),
+        Id::from(102u128),
+        TrustTier::Established,
+        Timestamp::from_millis(NOW),
+    );
+
+    // One settled friend, then one request waiting: a graph where the friend fills a
+    // one-entry page and the request is the entry a combined cap would drop.
+    svc.request_friend(&alice, Id::from(2u128))
+        .await
+        .expect("the request is sent");
+    svc.respond_friend(&bob, Id::from(1u128), true)
+        .await
+        .expect("the request is accepted");
+    svc.request_friend(
+        &Caller::new(
+            Id::from(3u128),
+            Id::from(103u128),
+            TrustTier::Established,
+            Timestamp::from_millis(NOW),
+        ),
+        Id::from(1u128),
+    )
+    .await
+    .expect("the second request is sent");
+
+    let edges = svc
+        .list_relationships(&alice, Some(1))
+        .await
+        .expect("the combined listing succeeds");
+    let has =
+        |wanted: migo_protocol::RelationshipKind| edges.iter().any(|edge| edge.kind == wanted);
+    assert!(
+        has(migo_protocol::RelationshipKind::Friend),
+        "the friend is on the page: {:?}",
+        edges
+    );
+    assert!(
+        has(migo_protocol::RelationshipKind::PendingIncoming),
+        "the waiting request is on its own page, not starved behind the friend: {:?}",
+        edges
+    );
+}
+
+/// The whole listing is one charge against the account budget of two hundred. At three
+/// a listing, sixty-six refreshes fit; at the seven per-kind charges the handler used
+/// to pay, nine would exhaust the budget and the tenth would answer `RATE_LIMITED` —
+/// one friends-screen refresh burning a fifth of what an honest client needs for
+/// everything else it does.
+#[tokio::test]
+async fn relationship_list_is_priced_as_one_listing() {
+    let (svc, store) = harness();
+    person(&store, 1, "alice").await;
+    let alice = Caller::new(
+        Id::from(1u128),
+        Id::from(101u128),
+        TrustTier::Established,
+        Timestamp::from_millis(NOW),
+    );
+
+    let mut refreshes = 0u32;
+    loop {
+        match svc.list_relationships(&alice, None).await {
+            Ok(_) => refreshes += 1,
+            Err(error) => {
+                assert_eq!(
+                    error.code(),
+                    migo_protocol::generated::codes::RATE_LIMITED,
+                    "the budget, not the graph, is what runs out: {error}"
+                );
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        refreshes, 66,
+        "sixty-six listings at three each fit the two-hundred budget; seven per kind would have stopped at nine"
+    );
+}
