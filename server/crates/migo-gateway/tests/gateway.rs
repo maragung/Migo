@@ -42,10 +42,11 @@ use migo_core::config::{Config, GatewayConfig};
 use migo_core::metrics::Registry;
 use migo_core::{Clock, Error, Id, ManualClock, SeededRandom, Shutdown, Timestamp};
 use migo_protocol::{
-    codes, fault, from_frame, to_frame, BandwidthMode, CloseReason, Encode, Error as ErrorMessage,
-    Frame, FrameHeader, Hello, MemberChange, MessageEvent, MessageKind, NodeInfo,
-    NotificationEvent, Opcode, Ping, PresenceState, PresenceUpdate, ReconnectHint, RoomMemberEvent,
-    SubscribeRequest, SubscribeResponse, Topic, TopicKind, Welcome, PROTOCOL_VERSION,
+    codes, fault, from_frame, to_frame, BandwidthMode, CloseReason, ConversationMemberEvent,
+    Encode, Error as ErrorMessage, Frame, FrameHeader, Hello, MemberChange, MessageEvent,
+    MessageKind, NodeInfo, NotificationEvent, Opcode, Ping, PresenceState, PresenceUpdate,
+    ReconnectHint, ResumeRequest, RoomMemberEvent, SubscribeRequest, SubscribeResponse, Topic,
+    TopicKind, Welcome, PROTOCOL_VERSION,
 };
 use migo_ratelimit::{CacheRateLimiter, Policies, SharedRateLimiter, TrustTier};
 
@@ -474,6 +475,8 @@ struct Wire {
     outbound: Vec<Bytes>,
     closed: bool,
     park_when_empty: bool,
+    /// Whether the client side of this pipe has died: sends fail from here on.
+    severed: bool,
 }
 
 #[derive(Clone, Default)]
@@ -510,6 +513,19 @@ impl Pipe {
         self.lock().park_when_empty = true;
     }
 
+    /// Unparks a kept-open pipe: the next time the script runs dry, `recv` returns `Ok(None)` —
+    /// a clean client hangup, which is the close a resume must be able to follow.
+    fn hangup(&self) {
+        self.lock().park_when_empty = false;
+    }
+
+    /// Makes every later `send` fail, the shape of a connection that died mid-write: the
+    /// gateway's next flush fails and the session closes as a transport error, which — unlike
+    /// a clean hangup — is an involuntary close, so the resume buffer is retained (section 150).
+    fn sever(&self) {
+        self.lock().severed = true;
+    }
+
     /// A transport handle sharing this pipe's buffers, to hand to [`Gateway::serve`].
     fn transport(&self) -> Pipe {
         self.clone()
@@ -534,6 +550,13 @@ impl Pipe {
 #[async_trait]
 impl Transport for Pipe {
     async fn recv(&mut self) -> Result<Option<Bytes>, TransportError> {
+        if self.lock().severed {
+            // A severed pipe is dead in both directions. recv is the side the
+            // session's select loop re-polls when a heartbeat tick fires, so
+            // this is the error the gateway actually sees — send alone would
+            // never be called again, with no further frame to flush.
+            return Err(TransportError::Io("the pipe was severed".to_string()));
+        }
         let next = self.lock().inbound.pop_front();
         match next {
             Some(bytes) => Ok(Some(bytes)),
@@ -550,7 +573,11 @@ impl Transport for Pipe {
     }
 
     async fn send(&mut self, frame: Bytes) -> Result<(), TransportError> {
-        self.lock().outbound.push(frame);
+        let mut wire = self.lock();
+        if wire.severed {
+            return Err(TransportError::Io("the pipe was severed".to_string()));
+        }
+        wire.outbound.push(frame);
         Ok(())
     }
 
@@ -1456,6 +1483,161 @@ async fn a_revoked_account_stops_hearing_the_topic_it_lost() {
         kicked_events, 1,
         "the kicked member's last frame is the kick itself, and nothing after it"
     );
+}
+
+/// A membership change is a discrete fact, and it must survive a disconnect.
+///
+/// `CONVERSATION_MEMBER_EVENT` and `ROOM_MEMBER_EVENT` were classed Coalescable:
+/// under a backed-up mailbox such a frame is dropped outright, and Coalescable
+/// frames never enter the resume ring — so a member who joined or left while a
+/// session was down was invisible to it until a full roster refetch, and clients
+/// that rotate sender keys on membership change missed the rotation trigger.
+/// The events are Critical now: never dropped, and retained in the ring so a
+/// resume redelivers them. This test drives the whole cycle — subscribe, receive
+/// an unacknowledged member event, drop the connection, resume from sequence
+/// zero — and asserts the event comes back.
+#[tokio::test(start_paused = true)]
+async fn a_member_event_survives_a_disconnect_into_the_resume() {
+    let mut builder = HarnessBuilder::new();
+    builder.dispatcher = Arc::new(GrantAll);
+    let h = builder.build();
+
+    let conversation = Topic {
+        kind: TopicKind::Conversation,
+        id: id(0x5EED),
+    };
+
+    // The session that will be dropped: authenticated, subscribed, and holding
+    // exactly one unacknowledged member event.
+    let first = Pipe::new();
+    first.keep_open();
+    first.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+    first.client(
+        Opcode::Subscribe,
+        2,
+        &SubscribeRequest {
+            topics: vec![conversation.clone()],
+        },
+    );
+
+    let joined = ConversationMemberEvent {
+        conversation_id: conversation.id,
+        user_id: id(0x00B7),
+        change: MemberChange::Joined,
+        member_count: 2,
+    };
+
+    let drive =
+        async {
+            for _ in 0..500 {
+                if subscribe_answered(&first) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(
+                subscribe_answered(&first),
+                "the session must hold the conversation topic before the member event"
+            );
+
+            // The membership change, published while the session is live. The
+            // session's writer delivers it to the pipe but the client never ACKs
+            // it — its sequence stays in the ring.
+            h.gateway.broadcast_to_topic(
+                &conversation,
+                Opcode::ConversationMemberEvent,
+                &joined,
+                ts(NOW),
+            );
+            for _ in 0..500 {
+                if first
+                    .sent()
+                    .iter()
+                    .any(|frame| frame.header.opcode == Opcode::ConversationMemberEvent.to_wire())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(
+                first.sent().iter().any(|frame| {
+                    frame.header.opcode == Opcode::ConversationMemberEvent.to_wire()
+                }),
+                "the live session received the member event"
+            );
+
+            // The session id, from the first WELCOME, is the resume key.
+            let session_id = welcome_in(&first.sent()).session_id;
+
+            // The drop: the connection dies mid-write — an involuntary close,
+            // which is what retains the unacknowledged backlog for a resume
+            // (section 150). A clean hangup is a client saying "I am done", and
+            // the gateway rightly keeps nothing for it.
+            first.sever();
+            // The parked recv future only re-polls when another select branch
+            // fires, and the slowest of those is the heartbeat ticker at a
+            // quarter of the 30 s heartbeat — so the poll must be willing to
+            // wait out 7.5 s of (paused) time, not just the send-side delay.
+            for _ in 0..500 {
+                if h.sessions_closed("transport_error") > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+            assert!(
+                h.sessions_closed("transport_error") > 0,
+                "the first session must close as a transport error before the resume"
+            );
+
+            // The resume: a second connection, same session id, claiming it saw
+            // nothing (sequence zero). The member event must come back. The
+            // resumed session stays alive (the pipe is kept open), so its
+            // driver is raced against the frame poll rather than awaited.
+            let second = Pipe::new();
+            second.keep_open();
+            second.client(
+                Opcode::Hello,
+                1,
+                &Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    access_token: Some(VALID_TOKEN.to_string()),
+                    device_id: Some(device_of(ACCOUNT)),
+                    resume: Some(ResumeRequest {
+                        session_id,
+                        last_frame_seq: 0,
+                    }),
+                    ..Default::default()
+                },
+            );
+            let resumed = h.serve(&second);
+            tokio::pin!(resumed);
+            for _ in 0..500 {
+                if second
+                    .sent()
+                    .iter()
+                    .any(|frame| frame.header.opcode == Opcode::ConversationMemberEvent.to_wire())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::time::timeout(Duration::ZERO, &mut resumed)
+                    .await
+                    .ok();
+            }
+            assert!(
+                second.sent().iter().any(|frame| {
+                    frame.header.opcode == Opcode::ConversationMemberEvent.to_wire()
+                }),
+                "the resumed session redelivers the member event that happened while it was away"
+            );
+            second.hangup();
+            resumed.await;
+        };
+    tokio::join!(h.serve(&first), drive);
 }
 
 #[tokio::test]

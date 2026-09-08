@@ -279,8 +279,8 @@
       "auth": "User",
       "cost": 0,
       "class": "Coalescable",
-      "doc": "A reaction was added or removed.",
-      "coalesce_key": "target_message_id"
+      "doc": "A reaction was added or removed. The same actor reacting to the same message is a latest-state stream \u2014 their newest frame replaces their older one \u2014 but two actors on one message are two streams, so the key carries both.",
+      "coalesce_key": "target_message_id+actor_id"
     },
     {
       "name": "CONVERSATION_INVITE",
@@ -366,9 +366,8 @@
       "payload": "ConversationMemberEvent",
       "auth": "User",
       "cost": 0,
-      "class": "Coalescable",
-      "coalesce_key": "conversation_id",
-      "doc": "A group's membership moved. Clients rotate sender keys on every change."
+      "class": "Critical",
+      "doc": "A group's membership moved, member by member. Clients rotate sender keys on every change, so an event is a discrete fact and not a latest-state stream: it is Critical \u2014 never dropped, and retained in the resume ring so a session that reconnects learns who joined and left while it was away."
     },
     {
       "name": "CONVERSATION_UPDATE",
@@ -438,8 +437,8 @@
       "payload": "RoomMemberEvent",
       "auth": "User",
       "cost": 0,
-      "class": "Coalescable",
-      "coalesce_key": "room_id"
+      "class": "Critical",
+      "doc": "A room's membership moved, member by member. A join, a leave, a kick, a role change: each is a discrete fact the roster is rebuilt from, not a latest-state stream \u2014 Critical, never dropped, retained in the resume ring."
     },
     {
       "name": "ROOM_STATE_EVENT",

@@ -8281,7 +8281,7 @@ object Op {
     const val MESSAGE_EDIT: Long = 40L
     /** Sets or removes the caller's reaction to a message. */
     const val REACTION_SET: Long = 41L
-    /** A reaction was added or removed. */
+    /** A reaction was added or removed. The same actor reacting to the same message is a latest-state stream — their newest frame replaces their older one — but two actors on one message are two streams, so the key carries both. */
     const val REACTION_EVENT: Long = 42L
     /** Adds members to a group. Any current member may invite, within the group size cap. */
     const val CONVERSATION_INVITE: Long = 43L
@@ -8297,7 +8297,7 @@ object Op {
     const val CONVERSATION_VOTE_KICK: Long = 48L
     /** A group kick vote's running tally; the newest tally per conversation is the one that matters. */
     const val CONVERSATION_VOTE_EVENT: Long = 49L
-    /** A group's membership moved. Clients rotate sender keys on every change. */
+    /** A group's membership moved, member by member. Clients rotate sender keys on every change, so an event is a discrete fact and not a latest-state stream: it is Critical — never dropped, and retained in the resume ring so a session that reconnects learns who joined and left while it was away. */
     const val CONVERSATION_MEMBER_EVENT: Long = 50L
     /** A founder renames a group. */
     const val CONVERSATION_UPDATE: Long = 51L
@@ -8306,6 +8306,7 @@ object Op {
     const val ROOM_JOIN: Long = 80L
     const val ROOM_LEAVE: Long = 81L
     const val ROOM_LIST: Long = 82L
+    /** A room's membership moved, member by member. A join, a leave, a kick, a role change: each is a discrete fact the roster is rebuilt from, not a latest-state stream — Critical, never dropped, retained in the resume ring. */
     const val ROOM_MEMBER_EVENT: Long = 83L
     const val ROOM_STATE_EVENT: Long = 84L
     /** Creates a room; the caller becomes its Owner. */
@@ -8467,7 +8468,7 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     39L to OpcodeMeta(39L, "TYPING", 1, DeliveryClass.Coalescable, AuthLevel.User, Direction.Both, false, "TypingEvent", null, "conversation_id"),
     40L to OpcodeMeta(40L, "MESSAGE_EDIT", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MessageEdit", "Acknowledged", null),
     41L to OpcodeMeta(41L, "REACTION_SET", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ReactionSet", "Acknowledged", null),
-    42L to OpcodeMeta(42L, "REACTION_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ReactionEvent", null, "target_message_id"),
+    42L to OpcodeMeta(42L, "REACTION_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ReactionEvent", null, "target_message_id+actor_id"),
     43L to OpcodeMeta(43L, "CONVERSATION_INVITE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationInviteRequest", "ConversationSummary", null),
     44L to OpcodeMeta(44L, "CONVERSATION_LEAVE", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationLeaveRequest", "Acknowledged", null),
     45L to OpcodeMeta(45L, "CONVERSATION_ROSTER", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationRosterRequest", "ConversationRosterResponse", null),
@@ -8475,14 +8476,14 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     47L to OpcodeMeta(47L, "CONVERSATION_KICK", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationKickRequest", "Acknowledged", null),
     48L to OpcodeMeta(48L, "CONVERSATION_VOTE_KICK", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationVoteKickRequest", "ConversationVoteKickResponse", null),
     49L to OpcodeMeta(49L, "CONVERSATION_VOTE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ConversationVoteEvent", null, "conversation_id"),
-    50L to OpcodeMeta(50L, "CONVERSATION_MEMBER_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ConversationMemberEvent", null, "conversation_id"),
+    50L to OpcodeMeta(50L, "CONVERSATION_MEMBER_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "ConversationMemberEvent", null, null),
     51L to OpcodeMeta(51L, "CONVERSATION_UPDATE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationUpdateRequest", "ConversationSummary", null),
     64L to OpcodeMeta(64L, "PRESENCE_SET", 1, DeliveryClass.Coalescable, AuthLevel.User, Direction.ClientToServer, false, "PresenceUpdate", "Acknowledged", null),
     65L to OpcodeMeta(65L, "PRESENCE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "PresenceEvent", null, "user_id"),
     80L to OpcodeMeta(80L, "ROOM_JOIN", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomJoinRequest", "RoomJoinResponse", null),
     81L to OpcodeMeta(81L, "ROOM_LEAVE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomLeaveRequest", "Acknowledged", null),
     82L to OpcodeMeta(82L, "ROOM_LIST", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomListRequest", "RoomListResponse", null),
-    83L to OpcodeMeta(83L, "ROOM_MEMBER_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "RoomMemberEvent", null, "room_id"),
+    83L to OpcodeMeta(83L, "ROOM_MEMBER_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "RoomMemberEvent", null, null),
     84L to OpcodeMeta(84L, "ROOM_STATE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "RoomStateEvent", null, "room_id"),
     85L to OpcodeMeta(85L, "ROOM_CREATE", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomCreate", "RoomJoinResponse", null),
     86L to OpcodeMeta(86L, "ROOM_ROSTER", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RosterReq", "RosterResponse", null),

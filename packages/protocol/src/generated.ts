@@ -6747,7 +6747,7 @@ export const OP = {
   MESSAGE_EDIT: 40,
   /** Sets or removes the caller's reaction to a message. */
   REACTION_SET: 41,
-  /** A reaction was added or removed. */
+  /** A reaction was added or removed. The same actor reacting to the same message is a latest-state stream — their newest frame replaces their older one — but two actors on one message are two streams, so the key carries both. */
   REACTION_EVENT: 42,
   /** Adds members to a group. Any current member may invite, within the group size cap. */
   CONVERSATION_INVITE: 43,
@@ -6763,7 +6763,7 @@ export const OP = {
   CONVERSATION_VOTE_KICK: 48,
   /** A group kick vote's running tally; the newest tally per conversation is the one that matters. */
   CONVERSATION_VOTE_EVENT: 49,
-  /** A group's membership moved. Clients rotate sender keys on every change. */
+  /** A group's membership moved, member by member. Clients rotate sender keys on every change, so an event is a discrete fact and not a latest-state stream: it is Critical — never dropped, and retained in the resume ring so a session that reconnects learns who joined and left while it was away. */
   CONVERSATION_MEMBER_EVENT: 50,
   /** A founder renames a group. */
   CONVERSATION_UPDATE: 51,
@@ -6772,6 +6772,7 @@ export const OP = {
   ROOM_JOIN: 80,
   ROOM_LEAVE: 81,
   ROOM_LIST: 82,
+  /** A room's membership moved, member by member. A join, a leave, a kick, a role change: each is a discrete fact the roster is rebuilt from, not a latest-state stream — Critical, never dropped, retained in the resume ring. */
   ROOM_MEMBER_EVENT: 83,
   ROOM_STATE_EVENT: 84,
   /** Creates a room; the caller becomes its Owner. */
@@ -6933,7 +6934,7 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   39: { code: 39, name: 'TYPING', cost: 1, cls: 'Coalescable', auth: 'User', direction: 'both', ackRequired: false, payload: 'TypingEvent', coalesceKey: 'conversation_id' },
   40: { code: 40, name: 'MESSAGE_EDIT', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MessageEdit', response: 'Acknowledged' },
   41: { code: 41, name: 'REACTION_SET', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ReactionSet', response: 'Acknowledged' },
-  42: { code: 42, name: 'REACTION_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ReactionEvent', coalesceKey: 'target_message_id' },
+  42: { code: 42, name: 'REACTION_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ReactionEvent', coalesceKey: 'target_message_id+actor_id' },
   43: { code: 43, name: 'CONVERSATION_INVITE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationInviteRequest', response: 'ConversationSummary' },
   44: { code: 44, name: 'CONVERSATION_LEAVE', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationLeaveRequest', response: 'Acknowledged' },
   45: { code: 45, name: 'CONVERSATION_ROSTER', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationRosterRequest', response: 'ConversationRosterResponse' },
@@ -6941,14 +6942,14 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   47: { code: 47, name: 'CONVERSATION_KICK', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationKickRequest', response: 'Acknowledged' },
   48: { code: 48, name: 'CONVERSATION_VOTE_KICK', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationVoteKickRequest', response: 'ConversationVoteKickResponse' },
   49: { code: 49, name: 'CONVERSATION_VOTE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ConversationVoteEvent', coalesceKey: 'conversation_id' },
-  50: { code: 50, name: 'CONVERSATION_MEMBER_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ConversationMemberEvent', coalesceKey: 'conversation_id' },
+  50: { code: 50, name: 'CONVERSATION_MEMBER_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ConversationMemberEvent' },
   51: { code: 51, name: 'CONVERSATION_UPDATE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationUpdateRequest', response: 'ConversationSummary' },
   64: { code: 64, name: 'PRESENCE_SET', cost: 1, cls: 'Coalescable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'PresenceUpdate', response: 'Acknowledged' },
   65: { code: 65, name: 'PRESENCE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'PresenceEvent', coalesceKey: 'user_id' },
   80: { code: 80, name: 'ROOM_JOIN', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomJoinRequest', response: 'RoomJoinResponse' },
   81: { code: 81, name: 'ROOM_LEAVE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomLeaveRequest', response: 'Acknowledged' },
   82: { code: 82, name: 'ROOM_LIST', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomListRequest', response: 'RoomListResponse' },
-  83: { code: 83, name: 'ROOM_MEMBER_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'RoomMemberEvent', coalesceKey: 'room_id' },
+  83: { code: 83, name: 'ROOM_MEMBER_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'RoomMemberEvent' },
   84: { code: 84, name: 'ROOM_STATE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'RoomStateEvent', coalesceKey: 'room_id' },
   85: { code: 85, name: 'ROOM_CREATE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomCreate', response: 'RoomJoinResponse' },
   86: { code: 86, name: 'ROOM_ROSTER', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RosterReq', response: 'RosterResponse' },

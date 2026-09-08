@@ -10229,7 +10229,7 @@ pub enum Opcode {
     MessageEdit = 40,
     /// Sets or removes the caller's reaction to a message.
     ReactionSet = 41,
-    /// A reaction was added or removed.
+    /// A reaction was added or removed. The same actor reacting to the same message is a latest-state stream — their newest frame replaces their older one — but two actors on one message are two streams, so the key carries both.
     ReactionEvent = 42,
     /// Adds members to a group. Any current member may invite, within the group size cap.
     ConversationInvite = 43,
@@ -10245,7 +10245,7 @@ pub enum Opcode {
     ConversationVoteKick = 48,
     /// A group kick vote's running tally; the newest tally per conversation is the one that matters.
     ConversationVoteEvent = 49,
-    /// A group's membership moved. Clients rotate sender keys on every change.
+    /// A group's membership moved, member by member. Clients rotate sender keys on every change, so an event is a discrete fact and not a latest-state stream: it is Critical — never dropped, and retained in the resume ring so a session that reconnects learns who joined and left while it was away.
     ConversationMemberEvent = 50,
     /// A founder renames a group.
     ConversationUpdate = 51,
@@ -10254,6 +10254,7 @@ pub enum Opcode {
     RoomJoin = 80,
     RoomLeave = 81,
     RoomList = 82,
+    /// A room's membership moved, member by member. A join, a leave, a kick, a role change: each is a discrete fact the roster is rebuilt from, not a latest-state stream — Critical, never dropped, retained in the resume ring.
     RoomMemberEvent = 83,
     RoomStateEvent = 84,
     /// Creates a room; the caller becomes its Owner.
@@ -10792,14 +10793,14 @@ impl Opcode {
             Self::ConversationKick => DeliveryClass::Critical,
             Self::ConversationVoteKick => DeliveryClass::Critical,
             Self::ConversationVoteEvent => DeliveryClass::Coalescable,
-            Self::ConversationMemberEvent => DeliveryClass::Coalescable,
+            Self::ConversationMemberEvent => DeliveryClass::Critical,
             Self::ConversationUpdate => DeliveryClass::Critical,
             Self::PresenceSet => DeliveryClass::Coalescable,
             Self::PresenceEvent => DeliveryClass::Coalescable,
             Self::RoomJoin => DeliveryClass::Critical,
             Self::RoomLeave => DeliveryClass::Critical,
             Self::RoomList => DeliveryClass::Critical,
-            Self::RoomMemberEvent => DeliveryClass::Coalescable,
+            Self::RoomMemberEvent => DeliveryClass::Critical,
             Self::RoomStateEvent => DeliveryClass::Coalescable,
             Self::RoomCreate => DeliveryClass::Critical,
             Self::RoomRoster => DeliveryClass::Critical,
