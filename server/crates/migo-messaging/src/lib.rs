@@ -52,9 +52,10 @@
 //! #     store: migo_store::SharedStore,
 //! #     cache: migo_cache::SharedCache,
 //! #     limiter: migo_ratelimit::SharedRateLimiter,
+//! #     gate: migo_messaging::SharedMessageGate,
 //! #     registry: &Registry,
 //! # ) -> migo_core::Result<()> {
-//! let messaging = migo_messaging::open(store, cache, limiter, registry);
+//! let messaging = migo_messaging::open(store, cache, limiter, gate, registry);
 //! # let _ = messaging;
 //! # Ok(())
 //! # }
@@ -76,4 +77,4 @@ pub use crate::model::{
     TYPING_TTL_MS,
 };
 pub use crate::service::{open, Messages, SharedMessaging};
-pub use crate::traits::Messaging;
+pub use crate::traits::{MessageGate, Messaging, OpenGate, RoomSpeak, SharedMessageGate};

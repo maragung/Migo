@@ -366,6 +366,16 @@ pub trait MessagingStore: Send + Sync {
     /// Reads one message.
     async fn message(&self, conversation_id: Id, message_id: Id) -> Result<Option<StoredMessage>>;
 
+    /// When this account last sent into the conversation, if ever.
+    ///
+    /// For slow mode, which is a decision about the *sender's own* pace and
+    /// nobody else's: one indexed probe on the hottest table, reading a single
+    /// row by (conversation, sender, newest seq), on a path a send has already
+    /// been charged for. A tombstone still counts — a deleted message was still
+    /// sent, and slow mode that a delete-button defeated would be no slow mode
+    /// at all.
+    async fn last_send_at(&self, conversation_id: Id, sender_id: Id) -> Result<Option<Timestamp>>;
+
     /// Newest-first history, for scrolling up.
     async fn history_before(
         &self,
@@ -453,6 +463,14 @@ pub trait RoomStore: Send + Sync {
 
     /// Reads a room by slug, case-insensitively.
     async fn room_by_slug(&self, slug: &str) -> Result<Option<Room>>;
+
+    /// Reads the room that owns a conversation, if any.
+    ///
+    /// For the send path, which knows a conversation id and must ask the room
+    /// aggregate about mutes and permissions before it will sequence a message.
+    /// Only a room's conversation resolves here; a direct or group conversation
+    /// is `None`, which the caller reads as "no room gate applies".
+    async fn room_by_conversation(&self, conversation_id: Id) -> Result<Option<Room>>;
 
     /// Updates mutable settings.
     async fn update_room(

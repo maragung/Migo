@@ -70,9 +70,11 @@
 
 #![allow(clippy::items_after_statements)]
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::body::Body;
+use axum::extract::ConnectInfo;
 use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::Router;
 use serde_json::{json, Value};
@@ -371,13 +373,10 @@ fn build_req(
     body: Option<&Value>,
 ) -> Request<Body> {
     let mut builder = Request::builder().method(method).uri(path);
-    if let Some(ip) = ip {
-        builder = builder.header("x-forwarded-for", ip);
-    }
     if let Some(token) = bearer {
         builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
-    match body {
+    let mut request = match body {
         Some(value) => builder
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
@@ -385,7 +384,15 @@ fn build_req(
             ))
             .expect("request builds"),
         None => builder.body(Body::empty()).expect("request builds"),
+    };
+    // The caller's address arrives on the request's connect info — the way
+    // `into_make_service_with_connect_info` attaches it — never as a header a
+    // caller could just type.
+    if let Some(ip) = ip {
+        let addr: SocketAddr = (ip.parse::<IpAddr>().expect("test ip parses"), 0).into();
+        request.extensions_mut().insert(ConnectInfo(addr));
     }
+    request
 }
 
 fn post_json(path: &str, ip: Option<&str>, body: &Value) -> Request<Body> {

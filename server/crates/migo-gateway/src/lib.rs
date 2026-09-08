@@ -360,6 +360,26 @@ impl Gateway {
             .broadcast(topic, &bytes, opcode.class(), None, now, None);
     }
 
+    /// Takes topics away from every live session an account holds, returning
+    /// how many subscriptions were removed.
+    ///
+    /// The revocation half of a membership loss: the domain has decided an
+    /// account no longer belongs to a room or a conversation, and asks the
+    /// transport to make the sockets agree — a subscription authorised while
+    /// the member was a member does not outlive the membership. A session that
+    /// wants the topic back must `SUBSCRIBE` again and be authorised again,
+    /// which a removed member cannot be. Publish the removal event *before*
+    /// calling this, so the removed member's last frame from the room is the
+    /// one that tells them they were removed.
+    ///
+    /// The count of removed subscriptions is returned for the tests that
+    /// assert on it; production callers ignore it, which is why it is not
+    /// `#[must_use]`.
+    #[allow(clippy::must_use_candidate)]
+    pub fn revoke_subscriptions(&self, account_id: Id, topics: &[migo_protocol::Topic]) -> usize {
+        self.inner.hub.revoke_topics(account_id, topics)
+    }
+
     /// Publishes a server-originated frame to one topic under a coalescing key.
     ///
     /// The same out-of-session path as [`broadcast_to_topic`](Gateway::broadcast_to_topic), for a

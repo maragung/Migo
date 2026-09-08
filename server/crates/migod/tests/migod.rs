@@ -886,7 +886,21 @@ async fn dispatcher() -> DispatcherHarness {
 
 /// A direct conversation between `a` and `b`, the simplest conversation the messaging service
 /// offers, and the one whose `is_participant` row the dispatcher asks.
+///
+/// The pair is made friends first: the messaging service asks the social gate who may open a
+/// direct conversation, and the default settings accept messages from friends — two strangers
+/// are exactly the case the gate exists to refuse.
 async fn direct_conversation(app: &migod::App, a: Id, b: Id) -> Id {
+    let social_a = migo_social::Caller::new(a, id(0xD1_0001), TrustTier::Established, now());
+    let social_b = migo_social::Caller::new(b, id(0xD1_0002), TrustTier::Established, now());
+    app.social
+        .request_friend(&social_a, b)
+        .await
+        .expect("a friend request between real accounts must be taken");
+    app.social
+        .respond_friend(&social_b, a, true)
+        .await
+        .expect("the friend request must be accepted");
     let caller = MessageCaller::new(a, id(0xD1_0001), TrustTier::Established, now());
     let summary = app
         .messaging
@@ -899,7 +913,7 @@ async fn direct_conversation(app: &migod::App, a: Id, b: Id) -> Id {
             },
         )
         .await
-        .expect("a direct conversation between two real accounts must build");
+        .expect("a direct conversation between two friends must build");
     summary.conversation_id
 }
 

@@ -1251,6 +1251,16 @@ impl MessagingStore for MemoryStore {
             .cloned())
     }
 
+    async fn last_send_at(&self, conversation_id: Id, sender_id: Id) -> Result<Option<Timestamp>> {
+        let s = self.state.read();
+        // Newest first, so the walk stops at the first hit: the answer is the
+        // sender's own latest word, not a scan of the conversation.
+        Ok(s.messages
+            .get(&conversation_id)
+            .and_then(|list| list.iter().rev().find(|m| m.sender_id == sender_id))
+            .map(|m| m.created_at))
+    }
+
     async fn history_before(
         &self,
         conversation_id: Id,
@@ -1629,6 +1639,14 @@ impl RoomStore for MemoryStore {
         Ok(s.room_slugs
             .get(&fold(slug))
             .and_then(|id| s.rooms.get(id))
+            .cloned())
+    }
+
+    async fn room_by_conversation(&self, conversation_id: Id) -> Result<Option<Room>> {
+        let s = self.state.read();
+        Ok(s.rooms
+            .values()
+            .find(|room| room.conversation_id == conversation_id)
             .cloned())
     }
 

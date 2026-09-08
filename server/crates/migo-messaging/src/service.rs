@@ -88,7 +88,7 @@ use crate::model::{
     Caller, DEFAULT_CONVERSATION_PAGE, MAX_EXPIRY_MS, MAX_GROUP_MEMBERS, MAX_TITLE_LEN,
     MEMBER_PREVIEW, TYPING_TTL_MS, VOTE_TTL_MS,
 };
-use crate::traits::Messaging;
+use crate::traits::{Messaging, RoomSpeak, SharedMessageGate};
 
 /// A shared, fully erased messaging service.
 pub type SharedMessaging = Arc<dyn Messaging>;
@@ -101,6 +101,12 @@ pub struct Messages<S: ?Sized = dyn Store, C: ?Sized = dyn Cache, L: ?Sized = dy
     store: Arc<S>,
     cache: Arc<C>,
     limiter: Arc<L>,
+    /// The send path's questions to the domains that own them: a peer's
+    /// message privacy and a room's moderation ladder. Erased and not generic,
+    /// because unlike the store there is exactly one implementation in any
+    /// process that matters and the tests want to swap it wholesale, not
+    /// specialise it.
+    gate: SharedMessageGate,
     /// The randomness source, behind a lock because [`Random`] is `Send` and not
     /// `Sync`.
     ///
@@ -152,12 +158,14 @@ pub fn open(
     store: SharedStore,
     cache: SharedCache,
     limiter: SharedRateLimiter,
+    gate: SharedMessageGate,
     registry: &Registry,
 ) -> SharedMessaging {
     Arc::new(Messages::new(
         store,
         cache,
         limiter,
+        gate,
         registry,
         Box::new(OsRandom) as Box<dyn Random>,
     ))
@@ -177,6 +185,7 @@ where
         store: Arc<S>,
         cache: Arc<C>,
         limiter: Arc<L>,
+        gate: SharedMessageGate,
         registry: &Registry,
         random: Box<dyn Random>,
     ) -> Self {
@@ -184,6 +193,7 @@ where
             store,
             cache,
             limiter,
+            gate,
             random: Mutex::new(random),
             meters: Meters::new(registry),
             votes: Mutex::new(HashMap::new()),
@@ -467,6 +477,23 @@ where
             self.meters.send(SendOutcome::Blocked);
             return Err(error);
         }
+        // The peer's own `who_can_message` setting, enforced on every send and
+        // not only at the create, for the same reason the block above is: a
+        // setting tightened after a conversation already exists must withhold
+        // the *next* message, or it would be a setting about the past. Asked
+        // after the block check, so a block keeps its own answer and privacy
+        // never has to speak for it.
+        if conversation.kind == ConversationKind::Direct {
+            if let Some(peer) = self.direct_peer(&conversation, caller.account_id).await? {
+                if !self.gate.can_message(caller, peer).await {
+                    self.meters.send(SendOutcome::Privacy);
+                    return Err(fault::error(
+                        codes::PRIVACY_RESTRICTED,
+                        "the recipient's settings do not accept messages from the caller",
+                    ));
+                }
+            }
+        }
         // A group's mute, enforced at the one moment it can be: the send. The
         // founder's write landed on the membership row and this is that row's
         // say. Only groups carry a mute, so the read never touches the send path
@@ -490,6 +517,54 @@ where
                     codes::MUTED,
                     "the caller is muted in this group",
                 ));
+            }
+        }
+        // A room's moderation ladder — membership, ban, mute, the `CHAT_SEND`
+        // bit, slow mode — resolved by the room aggregate through the gate,
+        // because the rows that carry it belong to a crate this one cannot
+        // read. The one fact the room cannot answer is when this caller last
+        // spoke, and that fact lives in this crate's own table, so slow mode is
+        // enforced here: the room supplies the interval, the send path supplies
+        // the timestamp, and neither domain reaches into the other.
+        if conversation.kind == ConversationKind::Room {
+            match self.gate.room_speak(request.conversation_id, caller).await {
+                RoomSpeak::Allowed { slow_mode_seconds } => {
+                    if slow_mode_seconds > 0 {
+                        let spoke_too_recently = self
+                            .store
+                            .last_send_at(request.conversation_id, caller.account_id)
+                            .await?
+                            .is_some_and(|last| {
+                                caller.now.as_millis().saturating_sub(last.as_millis())
+                                    < i64::from(slow_mode_seconds) * 1000
+                            });
+                        if spoke_too_recently {
+                            self.meters.send(SendOutcome::SlowMode);
+                            return Err(fault::error(
+                                codes::SLOW_MODE_ACTIVE,
+                                "the room's slow mode has not elapsed since the caller's last message",
+                            ));
+                        }
+                    }
+                }
+                RoomSpeak::NotMember => {
+                    self.meters.send(SendOutcome::Unknown);
+                    return Err(fault::error(
+                        codes::NOT_A_MEMBER,
+                        "the caller is not a member of the room that owns this conversation",
+                    ));
+                }
+                RoomSpeak::Muted => {
+                    self.meters.send(SendOutcome::Muted);
+                    return Err(fault::error(
+                        codes::MUTED,
+                        "the caller is muted in this room",
+                    ));
+                }
+                RoomSpeak::Denied => {
+                    self.meters.send(SendOutcome::Denied);
+                    return Err(fault::permission_denied("the room permission is not held"));
+                }
             }
         }
 
@@ -675,7 +750,12 @@ where
         self.charge(caller, Opcode::MessageEdit).await?;
         // Same posture as delete: membership is required, and the conversation is then
         // discarded — an archived conversation still lets the sender fix what they said.
-        self.conversation_for(caller, conversation_id).await?;
+        let conversation = self.conversation_for(caller, conversation_id).await?;
+        // Same posture as send, for the same reason: an edit is a send that
+        // happens to land on an old sequence, and a block that stopped new
+        // messages would be no block at all if it left the old ones rewritable.
+        self.refuse_if_blocked(&conversation, caller.account_id)
+            .await?;
 
         let existing = self
             .store
@@ -1035,6 +1115,20 @@ where
                     "one of the proposed members has blocked the caller, or is blocked by them",
                 ));
             }
+        }
+
+        // The peer's own `who_can_message` setting, asked at the door as well as
+        // on every send. The send path re-asks, so this check saves the round
+        // trip of creating a conversation the first message into it will refuse
+        // — and nothing more; the send remains the enforcement point for a
+        // setting that can change at any time.
+        if request.kind == ConversationKind::Direct
+            && !self.gate.can_message(caller, others[0]).await
+        {
+            return Err(fault::error(
+                codes::PRIVACY_RESTRICTED,
+                "the recipient's settings do not accept messages from the caller",
+            ));
         }
 
         let conversation_id = self.new_id(caller.now);

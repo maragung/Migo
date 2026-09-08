@@ -12,10 +12,13 @@
 //!   make a retry safe (section 118).
 //!
 //! The client address is read the way a service behind a CDN and an edge proxy actually receives
-//! it (section 121): the first hop of `X-Forwarded-For`, then `X-Real-IP`, and only then the
-//! transport peer address if the composition root attached one. A missing address is not an
-//! error — it means the network-scoped rate-limit buckets are skipped for this request rather
-//! than merged into one shared bucket.
+//! it (section 121): the transport peer address, plus the first hop of `X-Forwarded-For` (then
+//! `X-Real-IP`) — but only when that peer is one the operator named in `http.trusted_proxies`.
+//! A forwarded header is a claim anybody can type; believing it from a peer that was never
+//! asked to forward hands every network-scoped bucket (registration cost, stranger domains,
+//! captcha failures) to whoever cares to rotate a header. A missing address is not an error —
+//! it means the network-scoped rate-limit buckets are skipped for this request rather than
+//! merged into one shared bucket.
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -45,10 +48,11 @@ pub struct RequestFacts {
 }
 
 impl RequestFacts {
-    /// Reads the facts out of a request head.
-    fn from_parts(parts: &Parts) -> Self {
+    /// Reads the facts out of a request head, against the operator's proxy
+    /// list.
+    fn from_parts(parts: &Parts, trusted_proxies: &[IpAddr]) -> Self {
         Self {
-            ip: client_ip(parts),
+            ip: client_ip(parts, trusted_proxies),
             user_agent: header_value(parts, &header::USER_AGENT),
             request_id: header_named(parts, "x-request-id"),
         }
@@ -71,7 +75,11 @@ impl RequestFacts {
     }
 }
 
-impl<S: Send + Sync> FromRequestParts<S> for RequestFacts {
+impl<S> FromRequestParts<S> for RequestFacts
+where
+    ApiState: FromRef<S>,
+    S: Send + Sync,
+{
     type Rejection = std::convert::Infallible;
 
     // No `.await` here — the facts are read synchronously from the request head. Written as a
@@ -79,9 +87,10 @@ impl<S: Send + Sync> FromRequestParts<S> for RequestFacts {
     // `async fn` trait impl with no await, and this form is equivalent on every clippy version.
     fn from_request_parts(
         parts: &mut Parts,
-        _state: &S,
+        state: &S,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
-        std::future::ready(Ok(Self::from_parts(parts)))
+        let api = ApiState::from_ref(state);
+        std::future::ready(Ok(Self::from_parts(parts, api.trusted_proxies())))
     }
 }
 
@@ -112,7 +121,7 @@ where
         // Cheap first: signature and expiry only, no I/O. This also yields the device the token
         // was minted for, which the revocation-checked lookup needs.
         let claims = api.authenticator().verify_access(&token, now)?;
-        let facts = RequestFacts::from_parts(parts);
+        let facts = RequestFacts::from_parts(parts, api.trusted_proxies());
         let context = facts.context(now);
         let identity = api
             .authenticator()
@@ -165,8 +174,24 @@ fn bearer(parts: &Parts) -> Option<String> {
     }
 }
 
-/// The caller's address, read the way a proxied deployment presents it.
-fn client_ip(parts: &Parts) -> Option<IpAddr> {
+/// The caller's address: the transport peer, plus a forwarded header the peer
+/// is trusted to have written.
+///
+/// The proxy list is the whole decision. A direct client — the default
+/// deployment, and every deployment whose operator left the list empty — is
+/// answered with its own socket address no matter what its headers claim,
+/// because a header that names an address is a claim, and an untrusted claim
+/// is not evidence. A peer the operator named keeps the section 121 reading:
+/// first hop of `X-Forwarded-For`, then `X-Real-IP`, then the peer itself
+/// when the proxy forwarded nothing.
+fn client_ip(parts: &Parts, trusted_proxies: &[IpAddr]) -> Option<IpAddr> {
+    let peer = parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip());
+    if !peer.is_some_and(|ip| trusted_proxies.contains(&ip)) {
+        return peer;
+    }
     if let Some(forwarded) = header_named(parts, "x-forwarded-for") {
         if let Some(first) = forwarded.split(',').next() {
             if let Ok(ip) = first.trim().parse::<IpAddr>() {
@@ -179,8 +204,5 @@ fn client_ip(parts: &Parts) -> Option<IpAddr> {
             return Some(ip);
         }
     }
-    parts
-        .extensions
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|info| info.0.ip())
+    peer
 }

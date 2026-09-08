@@ -43,9 +43,9 @@ use migo_core::metrics::Registry;
 use migo_core::{Clock, Error, Id, ManualClock, SeededRandom, Shutdown, Timestamp};
 use migo_protocol::{
     codes, fault, from_frame, to_frame, BandwidthMode, CloseReason, Encode, Error as ErrorMessage,
-    Frame, FrameHeader, Hello, MessageEvent, MessageKind, NodeInfo, NotificationEvent, Opcode,
-    Ping, PresenceState, PresenceUpdate, ReconnectHint, SubscribeRequest, SubscribeResponse, Topic,
-    TopicKind, Welcome, PROTOCOL_VERSION,
+    Frame, FrameHeader, Hello, MemberChange, MessageEvent, MessageKind, NodeInfo,
+    NotificationEvent, Opcode, Ping, PresenceState, PresenceUpdate, ReconnectHint, RoomMemberEvent,
+    SubscribeRequest, SubscribeResponse, Topic, TopicKind, Welcome, PROTOCOL_VERSION,
 };
 use migo_ratelimit::{CacheRateLimiter, Policies, SharedRateLimiter, TrustTier};
 
@@ -86,6 +86,25 @@ fn device_of(account: u128) -> Id {
     id(account + DEVICE_OFFSET)
 }
 
+/// A fixed identity for an account, in the shape the fake directory issues, for the
+/// tests that seat a second account on the gateway.
+fn seat(account: u128, username: &str) -> Identity {
+    Identity {
+        claims: Claims {
+            account_id: id(account),
+            device_id: device_of(account),
+            session_id: id(account + SESSION_OFFSET),
+            capabilities: Capabilities::NONE,
+            issued_at: ts(NOW),
+            expires_at: ts(NOW + HOUR),
+            authenticated_at: ts(NOW),
+        },
+        username: username.to_string(),
+        tier: TrustTier::Established,
+        capabilities: Capabilities::NONE,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The fake authenticator: the seam the gateway calls to verify a token.
 //
@@ -105,6 +124,10 @@ struct FakeAuth {
     expires_at: Timestamp,
     /// When the human last proved presence.
     authenticated_at: Timestamp,
+    /// An optional second seat: a second token that verifies to a second identity,
+    /// for the tests that need two accounts on one gateway (revocation is about one
+    /// account losing a topic another keeps).
+    second: Option<(String, Identity)>,
     /// Every `(token, device)` pair the gateway asked us to verify, in order.
     calls: Mutex<Vec<(String, Id)>>,
 }
@@ -118,8 +141,15 @@ impl FakeAuth {
             session: id(ACCOUNT + SESSION_OFFSET),
             expires_at: ts(NOW + HOUR),
             authenticated_at: ts(NOW),
+            second: None,
             calls: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Adds a second honoured token, verifying to the given identity.
+    fn with_second_seat(mut self, token: &str, identity: Identity) -> Self {
+        self.second = Some((token.to_string(), identity));
+        self
     }
 
     /// The identity a successful verification yields, built from the fake's fixed facts.
@@ -163,6 +193,15 @@ impl Authenticator for FakeAuth {
             .push((access_token.to_string(), device_id));
         if access_token == self.token {
             Ok(self.identity())
+        } else if let Some((token, identity)) = &self.second {
+            if access_token == token {
+                Ok(identity.clone())
+            } else {
+                Err(fault::error(
+                    codes::UNAUTHENTICATED,
+                    "the access token did not verify against the fake directory",
+                ))
+            }
         } else {
             // An internal detail with no public face: the gateway must not disclose it, and the
             // "nothing leaks" tests check that it does not.
@@ -1279,6 +1318,144 @@ fn subscribe_response_in(frames: &[Frame]) -> SubscribeResponse {
         })
         .expect("a SUBSCRIBE request must be answered with a SUBSCRIBE response");
     from_frame::<SubscribeResponse>(frame).expect("the SUBSCRIBE response must decode")
+}
+
+/// Whether a pipe has been answered for its `SUBSCRIBE`.
+fn subscribe_answered(pipe: &Pipe) -> bool {
+    pipe.sent()
+        .iter()
+        .any(|frame| frame.header.opcode == Opcode::Subscribe.to_wire() && !frame.header.is_error())
+}
+
+/// The room-kick shape of revocation: the removed member's subscription does not
+/// outlive the removal.
+///
+/// Two accounts hold the same room topic; the room kicks one of them. The kick
+/// publishes its member event first — the removed member's last frame from the
+/// room is the one that tells them they were removed — and then revokes, so the
+/// next broadcast reaches the member who stayed and not the one who went. A
+/// subscription authorised while the member was a member is not a subscription
+/// for life.
+#[tokio::test(start_paused = true)]
+async fn a_revoked_account_stops_hearing_the_topic_it_lost() {
+    const KICKED: u128 = 0x00A2;
+    const SECOND_TOKEN: &str = "second-valid-token";
+
+    let mut builder = HarnessBuilder::new();
+    builder.dispatcher = Arc::new(GrantAll);
+    builder.auth = FakeAuth::new().with_second_seat(SECOND_TOKEN, seat(KICKED, "bob"));
+    let h = builder.build();
+
+    let room = Topic {
+        kind: TopicKind::Room,
+        id: id(0xCAFE),
+    };
+    let member = Pipe::new();
+    member.keep_open();
+    member.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+    member.client(
+        Opcode::Subscribe,
+        2,
+        &SubscribeRequest {
+            topics: vec![room.clone()],
+        },
+    );
+    let kicked_pipe = Pipe::new();
+    kicked_pipe.keep_open();
+    kicked_pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(SECOND_TOKEN, device_of(KICKED)),
+    );
+    kicked_pipe.client(
+        Opcode::Subscribe,
+        2,
+        &SubscribeRequest {
+            topics: vec![room.clone()],
+        },
+    );
+
+    let drive = async {
+        // Both subscriptions must be filed before the revocation is judged
+        // against them; ten-millisecond polls under paused time are cheap and
+        // the answers land on the first or second one.
+        for _ in 0..500 {
+            if subscribe_answered(&member) && subscribe_answered(&kicked_pipe) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            subscribe_answered(&member) && subscribe_answered(&kicked_pipe),
+            "both accounts must hold the room topic before the kick"
+        );
+
+        // The kick: publish the removal event, then take the topic away.
+        let removal = RoomMemberEvent {
+            room_id: room.id,
+            user_id: id(KICKED),
+            joined: false,
+            role: None,
+            member_count: Some(1),
+            change: Some(MemberChange::Kicked),
+        };
+        h.gateway
+            .broadcast_to_topic(&room, Opcode::RoomMemberEvent, &removal, ts(NOW));
+        let removed = h
+            .gateway
+            .revoke_subscriptions(id(KICKED), std::slice::from_ref(&room));
+        assert_eq!(
+            removed, 1,
+            "the kicked account held the room topic exactly once"
+        );
+
+        // The room goes on speaking; only the member who stayed can hear it.
+        let after = RoomMemberEvent {
+            room_id: room.id,
+            user_id: id(ACCOUNT),
+            joined: true,
+            role: None,
+            member_count: Some(2),
+            change: Some(MemberChange::Joined),
+        };
+        h.gateway
+            .broadcast_to_topic(&room, Opcode::RoomMemberEvent, &after, ts(NOW));
+        for _ in 0..500 {
+            if member
+                .sent()
+                .iter()
+                .any(|frame| frame.header.opcode == Opcode::RoomMemberEvent.to_wire())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        h.shutdown.trigger();
+    };
+    tokio::join!(h.serve(&member), h.serve(&kicked_pipe), drive);
+
+    let member_events = member
+        .sent()
+        .iter()
+        .filter(|frame| frame.header.opcode == Opcode::RoomMemberEvent.to_wire())
+        .count();
+    let kicked_events = kicked_pipe
+        .sent()
+        .iter()
+        .filter(|frame| frame.header.opcode == Opcode::RoomMemberEvent.to_wire())
+        .count();
+    assert_eq!(
+        member_events, 2,
+        "the member who stayed hears the removal and the arrival"
+    );
+    assert_eq!(
+        kicked_events, 1,
+        "the kicked member's last frame is the kick itself, and nothing after it"
+    );
 }
 
 #[tokio::test]

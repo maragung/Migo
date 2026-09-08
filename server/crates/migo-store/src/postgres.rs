@@ -2315,6 +2315,23 @@ impl MessagingStore for PostgresStore {
             .map(Into::into))
     }
 
+    async fn last_send_at(&self, conversation_id: Id, sender_id: Id) -> Result<Option<Timestamp>> {
+        // `select_only` and one column: the row that answers this is the newest
+        // message of the hottest table, and its envelope — up to 128 KiB of
+        // ciphertext this question never asked about — must not ride along.
+        Ok(entity::message::Entity::find()
+            .select_only()
+            .column(entity::message::Column::CreatedAt)
+            .filter(entity::message::Column::ConversationId.eq(uuid_of(conversation_id)))
+            .filter(entity::message::Column::SenderId.eq(uuid_of(sender_id)))
+            .order_by_desc(entity::message::Column::Seq)
+            .into_tuple::<(OffsetDateTime,)>()
+            .one(&self.db)
+            .await
+            .context("last_send_at")?
+            .map(|(at,)| instant_of(at)))
+    }
+
     async fn history_before(
         &self,
         conversation_id: Id,
@@ -2972,6 +2989,15 @@ impl RoomStore for PostgresStore {
             .one(&self.db)
             .await
             .context("room_by_slug")?
+            .map(Into::into))
+    }
+
+    async fn room_by_conversation(&self, conversation_id: Id) -> Result<Option<Room>> {
+        Ok(entity::room::Entity::find()
+            .filter(entity::room::Column::ConversationId.eq(uuid_of(conversation_id)))
+            .one(&self.db)
+            .await
+            .context("room_by_conversation")?
             .map(Into::into))
     }
 

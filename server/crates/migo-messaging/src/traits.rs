@@ -22,6 +22,8 @@
 //! acknowledged, and a delete of something already tombstoned all return `None`,
 //! and a caller cannot forget to check.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use migo_core::{Id, Result, Timestamp};
 use migo_protocol::{
@@ -308,4 +310,92 @@ pub trait Messaging: Send + Sync {
     /// so telling them all again would be a broadcast to say what they already
     /// knew, timed to arrive after they acted on it.
     async fn purge_expired(&self, now: Timestamp, limit: u16) -> Result<u64>;
+}
+
+/// The questions the messaging service must ask other domains, answered by the
+/// composition root.
+///
+/// Two send-path decisions belong to domains this crate cannot read by the
+/// layering rule: whether a *person's* own privacy settings admit a stranger
+/// to their direct messages (`migo-social`'s `who_can_message`), and whether a
+/// *room's* moderation surface — mute, permission bits, slow mode — withholds
+/// speech from one member. [`MessageGate`] is those questions, asked as
+/// questions, so the answers arrive pre-checked: the composition root wires
+/// them to the social graph and the room aggregate, and a test wires them to
+/// a closure. This crate deliberately cannot read either table itself, for the
+/// same reason `migo-calls` cannot read the block table: a send is the one
+/// request whose rules are about somebody else's settings.
+///
+/// Every question fails closed. An authority that cannot answer is an
+/// authority that has not said "allowed", and the send is refused.
+#[async_trait]
+pub trait MessageGate: Send + Sync {
+    /// Whether the peer's own `who_can_message` policy admits the caller to a
+    /// direct conversation.
+    ///
+    /// Asked with the whole [`Caller`] because the answer is about a person
+    /// making a request, not two bare ids. `false` refuses the send with
+    /// `PRIVACY_RESTRICTED`, indistinguishable from a peer that does not exist
+    /// — the caller was already told about blocks separately, so everything
+    /// this question withholds is privacy, and privacy does not explain
+    /// itself.
+    async fn can_message(&self, caller: &Caller, peer_id: Id) -> bool;
+
+    /// Whether the caller may speak in the room that owns this conversation.
+    ///
+    /// Membership, ban, mute, and the `CHAT_SEND` permission bit — the room
+    /// aggregate's own ladder, answered in the shape the send path needs: one
+    /// decision, not four round trips. Slow mode is deliberately *not* decided
+    /// here: the room supplies its interval on [`RoomSpeak::Allowed`] and the
+    /// send path — the one place that knows when this caller last spoke —
+    /// enforces it.
+    async fn room_speak(&self, conversation_id: Id, caller: &Caller) -> RoomSpeak;
+}
+
+/// The room aggregate's answer to "may this member speak".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomSpeak {
+    /// Yes. The `slow_mode_seconds` the room applies to this member is carried
+    /// back so the caller can enforce the interval on the send it is about to
+    /// allow — a moderator's zero is already resolved here, and the send path
+    /// needs one rule, not two.
+    Allowed {
+        /// Seconds this member must leave between their own messages. Zero for
+        /// a room without slow mode, and for a member the room exempts.
+        slow_mode_seconds: u32,
+    },
+    /// The room has no such member, or one who has left or been banned. A
+    /// conversation member row without a room member row is a state no client
+    /// can produce and the send must not paper over.
+    NotMember,
+    /// A live mute withholds speech. Reading stays allowed.
+    Muted,
+    /// A member in good standing without the `CHAT_SEND` bit.
+    Denied,
+}
+
+/// A shared, fully erased gate.
+pub type SharedMessageGate = Arc<dyn MessageGate>;
+
+/// The gate that says yes to everything.
+///
+/// The development default, and the one a unit test wants: every direct
+/// conversation is open, every room member may speak. It exists so a test can
+/// drive the sequencing and fanout machinery without standing up the graph and
+/// room tables behind it — never so a production node can skip the checks,
+/// which is why nothing in this crate constructs it for you.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OpenGate;
+
+#[async_trait]
+impl MessageGate for OpenGate {
+    async fn can_message(&self, _caller: &Caller, _peer_id: Id) -> bool {
+        true
+    }
+
+    async fn room_speak(&self, _conversation_id: Id, _caller: &Caller) -> RoomSpeak {
+        RoomSpeak::Allowed {
+            slow_mode_seconds: 0,
+        }
+    }
 }

@@ -224,6 +224,18 @@ pub struct HttpConfig {
     pub max_body_bytes: usize,
     /// Timeout applied to a whole REST request.
     pub request_timeout_ms: u64,
+    /// Peer addresses whose `X-Forwarded-For` and `X-Real-IP` headers are
+    /// believed.
+    ///
+    /// Empty — the default, and the posture of a deployment whose clients
+    /// connect directly — means the headers are ignored and the transport peer
+    /// address is the caller's address. This is the whole game: a forwarded
+    /// header is a claim anybody can type, and believing it without knowing
+    /// which peer is doing the forwarding hands the network-scoped buckets
+    /// (registration cost, stranger domains, captcha failures) to whoever
+    /// cares to rotate a header.
+    #[serde(deserialize_with = "comma_separated_strings")]
+    pub trusted_proxies: Vec<String>,
 }
 
 impl Default for HttpConfig {
@@ -234,6 +246,7 @@ impl Default for HttpConfig {
             cors_origins: vec!["http://localhost:19991".to_string()],
             max_body_bytes: 1024 * 1024,
             request_timeout_ms: 15_000,
+            trusted_proxies: Vec::new(),
         }
     }
 }

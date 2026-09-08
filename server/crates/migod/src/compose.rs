@@ -63,7 +63,7 @@ use migo_rooms::SharedRooms;
 use migo_social::SharedSocial;
 
 use crate::dispatch::AppDispatcher;
-use crate::ports::{EconomyRewards, FsStorage, StaffRoster, StoreCallGate};
+use crate::ports::{EconomyRewards, FsStorage, StaffRoster, StoreCallGate, StoreMessageGate};
 use crate::room_presence::GatewayHandle;
 
 /// The feature bits this node advertises to clients in the handshake and the `/v1/config`
@@ -322,26 +322,43 @@ impl App {
             concrete
         };
 
-        let messaging =
-            migo_messaging::open(store.clone(), cache.clone(), limiter.clone(), &registry);
-        let presence = migo_presence::open(
-            store.clone(),
-            cache.clone(),
-            limiter.clone(),
-            &registry,
-            migo_presence::PresenceConfig::default(),
-        );
+        // Rooms and the graph first: the messaging gate below answers from both,
+        // and the layering rule says they meet here, in the composition root,
+        // rather than by `migo-messaging` depending on either. The room config
+        // takes its home region from the node identity — one source, the same
+        // one every other region-scoped decision reads.
         let rooms = migo_rooms::open(
             store.clone(),
             limiter.clone(),
             &registry,
-            migo_rooms::RoomsConfig::default(),
+            migo_rooms::RoomsConfig::from_node(&config.node),
         );
         let social = migo_social::open(
             store.clone(),
             limiter.clone(),
             &registry,
             migo_social::SocialConfig::default(),
+        );
+        // Messaging: sequencing and fanout over the store, asking the gate
+        // (backed by the graph and the room aggregate above) before a direct
+        // send passes a peer's privacy or a room send passes a mute.
+        let messaging = migo_messaging::open(
+            store.clone(),
+            cache.clone(),
+            limiter.clone(),
+            Arc::new(StoreMessageGate::new(
+                store.clone(),
+                social.clone(),
+                rooms.clone(),
+            )),
+            &registry,
+        );
+        let presence = migo_presence::open(
+            store.clone(),
+            cache.clone(),
+            limiter.clone(),
+            &registry,
+            migo_presence::PresenceConfig::default(),
         );
 
         // Calls: the ring state machine over its own store, asking the gate (backed by the

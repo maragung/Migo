@@ -23,18 +23,18 @@ use migo_core::{Id, Random, Result, SeededRandom, Timestamp};
 use migo_messaging::fanout::Broadcast;
 use migo_messaging::model::{Caller, MAX_GROUP_MEMBERS};
 use migo_messaging::service::Messages;
-use migo_messaging::traits::Messaging;
+use migo_messaging::traits::{MessageGate, Messaging, RoomSpeak};
 use migo_protocol::{
     codes, ConversationCreateRequest, ConversationInviteRequest, ConversationKickRequest,
     ConversationKind, ConversationLeaveRequest, ConversationListRequest, ConversationMuteRequest,
     ConversationRosterRequest, ConversationSummary, ConversationUpdateRequest,
-    ConversationVoteKickRequest, MemberChange, MessageAccepted, MessageDelete, MessageKind,
-    MessageReceipt, MessageSend, Opcode, ReceiptKind, RelationshipKind, SyncRequest, SyncResponse,
-    SyncStatus, TypingEvent, TypingState,
+    ConversationVoteKickRequest, EncryptionMode, MemberChange, MessageAccepted, MessageDelete,
+    MessageKind, MessageReceipt, MessageSend, Opcode, ReceiptKind, RelationshipKind, RoomKind,
+    RoomRole, SyncRequest, SyncResponse, SyncStatus, TypingEvent, TypingState,
 };
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
-use migo_store::model::Relationship;
-use migo_store::traits::{MessagingStore, SocialStore};
+use migo_store::model::{NewRoom, Patch, Relationship, RoomMember};
+use migo_store::traits::{MessagingStore, RoomStore, SocialStore};
 use migo_store::MemoryStore;
 
 /// One second in milliseconds.
@@ -60,12 +60,48 @@ const BOB_LAPTOP: u128 = 102;
 
 type TestMessaging = Messages<MemoryStore, MemoryCache, CacheRateLimiter<MemoryCache>>;
 
+/// The gate as a test needs it: one peer whose message privacy excludes the
+/// caller, and one canned answer for every room.
+///
+/// The settings are mutable through the harness so a test can flip a policy
+/// mid-scene — the property under test is that a setting changed *after* a
+/// conversation exists still withholds the next message, and that needs a
+/// gate that can change its mind.
+struct TestGate {
+    refused_peer: std::sync::Mutex<Option<Id>>,
+    room: std::sync::Mutex<RoomSpeak>,
+}
+
+impl TestGate {
+    /// The open gate: every peer accepts messages, every room allows speech.
+    fn open() -> Self {
+        Self {
+            refused_peer: std::sync::Mutex::new(None),
+            room: std::sync::Mutex::new(RoomSpeak::Allowed {
+                slow_mode_seconds: 0,
+            }),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl MessageGate for TestGate {
+    async fn can_message(&self, _caller: &Caller, peer_id: Id) -> bool {
+        *self.refused_peer.lock().unwrap() != Some(peer_id)
+    }
+
+    async fn room_speak(&self, _conversation_id: Id, _caller: &Caller) -> RoomSpeak {
+        *self.room.lock().unwrap()
+    }
+}
+
 /// Everything a test needs, built the way `migod` builds it.
 struct Harness {
     messaging: TestMessaging,
     store: Arc<MemoryStore>,
     cache: Arc<MemoryCache>,
     registry: Registry,
+    gate: Arc<TestGate>,
 }
 
 impl Harness {
@@ -81,10 +117,13 @@ impl Harness {
             policies,
             &registry,
         ));
+        let gate = Arc::new(TestGate::open());
+        let erased: Arc<dyn MessageGate> = gate.clone();
         let messaging = Messages::new(
             Arc::clone(&store),
             Arc::clone(&cache),
             limiter,
+            erased,
             &registry,
             Box::new(SeededRandom::new(0x5eed_9001)) as Box<dyn Random>,
         );
@@ -93,7 +132,20 @@ impl Harness {
             store,
             cache,
             registry,
+            gate,
         }
+    }
+
+    /// Makes the gate treat `peer` as a stranger the peer's own settings
+    /// exclude — the `who_can_message = Friends` answer for a caller who is
+    /// not a friend.
+    fn refuse_messages_from(&self, peer: Id) {
+        *self.gate.refused_peer.lock().unwrap() = Some(peer);
+    }
+
+    /// Makes the gate answer every room question with `decision`.
+    fn room_speak(&self, decision: RoomSpeak) {
+        *self.gate.room.lock().unwrap() = decision;
     }
 
     /// The direct conversation between Alice and Bob, created by Alice.
@@ -126,6 +178,46 @@ impl Harness {
             .await
             .expect("a group of three is allowed")
             .conversation_id
+    }
+
+    /// A public room owned by Alice, its conversation seeded with Alice and
+    /// Bob as members. The store call is the one the room service makes, so
+    /// what the send path sees here is what it sees in production.
+    async fn room(&self, millis: i64) -> (Id, Id) {
+        let room = self
+            .store
+            .create_room(NewRoom {
+                room_id: id(500),
+                conversation_id: id(501),
+                slug: "audit".to_string(),
+                name: "The Audit Room".to_string(),
+                topic: None,
+                kind: RoomKind::Public,
+                owner_id: id(ALICE),
+                home_region: "local".to_string(),
+                max_members: 33,
+                encryption: EncryptionMode::Transport,
+                created_at: ts(millis),
+            })
+            .await
+            .expect("a room can be created");
+        self.store
+            .join_room(RoomMember {
+                room_id: room.room_id,
+                account_id: id(BOB),
+                role: RoomRole::Member,
+                permissions_grant: 0,
+                permissions_deny: 0,
+                joined_at: ts(millis),
+                left_at: None,
+                muted_until: None,
+                banned_until: None,
+                ban_reason: None,
+                invited_by: Some(id(ALICE)),
+            })
+            .await
+            .expect("Bob can join");
+        (room.room_id, room.conversation_id)
     }
 
     /// Sends one text message from Alice's phone.
@@ -2565,4 +2657,235 @@ async fn a_founder_renames_the_group_and_the_title_travels() {
         .find(|row| row.conversation_id == conversation)
         .expect("the group is in Bob's list");
     assert_eq!(row.title.as_deref(), Some("Weekend Plans"));
+}
+
+// --- the send-path gates -------------------------------------------------------------
+
+/// A peer's `who_can_message` setting withholds a stranger's send, even into a
+/// conversation that already exists.
+///
+/// The setting is flipped *after* the conversation is created, which is the
+/// case a create-time-only check would miss: privacy tightened later must
+/// still stop the next message.
+#[tokio::test]
+async fn direct_send_refused_by_peer_privacy() {
+    let harness = Harness::new();
+    let conversation = harness.direct(0).await;
+    harness.refuse_messages_from(id(BOB));
+
+    expect_code(
+        harness
+            .messaging
+            .send(
+                &caller(ALICE, ALICE_PHONE, MINUTE),
+                MessageSend {
+                    message_id: id(601),
+                    conversation_id: conversation,
+                    kind: MessageKind::Text,
+                    envelope: b"let me in".to_vec(),
+                    ..MessageSend::default()
+                },
+            )
+            .await,
+        codes::PRIVACY_RESTRICTED,
+    );
+
+    // Nothing was sequenced behind the refusal.
+    let page = harness
+        .messaging
+        .sync(
+            &caller(BOB, BOB_LAPTOP, 2 * MINUTE),
+            SyncRequest {
+                conversation_id: conversation,
+                ..SyncRequest::default()
+            },
+        )
+        .await
+        .expect("Bob can still read");
+    assert_eq!(page.status, SyncStatus::Ok, "no message landed");
+}
+
+/// The same setting refuses the create itself, so a stranger cannot even open
+/// the conversation the first send would be refused from.
+#[tokio::test]
+async fn direct_create_refused_by_peer_privacy() {
+    let harness = Harness::new();
+    harness.refuse_messages_from(id(BOB));
+
+    expect_code(
+        harness
+            .messaging
+            .create(
+                &caller(ALICE, ALICE_PHONE, 0),
+                ConversationCreateRequest {
+                    kind: ConversationKind::Direct,
+                    members: vec![id(BOB)],
+                    title: None,
+                },
+            )
+            .await,
+        codes::PRIVACY_RESTRICTED,
+    );
+}
+
+/// A room mute, written by the moderation surface the messaging service
+/// cannot see, withholds the muted member's send.
+///
+/// The mute is applied *after* the sender joined and after the conversation
+/// existed, because that is the order a real mute arrives in.
+#[tokio::test]
+async fn room_send_refused_by_mute() {
+    let harness = Harness::new();
+    let (room, conversation) = harness.room(0).await;
+    harness.room_speak(RoomSpeak::Muted);
+
+    expect_code(
+        harness
+            .messaging
+            .send(
+                &caller(ALICE, ALICE_PHONE, MINUTE),
+                MessageSend {
+                    message_id: id(602),
+                    conversation_id: conversation,
+                    kind: MessageKind::Text,
+                    envelope: b"can I talk".to_vec(),
+                    ..MessageSend::default()
+                },
+            )
+            .await,
+        codes::MUTED,
+    );
+    // The room is untouched by the refusal, and a read still works: a mute
+    // withholds speech, not citizenship.
+    assert!(harness
+        .store
+        .room(room)
+        .await
+        .expect("the room survives a refused send")
+        .is_some());
+}
+
+/// A room that withholds the `CHAT_SEND` bit from a member refuses their send
+/// with `PERMISSION_DENIED` and not a generic refusal.
+#[tokio::test]
+async fn room_send_refused_without_chat_send() {
+    let harness = Harness::new();
+    let (_, conversation) = harness.room(0).await;
+    harness.room_speak(RoomSpeak::Denied);
+
+    expect_code(
+        harness
+            .messaging
+            .send(
+                &caller(BOB, BOB_LAPTOP, MINUTE),
+                MessageSend {
+                    message_id: id(603),
+                    conversation_id: conversation,
+                    kind: MessageKind::Text,
+                    envelope: b"why not".to_vec(),
+                    ..MessageSend::default()
+                },
+            )
+            .await,
+        codes::PERMISSION_DENIED,
+    );
+}
+
+/// Slow mode is enforced on the sender's own pace: a second message inside
+/// the interval is refused, and one after it is sequenced.
+///
+/// The room supplies the interval; the send path supplies the timestamp of
+/// the caller's own last message. Both halves are exercised here, with the
+/// boundary on the outside of the window (elapsed > interval, not >=).
+#[tokio::test]
+async fn room_slow_mode_spaces_one_sender() {
+    let harness = Harness::new();
+    let (room, conversation) = harness.room(0).await;
+    harness
+        .store
+        .update_room(room, None, Patch::Keep, Some(30), None, ts(0))
+        .await
+        .expect("slow mode can be set");
+    harness.room_speak(RoomSpeak::Allowed {
+        slow_mode_seconds: 30,
+    });
+
+    harness.send(conversation, 610, b"first", MINUTE).await;
+
+    // One second later: inside the thirty-second window.
+    expect_code(
+        harness
+            .messaging
+            .send(
+                &caller(ALICE, ALICE_PHONE, MINUTE + SECOND),
+                MessageSend {
+                    message_id: id(611),
+                    conversation_id: conversation,
+                    kind: MessageKind::Text,
+                    envelope: b"too soon".to_vec(),
+                    ..MessageSend::default()
+                },
+            )
+            .await,
+        codes::SLOW_MODE_ACTIVE,
+    );
+
+    // Past the window: sequenced. Bob is not slow-moded — the interval is a
+    // property of the *sender's* pace, so his message lands mid-window.
+    let second = harness
+        .messaging
+        .send(
+            &caller(BOB, BOB_LAPTOP, MINUTE + 2 * SECOND),
+            MessageSend {
+                message_id: id(612),
+                conversation_id: conversation,
+                kind: MessageKind::Text,
+                envelope: b"bob is fine".to_vec(),
+                ..MessageSend::default()
+            },
+        )
+        .await
+        .expect("slow mode spaces one sender, not the room");
+    assert_eq!(second.0.seq, 2, "sequenced after the refusal, no gap");
+
+    let third = harness
+        .messaging
+        .send(
+            &caller(ALICE, ALICE_PHONE, MINUTE + 31 * SECOND),
+            MessageSend {
+                message_id: id(613),
+                conversation_id: conversation,
+                kind: MessageKind::Text,
+                envelope: b"now it is allowed".to_vec(),
+                ..MessageSend::default()
+            },
+        )
+        .await
+        .expect("the window has elapsed");
+    assert_eq!(third.0.seq, 3);
+}
+
+/// A blocked peer cannot rewrite their old messages either: an edit is a send
+/// that lands on an old sequence, and the block covers both.
+#[tokio::test]
+async fn edit_refused_when_blocked() {
+    let harness = Harness::new();
+    let conversation = harness.direct(0).await;
+    harness
+        .send(conversation, 620, b"as first written", MINUTE)
+        .await;
+    harness.block(ALICE, BOB, 2 * MINUTE).await;
+
+    expect_code(
+        harness
+            .messaging
+            .edit(
+                &caller(ALICE, ALICE_PHONE, 3 * MINUTE),
+                conversation,
+                id(620),
+                b"as rewritten".to_vec(),
+            )
+            .await,
+        codes::BLOCKED_BY_USER,
+    );
 }

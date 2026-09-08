@@ -43,6 +43,14 @@ pub struct Hub {
     sessions: DashMap<Id, SessionHandle>,
     /// Session id to the topics it holds, for cap enforcement and clean teardown.
     session_topics: DashMap<Id, HashSet<TopicKey>>,
+    /// Session id to the account that authenticated it, filed when the session
+    /// first acquires an identity. The reverse of `account_sessions`; kept as
+    /// its own map so teardown of a session can find the account row to leave.
+    session_accounts: DashMap<Id, Id>,
+    /// Account id to its live sessions, so a membership decision can reach every
+    /// connection a person holds — the transport's only answer to "which sockets
+    /// are theirs", which is a transport question and not a domain one.
+    account_sessions: DashMap<Id, HashSet<Id>>,
     max_subscriptions: usize,
     meters: Arc<Meters>,
 }
@@ -54,6 +62,8 @@ impl Hub {
             subscribers: DashMap::new(),
             sessions: DashMap::new(),
             session_topics: DashMap::new(),
+            session_accounts: DashMap::new(),
+            account_sessions: DashMap::new(),
             max_subscriptions,
             meters,
         }
@@ -66,9 +76,39 @@ impl Hub {
         self.session_topics.entry(id).or_default();
     }
 
+    /// Records which account a session authenticated as.
+    ///
+    /// Called the moment a session first holds an identity — inline in its
+    /// `HELLO` or on `AUTHENTICATE` — and idempotent for the account it already
+    /// had. A session that re-authenticates as a *different* account is not a
+    /// flow the handshake permits, but if it happens the binding follows the
+    /// new identity, so the old account's row cannot keep a session that no
+    /// longer speaks for it.
+    pub(crate) fn bind_account(&self, session_id: Id, account_id: Id) {
+        if let Some((_, previous)) = self.session_accounts.remove(&session_id) {
+            if let Some(mut sessions) = self.account_sessions.get_mut(&previous) {
+                sessions.remove(&session_id);
+            }
+        }
+        self.session_accounts.insert(session_id, account_id);
+        self.account_sessions
+            .entry(account_id)
+            .or_default()
+            .insert(session_id);
+    }
+
     /// Removes a session and all of its subscriptions.
     pub(crate) fn deregister(&self, session_id: Id) {
         self.sessions.remove(&session_id);
+        if let Some((_, account_id)) = self.session_accounts.remove(&session_id) {
+            if let Some(mut sessions) = self.account_sessions.get_mut(&account_id) {
+                sessions.remove(&session_id);
+                if sessions.is_empty() {
+                    drop(sessions);
+                    self.account_sessions.remove(&account_id);
+                }
+            }
+        }
         if let Some((_, topics)) = self.session_topics.remove(&session_id) {
             for key in &topics {
                 if let Some(mut set) = self.subscribers.get_mut(key) {
@@ -132,6 +172,52 @@ impl Hub {
         }
         drop(held);
         self.meters.subscriptions_removed(removed);
+    }
+
+    /// Takes topics away from every live session an account holds, and reports
+    /// how many subscriptions were removed.
+    ///
+    /// This is the revocation half of membership: the domain has already
+    /// decided the account no longer belongs — kicked, banned, or left — and
+    /// asks the transport to make the sockets match the roster. Subscription
+    /// without revocation would let a removed member keep every live frame on
+    /// a topic they can no longer ask for again, because authorisation is
+    /// checked when a `SUBSCRIBE` arrives and never after. Publishing the
+    /// removal event *first* and revoking *second* — the caller's ordering —
+    /// still tells the removed member what happened to them before the room
+    /// goes quiet.
+    ///
+    /// How many sessions the account holds is read once into a vector, and
+    /// each is then unsubscribed with no hub guard held, so a revocation can
+    /// never deadlock against a concurrent subscribe or teardown on the same
+    /// shard.
+    pub(crate) fn revoke_topics(&self, account_id: Id, topics: &[Topic]) -> usize {
+        let sessions: Vec<Id> = match self.account_sessions.get(&account_id) {
+            Some(set) => set.iter().copied().collect(),
+            None => return 0,
+        };
+        let mut removed = 0;
+        for session_id in sessions {
+            if let Some(mut held) = self.session_topics.get_mut(&session_id) {
+                for topic in topics {
+                    let key = TopicKey::of(topic);
+                    if held.remove(&key) {
+                        removed += 1;
+                        if let Some(mut set) = self.subscribers.get_mut(&key) {
+                            set.remove(&session_id);
+                            if set.is_empty() {
+                                drop(set);
+                                self.subscribers.remove(&key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if removed > 0 {
+            self.meters.subscriptions_removed(removed as u64);
+        }
+        removed
     }
 
     /// Fans one pre-encoded frame out to every subscriber of a topic.

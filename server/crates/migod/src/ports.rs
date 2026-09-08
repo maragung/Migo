@@ -20,6 +20,10 @@
 //!   social-graph questions the call service must ask before it lets one account ring
 //!   another. Calls cannot read those tables themselves — same layering rule, same answer:
 //!   the composition root decides, the domain asks.
+//! - [`StoreMessageGate`] implements [`migo_messaging::MessageGate`]: the peer-privacy and
+//!   room-moderation questions the messaging service must ask before one send is
+//!   sequenced. Messaging cannot read the social graph or the room aggregate — the same
+//!   layering rule once more, and the same answer.
 
 use std::collections::HashMap;
 use std::io::ErrorKind as IoErrorKind;
@@ -361,6 +365,105 @@ impl CallGate for StoreCallGate {
             .may_interact(&who, callee_id, migo_social::Interaction::Call)
             .await
             .is_ok()
+    }
+}
+
+// --- the messaging service's questions ----------------------------------------------
+//
+// `migo-messaging` refuses to read the social graph or the room aggregate: the first
+// owns "whose messages does this person accept", the second owns the moderation
+// ladder a room's conversation is sent into. It asks through the `MessageGate` port
+// instead, and this adapter answers from the graph and the room service the
+// composition root already opened.
+
+/// Answers the messaging service's gate questions from the process's own social
+/// graph and room aggregate.
+///
+/// The privacy question delegates to [`Graph::may_interact`] with
+/// [`Interaction::Message`], which is the same gate every other kind of contact
+/// already passes — a direct message must not be the one path that skips it. The
+/// room question delegates to [`Roomkeeper::authorize`] with the `CHAT_SEND` bit,
+/// which walks the room's own ladder (membership, ban, mute, permission) and
+/// returns its interval.
+///
+/// Both questions fail closed, exactly as the port's contract requires: a graph
+/// or room that cannot answer is one that has not said "allowed", and the send
+/// is refused rather than sequenced past the refusal.
+pub struct StoreMessageGate {
+    store: migo_store::SharedStore,
+    social: migo_social::SharedSocial,
+    rooms: migo_rooms::SharedRooms,
+}
+
+impl StoreMessageGate {
+    /// Wraps the store, social graph, and room service the composition root
+    /// already opened.
+    #[must_use]
+    pub fn new(
+        store: migo_store::SharedStore,
+        social: migo_social::SharedSocial,
+        rooms: migo_rooms::SharedRooms,
+    ) -> Self {
+        Self {
+            store,
+            social,
+            rooms,
+        }
+    }
+}
+
+#[async_trait]
+impl migo_messaging::MessageGate for StoreMessageGate {
+    async fn can_message(&self, caller: &migo_messaging::Caller, peer_id: Id) -> bool {
+        // The graph's own `Caller`, rebuilt from the one messaging proved, for
+        // the same reason `StoreCallGate::can_call` rebuilds it: the graph
+        // answers for exactly this request. The block case never reaches here
+        // — the send path has already refused it with its own code — so
+        // everything this `false` withholds is privacy, and `is_ok()` folds
+        // the graph's own refusal codes into the one answer the port allows.
+        let who =
+            migo_social::Caller::new(caller.account_id, caller.device_id, caller.tier, caller.now);
+        self.social
+            .may_interact(&who, peer_id, migo_social::Interaction::Message)
+            .await
+            .is_ok()
+    }
+
+    async fn room_speak(
+        &self,
+        conversation_id: Id,
+        caller: &migo_messaging::Caller,
+    ) -> migo_messaging::RoomSpeak {
+        use migo_protocol::codes;
+
+        // The conversation a room owns resolves to the room first: the ladder
+        // is asked about a room, and a conversation no room claims is one no
+        // member may speak into — a state no client can produce, and one the
+        // port's fail-closed contract answers before the ladder is reached.
+        let Ok(Some(room)) = self.store.room_by_conversation(conversation_id).await else {
+            return migo_messaging::RoomSpeak::NotMember;
+        };
+        // The room aggregate's own ladder, asked with the bit a message send
+        // needs. Its refusal codes are already the port's vocabulary.
+        let who =
+            migo_rooms::Caller::new(caller.account_id, caller.device_id, caller.tier, caller.now);
+        match self
+            .rooms
+            .authorize(&who, room.room_id, migo_rooms::permission::CHAT_SEND)
+            .await
+        {
+            Ok(authorized) => migo_messaging::RoomSpeak::Allowed {
+                slow_mode_seconds: authorized.slow_mode_seconds.max(0) as u32,
+            },
+            Err(error) => match error.code() {
+                codes::MUTED => migo_messaging::RoomSpeak::Muted,
+                codes::NOT_A_MEMBER | codes::BANNED => migo_messaging::RoomSpeak::NotMember,
+                // `PERMISSION_DENIED` and anything the ladder could not answer:
+                // a refusal the port cannot name is still a refusal, and speech
+                // is the side that fails closed.
+                _ => migo_messaging::RoomSpeak::Denied,
+            },
+        }
     }
 }
 

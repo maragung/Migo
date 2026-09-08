@@ -42,11 +42,12 @@
 
 #![allow(clippy::items_after_statements, clippy::too_many_lines)]
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::http::{header, HeaderMap, Method, Request, StatusCode};
+use axum::extract::ConnectInfo;
+use axum::http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::Router;
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -329,13 +330,10 @@ fn build_req(
     body: Option<&Value>,
 ) -> Request<Body> {
     let mut builder = Request::builder().method(method).uri(path);
-    if let Some(ip) = ip {
-        builder = builder.header("x-forwarded-for", ip);
-    }
     if let Some(token) = bearer {
         builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
     }
-    match body {
+    let mut request = match body {
         Some(value) => builder
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
@@ -343,7 +341,16 @@ fn build_req(
             ))
             .expect("request builds"),
         None => builder.body(Body::empty()).expect("request builds"),
+    };
+    // The caller's address arrives the way the transport delivers it: on the
+    // request's connect info, the way `into_make_service_with_connect_info`
+    // attaches it. A header would beg the question these tests exist to pin —
+    // which addresses a forwarded header is believed from.
+    if let Some(ip) = ip {
+        let addr: SocketAddr = (ip.parse::<IpAddr>().expect("test ip parses"), 0).into();
+        request.extensions_mut().insert(ConnectInfo(addr));
     }
+    request
 }
 
 fn get(path: &str) -> Request<Body> {
@@ -1054,6 +1061,90 @@ async fn one_networks_spending_leaves_another_networks_budget_intact() {
     assert_eq!(
         victim, pristine,
         "a stranger's spend must not touch another network"
+    );
+}
+
+#[tokio::test]
+async fn a_forwarded_header_from_an_untrusted_peer_is_not_believed() {
+    // The default surface trusts no proxy, so a caller's `X-Forwarded-For` is
+    // a claim and not evidence. The charge lands on the caller's own socket
+    // address, and rotating the header cannot reach a stranger's bucket.
+    let h = Harness::new();
+    let peer = "203.0.113.80";
+    let claims = ["198.51.100.77", "198.51.100.78", "198.51.100.79"];
+    let pristine = h.peek_ip(claims[0]).await;
+    let peer_before = h.peek_ip(peer).await;
+    for (n, claimed) in claims.iter().enumerate() {
+        // Space the registrations out so the per-address register limit does
+        // not refuse them; the bucket each claim should have touched is read
+        // before and after, so the refill does not blur the assertion.
+        if n > 0 {
+            h.advance(10_000);
+        }
+        let body = json!({
+            "username": format!("spoof{n}"),
+            "passphrase": GOOD_PASSPHRASE,
+            "device": { "display_name": "Integration Test" },
+        });
+        let mut request = post_json("/v1/auth/register", None, &body);
+        let addr: SocketAddr = (peer.parse::<IpAddr>().expect("peer parses"), 0).into();
+        request.extensions_mut().insert(ConnectInfo(addr));
+        request.headers_mut().insert(
+            "x-forwarded-for",
+            HeaderValue::from_str(claimed).expect("claim header builds"),
+        );
+        let resp = h.send(request).await;
+        assert_eq!(resp.status, StatusCode::CREATED, "body={}", resp.text());
+    }
+    let peer_after = h.peek_ip(peer).await;
+    assert!(
+        peer_after < peer_before,
+        "every spend must land on the caller's own address"
+    );
+    for claimed in claims {
+        let balance = h.peek_ip(claimed).await;
+        assert_eq!(
+            balance, pristine,
+            "an untrusted claim must not touch {claimed}'s bucket"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_forwarded_header_from_a_trusted_proxy_names_the_caller() {
+    // Behind a proxy the operator named, the header is the caller: the charge
+    // lands on the forwarded address and the proxy's own bucket stays whole,
+    // so a deployment behind one edge does not merge every caller into one.
+    let h = Harness::with(|config| {
+        config.http.trusted_proxies = vec!["198.51.100.4".to_string()];
+    });
+    let caller = "203.0.113.90";
+    let proxy = "198.51.100.4";
+    let caller_before = h.peek_ip(caller).await;
+    let proxy_before = h.peek_ip(proxy).await;
+    let body = json!({
+        "username": "via_proxy",
+        "passphrase": GOOD_PASSPHRASE,
+        "device": { "display_name": "Integration Test" },
+    });
+    let mut request = post_json("/v1/auth/register", None, &body);
+    let addr: SocketAddr = (proxy.parse::<IpAddr>().expect("proxy parses"), 0).into();
+    request.extensions_mut().insert(ConnectInfo(addr));
+    request.headers_mut().insert(
+        "x-forwarded-for",
+        HeaderValue::from_str(caller).expect("forwarded header builds"),
+    );
+    let resp = h.send(request).await;
+    assert_eq!(resp.status, StatusCode::CREATED, "body={}", resp.text());
+    let caller_after = h.peek_ip(caller).await;
+    let proxy_after = h.peek_ip(proxy).await;
+    assert!(
+        caller_after < caller_before,
+        "the spend must land on the forwarded address"
+    );
+    assert_eq!(
+        proxy_after, proxy_before,
+        "the proxy's own bucket must stay whole"
     );
 }
 

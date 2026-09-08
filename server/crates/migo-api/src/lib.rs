@@ -147,6 +147,9 @@ struct Inner {
     node: NodeInfo,
     features: u64,
     policy: Policy,
+    /// Peer addresses whose forwarded headers name the caller. Empty means
+    /// every request is answered with its own socket address.
+    trusted_proxies: Vec<std::net::IpAddr>,
     media_files: Option<SharedMediaFiles>,
 }
 
@@ -184,6 +187,22 @@ impl ApiState {
             captcha_enabled: config.captcha.enabled,
             media_max_upload_bytes: config.media.max_upload_bytes,
         };
+        // Parsed once, here, rather than per request: an entry that is not an
+        // address is a misconfiguration the operator hears about at startup
+        // and not a per-request parse of a header that never arrives.
+        let trusted_proxies = config
+            .http
+            .trusted_proxies
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .parse()
+                    .map_err(|_| {
+                        tracing::warn!(entry, "http.trusted_proxies entry is not an address");
+                    })
+                    .ok()
+            })
+            .collect();
         Self {
             inner: Arc::new(Inner {
                 authenticator: services.authenticator,
@@ -193,6 +212,7 @@ impl ApiState {
                 node: services.node,
                 features: services.features,
                 policy,
+                trusted_proxies,
                 media_files: services.media_files,
             }),
         }
@@ -211,6 +231,12 @@ impl ApiState {
     /// The rate limiter, for the edge charge on the bootstrap endpoints.
     pub(crate) fn rate_limiter(&self) -> &SharedRateLimiter {
         &self.inner.rate_limiter
+    }
+
+    /// The peers whose forwarded headers name the caller, for the address
+    /// extractors.
+    pub(crate) fn trusted_proxies(&self) -> &[std::net::IpAddr] {
+        &self.inner.trusted_proxies
     }
 
     /// The metric registry, for `/metrics`.

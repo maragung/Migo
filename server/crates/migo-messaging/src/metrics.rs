@@ -48,9 +48,20 @@ pub(crate) enum SendOutcome {
     Blocked,
     /// The conversation is archived and takes no more messages.
     Archived,
-    /// The caller is muted in this group. Speech, not citizenship: they keep
-    /// their vote, and the moment the mute expires passes on its own.
+    /// The caller is muted in this group or room. Speech, not citizenship:
+    /// they keep their vote, and the moment the mute expires passes on its
+    /// own.
     Muted,
+    /// The peer's own `who_can_message` setting excludes the caller. One
+    /// outcome for a refusal the caller cannot distinguish from a peer that
+    /// does not exist, because the code it fails with is the same
+    /// privacy-preserving shape.
+    Privacy,
+    /// A room withholds the `CHAT_SEND` bit from this member.
+    Denied,
+    /// A room's slow mode has not elapsed since the caller's own last
+    /// message.
+    SlowMode,
     /// Refused on shape before anything was read.
     Invalid,
     /// Refused by the rate limiter.
@@ -58,7 +69,7 @@ pub(crate) enum SendOutcome {
 }
 
 impl SendOutcome {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 12] = [
         Self::Accepted,
         Self::Duplicate,
         Self::Mismatch,
@@ -66,6 +77,9 @@ impl SendOutcome {
         Self::Blocked,
         Self::Archived,
         Self::Muted,
+        Self::Privacy,
+        Self::Denied,
+        Self::SlowMode,
         Self::Invalid,
         Self::RateLimited,
     ];
@@ -79,6 +93,9 @@ impl SendOutcome {
             Self::Blocked => "blocked",
             Self::Archived => "archived",
             Self::Muted => "muted",
+            Self::Privacy => "privacy_restricted",
+            Self::Denied => "permission_denied",
+            Self::SlowMode => "slow_mode",
             Self::Invalid => "invalid",
             Self::RateLimited => "rate_limited",
         }
@@ -93,8 +110,11 @@ impl SendOutcome {
             Self::Blocked => 4,
             Self::Archived => 5,
             Self::Muted => 6,
-            Self::Invalid => 7,
-            Self::RateLimited => 8,
+            Self::Privacy => 7,
+            Self::Denied => 8,
+            Self::SlowMode => 9,
+            Self::Invalid => 10,
+            Self::RateLimited => 11,
         }
     }
 }

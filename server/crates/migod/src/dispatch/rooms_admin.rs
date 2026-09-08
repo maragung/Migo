@@ -152,13 +152,14 @@ pub(crate) async fn handle_roster(
 /// The wire's `role` number is decoded with the protocol's own `from_wire`; a number
 /// this build does not know arrives as `RoomRole::Unknown` and the service refuses it,
 /// as it refuses a grant of `Owner`, by its own rules. `Some(fanout)` reaches everyone
-/// else on the room topic through [`publish_rooms`](super::publish_rooms), which
-/// excludes the actor's own socket: the actor has the acknowledgement, and a member
+/// else on the room topic through [`publish_rooms`](super::AppDispatcher::publish_rooms),
+/// which excludes the actor's own socket: the actor has the acknowledgement, and a member
 /// event the service can return as `None` — the role already held — sends nothing.
 pub(crate) async fn handle_role_set(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedRooms,
+    dispatcher: &super::AppDispatcher,
 ) -> Result<(), Error> {
     let caller = RoomCaller::new(
         ctx.identity().account_id(),
@@ -177,7 +178,7 @@ pub(crate) async fn handle_role_set(
         .await?;
     ctx.reply(&Acknowledged { ok: true })?;
     if let Some(fanout) = fanout {
-        super::publish_rooms(ctx, fanout)?;
+        dispatcher.publish_rooms(ctx, fanout).await?;
     }
     Ok(())
 }
@@ -199,6 +200,7 @@ pub(crate) async fn handle_room_update(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedRooms,
+    dispatcher: &super::AppDispatcher,
 ) -> Result<(), Error> {
     let caller = RoomCaller::new(
         ctx.identity().account_id(),
@@ -218,7 +220,7 @@ pub(crate) async fn handle_room_update(
     let (_summary, fanout) = svc.update(&caller, request.room_id, settings).await?;
     ctx.reply(&Acknowledged { ok: true })?;
     if let Some(fanout) = fanout {
-        super::publish_rooms(ctx, fanout)?;
+        dispatcher.publish_rooms(ctx, fanout).await?;
     }
     Ok(())
 }
@@ -262,11 +264,15 @@ pub(crate) async fn handle_room_archive(
 ///
 /// One action can reach many rooms: a global admin's fourth kick of one account sweeps
 /// them out of every room they still hold, and each emptied room hears its own member
-/// event. All of it publishes through [`publish_rooms`](super::publish_rooms).
+/// event. All of it publishes through
+/// [`publish_rooms`](super::AppDispatcher::publish_rooms), which also takes every
+/// emptied room's topics away from the removed account's live sockets — a kick that
+/// left the subscriptions standing would be a door that closes but keeps whispering.
 pub(crate) async fn handle_sanction(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedRooms,
+    dispatcher: &super::AppDispatcher,
 ) -> Result<(), Error> {
     let caller = RoomCaller::new(
         ctx.identity().account_id(),
@@ -304,7 +310,7 @@ pub(crate) async fn handle_sanction(
         .await?;
     ctx.reply(&Acknowledged { ok: true })?;
     for fanout in fanouts {
-        super::publish_rooms(ctx, fanout)?;
+        dispatcher.publish_rooms(ctx, fanout).await?;
     }
     Ok(())
 }
@@ -319,6 +325,7 @@ pub(crate) async fn handle_vote_kick(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedRooms,
+    dispatcher: &super::AppDispatcher,
 ) -> Result<(), Error> {
     let caller = RoomCaller::new(
         ctx.identity().account_id(),
@@ -332,7 +339,7 @@ pub(crate) async fn handle_vote_kick(
         .await?;
     ctx.reply(&response)?;
     for fanout in fanouts {
-        super::publish_rooms(ctx, fanout)?;
+        dispatcher.publish_rooms(ctx, fanout).await?;
     }
     Ok(())
 }

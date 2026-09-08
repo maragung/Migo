@@ -79,12 +79,13 @@ use migo_presence::{Caller as PresenceCaller, SharedPresence};
 use migo_protocol::{
     fault, from_frame, Acknowledged, BandwidthMode, ConversationCreateRequest,
     ConversationInviteRequest, ConversationKickRequest, ConversationLeaveRequest,
-    ConversationListRequest, ConversationMuteRequest, ConversationRosterRequest,
-    ConversationUpdateRequest, ConversationVoteKickRequest, Encode, Frame, GameAction, GameEvent,
-    KeyBundle as WireBundle, KeyBundleRequest, KeyBundleResponse, KeyPublish, KeyPublishResult,
-    MemberChange, MessageDelete, MessageEdit, MessageKind, MessageReceipt, MessageSend, Opcode,
-    PresenceUpdate, ProfileRequest, ProfileResponse, ReactionSet, RoomJoinRequest,
-    RoomLeaveRequest, RoomListRequest, SyncRequest, Topic, TopicKind, TypingEvent, UserProfile,
+    ConversationListRequest, ConversationMemberEvent, ConversationMuteRequest,
+    ConversationRosterRequest, ConversationUpdateRequest, ConversationVoteKickRequest, Encode,
+    Frame, GameAction, GameEvent, KeyBundle as WireBundle, KeyBundleRequest, KeyBundleResponse,
+    KeyPublish, KeyPublishResult, MemberChange, MessageDelete, MessageEdit, MessageKind,
+    MessageReceipt, MessageSend, Opcode, PresenceUpdate, ProfileRequest, ProfileResponse,
+    ReactionSet, RoomJoinRequest, RoomLeaveRequest, RoomListRequest, SyncRequest, Topic, TopicKind,
+    TypingEvent, UserProfile,
 };
 use migo_rooms::{
     Broadcast as RoomBroadcast, Caller as RoomCaller, Fanout as RoomFanout, SharedRooms,
@@ -235,6 +236,106 @@ impl AppDispatcher {
             now,
         );
     }
+
+    /// Publishes a rooms [`Fanout`](RoomFanout) and then, when it removed a
+    /// member, takes the room away from the removed account's live sockets.
+    ///
+    /// Publish first, revoke second: the removed member's last frame from the
+    /// room must be the one that tells them they were removed, and every frame
+    /// after it is the room's business without them. Both of the room's topics
+    /// go — the `Room` topic that carries roster and state events, and the
+    /// `Conversation` topic its messages fan out on — because a member who
+    /// lost the first but kept the second would still hear every word said in
+    /// a room they can no longer be in. Getting the topic back requires a
+    /// `SUBSCRIBE`, and authorisation asks the membership question again.
+    async fn publish_rooms(
+        &self,
+        context: &ClientContext<'_>,
+        fanout: RoomFanout,
+    ) -> Result<(), Error> {
+        // Kicked and Banned are removals done to the member, Left one they did
+        // themselves; every other change keeps the member and their topics.
+        let removed = match &fanout.event {
+            RoomBroadcast::Member(event)
+                if matches!(
+                    event.change,
+                    Some(MemberChange::Kicked | MemberChange::Banned | MemberChange::Left)
+                ) =>
+            {
+                Some(event.user_id)
+            }
+            _ => None,
+        };
+        let room_id = fanout.room_id;
+        publish_room_fanout(context, fanout)?;
+        if let Some(account_id) = removed {
+            self.revoke_room_audience(room_id, account_id).await;
+        }
+        Ok(())
+    }
+
+    /// Publishes a messaging [`Fanout`](MessageFanout) and then, when it
+    /// removed a member from a group conversation, takes the conversation away
+    /// from that account's live sockets.
+    ///
+    /// The room path revokes two topics; this one has only the conversation
+    /// topic to lose. A `Left` reaches the leaver's own other devices too —
+    /// the event is published to everyone but the acting socket — so a parked
+    /// tab that never unsubscribes is caught the same way a kicked member is.
+    async fn publish_messaging(
+        &self,
+        context: &ClientContext<'_>,
+        user: Id,
+        fanout: MessageFanout,
+    ) -> Result<(), Error> {
+        let removed = match &fanout.event {
+            MessageBroadcast::Member(
+                event @ ConversationMemberEvent {
+                    change: MemberChange::Kicked | MemberChange::Left,
+                    ..
+                },
+            ) => Some(event.user_id),
+            _ => None,
+        };
+        let conversation_id = fanout.conversation_id;
+        publish_message_fanout(context, user, fanout)?;
+        if let Some(account_id) = removed {
+            if let Some(gateway) = self.gateway.get() {
+                gateway.revoke_subscriptions(
+                    account_id,
+                    &[Topic {
+                        kind: TopicKind::Conversation,
+                        id: conversation_id,
+                    }],
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Takes a room's topics away from one account's live sessions.
+    ///
+    /// The conversation id is read from the room row rather than carried on
+    /// the wire event, because the fanout names the room and the row is the
+    /// one place that knows which conversation speaks for it. A missing row —
+    /// archived mid-flight, or a store fault — still revokes the room topic;
+    /// the message topic is the bonus, not the floor.
+    async fn revoke_room_audience(&self, room_id: Id, account_id: Id) {
+        let Some(gateway) = self.gateway.get() else {
+            return;
+        };
+        let mut topics = vec![Topic {
+            kind: TopicKind::Room,
+            id: room_id,
+        }];
+        if let Ok(Some(room)) = self.store.room(room_id).await {
+            topics.push(Topic {
+                kind: TopicKind::Conversation,
+                id: room.conversation_id,
+            });
+        }
+        gateway.revoke_subscriptions(account_id, &topics);
+    }
 }
 
 #[async_trait]
@@ -256,7 +357,8 @@ impl Dispatcher for AppDispatcher {
                 let (accepted, fanout) = self.messaging.send(&caller, request).await?;
                 context.reply(&accepted)?;
                 if let Some(fanout) = fanout {
-                    publish_messaging(context, caller.account_id, fanout)?;
+                    self.publish_messaging(context, caller.account_id, fanout)
+                        .await?;
                 }
                 Ok(())
             }
@@ -282,7 +384,8 @@ impl Dispatcher for AppDispatcher {
                     .await?;
                 context.reply(&accepted)?;
                 if let Some(fanout) = fanout {
-                    publish_messaging(context, caller.account_id, fanout)?;
+                    self.publish_messaging(context, caller.account_id, fanout)
+                        .await?;
                 }
                 Ok(())
             }
@@ -309,7 +412,8 @@ impl Dispatcher for AppDispatcher {
                 let (_accepted, fanout) = self.messaging.send(&caller, send).await?;
                 context.reply(&Acknowledged { ok: true })?;
                 if let Some(fanout) = fanout {
-                    publish_messaging(context, caller.account_id, fanout)?;
+                    self.publish_messaging(context, caller.account_id, fanout)
+                        .await?;
                 }
                 Ok(())
             }
@@ -322,7 +426,8 @@ impl Dispatcher for AppDispatcher {
                 );
                 let request: MessageReceipt = from_frame(frame).map_err(fault::from_wire)?;
                 if let Some(fanout) = self.messaging.receipt(&caller, request).await? {
-                    publish_messaging(context, caller.account_id, fanout)?;
+                    self.publish_messaging(context, caller.account_id, fanout)
+                        .await?;
                 }
                 Ok(())
             }
@@ -337,7 +442,8 @@ impl Dispatcher for AppDispatcher {
                 let (accepted, fanout) = self.messaging.delete(&caller, request).await?;
                 context.reply(&accepted)?;
                 if let Some(fanout) = fanout {
-                    publish_messaging(context, caller.account_id, fanout)?;
+                    self.publish_messaging(context, caller.account_id, fanout)
+                        .await?;
                 }
                 Ok(())
             }
@@ -385,7 +491,8 @@ impl Dispatcher for AppDispatcher {
                 );
                 let request: TypingEvent = from_frame(frame).map_err(fault::from_wire)?;
                 if let Some(fanout) = self.messaging.typing(&caller, request).await? {
-                    publish_messaging(context, caller.account_id, fanout)?;
+                    self.publish_messaging(context, caller.account_id, fanout)
+                        .await?;
                 }
                 Ok(())
             }
@@ -404,7 +511,8 @@ impl Dispatcher for AppDispatcher {
                 let (summary, fanouts) = self.messaging.invite(&caller, request).await?;
                 context.reply(&summary)?;
                 for fanout in fanouts {
-                    publish_messaging(context, caller.account_id, fanout)?;
+                    self.publish_messaging(context, caller.account_id, fanout)
+                        .await?;
                 }
                 Ok(())
             }
@@ -420,7 +528,8 @@ impl Dispatcher for AppDispatcher {
                 let fanouts = self.messaging.leave(&caller, request).await?;
                 context.reply(&Acknowledged { ok: true })?;
                 for fanout in fanouts {
-                    publish_messaging(context, caller.account_id, fanout)?;
+                    self.publish_messaging(context, caller.account_id, fanout)
+                        .await?;
                 }
                 Ok(())
             }
@@ -462,7 +571,8 @@ impl Dispatcher for AppDispatcher {
                 let fanouts = self.messaging.kick(&caller, request).await?;
                 context.reply(&Acknowledged { ok: true })?;
                 for fanout in fanouts {
-                    publish_messaging(context, caller.account_id, fanout)?;
+                    self.publish_messaging(context, caller.account_id, fanout)
+                        .await?;
                 }
                 Ok(())
             }
@@ -480,7 +590,8 @@ impl Dispatcher for AppDispatcher {
                 let (response, fanouts) = self.messaging.vote_kick(&caller, request).await?;
                 context.reply(&response)?;
                 for fanout in fanouts {
-                    publish_messaging(context, caller.account_id, fanout)?;
+                    self.publish_messaging(context, caller.account_id, fanout)
+                        .await?;
                 }
                 Ok(())
             }
@@ -496,7 +607,8 @@ impl Dispatcher for AppDispatcher {
                 let (summary, fanout) = self.messaging.update(&caller, request).await?;
                 context.reply(&summary)?;
                 if let Some(fanout) = fanout {
-                    publish_messaging(context, caller.account_id, fanout)?;
+                    self.publish_messaging(context, caller.account_id, fanout)
+                        .await?;
                 }
                 Ok(())
             }
@@ -554,7 +666,7 @@ impl Dispatcher for AppDispatcher {
                     self.room_presence.online_count(response.room.room_id).await;
                 context.reply(&response)?;
                 if let Some(fanout) = fanout {
-                    publish_rooms(context, fanout)?;
+                    self.publish_rooms(context, fanout).await?;
                 }
                 Ok(())
             }
@@ -573,7 +685,7 @@ impl Dispatcher for AppDispatcher {
                 // the fanout left those paths hanging until the client's request timer fired.
                 context.reply(&Acknowledged { ok: true })?;
                 if let Some(fanout) = fanout {
-                    publish_rooms(context, fanout)?;
+                    self.publish_rooms(context, fanout).await?;
                 }
                 Ok(())
             }
@@ -599,16 +711,20 @@ impl Dispatcher for AppDispatcher {
                 rooms_admin::handle_room_create(context, frame, &self.rooms).await
             }
             Opcode::RoomRoster => rooms_admin::handle_roster(context, frame, &self.rooms).await,
-            Opcode::RoomRoleSet => rooms_admin::handle_role_set(context, frame, &self.rooms).await,
+            Opcode::RoomRoleSet => {
+                rooms_admin::handle_role_set(context, frame, &self.rooms, self).await
+            }
             Opcode::RoomUpdate => {
-                rooms_admin::handle_room_update(context, frame, &self.rooms).await
+                rooms_admin::handle_room_update(context, frame, &self.rooms, self).await
             }
             Opcode::RoomArchive => {
                 rooms_admin::handle_room_archive(context, frame, &self.rooms).await
             }
-            Opcode::RoomSanction => rooms_admin::handle_sanction(context, frame, &self.rooms).await,
+            Opcode::RoomSanction => {
+                rooms_admin::handle_sanction(context, frame, &self.rooms, self).await
+            }
             Opcode::RoomVoteKick => {
-                rooms_admin::handle_vote_kick(context, frame, &self.rooms).await
+                rooms_admin::handle_vote_kick(context, frame, &self.rooms, self).await
             }
 
             // --- key material ---
@@ -993,7 +1109,7 @@ impl AppDispatcher {
 /// see. A typing frame is Coalescable, keyed by conversation and user (section 154), so a burst of
 /// start/stop marks from one author collapses to the latest for a consumer whose queue is backed
 /// up, and two different authors typing in the same conversation never collapse into one.
-fn publish_messaging(
+fn publish_message_fanout(
     context: &ClientContext<'_>,
     user: Id,
     fanout: MessageFanout,
@@ -1123,15 +1239,20 @@ fn publish_event<T: Encode>(
     }
 }
 
-/// Publishes a rooms [`Fanout`](RoomFanout) to its room topic, excluding the actor.
+/// Encodes and publishes one rooms [`Fanout`](RoomFanout) to its room topic, excluding the actor.
 ///
 /// A membership event (join, leave, role change) is not coalesced: collapsing two joins would lose
 /// one arrival. A state event (a counter or a setting moving) is Coalescable, keyed by room, so
 /// three counter updates about one room collapse to the last one for a backed-up consumer.
 ///
-/// Shared with the rooms dispatch module, whose role and settings handlers fan out through the
-/// same match so a member event and a state event keep one encoder and one exclusion rule.
-pub(crate) fn publish_rooms(context: &ClientContext<'_>, fanout: RoomFanout) -> Result<(), Error> {
+/// This is the delivery half only. Callers on the request path go through
+/// [`AppDispatcher::publish_rooms`], which also takes the room's topics away
+/// from a member the event removed; this bare helper is for fanouts that
+/// change nobody's standing.
+pub(crate) fn publish_room_fanout(
+    context: &ClientContext<'_>,
+    fanout: RoomFanout,
+) -> Result<(), Error> {
     let topic = Topic {
         kind: TopicKind::Room,
         id: fanout.room_id,

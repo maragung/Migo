@@ -215,6 +215,9 @@ impl<T: Transport> Connection<'_, T> {
         let mut lifecycle_started = false;
         if let Some(identity) = identity.as_ref() {
             self.gateway
+                .hub
+                .bind_account(session_id, identity.account_id());
+            self.gateway
                 .dispatcher
                 .session_started(identity, hello.bandwidth_mode, now)
                 .await;
@@ -768,8 +771,15 @@ impl<T: Transport> Connection<'_, T> {
                     capabilities: identity.capabilities.bits(),
                     profile: None,
                 };
+                let account_id = identity.account_id();
                 established.identity = Some(identity);
                 established.phase = Phase::Ready;
+                // File the session under its account the moment it has one, so a later
+                // membership decision can reach this socket by person and not only by
+                // session id (see `Hub::revoke_topics`).
+                self.gateway
+                    .hub
+                    .bind_account(established.session_id, account_id);
                 push_message(
                     outbound,
                     &self.gateway.meters,
