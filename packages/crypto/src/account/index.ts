@@ -45,7 +45,7 @@ export {
   CONTEXT_LOGIN_DEVICE,
 } from './identity.js';
 
-export { EvmWallet, eip55, EIP155_COIN_TYPE, EVM_BIP44_PATH } from './evm.js';
+export { EvmWallet, eip55, canonicalAddress, EIP155_COIN_TYPE, EVM_BIP44_PATH } from './evm.js';
 
 export {
   Eip1559Tx,

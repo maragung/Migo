@@ -715,3 +715,22 @@ test('every account vector file is present and populated', () => {
   }
   assert.ok(total >= 36, `only ${total} account vector cases, expected at least 36`);
 });
+
+test('canonicalAddress folds every written form of one address to the same string', () => {
+  // The wallet registry stores lowercase hex without the prefix; display holds EIP-55 with it.
+  // The enrolment compare folds both before comparing, and this is the fold it relies on — the
+  // same address in every written form must land on the same string, or a registered wallet
+  // reads as missing and enrolment re-registers (resurrecting an archived one) on every sign-in.
+  const evm = load('account-evm.json');
+  const withLetters = section(evm, 'cases', 'account-evm.json').find((item) =>
+    /[a-fA-F]/.test(text(item, 'address_checksummed')),
+  );
+  assert.ok(withLetters !== undefined, 'account-evm.json carries no address with a letter in it');
+  const checksummed = text(withLetters, 'address_checksummed');
+  const lowercase = checksummed.toLowerCase().replace(/^0x/, '');
+  assert.match(lowercase, /^[0-9a-f]{40}$/);
+  assert.equal(account.canonicalAddress(checksummed), lowercase);
+  assert.equal(account.canonicalAddress(`0x${lowercase}`), lowercase);
+  assert.equal(account.canonicalAddress(lowercase), lowercase);
+  assert.equal(account.canonicalAddress(`  ${checksummed} `), lowercase);
+});

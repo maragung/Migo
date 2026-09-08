@@ -2585,9 +2585,13 @@ impl Worker {
         let Ok(known) = signed.rest.wallets(&signed.access_token).await else {
             return;
         };
+        // The registry speaks canonical form (lowercase, no prefix) and the derivation speaks
+        // EIP-55 with the 0x prefix; both are folded before comparing, and archived rows count
+        // as known — a wallet the user archived stays archived, and this sync must not
+        // resurrect it by re-registering the address.
         let registered: HashSet<String> = known
             .into_iter()
-            .map(|wallet| wallet.address.to_ascii_lowercase())
+            .map(|wallet| canonical_address(&wallet.address))
             .collect();
         // The first eight indexes cover a personal account generously; a user past that has made a
         // habit of wallet rotation and can archive and register from a client that shows the list.
@@ -2595,10 +2599,8 @@ impl Worker {
             let Ok(wallet) = migo_account::EvmWallet::from_root(&root, index) else {
                 return;
             };
-            // EIP-55 is the canonical form; the comparison lowercases so a wallet another client
-            // registered in a different case is recognised as the same address, not re-registered.
             let address = wallet.address_checksummed();
-            if registered.contains(&address.to_ascii_lowercase()) {
+            if registered.contains(&wallet.address_canonical()) {
                 continue;
             }
             if let Err(error) = signed
@@ -4875,6 +4877,18 @@ fn hex_of(bytes: &[u8]) -> String {
     out
 }
 
+/// An address text folded to the registry's canonical form: lowercase hex, no prefix.
+///
+/// The server's wallet registry stores — and `GET /v1/wallets` returns — exactly this form,
+/// while display and derivation hold EIP-55 with the `0x` prefix. The two are the same
+/// address but not the same string, and comparing them unfolded is how a registered wallet
+/// reads as missing on every sync and gets re-registered, resurrecting one the user archived.
+fn canonical_address(address: &str) -> String {
+    let trimmed = address.trim();
+    let bare = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    bare.to_ascii_lowercase()
+}
+
 /// Files one observed peer fingerprint against the last-seen map, and says whether it changed.
 ///
 /// First sight is not a change: a peer's second device is new, not suspicious, and a warning
@@ -4924,6 +4938,21 @@ fn body_of(content: Content) -> Body {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wallet-sync compare folds every written form of one address to the registry's
+    /// canonical string: EIP-55 (what derivation holds), prefixed lowercase (what a paste
+    /// carries), and the registry's own no-prefix form must all land on the same bytes, or a
+    /// registered wallet reads as missing and the sync re-registers it — resurrecting one the
+    /// user archived.
+    #[test]
+    fn canonical_address_folds_every_written_form_together() {
+        const CHECKSUMMED: &str = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
+        const LOWERCASE: &str = "5aaeb6053f3e94c9b9a09f33669435e7ef1beaed";
+        assert_eq!(canonical_address(CHECKSUMMED), LOWERCASE);
+        assert_eq!(canonical_address(&format!("0x{LOWERCASE}")), LOWERCASE);
+        assert_eq!(canonical_address(LOWERCASE), LOWERCASE);
+        assert_eq!(canonical_address(&format!("  {CHECKSUMMED} ")), LOWERCASE);
+    }
 
     fn keys_of(root: Option<&migo_account::MigoRoot>, account_id: Id) -> DeviceKeys {
         let mut keys = match root {

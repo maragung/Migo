@@ -91,6 +91,14 @@ class EvmWallet private constructor(
      */
     fun addressChecksummed(): String = eip55(addressBytes)
 
+    /**
+     * The address in the canonical stored form: lowercase hex, no prefix. The server's wallet
+     * registry holds — and returns — exactly this form, and it is the only form a comparison
+     * against that registry should use: EIP-55 and canonical are the same address but not the
+     * same string, and comparing them unfolded is how a registered wallet reads as missing.
+     */
+    fun addressCanonical(): String = hexOf(addressBytes)
+
     /** The BIP-32 chain code after the full path, for container metadata. */
     fun chainCodeBytes(): ByteArray = chainCode.copyOf()
 

@@ -144,11 +144,13 @@ class MigoSession private constructor(
         try {
             val identity = client.keyStore.rotatedIdentity ?: IdentityKey.fromRoot(root)
             client.publishIdentityKey(identity.publicKey())
-            val known = client.registeredWallets().map { it.address }.toSet()
+            // The registry speaks canonical form (lowercase, no prefix) and the derivation speaks
+            // EIP-55; both are folded before comparing, and archived rows count as known — a
+            // wallet the user archived stays archived, and enrolment must not resurrect it.
+            val known = client.registeredWallets().map { canonicalAddress(it.address) }.toSet()
             val wallet = EvmWallet.fromRoot(root, 0)
-            val address = wallet.addressChecksummed()
-            if (address !in known) {
-                client.registerWallet(address, 0)
+            if (wallet.addressCanonical() !in known) {
+                client.registerWallet(wallet.addressChecksummed(), 0)
             }
         } catch (_: Exception) {
             // Deliberately quiet: the material publishes again on the next sign-in.
@@ -687,3 +689,11 @@ private class StoredVault(
     val session: SavedSession,
     val credential: DeviceCredential,
 )
+
+/**
+ * An address text folded to the registry's canonical form: lowercase hex, no prefix — the form
+ * the server stores and returns, and the only form a comparison against it should use. EIP-55
+ * and canonical are the same address but not the same string, and comparing them unfolded is how
+ * a registered wallet reads as missing on every sign-in.
+ */
+private fun canonicalAddress(address: String): String = address.trim().lowercase().removePrefix("0x")

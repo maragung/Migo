@@ -127,6 +127,18 @@ impl EvmWallet {
         eip55(&self.address)
     }
 
+    /// The address in the canonical stored form: lowercase hex, no prefix.
+    ///
+    /// The wallet registry holds — and returns — exactly this form, and it is
+    /// the only form a comparison against that registry should use: EIP-55
+    /// and canonical are the same address but not the same string, and
+    /// comparing them unfolded is how a registered wallet reads as missing
+    /// (and gets re-registered) on every sign-in.
+    #[must_use]
+    pub fn address_canonical(&self) -> String {
+        hex(&self.address)
+    }
+
     /// The BIP-32 chain code after the full path, for container metadata.
     #[must_use]
     pub fn chain_code(&self) -> &[u8; 32] {
@@ -355,6 +367,25 @@ mod tests {
                 .expect("20 bytes");
             assert_eq!(eip55(&bytes), known);
         }
+    }
+
+    #[test]
+    fn canonical_form_is_the_checksummed_address_folded() {
+        // The registry's stored form is the same address as the checksum with
+        // the prefix and the casing folded away: the enrolment compare relies
+        // on the two landing on one string, and a canonical form that kept
+        // either would re-register a wallet the registry already holds.
+        let wallet = EvmWallet::derive(domain_seed(0x55), 0).expect("derive");
+        let canonical = wallet.address_canonical();
+        assert_eq!(
+            canonical,
+            wallet.address_checksummed()[2..].to_ascii_lowercase()
+        );
+        assert_eq!(canonical.len(), 40);
+        assert!(!canonical.starts_with("0x"));
+        assert!(canonical
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
     }
 
     #[test]

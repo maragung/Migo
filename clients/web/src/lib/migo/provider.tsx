@@ -271,11 +271,16 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
         await rest.publishIdentityKey(grant.accessToken, {
           identityPublicKey: identity.publicKey(),
         });
+        // The registry speaks canonical form (lowercase, no prefix) and the derivation speaks
+        // EIP-55; both are folded before comparing, and archived rows count as known — a
+        // wallet the user archived stays archived, and enrolment must not resurrect it.
         const known = new Set(
-          (await rest.wallets(grant.accessToken)).map((wallet) => wallet.address),
+          (await rest.wallets(grant.accessToken)).map((wallet) =>
+            account.canonicalAddress(wallet.address),
+          ),
         );
         const address = account.EvmWallet.fromRoot(root, 0).addressChecksummed();
-        if (!known.has(address)) {
+        if (!known.has(account.canonicalAddress(address))) {
           await rest.registerWallet(grant.accessToken, { address, derivationIndex: 0 });
         }
       } catch {

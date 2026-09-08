@@ -170,6 +170,19 @@ function addressOf(privateKey: Uint8Array): Uint8Array {
 }
 
 /**
+ * An address text folded to the canonical stored form: lowercase hex, no prefix.
+ *
+ * The server's wallet registry holds — and `GET /v1/wallets` returns — exactly this form,
+ * while display holds EIP-55. The two are the same address, but not the same string:
+ * comparing them without folding first is how a registered wallet reads as missing on
+ * every sign-in and gets re-registered (resurrecting an archived one). Canonical form is
+ * the only form a comparison should ever use.
+ */
+export function canonicalAddress(address: string): string {
+  return address.trim().toLowerCase().replace(/^0x/, '');
+}
+
+/**
  * Renders a 20-byte address in EIP-55 form: lowercase hex, then each letter uppercased where the
  * corresponding nibble of Keccak-256 of that lowercase hex string is ≥ 8.
  *
