@@ -379,10 +379,11 @@ impl CallGate for StoreCallGate {
 /// Answers the messaging service's gate questions from the process's own social
 /// graph and room aggregate.
 ///
-/// The privacy question delegates to [`Graph::may_interact`] with
-/// [`Interaction::Message`], which is the same gate every other kind of contact
-/// already passes — a direct message must not be the one path that skips it. The
-/// room question delegates to [`Roomkeeper::authorize`] with the `CHAT_SEND` bit,
+/// The privacy question delegates to [`Graph::may_interact`](migo_social::Graph::may_interact)
+/// with [`Interaction::Message`](migo_social::Interaction::Message), which is the same gate
+/// every other kind of contact already passes — a direct message must not be the one path that
+/// skips it. The room question delegates to
+/// [`Roomkeeper::authorize`](migo_rooms::Roomkeeper::authorize) with the `CHAT_SEND` bit,
 /// which walks the room's own ladder (membership, ban, mute, permission) and
 /// returns its interval.
 ///

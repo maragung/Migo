@@ -203,8 +203,9 @@ export class EconomyDomain {
    * same call lists every category the server sells, not only gifts, because the wire's
    * `category` field already carries which shelf a listing sits on. `clientKey` is the
    * caller's idempotency key: one per purchase intent, so a retry after a network failure
-   * returns the first purchase instead of charging twice. `txHash`, when the purchase was paid
-   * on-chain, rides along for the server's audit log.
+   * returns the first purchase instead of charging twice. `txHash`, when given, claims the
+   * purchase was already paid on-chain — the server cannot verify a chain it does not read,
+   * so such a purchase is refused with `FEATURE_DISABLED` rather than settled on the claim.
    */
   async purchase(sku: string, clientKey: string, txHash?: string): Promise<StorePurchaseResult> {
     const request: StorePurchase = { sku, clientKey };

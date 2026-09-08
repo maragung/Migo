@@ -114,11 +114,19 @@ pub trait Treasurer: Send + Sync {
     /// Refuses with `ALREADY_EXISTS` if the caller already owns it, and with
     /// `INSUFFICIENT_BALANCE` if they cannot afford it — both before any money moves. The
     /// `client_key` is the caller's idempotency key; a repeat returns the first purchase.
+    ///
+    /// `on_chain` is the transaction hash the caller claims already settled the price on the
+    /// chain. This ledger cannot verify such a claim, and a payment it cannot verify is not a
+    /// payment method it will honour, so a purchase carrying one is refused with
+    /// `FEATURE_DISABLED` before anything is written: ignoring the claim would bill a caller
+    /// who has already paid on-chain, and honouring it would sell the catalogue for
+    /// fabricated hashes.
     async fn purchase(
         &self,
         caller: &Caller,
         sku: &Sku,
         client_key: &str,
+        on_chain: Option<&str>,
     ) -> Result<PurchaseOutcome>;
 
     /// Sends a gift to another account.

@@ -19,8 +19,12 @@
  *   2. `payOnChain` — sign with wallet 0 of the account root (`EvmWallet.fromRoot`), broadcast
  *      through `ChainClient` (the Migo server is never a blockchain proxy and never sees the
  *      transaction), track to an honest ending.
- *   3. `client.economy.purchase(sku, clientKey, txHash)` — the server writes the entitlement and
- *      the ledger legs, with the tx hash riding along for audit.
+ *   3. `client.economy.purchase(sku, clientKey, txHash)` — refused by the server: a hash the
+ *      server cannot verify against the chain is not a payment method it will honour, so the
+ *      purchase answers `FEATURE_DISABLED` rather than settling on an unverified claim. Until
+ *      the server can verify the chain itself, `CHAIN_SETTLEMENT_SUPPORTED` keeps this whole
+ *      flow switched off below — the store must never take real money for a purchase the
+ *      server has already decided it will refuse.
  *
  * Paying with native AVAX sends `value` to the MGO treasury address; paying with USDT/BTC.b
  * sends an ERC-20 `transfer(address,uint256)` in the calldata, in the *token's* smallest
@@ -90,6 +94,17 @@ const COINS_PER_MGO = 1n;
  */
 export const MGO_USD = 0.001;
 
+/**
+ * Whether this build may offer on-chain payment at all.
+ *
+ * The server refuses a purchase that claims on-chain settlement (`FEATURE_DISABLED`): it
+ * cannot verify a chain it does not read, and an unverifiable hash is not a debit it will
+ * honour. Flipping this to `true` before the server verifies the chain itself would let the
+ * store take a buyer's real AVAX/USDT/BTC.b and then fail the very purchase that money paid
+ * for — which is why the flag, not the addresses below, is the switch that matters.
+ */
+export const CHAIN_SETTLEMENT_SUPPORTED = false;
+
 /** The payment currencies the store accepts, as the chips name them. */
 export type PayCurrency = 'avax' | 'usdt' | 'btcb';
 
@@ -112,6 +127,9 @@ export function tokenOf(currency: PayCurrency): string | null {
 
 /** Whether a currency is actually payable in this build: a placeholder contract is not. */
 export function currencyAvailable(currency: PayCurrency): boolean {
+  if (!CHAIN_SETTLEMENT_SUPPORTED) {
+    return false;
+  }
   if (currency === 'avax') {
     return MGO_TREASURY_FUJI !== '0x0000000000000000000000000000000000000000';
   }

@@ -145,9 +145,11 @@ pub(crate) async fn handle_balance_fetch(
 ///
 /// The wire carries the catalogue code and the caller's idempotency key; the service owns every
 /// rule — the price, the affordability, the single-ownership refusal — and the store writes the
-/// entitlement and the ledger legs together. `tx_hash`, when the client paid on-chain, is logged
-/// with the purchase for audit; the ledger is the accounting truth and the hash is the trail to
-/// the chain, and neither is asked to be the other.
+/// entitlement and the ledger legs together. `tx_hash`, when the client claims it paid on-chain,
+/// names a settlement this node cannot verify, so the service refuses the purchase outright with
+/// `FEATURE_DISABLED`: the ledger is the accounting truth, and a hash it cannot check against the
+/// chain is neither a debit nor a credit. On-chain buying arrives when the server can verify the
+/// chain, not before.
 pub(crate) async fn handle_store_purchase(
     ctx: &ClientContext<'_>,
     frame: &Frame,
@@ -163,11 +165,17 @@ pub(crate) async fn handle_store_purchase(
     let request: StorePurchase = from_frame(frame).map_err(fault::from_wire)?;
     let sku = Sku::parse(&request.sku)
         .ok_or_else(|| fault::validation("sku", "unknown catalogue code"))?;
-    let outcome = svc.purchase(&caller, &sku, &request.client_key).await?;
+    let outcome = svc
+        .purchase(
+            &caller,
+            &sku,
+            &request.client_key,
+            request.tx_hash.as_deref(),
+        )
+        .await?;
     tracing::info!(
         account = %caller.account_id,
         sku = %request.sku,
-        tx_hash = request.tx_hash.as_deref().unwrap_or(""),
         duplicate = outcome.duplicate,
         "store purchase"
     );

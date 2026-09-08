@@ -9930,7 +9930,7 @@ pub struct StorePurchase {
     pub sku: String,
     /// Caller's idempotency key; a repeat returns the first purchase.
     pub client_key: String,
-    /// The on-chain payment's transaction hash, when the purchase was paid on-chain (Avalanche C-Chain). Recorded with the entitlement so a purchase can be audited against the chain.
+    /// The on-chain payment's transaction hash, when the client claims the purchase was paid on-chain (Avalanche C-Chain). The server cannot verify a chain it does not read, so a purchase carrying this field is refused with FEATURE_DISABLED rather than settled on an unverified claim; on-chain buying arrives when the server can verify the chain itself.
     pub tx_hash: Option<String>,
 }
 

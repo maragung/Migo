@@ -122,3 +122,92 @@ async fn gift_send_spends_the_sender_coins() {
         "the sender's coins decreased by the gift price"
     );
 }
+
+/// The path `STORE_PURCHASE` drives with coins: a funded buyer pays the catalogue price
+/// once, owns the item, and a retry with the same key is the first purchase again — this
+/// is the same `purchase` method the handler calls.
+#[tokio::test]
+async fn store_purchase_charges_once_and_grants_the_entitlement() {
+    let (svc, store) = harness();
+    seed_account(&store, 1, "buyer").await;
+    let buyer = caller(1, 101);
+    let sku = migo_economy::Sku::parse("gift.rose").expect("the default catalogue prices it");
+
+    svc.grant(Grant {
+        account_id: Id::from(1u128),
+        currency: Currency::Coins,
+        amount: 1000,
+        reason: Reason::Grant,
+        ref_id: None,
+        idempotency_key: "seed:buyer".to_string(),
+        created_by: None,
+        at: Timestamp::from_millis(NOW),
+    })
+    .await
+    .expect("grant succeeds");
+
+    let first = svc
+        .purchase(&buyer, &sku, "spec:rose", None)
+        .await
+        .expect("purchase succeeds");
+    assert!(!first.duplicate);
+    assert_eq!(first.price.amount, 10);
+    let paid = 1000 - svc.wallet(&buyer).await.expect("wallet read").coins;
+    assert_eq!(paid, 10, "the buyer paid exactly the catalogue price");
+
+    let owned = svc.entitlements(&buyer).await.expect("entitlements read");
+    assert_eq!(owned.len(), 1, "the buyer owns the item they paid for");
+    assert_eq!(owned[0].sku, "gift.rose");
+
+    let retry = svc
+        .purchase(&buyer, &sku, "spec:rose", None)
+        .await
+        .expect("retry is answered, not failed");
+    assert!(
+        retry.duplicate,
+        "a retry with the same key is the first purchase again"
+    );
+    let paid_twice = 1000 - svc.wallet(&buyer).await.expect("wallet read").coins;
+    assert_eq!(paid_twice, 10, "the retry charged nothing");
+}
+
+/// The trap the on-chain path used to spring: a client that had already paid real currency
+/// on the chain was then charged the full coin price too — and refused for unaffordable
+/// coins after the money had left. A purchase claiming on-chain settlement is now refused
+/// outright (`FEATURE_DISABLED`) before anything is written, whatever the buyer's balance,
+/// because a hash this node cannot verify is not a payment method it will honour.
+#[tokio::test]
+async fn an_on_chain_claim_is_refused_before_anything_is_written() {
+    let (svc, store) = harness();
+    seed_account(&store, 1, "buyer").await;
+    let buyer = caller(1, 101);
+    let sku = migo_economy::Sku::parse("gift.rose").expect("the default catalogue prices it");
+
+    // Funded on purpose: the refusal must not depend on the buyer being unable to pay.
+    svc.grant(Grant {
+        account_id: Id::from(1u128),
+        currency: Currency::Coins,
+        amount: 10_000,
+        reason: Reason::Grant,
+        ref_id: None,
+        idempotency_key: "seed:rich-buyer".to_string(),
+        created_by: None,
+        at: Timestamp::from_millis(NOW),
+    })
+    .await
+    .expect("grant succeeds");
+
+    let error = svc
+        .purchase(&buyer, &sku, "spec:chain", Some("0xdeadbeef"))
+        .await
+        .expect_err("an unverifiable on-chain claim is refused");
+    assert_eq!(error.code(), migo_protocol::codes::FEATURE_DISABLED);
+
+    let wallet = svc.wallet(&buyer).await.expect("wallet read");
+    assert_eq!(wallet.coins, 10_000, "a refused settlement moves no money");
+    let owned = svc.entitlements(&buyer).await.expect("entitlements read");
+    assert!(
+        owned.is_empty(),
+        "a refused settlement grants no entitlement"
+    );
+}

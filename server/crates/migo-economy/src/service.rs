@@ -366,8 +366,17 @@ where
         caller: &Caller,
         sku: &Sku,
         client_key: &str,
+        on_chain: Option<&str>,
     ) -> Result<PurchaseOutcome> {
         self.charge(caller, PURCHASE_COST).await?;
+        // An on-chain claim is not a payment method this ledger can debit. The hash cannot be
+        // verified here — honouring it would sell the catalogue for a fabricated string, and
+        // ignoring it would charge a caller who has already paid on-chain for the same item.
+        // Refused after the rate charge (asking is what the bucket defends) but before the
+        // catalogue is read or any leg is posted, so a refused settlement moves no money.
+        if on_chain.is_some() {
+            return Err(fault::feature_disabled("on-chain settlement"));
+        }
         let price = self
             .catalogue
             .get(sku)
