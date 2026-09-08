@@ -264,6 +264,27 @@ impl MemoryStore {
         Self::default()
     }
 
+    /// Removes a pair's rows of the given kinds in one write guard, whichever way
+    /// each row points, so a teardown cannot interleave with an acceptance the way
+    /// separate per-direction calls could. The guard is the memory store's
+    /// transaction; the PostgreSQL implementation buys the same guarantee with a
+    /// real one.
+    async fn remove_pair_kinds(
+        &self,
+        left: Id,
+        right: Id,
+        kinds: &[RelationshipKind],
+    ) -> Result<()> {
+        let mut s = self.state.write();
+        for owner in [left, right] {
+            let peer = if owner == left { right } else { left };
+            for kind in kinds {
+                s.relationships.remove(&(owner, peer, *kind));
+            }
+        }
+        Ok(())
+    }
+
     /// The audit actions recorded so far, in order, for tests that assert a
     /// trail was left without needing the rows' other columns.
     #[must_use]
@@ -2158,6 +2179,62 @@ impl SocialStore for MemoryStore {
             );
         }
         Ok(())
+    }
+
+    async fn request_friend_pair(&self, asker: Id, recipient: Id, at: Timestamp) -> Result<()> {
+        // One write guard for the pair, which is the memory store's transaction:
+        // the two rows land together or not at all, exactly what the PostgreSQL
+        // implementation buys with a real one.
+        let mut s = self.state.write();
+        for (owner, peer, kind) in [
+            (asker, recipient, RelationshipKind::PendingOutgoing),
+            (recipient, asker, RelationshipKind::PendingIncoming),
+        ] {
+            let key = (owner, peer, kind);
+            // Upsert, keeping the original creation time — the same rule as
+            // `put_relationship`, so a re-sent request cannot make an old one look
+            // new whichever store call wrote it.
+            let created_at = s
+                .relationships
+                .get(&key)
+                .map_or(at, |existing| existing.created_at);
+            s.relationships.insert(
+                key,
+                Relationship {
+                    account_id: owner,
+                    other_id: peer,
+                    kind,
+                    created_at,
+                    accepted_at: None,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    async fn remove_friend_pair(&self, left: Id, right: Id) -> Result<()> {
+        self.remove_pair_kinds(
+            left,
+            right,
+            &[
+                RelationshipKind::Friend,
+                RelationshipKind::PendingIncoming,
+                RelationshipKind::PendingOutgoing,
+            ],
+        )
+        .await
+    }
+
+    async fn remove_pending_pair(&self, left: Id, right: Id) -> Result<()> {
+        self.remove_pair_kinds(
+            left,
+            right,
+            &[
+                RelationshipKind::PendingIncoming,
+                RelationshipKind::PendingOutgoing,
+            ],
+        )
+        .await
     }
 
     async fn relationships(

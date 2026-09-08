@@ -2615,6 +2615,102 @@ pub async fn accepting_a_friend_request_writes_both_sides(store: &SharedStore) {
     );
 }
 
+pub async fn pair_writes_and_pair_removals_leave_no_half_pair_behind(store: &SharedStore) {
+    let alice = seed_account(store, 1, "alice").await;
+    let bob = seed_account(store, 2, "bob").await;
+
+    // One call, two rows: the asker's outgoing and the recipient's incoming view of
+    // the same request. A caller that sees one without the other is looking at a
+    // store that wrote half a pair — which is the bug these methods exist to close.
+    store
+        .request_friend_pair(alice, bob, ts(5_000))
+        .await
+        .unwrap();
+    for (owner, peer, kind) in [
+        (alice, bob, RelationshipKind::PendingOutgoing),
+        (bob, alice, RelationshipKind::PendingIncoming),
+    ] {
+        let pending = store
+            .relationship(owner, peer, kind)
+            .await
+            .unwrap()
+            .expect("the pair is written whole or not at all");
+        assert_eq!(pending.created_at, ts(5_000));
+        assert_eq!(pending.accepted_at, None);
+    }
+
+    // A repeated ask must not make an old request look new; the same don't-touch
+    // semantics as a single re-sent row.
+    store
+        .request_friend_pair(alice, bob, ts(5_900))
+        .await
+        .unwrap();
+    let resent = store
+        .relationship(alice, bob, RelationshipKind::PendingOutgoing)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resent.created_at, ts(5_000));
+
+    // Declining removes both rows, whichever way the request pointed, and removing
+    // a pair that is not there is the outcome the caller wanted anyway.
+    store.remove_pending_pair(alice, bob).await.unwrap();
+    assert!(store
+        .relationship(alice, bob, RelationshipKind::PendingOutgoing)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store
+        .relationship(bob, alice, RelationshipKind::PendingIncoming)
+        .await
+        .unwrap()
+        .is_none());
+    store.remove_pending_pair(alice, bob).await.unwrap();
+
+    // Un-friending clears the friendship in both directions and any pending rows a
+    // re-request wrote in the meantime — in one call, for the same whole-or-nothing
+    // reason. Un-friending strangers stays legal.
+    store
+        .request_friend_pair(bob, alice, ts(7_000))
+        .await
+        .unwrap();
+    store.accept_friend(alice, bob, ts(8_000)).await.unwrap();
+    store
+        .request_friend_pair(alice, bob, ts(8_500))
+        .await
+        .unwrap();
+    store.remove_friend_pair(alice, bob).await.unwrap();
+    for (owner, peer, kind) in [
+        (alice, bob, RelationshipKind::Friend),
+        (bob, alice, RelationshipKind::Friend),
+        (alice, bob, RelationshipKind::PendingOutgoing),
+        (bob, alice, RelationshipKind::PendingIncoming),
+    ] {
+        assert!(
+            store
+                .relationship(owner, peer, kind)
+                .await
+                .unwrap()
+                .is_none(),
+            "remove_friend_pair leaves no row of the pair behind"
+        );
+    }
+    store.remove_friend_pair(alice, bob).await.unwrap();
+
+    // Other kinds are not the friend pair's business: a block or a follow between
+    // the same two accounts survives an un-friend.
+    store
+        .put_relationship(edge(alice, bob, RelationshipKind::Follow, 9_000))
+        .await
+        .unwrap();
+    store.remove_friend_pair(alice, bob).await.unwrap();
+    assert!(store
+        .relationship(alice, bob, RelationshipKind::Follow)
+        .await
+        .unwrap()
+        .is_some());
+}
+
 pub async fn relationship_pages_are_newest_first_and_clamped(store: &SharedStore) {
     let alice = seed_account(store, 1, "alice").await;
     for n in 2..=(MAX_PAGE as u128 + 10) {
@@ -3282,6 +3378,7 @@ macro_rules! for_each_contract_case {
         $case!(updating_a_room_can_clear_a_topic_without_clearing_a_name);
         $case!(a_block_stops_contact_in_both_directions);
         $case!(accepting_a_friend_request_writes_both_sides);
+        $case!(pair_writes_and_pair_removals_leave_no_half_pair_behind);
         $case!(relationship_pages_are_newest_first_and_clamped);
         $case!(a_wallet_is_opened_once_however_often_it_is_asked_for);
         $case!(a_transfer_moves_value_without_creating_any);

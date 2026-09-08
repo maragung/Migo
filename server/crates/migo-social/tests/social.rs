@@ -1296,6 +1296,61 @@ async fn a_friendship_keeps_the_date_the_request_was_made() {
     }
 }
 
+/// An acceptance racing an un-friend can never leave a friendship stored on one side.
+///
+/// The acceptance writes two friend rows; the un-friend deletes them. Before both
+/// sides of each operation became single store calls, the two deletes of an un-friend
+/// could interleave with the two inserts of an acceptance, and the row left standing
+/// made one account a friend of somebody who had already removed them — a friendship
+/// only one side can see, with no way to un-friend it again, because the other side
+/// believes it does not exist. Whatever order the two operations land in, the pair
+/// must move as a pair.
+#[tokio::test]
+async fn an_acceptance_racing_an_unfriend_leaves_no_one_sided_friendship() {
+    let harness = Harness::new();
+    harness.cast().await;
+    harness.request_waiting(BOB, ALICE, NOW).await;
+
+    let asker = caller(ALICE, ALICE_PHONE);
+    let subject = caller(BOB, BOB_LAPTOP);
+    let (accept, remove) = tokio::join!(
+        harness.social.respond_friend(&asker, id(BOB), true),
+        harness.social.remove_friend(&subject, id(ALICE)),
+    );
+
+    // Either the un-friend lands first — the acceptance then answers a request that
+    // is no longer waiting, and is refused — or the acceptance lands first and the
+    // un-friend tears the new friendship down. Both are coherent; neither may
+    // half-happen.
+    if accept.is_ok() {
+        remove.expect("un-friending a brand-new friend is legal");
+        assert!(
+            !harness.has(ALICE, BOB, RelationshipKind::Friend).await
+                && !harness.has(BOB, ALICE, RelationshipKind::Friend).await,
+            "the un-friend removed both rows"
+        );
+    } else {
+        remove.expect("un-friending before accepting is legal, and removes the pending pair");
+        assert!(
+            !harness
+                .has(BOB, ALICE, RelationshipKind::PendingOutgoing)
+                .await
+                && !harness
+                    .has(ALICE, BOB, RelationshipKind::PendingIncoming)
+                    .await,
+            "the un-friend took the request with it"
+        );
+    }
+
+    // The invariant under race, and the point of the whole exercise: whatever the
+    // interleaving, both sides agree about whether they are friends.
+    assert_eq!(
+        harness.has(ALICE, BOB, RelationshipKind::Friend).await,
+        harness.has(BOB, ALICE, RelationshipKind::Friend).await,
+        "a friendship stored on one side only is not a friendship"
+    );
+}
+
 /// Declining is silent.
 ///
 /// No notice, deliberately. "X declined your friend request" is a sentence whose only

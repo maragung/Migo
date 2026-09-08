@@ -643,6 +643,30 @@ pub trait SocialStore: Send + Sync {
     /// Accepts a pending friend request, creating the reciprocal edge.
     async fn accept_friend(&self, account_id: Id, other_id: Id, at: Timestamp) -> Result<()>;
 
+    /// Writes the two rows of one friend request, whole.
+    ///
+    /// A pending request is a pair — the asker's outgoing row and the recipient's
+    /// incoming row — and writing them as separate calls is how an asker is told
+    /// "request sent" while the recipient's side never hears of it: a crash between
+    /// the two writes leaves a state nothing cleans up, and the recipient's answer
+    /// then fails because only half the request exists. One call, one transaction,
+    /// the pattern [`SocialStore::accept_friend`] already set.
+    async fn request_friend_pair(&self, asker: Id, recipient: Id, at: Timestamp) -> Result<()>;
+
+    /// Tears down a friendship and any pending request between two accounts, whole.
+    ///
+    /// The mirror of [`SocialStore::accept_friend`]: un-friending removes both friend
+    /// rows and both directions of a pending request, and doing that as separate
+    /// calls is how "we are not friends but you are still in my list" happens when
+    /// the removal interleaves with an acceptance arriving between the two writes.
+    async fn remove_friend_pair(&self, left: Id, right: Id) -> Result<()>;
+
+    /// Removes the pending request between two accounts, whichever way it points,
+    /// whole. A decline and a block's clearing of a stale request both need the
+    /// pair gone in one step, for the same reason
+    /// [`SocialStore::request_friend_pair`] writes it in one.
+    async fn remove_pending_pair(&self, left: Id, right: Id) -> Result<()>;
+
     /// Lists edges of one kind that the account owns.
     async fn relationships(
         &self,

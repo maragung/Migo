@@ -735,6 +735,42 @@ impl PostgresStore {
     async fn begin(&self, what: &str) -> Result<DatabaseTransaction> {
         self.db.begin().await.context(what)
     }
+
+    /// One statement over a pair's rows, in one transaction: an acceptance
+    /// committing between two separate deletes is how a friendship ends up stored on
+    /// one side only. `accept_friend` locks the pending rows for update, so a
+    /// concurrent pair removal waits for the acceptance to settle and then removes
+    /// what it wrote — the two operations serialize instead of interleaving.
+    async fn remove_pair_kinds(
+        transaction: &DatabaseTransaction,
+        left: Id,
+        right: Id,
+        kinds: &[RelationshipKind],
+    ) -> Result<()> {
+        let a = uuid_of(left);
+        let b = uuid_of(right);
+        let either_way = Condition::any()
+            .add(
+                Condition::all()
+                    .add(entity::relationship::Column::AccountId.eq(a))
+                    .add(entity::relationship::Column::OtherId.eq(b)),
+            )
+            .add(
+                Condition::all()
+                    .add(entity::relationship::Column::AccountId.eq(b))
+                    .add(entity::relationship::Column::OtherId.eq(a)),
+            );
+        entity::relationship::Entity::delete_many()
+            .filter(either_way)
+            .filter(
+                entity::relationship::Column::Kind
+                    .is_in(kinds.iter().map(|kind| wire_i16(kind.to_wire()))),
+            )
+            .exec(transaction)
+            .await
+            .context("remove_friend_pair: teardown")?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -3912,6 +3948,89 @@ impl SocialStore for PostgresStore {
             .commit()
             .await
             .context("accept_friend: commit")?;
+        Ok(())
+    }
+
+    async fn request_friend_pair(&self, asker: Id, recipient: Id, at: Timestamp) -> Result<()> {
+        let transaction = self.begin("request_friend_pair").await?;
+        let owner = uuid_of(asker);
+        let peer = uuid_of(recipient);
+        // The upsert matches `put_relationship`: `created_at` is left alone on a
+        // conflict so a re-sent request cannot make an old one look new, and
+        // `accepted_at` is the only column updated — which here is a no-op, because
+        // a pending row is never accepted.
+        entity::relationship::Entity::insert_many([
+            entity::relationship::ActiveModel {
+                account_id: Set(owner),
+                other_id: Set(peer),
+                kind: Set(wire_i16(RelationshipKind::PendingOutgoing.to_wire())),
+                created_at: Set(stamp_of(at)),
+                accepted_at: Set(None),
+            },
+            entity::relationship::ActiveModel {
+                account_id: Set(peer),
+                other_id: Set(owner),
+                kind: Set(wire_i16(RelationshipKind::PendingIncoming.to_wire())),
+                created_at: Set(stamp_of(at)),
+                accepted_at: Set(None),
+            },
+        ])
+        .on_conflict(
+            OnConflict::columns([
+                entity::relationship::Column::AccountId,
+                entity::relationship::Column::OtherId,
+                entity::relationship::Column::Kind,
+            ])
+            .update_column(entity::relationship::Column::AcceptedAt)
+            .to_owned(),
+        )
+        .exec_without_returning(&transaction)
+        .await
+        .context("request_friend_pair: write request")?;
+
+        transaction
+            .commit()
+            .await
+            .context("request_friend_pair: commit")?;
+        Ok(())
+    }
+
+    async fn remove_friend_pair(&self, left: Id, right: Id) -> Result<()> {
+        let transaction = self.begin("remove_friend_pair").await?;
+        Self::remove_pair_kinds(
+            &transaction,
+            left,
+            right,
+            &[
+                RelationshipKind::Friend,
+                RelationshipKind::PendingIncoming,
+                RelationshipKind::PendingOutgoing,
+            ],
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .context("remove_friend_pair: commit")?;
+        Ok(())
+    }
+
+    async fn remove_pending_pair(&self, left: Id, right: Id) -> Result<()> {
+        let transaction = self.begin("remove_pending_pair").await?;
+        Self::remove_pair_kinds(
+            &transaction,
+            left,
+            right,
+            &[
+                RelationshipKind::PendingIncoming,
+                RelationshipKind::PendingOutgoing,
+            ],
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .context("remove_pending_pair: commit")?;
         Ok(())
     }
 

@@ -556,19 +556,13 @@ where
     /// Removes one edge in both directions.
     ///
     /// Removing something absent is not an error at the store, which is what makes
-    /// every un- operation in this crate idempotent without a read first.
+    /// every un- operation in this crate idempotent without a read first. Used for
+    /// single-direction kinds (follow); the friend and pending pairs have their own
+    /// atomic store calls, because a pair half-written is worse than a pair absent.
     async fn drop_both(&self, left: Id, right: Id, kind: RelationshipKind) -> Result<()> {
         self.store.remove_relationship(left, right, kind).await?;
         self.store.remove_relationship(right, left, kind).await?;
         Ok(())
-    }
-
-    /// Removes the two rows that make up a pending request, whichever way it points.
-    async fn drop_pending(&self, left: Id, right: Id) -> Result<()> {
-        self.drop_both(left, right, RelationshipKind::PendingIncoming)
-            .await?;
-        self.drop_both(left, right, RelationshipKind::PendingOutgoing)
-            .await
     }
 
     /// A listing of one kind the caller owns.
@@ -752,17 +746,12 @@ where
         }
 
         // Two rows, one per side, so that "who asked me" is an indexed read of the
-        // asker's own rows rather than a scan of everybody's outgoing requests.
-        self.put_edge(caller, subject_id, RelationshipKind::PendingOutgoing)
-            .await?;
+        // asker's own rows rather than a scan of everybody's outgoing requests —
+        // and one store call, so the pair lands whole: a crash between two separate
+        // writes would tell the asker "request sent" while the recipient's side
+        // never heard of it.
         self.store
-            .put_relationship(Relationship {
-                account_id: subject_id,
-                other_id: caller.account_id,
-                kind: RelationshipKind::PendingIncoming,
-                created_at: caller.now,
-                accepted_at: None,
-            })
+            .request_friend_pair(caller.account_id, subject_id, caller.now)
             .await?;
         self.meters.request(RequestOutcome::Sent);
         Ok((
@@ -803,7 +792,9 @@ where
         }
 
         if !accept {
-            self.drop_pending(caller.account_id, requester_id).await?;
+            self.store
+                .remove_pending_pair(caller.account_id, requester_id)
+                .await?;
             self.meters.response(ResponseOutcome::Declined);
             // No notice. "X declined your friend request" is a message whose only
             // function is to make a private decision somebody else's business.
@@ -817,7 +808,9 @@ where
         if let Some(refusal) = Self::block_refusal(state) {
             // The stale request goes too. Leaving it would show the blocked account's
             // name in a pending list forever with no way to clear it.
-            self.drop_pending(caller.account_id, requester_id).await?;
+            self.store
+                .remove_pending_pair(caller.account_id, requester_id)
+                .await?;
             self.meters.response(ResponseOutcome::Missing);
             self.meters.gate(Self::block_outcome(state));
             return Err(refusal);
@@ -866,9 +859,12 @@ where
         self.charge(caller, EDGE_COST).await?;
         // Both directions, and the pending rows too: un-friending somebody who had
         // also just asked to be a friend again should not leave the request behind.
-        self.drop_both(caller.account_id, subject_id, RelationshipKind::Friend)
+        // One store call so the teardown lands whole — two separate writes could
+        // interleave with the other side accepting, and leave a friendship stored
+        // on one side only.
+        self.store
+            .remove_friend_pair(caller.account_id, subject_id)
             .await?;
-        self.drop_pending(caller.account_id, subject_id).await?;
         self.meters.removed(EdgeKind::Friend);
         Ok(())
     }
@@ -957,10 +953,12 @@ where
 
         // Everything a block has to undo, in both directions. Leaving the follow edges
         // in place is the classic version of this bug: new contact is stopped while
-        // the blocked account keeps receiving everything the blocker posts.
-        self.drop_both(caller.account_id, subject_id, RelationshipKind::Friend)
+        // the blocked account keeps receiving everything the blocker posts. The
+        // friend rows and the pending rows go in one store call so the pair cannot
+        // be left half-torn-down by a failure between two writes.
+        self.store
+            .remove_friend_pair(caller.account_id, subject_id)
             .await?;
-        self.drop_pending(caller.account_id, subject_id).await?;
         self.drop_both(caller.account_id, subject_id, RelationshipKind::Follow)
             .await?;
         // And the favourite, which would otherwise keep the blocked account pinned to
