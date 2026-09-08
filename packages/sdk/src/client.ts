@@ -219,6 +219,16 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   /** Every topic we have an active subscription to, re-sent after a session reset. */
   readonly #subscribedTopics = new Map<string, Topic>();
 
+  /**
+   * The refresh in flight, when one is. A refresh token is single-use: the server's replay
+   * protection revokes the whole token family when a second exchange presents a token it has
+   * already rotated, so two concurrent {@link refreshSession} calls — a timer firing while a
+   * caller refreshes by hand, say — would each send the same token and the second would kill
+   * the session for both. The in-flight promise is shared instead of the risk: every caller
+   * of the concurrent window resolves with the one grant the one exchange produced.
+   */
+  #refreshInFlight: Promise<Grant> | null = null;
+
   #ctx: Connected | null = null;
 
   private constructor(options: MigoClientOptions) {
@@ -394,8 +404,32 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
    *
    * Resolves with the new grant. Call it before {@link resume} when a persisted access token may have
    * expired, or proactively before {@link Grant.accessExpiresAtMs}.
+   *
+   * Concurrent calls are single-flight: the refresh token is single-use and its replay revokes the
+   * token family on the server, so a second exchange racing the first would invalidate both callers'
+   * sessions. Callers arriving while a refresh is already in flight await that exchange's grant
+   * rather than starting one of their own.
    */
   async refreshSession(): Promise<Grant> {
+    const inFlight = this.#refreshInFlight;
+    if (inFlight !== null) {
+      return inFlight;
+    }
+    const exchange = this.#exchangeGrant();
+    this.#refreshInFlight = exchange;
+    try {
+      return await exchange;
+    } finally {
+      // Cleared while settled rather than on the shared await, so a failure does not
+      // wedge the next refresh behind a promise that will never resolve again.
+      if (this.#refreshInFlight === exchange) {
+        this.#refreshInFlight = null;
+      }
+    }
+  }
+
+  /** The one grant exchange behind {@link refreshSession}: bootstrap call, reauthenticate, swap. */
+  async #exchangeGrant(): Promise<Grant> {
     const current = this.#requireConnected();
     const refreshed = await this.#bootstrap.refresh({
       refreshToken: current.grant.refreshToken,
@@ -418,6 +452,10 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     if (ctx === null) {
       return Promise.resolve();
     }
+    // An in-flight refresh is left to settle on its own: it holds the old transport's
+    // reauthenticate, which a closed transport treats as a no-op rather than an error, and
+    // clearing it here would let a racing caller start a fresh exchange against a grant
+    // whose session is already gone.
     ctx.messaging.stop();
     ctx.typing.stop();
     ctx.presence.stop();
