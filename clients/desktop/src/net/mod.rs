@@ -4661,11 +4661,22 @@ impl Worker {
         let Ok(response) = gateway::decode::<migo_protocol::SyncResponse>(frame) else {
             return;
         };
-        let messages: Vec<Message> = response
-            .messages
-            .iter()
-            .filter_map(|event| self.decrypt(event))
-            .collect();
+        // History replays through the *live* routing, exactly the way the SDK's `catchUp` feeds
+        // every fetched event through `messaging.ingest`: a historical KeyExchange is a sender-key
+        // distribution the group layer must adopt, or every message sealed under it stays
+        // undecryptable — the buffering holds them, and the per-sender bound silently drops the
+        // oldest. Replaying in the server's order preserves the "distribution before content"
+        // ordering the buffering relies on.
+        let mut messages = Vec::with_capacity(response.messages.len());
+        for event in response.messages {
+            if event.kind == MessageKind::KeyExchange {
+                self.on_key_exchange(&event);
+                continue;
+            }
+            if let Some(message) = self.decrypt(&event) {
+                messages.push(message);
+            }
+        }
         self.sink.send(Event::History {
             conversation_id: response.conversation_id,
             messages,

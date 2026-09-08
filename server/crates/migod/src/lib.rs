@@ -17,6 +17,7 @@
 pub mod call_sweep;
 pub mod cli;
 pub mod dispatch;
+pub mod message_sweep;
 pub mod ports;
 pub mod room_presence;
 

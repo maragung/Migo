@@ -147,6 +147,26 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val names = ConcurrentHashMap<Id, String>()
 
     /**
+     * The decrypted transcript of every conversation this session has shown a message from, by
+     * conversation id, oldest first.
+     *
+     * This is the half of the no-store design that costs nothing to keep: [ChatMessage] is a
+     * display row, not key material, and the ratchets that produced it are already sealed on disk
+     * in the [SessionStore]. The half it repairs is the reopen: a chat closed and reopened refetches
+     * history from the server, but the ratchet has advanced past every message it replayed before,
+     * so the replay of already-decrypted ciphertext is refused as key reuse and the transcript
+     * comes back *empty*. With the cache, [open] restores what this session already decrypted and
+     * only the tail beyond the highest cached seq is fetched -- a fetch whose `haveSeq` is that
+     * highest seq, so it never asks the ratchet for a byte it has already opened.
+     *
+     * Cleared on sign-out with the rest of the session's surface, and bounded per conversation by
+     * [TRANSCRIPT_CACHE_MAX]: memory, not disk, and a conversation nobody has opened in this
+     * session holds nothing. Entries survive the window closing (that is their point) and are
+     * updated live, so the cache never serves a row the live stream has deleted or edited past.
+     */
+    private val transcripts = HashMap<Id, MutableList<ChatMessage>>()
+
+    /**
      * The last [RoomSummary] this shell saw for a room, by room id.
      *
      * A room chat's header wants live counts and the caller's role, but a conversation opened cold
@@ -528,6 +548,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 // this device any less signed out.
             }
             names.clear()
+            // The transcripts are this session's decrypted surface; a different account signing in
+            // over the same window must not inherit them (nor the next session of this one — the
+            // ratchets that re-decrypt them are gone, and a stale row is a lie about what the
+            // server holds).
+            transcripts.clear()
             _state.value = AppState.SignedOut(endpoint)
         }
     }
@@ -585,6 +610,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     roomId = listed?.roomId,
                     peerId = listed?.peerId,
                     room = listed?.roomId?.let { liveInfoFor(it) },
+                    // Seeded from the transcript cache, so the window opens on what this session
+                    // already decrypted rather than on a spinner over an empty list. The tail
+                    // fetch below fills whatever is newer; the seed is what makes a reopen not
+                    // depend on replaying ciphertext the ratchet will refuse.
+                    messages = transcripts[conversationId]?.toList() ?: emptyList(),
                     loading = true,
                 ),
                 windows = windows,
@@ -596,7 +626,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 live.client.watchConversation(conversationId)
-                val response = live.client.catchUp(conversationId, HISTORY_FROM, HISTORY_LIMIT)
+                // The tail fetch starts at the highest sequence the cache holds: everything at or
+                // below it is already decrypted as far as this device is concerned, and asking the
+                // server for it again would replay ciphertext the ratchet refuses as key reuse --
+                // the empty-transcript bug the cache exists for. A conversation with no cache yet
+                // (first open of the session) still fetches from the beginning.
+                val held = transcripts[conversationId]?.lastOrNull()?.seq ?: HISTORY_FROM
+                val response = live.client.catchUp(conversationId, held, HISTORY_LIMIT)
                 inChat(conversationId) { it.copy(loading = false) }
                 if (response.toSeq > 0) {
                     live.client.messaging.sendReceipt(conversationId, ReceiptKind.Read, response.toSeq)
@@ -793,6 +829,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 inChat(chat.conversationId) {
                     it.copy(sending = false, messages = merge(it.messages, mine))
                 }
+                cacheTranscript(chat.conversationId, mine)
                 bump(chat.conversationId, text, accepted.createdAt, unread = false)
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -2757,6 +2794,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             unsupported = body.placeholder,
         )
         val onScreen = opened(message.conversationId)
+        // Filed in the transcript cache whatever the window state: a message that arrives while no
+        // chat is open (the list row's bump, the minted window) is one a reopen must still show
+        // without asking the ratchet to open it a second time.
+        cacheTranscript(message.conversationId, entry)
         signedIn { current ->
             val chat = current.open
             val here = chat != null && chat.conversationId == message.conversationId
@@ -2803,6 +2844,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         inChat(deletion.conversationId) { chat ->
             chat.copy(messages = chat.messages.filterNot { it.messageId == deletion.messageId })
         }
+        evictTranscript(deletion.conversationId, deletion.messageId)
     }
 
     private fun typing(event: TypingEvent) {
@@ -3112,6 +3154,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Files one decrypted row in the conversation's transcript cache, oldest first, de-duplicated
+     * by message id and bounded by [TRANSCRIPT_CACHE_MAX].
+     *
+     * The same merge rules the window's own list follows: the cache is a transcript, not an append
+     * log, so an echo the server replays and a message a live event already delivered both land as
+     * one row. UI-thread only, like every writer of it.
+     */
+    private fun cacheTranscript(conversationId: Id, entry: ChatMessage) {
+        val cached = transcripts.getOrPut(conversationId) { ArrayList() }
+        val without = cached.filterNot { it.messageId == entry.messageId }
+        val at = without.indexOfFirst { it.seq > entry.seq }
+        if (at < 0) {
+            cached.add(entry)
+        } else {
+            cached.add(at, entry)
+        }
+        while (cached.size > TRANSCRIPT_CACHE_MAX) {
+            cached.removeAt(0)
+        }
+    }
+
+    /** Drops a row from the transcript cache the deletion dropped from the window. */
+    private fun evictTranscript(conversationId: Id, messageId: Id) {
+        val cached = transcripts[conversationId] ?: return
+        cached.removeAll { it.messageId == messageId }
+    }
+
+    /**
      * What to draw for a body, and whether this build understood it.
      *
      * Media, voice notes and reactions decode correctly here but have no screen yet, so they are
@@ -3220,6 +3290,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
         /** Enough history to open a chat on, bounded so a long conversation does not stall the open. */
         const val HISTORY_LIMIT = 100L
+
+        /**
+         * How many decrypted rows one conversation's in-memory transcript may hold. The cache is a
+         * reopen convenience, not an archive: a conversation that outgrows it keeps its newest
+         * [HISTORY_LIMIT] rows -- the window only ever shows that many -- and the ones dropped are
+         * still on the server, still decryptable by a device whose ratchet is behind (which is the
+         * device that would want them).
+         */
+        const val TRANSCRIPT_CACHE_MAX = 200
 
         /** The profile endpoint takes a batch; this keeps one list refresh to one request. */
         const val PROFILE_BATCH = 50

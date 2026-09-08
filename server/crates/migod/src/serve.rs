@@ -73,6 +73,11 @@ impl App {
         // exactly as long as the node accepts calls at all.
         let sweeper = self.spawn_call_sweeper();
 
+        // The message sweeper sits in the same seat: a disappearing message whose
+        // deadline passed has no client left to delete it, so the node itself is the
+        // only party that can let the row go.
+        let message_sweeper = self.spawn_message_sweeper();
+
         let state = GatewayState {
             gateway: self.gateway,
             clock: self.clock,
@@ -93,9 +98,10 @@ impl App {
         .await
         .context("server stopped abnormally")?;
 
-        // The sweeper heard the same shutdown signal; this await is so a fully
+        // Both sweepers heard the same shutdown signal; this await is so a fully
         // stopped node leaves no task behind it.
         let _ = sweeper.await;
+        let _ = message_sweeper.await;
 
         tracing::info!("server stopped");
         Ok(())

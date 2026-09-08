@@ -1357,9 +1357,12 @@ class MigoClient private constructor(
         // Membership movement keeps the membership cache true, so the sender-key audience the
         // next send builds is the group as it stands, not the group as a list row previewed
         // it. The live subscription lives on this session's Rpc, so it goes with the session
-        // the way the other bridge subscriptions do.
+        // the way the other bridge subscriptions do. The patch itself is launched onto the
+        // client scope: the handler is a plain (non-suspending) callback, while the cache's
+        // Mutex -- shared with the suspending paths that read and promote it -- may only be
+        // taken from a coroutine.
         session.rpc.on(Op.CONVERSATION_MEMBER_EVENT, { r -> ConversationMemberEvent.decode(r) }) { event, _ ->
-            applyMemberEvent(event)
+            scope.launch { applyMemberEvent(event) }
         }
     }
 
@@ -1374,7 +1377,7 @@ class MigoClient private constructor(
      * client has never loaded carries no membership to patch, and the roster read will find
      * the truth.
      */
-    private fun applyMemberEvent(event: ConversationMemberEvent) {
+    private suspend fun applyMemberEvent(event: ConversationMemberEvent) {
         cacheLock.withLock {
             val cached = members[event.conversationId] ?: return
             val joined = event.change == MemberChange.Joined
