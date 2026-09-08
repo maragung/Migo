@@ -4,6 +4,9 @@ import com.migo.core.protocol.ConversationCreateRequest
 import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.ConversationListRequest
 import com.migo.core.protocol.ConversationListResponse
+import com.migo.core.protocol.ConversationRosterEntry
+import com.migo.core.protocol.ConversationRosterRequest
+import com.migo.core.protocol.ConversationRosterResponse
 import com.migo.core.protocol.ConversationSummary
 import com.migo.core.protocol.Op
 import com.migo.core.wire.Id
@@ -67,5 +70,23 @@ class ConversationsDomain(private val rpc: Rpc) {
             { w -> request.encode(w) },
             { r -> ConversationSummary.decode(r) },
         )
+    }
+
+    /**
+     * Reads a group's roster: active members first by join time, then the departed.
+     *
+     * The whole membership, where a conversation-list row's members field is a capped preview --
+     * which is why the client's sender-key audience is chosen from this answer and never from a
+     * list row. A departure carries a non-null [ConversationRosterEntry.leftAt]; the caller that
+     * wants "who is in the group now" filters on it.
+     */
+    suspend fun getRoster(conversationId: Id): List<ConversationRosterEntry> {
+        val request = ConversationRosterRequest(conversationId)
+        val response = rpc.call(
+            Op.CONVERSATION_ROSTER,
+            { w -> request.encode(w) },
+            { r -> ConversationRosterResponse.decode(r) },
+        )
+        return response.entries
     }
 }

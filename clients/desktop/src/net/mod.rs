@@ -753,6 +753,50 @@ impl Sink {
 }
 
 /// One signed-in session's worth of state.
+/// One conversation's cached membership: the member ids, and whether the set is the whole
+/// membership or a list row's capped preview of it. The distinction is the whole bug this type
+/// exists for — see [`Signed::members`].
+#[derive(Debug, Clone, Default)]
+struct MemberCache {
+    ids: Vec<Id>,
+    complete: bool,
+}
+
+impl MemberCache {
+    /// Applies one membership movement onto the cache, as a `CONVERSATION_MEMBER_EVENT` reports
+    /// it. A join adds the account; a leave, kick, or ban removes it; anything else (a connect
+    /// or disconnect is a *presence* fact, an unknown change is not a fact at all) leaves the
+    /// set alone. `complete` is never touched: a preview that already truncates cannot be made
+    /// whole by patching it — only the roster read promotes.
+    fn apply(&mut self, event: &migo_protocol::ConversationMemberEvent) {
+        match event.change {
+            migo_protocol::MemberChange::Joined => {
+                if !self.ids.contains(&event.user_id) {
+                    self.ids.push(event.user_id);
+                }
+            }
+            migo_protocol::MemberChange::Left
+            | migo_protocol::MemberChange::Kicked
+            | migo_protocol::MemberChange::Banned => {
+                self.ids.retain(|id| *id != event.user_id);
+            }
+            _ => {}
+        }
+    }
+
+    /// Promotes the cache with a roster's answer: the active ids replace the preview wholesale
+    /// — a merge would keep a preview's truncation and call the result complete. An empty
+    /// active set is refused for the same reason the SDK refuses one: a conversation the roster
+    /// says has nobody in it is an answer no audience can be built from, and whatever the
+    /// preview named is the better guess until a fuller answer says otherwise.
+    fn promote(&mut self, active: Vec<Id>) {
+        if !active.is_empty() {
+            self.ids = active;
+            self.complete = true;
+        }
+    }
+}
+
 struct Signed {
     server: ServerEndpoint,
     rest: Rest,
@@ -775,8 +819,17 @@ struct Signed {
     bundles: HashMap<Id, migo_crypto::x3dh::PrekeyBundle>,
     /// Which devices belong to which account, learned from KEY_BUNDLE responses.
     devices: HashMap<Id, Vec<Id>>,
-    /// Members of each conversation, from the conversation list.
-    members: HashMap<Id, Vec<Id>>,
+    /// Members of each conversation, with whether the set is the whole membership.
+    ///
+    /// A conversation-list row carries only a *preview* — the server caps each row's members
+    /// field at `MEMBER_PREVIEW`, enough to render the row and far short of an encryption
+    /// audience. A cache seeded from a list row is therefore incomplete, and the first send to
+    /// it reads the roster (the whole truth, [`Opcode::ConversationRoster`]) before choosing
+    /// who the sender key is sealed for; a summary from a create or a join answers with the
+    /// whole membership and seeds a complete entry. Member events patch the set in place —
+    /// they are deltas, and a complete cache they patch stays correct — but never promote an
+    /// incomplete one: a preview that already truncates cannot be made whole by adding one.
+    members: HashMap<Id, MemberCache>,
     /// Conversation topics this session has already subscribed to.
     ///
     /// The hub delivers a topic's events only to subscribed sessions, so the desktop client that
@@ -968,6 +1021,12 @@ struct Worker {
     /// The room a leave is in flight for. The wire's acknowledgement names no room, so the
     /// request's own id is the only thing that can say which room the ack answers.
     pending_leave: Option<Id>,
+    /// The conversation a roster read is in flight for. The wire's roster answer names no
+    /// conversation, so the request's own subject is the only thing that can say which
+    /// membership the reply promotes. One at a time by design: the send path asks only when
+    /// its cached membership is incomplete, and the answer that stores completes that cache,
+    /// so a second ask for the same conversation cannot arise before the first is answered.
+    pending_roster: Option<Id>,
     /// The founding keys a registration attempt minted but has not yet made stick (§12). A
     /// registration that fails after the server heard it must be retried with the *same* keys:
     /// a fresh root would be a different identity key, which the server can only answer with
@@ -1023,6 +1082,7 @@ impl Worker {
             gateway: None,
             retry: None,
             pending_leave: None,
+            pending_roster: None,
             pending_registration: None,
             txs: None,
             peers: None,
@@ -3609,14 +3669,43 @@ impl Worker {
         // each, minus this sending device. Devices are known only through KEY_BUNDLE responses;
         // an account with no bundle yet is a peer this client cannot reach, so the send is
         // retried after the fetch the code below triggers.
-        let members: Vec<Id> = signed
-            .members
-            .get(&conversation_id)
-            .cloned()
-            .unwrap_or_default();
+        //
+        // A membership cached from a list row is a *preview* — the server caps list rows at
+        // `MEMBER_PREVIEW` members, enough to render the row and not enough to choose an
+        // encryption audience. Sealing to it would hand the group key to eight members of a
+        // nine-member group and leave the ninth unable to decrypt, ever. So an incomplete cache
+        // asks the roster first (the same answer the SDK's first send reads); the message is
+        // retried once the whole truth arrives, exactly the way a missing device list is.
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let Some(cached) = signed.members.get(&conversation_id) else {
+            // Never primed: the send path is only reached from a conversation the list or a
+            // create seeded, but a defensive refusal beats sealing for no one.
+            return self.sink.send(Event::SendFailed { message_id });
+        };
+        let incomplete = !cached.complete;
+        if incomplete {
+            let roster = migo_protocol::ConversationRosterRequest { conversation_id };
+            self.pending_roster = Some(conversation_id);
+            self.request(Opcode::ConversationRoster, &roster).await;
+            self.sink.toast(
+                "reading this group's full roster, try again in a moment",
+                ToastKind::Info,
+            );
+            return self.sink.send(Event::SendFailed { message_id });
+        }
         // The audience the SDK's `recipientDevices` computes: members ∪ this account (the account's
         // other devices must receive this message for sync), devices of each, minus this sending
         // device.
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let members: Vec<Id> = signed
+            .members
+            .get(&conversation_id)
+            .map(|cached| cached.ids.clone())
+            .unwrap_or_default();
         let mut audience: Vec<Id> = members;
         if !audience.contains(&signed.account.account_id) {
             audience.push(signed.account.account_id);
@@ -3649,6 +3738,9 @@ impl Worker {
         // so it must be taken before the content seal — handing it out after the first message
         // would gate that message out of the receiver's chain, which is the late-joiner property
         // applied to everyone.
+        let Some(signed) = self.signed.as_mut() else {
+            return;
+        };
         let distribution = signed.groups.distribution(conversation_id);
         for device in &targets {
             let Some(signed) = self.signed.as_mut() else {
@@ -3884,7 +3976,9 @@ impl Worker {
         let mut to_watch: Vec<Id> = Vec::new();
         if let Some(signed) = self.signed.as_mut() {
             // A room's member set is served by the roster, not the join; the empty set here only
-            // seeds the map so a send before the list re-reads does not mis-address.
+            // seeds the map so a send before the list re-reads does not mis-address. Seeded
+            // incomplete — empty is the most truncated a preview can be — so the first send
+            // reads the roster rather than sealing for nobody.
             signed.members.entry(joined.conversation_id).or_default();
             signed
                 .room_conversations
@@ -3978,6 +4072,74 @@ impl Worker {
             change,
             member_count: event.member_count,
         });
+    }
+
+    /// A conversation's roster arrived: the whole membership, where a list row carried only a
+    /// preview. This is the answer the send path asks for when its cached membership is
+    /// incomplete — the promotion that makes the next send's audience the truth.
+    ///
+    /// The departed are filtered out (`left_at` is the roster's own word for "no longer in the
+    /// group"), and the active ids replace the preview wholesale rather than merging into it: a
+    /// merge would keep a preview's truncation and call the result complete.
+    fn on_roster(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(response) = gateway::decode::<migo_protocol::ConversationRosterResponse>(frame)
+        else {
+            return;
+        };
+        // Which conversation the answer names: the request carried the id, but the reply does
+        // not repeat it. The one in-flight roster ask is the only ask — the send path makes a
+        // second only after this answer stores — so remembering the ask is remembering the
+        // answer's subject.
+        let Some(conversation_id) = self.pending_roster.take() else {
+            return;
+        };
+        let active: Vec<Id> = response
+            .entries
+            .into_iter()
+            .filter(|entry| entry.left_at.is_none())
+            .map(|entry| entry.account_id)
+            .collect();
+        let Some(signed) = self.signed.as_mut() else {
+            return;
+        };
+        if let Some(cached) = signed.members.get_mut(&conversation_id) {
+            cached.promote(active);
+        }
+        // The send that asked for this roster failed on purpose (the audience was not knowable
+        // yet); the UI's retry affordance — the same one a missing device list surfaces — sends
+        // it again now that the membership is whole.
+    }
+
+    /// A member event off a watched conversation's topic: someone joined, left, or was removed.
+    ///
+    /// The room twin of this event rotates the chain on a departure; the conversation twin
+    /// cannot yet — it names no room, and the rotation the group path performs lives behind
+    /// `room_conversations`. What it always carries is the one fact the send audience is built
+    /// from, so the membership cache is patched here, exactly the way the SDK's
+    /// `applyMemberEvent` patches its own.
+    fn on_conversation_member(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(event) = gateway::decode::<migo_protocol::ConversationMemberEvent>(frame) else {
+            return;
+        };
+        if let Some(signed) = self.signed.as_mut() {
+            if let Some(cached) = signed.members.get_mut(&event.conversation_id) {
+                cached.apply(&event);
+            }
+        }
+        // A departure from a group this session is in must also kill the group's outbound
+        // chain, for the same reason the room path rotates: the member who left may still hold
+        // the key. The conversation id itself is the key the group state lives under, so no
+        // room mapping is needed here.
+        if matches!(
+            event.change,
+            migo_protocol::MemberChange::Left
+                | migo_protocol::MemberChange::Kicked
+                | migo_protocol::MemberChange::Banned
+        ) {
+            if let Some(signed) = self.signed.as_mut() {
+                signed.groups.rotate(event.conversation_id);
+            }
+        }
     }
 
     /// A state event off a watched room's topic: the counters moved. A delta, folded — never a
@@ -4211,6 +4373,13 @@ impl Worker {
             Opcode::MessageReceipt => self.on_receipt(&frame),
             Opcode::ConversationList => self.on_conversations(&frame).await,
             Opcode::ConversationCreate => self.on_conversation_created(&frame).await,
+            // The roster the send path asks for when its cached membership is a list preview:
+            // the whole truth the audience is chosen from.
+            Opcode::ConversationRoster => self.on_roster(&frame),
+            // A group's membership moved. Patched onto the cache the next audience is built
+            // from, the way `on_room_member` feeds the rooms pane — and the same rotation on
+            // a departure, so a key a departed member may still hold stops sealing.
+            Opcode::ConversationMemberEvent => self.on_conversation_member(&frame),
             Opcode::Sync => self.on_history(&frame),
             Opcode::KeyBundleFetch => self.on_bundles(&frame),
             Opcode::Typing => self.on_typing(&frame),
@@ -4390,9 +4559,24 @@ impl Worker {
                 }
             }
             if let Some(signed) = self.signed.as_mut() {
+                // A list row's members field is a capped preview, not the membership: seeded
+                // incomplete, so the first send reads the roster before choosing an audience.
+                // A cache already complete (a create's answer, or a roster this session read)
+                // is *not* demoted by a list re-read — the row says nothing the fuller answer
+                // did not, and demotion would cost a roster round trip per list refresh.
                 signed
                     .members
-                    .insert(summary.conversation_id, members.clone());
+                    .entry(summary.conversation_id)
+                    .and_modify(|cached| {
+                        if cached.complete {
+                            return;
+                        }
+                        cached.ids = members.clone();
+                    })
+                    .or_insert_with(|| MemberCache {
+                        ids: members.clone(),
+                        complete: false,
+                    });
                 if signed.conversations_watched.insert(summary.conversation_id) {
                     to_watch.push(summary.conversation_id);
                 }
@@ -4453,9 +4637,14 @@ impl Worker {
         };
         let mut to_watch: Vec<Id> = Vec::new();
         if let Some(signed) = self.signed.as_mut() {
+            // The create answer names the whole membership — the caller chose it — so it is
+            // cached complete: the first send builds its audience from it with no roster read.
             signed.members.insert(
                 summary.conversation_id,
-                summary.members.clone().unwrap_or_default(),
+                MemberCache {
+                    ids: summary.members.clone().unwrap_or_default(),
+                    complete: true,
+                },
             );
             if signed.conversations_watched.insert(summary.conversation_id) {
                 to_watch.push(summary.conversation_id);
@@ -4959,6 +5148,107 @@ fn body_of(content: Content) -> Body {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A deterministic id: the number rendered as the low bytes of a 128-bit id, so members
+    /// can be named in tests the way `idOf(n)` names them across the SDK's tests.
+    fn id_of(n: u8) -> Id {
+        let mut bytes = [0u8; 16];
+        bytes[15] = n;
+        Id::from_bytes(bytes)
+    }
+
+    /// A `CONVERSATION_MEMBER_EVENT` for one account and change, in the conversation every
+    /// membership test here shares.
+    fn member_event(
+        user: u8,
+        change: migo_protocol::MemberChange,
+    ) -> migo_protocol::ConversationMemberEvent {
+        migo_protocol::ConversationMemberEvent {
+            conversation_id: id_of(0x5e),
+            user_id: id_of(user),
+            change,
+            member_count: 2,
+        }
+    }
+
+    /// The list row's preview is not the membership: a cache seeded from a list row stays
+    /// incomplete until the roster promotes it, and a join applied onto the preview does not
+    /// promote it — the ninth member of a nine-member group must be reached by the roster the
+    /// first send reads, never by the eight the preview happened to name.
+    #[test]
+    fn a_list_preview_is_promoted_only_by_the_roster() {
+        let mut cache = MemberCache {
+            ids: (20..=27).map(id_of).collect(),
+            complete: false,
+        };
+
+        // A join lands before the roster read. The preview patched with it is still a
+        // preview: nothing about one more member makes the set whole.
+        cache.apply(&member_event(29, migo_protocol::MemberChange::Joined));
+        assert!(!cache.complete, "a patched preview stays incomplete");
+
+        // The roster answers with the whole membership — nine members, none of them the
+        // premature join above (it arrived before the truth, and the truth wins wholesale).
+        cache.promote((20..=28).map(id_of).collect());
+        assert!(cache.complete, "the roster promotes");
+        assert_eq!(cache.ids, (20..=28).map(id_of).collect::<Vec<_>>());
+        assert!(
+            !cache.ids.contains(&id_of(29)),
+            "the promotion replaces the preview rather than merging into it"
+        );
+    }
+
+    /// A member event moves a complete cache without a roster re-read: a join adds, a
+    /// departure removes, and a presence fact or an unknown change touches nothing. This is
+    /// the live-stream half of the fix — the audience follows the group between roster reads.
+    #[test]
+    fn member_events_move_a_complete_cache() {
+        let mut cache = MemberCache {
+            ids: (20..=22).map(id_of).collect(),
+            complete: true,
+        };
+
+        cache.apply(&member_event(29, migo_protocol::MemberChange::Joined));
+        assert_eq!(
+            cache.ids,
+            (20..=22).chain(29..=29).map(id_of).collect::<Vec<_>>()
+        );
+        assert!(cache.complete, "a patch does not demote a complete cache");
+
+        // A duplicate join is a no-op: the set holds the member already.
+        cache.apply(&member_event(29, migo_protocol::MemberChange::Joined));
+        assert_eq!(cache.ids.len(), 4);
+
+        cache.apply(&member_event(20, migo_protocol::MemberChange::Left));
+        assert!(!cache.ids.contains(&id_of(20)), "a departure is removed");
+
+        // Presence facts and unknown changes are not membership: the set stands.
+        cache.apply(&member_event(29, migo_protocol::MemberChange::Disconnected));
+        cache.apply(&member_event(29, migo_protocol::MemberChange::Reconnected));
+        cache.apply(&member_event(29, migo_protocol::MemberChange::Unknown));
+        assert!(cache.ids.contains(&id_of(29)));
+
+        // A kick and a ban depart the member the same way a leave does.
+        cache.apply(&member_event(21, migo_protocol::MemberChange::Kicked));
+        cache.apply(&member_event(22, migo_protocol::MemberChange::Banned));
+        assert_eq!(cache.ids, vec![id_of(29)]);
+    }
+
+    /// An empty roster answer is not a promotion: a conversation the roster says has nobody in
+    /// it is an answer no audience can be built from, and the preview the cache held — whatever
+    /// it named — stays, incomplete, until a fuller answer says otherwise.
+    #[test]
+    fn an_empty_roster_does_not_promote() {
+        let preview: Vec<Id> = (20..=22).map(id_of).collect();
+        let mut cache = MemberCache {
+            ids: preview.clone(),
+            complete: false,
+        };
+
+        cache.promote(Vec::new());
+        assert!(!cache.complete, "an empty answer promotes nothing");
+        assert_eq!(cache.ids, preview, "the preview the cache held stands");
+    }
 
     /// The wallet-sync compare folds every written form of one address to the registry's
     /// canonical string: EIP-55 (what derivation holds), prefixed lowercase (what a paste

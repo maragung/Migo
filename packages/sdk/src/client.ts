@@ -49,9 +49,12 @@ import {
   decodeAcknowledged,
   encodePing,
   decodePong,
+  decodeConversationMemberEvent,
+  MemberChange,
 } from '@migo/protocol';
 import type {
   Acknowledged,
+  ConversationMemberEvent,
   ConversationSummary,
   ConversationListResponse,
   SubscribeResponse,
@@ -205,8 +208,8 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   readonly #keyStore: KeyStore;
   readonly #replenishPolicy: PrekeyReplenishPolicy;
 
-  /** Conversation id to its member account ids, primed from summaries; backs {@link recipientDevices}. */
-  readonly #members = new Map<Id, Id[]>();
+  /** Conversation id to its member account ids and whether that set is known whole; backs {@link recipientDevices}. */
+  readonly #members = new Map<Id, { ids: Id[]; complete: boolean }>();
   /** Account id to its device ids, cached so the steady-state send path makes no round trip. */
   readonly #userDevices = new Map<Id, Id[]>();
   /** `${userId}|${deviceId}` to a bundle enumerated but not yet spent, served once to {@link fetchBundle}. */
@@ -218,6 +221,11 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   readonly #peerIdentitiesCache = new Map<Id, PeerIdentity[]>();
   /** Every topic we have an active subscription to, re-sent after a session reset. */
   readonly #subscribedTopics = new Map<string, Topic>();
+  /**
+   * Unsubscribers for the client-internal event listeners ({@link #applyMemberEvent}'s wiring),
+   * torn down on disconnect so a reconnect does not stack a second copy of each.
+   */
+  readonly #unsubscribes: (() => void)[] = [];
 
   /**
    * The refresh in flight, when one is. A refresh token is single-use: the server's replay
@@ -466,6 +474,9 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     ctx.social.stop();
     ctx.games.stop();
     ctx.transport.close();
+    for (const unsubscribe of this.#unsubscribes.splice(0)) {
+      unsubscribe();
+    }
     this.#ctx = null;
     this.#members.clear();
     this.#userDevices.clear();
@@ -562,7 +573,9 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     options: CreateConversationOptions = {},
   ): Promise<ConversationSummary> {
     const summary = await this.conversations.create(kind, members, options);
-    this.rememberConversation(summary);
+    // The create answer carries the whole membership (the caller named it), so it is cached
+    // complete: the first send builds its audience from it with no roster round trip.
+    this.rememberConversation(summary, true);
     if (this.#members.get(summary.conversationId) === undefined) {
       this.rememberMembers(summary.conversationId, members);
     }
@@ -573,8 +586,10 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   /**
    * Lists conversations, priming each one's membership and subscribing to it.
    *
-   * After this returns, every listed conversation can be sent to and will deliver inbound events. Page with
-   * the returned {@link ConversationListResponse.nextCursor}.
+   * After this returns, every listed conversation can be sent to and will deliver inbound events.
+   * Page with the returned {@link ConversationListResponse.nextCursor}. Each row's membership is
+   * a preview — the server caps list rows at `MEMBER_PREVIEW` members — so it is cached
+   * incomplete and the first send to it re-reads the roster before choosing an audience.
    */
   async loadConversations(limit: number, cursor?: string): Promise<ConversationListResponse> {
     const response = await this.conversations.list(limit, cursor);
@@ -609,16 +624,28 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
 
   // --- membership cache priming ---
 
-  /** Caches a summary's membership, if it carries one, so sends to it need no extra round trip. */
-  rememberConversation(summary: ConversationSummary): void {
+  /**
+   * Caches a summary's membership, if it carries one, so sends to it need no extra round trip.
+   *
+   * A summary from the conversation *list* is a preview: the server caps each row at
+   * `MEMBER_PREVIEW` members, so its membership counts as incomplete and the first send to it
+   * re-reads the roster before choosing a sender-key audience (see {@link recipientDevices}).
+   * A summary from a create or an invite answers with the whole membership and is cached as
+   * complete.
+   */
+  rememberConversation(summary: ConversationSummary, complete = false): void {
     if (summary.members !== undefined) {
-      this.#members.set(summary.conversationId, summary.members);
+      this.#members.set(summary.conversationId, { ids: summary.members, complete });
     }
   }
 
-  /** Explicitly sets a conversation's membership, for a handle that arrived without one (e.g. a room). */
+  /**
+   * Explicitly sets a conversation's membership, for a handle that arrived without one (e.g. a room).
+   *
+   * The caller vouches for the set being the whole membership, as a roster read would.
+   */
   rememberMembers(conversationId: Id, members: Id[]): void {
-    this.#members.set(conversationId, members);
+    this.#members.set(conversationId, { ids: members, complete: true });
   }
 
   /** Forgets a user's cached device list, so the next send re-enumerates it (e.g. after a key change). */
@@ -638,6 +665,43 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     this.#members.delete(conversationId);
   }
 
+  /**
+   * Applies one membership movement onto the membership cache.
+   *
+   * A join adds the account; a leave, kick, or ban removes it. Everything else (a connect or
+   * disconnect is a *presence* fact, not a membership one) leaves the cache alone. An incomplete
+   * cache stays incomplete: a preview that already truncates cannot be made whole by patching
+   * it — the roster re-read in {@link recipientDevices} is what promotes it. An unknown
+   * conversation is ignored rather than created: the event for a conversation this client has
+   * never loaded carries no membership to patch, and the roster read will find the truth.
+   */
+  #applyMemberEvent(event: ConversationMemberEvent): void {
+    const cached = this.#members.get(event.conversationId);
+    if (cached === undefined) {
+      return;
+    }
+    const joined = event.change === MemberChange.Joined;
+    const departed =
+      event.change === MemberChange.Left ||
+      event.change === MemberChange.Kicked ||
+      event.change === MemberChange.Banned;
+    if (!joined && !departed) {
+      return;
+    }
+    const held = cached.ids.includes(event.userId);
+    if (joined && !held) {
+      this.#members.set(event.conversationId, {
+        ids: [...cached.ids, event.userId],
+        complete: cached.complete,
+      });
+    } else if (departed && held) {
+      this.#members.set(event.conversationId, {
+        ids: cached.ids.filter((id) => id !== event.userId),
+        complete: cached.complete,
+      });
+    }
+  }
+
   // --- DeviceDirectory ---
 
   /**
@@ -647,17 +711,41 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
    * minus the one device we send from. Membership must have been primed ({@link rememberConversation} or
    * the orchestration helpers); an unknown conversation is a programming error and throws rather than
    * silently sealing for no one.
+   *
+   * A membership cached from a list row is a *preview* — the server caps list rows at
+   * `MEMBER_PREVIEW` members, which is enough to render a row and not enough to choose an
+   * encryption audience. When the cache is incomplete the roster is read here, once: the fresh
+   * answer replaces the preview, is cached as complete, and every later send uses it without a
+   * round trip. Sealing to the preview instead would send the group key to eight members of a
+   * nine-member group — a member who can never decrypt, and a member count the sender believes
+   * is wrong.
    */
   async recipientDevices(conversationId: Id): Promise<DeviceAddress[]> {
     const ctx = this.#requireConnected();
-    const members = this.#members.get(conversationId);
+    let members = this.#members.get(conversationId);
+    if (members === undefined || !members.complete) {
+      const roster = await ctx.conversations.getRoster(conversationId);
+      const ids = roster
+        .filter((entry) => entry.leftAt === undefined)
+        .map((entry) => entry.accountId);
+      // Only a *known* conversation is promoted: a caller asking after `invalidateConversation`
+      // keeps the invalidation, so a later conversation that reuses the id is not handed a stale
+      // audience. The unknown-conversation throw below stays reachable.
+      members =
+        members === undefined
+          ? undefined
+          : { ids: ids.length > 0 ? ids : members.ids, complete: true };
+      if (members !== undefined) {
+        this.#members.set(conversationId, members);
+      }
+    }
     if (members === undefined) {
       throw new SdkError(
         `migo: membership for conversation ${conversationId} is unknown; ` +
           'call startConversation, loadConversations, or rememberMembers first',
       );
     }
-    const audience = new Set<Id>(members);
+    const audience = new Set<Id>(members.ids);
     audience.add(ctx.grant.accountId);
 
     const devices: DeviceAddress[] = [];
@@ -1088,6 +1176,17 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     ctx.notifications.start();
     ctx.social.start();
     ctx.games.start();
+
+    // Membership movement keeps the membership cache true, so the sender-key audience the next
+    // send builds is the group as it stands, not the group as a list row previewed it. A join or
+    // a departure is also a crypto event for the domains' listeners — the app's rotation — but
+    // the cache is this class's own state and updating it here is what keeps `recipientDevices`
+    // from re-reading the roster on every send after every invite.
+    this.#unsubscribes.push(
+      rpc.on(OP.CONVERSATION_MEMBER_EVENT, decodeConversationMemberEvent, (event) => {
+        this.#applyMemberEvent(event);
+      }),
+    );
 
     await keys.publish();
     // Our own user topic carries self-directed events: presence sync across our devices, notifications.

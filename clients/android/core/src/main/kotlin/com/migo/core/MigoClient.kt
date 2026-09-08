@@ -46,11 +46,13 @@ import com.migo.core.protocol.BandwidthMode
 import com.migo.core.protocol.ClientInfo
 import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.ConversationListResponse
+import com.migo.core.protocol.ConversationMemberEvent
 import com.migo.core.protocol.ConversationSummary
 import com.migo.core.protocol.Feature
 import com.migo.core.protocol.FriendEvent
 import com.migo.core.protocol.GameEvent
 import com.migo.core.protocol.Hello
+import com.migo.core.protocol.MemberChange
 import com.migo.core.protocol.MessageReceipt
 import com.migo.core.protocol.NotificationEvent
 import com.migo.core.protocol.Op
@@ -351,8 +353,8 @@ class MigoClient private constructor(
         ListenerSet<NotificationEvent>(Op.NOTIFICATION_EVENT, options.onEventError)
     private val gameListeners = ListenerSet<GameEvent>(Op.GAME_EVENT, options.onEventError)
 
-    /** Conversation id to its member account ids, primed from summaries; backs [recipientDevices]. */
-    private val members = HashMap<Id, List<Id>>()
+    /** Conversation id to its member account ids and whether that set is known whole; backs [recipientDevices]. */
+    private val members = HashMap<Id, MemberCache>()
 
     /** Account id to its device ids, cached so the steady-state send path makes no round trip. */
     private val userDevices = HashMap<Id, List<Id>>()
@@ -950,10 +952,12 @@ class MigoClient private constructor(
         title: String? = null,
     ): ConversationSummary {
         val summary = conversations.create(kind, memberIds, title)
-        rememberConversation(summary)
+        // The create answer carries the whole membership (the caller named it), so it is cached
+        // complete: the first send builds its audience from it with no roster round trip.
+        rememberConversation(summary, complete = true)
         cacheLock.withLock {
             if (members[summary.conversationId] == null) {
-                members[summary.conversationId] = memberIds.toList()
+                members[summary.conversationId] = MemberCache(memberIds.toList(), true)
             }
         }
         watchConversation(summary.conversationId)
@@ -965,7 +969,9 @@ class MigoClient private constructor(
      *
      * One SUBSCRIBE for the whole page rather than one per conversation: the topics are known together,
      * and a frame per conversation on every app start is the kind of thing that shows up on a phone's
-     * battery graph. Page with the response's cursor.
+     * battery graph. Page with the response's cursor. Each row's membership is a preview -- the
+     * server caps list rows at its `MEMBER_PREVIEW` members -- so it is cached incomplete and the
+     * first send to it re-reads the roster before choosing an audience.
      */
     suspend fun loadConversations(limit: Long, cursor: String? = null): ConversationListResponse {
         val response = conversations.list(limit, cursor)
@@ -998,15 +1004,27 @@ class MigoClient private constructor(
 
     // --- membership cache priming ---
 
-    /** Caches a summary's membership, if it carries one, so sends need no extra round trip. */
-    suspend fun rememberConversation(summary: ConversationSummary) {
+    /**
+     * Caches a summary's membership, if it carries one, so sends need no extra round trip.
+     *
+     * A summary from the conversation *list* is a preview: the server caps each row at its
+     * `MEMBER_PREVIEW` members, so its membership counts as incomplete and the first send to
+     * it re-reads the roster before choosing a sender-key audience (see [recipientDevices]).
+     * A summary from a create or an invite answers with the whole membership and is cached as
+     * complete.
+     */
+    suspend fun rememberConversation(summary: ConversationSummary, complete: Boolean = false) {
         val listed = summary.members ?: return
-        cacheLock.withLock { members[summary.conversationId] = listed }
+        cacheLock.withLock { members[summary.conversationId] = MemberCache(listed, complete) }
     }
 
-    /** Sets a conversation's membership explicitly, for a handle that arrived without one. */
+    /**
+     * Sets a conversation's membership explicitly, for a handle that arrived without one.
+     *
+     * The caller vouches for the set being the whole membership, as a roster read would.
+     */
     suspend fun rememberMembers(conversationId: Id, memberIds: List<Id>) {
-        cacheLock.withLock { members[conversationId] = memberIds.toList() }
+        cacheLock.withLock { members[conversationId] = MemberCache(memberIds.toList(), true) }
     }
 
     /**
@@ -1039,15 +1057,36 @@ class MigoClient private constructor(
      * [loadConversations] or [rememberMembers]; an unknown conversation throws rather than quietly
      * sealing for nobody, because a send that reached no one and reported success is the worst of the
      * available outcomes.
+     *
+     * A membership cached from a list row is a *preview* -- the server caps list rows at its
+     * `MEMBER_PREVIEW` members, which is enough to render a row and not enough to choose an
+     * encryption audience. When the cache is incomplete the roster is read here, once: the fresh
+     * answer replaces the preview, is cached as complete, and every later send uses it without a
+     * round trip. Sealing to the preview instead would send the group key to eight members of a
+     * nine-member group -- a member who can never decrypt, and a member count the sender believes
+     * is wrong.
      */
     override suspend fun recipientDevices(conversationId: Id): List<DeviceAddress> {
         val session = requireConnected()
+        var cached = cacheLock.withLock { members[conversationId] }
+        if (cached != null && !cached.complete) {
+            val roster = session.conversations.getRoster(conversationId)
+            val active = roster.filter { it.leftAt == null }.map { it.accountId }
+            // Only a *known* conversation is promoted: a caller asking after
+            // [invalidateConversation] keeps the invalidation, and the unknown-conversation throw
+            // below stays reachable. A roster that answers nobody (a group the caller just left,
+            // say) keeps the preview rather than caching an empty audience.
+            if (active.isNotEmpty()) {
+                cached = MemberCache(active, true)
+                cacheLock.withLock { members[conversationId] = cached!! }
+            }
+        }
         val audience = cacheLock.withLock {
-            val listed = members[conversationId] ?: throw SdkError(
+            val listed = cached ?: throw SdkError(
                 "membership for conversation $conversationId is unknown; call startConversation, " +
                     "loadConversations, or rememberMembers first",
             )
-            LinkedHashSet(listed).apply { add(session.accountId) }
+            LinkedHashSet(listed.ids).apply { add(session.accountId) }
         }
 
         val devices = ArrayList<DeviceAddress>()
@@ -1315,6 +1354,42 @@ class MigoClient private constructor(
         session.notifications.onNotification { notificationListeners.deliver(it) }
         session.games.onEvent { gameListeners.deliver(it) }
         session.social.onFriendEvent { friendListeners.deliver(it) }
+        // Membership movement keeps the membership cache true, so the sender-key audience the
+        // next send builds is the group as it stands, not the group as a list row previewed
+        // it. The live subscription lives on this session's Rpc, so it goes with the session
+        // the way the other bridge subscriptions do.
+        session.rpc.on(Op.CONVERSATION_MEMBER_EVENT, { r -> ConversationMemberEvent.decode(r) }) { event, _ ->
+            applyMemberEvent(event)
+        }
+    }
+
+    /**
+     * Applies one membership movement onto the membership cache.
+     *
+     * A join adds the account; a leave, kick, or ban removes it. Everything else (a connect or
+     * disconnect is a *presence* fact, not a membership one) leaves the cache alone. An
+     * incomplete cache stays incomplete: a preview that already truncates cannot be made whole
+     * by patching it -- the roster re-read in [recipientDevices] is what promotes it. An
+     * unknown conversation is ignored rather than created: the event for a conversation this
+     * client has never loaded carries no membership to patch, and the roster read will find
+     * the truth.
+     */
+    private fun applyMemberEvent(event: ConversationMemberEvent) {
+        cacheLock.withLock {
+            val cached = members[event.conversationId] ?: return
+            val joined = event.change == MemberChange.Joined
+            val departed = event.change == MemberChange.Left ||
+                event.change == MemberChange.Kicked ||
+                event.change == MemberChange.Banned
+            if (!joined && !departed) return
+            val held = event.userId in cached.ids
+            when {
+                joined && !held -> members[event.conversationId] =
+                    MemberCache(cached.ids + event.userId, cached.complete)
+                departed && held -> members[event.conversationId] =
+                    MemberCache(cached.ids - event.userId, cached.complete)
+            }
+        }
     }
 
     /**
@@ -1518,6 +1593,16 @@ private class Session(
  * load that keeps the node down. Spreading each client's retry across the interval is what turns a
  * thundering herd into an arrival rate.
  */
+/**
+ * One conversation's cached membership, and whether the set is known whole.
+ *
+ * `complete` is false for a membership that came from a conversation-list row: the server caps
+ * those rows at its `MEMBER_PREVIEW` members, so the set is a rendering preview and never an
+ * encryption audience -- [MigoClient.recipientDevices] reads the roster before choosing one. It
+ * is true for a membership the caller vouched for or a roster read answered.
+ */
+private data class MemberCache(val ids: List<Id>, val complete: Boolean)
+
 private class Backoff(private val ceilingMs: Long) {
     private var current = INITIAL_MS
 
