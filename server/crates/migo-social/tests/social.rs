@@ -1065,6 +1065,96 @@ async fn a_request_is_refused_when_either_friend_list_is_full() {
     assert_eq!(harness.requests("full"), 2);
 }
 
+/// An acceptance is refused when either list has filled while the request waited.
+///
+/// The ceiling is checked at the ask, but pending rows do not count toward a friend
+/// count — so a request can queue against a list that fills in the meantime. Without
+/// the re-check at the answer, a hundred accounts each requesting a user sitting one
+/// seat under the ceiling would take that user past it, one acceptance at a time.
+#[tokio::test]
+async fn an_acceptance_is_refused_when_a_list_has_filled_meanwhile() {
+    let harness = Harness::configured(SocialConfig {
+        max_friends: 1,
+        ..SocialConfig::default()
+    });
+    harness.cast().await;
+    harness.person(ERIN, "erin").await;
+
+    // The responder's list fills after the request queued.
+    harness.request_waiting(BOB, ALICE, NOW).await;
+    harness.friendship(ALICE, CAROL, NOW + SECOND).await;
+    expect_code(
+        harness
+            .social
+            .respond_friend(&caller(ALICE, ALICE_PHONE), id(BOB), true)
+            .await,
+        codes::QUOTA_EXCEEDED,
+    );
+    assert_eq!(harness.responses("full"), 1);
+    // The request is unanswered, not destroyed, and the full list keeps its seat:
+    // unfriending one account is enough to make room and answer it.
+    assert!(
+        harness
+            .row(BOB, ALICE, RelationshipKind::PendingOutgoing)
+            .await
+            .is_some(),
+        "the refusal leaves the request waiting"
+    );
+    assert!(
+        harness
+            .row(ALICE, CAROL, RelationshipKind::Friend)
+            .await
+            .is_some(),
+        "the refusal leaves the existing friendship alone"
+    );
+
+    // The asker's list filling is the same refusal from the other side.
+    harness.request_waiting(DAVE, ERIN, NOW).await;
+    harness.friendship(DAVE, BOB, NOW + 2 * SECOND).await;
+    expect_code(
+        harness
+            .social
+            .respond_friend(&caller(ERIN, ERIN_PHONE), id(DAVE), true)
+            .await,
+        codes::QUOTA_EXCEEDED,
+    );
+    assert_eq!(harness.responses("full"), 2);
+}
+
+/// A crossing request — the asker's own request accepting one already waiting — meets
+/// the same ceiling a plain acceptance does.
+///
+/// The crossing branch returns before the request path's own ceiling check ever runs,
+/// so without a check of its own it would be the one door into a full list.
+#[tokio::test]
+async fn a_crossing_request_is_refused_when_a_list_has_filled_meanwhile() {
+    let harness = Harness::configured(SocialConfig {
+        max_friends: 1,
+        ..SocialConfig::default()
+    });
+    harness.cast().await;
+
+    // Bob asked Alice; Alice's list filled while the request waited; Alice asking Bob
+    // back would cross into the acceptance, and must not cross the ceiling.
+    harness.request_waiting(BOB, ALICE, NOW).await;
+    harness.friendship(ALICE, CAROL, NOW + SECOND).await;
+    expect_code(
+        harness
+            .social
+            .request_friend(&caller(ALICE, ALICE_PHONE), id(BOB))
+            .await,
+        codes::QUOTA_EXCEEDED,
+    );
+    assert_eq!(harness.requests("full"), 1);
+    assert!(
+        harness
+            .row(BOB, ALICE, RelationshipKind::PendingOutgoing)
+            .await
+            .is_some(),
+        "the waiting request survives the refusal"
+    );
+}
+
 /// An account nobody registered cannot be asked.
 ///
 /// `NOT_FOUND` and not a privacy refusal, because there is no privacy to protect: an id
@@ -3109,6 +3199,45 @@ async fn a_suggestion_never_offers_a_friend_a_request_or_the_caller() {
     assert!(
         suggestions.is_empty(),
         "everybody reachable is already known: {suggestions:?}"
+    );
+}
+
+/// A suggestion never offers a friend the scan did not see.
+///
+/// The known-set is bounded at [`MAX_MUTUAL_SCAN`] rows, so a caller with more friends
+/// than that has friends the set never read — and the one-hop scan is likeliest to
+/// resurface exactly those, as friends of the newest seed friends. The per-candidate
+/// read is what keeps the promise for the accounts whose list is too big for the scan
+/// to cover.
+#[tokio::test]
+async fn a_suggestion_never_offers_a_friend_the_scan_did_not_see() {
+    let harness = Harness::new();
+    harness.person(ALICE, "alice").await;
+    // The friend the scan cannot reach: older than MAX_MUTUAL_SCAN newer friends.
+    harness.friendship(ALICE, 2_000, NOW).await;
+    for extra in 0..MAX_MUTUAL_SCAN as u128 {
+        harness
+            .friendship(ALICE, 1_000 + extra, NOW + SECOND + extra as i64)
+            .await;
+    }
+    // The newest seed friend knows both the unseen friend and a genuine stranger, so
+    // the one-hop scan surfaces one of each — and only the stranger may be offered.
+    harness.friendship(1_199, 2_000, NOW + 2 * SECOND).await;
+    harness.friendship(1_199, 3_000, NOW + 2 * SECOND).await;
+
+    let suggestions = harness
+        .social
+        .suggest(&caller(ALICE, ALICE_PHONE), None)
+        .await
+        .expect("an account may ask who it might know");
+
+    assert!(
+        !suggestions.iter().any(|s| s.account_id == id(2_000)),
+        "the caller's own oldest friend is not a suggestion: {suggestions:?}"
+    );
+    assert!(
+        suggestions.iter().any(|s| s.account_id == id(3_000)),
+        "the genuine stranger still is: {suggestions:?}"
     );
 }
 

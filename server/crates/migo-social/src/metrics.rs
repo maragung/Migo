@@ -89,16 +89,19 @@ pub(crate) enum ResponseOutcome {
     Declined,
     /// There was nothing to answer.
     Missing,
+    /// There was something to answer, but one of the two lists was full.
+    Full,
 }
 
 impl ResponseOutcome {
-    pub(crate) const ALL: [Self; 3] = [Self::Accepted, Self::Declined, Self::Missing];
+    pub(crate) const ALL: [Self; 4] = [Self::Accepted, Self::Declined, Self::Missing, Self::Full];
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Accepted => "accepted",
             Self::Declined => "declined",
             Self::Missing => "missing",
+            Self::Full => "full",
         }
     }
 

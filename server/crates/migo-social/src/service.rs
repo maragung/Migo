@@ -690,6 +690,25 @@ where
             .await?
             .is_some()
         {
+            // Both ceilings, re-checked at the acceptance for the same reason the
+            // request path checks them at the ask: pending rows do not count toward a
+            // Friend count, so a request can queue against a list that fills while it
+            // waits. The pending rows stay — the other side can still answer, decline,
+            // or free a seat and ask again.
+            for account_id in [caller.account_id, subject_id] {
+                if let Err(error) = self
+                    .require_room_for(
+                        account_id,
+                        RelationshipKind::Friend,
+                        self.config.max_friends,
+                        "friend",
+                    )
+                    .await
+                {
+                    self.meters.request(RequestOutcome::Full);
+                    return Err(error);
+                }
+            }
             self.store
                 .accept_friend(caller.account_id, subject_id, caller.now)
                 .await?;
@@ -802,6 +821,28 @@ where
             self.meters.response(ResponseOutcome::Missing);
             self.meters.gate(Self::block_outcome(state));
             return Err(refusal);
+        }
+
+        // Both ceilings, re-checked at the acceptance for the same reason the request
+        // path checks them at the ask: pending rows do not count toward a Friend
+        // count, so a month of requests can queue against a list that fills in the
+        // meantime. Without this, a hundred accounts each requesting a user at 4,998
+        // friends would take that user past 5,000 by accepting. The pending rows stay:
+        // the requester is no further from a seat than before, and unfriending one
+        // account is enough to make room.
+        for account_id in [caller.account_id, requester_id] {
+            if let Err(error) = self
+                .require_room_for(
+                    account_id,
+                    RelationshipKind::Friend,
+                    self.config.max_friends,
+                    "friend",
+                )
+                .await
+            {
+                self.meters.response(ResponseOutcome::Full);
+                return Err(error);
+            }
         }
 
         self.store
@@ -1253,6 +1294,16 @@ where
                 .is_blocked_either_way(caller.account_id, account_id)
                 .await?
             {
+                continue;
+            }
+            // The same blind spot, for friends: `known` is bounded at
+            // [`MAX_MUTUAL_SCAN`] rows, and a caller past that bound has friends the
+            // set never saw — the very accounts a mutual-friend scan is most likely
+            // to surface again. The per-candidate read is one keyed lookup over an
+            // already-truncated list, and it is what keeps the promise that a
+            // suggestion is never somebody's existing friend, for the accounts whose
+            // list is too big for the scan to cover.
+            if self.are_friends(caller.account_id, account_id).await? {
                 continue;
             }
             out.push(Suggestion {
