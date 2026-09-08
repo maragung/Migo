@@ -1390,6 +1390,37 @@ pub struct NewXpAward {
     pub at: Timestamp,
 }
 
+/// The daily caps an XP award is clamped to, evaluated atomically with the write.
+///
+/// The service reads its policy numbers from configuration and hands them here rather
+/// than reading the earned totals itself, because a cap checked outside the write has a
+/// window between the two: two awards arriving together each read the same headroom and
+/// both pass, and the day's limit is spent twice. The caps are parameters so the store
+/// stays the dumb layer — it clamps, it does not own the policy.
+#[derive(Clone, Copy, Debug)]
+pub struct XpCaps {
+    /// Only awards at or after this instant count towards either cap: the rolling
+    /// window's start.
+    pub window_start: Timestamp,
+    /// The day's cap across every source.
+    pub global_cap: i64,
+    /// The day's cap for the award's own source.
+    pub source_cap: i64,
+}
+
+/// What a capped award actually did.
+#[derive(Clone, Copy, Debug)]
+pub struct CappedXpAward {
+    /// The amount actually written: the request clamped to the smaller remaining
+    /// headroom, zero when the caps left nothing.
+    pub granted: i64,
+    /// Whether the caps reduced the request. A granted award may still be capped.
+    pub capped: bool,
+    /// The total's movement. When `granted` is zero nothing was written and
+    /// `before` equals `after` at the account's current total.
+    pub change: XpChange,
+}
+
 /// Which population a leaderboard ranks.
 ///
 /// Section 32 lists a global, a country, and a room leaderboard. One parameter rather

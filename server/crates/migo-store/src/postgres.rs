@@ -93,15 +93,15 @@ use crate::entity;
 use crate::migration::{Migrator, MIGRATION_LOCK_KEY};
 use crate::model::{
     advanced_token, game_status, notification_kind, Account, AccountStatus, AdvanceGame, Appended,
-    AuditEntry, BadgeAward, Bot, Conversation, ConversationMember, ConversationPosition,
-    ConversationSummary, Currency, Cursor, Device, DeviceStatus, Entitlement, GameSession, Gender,
-    GiftSent, GlobalAdmin, IdentityKeyStatus, KeyBundle, LedgerAccount, LedgerAccountKind,
-    LedgerLeg, LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice, NewGame, NewMessage,
-    NewModerationAction, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward,
-    Notification, OutboxRecord, Patch, PeerRecord, Posted, Profile, ProfilePatch, Progression,
-    PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship, Report, RevokeReason, Room,
-    RoomMember, RoomNetworkBan, Scope, Session, Standing, StoredMessage, Visibility, WalletStatus,
-    XpChange,
+    AuditEntry, BadgeAward, Bot, CappedXpAward, Conversation, ConversationMember,
+    ConversationPosition, ConversationSummary, Currency, Cursor, Device, DeviceStatus, Entitlement,
+    GameSession, Gender, GiftSent, GlobalAdmin, IdentityKeyStatus, KeyBundle, LedgerAccount,
+    LedgerAccountKind, LedgerLeg, LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice,
+    NewGame, NewMessage, NewModerationAction, NewOutboxEvent, NewPeer, NewRoom, NewSession,
+    NewTransaction, NewXpAward, Notification, OutboxRecord, Patch, PeerRecord, Posted, Profile,
+    ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship,
+    Report, RevokeReason, Room, RoomMember, RoomNetworkBan, Scope, Session, Standing,
+    StoredMessage, Visibility, WalletStatus, XpCaps, XpChange,
 };
 use crate::traits::{
     canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore,
@@ -4859,6 +4859,155 @@ impl ProgressionStore for PostgresStore {
         Ok(XpChange {
             before: after - award.amount,
             after,
+        })
+    }
+
+    async fn award_xp_capped(&self, award: NewXpAward, caps: XpCaps) -> Result<CappedXpAward> {
+        if award.amount <= 0 {
+            return Err(fault::validation("amount", "must be positive"));
+        }
+        // One transaction, and the advisory lock inside it is what closes the
+        // check-then-write window: two capped awards for one account serialise here,
+        // so the second sums the first's row before clamping its own amount. The
+        // lock is transaction-scoped, so a commit, a rollback, or a panic releases
+        // it — there is no path that leaves it held. Keyed by a hash of the account
+        // id: a collision only over-serialises two accounts for one transaction's
+        // length; the same account always hashes to the same key.
+        let transaction = self.begin("award_xp_capped").await?;
+        transaction
+            .execute_raw(sql(
+                "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+                [uuid_of(award.account_id).into()],
+            ))
+            .await
+            .context("award_xp_capped: lock")?;
+
+        // The earned totals under the lock. Clamped on the high side only, as in
+        // `xp_earned_since`: every amount is positive, and a total that wrapped would
+        // come back small and hand an abuser the very allowance this read exists to
+        // deny them.
+        let earned_sum = |source: Option<i16>| {
+            let mut query = entity::xp_award::Entity::find()
+                .select_only()
+                .expr_as(
+                    Expr::from(Func::least([
+                        Expr::from(Func::sum(Expr::col(
+                            entity::xp_award::Column::Amount.as_column_ref(),
+                        )))
+                        .if_null(0_i64),
+                        Expr::val(i64::MAX),
+                    ]))
+                    .cast_as(Alias::new("bigint")),
+                    "earned",
+                )
+                .filter(entity::xp_award::Column::AccountId.eq(uuid_of(award.account_id)))
+                .filter(entity::xp_award::Column::CreatedAt.gte(stamp_of(caps.window_start)));
+            if let Some(source) = source {
+                query = query.filter(entity::xp_award::Column::Source.eq(source));
+            }
+            query.into_tuple::<i64>().one(&transaction)
+        };
+        let earned_all = earned_sum(None)
+            .await
+            .context("award_xp_capped: global sum")?
+            .unwrap_or(0);
+        let earned_source = earned_sum(Some(award.source))
+            .await
+            .context("award_xp_capped: source sum")?
+            .unwrap_or(0);
+        // The plain-integer clamp, spelt `Ord::` because the sea-query `ExprTrait`
+        // is in scope for the sum above and its `max`/`min` build SQL expressions.
+        let global_room = Ord::max(caps.global_cap - earned_all, 0);
+        let source_room = Ord::max(caps.source_cap - earned_source, 0);
+        let granted = Ord::max(
+            Ord::min(Ord::min(award.amount, global_room), source_room),
+            0,
+        );
+        let capped = granted < award.amount;
+
+        if granted == 0 {
+            transaction
+                .rollback()
+                .await
+                .context("award_xp_capped: rollback")?;
+            // Nothing was written and no id was consumed. The current total is the
+            // answer both halves of the change report.
+            let current = self
+                .progression(award.account_id)
+                .await?
+                .map_or(0, |progression| progression.xp);
+            return Ok(CappedXpAward {
+                granted: 0,
+                capped: true,
+                change: XpChange {
+                    before: current,
+                    after: current,
+                },
+            });
+        }
+
+        // The award row and the progression upsert, clamped amount and all, in the
+        // same transaction that holds the lock — the write consumes exactly the
+        // headroom the clamp read.
+        let awarded = NewXpAward {
+            amount: granted,
+            ..award
+        };
+        entity::xp_award::Entity::insert(entity::xp_award::ActiveModel {
+            award_id: Set(uuid_of(awarded.award_id)),
+            account_id: Set(uuid_of(awarded.account_id)),
+            source: Set(awarded.source),
+            amount: Set(awarded.amount),
+            ref_id: Set(awarded.ref_id.map(uuid_of)),
+            idempotency_key: Set(awarded.idempotency_key.clone()),
+            created_at: Set(stamp_of(awarded.at)),
+        })
+        .exec_without_returning(&transaction)
+        .await
+        .map_err(|error| {
+            on_conflict(error, "xp award", |name| match name {
+                "xp_award_pkey" | "xp_award_key" => Some(fault::already_exists("xp award")),
+                "xp_award_account_id_fkey" => Some(fault::not_found("account")),
+                _ => None,
+            })
+        })?;
+        let row = entity::progression::Entity::insert(entity::progression::ActiveModel {
+            account_id: Set(uuid_of(awarded.account_id)),
+            xp: Set(awarded.amount),
+            level: Set(1),
+            updated_at: Set(stamp_of(awarded.at)),
+        })
+        .on_conflict(
+            OnConflict::column(entity::progression::Column::AccountId)
+                .value(
+                    entity::progression::Column::Xp,
+                    Expr::col((entity::progression::Entity, entity::progression::Column::Xp))
+                        .add(awarded.amount),
+                )
+                .value(entity::progression::Column::UpdatedAt, stamp_of(awarded.at))
+                .to_owned(),
+        )
+        .exec_with_returning(&transaction)
+        .await
+        .map_err(|error| {
+            on_conflict(error, "progression", |name| match name {
+                "progression_account_id_fkey" => Some(fault::not_found("account")),
+                _ => None,
+            })
+        })?;
+        transaction
+            .commit()
+            .await
+            .context("award_xp_capped: commit")?;
+
+        let after = row.xp;
+        Ok(CappedXpAward {
+            granted,
+            capped,
+            change: XpChange {
+                before: after - granted,
+                after,
+            },
         })
     }
 

@@ -46,7 +46,7 @@ use migo_protocol::{codes, fault, NotificationKind};
 use migo_ratelimit::{BucketKey, RateLimiter, SharedRateLimiter};
 use migo_store::model::{
     BadgeAward, Currency, Entitlement, GiftReceipt, GiftSent, LedgerAccountKind, LedgerLeg,
-    NewTransaction, NewXpAward, Posted, Receipt, Scope,
+    NewTransaction, NewXpAward, Posted, Receipt, Scope, XpCaps,
 };
 use migo_store::{SharedStore, Store, MAX_PAGE};
 
@@ -706,58 +706,32 @@ where
         }
         // Two caps bound the award over a rolling day (section 30): the global daily cap across
         // every source, and the per-source cap. The smaller remaining headroom binds. Both are
-        // read from the durable award rows, not a cache counter, so a cache restart cannot
-        // silently reset an abuser's daily limit.
-        let since = Self::day_before(award.at);
-        let earned_all = self
+        // enforced inside the store's write — the earned totals are summed under the same lock
+        // the award takes — so two awards arriving together cannot each spend the same headroom
+        // and spend the day's limit twice. The numbers stay here, in configuration, because the
+        // policy is this crate's; the store clamps, it does not own the policy.
+        let caps = XpCaps {
+            window_start: Self::day_before(award.at),
+            global_cap: self.config.daily_xp_cap,
+            source_cap: self.config.source_cap(award.source),
+        };
+        let outcome = match self
             .store
-            .xp_earned_since(award.account_id, None, since)
-            .await?;
-        let earned_source = self
-            .store
-            .xp_earned_since(award.account_id, Some(award.source.to_i16()), since)
-            .await?;
-        let global_room = (self.config.daily_xp_cap - earned_all).max(0);
-        let source_room = (self.config.source_cap(award.source) - earned_source).max(0);
-        let granted = award.amount.min(global_room).min(source_room).max(0);
-        let capped = granted < award.amount;
-
-        if granted == 0 {
-            // The cap is met; nothing is written and no id is minted. The outcome still reports
-            // the real standing so a client can say "you have hit today's limit" rather than
-            // showing a phantom award.
-            self.meters.xp_capped(award.source);
-            let current = self
-                .store
-                .progression(award.account_id)
-                .await?
-                .map_or(0, |progression| progression.xp);
-            let level = level_for_xp(current);
-            return Ok(AwardOutcome {
-                requested: award.amount,
-                granted: 0,
-                before: current,
-                after: current,
-                level_before: level,
-                level_after: level,
-                capped: true,
-            });
-        }
-
-        let change = match self
-            .store
-            .award_xp(NewXpAward {
-                award_id: self.new_id(award.at),
-                account_id: award.account_id,
-                source: award.source.to_i16(),
-                amount: granted,
-                ref_id: award.ref_id,
-                idempotency_key: award.idempotency_key,
-                at: award.at,
-            })
+            .award_xp_capped(
+                NewXpAward {
+                    award_id: self.new_id(award.at),
+                    account_id: award.account_id,
+                    source: award.source.to_i16(),
+                    amount: award.amount,
+                    ref_id: award.ref_id,
+                    idempotency_key: award.idempotency_key,
+                    at: award.at,
+                },
+                caps,
+            )
             .await
         {
-            Ok(change) => change,
+            Ok(outcome) => outcome,
             // The key names an award already granted. The store refuses it so we cannot
             // announce a level-up twice; we report a no-op computed from the current total.
             Err(error) if error.code() == codes::ALREADY_EXISTS => {
@@ -774,11 +748,32 @@ where
                     after: current,
                     level_before: level,
                     level_after: level,
-                    capped,
+                    capped: false,
                 });
             }
             Err(error) => return Err(error),
         };
+
+        if outcome.granted == 0 {
+            // The cap is met; nothing is written and no id is minted. The outcome still reports
+            // the real standing so a client can say "you have hit today's limit" rather than
+            // showing a phantom award.
+            self.meters.xp_capped(award.source);
+            let level = level_for_xp(outcome.change.after);
+            return Ok(AwardOutcome {
+                requested: award.amount,
+                granted: 0,
+                before: outcome.change.before,
+                after: outcome.change.after,
+                level_before: level,
+                level_after: level,
+                capped: true,
+            });
+        }
+
+        let granted = outcome.granted;
+        let capped = outcome.capped;
+        let change = outcome.change;
 
         if capped {
             self.meters.xp_capped(award.source);

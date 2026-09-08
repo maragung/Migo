@@ -238,3 +238,87 @@ async fn an_on_chain_claim_is_refused_before_anything_is_written() {
         "a refused settlement grants no entitlement"
     );
 }
+
+/// One XP award intent, shared by the cap tests below.
+fn xp_award(amount: i64, key: &str, at: i64) -> migo_economy::Award {
+    migo_economy::Award {
+        account_id: Id::from(1u128),
+        source: migo_economy::Source::Game,
+        amount,
+        ref_id: None,
+        idempotency_key: Some(key.to_string()),
+        at: Timestamp::from_millis(at),
+    }
+}
+
+/// The daily caps bind inside the award write: the smaller remaining headroom is granted,
+/// the rest is refused without a write, and the day's window is rolling — the same
+/// `award` method the dispatch path calls. Defaults: 2,000 per game source, 3,000 global.
+#[tokio::test]
+async fn xp_daily_caps_clamp_inside_the_award_write() {
+    let (svc, store) = harness();
+    seed_account(&store, 1, "player").await;
+
+    let first = svc
+        .award(xp_award(1_500, "spec:xp:1", NOW))
+        .await
+        .expect("the first award lands");
+    assert_eq!(first.granted, 1_500);
+    assert!(!first.capped);
+    assert_eq!(first.after - first.before, 1_500);
+
+    // Only 500 of the source cap's headroom remains: the request is cut, not refused,
+    // and the cut is reported so a client can say "capped", not "nothing".
+    let second = svc
+        .award(xp_award(1_000, "spec:xp:2", NOW))
+        .await
+        .expect("the second award lands");
+    assert_eq!(second.granted, 500, "the source cap binds at its remainder");
+    assert!(second.capped);
+
+    // The cap is met: nothing granted, nothing written, standing unchanged.
+    let third = svc
+        .award(xp_award(1, "spec:xp:3", NOW))
+        .await
+        .expect("a capped award answers, not fails");
+    assert_eq!(third.granted, 0);
+    assert!(third.capped);
+    assert_eq!(third.before, third.after, "nothing moved");
+
+    // The window is rolling: a day later the same source has its headroom again.
+    let next_day = svc
+        .award(xp_award(1, "spec:xp:4", NOW + 25 * 60 * 60 * 1000))
+        .await
+        .expect("a new day grants again");
+    assert_eq!(next_day.granted, 1);
+}
+
+/// The race the capped write exists to close: two awards arriving together must not each
+/// read the same headroom and spend the cap twice. Against the memory store the write
+/// lock serialises them; against PostgreSQL the advisory lock does. The property under
+/// test is the total: whatever interleaving, the day's source cap is not exceeded.
+#[tokio::test]
+async fn concurrent_xp_awards_cannot_spend_the_cap_twice() {
+    let (svc, store) = harness();
+    seed_account(&store, 1, "racer").await;
+
+    let (first, second) = tokio::join!(
+        svc.award(xp_award(2_000, "spec:xp:race:1", NOW)),
+        svc.award(xp_award(2_000, "spec:xp:race:2", NOW)),
+    );
+    let first = first.expect("the first award lands");
+    let second = second.expect("the second award lands");
+    let granted = first.granted + second.granted;
+    assert!(
+        granted <= 2_000,
+        "two concurrent awards cannot spend the source cap twice: {granted} granted"
+    );
+    assert!(
+        granted > 0,
+        "the race must not refuse the first award outright either"
+    );
+    assert_eq!(
+        first.after, second.after,
+        "both answers see the same final progression row"
+    );
+}

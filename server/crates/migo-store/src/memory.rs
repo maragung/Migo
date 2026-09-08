@@ -39,15 +39,15 @@ use parking_lot::RwLock;
 
 use crate::model::{
     advanced_token, game_status, notification_kind, report_status, Account, AccountStatus,
-    AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, Conversation, ConversationMember,
-    ConversationPosition, ConversationSummary, Currency, Cursor, Device, DeviceStatus, Entitlement,
-    GameSession, GiftSent, GlobalAdmin, IdentityKeyStatus, KeyBundle, LedgerAccount,
-    LedgerAccountKind, LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice, NewGame,
-    NewMessage, NewModerationAction, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction,
-    NewXpAward, Notification, OutboxRecord, Patch, PeerRecord, Posted, Profile, ProfilePatch,
-    Progression, PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship, Report,
-    RevokeReason, Room, RoomMember, RoomNetworkBan, Scope, Session, Standing, StoredMessage,
-    Visibility, WalletStatus, XpChange,
+    AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, CappedXpAward, Conversation,
+    ConversationMember, ConversationPosition, ConversationSummary, Currency, Cursor, Device,
+    DeviceStatus, Entitlement, GameSession, GiftSent, GlobalAdmin, IdentityKeyStatus, KeyBundle,
+    LedgerAccount, LedgerAccountKind, LedgerTransaction, MediaObject, NewAccount, NewBot,
+    NewDevice, NewGame, NewMessage, NewModerationAction, NewOutboxEvent, NewPeer, NewRoom,
+    NewSession, NewTransaction, NewXpAward, Notification, OutboxRecord, Patch, PeerRecord, Posted,
+    Profile, ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Receipt,
+    Relationship, Report, RevokeReason, Room, RoomMember, RoomNetworkBan, Scope, Session, Standing,
+    StoredMessage, Visibility, WalletStatus, XpCaps, XpChange,
 };
 use crate::traits::{
     canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore,
@@ -2580,6 +2580,88 @@ impl ProgressionStore for MemoryStore {
         s.xp_order.push(award.award_id);
         s.xp_awards.insert(award.award_id, award);
         Ok(XpChange { before, after })
+    }
+
+    async fn award_xp_capped(&self, award: NewXpAward, caps: XpCaps) -> Result<CappedXpAward> {
+        if award.amount <= 0 {
+            return Err(fault::validation("amount", "must be positive"));
+        }
+        // The whole clamp-and-write under one write lock: the sums and the insert
+        // cannot interleave, which is the atomicity the PostgreSQL backend gets
+        // from its advisory lock. A cap checked in a separate read would have the
+        // same window there as it had here.
+        let mut s = self.state.write();
+        if !s.accounts.contains_key(&award.account_id) {
+            return Err(fault::not_found("account"));
+        }
+        if let Some(key) = award.idempotency_key.as_deref() {
+            if s.xp_keys.contains_key(key) {
+                return Err(fault::already_exists("xp award"));
+            }
+        }
+        if s.xp_awards.contains_key(&award.award_id) {
+            return Err(fault::already_exists("xp award"));
+        }
+
+        let earned_since = |source: Option<i16>| {
+            s.xp_awards
+                .values()
+                .filter(|row| {
+                    row.account_id == award.account_id
+                        && row.at >= caps.window_start
+                        && source.is_none_or(|wanted| row.source == wanted)
+                })
+                .map(|row| row.amount)
+                .fold(0i64, |sum, amount| sum.saturating_add(amount))
+        };
+        let global_room = (caps.global_cap - earned_since(None)).max(0);
+        let source_room = (caps.source_cap - earned_since(Some(award.source))).max(0);
+        let granted = award.amount.min(global_room).min(source_room).max(0);
+        let capped = granted < award.amount;
+
+        if granted == 0 {
+            // Nothing written, no id consumed, and no progression row invented: the
+            // caps left nothing, and the account's standing is the answer both
+            // halves report.
+            let current = s.progression.get(&award.account_id).map_or(0, |row| row.xp);
+            return Ok(CappedXpAward {
+                granted: 0,
+                capped: true,
+                change: XpChange {
+                    before: current,
+                    after: current,
+                },
+            });
+        }
+
+        let row = s
+            .progression
+            .entry(award.account_id)
+            .or_insert(Progression {
+                account_id: award.account_id,
+                xp: 0,
+                level: 1,
+                updated_at: award.at,
+            });
+        let before = row.xp;
+        let after = before
+            .checked_add(granted)
+            .ok_or_else(|| fault::validation("amount", "overflows the total"))?;
+        row.xp = after;
+        row.updated_at = award.at;
+
+        let mut awarded = award;
+        awarded.amount = granted;
+        if let Some(key) = awarded.idempotency_key.clone() {
+            s.xp_keys.insert(key, awarded.award_id);
+        }
+        s.xp_order.push(awarded.award_id);
+        s.xp_awards.insert(awarded.award_id, awarded);
+        Ok(CappedXpAward {
+            granted,
+            capped,
+            change: XpChange { before, after },
+        })
     }
 
     async fn set_level(&self, account_id: Id, level: i32, at: Timestamp) -> Result<()> {

@@ -27,13 +27,14 @@ use migo_core::{Id, Result, Timestamp};
 use migo_protocol::{fault, MlDsaPurpose, RelationshipKind};
 
 use crate::model::{
-    Account, AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, Conversation, ConversationMember,
-    ConversationPosition, ConversationSummary, Cursor, Device, Entitlement, GameSession, GiftSent,
-    GlobalAdmin, KeyBundle, LedgerAccount, LedgerAccountKind, LedgerTransaction, MediaObject,
-    NewAccount, NewBot, NewDevice, NewGame, NewMessage, NewOutboxEvent, NewPeer, NewRoom,
-    NewSession, NewTransaction, NewXpAward, Notification, OutboxRecord, PeerRecord, Posted,
-    Profile, ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Relationship,
-    Report, Room, RoomMember, Scope, Session, Standing, StoredMessage, XpChange,
+    Account, AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, CappedXpAward, Conversation,
+    ConversationMember, ConversationPosition, ConversationSummary, Cursor, Device, Entitlement,
+    GameSession, GiftSent, GlobalAdmin, KeyBundle, LedgerAccount, LedgerAccountKind,
+    LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice, NewGame, NewMessage,
+    NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward, Notification,
+    OutboxRecord, PeerRecord, Posted, Profile, ProfilePatch, Progression, PublishedKeys,
+    PushRegistration, PushTarget, Relationship, Report, Room, RoomMember, Scope, Session, Standing,
+    StoredMessage, XpCaps, XpChange,
 };
 
 /// Largest page any read will return, whatever the caller asks for.
@@ -803,6 +804,25 @@ pub trait ProgressionStore: Send + Sync {
     /// the earlier `XpChange` would be indistinguishable from a fresh award and would
     /// make the caller announce a level-up twice.
     async fn award_xp(&self, award: NewXpAward) -> Result<XpChange>;
+
+    /// Awards XP clamped to the daily caps, the check and the write atomic.
+    ///
+    /// [`ProgressionStore::award_xp`] plus the cap the caller would otherwise have to
+    /// check before it — a check made outside the write has a window between the read
+    /// and the award, and two awards arriving together each read the same headroom and
+    /// both pass, spending the day's limit twice. Here the earned totals are summed
+    /// under the same lock the write takes, so the headroom the clamp used is the
+    /// headroom the write consumed.
+    ///
+    /// `caps` carries the policy numbers and the window's start; the store clamps, it
+    /// does not own the policy. `granted` of zero means the caps left nothing: nothing
+    /// is written, no id is consumed, and `change` reports the account's current total
+    /// unmoved.
+    ///
+    /// # Errors
+    ///
+    /// As [`ProgressionStore::award_xp`].
+    async fn award_xp_capped(&self, award: NewXpAward, caps: XpCaps) -> Result<CappedXpAward>;
 
     /// Rewrites the cached level.
     ///
