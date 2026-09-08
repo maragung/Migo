@@ -24,8 +24,8 @@ use migo_core::metrics::Registry;
 use migo_core::{Id, Random, Secret, SeededRandom, Timestamp};
 use migo_protocol::{codes, Platform};
 use migo_ratelimit::{CacheRateLimiter, Policies};
-use migo_store::traits::{AccountStore, DeviceStore, SessionStore};
-use migo_store::MemoryStore;
+use migo_store::traits::{AccountStore, DeviceStore, KeyStore, SessionStore};
+use migo_store::{model::PublishedKeys, MemoryStore};
 
 /// One second in milliseconds.
 const SECOND: i64 = 1_000;
@@ -1119,6 +1119,89 @@ async fn revoking_a_device_ends_its_sessions_and_does_not_resurrect_it() {
         third.device_id, first.device_id,
         "revoking a device must not mean revoking it until the next sign-in"
     );
+}
+
+/// Key material for `device`, good enough for the store: a distinct byte
+/// pattern per tag so a bundle that survives a revocation is recognisable by
+/// its bytes, and one one-time prekey so the drain the revocation must prevent
+/// is observable.
+fn published_keys(account: Id, device: Id, tag: u8) -> PublishedKeys {
+    let identity = vec![tag; 64];
+    PublishedKeys {
+        account_id: account,
+        device_id: device,
+        identity_key: identity.clone(),
+        signed_prekey_id: i32::from(tag),
+        signed_prekey: vec![tag; 32],
+        // A signature the crypto layer would reject, and nothing here verifies:
+        // the store holds it, the fetch hands it back, and the test only asks
+        // whether the bytes are still being handed back.
+        signed_prekey_signature: vec![tag; 64],
+        signed_prekey_expires_at: Timestamp::from_millis(1_000).saturating_add_millis(DAY),
+        one_time_prekeys: vec![(i32::from(tag), vec![tag; 32])],
+        created_at: Timestamp::from_millis(1_500),
+    }
+}
+
+#[tokio::test]
+async fn revoking_a_device_takes_its_key_material_with_it() {
+    let harness = Harness::new();
+    let laptop = harness.register_at("ada", 1_000).await;
+    let phone = harness
+        .auth
+        .sign_in(sign_in("ada"), &context_from(2_000, "198.51.100.4"))
+        .await
+        .unwrap();
+    let identity = identify(&harness.auth, &phone, 3_000).await.unwrap();
+
+    // Both devices have published key material, as every real device has.
+    for (device, tag) in [(laptop.device_id, 0x21u8), (phone.device_id, 0x22u8)] {
+        harness
+            .store
+            .publish_keys(published_keys(laptop.account_id, device, tag))
+            .await
+            .expect("the keys are published");
+    }
+
+    // The bundle is there before the revocation — the test's control, so the
+    // empty answer after it is the revocation and not a never-published bundle.
+    let before = harness
+        .store
+        .take_key_bundle(laptop.account_id, laptop.device_id)
+        .await
+        .expect("the read succeeds")
+        .expect("the bundle exists while the device does");
+    assert_eq!(before.signed_prekey_id, i32::from(0x21u8));
+
+    harness
+        .auth
+        .revoke_device(&identity, laptop.device_id, &context(4_000))
+        .await
+        .expect("the device is revoked");
+
+    // The bundle fetch gates on the key rows' own revocation, so removing the
+    // device must have revoked them: a surviving bundle would hand senders an
+    // identity key nobody can answer for and spend the owner's remaining
+    // one-time prekeys on sessions that can never be read.
+    let after = harness
+        .store
+        .take_key_bundle(laptop.account_id, laptop.device_id)
+        .await
+        .expect("the read succeeds");
+    assert!(
+        after.is_none(),
+        "a revoked device's keys must stop being served"
+    );
+
+    // The other device is untouched: the revocation is per device, and a
+    // bundle for the survivor proves the account did not lose its keys.
+    let survivor = harness
+        .store
+        .take_key_bundle(laptop.account_id, phone.device_id)
+        .await
+        .expect("the read succeeds")
+        .expect("the surviving device still serves its bundle");
+    assert_eq!(survivor.signed_prekey_id, i32::from(0x22u8));
 }
 
 #[tokio::test]

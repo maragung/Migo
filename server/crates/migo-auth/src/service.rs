@@ -67,7 +67,7 @@ use migo_store::model::{
 };
 use migo_store::traits::{
     AccountStore, ChallengeStore, DeviceStore, GlobalAdminStore, IdentityKeyRow, IdentityStore,
-    LoginChallengeRow, RecoveryRow, RecoveryStore, SafetyStore, SessionStore, WalletRow,
+    KeyStore, LoginChallengeRow, RecoveryRow, RecoveryStore, SafetyStore, SessionStore, WalletRow,
     WalletStore,
 };
 use migo_store::{SharedStore, Store};
@@ -1081,6 +1081,7 @@ where
     S: AccountStore
         + DeviceStore
         + SessionStore
+        + KeyStore
         + SafetyStore
         + RecoveryStore
         + IdentityStore
@@ -1749,6 +1750,16 @@ where
             )
             .await?;
         self.store.revoke_device(device.device_id, now).await?;
+        // …and the key material with them. The bundle fetch gates on the key
+        // rows' own revocation, not on the device row, so a device removed
+        // without this call keeps handing its identity key and signed prekey to
+        // whoever asks — sessions nobody can ever read, paid for in one-time
+        // prekeys the owner has to replace. The identity key row is only
+        // reachable through the device, so this cannot strand a live device's
+        // keys: the filter is on this pair, not the account.
+        self.store
+            .revoke_device_keys(identity.account_id(), device.device_id, now)
+            .await?;
         self.meters.device_revoked();
         self.meters.sessions_revoked(revoked);
         self.audit(
