@@ -124,20 +124,28 @@ pub trait Graph: Send + Sync {
 
     /// Blocks an account.
     ///
-    /// Does four things at once, because a block that did three of them is a bug
+    /// Does five things at once, because a block that did four of them is a bug
     /// waiting for somebody to notice: it writes the block edge, drops any friendship
-    /// in both directions, drops any pending request in either direction, and drops
-    /// the follow edges in both directions.
+    /// in both directions, drops any pending request in either direction, drops
+    /// the follow edges in both directions, and writes a mute edge for the caller.
     ///
-    /// Not doing the last one is the classic version of this bug — the block stops new
-    /// contact while the blocked account keeps receiving everything the blocker posts.
+    /// Not doing the follow teardown is the classic version of this bug — the block
+    /// stops new contact while the blocked account keeps receiving everything the
+    /// blocker posts. Not writing the mute is the quieter version: the block gates
+    /// direct chat, but a room the two still share is one log read by all its
+    /// members, so the blocked account's room chatter keeps reaching the blocker's
+    /// screen until their client hides it — and the client's hiding mechanism is the
+    /// mute list.
     async fn block(&self, caller: &Caller, subject_id: Id) -> Result<()>;
 
     /// Lifts a block. Idempotent.
     ///
     /// Restores nothing. The friendship and the follows the block removed are gone,
     /// and rebuilding them would be this crate deciding that two people who fell out
-    /// and made up want the same graph they had before.
+    /// and made up want the same graph they had before. The mute the block wrote
+    /// stays too: removing it would silently discard a mute the caller may have set
+    /// before ever blocking, while leaving it is visible in the caller's muted list
+    /// and reversible with [`mute`](Graph::mute).
     async fn unblock(&self, caller: &Caller, subject_id: Id) -> Result<()>;
 
     /// Mutes or unmutes one account, for the caller alone.

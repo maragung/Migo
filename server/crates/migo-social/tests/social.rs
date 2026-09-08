@@ -1922,6 +1922,84 @@ async fn blocking_twice_leaves_one_row() {
     assert_eq!(harness.count(ALICE, RelationshipKind::Block).await, 1);
 }
 
+/// A block carries a mute, because a room transcript is one log.
+///
+/// The block gates direct chat, but the room the two still share is read by its
+/// members from the same sequences, so the only place the blocker can be spared the
+/// blocked account's chatter is their own client — and the client's hiding mechanism
+/// is the mute list. A block that left the mute unwritten would let "I blocked them"
+/// and "their room chatter still reaches my screen" both be true at once.
+#[tokio::test]
+async fn a_block_carries_a_mute_so_room_chatter_stops() {
+    let harness = Harness::new();
+    harness.cast().await;
+    let alice = caller(ALICE, ALICE_PHONE);
+
+    harness
+        .social
+        .block(&alice, id(BOB))
+        .await
+        .expect("blocking needs no consent");
+
+    assert!(
+        harness.has(ALICE, BOB, RelationshipKind::Mute).await,
+        "the block mutes, so the blocker's clients hide the blocked account in rooms"
+    );
+    // One direction only, like a manual mute: the blocked account is not told.
+    assert!(!harness.has(BOB, ALICE, RelationshipKind::Mute).await);
+    assert_eq!(harness.added("mute"), 1);
+
+    // A second block must not count the mute again, exactly as the first block's
+    // teardown does not report removing a friendship that was not there.
+    harness.social.block(&alice, id(BOB)).await.expect("second");
+    assert_eq!(harness.added("mute"), 1);
+
+    // Lifting the block keeps the mute. Removing it would silently discard a mute
+    // the caller may have chosen before blocking; leaving it is visible in the
+    // muted list and reversible by hand.
+    harness
+        .social
+        .unblock(&alice, id(BOB))
+        .await
+        .expect("unblocking restores nothing, and breaks nothing");
+    assert!(harness.has(ALICE, BOB, RelationshipKind::Mute).await);
+    assert_eq!(harness.removed("mute"), 0);
+
+    // And the carried mute is an ordinary mute: the caller can lift it themselves.
+    harness
+        .social
+        .mute(&alice, id(BOB), false)
+        .await
+        .expect("a carried mute is removable like any other");
+    assert!(!harness.has(ALICE, BOB, RelationshipKind::Mute).await);
+}
+
+/// A block over an existing mute counts no second mute.
+///
+/// The caller silenced the account first and blocked them later; the block reuses
+/// the row that is already there, and the mute series keeps meaning "a mute came
+/// into existence" rather than "a block happened".
+#[tokio::test]
+async fn a_block_over_an_existing_mute_adds_no_second_mute() {
+    let harness = Harness::new();
+    harness.cast().await;
+    let alice = caller(ALICE, ALICE_PHONE);
+
+    harness
+        .social
+        .mute(&alice, id(BOB), true)
+        .await
+        .expect("muting needs no consent");
+    harness
+        .social
+        .block(&alice, id(BOB))
+        .await
+        .expect("blocking a muted account needs nothing further");
+
+    assert_eq!(harness.added("mute"), 1);
+    assert!(harness.has(ALICE, BOB, RelationshipKind::Mute).await);
+}
+
 /// The blocklist has a ceiling.
 ///
 /// A blocklist is a list of people somebody met and did not want to meet again. A number

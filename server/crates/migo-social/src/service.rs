@@ -943,6 +943,11 @@ where
             .relationship(caller.account_id, subject_id, RelationshipKind::Favorite)
             .await?
             .is_some();
+        let was_muted = self
+            .store
+            .relationship(caller.account_id, subject_id, RelationshipKind::Mute)
+            .await?
+            .is_some();
 
         // The block row first. If any of what follows fails, the state left behind is
         // "blocked, and some edges not yet cleared" — which still stops contact. The
@@ -967,6 +972,19 @@ where
             .remove_relationship(caller.account_id, subject_id, RelationshipKind::Favorite)
             .await?;
 
+        // And a mute, because a room transcript is one shared log. Direct chat is
+        // gated on the block and cannot reach the blocker, but a room the two still
+        // share is read by its members from the same sequences, so the only honest
+        // place to hide the blocked account's chatter is the reader — and the
+        // reader's clients already hide muted senders. The block therefore carries a
+        // personal mute with it, the same edge a manual mute writes, so "I blocked
+        // them" and "their room chatter is hidden from me" cannot drift apart. Not
+        // subject to the mute ceiling: the block ceiling already bounds how many of
+        // these a caller can produce, and a full mute list must not stop anybody
+        // from blocking somebody.
+        self.put_edge(caller, subject_id, RelationshipKind::Mute)
+            .await?;
+
         self.meters.added(EdgeKind::Block);
         // The edges a block took with it are counted as removals, because that is what
         // they are. An operator watching `added` against `removed` for one kind is
@@ -980,6 +998,9 @@ where
         }
         if was_favorite {
             self.meters.removed(EdgeKind::Favorite);
+        }
+        if !was_muted {
+            self.meters.added(EdgeKind::Mute);
         }
         Ok(())
     }
