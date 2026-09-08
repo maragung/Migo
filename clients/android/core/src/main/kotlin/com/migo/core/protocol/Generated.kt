@@ -4072,6 +4072,8 @@ data class GiftSend(
     val gift: String,
     val recipient: Id,
     val conversationId: Id? = null,
+    /** Caller's idempotency key for this gift intent; a retry with the same key returns the first send instead of charging again. Mint one key per intent and reuse it across retries. Absent on older clients, in which case the server derives a key from the recipient and the instant — fresh every attempt, so no dedupe. */
+    val clientKey: String? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -4079,11 +4081,18 @@ data class GiftSend(
         w.id(recipient)
         var present = 0
         if (conversationId != null) present++
+        if (clientKey != null) present++
         w.u32(present)
         if (conversationId != null) {
             val value = conversationId
             w.optional(1) { w ->
                 w.id(value)
+            }
+        }
+        if (clientKey != null) {
+            val value = clientKey
+            w.optional(2) { w ->
+                w.str(value)
             }
         }
         w.leave()
@@ -4095,34 +4104,46 @@ data class GiftSend(
             val gift = r.str()
             val recipient = r.id()
             var conversationId: Id? = null
+            var clientKey: String? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
                 when (fieldId) {
                     1L -> conversationId = sub.id()
+                    2L -> clientKey = sub.str()
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return GiftSend(gift, recipient, conversationId)
+            return GiftSend(gift, recipient, conversationId, clientKey)
         }
     }
 }
 
+/** The gift's answer: the send stands, keyed by tx_id, and `duplicate` says whether this call returned an earlier send rather than charging again. A duplicate is a success, not a failure — the gift stands either way. */
 data class GiftSendResult(
     val ok: Boolean,
     val txId: Id? = null,
+    /** True when this call was a repeat of an earlier one with the same client_key; nothing was charged and nothing was announced a second time. */
+    val duplicate: Boolean? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
         w.bool(ok)
         var present = 0
         if (txId != null) present++
+        if (duplicate != null) present++
         w.u32(present)
         if (txId != null) {
             val value = txId
             w.optional(1) { w ->
                 w.id(value)
+            }
+        }
+        if (duplicate != null) {
+            val value = duplicate
+            w.optional(2) { w ->
+                w.bool(value)
             }
         }
         w.leave()
@@ -4133,16 +4154,18 @@ data class GiftSendResult(
             r.enter()
             val ok = r.bool()
             var txId: Id? = null
+            var duplicate: Boolean? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
                 when (fieldId) {
                     1L -> txId = sub.id()
+                    2L -> duplicate = sub.bool()
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return GiftSendResult(ok, txId)
+            return GiftSendResult(ok, txId, duplicate)
         }
     }
 }

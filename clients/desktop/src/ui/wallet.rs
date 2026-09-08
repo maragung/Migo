@@ -28,6 +28,9 @@ pub struct WalletState {
     pub gifts: Vec<GiftRow>,
     /// The gift being addressed, if any: the picker is open.
     pub picking: Option<GiftRow>,
+    /// The picked gift's idempotency key: minted with the pick, sent with every retry of it,
+    /// so a lost reply is the first send again server-side rather than a second charge.
+    pub picking_key: Option<String>,
     /// The typed recipient of the picked gift.
     pub recipient: String,
     /// The AVAX side: the account's first wallet on one network at a time.
@@ -205,6 +208,7 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut WalletState) {
                             ui.add_space(space::MD);
                             if ui.button("Send").clicked() {
                                 state.picking = Some(gift);
+                                state.picking_key = Some(intent_key());
                                 state.recipient.clear();
                             }
                         });
@@ -289,6 +293,7 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut WalletState) {
                             context.issue(Command::SendGift {
                                 sku: gift.sku.clone(),
                                 recipient: peer,
+                                client_key: state.picking_key.clone(),
                             });
                             send = true;
                         }
@@ -297,6 +302,7 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut WalletState) {
             });
         if close || send {
             state.picking = None;
+            state.picking_key = None;
             state.recipient.clear();
         }
     }
@@ -837,4 +843,18 @@ fn prepared_line(ui: &mut Ui, theme: Theme, label: &str, value: &str, monospace:
             .color(colors.text),
     );
     ui.end_row();
+}
+
+/// A fresh idempotency key for one gift-picker intent.
+///
+/// Wall-clock nanoseconds are unique per pick on one device, which is all the key
+/// needs to be: it separates a retry of one pick from a second, separate gift.
+fn intent_key() -> String {
+    format!(
+        "gift-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    )
 }

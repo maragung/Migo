@@ -121,6 +121,33 @@ async fn gift_send_spends_the_sender_coins() {
         after < before,
         "the sender's coins decreased by the gift price"
     );
+
+    // The wire now carries a client key per intent, so a genuine retry — same
+    // key, the network having eaten the first answer — is the first send
+    // again: same gift row, no second charge, and `duplicate` set so the
+    // handler can report the gift standing instead of failing.
+    let retry = svc
+        .send_gift(
+            &sender,
+            SendGift {
+                recipient_id: Id::from(2u128),
+                gift: Gift::Rose,
+                conversation_id: None,
+                client_key: "spec:1".to_string(),
+            },
+        )
+        .await
+        .expect("retry is answered, not failed");
+    assert!(retry.duplicate, "the retry returns the first send");
+    assert_eq!(
+        retry.gift_id, outcome.gift_id,
+        "the retry names the same gift row"
+    );
+    let after_retry = svc.wallet(&sender).await.expect("wallet read").coins;
+    assert_eq!(
+        after_retry, after,
+        "the retry charges nothing on top of the first send"
+    );
 }
 
 /// The path `STORE_PURCHASE` drives with coins: a funded buyer pays the catalogue price

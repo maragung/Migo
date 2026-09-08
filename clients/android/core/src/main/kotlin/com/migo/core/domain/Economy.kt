@@ -59,9 +59,19 @@ class EconomyDomain(
      * the transfer recorded, both atomically server-side; a short balance rejects with an error
      * rather than a partial send. `conversationId`, when the gift is being sent inside an open
      * conversation, lets the server attach the transfer to it for the participants' ledgers.
+     *
+     * `clientKey` is this gift intent's idempotency key: mint one per intent (once when the picker
+     * opens for a chosen recipient) and send the same key on every retry. A retry with the same
+     * key returns the first send instead of charging twice; without a key the server cannot tell a
+     * retry from a fresh intent and charges every attempt.
      */
-    suspend fun sendGift(gift: String, recipient: Id, conversationId: Id? = null): GiftSendResult {
-        val request = GiftSend(gift, recipient, conversationId)
+    suspend fun sendGift(
+        gift: String,
+        recipient: Id,
+        conversationId: Id? = null,
+        clientKey: String? = null,
+    ): GiftSendResult {
+        val request = GiftSend(gift, recipient, conversationId, clientKey)
         return rpc.call(Op.GIFT_SEND, { w -> request.encode(w) }, { r -> GiftSendResult.decode(r) })
     }
 

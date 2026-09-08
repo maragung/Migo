@@ -51,10 +51,14 @@ pub(crate) async fn handle_gift_send(
     let request: GiftSend = from_frame(frame).map_err(fault::from_wire)?;
     let gift =
         Gift::from_slug(&request.gift).ok_or_else(|| fault::validation("gift", "unknown gift"))?;
-    // The wire carries no client idempotency key, so one is derived from the recipient and the
-    // sampled `now`. Stamping it with `now` keeps a fresh attempt from collapsing into a prior
-    // one; a client that genuinely retries must send within the same instant to dedupe.
-    let client_key = format!("{}:{}", request.recipient, ctx.now().as_millis());
+    // The wire carries the caller's idempotency key when it has one: one key per gift
+    // intent, reused across retries, so a retry returns the first send instead of
+    // charging again. A client that sends none gets the historical behaviour — a key
+    // derived from the recipient and the sampled `now`, fresh every attempt.
+    let client_key = request
+        .client_key
+        .clone()
+        .unwrap_or_else(|| format!("{}:{}", request.recipient, ctx.now().as_millis()));
     let outcome = svc
         .send_gift(
             &caller,
@@ -66,9 +70,13 @@ pub(crate) async fn handle_gift_send(
             },
         )
         .await?;
+    // A duplicate is a success: the gift stands, the recipient has it, and the caller's
+    // key did its job. Reporting it as `ok: false` told an honest retrying client its
+    // gift failed when it had in fact already arrived.
     ctx.reply(&GiftSendResult {
-        ok: !outcome.duplicate,
+        ok: true,
         tx_id: Some(outcome.gift_id),
+        duplicate: Some(outcome.duplicate),
     })?;
 
     // Two events, two audiences, and only on a first send — a retry that the service
@@ -87,7 +95,7 @@ pub(crate) async fn handle_gift_send(
             &EconomyEvent {
                 kind: "gift_sent".to_string(),
                 amount: u64::try_from(outcome.price.amount).unwrap_or(0),
-                currency: "coins".to_string(),
+                currency: outcome.price.currency.as_str().to_string(),
             },
             None,
         )?;
@@ -199,7 +207,7 @@ pub(crate) async fn handle_store_purchase(
             &EconomyEvent {
                 kind: "purchase".to_string(),
                 amount: u64::try_from(outcome.price.amount).unwrap_or(0),
-                currency: "coins".to_string(),
+                currency: outcome.price.currency.as_str().to_string(),
             },
             None,
         )?;

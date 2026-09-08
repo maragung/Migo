@@ -69,6 +69,17 @@ const LEDGER_ROWS = 10;
 const LEADERBOARD_ROWS = 10;
 
 /**
+ * A fresh idempotency key for one gift pick, from the platform CSPRNG.
+ *
+ * Sent with every retry of that pick so the server can tell a re-sent gift
+ * (a lost reply, a second tap) from a second, separate gift.
+ */
+function newGiftIntentKey(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
  * The XP bar's filled fraction: `into` of `total`, clamped into 0–1.
  *
  * A total of zero (or a negative a hostile server sent) renders an empty bar rather than `NaN`%
@@ -448,6 +459,10 @@ export function WalletPanel(): ReactNode {
   // flight. Its failure line is separate from the panel's load error, so a refused send never
   // reads as a broken panel. Success feedback is a plain line, cleared by the next flow.
   const [picking, setPicking] = useState<GiftListing | null>(null);
+  // The picked gift's idempotency key: minted with the pick, reused across retries of
+  // that pick, so a lost reply retried is the first send again server-side rather
+  // than a second charge. A new pick is a new intent and mints a new key.
+  const [pickingKey, setPickingKey] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -518,10 +533,11 @@ export function WalletPanel(): ReactNode {
       setSendError(null);
       setNotice(null);
       client.economy
-        .sendGift(picking.sku, recipient)
+        .sendGift(picking.sku, recipient, undefined, pickingKey ?? undefined)
         .then(() => {
           setNotice(`Sent ${picking.name}.`);
           setPicking(null);
+          setPickingKey(null);
           setResults(null);
           return reload();
         })
@@ -532,7 +548,7 @@ export function WalletPanel(): ReactNode {
           setSending(false);
         });
     },
-    [client, picking, sending, reload],
+    [client, picking, pickingKey, sending, reload],
   );
 
   const onSearch = useCallback(
@@ -623,6 +639,7 @@ export function WalletPanel(): ReactNode {
                 onSend={(gift) => {
                   setNotice(null);
                   setPicking(gift);
+                  setPickingKey(newGiftIntentKey());
                 }}
                 disabled={picking !== null}
               />
@@ -648,6 +665,7 @@ export function WalletPanel(): ReactNode {
           title={`Send ${picking.name}`}
           onClose={() => {
             setPicking(null);
+            setPickingKey(null);
             setResults(null);
             setSendError(null);
           }}
@@ -661,6 +679,7 @@ export function WalletPanel(): ReactNode {
             onPick={sendTo}
             onCancel={() => {
               setPicking(null);
+              setPickingKey(null);
               setResults(null);
               setSendError(null);
             }}

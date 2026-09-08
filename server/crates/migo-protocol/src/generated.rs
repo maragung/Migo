@@ -5039,6 +5039,8 @@ pub struct GiftSend {
     pub gift: String,
     pub recipient: Id,
     pub conversation_id: Option<Id>,
+    /// Caller's idempotency key for this gift intent; a retry with the same key returns the first send instead of charging again. Mint one key per intent and reuse it across retries. Absent on older clients, in which case the server derives a key from the recipient and the instant — fresh every attempt, so no dedupe.
+    pub client_key: Option<String>,
 }
 
 impl Encode for GiftSend {
@@ -5046,11 +5048,18 @@ impl Encode for GiftSend {
         w.enter()?;
         w.write_str(&self.gift)?;
         w.write_id(&self.recipient);
-        let present = usize::from(self.conversation_id.is_some());
+        let present =
+            usize::from(self.conversation_id.is_some()) + usize::from(self.client_key.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.conversation_id {
             w.optional(1, |w| {
                 w.write_id(v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.client_key {
+            w.optional(2, |w| {
+                w.write_str(v)?;
                 Ok(())
             })?;
         }
@@ -5071,6 +5080,7 @@ impl Decode for GiftSend {
             let sub = &mut owned;
             match field_id {
                 1 => out.conversation_id = Some(sub.read_id()?),
+                2 => out.client_key = Some(sub.read_string()?),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }
@@ -5079,21 +5089,30 @@ impl Decode for GiftSend {
     }
 }
 
+/// The gift's answer: the send stands, keyed by tx_id, and `duplicate` says whether this call returned an earlier send rather than charging again. A duplicate is a success, not a failure — the gift stands either way.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct GiftSendResult {
     pub ok: bool,
     pub tx_id: Option<Id>,
+    /// True when this call was a repeat of an earlier one with the same client_key; nothing was charged and nothing was announced a second time.
+    pub duplicate: Option<bool>,
 }
 
 impl Encode for GiftSendResult {
     fn encode(&self, w: &mut Writer) -> Result<()> {
         w.enter()?;
         w.write_bool(self.ok);
-        let present = usize::from(self.tx_id.is_some());
+        let present = usize::from(self.tx_id.is_some()) + usize::from(self.duplicate.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.tx_id {
             w.optional(1, |w| {
                 w.write_id(v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.duplicate {
+            w.optional(2, |w| {
+                w.write_bool(*v);
                 Ok(())
             })?;
         }
@@ -5113,6 +5132,7 @@ impl Decode for GiftSendResult {
             let sub = &mut owned;
             match field_id {
                 1 => out.tx_id = Some(sub.read_id()?),
+                2 => out.duplicate = Some(sub.read_bool()?),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }

@@ -2978,6 +2978,8 @@ export interface GiftSend {
   gift: string;
   recipient: Id;
   conversationId?: Id;
+  /** Caller's idempotency key for this gift intent; a retry with the same key returns the first send instead of charging again. Mint one key per intent and reuse it across retries. Absent on older clients, in which case the server derives a key from the recipient and the instant — fresh every attempt, so no dedupe. */
+  clientKey?: string;
 }
 
 export function encodeGiftSend(w: Writer, v: GiftSend): void {
@@ -2986,8 +2988,10 @@ export function encodeGiftSend(w: Writer, v: GiftSend): void {
   w.id(v.recipient);
   let present = 0;
   if (v.conversationId !== undefined) present++;
+  if (v.clientKey !== undefined) present++;
   w.u32(present);
   if (v.conversationId !== undefined) { const value = v.conversationId; w.optional(1, (w) => { w.id(value); }); }
+  if (v.clientKey !== undefined) { const value = v.clientKey; w.optional(2, (w) => { w.str(value); }); }
   w.leave();
 }
 
@@ -3001,6 +3005,7 @@ export function decodeGiftSend(r: Reader): GiftSend {
     const [fieldId, sub] = r.optional();
     switch (fieldId) {
       case 1: out.conversationId = sub.id(); break;
+      case 2: out.clientKey = sub.str(); break;
       default: break; // unknown optional field: skipped by length
     }
   }
@@ -3008,9 +3013,12 @@ export function decodeGiftSend(r: Reader): GiftSend {
   return out;
 }
 
+/** The gift's answer: the send stands, keyed by tx_id, and `duplicate` says whether this call returned an earlier send rather than charging again. A duplicate is a success, not a failure — the gift stands either way. */
 export interface GiftSendResult {
   ok: boolean;
   txId?: Id;
+  /** True when this call was a repeat of an earlier one with the same client_key; nothing was charged and nothing was announced a second time. */
+  duplicate?: boolean;
 }
 
 export function encodeGiftSendResult(w: Writer, v: GiftSendResult): void {
@@ -3018,8 +3026,10 @@ export function encodeGiftSendResult(w: Writer, v: GiftSendResult): void {
   w.bool(v.ok);
   let present = 0;
   if (v.txId !== undefined) present++;
+  if (v.duplicate !== undefined) present++;
   w.u32(present);
   if (v.txId !== undefined) { const value = v.txId; w.optional(1, (w) => { w.id(value); }); }
+  if (v.duplicate !== undefined) { const value = v.duplicate; w.optional(2, (w) => { w.bool(value); }); }
   w.leave();
 }
 
@@ -3032,6 +3042,7 @@ export function decodeGiftSendResult(r: Reader): GiftSendResult {
     const [fieldId, sub] = r.optional();
     switch (fieldId) {
       case 1: out.txId = sub.id(); break;
+      case 2: out.duplicate = sub.bool(); break;
       default: break; // unknown optional field: skipped by length
     }
   }

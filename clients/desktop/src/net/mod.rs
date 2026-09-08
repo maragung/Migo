@@ -234,8 +234,14 @@ pub enum Command {
     /// and the gift catalogue — six reads fired together, each arriving as its own event.
     Wallet,
     /// Buy and deliver a gift; the wallet re-reads after, because the server's arithmetic is the
-    /// only arithmetic worth showing.
-    SendGift { sku: String, recipient: Id },
+    /// only arithmetic worth showing. `client_key` is the picker intent's idempotency key — the
+    /// same key on every retry of one pick, so a lost reply is the first send again, not a second
+    /// charge.
+    SendGift {
+        sku: String,
+        recipient: Id,
+        client_key: Option<String>,
+    },
     /// Search public profiles by username prefix.
     SearchPeople { query: String },
     /// Ask the social graph for its own suggestions.
@@ -1179,8 +1185,12 @@ impl Worker {
                 self.acknowledge_alerts(through_unix_ms).await;
             }
             Command::Wallet => self.request_wallet().await,
-            Command::SendGift { sku, recipient } => {
-                self.send_gift(sku, recipient).await;
+            Command::SendGift {
+                sku,
+                recipient,
+                client_key,
+            } => {
+                self.send_gift(sku, recipient, client_key).await;
             }
             Command::SearchPeople { query } => self.search_people(query).await,
             Command::Suggestions => self.request_suggestions().await,
@@ -3810,11 +3820,12 @@ impl Worker {
 
     /// Buys and delivers a gift. On acceptance the wallet re-reads, so the balance and the
     /// statement move to the server's arithmetic rather than a local guess.
-    async fn send_gift(&mut self, sku: String, recipient: Id) {
+    async fn send_gift(&mut self, sku: String, recipient: Id, client_key: Option<String>) {
         let message = GiftSend {
             gift: sku,
             recipient,
             conversation_id: None,
+            client_key,
         };
         self.request(Opcode::GiftSend, &message).await;
     }
@@ -4102,7 +4113,13 @@ impl Worker {
             return;
         };
         if result.ok {
-            self.sink.toast("Gift sent", ToastKind::Success);
+            // A duplicate is the first send returned again: the gift stands, nothing was charged
+            // twice — say the fact rather than the mechanism.
+            if result.duplicate == Some(true) {
+                self.sink.toast("Gift already sent", ToastKind::Success);
+            } else {
+                self.sink.toast("Gift sent", ToastKind::Success);
+            }
             self.request_wallet().await;
         } else {
             // The server judged the send — an unknown gift, an unroutable recipient, a balance

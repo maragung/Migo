@@ -1503,13 +1503,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Sends a gift; the wallet re-reads after, because the server's arithmetic is the only arithmetic
-     * worth showing.
+     * worth showing. `clientKey` is the intent's idempotency key from the picker — a retry of the
+     * same pick is the first send again server-side, not a second charge.
      */
-    fun sendGift(sku: String, recipient: Id) {
+    fun sendGift(sku: String, recipient: Id, clientKey: String? = null) {
         val live = session ?: return
         viewModelScope.launch {
             try {
-                live.client.economy.sendGift(sku, recipient)
+                live.client.economy.sendGift(sku, recipient, null, clientKey)
                 loadWallet()
                 signedIn { it.copy(failure = null) }
             } catch (cancelled: CancellationException) {

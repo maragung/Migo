@@ -64,7 +64,7 @@ import com.migo.core.wire.Id
 @Composable
 fun WalletScreen(
     state: AppState.SignedIn,
-    onSendGift: (sku: String, recipient: Id) -> Unit,
+    onSendGift: (sku: String, recipient: Id, clientKey: String?) -> Unit,
     onRefresh: () -> Unit,
     onArchiveWallet: (walletId: String) -> Unit,
     onChainNetwork: (ChainNetworkChoice) -> Unit,
@@ -78,6 +78,9 @@ fun WalletScreen(
     // The picker survives recomposition but not process death: a gift half-addressed is cheaply
     // re-chosen, and GiftListing is not a saveable type.
     var picking: GiftListing? by remember { mutableStateOf<GiftListing?>(null) }
+    // The picked gift's idempotency key: minted with the pick, sent with every retry of it, so
+    // the server returns the first send instead of charging twice on a lost reply.
+    var giftKey by remember { mutableStateOf<String?>(null) }
     var recipientField by rememberSaveable { mutableStateOf("") }
     // The AVAX send form's own visibility; its text survives rotation in saveables below.
     var chainSending by rememberSaveable { mutableStateOf(false) }
@@ -204,7 +207,10 @@ fun WalletScreen(
                                 Text(gift.name, style = MaterialTheme.typography.titleMedium)
                                 OneLine(text = "${gift.price} \$MIG · ${gift.category}")
                             }
-                            Button(onClick = { picking = gift }) { Text("Send") }
+                            Button(onClick = {
+                                picking = gift
+                                giftKey = java.util.UUID.randomUUID().toString()
+                            }) { Text("Send") }
                         }
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     }
@@ -273,6 +279,7 @@ fun WalletScreen(
                         Row {
                             TextButton(onClick = {
                                 picking = null
+                                giftKey = null
                                 recipientField = ""
                             }) { Text("Cancel") }
                             Spacer(modifier = Modifier.width(8.dp))
@@ -284,8 +291,9 @@ fun WalletScreen(
                                         null
                                     }
                                     if (id != null) {
-                                        onSendGift(gift.sku, id)
+                                        onSendGift(gift.sku, id, giftKey)
                                         picking = null
+                                        giftKey = null
                                         recipientField = ""
                                     }
                                 },

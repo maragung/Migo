@@ -55,6 +55,17 @@ const REPLY_PREVIEW_CHARS = 50;
 const GIFT_PICKER_COUNT = 6;
 
 /**
+ * A fresh idempotency key for one gift-picker session, from the platform CSPRNG.
+ *
+ * The key rides on every send attempt from that session so the server can tell a
+ * retry of the same intent (a lost reply, a re-tap) from a second, separate gift.
+ */
+function newIntentKey(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
  * The lock label the header may claim, from the summary's {@link EncryptionMode}.
  *
  * The mode is the server's own statement of what the UI is allowed to claim, so the label is
@@ -152,6 +163,10 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   const [giftRecipient, setGiftRecipient] = useState<Id | null>(null);
   const [giftBusy, setGiftBusy] = useState(false);
   const [giftError, setGiftError] = useState<string | null>(null);
+  // One idempotency key per picker session: minted when the picker opens, sent with
+  // every gift attempt from it, so a retry after a lost reply returns the first send
+  // instead of charging the sender twice. Closing the picker ends the intent.
+  const [giftKey, setGiftKey] = useState<string | null>(null);
   // The composer's emoticon/sticker picker, beside the gift picker it shares the row with.
   const [emoticonOpen, setEmoticonOpen] = useState(false);
   // The account's purchased packs: one read per session, shared across every chat window.
@@ -361,7 +376,8 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   }, [client, giftOpen, giftCatalogue]);
 
   // A gift from the composer: the conversation rides along so the server can attach the transfer
-  // to this thread for both ledgers.
+  // to this thread for both ledgers, and the picker-session key rides along so a retry after a
+  // lost reply is the first send again server-side.
   const sendGift = useCallback(
     (gift: GiftListing, recipient: Id): void => {
       if (!client || giftBusy) {
@@ -370,7 +386,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
       setGiftBusy(true);
       setGiftError(null);
       client.economy
-        .sendGift(gift.sku, recipient, conversationId)
+        .sendGift(gift.sku, recipient, conversationId, giftKey ?? undefined)
         .then(() => {
           setGiftOpen(false);
         })
@@ -381,7 +397,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
           setGiftBusy(false);
         });
     },
-    [client, giftBusy, conversationId],
+    [client, giftBusy, conversationId, giftKey],
   );
 
   // The gift picker's candidate recipients: the conversation's other members with resolved
@@ -641,7 +657,10 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
         onCancelReply={() => setReplyTo(null)}
         onGift={() => {
           setEmoticonOpen(false);
-          setGiftOpen((open) => !open);
+          if (!giftOpen) {
+            setGiftKey(newIntentKey());
+          }
+          setGiftOpen(!giftOpen);
         }}
         giftOpen={giftOpen}
         emoticonOpen={emoticonOpen}

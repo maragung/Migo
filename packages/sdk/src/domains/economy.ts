@@ -100,11 +100,24 @@ export class EconomyDomain {
    * and the transfer recorded, both atomically server-side; a short balance rejects with an error
    * rather than a partial send. `conversationId`, when the gift is being sent inside an open
    * conversation, lets the server attach the transfer to it for the participants' ledgers.
+   *
+   * `clientKey` is this gift intent's idempotency key: mint one per intent (e.g. once when the
+   * picker opens for a chosen recipient) and send the same key on every retry. A retry with the
+   * same key returns the first send — `duplicate` true on the result — instead of charging twice.
+   * Without a key the server cannot tell a retry from a fresh intent and charges every attempt.
    */
-  async sendGift(gift: string, recipient: Id, conversationId?: Id): Promise<GiftSendResult> {
+  async sendGift(
+    gift: string,
+    recipient: Id,
+    conversationId?: Id,
+    clientKey?: string,
+  ): Promise<GiftSendResult> {
     const request: GiftSend = { gift, recipient };
     if (conversationId !== undefined) {
       request.conversationId = conversationId;
+    }
+    if (clientKey !== undefined) {
+      request.clientKey = clientKey;
     }
     return this.#rpc.call(OP.GIFT_SEND, encodeGiftSend, decodeGiftSendResult, request);
   }

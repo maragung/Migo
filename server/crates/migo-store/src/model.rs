@@ -1122,6 +1122,20 @@ impl Currency {
             _ => return None,
         })
     }
+
+    /// The lowercase name a wire payload or an event label carries, e.g. `"coins"`.
+    ///
+    /// The one spelling every event consumer keys on, so a price in gems never
+    /// arrives labelled `"coins"` — which is what hardcoding the label at each
+    /// publish site used to produce.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Coins => "coins",
+            Self::Gems => "gems",
+            Self::Points => "points",
+        }
+    }
 }
 
 /// What a ledger account is for.
