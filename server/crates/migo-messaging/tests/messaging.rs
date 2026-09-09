@@ -228,6 +228,20 @@ impl Harness {
         body: &[u8],
         millis: i64,
     ) -> MessageAccepted {
+        self.send_raw(conversation, message, body.to_vec(), millis)
+            .await
+    }
+
+    /// Sends one message with an owned envelope: the bulk the byte-budget tests need, where
+    /// cloning a `SYNC_BUDGET_BYTES`-sized body just to pass a slice is the clearest cost in
+    /// the file.
+    async fn send_raw(
+        &self,
+        conversation: Id,
+        message: u128,
+        envelope: Vec<u8>,
+        millis: i64,
+    ) -> MessageAccepted {
         self.messaging
             .send(
                 &caller(ALICE, ALICE_PHONE, millis),
@@ -235,7 +249,7 @@ impl Harness {
                     message_id: id(message),
                     conversation_id: conversation,
                     kind: MessageKind::Text,
-                    envelope: body.to_vec(),
+                    envelope,
                     ..MessageSend::default()
                 },
             )
@@ -2888,4 +2902,148 @@ async fn edit_refused_when_blocked() {
             .await,
         codes::BLOCKED_BY_USER,
     );
+}
+
+#[tokio::test]
+async fn a_sync_page_that_exceeds_the_byte_budget_pages_instead_of_erroring() {
+    // The row bound alone cannot keep a sync answer inside the frame ceiling: a row's
+    // envelope may reach MAX_BYTES_LEN, so two hundred maximal rows would ask the wire for
+    // ~25 MiB and be answered with an internal error no client can use or avoid. The byte
+    // budget trims the page from the far end and raises `more`, so the caller's existing
+    // paging loop picks up exactly the rows that did not fit — nothing skipped, nothing
+    // repeated.
+    use migo_messaging::model::SYNC_BUDGET_BYTES;
+
+    let harness = Harness::new();
+    let conversation = harness.direct(MINUTE).await;
+
+    // Two rows that each fit the budget but not together, then a cheap tail row. The page is
+    // asked for all three; only the first can come back.
+    let bulky = vec![7u8; SYNC_BUDGET_BYTES / 2 + 1_024];
+    harness
+        .send_raw(conversation, 21_001, bulky.clone(), 2 * MINUTE)
+        .await;
+    harness
+        .send_raw(conversation, 21_002, bulky, 3 * MINUTE)
+        .await;
+    harness
+        .send(conversation, 21_003, b"cheap", 4 * MINUTE)
+        .await;
+
+    let page = harness
+        .messaging
+        .sync(
+            &caller(BOB, BOB_LAPTOP, 5 * MINUTE),
+            sync_from(conversation, 0, 50),
+        )
+        .await
+        .expect("a member may read history");
+    assert_eq!(
+        seqs(&page),
+        vec![1],
+        "only the first bulky row fits the budget"
+    );
+    assert!(page.more, "the trimmed page says there is more to fetch");
+
+    // The next page starts from the seq the first one ended on and must return the rest in
+    // order: the budget paged, it did not drop.
+    let rest = harness
+        .messaging
+        .sync(
+            &caller(BOB, BOB_LAPTOP, 6 * MINUTE),
+            sync_from(conversation, 1, 50),
+        )
+        .await
+        .expect("a member may keep reading");
+    assert_eq!(seqs(&rest), vec![2, 3], "the remainder pages in order");
+    assert!(!rest.more, "everything has now been delivered");
+
+    // A single row larger than the whole budget is still delivered: an answer of zero rows
+    // cannot be smaller than the question, and the sender's own client sent that envelope.
+    // A different member pair than the conversation above — a direct conversation is
+    // idempotent in its member set, so reusing the pair would return the first conversation
+    // and stack the huge row on top of its history instead of standing alone.
+    let huge = vec![9u8; SYNC_BUDGET_BYTES + 1_024];
+    let conversation2 = harness
+        .messaging
+        .create(
+            &caller(ALICE, ALICE_PHONE, 7 * MINUTE),
+            ConversationCreateRequest {
+                kind: ConversationKind::Direct,
+                members: vec![id(CAROL)],
+                title: None,
+            },
+        )
+        .await
+        .expect("a direct conversation between two strangers is allowed")
+        .conversation_id;
+    harness
+        .send_raw(conversation2, 21_004, huge, 8 * MINUTE)
+        .await;
+    let alone = harness
+        .messaging
+        .sync(
+            &caller(CAROL, BOB_LAPTOP, 9 * MINUTE),
+            sync_from(conversation2, 0, 50),
+        )
+        .await
+        .expect("a member may read history");
+    assert_eq!(
+        seqs(&alone),
+        vec![1],
+        "the oversized row arrives on its own"
+    );
+    assert!(!alone.more, "nothing remains behind it");
+}
+
+#[tokio::test]
+async fn a_backwards_page_honours_the_byte_budget_too() {
+    // loadEarlier pages downward with `backwards: true`, and the budget must hold in that
+    // direction as well: the rows are trimmed from the far end, which for a backwards page
+    // is the oldest — so the next backwards page asks from the new lowest seq and still
+    // walks to the top without gaps.
+    use migo_messaging::model::SYNC_BUDGET_BYTES;
+
+    let harness = Harness::new();
+    let conversation = harness.direct(MINUTE).await;
+
+    let bulky = vec![7u8; SYNC_BUDGET_BYTES / 2 + 1_024];
+    for seq in 1..=3u128 {
+        harness
+            .send_raw(conversation, 22_000 + seq, bulky.clone(), 2 * MINUTE)
+            .await;
+    }
+
+    let page = harness
+        .messaging
+        .sync(
+            &caller(BOB, BOB_LAPTOP, 3 * MINUTE),
+            SyncRequest {
+                conversation_id: conversation,
+                have_seq: 4,
+                limit: 50,
+                to_seq: None,
+                backwards: Some(true),
+            },
+        )
+        .await
+        .expect("a member may page older history");
+    assert_eq!(seqs(&page), vec![3], "one bulky row fits a backwards page");
+    assert!(page.more, "the older rows are still there to fetch");
+
+    let older = harness
+        .messaging
+        .sync(
+            &caller(BOB, BOB_LAPTOP, 4 * MINUTE),
+            SyncRequest {
+                conversation_id: conversation,
+                have_seq: 3,
+                limit: 50,
+                to_seq: None,
+                backwards: Some(true),
+            },
+        )
+        .await
+        .expect("a member may keep paging");
+    assert_eq!(seqs(&older), vec![2], "the next older row pages next");
 }

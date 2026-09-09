@@ -120,3 +120,20 @@ pub const MEMBER_PREVIEW: u16 = 8;
 /// is not a feature — it is an off-by-a-thousand in a client that meant seconds.
 /// Refusing it is how that bug gets found in development rather than in a year.
 pub const MAX_EXPIRY_MS: u32 = 30 * 24 * 60 * 60 * 1_000;
+
+/// Ceiling on the message payload bytes one `SYNC` answer may carry.
+///
+/// The page is bounded by rows (200 at the clamp ceiling) and each row's
+/// envelope is bounded by `MAX_BYTES_LEN`, so the row bound alone lets one
+/// answer reach ~25 MiB — far past the frame ceiling every transport enforces,
+/// which would turn a maximal catch-up into an internal error the client can
+/// neither use nor avoid. The byte bound is checked after the rows are read and
+/// the surplus rows are returned to the client through the same `more` flag it
+/// already pages on: a page of one 96-KiB message and a page of two hundred
+/// 100-byte ones are both valid answers, and the caller's next page asks for
+/// whatever remains. Set below both the wire's frame ceiling and the envelope
+/// ceiling — below the frame ceiling to leave room for the response's own
+/// framing, below the envelope ceiling so one maximal envelope still overruns
+/// the budget and the single-row rule in the send path has a real case to
+/// answer.
+pub const SYNC_BUDGET_BYTES: usize = 96 * 1_024;

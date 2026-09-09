@@ -86,7 +86,7 @@ use crate::fanout::{Broadcast, Fanout};
 use crate::metrics::{Meters, SendOutcome, SyncOutcome};
 use crate::model::{
     Caller, DEFAULT_CONVERSATION_PAGE, MAX_EXPIRY_MS, MAX_GROUP_MEMBERS, MAX_TITLE_LEN,
-    MEMBER_PREVIEW, TYPING_TTL_MS, VOTE_TTL_MS,
+    MEMBER_PREVIEW, SYNC_BUDGET_BYTES, TYPING_TTL_MS, VOTE_TTL_MS,
 };
 use crate::traits::{Messaging, RoomSpeak, SharedMessageGate};
 
@@ -959,6 +959,30 @@ where
             SyncOutcome::Complete
         };
         self.meters.synced(outcome, messages.len());
+
+        // The byte budget. The page is bounded by rows, but a row's envelope is
+        // bounded only by `MAX_BYTES_LEN`, so the row bound alone lets one
+        // answer grow past the frame ceiling every transport enforces — a
+        // catch-up that asked for everything would be answered with an internal
+        // error instead of a page. Rows are trimmed from the end the next page
+        // starts from — the tail for a forward page, the head for a backwards
+        // one, whose caller walks downward from the lowest seq returned — until
+        // the payload fits, and `more` is raised when anything was dropped: the
+        // caller's existing paging loop asks again from the seq it now holds on
+        // its walking edge, so no row is skipped and none is repeated. A single
+        // row larger than the whole budget is still returned — an answer of
+        // zero rows could not be smaller than the question, and the sender's
+        // own client accepted that envelope.
+        let mut messages = messages;
+        let mut more = more;
+        while messages.len() > 1 && payload_bytes(&messages) > SYNC_BUDGET_BYTES {
+            if backwards {
+                messages.remove(0);
+            } else {
+                messages.pop();
+            }
+            more = true;
+        }
 
         // A zero range means "nothing". Sequences start at one, so zero cannot be
         // mistaken for a real position, which `have_seq` on both ends could be.
@@ -1988,6 +2012,14 @@ fn moved(before: &Cursor, after: &Cursor) -> bool {
 fn page_limit(requested: u32) -> u16 {
     let narrowed = u16::try_from(requested).unwrap_or(u16::MAX);
     clamp_limit(narrowed) as u16
+}
+
+/// The payload bytes a page of messages costs on the wire: the envelopes, which
+/// dominate every other field by orders of magnitude. The fixed per-row fields
+/// (ids, seq, timestamps) are a rounding error beside them and the frame header
+/// is one, so the envelopes alone are the honest measure of the budget.
+fn payload_bytes(messages: &[StoredMessage]) -> usize {
+    messages.iter().map(|m| m.envelope.len()).sum()
 }
 
 /// What a send has to agree with for a repeat of its id to count as a retry.
