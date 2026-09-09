@@ -110,7 +110,9 @@ fn backoff(consecutive_failures: u32) -> Duration {
         return RUNNER_TICK;
     }
     let shift = consecutive_failures.min(RUNNER_BACKOFF_SHIFT_CAP);
-    RUNNER_TICK.saturating_mul(1u32 << shift).min(RUNNER_TICK_MAX)
+    RUNNER_TICK
+        .saturating_mul(1u32 << shift)
+        .min(RUNNER_TICK_MAX)
 }
 
 // ---------------------------------------------------------------------------
