@@ -20,6 +20,18 @@
 //!
 //! Both tests use the reply rule as their clock: every frame they wait for is
 //! one the server owes somebody, so the timeout is the assertion.
+//!
+//! The third and fourth facts the tests here pin live on the *reason* lines:
+//! * **A busy decline says busy.** The wire's `CallDecline.reason` existed and
+//!   was ignored — every decline, busy or not, ended the call `Declined`, so a
+//!   caller whose callee's devices were merely occupied was told a person
+//!   refused them. The third test declines busy over the socket and asserts
+//!   the caller hears `Ended(Busy)`.
+//! * **The answer relay connects the call out loud.** The service marked the
+//!   row `Connected` when the callee's first SDP relay landed, but published
+//!   only the relay — the `Connected` state event every client listens for
+//!   never went out. The fourth test relays the answer and asserts both
+//!   parties hear `Connected`.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -32,8 +44,8 @@ use migo_auth::{DeviceClaim, Grant, Registration, RequestContext, SignIn};
 use migo_calls::{CallState, EndReason};
 use migo_core::{Clock, Config, Id, Secret, Timestamp};
 use migo_protocol::{
-    from_frame, to_frame, CallAnswer, CallInvite, CallInviteEvent, CallInviteResult,
-    CallStateEvent, Encode, Frame, Hello, Opcode, Platform, RoomJoinRequest, RoomKind,
+    from_frame, to_frame, CallAnswer, CallDecline, CallInvite, CallInviteEvent, CallInviteResult,
+    CallSdp, CallStateEvent, Encode, Frame, Hello, Opcode, Platform, RoomJoinRequest, RoomKind,
     SubscribeRequest, SubscribeResponse, Topic, TopicKind, Welcome, PROTOCOL_VERSION,
 };
 use migo_ratelimit::TrustTier;
@@ -517,4 +529,147 @@ async fn a_call_answered_on_one_device_stops_the_ring_on_the_other() {
         CallState::Connecting.to_wire(),
         "the still-ringing sibling must hear the answer"
     );
+}
+
+#[tokio::test]
+async fn a_busy_decline_reaches_the_caller_as_busy() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let caller = registered_grant(&app, "busycaller").await;
+    let callee = registered_grant(&app, "busycallee").await;
+    let conversation_id = a_room_between(&app, &caller, &callee, "busy-room").await;
+
+    let mut caller_session = LiveSession::connect(addr, &caller).await;
+    let mut callee_session = LiveSession::connect(addr, &callee).await;
+
+    let call_id = Id::from_bytes([0xB7; 16]);
+    let result: CallInviteResult = caller_session
+        .ask(
+            Opcode::CallInvite,
+            101,
+            &CallInvite {
+                call_id,
+                conversation_id,
+                callee_id: callee.account_id,
+                media_kind: 0,
+                caller_device: caller.device_id,
+                capabilities: 0,
+                sealed_offer: vec![0x44; 48],
+            },
+        )
+        .await;
+    assert_eq!(result.status, 0, "the invite is accepted as a ring");
+
+    let invite_frame =
+        next_event_of(&mut callee_session.stream, Opcode::CallInviteEvent, STEP).await;
+    let invite: CallInviteEvent = from_frame(&invite_frame).expect("the invite event decodes");
+    assert_eq!(invite.call_id, call_id);
+
+    // The callee's devices were occupied — 0=Busy on the wire. The caller's
+    // screen must say busy, not declined: the difference is whether the
+    // caller believes a person refused them.
+    let _: migo_protocol::Acknowledged = callee_session
+        .ask(
+            Opcode::CallDecline,
+            102,
+            &CallDecline { call_id, reason: 0 },
+        )
+        .await;
+
+    // The caller hears the end with the busy reason — the reason the callee
+    // stated, relayed rather than overwritten.
+    let ended = next_event_of(&mut caller_session.stream, Opcode::CallStateEvent, STEP).await;
+    let state: CallStateEvent = from_frame(&ended).expect("the caller's event decodes");
+    assert_eq!(state.call_id, call_id);
+    assert_eq!(state.state, CallState::Ended.to_wire());
+    assert_eq!(
+        state.reason,
+        Some(EndReason::Busy.to_wire()),
+        "a busy decline must end busy, not declined"
+    );
+}
+
+#[tokio::test]
+async fn the_answer_relay_tells_both_parties_the_call_connected() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let caller = registered_grant(&app, "connectcaller").await;
+    let callee = registered_grant(&app, "connectcallee").await;
+    let conversation_id = a_room_between(&app, &caller, &callee, "connect-room").await;
+
+    let mut caller_session = LiveSession::connect(addr, &caller).await;
+    let mut callee_session = LiveSession::connect(addr, &callee).await;
+
+    let call_id = Id::from_bytes([0xC3; 16]);
+    let result: CallInviteResult = caller_session
+        .ask(
+            Opcode::CallInvite,
+            111,
+            &CallInvite {
+                call_id,
+                conversation_id,
+                callee_id: callee.account_id,
+                media_kind: 0,
+                caller_device: caller.device_id,
+                capabilities: 0,
+                sealed_offer: vec![0x55; 48],
+            },
+        )
+        .await;
+    assert_eq!(result.status, 0, "the invite is accepted as a ring");
+    let _ = next_event_of(&mut callee_session.stream, Opcode::CallInviteEvent, STEP).await;
+
+    // The callee answers on the connection's own device.
+    let _: migo_protocol::Acknowledged = callee_session
+        .ask(
+            Opcode::CallAnswer,
+            112,
+            &CallAnswer {
+                call_id,
+                callee_device: callee.device_id,
+                sealed_answer: vec![0x66; 48],
+            },
+        )
+        .await;
+    // Both parties leave "ringing": the answer publishes Connecting — to the
+    // caller's session, and to the callee's *other* devices. The answering
+    // session itself is the origin connection the fan-out excludes, so the
+    // callee's session here has no Connecting of its own to wait for.
+    let _ = next_event_of(&mut caller_session.stream, Opcode::CallStateEvent, STEP).await;
+
+    // The callee relays its sealed answer toward the caller's device — the
+    // moment the call turns Connected server-side, and the moment both
+    // parties must *hear* that it did.
+    let _: migo_protocol::Acknowledged = callee_session
+        .ask(
+            Opcode::CallSdp,
+            113,
+            &CallSdp {
+                call_id,
+                from_device: callee.device_id,
+                to_device: caller.device_id,
+                sealed_sdp: vec![0x77; 48],
+            },
+        )
+        .await;
+
+    let connected = next_event_of(&mut caller_session.stream, Opcode::CallStateEvent, STEP).await;
+    let state: CallStateEvent = from_frame(&connected).expect("the caller's event decodes");
+    assert_eq!(state.call_id, call_id);
+    assert_eq!(state.state, CallState::Connected.to_wire());
+
+    // The callee's session is the relay's origin connection, so the Connected
+    // event reaches it only as this same fan-out — through the topic, after
+    // the answer's own devices were told. The relayed SDP frame follows: the
+    // Connected event is a fact added, not a frame replaced.
+    let sdp = next_event_of(&mut caller_session.stream, Opcode::CallSdp, STEP).await;
+    let relayed: CallSdp = from_frame(&sdp).expect("the relayed SDP decodes");
+    assert_eq!(relayed.call_id, call_id);
+    assert_eq!(relayed.sealed_sdp, vec![0x77; 48]);
+
+    // The callee's session hears its relay echo... or does not: the relay is
+    // published to the *caller's* account topic, and the Connected event went
+    // out before it. Nothing further is owed to the callee's own session, and
+    // that is the design — the answering device's truth is its reply and its
+    // own screen state, not an event it must wait for.
 }

@@ -153,7 +153,9 @@ pub(crate) async fn handle_answer(
     Ok(())
 }
 
-/// Declines a ringing call; the caller hears `Ended(Declined)`.
+/// Declines a ringing call; the caller hears `Ended(Declined)` — or
+/// `Ended(Busy)`, when the callee's own reason says their devices were
+/// occupied rather than unwilling.
 pub(crate) async fn handle_decline(
     ctx: &ClientContext<'_>,
     frame: &Frame,
@@ -161,7 +163,9 @@ pub(crate) async fn handle_decline(
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallDecline = from_frame(frame).map_err(fault::from_wire)?;
-    let event = svc.decline(&caller, request.call_id).await?;
+    let event = svc
+        .decline(&caller, request.call_id, request.reason)
+        .await?;
     ctx.reply(&Acknowledged { ok: true })?;
     if let Some(event) = event {
         publish_to_caller_of(ctx, svc, &caller, request.call_id, &event).await;
@@ -248,15 +252,25 @@ pub(crate) async fn handle_renegotiate(
 }
 
 /// Relays sealed SDP after the service has validated its routing.
+///
+/// When the relayed frame is the callee's first answer — the moment the call
+/// turns `Connected` — the service hands back the `Connected` state event
+/// alongside the frame, and it is published to *both* parties here: each
+/// side's screen has a `Connecting` state to retire, and the wire's promise
+/// is that the authoritative transitions arrive as events, not as side
+/// effects of frames a client must infer from.
 async fn relay_sdp(
     ctx: &ClientContext<'_>,
     svc: &SharedCallkeeper,
     caller: &CallCaller,
     request: CallSdp,
 ) -> Result<(), Error> {
-    let relayed = svc.relay_sdp(caller, request).await?;
+    let (relayed, connected) = svc.relay_sdp(caller, request).await?;
     let call = svc.call(caller, relayed.call_id).await?;
     ctx.reply(&Acknowledged { ok: true })?;
+    if let Some(event) = connected {
+        publish_to_both_parties(ctx, svc, caller, relayed.call_id, &event).await;
+    }
     // The relay succeeded, so `to_device` is one of the call's two devices;
     // the row says which account's topic reaches it.
     let target = call

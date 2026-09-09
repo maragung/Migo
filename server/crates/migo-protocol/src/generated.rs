@@ -8688,7 +8688,7 @@ impl Decode for CallInvite {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CallInviteResult {
     pub call_id: Id,
-    /// 0=Ringing, 1=Declined, 2=Expired, 3=Blocked.
+    /// 0=Ringing, 1=Declined, 2=Expired, 3=Blocked, 4=Busy. Busy is the callee's decline reason: their devices were occupied, nobody refused — a retry is welcome.
     pub status: u32,
     pub expires_at: Timestamp,
 }
@@ -8816,7 +8816,7 @@ impl Decode for CallAnswer {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CallDecline {
     pub call_id: Id,
-    /// 0=Busy, 1=Declined.
+    /// 0=Busy, 1=Declined. The reason reaches the caller as the end reason: a Busy call ended Busy, not Declined.
     pub reason: u32,
 }
 
@@ -8884,7 +8884,7 @@ impl Decode for CallCancel {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CallEnd {
     pub call_id: Id,
-    /// 0=ByCaller, 1=ByCallee, 2=Declined, 3=NoAnswer, 4=Failed, 5=Network.
+    /// 0=ByCaller, 1=ByCallee, 2=Declined, 3=NoAnswer, 4=Failed, 5=Network, 6=Busy. Busy is the callee's decline reason, not a hang-up: the callee's devices were occupied, nobody refused.
     pub reason: u32,
 }
 

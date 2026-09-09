@@ -55,6 +55,13 @@ pub mod invite_status {
     pub const EXPIRED: u32 = 2;
     /// A block in either direction stops the invite before it rings.
     pub const BLOCKED: u32 = 3;
+    /// The callee declined *busy* before this invite was retried.
+    ///
+    /// A re-invite against a call that ended `Busy` owes the caller the same
+    /// distinction the original decline carried: "busy" invites a retry in a
+    /// minute, "declined" does not, and a retry that reports the gentler of
+    /// the two is a lie the caller acts on.
+    pub const BUSY: u32 = 4;
 }
 
 /// Who is asking.
@@ -133,6 +140,10 @@ impl CallState {
 /// two reasons the server *does* own — [`Self::Declined`] and
 /// [`Self::NoAnswer`] — are produced by the decline path and the expiry sweep
 /// respectively, which is why a client can trust them to mean what they say.
+/// [`Self::Busy`] joins them from the decline path: it is the callee's own
+/// claim about *why* they declined, relayed the same way, and it exists so a
+/// caller's screen can say "busy" rather than accusing a device that was
+/// merely occupied of a human refusal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EndReason {
     /// The caller withdrew the call.
@@ -147,17 +158,20 @@ pub enum EndReason {
     Failed,
     /// Connectivity was lost.
     Network,
+    /// The callee's devices were occupied — a decline, not a hang-up.
+    Busy,
 }
 
 impl EndReason {
     /// Every reason this build knows, for metric registration.
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::ByCaller,
         Self::ByCallee,
         Self::Declined,
         Self::NoAnswer,
         Self::Failed,
         Self::Network,
+        Self::Busy,
     ];
 
     /// The wire's numbering, shared with `CallEnd.reason` and the optional
@@ -171,6 +185,7 @@ impl EndReason {
             Self::NoAnswer => 3,
             Self::Failed => 4,
             Self::Network => 5,
+            Self::Busy => 6,
         }
     }
 
@@ -186,6 +201,7 @@ impl EndReason {
             3 => Some(Self::NoAnswer),
             4 => Some(Self::Failed),
             5 => Some(Self::Network),
+            6 => Some(Self::Busy),
             _ => None,
         }
     }

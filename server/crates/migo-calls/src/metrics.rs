@@ -271,5 +271,6 @@ const fn reason_label(reason: EndReason) -> &'static str {
         EndReason::NoAnswer => "no_answer",
         EndReason::Failed => "failed",
         EndReason::Network => "network",
+        EndReason::Busy => "busy",
     }
 }

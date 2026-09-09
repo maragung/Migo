@@ -313,6 +313,8 @@ export function endReasonLabel(reason: CallEndReason | undefined): string {
       return 'Failed to connect';
     case CallEndReason.Network:
       return 'Connection lost';
+    case CallEndReason.Busy:
+      return 'Busy';
     default:
       return 'Call ended';
   }
@@ -328,17 +330,25 @@ export const INVITE_DECLINED = 1;
 export const INVITE_EXPIRED = 2;
 /** The wire's `CallInviteResult.status`: a block or call policy excludes the caller. */
 export const INVITE_BLOCKED = 3;
+/** The wire's `CallInviteResult.status`: the callee's devices were occupied (a busy decline). */
+export const INVITE_BUSY = 4;
 
 /**
  * The ended reason for an invite that never rang.
  *
- * Expired is {@link CallEndReason.NoAnswer}; every other refusal is {@link
- * CallEndReason.Declined}, because the wire's reason enum has no Blocked member. The distinction
- * the wire did draw — blocked — rides on the tracked call as its raw `inviteStatus` for the
- * screen to read through {@link endedReasonLine}.
+ * Expired is {@link CallEndReason.NoAnswer}; busy is {@link CallEndReason.Busy}; every other
+ * refusal is {@link CallEndReason.Declined}, because the wire's reason enum has no Blocked
+ * member. The distinction the wire did draw — blocked — rides on the tracked call as its raw
+ * `inviteStatus` for the screen to read through {@link endedReasonLine}.
  */
 export function inviteEndReason(status: number): CallEndReason {
-  return status === INVITE_EXPIRED ? CallEndReason.NoAnswer : CallEndReason.Declined;
+  if (status === INVITE_EXPIRED) {
+    return CallEndReason.NoAnswer;
+  }
+  if (status === INVITE_BUSY) {
+    return CallEndReason.Busy;
+  }
+  return CallEndReason.Declined;
 }
 
 /**
@@ -477,6 +487,7 @@ const WIRE_CALL_END_REASONS: Readonly<Record<number, CallEndReason>> = {
   [CallEndReason.NoAnswer]: CallEndReason.NoAnswer,
   [CallEndReason.Failed]: CallEndReason.Failed,
   [CallEndReason.Network]: CallEndReason.Network,
+  [CallEndReason.Busy]: CallEndReason.Busy,
 };
 
 /** Narrows a wire `CallStateEvent.reason`; an absent or unknown reason yields `undefined`. */

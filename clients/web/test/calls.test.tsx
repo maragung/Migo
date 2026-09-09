@@ -49,6 +49,7 @@ import {
   CALL_KEY_EVENT,
   CallSignalFormatError,
   INVITE_BLOCKED,
+  INVITE_BUSY,
   INVITE_DECLINED,
   INVITE_EXPIRED,
   INVITE_RINGING,
@@ -289,6 +290,7 @@ test('ended reasons stay distinct, as section 180 requires', () => {
   assert.equal(endReasonLabel(CallEndReason.NoAnswer), 'No answer');
   assert.equal(endReasonLabel(CallEndReason.Failed), 'Failed to connect');
   assert.equal(endReasonLabel(CallEndReason.Network), 'Connection lost');
+  assert.equal(endReasonLabel(CallEndReason.Busy), 'Busy');
   assert.equal(endReasonLabel(undefined), 'Call ended');
   assert.equal(mediaKindLabel(CallMediaKind.Audio), 'voice call');
   assert.equal(mediaKindLabel(CallMediaKind.Video), 'video call');
@@ -630,6 +632,7 @@ test('a blocked invite refusal is a distinct fact on the caller\u2019s ended scr
   assert.equal(inviteEndReason(INVITE_DECLINED), CallEndReason.Declined);
   assert.equal(inviteEndReason(INVITE_EXPIRED), CallEndReason.NoAnswer);
   assert.equal(inviteEndReason(INVITE_BLOCKED), CallEndReason.Declined);
+  assert.equal(inviteEndReason(INVITE_BUSY), CallEndReason.Busy);
 
   const blocked = activeCall({
     state: CallState.Ended,

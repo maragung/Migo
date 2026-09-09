@@ -150,8 +150,12 @@ pub trait Callkeeper: Send + Sync {
         callee_device: Id,
     ) -> Result<Option<migo_protocol::CallStateEvent>>;
 
-    /// Callee declines. Any live call ends `Declined`.
+    /// Callee declines. Any live call ends `Declined` — or `Busy`, when the
+    /// callee's own reason says their devices were occupied.
     ///
+    /// The reason is the wire's decline vocabulary (0=Busy, 1=Declined) and
+    /// reaches the caller as the call's end reason, so a caller's screen can
+    /// say "busy" rather than reporting a human refusal that never happened.
     /// Returns the ended state event for the caller's topic. Declining a
     /// call that is already over is a retry, not an error: nothing changes,
     /// nothing is sent.
@@ -159,6 +163,7 @@ pub trait Callkeeper: Send + Sync {
         &self,
         caller: &Caller,
         call_id: Id,
+        reason: u32,
     ) -> Result<Option<migo_protocol::CallStateEvent>>;
 
     /// Caller cancels before an answer. Any live call ends `ByCaller`.
@@ -196,8 +201,14 @@ pub trait Callkeeper: Send + Sync {
     ///
     /// Relaying the callee's first answer while the call is `Connecting`
     /// marks the call `Connected`: that relay is the moment both sides hold
-    /// what they need for media.
-    async fn relay_sdp(&self, caller: &Caller, sdp: CallSdpWire) -> Result<CallSdpWire>;
+    /// what they need for media, and the `Connected` state event for that
+    /// transition rides back alongside the frame so the publisher can tell
+    /// both parties — `None` for every other relay, which changes nothing.
+    async fn relay_sdp(
+        &self,
+        caller: &Caller,
+        sdp: CallSdpWire,
+    ) -> Result<(CallSdpWire, Option<migo_protocol::CallStateEvent>)>;
 
     /// Relays a batch of sealed ICE candidates, same rules as
     /// [`Callkeeper::relay_sdp`].

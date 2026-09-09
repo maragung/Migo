@@ -3155,7 +3155,7 @@
         {
           "name": "status",
           "type": "u32",
-          "doc": "0=Ringing, 1=Declined, 2=Expired, 3=Blocked."
+          "doc": "0=Ringing, 1=Declined, 2=Expired, 3=Blocked, 4=Busy. Busy is the callee's decline reason: their devices were occupied, nobody refused — a retry is welcome."
         },
         {
           "name": "expires_at",
@@ -3227,7 +3227,7 @@
         {
           "name": "reason",
           "type": "u32",
-          "doc": "0=Busy, 1=Declined."
+          "doc": "0=Busy, 1=Declined. The reason reaches the caller as the end reason: a Busy call ended Busy, not Declined."
         }
       ]
     },
@@ -3252,7 +3252,7 @@
         {
           "name": "reason",
           "type": "u32",
-          "doc": "0=ByCaller, 1=ByCallee, 2=Declined, 3=NoAnswer, 4=Failed, 5=Network."
+          "doc": "0=ByCaller, 1=ByCallee, 2=Declined, 3=NoAnswer, 4=Failed, 5=Network, 6=Busy. Busy is the callee's decline reason, not a hang-up: the callee's devices were occupied, nobody refused."
         }
       ]
     },
@@ -3486,7 +3486,7 @@
         {
           "name": "challenge_id",
           "type": "id",
-          "doc": "Server-side handle; single use \u2014 the first answer consumes it"
+          "doc": "Server-side handle; single use — the first answer consumes it"
         },
         {
           "name": "nonce",

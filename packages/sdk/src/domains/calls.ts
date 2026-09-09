@@ -89,7 +89,11 @@ export enum CallMediaKind {
   Video = 1,
 }
 
-/** Why a call ended. The first three are human decisions; the last two are system failures. */
+/**
+ * Why a call ended. The first three are human decisions; the next two are system failures; the
+ * last is the callee's decline reason, relayed so a caller's screen can say "busy" rather than
+ * reporting a human refusal that never happened.
+ */
 export enum CallEndReason {
   /** The caller hung up. */
   ByCaller = 0,
@@ -103,6 +107,8 @@ export enum CallEndReason {
   Failed = 4,
   /** The network gave out and the reconnect window closed. */
   Network = 5,
+  /** The callee's devices were occupied — a decline reason, not a hang-up. */
+  Busy = 6,
 }
 
 /** Why a callee declined. `Busy` answers faster than a ring that can never be picked up. */

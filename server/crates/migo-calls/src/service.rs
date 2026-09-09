@@ -239,6 +239,7 @@ where
         }
         let status = match existing.end_reason {
             Some(EndReason::Declined) => crate::model::invite_status::DECLINED,
+            Some(EndReason::Busy) => crate::model::invite_status::BUSY,
             Some(EndReason::NoAnswer) => crate::model::invite_status::EXPIRED,
             // Cancelled, failed, or dropped: the id is spent, and the caller
             // is told so rather than handed a status the vocabulary has no
@@ -514,10 +515,30 @@ where
         }
     }
 
-    async fn decline(&self, caller: &Caller, call_id: Id) -> Result<Option<CallStateEvent>> {
+    async fn decline(
+        &self,
+        caller: &Caller,
+        call_id: Id,
+        reason: u32,
+    ) -> Result<Option<CallStateEvent>> {
         if call_id.is_nil() {
             return Err(fault::field_required("call_id"));
         }
+        // 0=Busy, 1=Declined — the wire's decline vocabulary. A value a newer
+        // build invented is refused rather than guessed at, because the
+        // difference between "busy" and "declined" is the difference between
+        // a caller who tries again later and one who believes they were
+        // refused by a person.
+        let reason = match reason {
+            0 => EndReason::Busy,
+            1 => EndReason::Declined,
+            _ => {
+                return Err(fault::validation(
+                    "reason",
+                    "not a decline reason this build knows",
+                ))
+            }
+        };
         self.charge(caller, Opcode::CallDecline).await?;
         let mut call = self.load(call_id).await?;
         if call.callee_id != caller.account_id {
@@ -532,11 +553,10 @@ where
         // From any live state, including one where the callee's own answer
         // had just landed: a client that declines after answering still wants
         // out, and refusing here would leave a call ringing that nobody can
-        // hear.
-        Ok(Some(
-            self.terminate(&mut call, EndReason::Declined, caller.now)
-                .await?,
-        ))
+        // hear. The reason is the callee's claim about *themselves* —
+        // occupied or unwilling — so it is honoured from any state, exactly
+        // as `end` honours the sender's own reason.
+        Ok(Some(self.terminate(&mut call, reason, caller.now).await?))
     }
 
     async fn cancel(&self, caller: &Caller, call_id: Id) -> Result<Option<CallStateEvent>> {
@@ -588,7 +608,11 @@ where
         Ok(Some(self.terminate(&mut call, reason, caller.now).await?))
     }
 
-    async fn relay_sdp(&self, caller: &Caller, sdp: CallSdpWire) -> Result<CallSdpWire> {
+    async fn relay_sdp(
+        &self,
+        caller: &Caller,
+        sdp: CallSdpWire,
+    ) -> Result<(CallSdpWire, Option<CallStateEvent>)> {
         if sdp.call_id.is_nil() {
             return Err(fault::field_required("call_id"));
         }
@@ -613,16 +637,18 @@ where
         // moment both devices hold what they need — the call is connected.
         // Later relays (renegotiations, ICE restarts) pass through without
         // touching the state again.
+        let mut connected_event = None;
         if call.state == CallState::Connecting && Some(sdp.from_device) == call.callee_device {
             call.state = CallState::Connected;
             self.store.put(&call).await?;
             self.meters.connected();
+            connected_event = Some(state_event(&call));
         }
         self.meters.relayed(RelayKind::Sdp);
         // Untouched. Not logged, not measured, not copied: the payload is
         // returned as it arrived and the routing decision above is the only
         // thing this method did with the frame.
-        Ok(sdp)
+        Ok((sdp, connected_event))
     }
 
     async fn relay_ice(&self, caller: &Caller, ice: CallIceWire) -> Result<CallIceWire> {

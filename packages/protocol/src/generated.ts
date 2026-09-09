@@ -5611,7 +5611,7 @@ export function decodeCallInvite(r: Reader): CallInvite {
 /** The caller's answer to its own invite. */
 export interface CallInviteResult {
   callId: Id;
-  /** 0=Ringing, 1=Declined, 2=Expired, 3=Blocked. */
+  /** 0=Ringing, 1=Declined, 2=Expired, 3=Blocked, 4=Busy. Busy is the callee's decline reason: their devices were occupied, nobody refused — a retry is welcome. */
   status: number;
   expiresAt: number;
 }
@@ -5715,7 +5715,7 @@ export function decodeCallAnswer(r: Reader): CallAnswer {
 /** The callee declines. */
 export interface CallDecline {
   callId: Id;
-  /** 0=Busy, 1=Declined. */
+  /** 0=Busy, 1=Declined. The reason reaches the caller as the end reason: a Busy call ended Busy, not Declined. */
   reason: number;
 }
 
@@ -5767,7 +5767,7 @@ export function decodeCallCancel(r: Reader): CallCancel {
 /** Ends an established call; always with a reason. */
 export interface CallEnd {
   callId: Id;
-  /** 0=ByCaller, 1=ByCallee, 2=Declined, 3=NoAnswer, 4=Failed, 5=Network. */
+  /** 0=ByCaller, 1=ByCallee, 2=Declined, 3=NoAnswer, 4=Failed, 5=Network, 6=Busy. Busy is the callee's decline reason, not a hang-up: the callee's devices were occupied, nobody refused. */
   reason: number;
 }
 

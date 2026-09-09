@@ -678,16 +678,16 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
         return;
       }
       startingRef.current = true;
+      // Minted before the try so the catch can forget the key it adopted: a
+      // placement that dies mid-flight must not leave its key in the session
+      // map, and the id is the map's handle for it.
+      const callId = newId();
       try {
         setupStartRef.current = Date.now();
         setCallError(null);
         // The call id is minted here rather than inside the invite so the TURN fetch can name
         // the call it belongs to: relays and credentials are for this call, and the peer
         // connection is built over them before it produces the offer the invite will carry.
-        const callId = newId();
-        // The call's sealing key is minted alongside it and travels ahead of the invite, inside
-        // the E2EE message layer, so every device that may answer holds it before the ring. See
-        // the module doc: this send is awaited *before* the invite on purpose.
         const callKey = generateCallKey();
         await current.messaging.send(conversationId, {
           type: ContentType.ControlEvent,
@@ -720,6 +720,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
         if (result.status !== INVITE_RINGING) {
           // Never rang: the callee's own settings (or the invite's expiry) answered first.
           teardownMedia();
+          forgetCallKey(callId);
           setActive({
             callId: result.callId,
             conversationId,
@@ -752,12 +753,21 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
         // Nothing was invited (permissions, no device) or the invite never landed: no call exists
         // to show, so state the failure as a fact instead of a dead button.
         teardownMedia();
+        forgetCallKey(callId);
         setCallError(placementErrorMessage(cause));
       } finally {
         startingRef.current = false;
       }
     },
-    [adoptCallKey, armRingTimeout, callInProgress, createPeer, setActive, teardownMedia],
+    [
+      adoptCallKey,
+      armRingTimeout,
+      callInProgress,
+      createPeer,
+      forgetCallKey,
+      setActive,
+      teardownMedia,
+    ],
   );
 
   /**
@@ -788,6 +798,13 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
     });
     // The invite already named the calling device, so this side's relays have a target at once.
     peerDeviceRef.current = incoming.callerDevice;
+    // Whether the answer itself reached the server. The catch path's honesty
+    // depends on it: before the answer lands, "cannot answer" genuinely is a
+    // busy fact — this device never picked up, so the ring is free to die as
+    // Busy; after it lands, the call is *connecting* and a media failure is a
+    // failure, and reporting it as a busy (let alone a human decline) would
+    // tell the caller a person refused what a device merely failed to do.
+    let answerLanded = false;
     try {
       // The call's key arrives through the message layer, sent before the invite; on the rare
       // crossing it is waited for here rather than failed over (see {@link CALL_KEY_WAIT_MS}).
@@ -819,12 +836,23 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
           incoming.callId,
         ),
       );
+      answerLanded = true;
       flushIce();
     } catch {
       // Could not answer (permissions, malformed or unopenable offer, a key that never arrived):
       // give the caller their "no" and show the failure here — a ring that can never be picked up
       // is worse than a decline.
-      void current.calls.decline(incoming.callId, CallDeclineReason.Busy).catch(() => {});
+      if (!answerLanded) {
+        // The answer never reached the server, so as far as it knows this
+        // device is still ringing — a decline is what retires the ring, and
+        // Busy is the honest reason: occupied or unable, not unwilling.
+        void current.calls.decline(incoming.callId, CallDeclineReason.Busy).catch(() => {});
+      } else {
+        // The answer landed, so the server already moved the call to
+        // Connecting and the caller's screen left the ring behind — a decline
+        // now would end an answered call as refused. End it as what it is.
+        void current.calls.end(incoming.callId, CallEndReason.Failed).catch(() => {});
+      }
       finishCall(CallEndReason.Failed);
     }
   }, [
@@ -947,6 +975,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
         // or the invite expired. Retire the ring and state the fact as a note: a screen that
         // keeps ringing a dead call teaches its user to distrust every ring after it. No
         // tracked call is created; this device was never in the call.
+        forgetCallKey(event.callId);
         setIncoming(null);
         setCallError(MISSED_CALL_MESSAGE);
         return;
@@ -956,6 +985,9 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
         // the answer to both parties, so this one hears the call move on without it — retire the
         // ring and say where the call went, because "missed" would be a lie about a call that
         // connected. This device never tracked the call; there is nothing else to tear down.
+        // The key is still forgotten: a sibling answered *this* call, so the only device that
+        // may keep using the key is the answering one, and this one is not it.
+        forgetCallKey(event.callId);
         setIncoming(null);
         setCallError(ANSWERED_ELSEWHERE_MESSAGE);
         return;
@@ -981,7 +1013,7 @@ export function CallManagerProvider({ children }: { children: ReactNode }): Reac
         setActive({ ...call, state });
       }
     },
-    [clearRingTimeout, finishCall, markConnected, setActive, setIncoming],
+    [clearRingTimeout, finishCall, forgetCallKey, markConnected, setActive, setIncoming],
   );
 
   /** An SDP relay: for a caller this is the answer naming the device everything now addresses. */

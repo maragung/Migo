@@ -450,7 +450,7 @@ async fn a_decline_ends_the_call_declined() {
         .unwrap();
     let event = harness
         .calls
-        .decline(&bob(NOW + SECOND), id(CALL))
+        .decline(&bob(NOW + SECOND), id(CALL), 1)
         .await
         .unwrap()
         .expect("the caller is told");
@@ -465,7 +465,7 @@ async fn a_decline_ends_the_call_declined() {
     // Declining again is a retry of a decision that already stands.
     let again = harness
         .calls
-        .decline(&bob(NOW + 2 * SECOND), id(CALL))
+        .decline(&bob(NOW + 2 * SECOND), id(CALL), 1)
         .await
         .unwrap();
     assert!(again.is_none());
@@ -567,10 +567,115 @@ async fn an_end_carries_each_reason() {
         .unwrap();
     let error = harness
         .calls
-        .end(&alice(NOW), id(CALL), 6)
+        .end(&alice(NOW), id(CALL), 7)
         .await
         .unwrap_err();
     assert_eq!(error.code(), codes::VALIDATION_FAILED);
+}
+
+#[tokio::test]
+async fn a_busy_decline_ends_the_call_busy_not_declined() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .invite(&alice(NOW), invite(CALL, BOB))
+        .await
+        .unwrap();
+    // 0=Busy: the callee's devices were occupied. The event must carry that
+    // reason, because "busy" invites the caller to try again while
+    // "declined" reports a human refusal that never happened.
+    let event = harness
+        .calls
+        .decline(&bob(NOW + SECOND), id(CALL), 0)
+        .await
+        .unwrap()
+        .expect("the caller is told");
+    assert_eq!(event.state, CallState::Ended.to_wire());
+    assert_eq!(event.reason, Some(EndReason::Busy.to_wire()));
+
+    let call = harness.calls.call(&alice(NOW), id(CALL)).await.unwrap();
+    assert_eq!(call.state, CallState::Ended);
+    assert_eq!(call.end_reason, Some(EndReason::Busy));
+
+    // A retried invite against the busy id reports busy, for the same reason
+    // the original decline did: the status is the caller's retry decision.
+    let (outcome, event) = harness
+        .calls
+        .invite(&alice(NOW + 3 * SECOND), invite(CALL, BOB))
+        .await
+        .unwrap();
+    assert_eq!(outcome.status, invite_status::BUSY);
+    assert!(event.is_none());
+}
+
+#[tokio::test]
+async fn an_unknown_decline_reason_is_the_clients_fault() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .invite(&alice(NOW), invite(CALL, BOB))
+        .await
+        .unwrap();
+    // 0=Busy, 1=Declined are the wire's whole decline vocabulary; anything
+    // else is refused rather than guessed at, so a caller is never told a
+    // gentler (or harsher) fact than the callee stated.
+    let error = harness
+        .calls
+        .decline(&bob(NOW + SECOND), id(CALL), 2)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), codes::VALIDATION_FAILED);
+
+    // The call is untouched by the refusal: still ringing.
+    let call = harness.calls.call(&alice(NOW), id(CALL)).await.unwrap();
+    assert_eq!(call.state, CallState::Ringing);
+}
+
+#[tokio::test]
+async fn the_answer_relay_publishes_the_connected_event_once() {
+    let harness = Harness::new();
+    harness
+        .calls
+        .invite(&alice(NOW), invite(CALL, BOB))
+        .await
+        .unwrap();
+    harness
+        .calls
+        .answer(&bob(NOW + SECOND), id(CALL), id(BOB_PHONE))
+        .await
+        .unwrap();
+    let sealed = [7u8; 16];
+    let sdp = CallSdpWire {
+        call_id: id(CALL),
+        from_device: id(BOB_PHONE),
+        to_device: id(ALICE_PHONE),
+        sealed_sdp: sealed.to_vec(),
+    };
+    let (relayed, event) = harness
+        .calls
+        .relay_sdp(&bob(NOW + SECOND), sdp)
+        .await
+        .unwrap();
+    assert_eq!(relayed.sealed_sdp, sealed.to_vec());
+    let event = event.expect("the callee's first answer connects the call");
+    assert_eq!(event.call_id, id(CALL));
+    assert_eq!(event.state, CallState::Connected.to_wire());
+
+    // A renegotiation relay changes nothing: no second Connected event, the
+    // store already said it, and a client that re-rendered from a duplicate
+    // would restart its duration timer.
+    let renegotiated = CallSdpWire {
+        call_id: id(CALL),
+        from_device: id(ALICE_PHONE),
+        to_device: id(BOB_PHONE),
+        sealed_sdp: [9u8; 16].to_vec(),
+    };
+    let (_, again) = harness
+        .calls
+        .relay_sdp(&alice(NOW + 2 * SECOND), renegotiated)
+        .await
+        .unwrap();
+    assert!(again.is_none());
 }
 
 #[tokio::test]
@@ -609,7 +714,7 @@ async fn a_relayed_sdp_passes_through_unchanged() {
         to_device: id(ALICE_PHONE),
         sealed_sdp: b"the-sealed-answer".to_vec(),
     };
-    let relayed = harness
+    let (relayed, connected) = harness
         .calls
         .relay_sdp(&bob(NOW + 2 * SECOND), frame)
         .await
@@ -625,8 +730,10 @@ async fn a_relayed_sdp_passes_through_unchanged() {
             sealed_sdp: b"the-sealed-answer".to_vec(),
         }
     );
-
-    // The callee's first answer is what connects the call.
+    // The callee's first answer is what connects the call, and the event
+    // says so to both parties.
+    let connected = connected.expect("the first answer connects the call");
+    assert_eq!(connected.state, CallState::Connected.to_wire());
     let call = harness.calls.call(&alice(NOW), id(CALL)).await.unwrap();
     assert_eq!(call.state, CallState::Connected);
 
@@ -638,12 +745,13 @@ async fn a_relayed_sdp_passes_through_unchanged() {
         to_device: id(BOB_PHONE),
         sealed_sdp: b"the-sealed-re-offer".to_vec(),
     };
-    let relayed = harness
+    let (relayed, again) = harness
         .calls
         .relay_sdp(&alice(NOW + 3 * SECOND), offer.clone())
         .await
         .unwrap();
     assert_eq!(relayed, offer);
+    assert!(again.is_none(), "a renegotiation connects nothing");
     let call = harness.calls.call(&alice(NOW), id(CALL)).await.unwrap();
     assert_eq!(call.state, CallState::Connected);
 }
