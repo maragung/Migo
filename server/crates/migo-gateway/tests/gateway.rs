@@ -44,7 +44,7 @@ use migo_core::{Clock, Error, Id, ManualClock, SeededRandom, Shutdown, Timestamp
 use migo_protocol::{
     codes, fault, from_frame, to_frame, BandwidthMode, CloseReason, ConversationMemberEvent,
     Encode, Error as ErrorMessage, Frame, FrameHeader, Hello, MemberChange, MessageEvent,
-    MessageKind, NodeInfo, NotificationEvent, Opcode, Ping, PresenceState, PresenceUpdate,
+    MessageKind, NodeInfo, NotificationEvent, Opcode, Ping, Pong, PresenceState, PresenceUpdate,
     ReconnectHint, ResumeRequest, RoomMemberEvent, SubscribeRequest, SubscribeResponse, Topic,
     TopicKind, Welcome, PROTOCOL_VERSION,
 };
@@ -1279,6 +1279,174 @@ async fn two_missed_heartbeats_close_a_silent_session_and_release_its_slot() {
         errors_in(&pipe.sent()).is_empty(),
         "there is nobody left to read an explanation, so none is written"
     );
+}
+
+/// The server-initiated PING probes a quiet session was handed, decoded, in arrival order.
+///
+/// A PING-opcode frame from the server is one of two things: a probe (`Ping` body, correlation
+/// 0 — nothing is waiting on an answer) or a PONG replying to an inbound ping (`Pong` body, the
+/// caller's correlation). A client that answers our probe with a `Pong` and correlation 0 makes
+/// the reply indistinguishable by header, so the body decides: only a decodable `Ping` counts
+/// as a probe, and a `Pong` — a reply, whichever correlation it rides — is excluded.
+fn server_pings_in(frames: &[Frame]) -> Vec<Ping> {
+    frames
+        .iter()
+        .filter(|frame| frame.header.opcode == Opcode::Ping.to_wire() && !frame.header.is_error())
+        // `from_frame` returns Err for a `Pong` body (the trailing server_time fails
+        // `finish`), which is exactly the exclusion wanted; keep only the true probes.
+        .filter_map(|frame| from_frame::<Ping>(frame).ok())
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_quiet_session_is_probed_once_before_the_deadline_decides() {
+    // Half of a quiet deadline earns the session one server-initiated PING — the friendly half
+    // of the keep-alive: a phone whose radio slept through its own heartbeat gets a direct
+    // question instead of an expiry, and any frame back resets the clock. The probe is exactly
+    // one per quiet stretch, not one per tick, so a session that stays silent is not pinged
+    // into a busy loop before it is closed.
+    let mut builder = HarnessBuilder::new();
+    builder.config.heartbeat_ms = 1_000;
+    let h = builder.build();
+    let pipe = Pipe::new();
+    pipe.client(Opcode::Hello, 1, &hello());
+    pipe.keep_open();
+
+    let clock = Arc::clone(&h.clock);
+    let quiet = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Half the deadline: probe territory, but not yet close territory. The sleeps between
+        // advances each outlast one liveness tick (a quarter of the heartbeat, floored at a
+        // quarter second), so the server observes each clock step rather than telescoping them.
+        clock.advance_millis(SECOND + 100);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // Still short of the deadline, and several ticks pass with the probe already sent: one
+        // probe per quiet stretch, not one per tick, so this advance must not buy a second.
+        clock.advance_millis(500);
+        tokio::time::sleep(Duration::from_millis(600)).await;
+    };
+    // The session survives this test on purpose, so `serve` has no natural end here: bound it
+    // with the suite's standard pattern (see the resume tests) and let the timeout elapse once
+    // the scripted clock has finished its story.
+    let bounded = tokio::time::timeout(Duration::from_secs(5), h.serve(&pipe));
+    let (elapsed, ()) = tokio::join!(bounded, quiet);
+    // The timeout expiring is the expected end: the session survived on purpose.
+    assert!(
+        elapsed.is_err(),
+        "the session outlived the script, as designed"
+    );
+
+    let pings = server_pings_in(&pipe.sent());
+    assert!(
+        !pings.is_empty(),
+        "a half-quiet session must be probed rather than left to expire unread"
+    );
+    assert!(
+        pings.len() <= 1,
+        "one probe per quiet stretch, got {}",
+        pings.len()
+    );
+    assert_eq!(
+        h.sessions_closed("heartbeat_timeout"),
+        0,
+        "half a deadline of quiet is not yet an expiry"
+    );
+    assert_eq!(h.sessions_live(), 1, "the session is still alive");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_probe_answered_keeps_the_session_alive_past_the_deadline() {
+    // The probe is a question, and any frame is an answer: `last_seen` resets on arrival, not on
+    // a matched PONG, so a client that answers the PING with its own traffic — a typing event, a
+    // receipt — is just as alive. This is the exact client the probe exists for: one whose own
+    // heartbeat timer slept (a hidden tab, a dozing radio) but whose connection is fine.
+    let mut builder = HarnessBuilder::new();
+    builder.config.heartbeat_ms = 1_000;
+    let h = builder.build();
+    let pipe = Pipe::new();
+    pipe.client(Opcode::Hello, 1, &hello());
+    pipe.keep_open();
+
+    let clock = Arc::clone(&h.clock);
+    let rescued = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Past the probe threshold, not yet at the deadline. The sleep outlasts a liveness tick
+        // so the server observes the step, probes, and flushes the probe.
+        clock.advance_millis(SECOND + 100);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // The client answers — a PONG, exactly as the protocol's one-opcode heartbeat says.
+        let pong = Pong {
+            client_time: clock.now(),
+            server_time: clock.now(),
+        };
+        pipe.client(Opcode::Ping, 0, &pong);
+        // A parked pipe wakes only on the next liveness tick, and the loop re-reads `recv` after
+        // every tick — so the Pong must be given a tick of its own BEFORE the clock moves again,
+        // or the next expiry check runs against a stale `last_seen` and closes on the Pong's
+        // behalf. One tick of sleep, with the device clock held still, is that read.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // Now the original deadline — the one that would have closed the un-probed silence —
+        // passes with no further frame: `last_seen` restarted at the PONG (t0+1100), so a fresh
+        // deadline sits at t0+3100 and staying under it keeps the point honest: the rescue is
+        // the PONG, not an accident of arithmetic.
+        clock.advance_millis(SECOND + 100);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    };
+    // The rescue is the point, so the session must still be alive at the end: bound `serve` the
+    // way the probe-only test does, and let the timeout close it after the story is told.
+    let bounded = tokio::time::timeout(Duration::from_secs(5), h.serve(&pipe));
+    let (elapsed, ()) = tokio::join!(bounded, rescued);
+    // The timeout expiring is the expected end: the rescue worked, the session lived.
+    assert!(
+        elapsed.is_err(),
+        "the session outlived the script, as designed"
+    );
+
+    assert_eq!(
+        h.sessions_closed("heartbeat_timeout"),
+        0,
+        "an answered probe must not be an expiry"
+    );
+    assert_eq!(
+        h.sessions_live(),
+        1,
+        "the answered session is alive across what would have been its deadline"
+    );
+    let pings = server_pings_in(&pipe.sent());
+    assert!(!pings.is_empty(), "the probe was sent");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_heartbeat_expiry_hands_the_client_a_reconnect_hint_before_the_close() {
+    // The close is honest about itself: a RECONNECT_HINT with a zero delay rides out before the
+    // FIN, so a client that is merely slow — not gone — reads "reconnect now, your resume
+    // buffer is waiting" instead of discovering the death through its own OS timeout. The
+    // resume retention is the other half of the friendliness and is covered by the retention
+    // tests; this one pins the frame the client actually sees.
+    let mut builder = HarnessBuilder::new();
+    builder.config.heartbeat_ms = 1_000;
+    let h = builder.build();
+    let pipe = Pipe::new();
+    pipe.client(Opcode::Hello, 1, &hello());
+    pipe.keep_open();
+
+    let clock = Arc::clone(&h.clock);
+    let silence = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Through the probe threshold and past the deadline in one step, so the probe and the
+        // expiry are both owed on the same tick; the expiry wins and the hint goes out.
+        clock.advance_millis(2 * SECOND + 1);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    tokio::join!(h.serve(&pipe), silence);
+
+    assert_eq!(h.sessions_closed("heartbeat_timeout"), 1);
+    let hint = reconnect_hint_in(&pipe.sent());
+    assert_eq!(
+        hint.after_ms, 0,
+        "a dead-quiet session is one client's problem, not a herd: come back now"
+    );
+    assert!(pipe.was_closed(), "the transport is closed after the hint");
 }
 
 // ===========================================================================

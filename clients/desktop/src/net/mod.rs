@@ -894,6 +894,20 @@ struct Retry {
     wait: Duration,
 }
 
+/// The heartbeat interval this client pings at, from the `heartbeat_ms` a WELCOME advertised.
+///
+/// Half the advertised interval — the same derivation the Android client uses, for the same
+/// reason: the server's deadline is two full intervals, so answering at half of one leaves a
+/// full interval of slack for a timer that fires late. The floor keeps a pathological
+/// advertisement (a heartbeat of, say, 2s) from turning the desktop into a constant pinger,
+/// and a `0` advertisement from arming a spin.
+const MIN_HEARTBEAT: Duration = Duration::from_secs(5);
+
+fn heartbeat_interval(advertised_ms: u32) -> Duration {
+    let half = Duration::from_millis(u64::from(advertised_ms) / 2);
+    half.max(MIN_HEARTBEAT)
+}
+
 impl Retry {
     /// Attempts before giving up and telling the user to check the address.
     const LIMIT: u32 = 8;
@@ -1066,6 +1080,20 @@ struct Worker {
     /// An avatar upload between its COMMIT and the acknowledgement that closes it: the media
     /// id the profile patch will name once the server says the object exists.
     avatar_commit_pending: Option<(Id, PathBuf)>,
+    /// The MWP heartbeat interval, taken from the WELCOME's advertised `heartbeat_ms` and
+    /// halved — the same derivation the Android client uses — with the same floor, so a
+    /// server that advertises an aggressively short interval cannot turn the desktop into a
+    /// ping flood. `None` while disconnected; set on every connect, which is also what
+    /// re-arms it after a reconnect.
+    ///
+    /// This is the client half of the keep-alive contract (section 139 / §151): the server
+    /// closes a session whose socket stays silent for two advertised intervals, and until
+    /// now the desktop never sent anything on an idle connection — an idle desktop session
+    /// died at the deadline and churned a full reconnect (keys, subscriptions, list
+    /// re-reads) every time the user stepped away. One PING at half the interval keeps the
+    /// session alive at a cost of a few bytes; the server's own half — a probe at half the
+    /// deadline before closing — covers the case where this timer is late.
+    heartbeat: Option<Duration>,
     /// One HTTP client for every chain call. A `reqwest::Client` shares its connection pool, so
     /// cloning it per operation is free, and the chain conversation stays off the Migo session's
     /// client entirely.
@@ -1089,6 +1117,7 @@ impl Worker {
             last_backup_at: None,
             avatar_pending: None,
             avatar_commit_pending: None,
+            heartbeat: None,
             chain_http: reqwest::Client::new(),
         }
     }
@@ -1128,6 +1157,17 @@ impl Worker {
                     None => std::future::pending::<()>().await,
                 }
             };
+            // The heartbeat arm, alongside the reconnect timer: same pattern, different
+            // question. It must live in this select — not in a spawned task — because it
+            // needs the same exclusive `&mut` gateway the frame arm borrows, and a ping sent
+            // from a sibling task would race the loop's own writes.
+            let beat = self.heartbeat;
+            let beat = async move {
+                match beat {
+                    Some(interval) => tokio::time::sleep(interval).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
 
             tokio::select! {
                 command = commands.recv() => {
@@ -1143,6 +1183,7 @@ impl Worker {
                     }
                 }
                 () = due => self.reconnect().await,
+                () = beat => self.send_heartbeat().await,
             }
         }
 
@@ -1781,9 +1822,14 @@ impl Worker {
             Transport::WebSocket => self.connect_websocket(hello).await,
         };
         match connected {
-            Ok((realtime, _welcome)) => {
+            Ok((realtime, welcome)) => {
                 self.gateway = Some(realtime);
                 self.retry = None;
+                // Arm the heartbeat from what this node advertised: half the interval, floored
+                // at 5s, so a session that goes quiet only from idleness — the desktop's
+                // resting state — never meets the two-interval deadline. Re-armed here on
+                // every connect, and disarmed in `on_disconnect`.
+                self.heartbeat = Some(heartbeat_interval(welcome.limits.heartbeat_ms));
                 if fell_back {
                     self.sink
                         .send(Event::Connection(Connection::Fallback(fallback_reason)));
@@ -5041,6 +5087,10 @@ impl Worker {
     /// path without that path having to await a reconnection it did not ask for.
     fn on_disconnect(&mut self, error: GatewayError) {
         self.gateway = None;
+        // The heartbeat belongs to the dead session, not the account: disarmed here so the
+        // select loop's beat arm parks while disconnected, and re-armed by `connect` when a
+        // WELCOME states a fresh interval.
+        self.heartbeat = None;
         if self.signed.is_none() {
             self.retry = None;
             self.sink.send(Event::Connection(Connection::Offline));
@@ -5053,6 +5103,26 @@ impl Worker {
         if self.retry.is_none() {
             self.retry = Some(Retry::first(&mut OsRandom));
         }
+    }
+
+    /// Sends the session's periodic PING (§151: the server closes a socket silent for two
+    /// advertised intervals; half the interval answers well before that).
+    ///
+    /// Fire-and-forget by design: the reply is a PONG nobody correlates, and a failure here is
+    /// the same disconnect any other send would see — `on_disconnect` disarms the timer and arms
+    /// the retry, which is the whole recovery story. A missing PONG (the server gone quiet
+    /// instead of the socket breaking) is caught on the next beat, when the send fails, or by
+    /// the read that follows it — the desktop has no RTT budget to defend.
+    async fn send_heartbeat(&mut self) {
+        let Some(gateway) = self.gateway.as_mut() else {
+            return;
+        };
+        let ping = migo_protocol::Ping {
+            client_time: Timestamp::now(),
+        };
+        // Correlation 0: nothing waits on the answer, and the server's reply rides the same
+        // opcode anyway (section 139).
+        let _ = gateway.send(Opcode::Ping, 0, &ping).await;
     }
 
     /// Reports a failure that left the client signed out.
@@ -5166,6 +5236,29 @@ mod tests {
         let mut bytes = [0u8; 16];
         bytes[15] = n;
         Id::from_bytes(bytes)
+    }
+
+    /// The heartbeat derivation is the keep-alive contract's client half: half the advertised
+    /// interval (so a late-firing timer still beats the two-interval deadline), never below
+    /// the floor (so a pathological advertisement cannot turn the desktop into a pinger, and
+    /// a zero cannot arm a spin).
+    #[test]
+    fn the_heartbeat_is_half_the_advertised_interval_floored() {
+        assert_eq!(
+            heartbeat_interval(30_000),
+            Duration::from_secs(15),
+            "the production advertisement halves to a 15s beat"
+        );
+        assert_eq!(
+            heartbeat_interval(10_000),
+            Duration::from_secs(5),
+            "the floor catches an aggressive 10s advertisement"
+        );
+        assert_eq!(
+            heartbeat_interval(0),
+            MIN_HEARTBEAT,
+            "a zero advertisement arms the floor, not a spin"
+        );
     }
 
     /// A `CONVERSATION_MEMBER_EVENT` for one account and change, in the conversation every

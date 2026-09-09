@@ -475,6 +475,9 @@ impl<T: Transport> Connection<'_, T> {
         let mut ticker = interval(self.gateway.settings.tick);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut last_seen = self.gateway.now();
+        // Whether the half-dead probe has gone out for the current quiet stretch. Cleared the
+        // moment a frame arrives, so the next quiet stretch gets one probe of its own.
+        let mut probed = false;
 
         loop {
             if !self.flush(&outbound).await {
@@ -489,6 +492,7 @@ impl<T: Transport> Connection<'_, T> {
                         Ok(Some(bytes)) => {
                             self.gateway.meters.frame_in();
                             last_seen = self.gateway.now();
+                            probed = false;
                             let frame = match Frame::decode(bytes) {
                                 Ok(frame) => frame,
                                 Err(error) => {
@@ -528,7 +532,25 @@ impl<T: Transport> Connection<'_, T> {
                 _ = ticker.tick() => {
                     let now = self.gateway.now();
                     if now.saturating_since(last_seen) > heartbeat_deadline_ms {
+                        // A close the client can act on rather than a silent expiry: the hint
+                        // says why and the resume buffer is retained (an involuntary close), so
+                        // a client that reads it reconnects and bridges the gap instead of
+                        // waiting out its own OS-level dead-peer timeout.
+                        self.expired_quiet(&outbound).await;
                         return Closed::HeartbeatTimeout;
+                    }
+                    if !probed && now.saturating_since(last_seen) > heartbeat_deadline_ms / 2 {
+                        // The keep-alive's friendly half. Half the deadline with no frame is a
+                        // quiet session, not a dead one — most clients heartbeat on the
+                        // interval the WELCOME advertised, and a phone whose radio slept through
+                        // a tick is exactly the client that deserves a second chance. One
+                        // server-initiated PING (section 139: the opcode is both directions)
+                        // asks the question directly; any frame back — the PONG, or anything
+                        // else — refreshes `last_seen`, and the probe flag is cleared with it.
+                        // A client that was never going to answer was going to be closed at
+                        // the deadline anyway, so the probe costs one small Critical frame.
+                        self.probe_quiet(&outbound, now);
+                        probed = true;
                     }
                     if outbound.lagging_expired(now, lagging_deadline_ms) {
                         return Closed::SessionLagging;
@@ -540,6 +562,54 @@ impl<T: Transport> Connection<'_, T> {
                     }
                 }
             }
+        }
+    }
+
+    /// Sends one server-initiated PING to a session that has been quiet for half the deadline.
+    ///
+    /// Pushed into the mailbox as a Critical frame rather than written directly: the mailbox is
+    /// the one place that respects the queue's own depth and the lagging deadline, and a probe
+    /// that overflows a full queue is a session the lagging check is about to close anyway.
+    /// Correlation 0, because nothing is waiting on the answer — `last_seen` is refreshed by the
+    /// reply's arrival, not by matching it.
+    fn probe_quiet(&self, outbound: &Outbound, now: Timestamp) {
+        let ping = Ping { client_time: now };
+        push_message(
+            outbound,
+            &self.gateway.meters,
+            Opcode::Ping,
+            0,
+            &ping,
+            DeliveryClass::Critical,
+            now,
+            self.compression,
+        );
+    }
+
+    /// Hands a heartbeat-expired session a `RECONNECT_HINT` before the close.
+    ///
+    /// The hint's `after_ms` is zero rather than jittered: a draining node spreads its sessions
+    /// to protect itself, but a dead-quiet session is one client's problem, not a herd, and the
+    /// honest instruction is "come back now" — the resume window (two minutes by default) is
+    /// what bounds the stampede, because a client that returns too late is refused a resume
+    /// rather than crowding the node.
+    async fn expired_quiet(&mut self, outbound: &Outbound) {
+        let _ = self.flush(outbound).await;
+        let hint = ReconnectHint {
+            reason: CloseReason::Unknown,
+            after_ms: 0,
+            endpoint: None,
+        };
+        // Server-initiated, so correlation 0 (section 139). Sent directly as the last frame out,
+        // mirroring graceful_shutdown: a mailbox push here could sit behind queued frames on a
+        // connection whose client is demonstrably not reading.
+        match encode_message(Opcode::ReconnectHint.to_wire(), 0, &hint, self.compression) {
+            Ok(bytes) => {
+                if self.transport.send(bytes).await.is_ok() {
+                    self.gateway.meters.frames_out(1);
+                }
+            }
+            Err(error) => tracing::warn!(?error, "failed to encode the reconnect hint"),
         }
     }
 
@@ -697,28 +767,43 @@ impl<T: Transport> Connection<'_, T> {
         correlation: u32,
         now: Timestamp,
     ) -> FrameOutcome {
-        match from_frame::<Ping>(frame) {
-            Ok(ping) => {
-                let reply = Pong {
-                    client_time: ping.client_time,
-                    server_time: now,
-                };
-                push_message(
-                    outbound,
-                    &self.gateway.meters,
-                    Opcode::Ping,
-                    correlation,
-                    &reply,
-                    DeliveryClass::Critical,
-                    now,
-                    self.compression,
-                );
-                FrameOutcome::Continue
-            }
-            Err(error) => {
-                self.close_malformed(outbound, Opcode::Ping.to_wire(), correlation, error, now)
-            }
-        }
+        // Section 139 reuses the PING opcode for the reply, so an inbound PING frame carries
+        // either body: a client-initiated `Ping`, or a `Pong` answering our own probe. The
+        // registry's `response: Pong` makes the second shape a legal client answer, and being
+        // tolerant of both means a client that echoes the documented reply (the desktop does)
+        // keeps its session instead of dying to a protocol violation. Either way, liveness is
+        // what the frame proves — `ready_loop` already reset the clock on arrival — and only
+        // the echoed `client_time` differs, which a Pong supplies as well as a Ping does.
+        let client_time = match from_frame::<Pong>(frame) {
+            Ok(pong) => pong.client_time,
+            Err(_) => match from_frame::<Ping>(frame) {
+                Ok(ping) => ping.client_time,
+                Err(error) => {
+                    return self.close_malformed(
+                        outbound,
+                        Opcode::Ping.to_wire(),
+                        correlation,
+                        error,
+                        now,
+                    )
+                }
+            },
+        };
+        let reply = Pong {
+            client_time,
+            server_time: now,
+        };
+        push_message(
+            outbound,
+            &self.gateway.meters,
+            Opcode::Ping,
+            correlation,
+            &reply,
+            DeliveryClass::Critical,
+            now,
+            self.compression,
+        );
+        FrameOutcome::Continue
     }
 
     /// Verifies an `AUTHENTICATE`, promoting the session to [`Ready`](Phase::Ready) and answering
