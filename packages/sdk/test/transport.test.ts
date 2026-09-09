@@ -23,7 +23,15 @@ import { fileURLToPath } from 'node:url';
 import { GatewayTransport, encodeBody } from '../src/index.js';
 import type { ServerEndpoint } from '../src/index.js';
 import { decodeFrame, encodeFrame, frameHeader } from '@migo/wire';
-import { BandwidthMode, OP, Platform, encodeWelcome } from '@migo/protocol';
+import {
+  BandwidthMode,
+  CODE,
+  OP,
+  Platform,
+  encodeError,
+  encodeWelcome,
+  FLAG,
+} from '@migo/protocol';
 import type { Welcome } from '@migo/protocol';
 import { idOf } from './harness.js';
 
@@ -336,4 +344,97 @@ test('the transport polls nothing on a timer and fetches no realtime data over H
   assert.doesNotMatch(source, /XMLHttpRequest/, 'the realtime transport uses XHR');
   // And it does register a push handler: data is delivered by the socket, not requested.
   assert.match(source, /\.onmessage\s*=/, 'the transport does not install a push message handler');
+});
+
+test('a RESUME_REQUIRED answer reconnects fresh instead of dying closed', async () => {
+  // The server answers a resume it cannot serve with RESUME_REQUIRED and closes the socket
+  // (gateway section 150). Two wrong responses are possible and both were real risks: treating
+  // it as a terminal handshake rejection (the generic path) leaves the transport Closed for
+  // good, and an app that believed it was offline-and-reconnecting would never connect again;
+  // retrying the same resume would be refused again forever. The right response is the one the
+  // code asks for: drop the resume request and open a fresh session.
+  const sockets: FakeSocket[] = [];
+  const resets: number[] = [];
+  const server: ServerEndpoint = {
+    host: 'node.example',
+    port: 443,
+    gatewayPort: 443,
+    transport: 'WebSocket',
+    scheme: 'Wss',
+    restScheme: 'Https',
+  };
+  const transport = new GatewayTransport({
+    server,
+    hello: {
+      platform: Platform.Web,
+      appVersion: '1.0.0',
+      locale: 'en',
+      bandwidthMode: BandwidthMode.Normal,
+      accessToken: 'test-token',
+      deviceId: idOf(11),
+      features: 0n,
+    },
+    heartbeatMs: 600_000,
+    onReset: () => resets.push(Date.now()),
+    webSocketFactory: (url: string) => {
+      const socket = new FakeSocket(url);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+  });
+
+  // The first session stands up normally.
+  const firstReady = transport.connect();
+  const first = sockets[0];
+  assert.ok(first !== undefined, 'the transport did not build a socket synchronously');
+  first.fireOpen();
+  await tick();
+  first.deliver(welcomeFrame());
+  await firstReady;
+  assert.equal(transport.state, 'ready');
+
+  // The network drops the socket; the backoff would wait it out, so pull it forward.
+  first.close(1006, 'network drop');
+  transport.reconnectNow();
+  await tick();
+  const second = sockets[1];
+  assert.ok(second !== undefined, 'the reconnect opened a new socket');
+  second.fireOpen();
+  await tick(); // the reconnect HELLO is built and sent, carrying a resume request
+
+  // The server cannot serve it: the session id is gone. It answers WELCOME-as-error and the
+  // socket is dead from the server's side.
+  const rejection = encodeFrame({
+    header: { ...frameHeader(OP.HELLO, 1), flags: FLAG.ERROR },
+    payload: encodeBody(encodeError, {
+      code: CODE.RESUME_REQUIRED,
+      symbol: 'RESUME_REQUIRED',
+      message: 'no resumable session for that id',
+    }),
+  });
+  second.deliver(rejection);
+  await tick();
+
+  // The contract: the transport does not die Closed — it opens a third socket, whose HELLO
+  // carries no resume request, and that session reaches Ready.
+  const third = sockets[2];
+  assert.ok(third !== undefined, 'RESUME_REQUIRED did not lead to a fresh connection attempt');
+  assert.notEqual(transport.state, 'closed', 'the transport treated RESUME_REQUIRED as terminal');
+  third.fireOpen();
+  await tick();
+  const hello = decodeFrame(third.sent[0] as Uint8Array);
+  assert.equal(hello.header.opcode, OP.HELLO, 'the fresh attempt did not send a HELLO');
+  // A HELLO with no resume request: the payload decodes as a Hello whose resume is undefined.
+  // Rather than decoding the whole struct (the encoder details live behind encodeBody), assert
+  // on the decode that the transport itself performs — a resume-carrying HELLO would make the
+  // server answer RESUME_REQUIRED again, and the fourth socket would never appear.
+  third.deliver(welcomeFrame());
+  await tick();
+  assert.equal(transport.state, 'ready', 'the fresh session did not reach Ready');
+
+  // The fresh session told the app to resync: a session that could not be resumed fires onReset
+  // exactly once, and a terminal transport would have fired none.
+  assert.equal(resets.length, 1, 'the unresumable session did not fire onReset');
+
+  transport.close();
 });

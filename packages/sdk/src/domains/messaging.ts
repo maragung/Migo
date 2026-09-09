@@ -120,6 +120,14 @@ export interface SendOptions extends ContentEncodeOptions {
   replyTo?: Id;
   /** A disappearing-message lifetime in milliseconds, after which the server expires the message. */
   expiresInMs?: number;
+  /**
+   * The client-chosen message id, minted by the caller and reused on every retry of the same
+   * send. The server's send idempotency is keyed on this id, so a retry after a lost reply —
+   * where the request reached the server but the acknowledgement did not — is answered
+   * `duplicate` and produces no second row. Omitted, a fresh id is minted per call, which is
+   * correct for every path that does not retry: a re-typed message is a new message.
+   */
+  messageId?: Id;
 }
 
 /** A handler that can be unsubscribed by calling the returned function. */
@@ -233,7 +241,7 @@ export class MessagingDomain {
     const sealed = this.#groupCrypto.sealContent(conversationId, plaintext);
 
     const send: MessageSend = {
-      messageId: newId(),
+      messageId: options.messageId ?? newId(),
       conversationId,
       kind: kindForContent(content.type),
       envelope: sealed.envelope,

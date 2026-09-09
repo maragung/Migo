@@ -204,6 +204,14 @@ class SendOptions(
     val replyTo: Id? = null,
     /** How long until the server expires the message, in milliseconds. */
     val expiresInMs: Long? = null,
+    /**
+     * The client-chosen message id, minted by the caller and reused on every retry of the same
+     * send. The server's send idempotency is keyed on this id, so a retry after a lost reply --
+     * the request reached the server, the acknowledgement did not -- is answered `duplicate` and
+     * produces no second row. Null mints a fresh id per call, which is correct for every path
+     * that does not retry: a re-typed message is a new message.
+     */
+    val messageId: Id? = null,
 )
 
 /**
@@ -337,7 +345,7 @@ class MessagingDomain(
         }
 
         val request = MessageSend(
-            messageId = newId(),
+            messageId = options.messageId ?: newId(),
             conversationId = conversationId,
             kind = kindForContent(content),
             envelope = sealed.envelope,

@@ -64,7 +64,7 @@ import {
   opcodeLabel,
   requiresAck,
 } from './codec.js';
-import { RemoteError, TimeoutError, TransportError } from './errors.js';
+import { CODE, RemoteError, TimeoutError, TransportError } from './errors.js';
 import { gatewayUrl } from './server-endpoint.js';
 import type { ServerEndpoint } from './server-endpoint.js';
 
@@ -445,7 +445,42 @@ export class GatewayTransport {
   #onWelcome(frame: Frame): void {
     this.#awaitingWelcome = false;
     if (hasErrorFlag(frame)) {
-      this.#failHandshake(RemoteError.fromMessage(decodeBody(decodeError, frame.payload)));
+      const error = RemoteError.fromMessage(decodeBody(decodeError, frame.payload));
+      // RESUME_REQUIRED is the server saying "that session id is gone, or its replay window no
+      // longer bridges your watermark — start a fresh session." It answers and then closes the
+      // socket, so nothing further can happen on this one, and the generic terminal path below
+      // would leave the transport Closed for good: an app that believed it was
+      // offline-and-reconnecting would never connect again. The right response is exactly what
+      // the code asks for — drop the resume request and connect fresh. Nulling #session makes
+      // the next #resumeRequest() undefined; keeping #isReconnect true means the fresh WELCOME
+      // takes the unresumable path there (reject pending, reset the seq space, fire onReset so
+      // the client resubscribes and resyncs), which is precisely what a lost session owes.
+      if (
+        error instanceof RemoteError &&
+        error.code === CODE.RESUME_REQUIRED &&
+        this.#resumeRequest() !== undefined
+      ) {
+        // The abandoned handshake promise never settles: only the reconnect loop awaits it, and
+        // its catch exists to reschedule on failure — a reschedule here would race the fresh
+        // open this branch is about to make.
+        this.#handshake = null;
+        this.#session = null;
+        const stale = this.#ws;
+        if (stale !== null) {
+          // Detach before closing: the old socket's onclose must not run #onClose against the
+          // new socket this transport is about to own.
+          stale.onclose = () => {};
+          try {
+            stale.close();
+          } catch {
+            // A close on an already-closing socket is harmless.
+          }
+          this.#ws = null;
+        }
+        void this.#open();
+        return;
+      }
+      this.#failHandshake(error);
       return;
     }
     let welcome: Welcome;

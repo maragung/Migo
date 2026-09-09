@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  ContentType,
   decodeBody,
   encodeBody,
   GroupCrypto,
@@ -21,9 +22,15 @@ import {
   Rpc,
   SessionCrypto,
 } from '../src/index.js';
-import type { DeviceAddress, DeviceDirectory } from '../src/index.js';
+import type { DeviceAddress, DeviceDirectory, TextContent } from '../src/index.js';
 import { OP } from '@migo/protocol';
-import { decodeMessageEdit, decodeReactionSet, encodeAcknowledged } from '@migo/protocol';
+import {
+  decodeMessageEdit,
+  decodeMessageSend,
+  decodeReactionSet,
+  encodeAcknowledged,
+  encodeMessageAccepted,
+} from '@migo/protocol';
 
 import { RecordingTransport, StaticBundleSource, bundleFrom, idOf, newStore } from './harness.js';
 
@@ -93,4 +100,31 @@ test('messaging: sendReaction sends REACTION_SET addressed to the target message
     conversationId: CONVERSATION,
     envelope: SEALED,
   });
+});
+
+test('messaging: send reuses a caller-supplied message id and mints one without', async () => {
+  // The server's send idempotency is keyed on the message id, so a retry that re-sends the same
+  // message must carry the same id or it becomes a second row. The domain cannot invent that
+  // policy — it does not know whether its caller is retrying — so it takes the id through
+  // SendOptions and mints a fresh one only when the caller supplied none.
+  const accepted = { messageId: idOf(2), conversationId: CONVERSATION, seq: 7, createdAt: 0 };
+  const replies = new Map([[OP.MESSAGE_SEND, () => encodeBody(encodeMessageAccepted, accepted)]]);
+
+  const text: TextContent = { type: ContentType.Text, text: 'a retry-safe send' };
+
+  // Supplied: the recorded MESSAGE_SEND carries exactly that id — the retry's id.
+  const chosen = rig(replies);
+  await chosen.messaging.send(CONVERSATION, text, { messageId: MESSAGE });
+  assert.equal(chosen.transport.sent.length, 1);
+  assert.equal(sentAt(chosen.transport, 0).opcode, OP.MESSAGE_SEND);
+  const withSupplied = decodeBody(decodeMessageSend, sentAt(chosen.transport, 0).body);
+  assert.equal(withSupplied.messageId, MESSAGE);
+
+  // Omitted: a minted id, which by construction differs from every id the test fixed.
+  const minted = rig(replies);
+  await minted.messaging.send(CONVERSATION, text);
+  assert.equal(minted.transport.sent.length, 1);
+  const withMinted = decodeBody(decodeMessageSend, sentAt(minted.transport, 0).body);
+  assert.notEqual(withMinted.messageId, MESSAGE);
+  assert.notEqual(withMinted.messageId, 0n, 'an omitted id minted to the zero id');
 });
