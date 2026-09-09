@@ -85,8 +85,33 @@ const MAX_WIRE_CHUNK: u32 = (MAX_FRAME_BYTES as u32) + 8;
 /// unbounded batch would hold the whole queue behind one link's health.
 const BATCH_LIMIT: usize = 128;
 
-/// What the runner does between outbox drains.
+/// What the runner does between outbox drains while the outbox is healthy.
 const RUNNER_TICK: Duration = Duration::from_millis(500);
+
+/// The longest the runner waits between drains once the outbox keeps failing. A storage
+/// outage — the connection pool timing out under host memory pressure, say — backs the runner
+/// off to this ceiling instead of retrying every half-second, so the log gets one warning and
+/// a slow heartbeat rather than a line every few seconds, and a pool already under strain is
+/// not hammered while it recovers.
+const RUNNER_TICK_MAX: Duration = Duration::from_secs(30);
+
+/// The cap on the backoff's doubling exponent. `RUNNER_TICK << 6` is 32s, already past the
+/// `RUNNER_TICK_MAX` ceiling, so six is as far as the shift ever needs to grow — and holding
+/// it well under 32 is what keeps `1 << shift` from overflowing on a long outage.
+const RUNNER_BACKOFF_SHIFT_CAP: u32 = 6;
+
+/// How long the runner sleeps before its next drain, given the number of consecutive failures
+/// behind it: `RUNNER_TICK` while healthy, doubling with each failure up to `RUNNER_TICK_MAX`.
+///
+/// Pure, so the curve is pinned by a unit test rather than a timing observation — patient
+/// retry under a storage outage is a contract worth asserting, not an implementation detail.
+fn backoff(consecutive_failures: u32) -> Duration {
+    if consecutive_failures == 0 {
+        return RUNNER_TICK;
+    }
+    let shift = consecutive_failures.min(RUNNER_BACKOFF_SHIFT_CAP);
+    RUNNER_TICK.saturating_mul(1u32 << shift).min(RUNNER_TICK_MAX)
+}
 
 // ---------------------------------------------------------------------------
 // Framing
@@ -859,10 +884,36 @@ impl MeshTransport {
     pub fn spawn_runner(self: &Arc<Self>, clock: Arc<dyn Clock>) {
         let transport = Arc::clone(self);
         tokio::spawn(async move {
+            // Consecutive failures back the runner off from RUNNER_TICK toward RUNNER_TICK_MAX
+            // and quiet the log: a storage outage — the pool timing out under host memory
+            // pressure — announces itself once at WARN, stays at DEBUG while it persists, and
+            // reports its end once at INFO, rather than a WARN every few seconds for as long
+            // as the outage lasts. The outbox is durable, so nothing is lost by waiting.
+            let mut consecutive_failures: u32 = 0;
             loop {
-                tokio::time::sleep(RUNNER_TICK).await;
-                if let Err(error) = transport.drain_once(clock.now()).await {
-                    tracing::warn!(%error, "mesh outbox drain failed");
+                tokio::time::sleep(backoff(consecutive_failures)).await;
+                match transport.drain_once(clock.now()).await {
+                    Ok(()) => {
+                        if consecutive_failures > 0 {
+                            tracing::info!(
+                                after = consecutive_failures,
+                                "mesh outbox drain recovered"
+                            );
+                            consecutive_failures = 0;
+                        }
+                    }
+                    Err(error) => {
+                        if consecutive_failures == 0 {
+                            tracing::warn!(%error, "mesh outbox drain failed; backing off");
+                        } else {
+                            tracing::debug!(
+                                %error,
+                                consecutive_failures,
+                                "mesh outbox drain still failing"
+                            );
+                        }
+                        consecutive_failures = consecutive_failures.saturating_add(1);
+                    }
                 }
             }
         });
@@ -1036,6 +1087,24 @@ mod tests {
         .expect("the digest encodes")
         .encode()
         .expect("the frame encodes")
+    }
+
+    /// The runner's sleep doubles with each consecutive drain failure and then holds at the
+    /// ceiling: a storage outage is retried patiently, never every half-second, and never for
+    /// a wait that overflows or exceeds `RUNNER_TICK_MAX`.
+    #[test]
+    fn backoff_doubles_then_holds_at_the_ceiling() {
+        // Healthy: the base tick, no wait added.
+        assert_eq!(backoff(0), RUNNER_TICK);
+        // Each consecutive failure doubles the wait...
+        assert_eq!(backoff(1), RUNNER_TICK * 2);
+        assert_eq!(backoff(2), RUNNER_TICK * 4);
+        assert!(backoff(3) > backoff(2));
+        // ...until it reaches the ceiling and holds there, exactly, forever after.
+        assert_eq!(backoff(RUNNER_BACKOFF_SHIFT_CAP), RUNNER_TICK_MAX);
+        assert_eq!(backoff(1_000), RUNNER_TICK_MAX);
+        // A pathological failure count neither overflows the shift nor exceeds the ceiling.
+        assert_eq!(backoff(u32::MAX), RUNNER_TICK_MAX);
     }
 
     /// The whole product, over one duplex: node A delivers an outbox event to node B, and
