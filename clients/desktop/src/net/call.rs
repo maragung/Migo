@@ -286,7 +286,6 @@ pub enum CallPhase {
 /// An inbound invite ringing on this device, before any answer.
 struct IncomingRing {
     call_id: Id,
-    conversation_id: Id,
     caller_id: Id,
     caller_device: Id,
     kind: CallMediaKind,
@@ -307,7 +306,6 @@ struct Placing {
 /// fetch, before any frame this call could be refused by goes out.
 struct Answering {
     call_id: Id,
-    conversation_id: Id,
     caller_id: Id,
     caller_device: Id,
     kind: CallMediaKind,
@@ -319,7 +317,6 @@ struct Answering {
 /// One call this device is in, either role, from the invite's acceptance to dismissal.
 struct TrackedCall {
     call_id: Id,
-    conversation_id: Id,
     /// The other account: the callee for a caller, the caller for a callee.
     peer: Id,
     is_caller: bool,
@@ -912,7 +909,6 @@ impl Worker {
         };
         self.calls.active = Some(TrackedCall {
             call_id: place.call_id,
-            conversation_id: place.conversation_id,
             peer: place.callee_id,
             is_caller: true,
             kind: place.kind,
@@ -952,7 +948,6 @@ impl Worker {
         let key = self.calls.keys.get(&call_id).copied();
         self.calls.answering = Some(Answering {
             call_id,
-            conversation_id: ring.conversation_id,
             caller_id: ring.caller_id,
             caller_device: ring.caller_device,
             kind: ring.kind,
@@ -1083,7 +1078,6 @@ impl Worker {
 
         self.calls.active = Some(TrackedCall {
             call_id: answer.call_id,
-            conversation_id: answer.conversation_id,
             peer: answer.caller_id,
             is_caller: false,
             kind: answer.kind,
@@ -1277,7 +1271,6 @@ impl Worker {
                 );
                 self.calls.ringing = Some(IncomingRing {
                     call_id: event.call_id,
-                    conversation_id: event.conversation_id,
                     caller_id: event.caller_id,
                     caller_device: event.caller_device,
                     kind: CallMediaKind::from_wire(event.media_kind),
