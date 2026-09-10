@@ -233,6 +233,17 @@ data class AppSettings(
     /** When an attachment is fetched without being asked for. */
     val mediaAutoDownload: MediaAutoDownload = MediaAutoDownload.Unmetered,
 
+    /**
+     * Whether closing a conversation window writes that conversation's transcript to app-private
+     * storage as a plain-text log.
+     *
+     * Off by default because the log is plaintext by design — the decrypted conversation written
+     * where the app's other plaintext never goes (memory only) — so the person turns it on
+     * themselves, having read the sentence next to the switch. The snapshots are the same
+     * decrypted surface as the in-memory transcript cache and follow it out on sign-out.
+     */
+    val autoSaveChatLogs: Boolean = false,
+
     /** Whether the first-run flow has been completed, so it is not shown again. */
     val onboardingComplete: Boolean = false,
 
@@ -279,6 +290,7 @@ private val KEY_SEND_READ_RECEIPTS = booleanPreferencesKey("send_read_receipts")
 private val KEY_SEND_TYPING = booleanPreferencesKey("send_typing_indicators")
 private val KEY_SHARE_PRESENCE = booleanPreferencesKey("share_presence")
 private val KEY_MEDIA_AUTO_DOWNLOAD = stringPreferencesKey("media_auto_download")
+private val KEY_AUTO_SAVE_CHAT_LOGS = booleanPreferencesKey("auto_save_chat_logs")
 private val KEY_ONBOARDING_COMPLETE = booleanPreferencesKey("onboarding_complete")
 private val KEY_LAST_BACKUP_EXPORT_MS = longPreferencesKey("last_backup_export_ms")
 private val KEY_LAST_IDENTITY_ROTATION_MS = longPreferencesKey("last_identity_rotation_ms")
@@ -308,6 +320,7 @@ private fun Preferences.toAppSettings(): AppSettings {
             MediaAutoDownload.entries,
             defaults.mediaAutoDownload,
         ),
+        autoSaveChatLogs = this[KEY_AUTO_SAVE_CHAT_LOGS] ?: defaults.autoSaveChatLogs,
         onboardingComplete = this[KEY_ONBOARDING_COMPLETE] ?: defaults.onboardingComplete,
         lastBackupExportMs = this[KEY_LAST_BACKUP_EXPORT_MS] ?: defaults.lastBackupExportMs,
         lastIdentityRotationMs = this[KEY_LAST_IDENTITY_ROTATION_MS] ?: defaults.lastIdentityRotationMs,
@@ -331,6 +344,7 @@ private fun AppSettings.writeTo(preferences: MutablePreferences) {
     preferences[KEY_SEND_TYPING] = sendTypingIndicators
     preferences[KEY_SHARE_PRESENCE] = sharePresence
     preferences[KEY_MEDIA_AUTO_DOWNLOAD] = mediaAutoDownload.name
+    preferences[KEY_AUTO_SAVE_CHAT_LOGS] = autoSaveChatLogs
     preferences[KEY_ONBOARDING_COMPLETE] = onboardingComplete
     preferences[KEY_LAST_BACKUP_EXPORT_MS] = lastBackupExportMs
     preferences[KEY_LAST_IDENTITY_ROTATION_MS] = lastIdentityRotationMs

@@ -2,6 +2,7 @@ package com.migo.app
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -9,6 +10,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -39,10 +41,13 @@ import com.migo.app.ui.PanelBar
 import com.migo.app.ui.ProfileScreen
 import com.migo.app.ui.SaveAccountFileDialog
 import com.migo.app.ui.SearchScreen
+import com.migo.app.ui.SettingsScreen
 import com.migo.app.ui.SignInScreen
 import com.migo.app.ui.WalletScreen
 import com.migo.app.ui.panelTitle
 import com.migo.core.protocol.ConversationKind
+import com.migo.core.store.MediaAutoDownload
+import com.migo.core.store.ThemeChoice
 import com.migo.core.wire.Id
 
 /**
@@ -66,15 +71,11 @@ class MainActivity : ComponentActivity() {
         // handled on every version rather than only the newest.
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        // The theme is the composition's own business, not the activity's: the preference it
+        // answers to is a device fact the view model already holds, and wrapping the tree here
+        // would leave the activity choosing a theme the settings panel then cannot change.
         setContent {
-            MigoTheme {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background,
-                ) {
-                    MigoApp()
-                }
-            }
+            MigoApp()
         }
     }
 }
@@ -89,6 +90,15 @@ class MainActivity : ComponentActivity() {
 private fun MigoApp(model: AppViewModel = viewModel()) {
     val state by model.state.collectAsState()
     val callState by model.callState.collectAsState()
+    // The theme preference is collected here — the composition root, the one place that both
+    // holds the view model and wraps everything the theme colours. "System" is the system's own
+    // dark fact; the other two choices are the person's word over it.
+    val preferences by model.preferences.collectAsState()
+    val dark = when (preferences.theme) {
+        ThemeChoice.System -> isSystemInDarkTheme()
+        ThemeChoice.Light -> false
+        ThemeChoice.Dark -> true
+    }
 
     // The microphone permission is asked for at the moment of use, at the call button: a prompt
     // at first launch teaches nothing (the user has not called anybody yet), and the call that
@@ -125,55 +135,57 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
         }
     }
 
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background,
-    ) {
-        Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
-            when (val current = state) {
-                AppState.Starting -> Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    CircularProgressIndicator()
+    MigoTheme(dark = dark) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.background,
+        ) {
+            Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+                when (val current = state) {
+                    AppState.Starting -> Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CircularProgressIndicator()
+                    }
+
+                    is AppState.SignedOut -> SignInScreen(
+                        form = current,
+                        onServerEndpoint = model::setServerEndpoint,
+                        onIdentifier = model::setIdentifier,
+                        onSubmit = model::signIn,
+                        onRestore = model::restoreFromBackup,
+                        onRefreshCaptcha = model::refreshCaptcha,
+                        onDismissFailure = model::dismissFailure,
+                    )
+
+                    is AppState.SignedIn -> ShellScreen(
+                        state = current,
+                        model = model,
+                        onRequestVoiceCall = requestVoiceCall,
+                        onRequestVoiceNote = requestVoiceNote,
+                    )
                 }
-
-                is AppState.SignedOut -> SignInScreen(
-                    form = current,
-                    onServerEndpoint = model::setServerEndpoint,
-                    onIdentifier = model::setIdentifier,
-                    onSubmit = model::signIn,
-                    onRestore = model::restoreFromBackup,
-                    onRefreshCaptcha = model::refreshCaptcha,
-                    onDismissFailure = model::dismissFailure,
-                )
-
-                is AppState.SignedIn -> ShellScreen(
-                    state = current,
-                    model = model,
-                    onRequestVoiceCall = requestVoiceCall,
-                    onRequestVoiceNote = requestVoiceNote,
-                )
             }
-        }
 
-        // The call overlay renders above whatever the shell is showing — a call takes the screen
-        // from anything, the same rule the web client's overlay keeps — and renders nothing at all
-        // when no call is ringing, live, just ended, or failed to start. The peer's name is
-        // resolved here at the composition root, the one place that holds both the call state and
-        // the model that knows the names.
-        val callPeerId = callState.incoming?.callerId
-            ?: callState.call?.let { if (it.isCaller) it.calleeId else it.callerId }
-        CallOverlay(
-            state = callState,
-            peerName = if (callPeerId != null) model.displayName(callPeerId) else "",
-            onAccept = model::acceptCall,
-            onDecline = model::declineCall,
-            onCancel = model::cancelCall,
-            onHangUp = model::hangUpCall,
-            onToggleMute = model::toggleCallMute,
-            onDismiss = model::dismissCallScreen,
-        )
+            // The call overlay renders above whatever the shell is showing — a call takes the screen
+            // from anything, the same rule the web client's overlay keeps — and renders nothing at all
+            // when no call is ringing, live, just ended, or failed to start. The peer's name is
+            // resolved here at the composition root, the one place that holds both the call state and
+            // the model that knows the names.
+            val callPeerId = callState.incoming?.callerId
+                ?: callState.call?.let { if (it.isCaller) it.calleeId else it.callerId }
+            CallOverlay(
+                state = callState,
+                peerName = if (callPeerId != null) model.displayName(callPeerId) else "",
+                onAccept = model::acceptCall,
+                onDecline = model::declineCall,
+                onCancel = model::cancelCall,
+                onHangUp = model::hangUpCall,
+                onToggleMute = model::toggleCallMute,
+                onDismiss = model::dismissCallScreen,
+            )
+        }
     }
 }
 
@@ -211,6 +223,21 @@ private fun ShellScreen(
         if (uri != null) model.saveDocumentTo(uri)
     }
     val mediaObjects by model.mediaObjects.collectAsState()
+    // The media choice, answered as one fact for every bubble on screen: "Wi-Fi only" reads the
+    // connection's own metered state, which is the network's word rather than the app's guess.
+    // Read per composition rather than remembered — a settings change must reach the next
+    // recomposition without a key to invalidate on, and the read is a system-service lookup this
+    // screen makes at most a few times a second.
+    val context = LocalContext.current
+    val preferences by model.preferences.collectAsState()
+    val autoFetchMedia = when (preferences.mediaAutoDownload) {
+        MediaAutoDownload.Always -> true
+        MediaAutoDownload.Never -> false
+        // A missing manager or no active network answers "metered": the safe reading of a
+        // Wi-Fi-only choice is the one that spends nothing.
+        MediaAutoDownload.Unmetered ->
+            context.getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered == false
+    }
     // Back means "close this, not the app", in the order a person reads the screen: the members
     // sheet (handled inside the chat, composed deeper so it wins while it is up), then the visible
     // window's tab, then a panel. The strip and the home screen are the resting state back stands
@@ -285,6 +312,7 @@ private fun ShellScreen(
                     selfId = state.accountId,
                     onAcknowledgeSafety = model::acknowledgeSafetyChange,
                     onStartCall = { peerId -> onRequestVoiceCall(open.conversationId, peerId) },
+                    onExportLog = { model.shareChatLog(open.conversationId) },
                     // Attachments are an end-to-end feature: the control is offered only where the
                     // conversation has a key channel to hand the recipients the object's key --
                     // every direct chat and group, never a server-readable room.
@@ -298,6 +326,7 @@ private fun ShellScreen(
                     onCancelVoiceNote = model::cancelVoiceNote,
                     onReact = model::react,
                     onResolveMedia = model::resolveMedia,
+                    autoFetchMedia = autoFetchMedia,
                     onSaveDocument = { attachment ->
                         model.stageDocumentSave(attachment)
                         saveDocument.launch(attachment.caption ?: "document")
@@ -407,5 +436,23 @@ private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifie
             onRefresh = model::loadAdmins,
             modifier = modifier,
         )
+
+        AppState.Section.SETTINGS -> {
+            val preferences by model.preferences.collectAsState()
+            SettingsScreen(
+                state = state,
+                preferences = preferences,
+                onTheme = model::setTheme,
+                onSendReadReceipts = model::setSendReadReceipts,
+                onSendTypingIndicators = model::setSendTypingIndicators,
+                onMediaAutoDownload = model::setMediaAutoDownload,
+                onAutoSaveChatLogs = model::setAutoSaveChatLogs,
+                onSaveAllChats = model::saveAllChatsTo,
+                onRefreshStorage = model::refreshStorage,
+                onClearCaches = model::clearCaches,
+                onSignOut = model::signOut,
+                modifier = modifier,
+            )
+        }
     }
 }

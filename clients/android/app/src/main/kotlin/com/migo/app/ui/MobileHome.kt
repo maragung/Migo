@@ -490,6 +490,12 @@ private fun MeSheet(
                 onClick = { onOpenSection(AppState.Section.ADMINS) },
             )
         }
+        SheetAction(
+            glyph = "⚙",
+            label = "Settings",
+            sub = "Chats, privacy, storage and appearance",
+            onClick = { onOpenSection(AppState.Section.SETTINGS) },
+        )
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         SheetAction(
             glyph = "✕",

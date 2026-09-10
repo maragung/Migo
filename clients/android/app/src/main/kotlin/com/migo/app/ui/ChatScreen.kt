@@ -152,6 +152,12 @@ fun ChatScreen(
      */
     onStartCall: ((Id) -> Unit)? = null,
     /**
+     * Shares this conversation's transcript as a log, from the header. Null when the shell has no
+     * share route; the transcript itself is the model's to build, because the log is the same
+     * plaintext the auto-saved snapshots are written from.
+     */
+    onExportLog: (() -> Unit)? = null,
+    /**
      * Opens the file picker for an attachment, whose answer is sent into the conversation. Null in
      * a server-readable room — attachments are an end-to-end feature (a room has no key channel to
      * hand the recipients a sealed object's key), mirroring the web composer's own gating.
@@ -171,6 +177,12 @@ fun ChatScreen(
     onReact: (Id, String) -> Unit = { _, _ -> },
     /** Asks the resolver to fetch and open the given attachment's object. */
     onResolveMedia: (Attachment) -> Unit = {},
+    /**
+     * Whether an attachment resolves itself on first display. False is the person's own media
+     * choice — never, or an unmetered network that turned out metered — and every bubble then
+     * offers its bytes as a tap instead of taking them.
+     */
+    autoFetchMedia: Boolean = true,
     /**
      * Saves the given document, handed the attachment so the shell can stage it and name the
      * destination picker's suggestion after the sender's file name.
@@ -252,6 +264,7 @@ fun ChatScreen(
                     null
                 },
                 onStartCall = onStartCall,
+                onExportLog = onExportLog,
             )
 
             // The change warning (§164) sits between the header and the thread, because it is about
@@ -286,6 +299,7 @@ fun ChatScreen(
                                     onReact = onReact,
                                     onResolveMedia = onResolveMedia,
                                     onSaveDocument = onSaveDocument,
+                                    autoFetchMedia = autoFetchMedia,
                                     mediaObject = mediaObjects[item.message.attachment?.mediaId],
                                 )
                                 is TimelineItem.Notice -> SystemNotice(text = item.notice.text)
@@ -387,6 +401,7 @@ private fun ChatHeader(
     onOpenGames: () -> Unit,
     onOpenSafety: (() -> Unit)? = null,
     onStartCall: ((Id) -> Unit)? = null,
+    onExportLog: (() -> Unit)? = null,
 ) {
     // Games are offered only where a game has an audience: a room or a group conversation, never a
     // direct chat — the web client's own rule, because a game is the room's shared spectacle.
@@ -436,6 +451,15 @@ private fun ChatHeader(
                 val peer = chat.peerId
                 TextButton(onClick = { onStartCall(peer) }) {
                     Text("📞")
+                }
+            }
+            // The conversation's own record: the transcript this device holds, handed to whatever
+            // the system shares text with. Offered in every conversation kind — a log is a log
+            // whether the room is encrypted or not — and stated as plaintext by the share sheet
+            // it opens into.
+            if (onExportLog != null) {
+                TextButton(onClick = onExportLog) {
+                    Text("Log")
                 }
             }
             if (chat.roomId != null && onOpenMembers != null) {
@@ -759,6 +783,7 @@ private fun MessageLine(
     onReact: (Id, String) -> Unit,
     onResolveMedia: (Attachment) -> Unit,
     onSaveDocument: (Attachment) -> Unit,
+    autoFetchMedia: Boolean,
     mediaObject: MediaObject?,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -827,6 +852,7 @@ private fun MessageLine(
                     mediaObject = mediaObject,
                     onResolve = onResolveMedia,
                     onSave = onSaveDocument,
+                    autoFetchMedia = autoFetchMedia,
                 )
             }
             if (reactionBarOpen.value) {
@@ -866,11 +892,12 @@ private fun AttachmentBlock(
     mediaObject: MediaObject?,
     onResolve: (Attachment) -> Unit,
     onSave: (Attachment) -> Unit,
+    autoFetchMedia: Boolean,
 ) {
     when (attachment.kind) {
-        AttachmentKind.Image -> ImageBubble(attachment, mediaObject, onResolve)
-        AttachmentKind.Document -> DocumentRow(attachment, mediaObject, onResolve, onSave)
-        AttachmentKind.Voice -> VoiceBubble(attachment, mediaObject, onResolve)
+        AttachmentKind.Image -> ImageBubble(attachment, mediaObject, onResolve, autoFetchMedia)
+        AttachmentKind.Document -> DocumentRow(attachment, mediaObject, onResolve, onSave, autoFetchMedia)
+        AttachmentKind.Voice -> VoiceBubble(attachment, mediaObject, onResolve, autoFetchMedia)
     }
 }
 
@@ -886,8 +913,14 @@ private fun ImageBubble(
     attachment: Attachment,
     mediaObject: MediaObject?,
     onResolve: (Attachment) -> Unit,
+    autoFetchMedia: Boolean,
 ) {
-    LaunchedEffect(attachment.mediaId) { onResolve(attachment) }
+    // Keyed on the choice too: a person who flips the media setting mid-conversation has the
+    // bubbles already on screen start fetching — the choice is about the future, not a puzzle
+    // about which attachments predate it.
+    LaunchedEffect(attachment.mediaId, autoFetchMedia) {
+        if (autoFetchMedia) onResolve(attachment)
+    }
     val bitmap = (mediaObject as? MediaObject.Ready)?.bytes?.let {
         BitmapFactory.decodeByteArray(it, 0, it.size)
     }
@@ -923,7 +956,9 @@ private fun ImageBubble(
             )
 
             // Loading, or the resolver has not been asked yet: a reserved block in the claimed
-            // shape, so the transcript does not jump when the bytes land.
+            // shape, so the transcript does not jump when the bytes land. With auto-fetch off the
+            // reserved block is the offer — the shape stays reserved, and the tap the reader was
+            // going to make anyway is the one that spends their data.
             else -> Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant,
                 shape = shape,
@@ -939,8 +974,23 @@ private fun ImageBubble(
                         }
                     },
             ) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .let { base ->
+                            if (autoFetchMedia) base else base.combinedClickable(onClick = { onResolve(attachment) })
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (autoFetchMedia) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    } else {
+                        Text(
+                            text = "Tap to load",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }
@@ -967,8 +1017,11 @@ private fun DocumentRow(
     mediaObject: MediaObject?,
     onResolve: (Attachment) -> Unit,
     onSave: (Attachment) -> Unit,
+    autoFetchMedia: Boolean,
 ) {
-    LaunchedEffect(attachment.mediaId) { onResolve(attachment) }
+    LaunchedEffect(attachment.mediaId, autoFetchMedia) {
+        if (autoFetchMedia) onResolve(attachment)
+    }
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(12.dp),
@@ -1008,6 +1061,12 @@ private fun DocumentRow(
                 mediaObject is MediaObject.Failed -> TextButton(onClick = { onResolve(attachment) }) {
                     Text("Retry")
                 }
+                // A document nobody asked for yet is a row with a price on it: the Load button
+                // states the choice the spinner would have hidden, that the bytes are the
+                // reader's to spend.
+                !autoFetchMedia -> TextButton(onClick = { onResolve(attachment) }) {
+                    Text("Load")
+                }
                 else -> CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
             }
         }
@@ -1026,8 +1085,11 @@ private fun VoiceBubble(
     attachment: Attachment,
     mediaObject: MediaObject?,
     onResolve: (Attachment) -> Unit,
+    autoFetchMedia: Boolean,
 ) {
-    LaunchedEffect(attachment.mediaId) { onResolve(attachment) }
+    LaunchedEffect(attachment.mediaId, autoFetchMedia) {
+        if (autoFetchMedia) onResolve(attachment)
+    }
     val context = LocalContext.current
     var playing by remember { mutableStateOf(false) }
     var positionMs by remember { mutableStateOf(0L) }
@@ -1112,6 +1174,9 @@ private fun VoiceBubble(
                 text = when {
                     failed || mediaObject is MediaObject.Failed -> "⚠️"
                     playing -> "⏸"
+                    // An unasked-for note is not a play button until it is loaded: the arrow
+                    // says what the tap does, which the row's own tap-to-load already is.
+                    mediaObject !is MediaObject.Ready && !autoFetchMedia -> "⬇"
                     else -> "▶"
                 },
                 fontSize = 16.sp,

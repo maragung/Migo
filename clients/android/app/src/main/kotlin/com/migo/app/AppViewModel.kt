@@ -1,7 +1,9 @@
 package com.migo.app
 
 import android.app.Application
+import android.content.Intent
 import android.net.Uri
+import android.os.Environment
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -54,10 +56,15 @@ import com.migo.core.account.parseAddress
 import com.migo.core.account.sealContainer
 import com.migo.core.crypto.Content
 import com.migo.core.domain.CallMediaKind
+import com.migo.core.domain.ChatLogLine
 import com.migo.core.domain.IncomingMessage
 import com.migo.core.domain.MessageDeletion
 import com.migo.core.domain.SendOptions
 import com.migo.core.domain.Subscription
+import com.migo.core.domain.chatLogFilename
+import com.migo.core.domain.formatAllChatsLog
+import com.migo.core.domain.formatChatLog
+import com.migo.core.domain.snapshotEvictions
 import com.migo.core.domain.withRotatedIdentityFrom
 import com.migo.core.net.CaptchaChallenge
 import com.migo.core.net.CaptchaProof
@@ -86,13 +93,17 @@ import com.migo.core.protocol.RoomVoteEvent
 import com.migo.core.protocol.SanctionAction
 import com.migo.core.protocol.TypingEvent
 import com.migo.core.protocol.TypingState
+import com.migo.core.store.AppSettings
+import com.migo.core.store.MediaAutoDownload
 import com.migo.core.store.ServerEndpoint
 import com.migo.core.store.Settings
+import com.migo.core.store.ThemeChoice
 import com.migo.core.store.TxRecord
 import com.migo.core.store.VaultError
 import com.migo.core.wire.Id
 import com.migo.core.wire.WireError
 import com.migo.core.wire.parseId
+import java.io.File
 import java.io.IOException
 import java.math.BigInteger
 import java.util.concurrent.ConcurrentHashMap
@@ -102,8 +113,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -160,6 +173,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * sessions changing underneath it.
      */
     val callState: StateFlow<CallUiState> = _callState.asStateFlow()
+
+    /**
+     * The user's preferences, as a stable flow of the store's own snapshots.
+     *
+     * A flow of its own rather than a field on [AppState] because preferences are device facts,
+     * not session ones: the theme has to hold before any sign-in, and a sign-out must not reset
+     * it. `Eagerly` rather than `WhileSubscribed` for the same reason — the theme collects only
+     * while the shell is composed, but the settings the send paths consult (typing indicators,
+     * read receipts, auto-save) are read at moments no collector is attached, and a lazily
+     * started flow would answer those from the default snapshot instead of the file.
+     */
+    val preferences: StateFlow<AppSettings> = settings.flow
+        .stateIn(viewModelScope, SharingStarted.Eagerly, AppSettings())
 
     private var callStateJob: Job? = null
 
@@ -653,6 +679,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             // ratchets that re-decrypt them are gone, and a stale row is a lie about what the
             // server holds).
             transcripts.clear()
+            // The auto-saved chat logs are the same conversations in plaintext on disk, written
+            // by this device at its owner's ask — the keys going does not make them private
+            // again — so they follow the transcripts out, or the sign-out promise of nothing
+            // decryptable left behind is not kept.
+            try {
+                withContext(Dispatchers.IO) { chatLogDir().deleteRecursively() }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Best effort is all a directory delete can be; the vault is gone regardless.
+            }
             _state.value = AppState.SignedOut(endpoint)
         }
     }
@@ -808,7 +845,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val held = transcripts[conversationId]?.lastOrNull()?.seq ?: HISTORY_FROM
                 val response = live.client.catchUp(conversationId, held, HISTORY_LIMIT)
                 inChat(conversationId) { it.copy(loading = false) }
-                if (response.toSeq > 0) {
+                // The read receipt is the preference's to withhold: opening a conversation still
+                // catches it up either way — the messages arrive on this device whatever the
+                // sender learns — so the switch changes what the sender is told, never what the
+                // reader sees.
+                if (response.toSeq > 0 && preferences.value.sendReadReceipts) {
                     live.client.messaging.sendReceipt(conversationId, ReceiptKind.Read, response.toSeq)
                 }
             } catch (cancelled: CancellationException) {
@@ -909,12 +950,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * goes with it — which is what drops its decrypted messages, per the no-store design.
      */
     fun closeWindow(conversationId: Id) {
+        // The snapshot, when the preference asks for one, is taken from what is about to be
+        // dropped: the title the window wore and the transcript the cache holds are the two
+        // halves of a log, and the copy is the list's own — the cache entry itself stays for a
+        // reopen, and a message arriving mid-write must not reach into the file's list.
+        val leaving = signedInState
+        val title = leaving?.windows?.find { it.conversationId == conversationId }?.title
+            ?: leaving?.conversations?.find { it.conversationId == conversationId }?.title
+            ?: "Conversation"
+        val lines = transcripts[conversationId]?.toList() ?: emptyList()
         signedIn { current ->
             current.copy(
                 windows = current.windows.filterNot { it.conversationId == conversationId },
                 open = if (current.open?.conversationId == conversationId) null else current.open,
             )
         }
+        snapshotOnClose(conversationId, title, lines)
     }
 
     /**
@@ -956,6 +1007,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val wasEmpty = current.draft.isEmpty()
         inChat(current.conversationId) { it.copy(draft = text) }
         if (wasEmpty == text.isEmpty()) return
+        // The typing indicator is a preference, not a law of nature: a person who switched it off
+        // sends neither Start nor Stop, and the peers' indicators simply expire on their own timers
+        // rather than this device announcing a behaviour it promised not to exhibit.
+        if (!preferences.value.sendTypingIndicators) return
         val live = session ?: return
         val next = if (text.isEmpty()) TypingState.Stop else TypingState.Start
         viewModelScope.launch {
@@ -1315,6 +1370,259 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 throw cancelled
             } catch (failure: Exception) {
                 signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    // --- settings & chat logs ---
+
+    /**
+     * Writes one preference change to the store.
+     *
+     * Every control the settings panel offers lands here, so the write path — and its failure
+     * wording — is stated once rather than once per switch. The flow the send paths read updates
+     * on its own; nobody polls this method's result.
+     */
+    private fun setPreference(transform: (AppSettings) -> AppSettings) {
+        viewModelScope.launch {
+            try {
+                settings.update(transform)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(settings = it.settings.copy(notice = readable(failure))) }
+            }
+        }
+    }
+
+    /** Sets how the app follows the system's light and dark. */
+    fun setTheme(theme: ThemeChoice) = setPreference { it.copy(theme = theme) }
+
+    /** Sets whether this device answers the messages it has read. */
+    fun setSendReadReceipts(enabled: Boolean) = setPreference { it.copy(sendReadReceipts = enabled) }
+
+    /** Sets whether this device announces that somebody is typing. */
+    fun setSendTypingIndicators(enabled: Boolean) = setPreference { it.copy(sendTypingIndicators = enabled) }
+
+    /** Sets when an attachment is fetched without being asked to. */
+    fun setMediaAutoDownload(choice: MediaAutoDownload) = setPreference { it.copy(mediaAutoDownload = choice) }
+
+    /** Sets whether closing a conversation writes its transcript to disk as plaintext. */
+    fun setAutoSaveChatLogs(enabled: Boolean) = setPreference { it.copy(autoSaveChatLogs = enabled) }
+
+    /**
+     * Shares one conversation's transcript as text, through whatever the device offers.
+     *
+     * The chooser is started from the application context, which is why it carries
+     * FLAG_ACTIVITY_NEW_TASK: a context that is not an activity may not stack one on top of
+     * anything, and the share sheet is a task of its own.
+     */
+    fun shareChatLog(conversationId: Id) {
+        val held = transcripts[conversationId]
+        if (held.isNullOrEmpty()) {
+            signedIn { it.copy(failure = "This conversation has no messages to export yet.") }
+            return
+        }
+        val log = formatChatLog(
+            title = conversationTitle(conversationId),
+            exportedAtMs = System.currentTimeMillis(),
+            lines = held.map { it.toLogLine() },
+        )
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, log)
+        }
+        val chooser = Intent.createChooser(send, "Share chat log")
+        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            getApplication<Application>().startActivity(chooser)
+        } catch (_: Exception) {
+            signedIn { it.copy(failure = "No app on this device could take the log.") }
+        }
+    }
+
+    /**
+     * Writes every held conversation's transcript to the destination the document picker named.
+     *
+     * Held means the transcript cache — the conversations this device decrypted this session —
+     * which is the honest bound of the export: a conversation never opened is not on this device
+     * to write, and the file's silence about it is truer than a completeness no client without a
+     * message store could promise.
+     */
+    fun saveAllChatsTo(destination: Uri) {
+        val live = session
+        if (live == null || transcripts.isEmpty()) {
+            signedIn { it.copy(settings = it.settings.copy(notice = "No conversations to export yet.")) }
+            return
+        }
+        val order = signedInState?.conversations?.map { it.conversationId } ?: emptyList()
+        val known = order.filter { !transcripts[it].isNullOrEmpty() }
+        val extras = transcripts.keys.filterNot { it in order }
+        val chats = (known + extras).mapNotNull { id ->
+            val lines = transcripts[id] ?: return@mapNotNull null
+            if (lines.isEmpty()) return@mapNotNull null
+            conversationTitle(id) to lines.map { it.toLogLine() }
+        }
+        val log = formatAllChatsLog(
+            accountName = live.username,
+            exportedAtMs = System.currentTimeMillis(),
+            chats = chats,
+        )
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    getApplication<Application>().contentResolver.openOutputStream(destination)
+                        ?.use { it.write(log.toByteArray(Charsets.UTF_8)) }
+                        ?: throw IOException("the destination could not be opened")
+                }
+                signedIn { it.copy(settings = it.settings.copy(notice = "Chat log saved.")) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(settings = it.settings.copy(notice = readable(failure))) }
+            }
+        }
+    }
+
+    /** A transcript row as a log line: own messages authored "You", the label every bubble omits. */
+    private fun ChatMessage.toLogLine() = ChatLogLine(
+        at = at,
+        author = if (mine) "You" else author.ifBlank { "—" },
+        text = text,
+    )
+
+    /** The newest title this shell knows for a conversation, whatever list it last appeared on. */
+    private fun conversationTitle(conversationId: Id): String {
+        val state = signedInState ?: return "Conversation"
+        return state.conversations.find { it.conversationId == conversationId }?.title
+            ?: state.windows.find { it.conversationId == conversationId }?.title
+            ?: state.open?.takeIf { it.conversationId == conversationId }?.title
+            ?: "Conversation"
+    }
+
+    /**
+     * The directory auto-saved chat logs live in: the app's own Documents folder on external
+     * storage when the device offers one, the app's private files otherwise.
+     *
+     * Either way the directory is this app's alone — no storage permission is asked for, ever —
+     * and the logs in it are plaintext, which is the thing the settings screen says out loud
+     * before the switch can be flipped.
+     */
+    private fun chatLogDir(): File {
+        val app = getApplication<Application>()
+        val external = app.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
+        return File(external ?: app.filesDir, "chatlogs")
+    }
+
+    /**
+     * Closes a conversation with its transcript written down, when the person asked for that.
+     *
+     * Closing is the moment the messages leave the screen and the no-store design drops them, so
+     * it is the one moment a snapshot can be taken of a transcript this device is about to stop
+     * showing. The write is launched rather than awaited: the window is gone either way, and a
+     * log that could not be written is a preference this session failed to honour, not a close
+     * to refuse.
+     */
+    private fun snapshotOnClose(conversationId: Id, title: String, lines: List<ChatMessage>) {
+        if (!preferences.value.autoSaveChatLogs || lines.isEmpty()) return
+        viewModelScope.launch {
+            try {
+                writeChatLogSnapshot(conversationId, title, lines)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Ignored on purpose — see the doc above.
+            }
+        }
+    }
+
+    /**
+     * Writes one conversation's snapshot: one file per conversation — the newest — in a
+     * directory bounded to [CHAT_LOG_SNAPSHOT_MAX] conversations, oldest evicted first.
+     */
+    private suspend fun writeChatLogSnapshot(conversationId: Id, title: String, lines: List<ChatMessage>) {
+        withContext(Dispatchers.IO) {
+            val dir = chatLogDir()
+            dir.mkdirs()
+            // The conversation's own older files go before the new one is written, so the
+            // conversation keeps exactly one snapshot however many titles it has worn.
+            val stale = dir.listFiles()
+                ?.filter { it.name.startsWith("chatlog-${conversationId.value}-") }
+                ?: emptyList()
+            stale.forEach { it.delete() }
+            val name = "chatlog-" + conversationId.value + "-" + chatLogFilename(title)
+            File(dir, name).writeText(
+                formatChatLog(title, System.currentTimeMillis(), lines.map { it.toLogLine() }),
+                Charsets.UTF_8,
+            )
+            // Then the cap across conversations, by the file system's own lastModified.
+            val oldestFirst = dir.listFiles()?.sortedBy { it.lastModified() } ?: emptyList()
+            for (gone in snapshotEvictions(oldestFirst, keep = CHAT_LOG_SNAPSHOT_MAX)) {
+                gone.delete()
+            }
+        }
+    }
+
+    /**
+     * Measures what the storage group states: the cache this app could clear and the logs it
+     * wrote itself. The walk is a directory traversal, so it runs off the main thread; the
+     * panel's nulls mean "not measured yet", which is the honest state until this lands.
+     */
+    fun refreshStorage() {
+        viewModelScope.launch {
+            val app = getApplication<Application>()
+            val measured = withContext(Dispatchers.IO) {
+                fun sizeOf(dir: File): Long = dir.walkBottomUp().filter { it.isFile }.sumOf { it.length() }
+                val logs = chatLogDir().listFiles()?.filter { it.isFile } ?: emptyList()
+                Triple(sizeOf(app.cacheDir), logs.sumOf { it.length() }, logs.size)
+            }
+            signedIn {
+                it.copy(
+                    settings = it.settings.copy(
+                        // The media cache is memory this session spent on decrypted originals;
+                        // a cache size that ignored it would understate the thing being cleared.
+                        cacheBytes = measured.first + mediaBytes,
+                        logBytes = measured.second,
+                        logCount = measured.third,
+                    ),
+                )
+            }
+        }
+    }
+
+    /**
+     * Clears the caches the storage group names: the app's cache directory (voice-note
+     * recordings, playback temp files) and the in-memory media cache, whose bytes are the
+     * decrypted originals this session fetched.
+     *
+     * The logs are not cache — they are the files the person asked to have written — and neither
+     * is anything under the app's private files, where the vault and the session store live. A
+     * recording in progress refuses the clear, because its own file is one of the things the
+     * clear would delete.
+     */
+    fun clearCaches() {
+        if (noteRecorder != null) {
+            signedIn { it.copy(settings = it.settings.copy(notice = "Stop the voice note before clearing the cache.")) }
+            return
+        }
+        if (signedInState?.settings?.clearing == true) return
+        signedIn { it.copy(settings = it.settings.copy(clearing = true, notice = null)) }
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    getApplication<Application>().cacheDir.listFiles()?.forEach { it.deleteRecursively() }
+                }
+                _mediaObjects.value = emptyMap()
+                mediaInFlight.clear()
+                mediaOrder.clear()
+                mediaBytes = 0
+                signedIn { it.copy(settings = it.settings.copy(notice = "Cache cleared.")) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(settings = it.settings.copy(notice = readable(failure))) }
+            } finally {
+                signedIn { it.copy(settings = it.settings.copy(clearing = false)) }
             }
         }
     }
@@ -3331,6 +3639,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             openFromMessage(message.conversationId)
         }
         if (onScreen && !mine) {
+            // The same preference gates the live-arrival receipt as the catch-up one above, so a
+            // person who turned receipts off is not re-published by the half of the path they
+            // never see.
+            if (!preferences.value.sendReadReceipts) return
             viewModelScope.launch {
                 try {
                     live.client.messaging.sendReceipt(
@@ -3850,6 +4162,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
          * device that would want them).
          */
         const val TRANSCRIPT_CACHE_MAX = 200
+
+        /**
+         * How many conversations' auto-saved snapshots the log directory keeps. One file per
+         * conversation, oldest evicted first: the directory is a rolling record of recent
+         * conversations, not an archive of everything ever closed.
+         */
+        const val CHAT_LOG_SNAPSHOT_MAX = 20
 
         /** The profile endpoint takes a batch; this keeps one list refresh to one request. */
         const val PROFILE_BATCH = 50

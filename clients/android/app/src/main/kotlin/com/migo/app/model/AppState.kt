@@ -136,6 +136,7 @@ sealed interface AppState {
         val securityCheckup: SecurityCheckupState = SecurityCheckupState(),
         val admins: AdminsState = AdminsState(),
         val games: GamesState = GamesState(),
+        val settings: SettingsPanelState = SettingsPanelState(),
     ) : AppState
 
     /**
@@ -145,11 +146,11 @@ sealed interface AppState {
      * which is how a phone wears a second pane.
      */
     enum class Section {
-        CHATS, FRIENDS, ROOMS, GAMES, FEED, ALERTS, SEARCH, WALLET, PROFILE, ADMINS;
+        CHATS, FRIENDS, ROOMS, GAMES, FEED, ALERTS, SEARCH, WALLET, PROFILE, ADMINS, SETTINGS;
 
         /** True for the panels the me sheet opens, which cover the strip rather than join it. */
         val isPanel: Boolean
-            get() = this == ALERTS || this == SEARCH || this == WALLET || this == PROFILE || this == ADMINS || this == GAMES
+            get() = this == ALERTS || this == SEARCH || this == WALLET || this == PROFILE || this == ADMINS || this == GAMES || this == SETTINGS
     }
 }
 
@@ -484,6 +485,29 @@ data class GamesState(
     val loading: Boolean = false,
     /** Why the last read could not answer. */
     val failure: String? = null,
+)
+
+/**
+ * The Settings panel's own facts: the storage the caches hold, and the one-shot sentence an action
+ * there answers with.
+ *
+ * The preferences themselves are not here — they live in the view model's preferences flow, a
+ * device-scoped fact that exists before any sign-in (the theme has to) — while this holder carries
+ * only what the panel measures: the sizes of the caches it offers to clear, and the notice that
+ * says a clear or a save landed. Null sizes are "not measured yet", the same honest
+ * not-checked-yet the device list keeps, rather than a zero that would read as "nothing to clear".
+ */
+data class SettingsPanelState(
+    /** The temporary-media cache (recordings, playback scratch) in bytes, or null before the first walk. */
+    val cacheBytes: Long? = null,
+    /** The auto-saved chat logs' directory in bytes, or null before the first walk. */
+    val logBytes: Long? = null,
+    /** How many conversation snapshots the log directory holds. */
+    val logCount: Int = 0,
+    /** True while a clear is running, so its button cannot double-fire. */
+    val clearing: Boolean = false,
+    /** The sentence the last clear or log save answered with, shown once. */
+    val notice: String? = null,
 )
 
 /** One row of the conversation list. */
