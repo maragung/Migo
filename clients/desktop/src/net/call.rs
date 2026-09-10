@@ -245,10 +245,6 @@ fn spawn_capture_pump(
 /// peer connection, key, or candidate ever crosses into UI code.
 #[derive(Debug, Clone)]
 pub struct CallView {
-    /// The call's own id, for the note lines that name one.
-    pub call_id: Id,
-    /// The conversation the call belongs to — where the 📞 was pressed.
-    pub conversation_id: Id,
     /// The other account: the callee for a call this device placed, the caller otherwise.
     pub peer: Id,
     /// Whether this device placed the call — decides whose "Cancel"/"Decline" button shows and
@@ -438,8 +434,6 @@ impl Calls {
         let call = self.active.as_ref()?;
         let ended = call.state == CallState::Ended;
         Some(CallView {
-            call_id: call.call_id,
-            conversation_id: call.conversation_id,
             peer: call.peer,
             outgoing: call.is_caller,
             kind: call.kind,
@@ -462,8 +456,6 @@ impl Calls {
     fn ring_view(&self) -> Option<CallView> {
         let ring = self.ringing.as_ref()?;
         Some(CallView {
-            call_id: ring.call_id,
-            conversation_id: ring.conversation_id,
             peer: ring.caller_id,
             outgoing: false,
             kind: ring.kind,

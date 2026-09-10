@@ -726,11 +726,12 @@ mod tests {
 
     #[test]
     fn an_sdp_description_round_trips_through_the_sealed_payload_shape() {
-        let description = RTCSessionDescription {
-            sdp_type: webrtc::peer_connection::sdp::sdp_type::RTCSdpType::Offer,
-            sdp: "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n".to_owned(),
-            ..Default::default()
-        };
+        // Built through Default and mutation rather than a struct literal: the struct's
+        // `parsed` field is private to the webrtc crate, and functional-update syntax
+        // (`..Default::default()`) may not skip what it cannot name.
+        let mut description = RTCSessionDescription::default();
+        description.sdp_type = webrtc::peer_connection::sdp::sdp_type::RTCSdpType::Offer;
+        description.sdp = "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\n".to_owned();
         let bytes = encode_sdp_description(&description).expect("encodes");
         assert_eq!(
             String::from_utf8(bytes.clone()).expect("json text"),

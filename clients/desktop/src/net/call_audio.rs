@@ -215,7 +215,9 @@ impl Resampler {
 
 /// The platform handle that keeps a stream alive. Dropping it stops the stream;
 /// the field order in the structs below is load-bearing only in that the
-/// channel ends drop with it too.
+/// channel ends drop with it too. The handle itself is owned for its Drop and
+/// never read, which is the one dead-code allowance this file states.
+#[allow(dead_code)]
 enum MicrophoneGuard {
     /// The ALSA capture thread; exits when the receiver it feeds is dropped.
     #[cfg(target_os = "linux")]
@@ -266,6 +268,8 @@ impl Microphone {
     }
 }
 
+/// The speaker's twin of [`MicrophoneGuard`]: owned for its Drop, never read.
+#[allow(dead_code)]
 enum SpeakerGuard {
     #[cfg(target_os = "linux")]
     Alsa(std::thread::JoinHandle<()>),
