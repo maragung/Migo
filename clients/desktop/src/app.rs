@@ -28,7 +28,7 @@ use crate::settings::{self, Settings};
 use crate::theme::{self, font, palette, radius, space, Theme};
 use crate::ui::alerts::AlertsState;
 use crate::ui::auth::AuthState;
-use crate::ui::chat::{ChatState, RoomNotice, MAX_ROOM_NOTICES};
+use crate::ui::chat::{ChatState, ImageBlob, RoomNotice, MAX_ROOM_NOTICES};
 use crate::ui::desktop::{self, Desktop, TaskAction, TaskEntry};
 use crate::ui::friends::FriendsState;
 use crate::ui::rooms::RoomsState;
@@ -672,6 +672,52 @@ impl App {
                 }
                 Event::CallGone => {
                     self.call = None;
+                }
+                Event::MediaImage {
+                    media_id,
+                    width,
+                    height,
+                    rgba,
+                } => {
+                    // A fetched image decoded in the worker: the blob the bubble's texture is
+                    // built from. A texture from an earlier serve of the same id is dropped
+                    // first, so a re-fetch can never leave the old pixels on screen behind the
+                    // new blob; the failure line, if one stood, is cleared with the same hand.
+                    self.chat.media.textures.remove(&media_id);
+                    self.chat.media.failures.remove(&media_id);
+                    self.chat.media.images.insert(
+                        media_id,
+                        ImageBlob {
+                            width,
+                            height,
+                            rgba,
+                        },
+                    );
+                }
+                Event::MediaFailed { media_id, reason } => {
+                    self.chat.media.failures.insert(media_id, reason);
+                }
+                Event::RecordingStarted { conversation_id } => {
+                    // The conversation id rides along so a recording left behind by a
+                    // conversation switch still clears its own bar, not whichever one is open.
+                    self.chat.recording = Some((conversation_id, std::time::Instant::now()));
+                }
+                Event::RecordingStopped { conversation_id } => {
+                    if self
+                        .chat
+                        .recording
+                        .is_some_and(|(recording, _)| *recording == conversation_id)
+                    {
+                        self.chat.recording = None;
+                    }
+                }
+                Event::VoicePlaying { media_id } => {
+                    self.chat.media.playing = Some(media_id);
+                }
+                Event::VoiceStopped { media_id } => {
+                    if self.chat.media.playing == Some(media_id) {
+                        self.chat.media.playing = None;
+                    }
                 }
                 Event::Toast { text, kind } => self.toasts.push(match kind {
                     ToastKind::Info => Toast::info(text),

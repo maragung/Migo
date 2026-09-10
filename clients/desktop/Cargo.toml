@@ -77,12 +77,39 @@ bytes = "1"
 # version the server graph uses, so the two dependency graphs share one copy of the crate.
 sha2 = "0.10"
 # The captcha challenge arrives as base64 text over REST and becomes pixels on a texture: base64
-# unwraps the wire form, `image` decodes the PNG inside it. Only the PNG codec is compiled in —
-# the server promises exactly one format, and a decoder that accepts more is a client that can be
-# handed something it never agreed to render. Same versions the server's captcha crate uses, so
-# the two dependency graphs share one copy of each.
+# unwraps the wire form, `image` decodes the PNG inside it. The codec list grew past PNG when
+# attachments arrived — an image another client sent is whatever that client's platform camera
+# produced, and the web client accepts png/jpeg/webp/gif, so this client decodes the same four
+# rather than rendering half the world's pictures as failures. Same version the server's captcha
+# crate uses, so the two dependency graphs share one copy of the crate.
 base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+# Voice-note decoding. A voice note arrives as whatever the sender's client recorded — the web
+# client records audio/webm (Opus) and audio/mp4, this client audio/wav — so the decode path
+# needs the containers those produce, plus the classics a desktop file might hold. Container +
+# codec features only, no default features: symphonia's defaults pull in everything it supports,
+# and a decoder that accepts more is a client that can be handed something it never agreed to
+# play. Symphonia has no Opus codec at all (its demuxers recognise the track but register no
+# decoder for it), so the Opus path — the web client's dominant recording — is decoded by
+# `oporus` below instead.
+symphonia = { version = "0.5", default-features = false, features = [
+    "wav",
+    "pcm",
+    "mkv",
+    "isomp4",
+    "aac",
+    "ogg",
+    "vorbis",
+    "mp3",
+    "flac",
+] }
+# Pure-Rust Opus decoder, wired by hand into the symphonia demux path for tracks symphonia
+# reports as Opus (audio/webm's A_OPUS, and Ogg Opus). Pure Rust on purpose: the alternative is
+# a libopus binding, and a C toolchain in the build is a dependency this client does not
+# otherwise carry. The same sample rates libopus offers (8/12/16/24/48 kHz), the same
+# capacity-style decode call — a buffer of the largest legal frame, the count of samples
+# actually decoded.
+oporus = "0.2"
 zeroize = { version = "1", features = ["derive"] }
 # Argon2id for the on-disk vault. `migo-crypto::password` hashes passwords into PHC strings for the
 # server to verify against; a vault needs the opposite — raw key bytes out of a passphrase — so the

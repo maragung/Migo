@@ -30,13 +30,16 @@ pub(crate) mod call_audio;
 pub(crate) mod call_signal;
 pub mod chain;
 pub mod gateway;
+pub(crate) mod media;
 pub mod quic;
 pub mod rest;
 pub mod tcp;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use migo_core::{Id, OsRandom, Random, Timestamp};
@@ -414,6 +417,42 @@ pub enum Command {
     /// Put an ended call's overlay away. The call is over on the wire; this only clears the
     /// screen.
     DismissCall,
+    /// Attach a local file to a conversation. The worker reads the bytes and judges them the
+    /// way the server will: an image the bytes prove is one, anything else is a document.
+    ///
+    /// The path is read here, in the worker, for the same reason the avatar's is — reading a
+    /// file is I/O the UI thread must not own — and the whole three-step upload (ticket, PUT,
+    /// commit) plus the message that references it is one command, because it is one action
+    /// to the person who clicked Attach.
+    SendAttachment { conversation_id: Id, path: PathBuf },
+    /// Begin recording a voice note in a conversation. One recording runs at a time; a second
+    /// ask while one runs is ignored (the UI trades its mic button for the recording bar, so
+    /// the ask should not be possible).
+    StartRecording { conversation_id: Id },
+    /// End the recording in progress: send it, or throw it away.
+    StopRecording { send: bool },
+    /// React to one message with one emoji. Add-only, the same shape every Migo client
+    /// sends: the server mints a deterministic message id from the envelope, and the UI adds
+    /// its own chip on the click rather than waiting for an echo this device suppresses.
+    SendReaction {
+        conversation_id: Id,
+        target_message_id: Id,
+        emoji: String,
+    },
+    /// Fetch one attachment for the thread. Deduplicated by the worker: a bubble that asks
+    /// twice still costs one fetch.
+    FetchMedia { media_id: Id },
+    /// Save one fetched attachment's original bytes to a local path. Fetches first when the
+    /// cache holds nothing, then writes — the file the sender sent, never a re-encode.
+    SaveMedia { media_id: Id, path: PathBuf },
+    /// Play one voice note, or stop it if it is the one already playing.
+    PlayVoiceNote { media_id: Id },
+    /// Stop whatever voice note is playing.
+    StopVoiceNote,
+    /// Internal: a voice note finished playing on its own — the pump ran out of samples.
+    /// Sent by the playback thread into this worker's own loop, the same way a chain
+    /// tracker's ending is, because the playing state belongs to the loop, not the thread.
+    VoiceNoteEnded { media_id: Id },
     /// Stop the worker. Sent on window close.
     Shutdown,
 }
@@ -676,6 +715,30 @@ pub enum Event {
     /// this device's to show anymore). Separate from [`Event::Call`] because "no call" is not a
     /// view, and an `Option` in every event would tax every other reader of the enum.
     CallGone,
+    /// A fetched image decoded: the pixels the bubble's texture wants, at their own size.
+    ///
+    /// Decoding happens in the worker — before the ask the bytes are sealed, and after it
+    /// they are an encoded format, and neither shape is one a paint loop should parse.
+    MediaImage {
+        media_id: Id,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
+    /// An attachment could not be had: the fetch failed, the seal refused, or the bytes
+    /// decoded as nothing this build can show. `reason` is safe to show as-is.
+    ///
+    /// Filed against the media id rather than toasted, so the failure lands in the bubble
+    /// it belongs to and a later press can try again.
+    MediaFailed { media_id: Id, reason: String },
+    /// A voice-note recording began, so the composer trades its field for the recording bar.
+    RecordingStarted { conversation_id: Id },
+    /// The recording ended — sent or discarded. The bar goes away.
+    RecordingStopped { conversation_id: Id },
+    /// A voice note started playing; the bubble's button becomes a stop.
+    VoicePlaying { media_id: Id },
+    /// A voice note stopped playing — the stop button, or the last sample itself.
+    VoiceStopped { media_id: Id },
     /// Something worth a line at the bottom of the window.
     Toast { text: String, kind: ToastKind },
 }
@@ -896,6 +959,41 @@ struct Signed {
     /// exactly that. Seeded `Online` — the same default a session announces itself with — so a
     /// status saved before any card arrives says the same thing the connect path already did.
     profile_presence: Option<migo_protocol::PresenceState>,
+    /// Which conversations are end-to-end encrypted, filed from every list read and create
+    /// answer because the summary is the one wire moment that states it.
+    ///
+    /// The upload path turns on this fact: an end-to-end conversation's attachment is sealed
+    /// before any bytes cross the wire, a room's travels as plaintext under the server's own
+    /// content policy (documents excepted — the one kind every client seals even into rooms).
+    /// A conversation this session has not been told about is guessed sealed: the wrong guess
+    /// fails an upload that can be retried, while the reverse would upload plaintext into an
+    /// encrypted conversation.
+    e2e: HashSet<Id>,
+    /// What every seen media reference said about its object: the key and nonce that open the
+    /// download, the claimed type, and whether it is a voice note (which is both its seal
+    /// domain and how it is served).
+    ///
+    /// Filed from every path that decrypts content — live, history, held-and-drained — and
+    /// from our own commits, because the keys travel only inside the message: the one message
+    /// a session misses is the one whose attachment can never be fetched again. Keyed by
+    /// media id, the one name the fetch wire knows.
+    media_keys: HashMap<Id, MediaKeying>,
+}
+
+/// What one media reference said about its object: the slots that open it, and how to serve
+/// it once opened.
+#[derive(Clone)]
+struct MediaKeying {
+    /// The key from the message's key slot: fresh when the upload sealed, all-zero when the
+    /// object is a room's plaintext.
+    key: Vec<u8>,
+    /// The nonce paired with the key.
+    nonce: Vec<u8>,
+    /// The MIME type the message claimed — what a save or a save-dialog is named after.
+    mime_type: String,
+    /// True when the object is a voice note: its seal domain is `migo-voice` and it is
+    /// served by playing, not by showing.
+    voice: bool,
 }
 
 /// One avatar upload in flight: the bytes the worker read, waiting for the ticket that says
@@ -905,6 +1003,138 @@ struct AvatarPending {
     path: PathBuf,
     /// The bytes themselves, held until the ticket's URL is known and they can be PUT.
     bytes: Vec<u8>,
+}
+
+/// One attachment upload between its `MEDIA_UPLOAD_BEGIN` and the ticket's arrival. Keyed by
+/// the correlation the reply will carry, because more than one attachment may be in flight
+/// and the wire's reply names nothing but the correlation.
+struct AttachmentBegin {
+    /// The conversation the message will land in.
+    conversation_id: Id,
+    /// The optimistic row's id, minted now so the commit's message send reuses it — the same
+    /// id the ACCEPTED acknowledgement will move from sending to sent.
+    message_id: Id,
+    /// What the message will claim, and the key slots that open the object.
+    plan: media::OutgoingMedia,
+    /// The bytes for the PUT: the sealed blob for an end-to-end upload, the plaintext for a
+    /// room's.
+    wire_bytes: Vec<u8>,
+}
+
+/// One attachment upload between its `MEDIA_UPLOAD_COMMIT` and the acknowledgement that says
+/// the object exists.
+struct AttachmentCommit {
+    /// The conversation the message will land in.
+    conversation_id: Id,
+    /// The optimistic row's id, the same one the BEGIN minted.
+    message_id: Id,
+    /// The object's id — the upload ticket's, which the message's content will name and
+    /// every later fetch will use. The commit's acknowledgement carries only `ok`, so it
+    /// rides here.
+    media_id: Id,
+    /// What the message will claim, key slots included.
+    plan: media::OutgoingMedia,
+}
+
+/// One fetch waiting on its signed URL, keyed by the correlation the reply will carry.
+struct MediaWant {
+    /// The object being fetched.
+    media_id: Id,
+    /// What the download is for once it opens.
+    intent: MediaIntent,
+}
+
+/// What a fetched attachment is being fetched *for* — the one fact that survives the fetch,
+/// because it decides how the opened bytes are served.
+enum MediaIntent {
+    /// Show it in the thread.
+    Show,
+    /// Play it as a voice note.
+    Play,
+    /// Write the original bytes to this path.
+    SaveTo(PathBuf),
+}
+
+/// A bounded cache of opened attachments, keyed by media id, oldest first.
+///
+/// Bounded because a thread full of images is a scrolling session's worth of megabytes and
+/// the seal's decryption work should be paid once per attachment, not once per scroll. The
+/// bound is bytes, not entries: a document and a thumbnail cost what they cost. Eviction is
+/// oldest-first and never empties the cache for one oversized entry — a note bigger than the
+/// whole budget is better playable than dropped for being large.
+struct MediaCache {
+    entries: VecDeque<(Id, media::CachedMedia)>,
+    cost: usize,
+}
+
+/// The cache's byte budget: enough for a handful of images or a conversation's voice notes,
+/// small enough that a long session's media cannot grow the worker without end.
+const MEDIA_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+impl MediaCache {
+    fn new() -> Self {
+        Self {
+            entries: VecDeque::new(),
+            cost: 0,
+        }
+    }
+
+    fn get(&self, id: &Id) -> Option<&media::CachedMedia> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|(held, _)| held == id)
+            .map(|(_, entry)| entry)
+    }
+
+    fn insert(&mut self, id: Id, entry: media::CachedMedia) {
+        if self.get(&id).is_some() {
+            return;
+        }
+        self.cost += entry.cost();
+        self.entries.push_back((id, entry));
+        while self.cost > MEDIA_CACHE_MAX_BYTES && self.entries.len() > 1 {
+            if let Some((_, evicted)) = self.entries.pop_front() {
+                self.cost = self.cost.saturating_sub(evicted.cost());
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.cost = 0;
+    }
+}
+
+/// One voice-note recording in progress: the open microphone, the samples it has produced,
+/// and the moment the cap ends it.
+struct Recording {
+    /// The conversation the note will land in.
+    conversation_id: Id,
+    /// The device handle, held so capture continues; dropped to stop. The chunk receiver is
+    /// not here — the capture pump owns it now.
+    microphone: call_audio::Microphone,
+    /// Where the capture pump appends, shared with the pump thread. A mutex over one vector
+    /// because the pump produces and the stop consumes; a channel would only move the same
+    /// hand-off somewhere else.
+    samples: Arc<Mutex<Vec<i16>>>,
+    /// The pump's stop flag, so an end is an end even mid-chunk.
+    stop: Arc<AtomicBool>,
+    /// The five-minute cap, as an instant the select loop can sleep to — a recording that
+    /// reaches it is ended and sent, not cut, because five minutes of someone's voice must
+    /// not be lost to a timer nobody watched.
+    deadline: std::time::Instant,
+}
+
+/// One voice note playing: the open speaker and the pump that feeds it.
+struct Playing {
+    /// The note's media id, so a late "ended" report from a stopped pump can be told from
+    /// this one's.
+    media_id: Id,
+    /// The device handle, held so playback continues; dropped to stop.
+    speaker: call_audio::Speaker,
+    /// The pump's stop flag.
+    stop: Arc<AtomicBool>,
 }
 
 /// The reconnect schedule after a lost gateway connection.
@@ -1133,6 +1363,25 @@ struct Worker {
     /// keys that unseal them. Lives on the worker because a call is a network session with its
     /// own timers, and the loop below owns every other timed thing the same way.
     calls: call::Calls,
+    /// Attachment uploads between their BEGIN and the ticket's arrival, keyed by correlation.
+    /// More than one may be in flight: an attach and a voice note can overlap, and the wire's
+    /// reply names nothing but the correlation it answers.
+    attachment_begins: HashMap<u32, AttachmentBegin>,
+    /// Attachment uploads between their COMMIT and the acknowledgement that closes them.
+    attachment_commits: HashMap<u32, AttachmentCommit>,
+    /// Fetches waiting on their signed URL, keyed by correlation.
+    media_wants: HashMap<u32, MediaWant>,
+    /// Media ids a fetch is already in flight for, so a bubble that asks twice (or a
+    /// scrolling thread that asks many times) costs one fetch.
+    media_fetching: HashSet<Id>,
+    /// What has been fetched and opened, bounded, so a scroll back through a thread of
+    /// images does not re-decrypt or re-download what this session already had.
+    media_cache: MediaCache,
+    /// The voice-note recording in progress, if one runs.
+    recording: Option<Recording>,
+    /// The voice note playing, if one plays. One at a time, like the recording: a speaker is
+    /// a device, and the second note would mix with the first.
+    playing: Option<Playing>,
 }
 
 impl Worker {
@@ -1155,6 +1404,13 @@ impl Worker {
             heartbeat: None,
             chain_http: reqwest::Client::new(),
             calls: call::Calls::new(),
+            attachment_begins: HashMap::new(),
+            attachment_commits: HashMap::new(),
+            media_wants: HashMap::new(),
+            media_fetching: HashSet::new(),
+            media_cache: MediaCache::new(),
+            recording: None,
+            playing: None,
         }
     }
 
@@ -1213,6 +1469,20 @@ impl Worker {
             // the borrow this future holds on the engine ends before `on_call_tick` takes its
             // own — the same discipline the frame arm follows with the gateway.
             let call_tick = self.calls.next_tick();
+            // A recording's cap, the same shape one more time: the deadline belongs to the
+            // loop because ending a recording touches the worker's own state (the recording,
+            // the pump's flag, the upload that follows), and a timer that fired from a
+            // sibling task would race every hand that touches them.
+            let record_until = self.recording.as_ref().map(|recording| recording.deadline);
+            let record = async move {
+                match record_until {
+                    Some(deadline) => {
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await
+                    }
+                    // Nothing recording: park, so this arm never completes and never spins.
+                    None => std::future::pending::<()>().await,
+                }
+            };
 
             tokio::select! {
                 command = commands.recv() => {
@@ -1230,6 +1500,7 @@ impl Worker {
                 () = due => self.reconnect().await,
                 () = beat => self.send_heartbeat().await,
                 Some(tick) = call_tick => self.on_call_tick(tick).await,
+                () = record => self.recording_deadline_reached().await,
             }
         }
 
@@ -1413,6 +1684,33 @@ impl Worker {
             Command::EndCall => self.end_call().await,
             Command::ToggleCallMute => self.toggle_call_mute(),
             Command::DismissCall => self.dismiss_call(),
+            Command::SendAttachment {
+                conversation_id,
+                path,
+            } => {
+                self.send_attachment(conversation_id, path).await;
+            }
+            Command::StartRecording { conversation_id } => {
+                self.start_recording(conversation_id);
+            }
+            Command::StopRecording { send } => self.stop_recording(send).await,
+            Command::SendReaction {
+                conversation_id,
+                target_message_id,
+                emoji,
+            } => {
+                self.send_reaction(conversation_id, target_message_id, emoji)
+                    .await;
+            }
+            Command::FetchMedia { media_id } => {
+                self.want_media(media_id, MediaIntent::Show).await;
+            }
+            Command::SaveMedia { media_id, path } => {
+                self.want_media(media_id, MediaIntent::SaveTo(path)).await;
+            }
+            Command::PlayVoiceNote { media_id } => self.play_voice_note(media_id).await,
+            Command::StopVoiceNote => self.stop_voice_note(),
+            Command::VoiceNoteEnded { media_id } => self.voice_note_ended(media_id),
             Command::Shutdown => {}
         }
     }
@@ -1746,6 +2044,8 @@ impl Worker {
             room_conversations: HashMap::new(),
             watched: HashSet::new(),
             profile_presence: None,
+            e2e: HashSet::new(),
+            media_keys: HashMap::new(),
         });
         self.txs = Some((account_id, txs));
         self.peers = Some((account_id, peers));
@@ -2455,6 +2755,725 @@ impl Worker {
     async fn abort_avatar(&mut self, upload_id: Id) {
         let message = migo_protocol::MediaAbort { upload_id };
         self.request(Opcode::MediaUploadAbort, &message).await;
+    }
+
+    /// Attaches a local file to a conversation: the three-step upload, then the message that
+    /// references it.
+    ///
+    /// The worker judges the file the way the server will, from the bytes: an image that
+    /// decodes is sent as an image (with its real dimensions, so receivers can lay out
+    /// before downloading), anything else is a document. The size caps are checked before
+    /// any bytes cross the wire, because a cap the server enforces is cheaper refused here.
+    async fn send_attachment(&mut self, conversation_id: Id, path: PathBuf) {
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.sink.toast(
+                    format!("Could not read the file: {error}"),
+                    ToastKind::Error,
+                );
+                return;
+            }
+        };
+        if bytes.is_empty() {
+            self.sink.toast("The file is empty.", ToastKind::Error);
+            return;
+        }
+        // The decoded image, when the bytes are one. Kept as a question (`ok()`) rather than
+        // a match on the result so the document arm does not have to spell out every way a
+        // decode refuses — anything that does not decode is a document, which is the honest
+        // claim for it.
+        let decoded = image::load_from_memory(&bytes).ok();
+        let (plan, plaintext) = match decoded.as_ref().map(image::DynamicImage::dimensions) {
+            Some((width, height)) => {
+                if bytes.len() as u64 > media::IMAGE_MAX_BYTES {
+                    self.sink.toast(
+                        "That image is larger than the 16 MB limit.",
+                        ToastKind::Error,
+                    );
+                    return;
+                }
+                let plan = media::OutgoingMedia {
+                    kind: media::KIND_IMAGE,
+                    mime_type: media::image_mime_of_bytes(&bytes, &path),
+                    size_bytes: bytes.len() as u64,
+                    // Filled by the begin, which is where the seal (or the room's plaintext
+                    // slots) is decided.
+                    key: Vec::new(),
+                    nonce: Vec::new(),
+                    width: Some(width),
+                    height: Some(height),
+                    duration_ms: None,
+                    caption: None,
+                };
+                (plan, bytes)
+            }
+            None => {
+                if bytes.len() as u64 > media::DOCUMENT_MAX_BYTES {
+                    self.sink.toast(
+                        "That file is larger than the 32 MB limit.",
+                        ToastKind::Error,
+                    );
+                    return;
+                }
+                let plan = media::OutgoingMedia {
+                    kind: media::KIND_DOCUMENT,
+                    mime_type: media::document_mime_of(&path).to_owned(),
+                    size_bytes: bytes.len() as u64,
+                    key: Vec::new(),
+                    nonce: Vec::new(),
+                    width: None,
+                    height: None,
+                    duration_ms: None,
+                    caption: None,
+                };
+                (plan, bytes)
+            }
+        };
+        self.begin_attachment(conversation_id, plan, plaintext)
+            .await;
+    }
+
+    /// Begins one attachment upload: decides the seal, claims what the wire's sniffer
+    /// expects, and sends the BEGIN whose ticket starts the real work.
+    ///
+    /// What the upload *claims* and what the message later claims are deliberately different
+    /// facts. An end-to-end upload claims `application/octet-stream` and the sealed length —
+    /// the server must not read the type off bytes it cannot read at all, and both the claim
+    /// and the digest describe the bytes actually PUT. The message claims the real MIME type
+    /// and the plaintext size, because its readers are the recipients, who hold the key.
+    /// A room's upload is the server-readable path: the real type, the plaintext, the
+    /// zero-filled key slots — except documents, which every client seals even into rooms.
+    async fn begin_attachment(
+        &mut self,
+        conversation_id: Id,
+        mut plan: media::OutgoingMedia,
+        plaintext: Vec<u8>,
+    ) {
+        let sealed = match self.signed.as_ref() {
+            // Documents are always sealed. Everything else follows the conversation: an
+            // end-to-end conversation seals, a room takes the plaintext path.
+            Some(signed) => {
+                plan.kind == media::KIND_DOCUMENT || signed.e2e.contains(&conversation_id)
+            }
+            None => return,
+        };
+        let (key, nonce, wire_bytes, content_type, size) = if sealed {
+            let domain = if plan.kind == media::KIND_VOICE_NOTE {
+                media::VOICE_DOMAIN
+            } else {
+                media::MEDIA_DOMAIN
+            };
+            let sealed = match media::seal_media(&plaintext, domain, &mut OsRandom) {
+                Ok(sealed) => sealed,
+                Err(reason) => {
+                    self.sink.toast(reason, ToastKind::Error);
+                    return;
+                }
+            };
+            let size = sealed.sealed.len() as u64;
+            (
+                sealed.key,
+                sealed.nonce,
+                sealed.sealed,
+                "application/octet-stream".to_owned(),
+                size,
+            )
+        } else {
+            let (key, nonce) = media::OutgoingMedia::plaintext_slots();
+            let content_type = plan.mime_type.clone();
+            let size = plan.size_bytes;
+            (key, nonce, plaintext, content_type, size)
+        };
+        plan.key = key;
+        plan.nonce = nonce;
+
+        let message_id = Id::generate_at(Timestamp::now(), &mut OsRandom);
+        let begin = migo_protocol::MediaBegin {
+            kind: plan.kind,
+            content_type,
+            size,
+            // The one field that decides the server's whole policy: with a conversation the
+            // upload is conversation-scoped (and an end-to-end conversation's is never
+            // sniffed or scanned), without one it is profile media.
+            conversation_id: Some(conversation_id),
+            width: plan.width,
+            height: plan.height,
+            duration_ms: plan.duration_ms,
+        };
+        let Some(correlation) = self
+            .send_and_remember(Opcode::MediaUploadBegin, &begin)
+            .await
+        else {
+            return;
+        };
+        self.attachment_begins.insert(
+            correlation,
+            AttachmentBegin {
+                conversation_id,
+                message_id,
+                plan,
+                wire_bytes,
+            },
+        );
+    }
+
+    /// A `MEDIA_UPLOAD_BEGIN` reply arrived for an attachment: PUT the bytes and commit them
+    /// with the real SHA-256 of what was sent.
+    ///
+    /// The digest is the one thing the server records about the bytes; a placeholder would
+    /// make this client the odd one out in every future integrity check. For an end-to-end
+    /// upload the bytes hashed are the sealed ones — they are the bytes that were PUT.
+    async fn attachment_ticket_arrived(
+        &mut self,
+        correlation: u32,
+        ticket: migo_protocol::MediaTicket,
+    ) {
+        let Some(pending) = self.attachment_begins.remove(&correlation) else {
+            return;
+        };
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        if let Err(error) = signed
+            .rest
+            .put_upload_bytes(&ticket.upload_url, pending.wire_bytes.clone())
+            .await
+        {
+            self.abort_attachment(ticket.upload_id).await;
+            self.sink.toast(
+                format!("Could not upload the attachment: {error}"),
+                ToastKind::Error,
+            );
+            return;
+        }
+        let digest = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&pending.wire_bytes);
+            hasher.finalize().to_vec()
+        };
+        let commit = migo_protocol::MediaCommit {
+            upload_id: ticket.upload_id,
+            digest,
+        };
+        let Some(correlation) = self
+            .send_and_remember(Opcode::MediaUploadCommit, &commit)
+            .await
+        else {
+            self.abort_attachment(ticket.upload_id).await;
+            return;
+        };
+        self.attachment_commits.insert(
+            correlation,
+            AttachmentCommit {
+                conversation_id: pending.conversation_id,
+                message_id: pending.message_id,
+                media_id: ticket.upload_id,
+                plan: pending.plan,
+            },
+        );
+    }
+
+    /// A `MEDIA_UPLOAD_COMMIT` acknowledgement arrived: the object exists, so the message
+    /// that references it can go out — the optimistic row first, the same shape a text send
+    /// takes, then the sealed content through the shared send path.
+    ///
+    /// The row appears here rather than at the click because the media id is minted by the
+    /// ticket, and the content can only be built once it exists — the same ordering the web
+    /// client's sendAttachment takes (upload, then send).
+    async fn attachment_committed(&mut self, correlation: u32) {
+        let Some(pending) = self.attachment_commits.remove(&correlation) else {
+            return;
+        };
+        // File the keying now, from the plan that minted it: a fetch of our own object —
+        // from this device after an eviction, or another device entirely — opens with the
+        // same slots the message carries.
+        if let Some(signed) = self.signed.as_mut() {
+            signed
+                .media_keys
+                .entry(pending.media_id)
+                .or_insert_with(|| MediaKeying {
+                    key: pending.plan.key.clone(),
+                    nonce: pending.plan.nonce.clone(),
+                    mime_type: pending.plan.mime_type.clone(),
+                    voice: pending.plan.kind == media::KIND_VOICE_NOTE,
+                });
+        }
+        let sender_id = self.signed.as_ref().map(|signed| signed.account.account_id);
+        let Some(sender_id) = sender_id else {
+            return;
+        };
+        self.sink.send(Event::Message(Message {
+            message_id: pending.message_id,
+            conversation_id: pending.conversation_id,
+            seq: 0,
+            sender_id,
+            outgoing: true,
+            body: pending.plan.body(pending.media_id),
+            sent_at: Timestamp::now(),
+            delivery: Delivery::Sending,
+        }));
+        let plaintext = match content::encode(&pending.plan.content(pending.media_id), true) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return self.sink.send(Event::SendFailed {
+                    message_id: pending.message_id,
+                })
+            }
+        };
+        let Some((envelope, chain_id)) =
+            self.envelope_for(pending.conversation_id, &plaintext).await
+        else {
+            return self.sink.send(Event::SendFailed {
+                message_id: pending.message_id,
+            });
+        };
+        // The coarse kind travels in the clear and the server routes and counts by it, so it
+        // must say what the envelope actually carries: Media for an image or document,
+        // Voice for a voice note — the same mapping the web SDK's `kindForContent` makes
+        // for MediaRef and VoiceNoteRef. Text would be a lie the counters keep.
+        let kind = if pending.plan.kind == media::KIND_VOICE_NOTE {
+            MessageKind::Voice
+        } else {
+            MessageKind::Media
+        };
+        let message = migo_protocol::MessageSend {
+            message_id: pending.message_id,
+            conversation_id: pending.conversation_id,
+            kind,
+            envelope,
+            reply_to: None,
+            expires_in_ms: None,
+            sender_key_id: Some(chain_id),
+        };
+        self.request(Opcode::MessageSend, &message).await;
+    }
+
+    /// Abandons an attachment's upload ticket, the same best-effort the avatar's takes.
+    async fn abort_attachment(&mut self, upload_id: Id) {
+        let message = migo_protocol::MediaAbort { upload_id };
+        self.request(Opcode::MediaUploadAbort, &message).await;
+    }
+
+    /// Reacts to one message with one emoji, over the same seal as any content.
+    ///
+    /// `REACTION_SET` is fire-and-forget here for the same reason the web client's is: the
+    /// server mints a deterministic message id from the envelope, so a retry is a duplicate
+    /// suppressed server-side and a lost reply is a reaction that still landed. Our own echo
+    /// comes back suppressed (this device's messages never re-render), so the UI adds its
+    /// own chip on the click — nothing here has an event to send.
+    async fn send_reaction(&mut self, conversation_id: Id, target_message_id: Id, emoji: String) {
+        let content = Content::Reaction {
+            target_message_id,
+            emoji,
+            // Add-only, the same shape every Migo client sends: no client offers a retract,
+            // so the flag exists on the wire but not in anyone's hands.
+            remove: false,
+        };
+        let plaintext = match content::encode(&content, true) {
+            Ok(bytes) => bytes,
+            Err(_) => return,
+        };
+        let Some((envelope, _chain_id)) = self.envelope_for(conversation_id, &plaintext).await
+        else {
+            return;
+        };
+        let reaction = migo_protocol::ReactionSet {
+            target_message_id,
+            conversation_id,
+            envelope,
+        };
+        self.request(Opcode::ReactionSet, &reaction).await;
+    }
+
+    /// Begins a voice-note recording: opens the microphone and hands its chunks to a pump
+    /// that appends them at the note's own rate.
+    fn start_recording(&mut self, conversation_id: Id) {
+        if self.recording.is_some() {
+            return;
+        }
+        let microphone = match call_audio::open_microphone() {
+            Ok(microphone) => microphone,
+            Err(error) => {
+                self.sink.toast(
+                    format!("Could not open the microphone: {error}"),
+                    ToastKind::Error,
+                );
+                return;
+            }
+        };
+        let rate = microphone.rate;
+        let frames = microphone.take_frames();
+        let samples = Arc::new(Mutex::new(Vec::<i16>::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        spawn_recording_pump(frames, rate, Arc::clone(&samples), Arc::clone(&stop));
+        self.recording = Some(Recording {
+            conversation_id,
+            microphone,
+            samples,
+            stop,
+            deadline: std::time::Instant::now() + Duration::from_millis(media::VOICE_NOTE_MAX_MS),
+        });
+        self.sink.send(Event::RecordingStarted { conversation_id });
+    }
+
+    /// Ends the recording in progress: sends it, or throws it away.
+    async fn stop_recording(&mut self, send: bool) {
+        let Some(recording) = self.recording.take() else {
+            return;
+        };
+        let conversation_id = recording.conversation_id;
+        recording.stop.store(true, Ordering::Relaxed);
+        let samples = recording
+            .samples
+            .lock()
+            .map(|mut buffer| std::mem::take(&mut *buffer))
+            .unwrap_or_default();
+        // Dropping the handle stops capture; the pump thread ends with its channel.
+        drop(recording);
+        self.sink.send(Event::RecordingStopped { conversation_id });
+        if !send {
+            return;
+        }
+        // A note shorter than a quarter-second is a click, not a message: refuse it as one.
+        if (samples.len() as u64) < u64::from(media::VOICE_NOTE_SAMPLE_RATE) / 4 {
+            self.sink.toast(
+                "Hold the microphone a moment longer to record a note.",
+                ToastKind::Info,
+            );
+            return;
+        }
+        // The cap, enforced on the samples the pump actually produced. The deadline arm ends
+        // the recording at the same cap, so this truncation is the backstop for a pump that
+        // appended past the deadline in its last chunk.
+        let max_samples =
+            media::VOICE_NOTE_MAX_MS * u64::from(media::VOICE_NOTE_SAMPLE_RATE) / 1_000;
+        let mut samples = samples;
+        samples.truncate(max_samples as usize);
+        let duration_ms = samples.len() as u64 * 1_000 / u64::from(media::VOICE_NOTE_SAMPLE_RATE);
+        let wav = media::wav_bytes(&samples, media::VOICE_NOTE_SAMPLE_RATE);
+        if wav.len() as u64 > media::VOICE_NOTE_MAX_BYTES {
+            // Cannot happen at this rate and cap (a capped recording is 4.8 MB of the 8 MB
+            // budget), but the byte cap is the policy and the policy is checked, not assumed.
+            self.sink
+                .toast("That recording is too long to send.", ToastKind::Error);
+            return;
+        }
+        let plan = media::OutgoingMedia {
+            kind: media::KIND_VOICE_NOTE,
+            // Plain WAV: PCM 16-bit, mono, at the note's own rate — the one container every
+            // client plays and the server's sniffer reads from the RIFF magic alone.
+            mime_type: "audio/wav".to_owned(),
+            size_bytes: wav.len() as u64,
+            key: Vec::new(),
+            nonce: Vec::new(),
+            width: None,
+            height: None,
+            duration_ms: Some(duration_ms),
+            caption: None,
+        };
+        self.begin_attachment(conversation_id, plan, wav).await;
+    }
+
+    /// The recording's cap arrived without a stop: end it and send, the same action the Send
+    /// button performs. A note lost to silence at its own five-minute mark is the one
+    /// failure of a deadline nobody was watching.
+    async fn recording_deadline_reached(&mut self) {
+        if self.recording.is_some() {
+            self.stop_recording(true).await;
+        }
+    }
+
+    /// Plays one voice note, or stops it if it is the one already playing. Any other note
+    /// playing is stopped first — one speaker, one note.
+    async fn play_voice_note(&mut self, media_id: Id) {
+        if let Some(playing) = self.playing.as_ref() {
+            if playing.media_id == media_id {
+                self.stop_voice_note();
+                return;
+            }
+            self.stop_voice_note();
+        }
+        if let Some(media::CachedMedia::Audio { samples, rate }) = self.media_cache.get(&media_id) {
+            let samples = Arc::clone(samples);
+            let rate = *rate;
+            self.start_playback(media_id, samples, rate);
+            return;
+        }
+        // Not cached: fetch it, and play when it opens. The want carries the intent so the
+        // fetch's completion knows what the bytes were fetched for.
+        self.want_media(media_id, MediaIntent::Play).await;
+    }
+
+    /// Starts one note playing on a fresh speaker, with a paced pump feeding it.
+    fn start_playback(&mut self, media_id: Id, samples: Arc<Vec<i16>>, rate: u32) {
+        let speaker = match call_audio::open_speaker() {
+            Ok(speaker) => speaker,
+            Err(error) => {
+                self.sink.toast(
+                    format!("Could not open the speaker: {error}"),
+                    ToastKind::Error,
+                );
+                return;
+            }
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        spawn_playback_pump(
+            speaker.frames.clone(),
+            speaker.rate,
+            samples,
+            rate,
+            Arc::clone(&stop),
+            self.commands.clone(),
+            media_id,
+        );
+        self.playing = Some(Playing {
+            media_id,
+            speaker,
+            stop,
+        });
+        self.sink.send(Event::VoicePlaying { media_id });
+    }
+
+    /// Stops the note playing, if one is. The button, a second note starting, sign-out, and
+    /// the loop's own teardown all arrive here.
+    fn stop_voice_note(&mut self) {
+        let Some(playing) = self.playing.take() else {
+            return;
+        };
+        let media_id = playing.media_id;
+        playing.stop.store(true, Ordering::Relaxed);
+        drop(playing);
+        self.sink.send(Event::VoiceStopped { media_id });
+    }
+
+    /// A playback pump ran out of samples: the note finished on its own. The pump that
+    /// reports is identified, because a stopped pump can outlive its stop by a chunk and a
+    /// late report must not end the note that replaced it.
+    fn voice_note_ended(&mut self, media_id: Id) {
+        let is_current = self
+            .playing
+            .as_ref()
+            .is_some_and(|playing| playing.media_id == media_id);
+        if !is_current {
+            return;
+        }
+        self.stop_voice_note();
+    }
+
+    /// Wants one attachment: serves it from the cache when this session already has it, and
+    /// fetches it otherwise. Asking twice while a fetch is in flight costs nothing — the
+    /// second ask is folded into the first by [`Self::media_fetching`].
+    async fn want_media(&mut self, media_id: Id, intent: MediaIntent) {
+        if self.media_cache.get(&media_id).is_some() {
+            // Already opened this session: serve it without a round trip. A kind and an
+            // intent that do not match (a play asked of a document) are serve_media's own
+            // nothing, not something to catch here.
+            self.serve_media(media_id, intent);
+            return;
+        }
+        if !self.media_fetching.insert(media_id) {
+            return;
+        }
+        let has_key = self
+            .signed
+            .as_ref()
+            .is_some_and(|signed| signed.media_keys.contains_key(&media_id));
+        if !has_key {
+            self.media_fetching.remove(&media_id);
+            self.sink.send(Event::MediaFailed {
+                media_id,
+                reason: "This attachment's message is not in this session, so its key is \
+                         not held. Reopen the conversation's history and try again."
+                    .to_owned(),
+            });
+            return;
+        }
+        let fetch = migo_protocol::MediaFetch {
+            object_id: media_id,
+            // The server ignores this field; the object id is the whole address. None, so a
+            // future server that reads it is not told a wrong conversation.
+            conversation_id: None,
+        };
+        let Some(correlation) = self.send_and_remember(Opcode::MediaFetchUrl, &fetch).await else {
+            self.media_fetching.remove(&media_id);
+            return;
+        };
+        self.media_wants
+            .insert(correlation, MediaWant { media_id, intent });
+    }
+
+    /// A `MEDIA_FETCH_URL` reply arrived: download, open, decode, cache, and serve.
+    ///
+    /// Every failure collapses into a [`Event::MediaFailed`] against the media id — the
+    /// fetch, the seal, the decode — because the bubble is where the sentence belongs, and
+    /// each of them leaves the attachment unfetchable for the same reason the retry exists:
+    /// the press of the button again.
+    async fn media_url_arrived(&mut self, correlation: u32, url: migo_protocol::MediaUrl) {
+        let Some(want) = self.media_wants.remove(&correlation) else {
+            return;
+        };
+        let media_id = want.media_id;
+        let failed = |worker: &mut Self, reason: String| {
+            worker.media_fetching.remove(&media_id);
+            worker.sink.send(Event::MediaFailed { media_id, reason });
+        };
+        let Some(signed) = self.signed.as_ref() else {
+            return;
+        };
+        let bytes = match signed.rest.get_download_bytes(&url.url).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                failed(self, format!("Could not fetch the attachment: {error}"));
+                return;
+            }
+        };
+        let Some(keying) = signed.media_keys.get(&media_id).cloned() else {
+            failed(
+                self,
+                "The key for this attachment is no longer held.".to_owned(),
+            );
+            return;
+        };
+        let opened = if media::is_legacy_plaintext(&keying.key) {
+            // A room's plaintext upload: the bytes are the attachment, nothing to open.
+            Ok(bytes)
+        } else {
+            let domain = if keying.voice {
+                media::VOICE_DOMAIN
+            } else {
+                media::MEDIA_DOMAIN
+            };
+            media::open_media(&keying.key, &keying.nonce, domain, &bytes)
+        };
+        let opened = match opened {
+            Ok(opened) => opened,
+            Err(reason) => {
+                failed(self, reason.to_owned());
+                return;
+            }
+        };
+        let cached = if keying.voice {
+            match media::decode_audio(&opened) {
+                Ok(decoded) => media::CachedMedia::Audio {
+                    samples: Arc::new(decoded.samples),
+                    rate: decoded.rate,
+                },
+                Err(reason) => {
+                    failed(self, reason);
+                    return;
+                }
+            }
+        } else if keying.mime_type.starts_with("image/") {
+            // Cached as the sender's original bytes; the pixels are decoded per serve, so a
+            // save writes the file that was sent.
+            media::CachedMedia::Image {
+                bytes: opened,
+                mime_type: keying.mime_type.clone(),
+            }
+        } else {
+            media::CachedMedia::Document {
+                bytes: opened,
+                mime_type: keying.mime_type.clone(),
+            }
+        };
+        self.media_cache.insert(media_id, cached);
+        self.media_fetching.remove(&media_id);
+        self.serve_media(media_id, want.intent);
+    }
+
+    /// Serves one cached attachment for one intent: pixels for a show, the speaker for a
+    /// play, the original bytes for a save.
+    fn serve_media(&mut self, media_id: Id, intent: MediaIntent) {
+        let Some(cached) = self.media_cache.get(&media_id) else {
+            return;
+        };
+        match (cached, intent) {
+            (media::CachedMedia::Image { bytes, .. }, MediaIntent::Show) => {
+                match media::decode_image(bytes) {
+                    Ok((width, height, rgba)) => self.sink.send(Event::MediaImage {
+                        media_id,
+                        width,
+                        height,
+                        rgba,
+                    }),
+                    Err(reason) => self.sink.send(Event::MediaFailed { media_id, reason }),
+                }
+            }
+            (media::CachedMedia::Audio { samples, rate }, MediaIntent::Play) => {
+                let samples = Arc::clone(samples);
+                let rate = *rate;
+                self.start_playback(media_id, samples, rate);
+            }
+            (cached, MediaIntent::SaveTo(path)) => match cached.bytes() {
+                Some(bytes) => match std::fs::write(&path, bytes) {
+                    Ok(()) => self
+                        .sink
+                        .toast(format!("Saved to {}", path.display()), ToastKind::Success),
+                    Err(error) => self
+                        .sink
+                        .toast(format!("Could not save: {error}"), ToastKind::Error),
+                },
+                None => self.sink.toast(
+                    "A voice note has no file to save — it plays here.".to_owned(),
+                    ToastKind::Info,
+                ),
+            },
+            // A kind and an intent that do not match (a play asked of a document, a show of
+            // a note) is nothing: the UI only offers the affordance the body type names.
+            _ => {}
+        }
+    }
+
+    /// Files what one decrypted content said about the media object it references.
+    ///
+    /// Called on every path that sees content — live, history, held-and-drained — and after
+    /// our own commits, because the keys travel only inside the message: the one message a
+    /// session misses is the one whose attachment can never be fetched again. An
+    /// `or_insert_with`, not an insert, so a peer's own echo of a reference we sent does not
+    /// overwrite the slots this device minted.
+    fn file_media_keys(&mut self, content: &Content) {
+        let Some(signed) = self.signed.as_mut() else {
+            return;
+        };
+        match content {
+            Content::MediaRef {
+                media_id,
+                mime_type,
+                key,
+                nonce,
+                ..
+            } => {
+                signed
+                    .media_keys
+                    .entry(*media_id)
+                    .or_insert_with(|| MediaKeying {
+                        key: key.clone(),
+                        nonce: nonce.clone(),
+                        mime_type: mime_type.clone(),
+                        voice: false,
+                    });
+            }
+            Content::VoiceNoteRef {
+                media_id,
+                mime_type,
+                key,
+                nonce,
+                ..
+            } => {
+                signed
+                    .media_keys
+                    .entry(*media_id)
+                    .or_insert_with(|| MediaKeying {
+                        key: key.clone(),
+                        nonce: nonce.clone(),
+                        mime_type: mime_type.clone(),
+                        voice: true,
+                    });
+            }
+            _ => {}
+        }
     }
 
     /// The MIME type to claim for an avatar file, from its extension.
@@ -3790,25 +4809,45 @@ impl Worker {
             Ok(bytes) => bytes,
             Err(_) => return self.sink.send(Event::SendFailed { message_id }),
         };
+        let Some((envelope, chain_id)) = self.envelope_for(conversation_id, &plaintext).await
+        else {
+            return self.sink.send(Event::SendFailed { message_id });
+        };
+        let message = migo_protocol::MessageSend {
+            message_id,
+            conversation_id,
+            kind: MessageKind::Text,
+            envelope,
+            reply_to: None,
+            expires_in_ms: None,
+            sender_key_id: Some(chain_id),
+        };
+        self.request(Opcode::MessageSend, &message).await;
+    }
 
-        // The audience the SDK's `recipientDevices` computes: members ∪ this account, devices of
-        // each, minus this sending device. Devices are known only through KEY_BUNDLE responses;
-        // an account with no bundle yet is a peer this client cannot reach, so the send is
-        // retried after the fetch the code below triggers.
-        //
-        // A membership cached from a list row is a *preview* — the server caps list rows at
-        // `MEMBER_PREVIEW` members, enough to render the row and not enough to choose an
-        // encryption audience. Sealing to it would hand the group key to eight members of a
-        // nine-member group and leave the ninth unable to decrypt, ever. So an incomplete cache
-        // asks the roster first (the same answer the SDK's first send reads); the message is
-        // retried once the whole truth arrives, exactly the way a missing device list is.
+    /// Everything a message needs after its content is encoded: the audience, the
+    /// distributions that reach it, and the content seal.
+    ///
+    /// The shared body of every send path — text, an attachment's reference, a reaction —
+    /// because the three differ only in what they seal, never in who it goes to or how.
+    /// [`Self::send_text`] states the reasoning in full; this is that reasoning, once.
+    ///
+    /// Returns `None` when the message cannot be sealed now — an incomplete roster, a device
+    /// list not yet fetched — each of which has already been reported as a toast, because the
+    /// same sentences are worth reading whatever the message would have been. The caller
+    /// fails its own optimistic row.
+    async fn envelope_for(
+        &mut self,
+        conversation_id: Id,
+        plaintext: &[u8],
+    ) -> Option<(Vec<u8>, u32)> {
         let Some(signed) = self.signed.as_ref() else {
-            return;
+            return None;
         };
         let Some(cached) = signed.members.get(&conversation_id) else {
             // Never primed: the send path is only reached from a conversation the list or a
             // create seeded, but a defensive refusal beats sealing for no one.
-            return self.sink.send(Event::SendFailed { message_id });
+            return None;
         };
         let incomplete = !cached.complete;
         if incomplete {
@@ -3819,13 +4858,13 @@ impl Worker {
                 "reading this group's full roster, try again in a moment",
                 ToastKind::Info,
             );
-            return self.sink.send(Event::SendFailed { message_id });
+            return None;
         }
         // The audience the SDK's `recipientDevices` computes: members ∪ this account (the account's
         // other devices must receive this message for sync), devices of each, minus this sending
         // device.
         let Some(signed) = self.signed.as_ref() else {
-            return;
+            return None;
         };
         let members: Vec<Id> = signed
             .members
@@ -3854,8 +4893,7 @@ impl Worker {
                         "fetching keys for this conversation, try again in a moment",
                         ToastKind::Info,
                     );
-                    self.sink.send(Event::SendFailed { message_id });
-                    return;
+                    return None;
                 }
             }
         }
@@ -3865,12 +4903,12 @@ impl Worker {
         // would gate that message out of the receiver's chain, which is the late-joiner property
         // applied to everyone.
         let Some(signed) = self.signed.as_mut() else {
-            return;
+            return None;
         };
         let distribution = signed.groups.distribution(conversation_id);
         for device in &targets {
             let Some(signed) = self.signed.as_mut() else {
-                return;
+                return None;
             };
             if !signed.groups.needs_distribution(conversation_id, *device) {
                 continue;
@@ -3915,26 +4953,16 @@ impl Worker {
             }
         }
 
-        // One MESSAGE_SEND for the whole conversation: sealed once, fanned out by the server to
-        // every device the distribution reached. This is the entire point of the sender-key
-        // design — the pairwise cost is paid per device once, not per message.
+        // One seal for the whole conversation, fanned out by the server to every device the
+        // distribution reached. This is the entire point of the sender-key design — the
+        // pairwise cost is paid per device once, not per message.
         let Some(signed) = self.signed.as_mut() else {
-            return;
+            return None;
         };
-        let sealed = match signed.groups.seal(conversation_id, &plaintext) {
-            Ok(sealed) => sealed,
-            Err(_) => return self.sink.send(Event::SendFailed { message_id }),
-        };
-        let message = migo_protocol::MessageSend {
-            message_id,
-            conversation_id,
-            kind: MessageKind::Text,
-            envelope: sealed.envelope,
-            reply_to: None,
-            expires_in_ms: None,
-            sender_key_id: Some(sealed.chain_id),
-        };
-        self.request(Opcode::MessageSend, &message).await;
+        match signed.groups.seal(conversation_id, plaintext) {
+            Ok(sealed) => Some((sealed.envelope, sealed.chain_id)),
+            Err(_) => None,
+        }
     }
 
     /// Requests the public room directory, narrowed by a query when one is held.
@@ -4462,6 +5490,16 @@ impl Worker {
         // all end now, without a wire message — the gateway is already gone above, and the
         // server tears the session down on its own.
         self.calls_sign_out();
+        // Media cannot survive them either: uploads in flight have no session to commit
+        // under, fetches no keys to open with, and a recording no conversation to land in.
+        // The abandoned tickets die on their own expiry; the pumps stop with their handles.
+        self.attachment_begins.clear();
+        self.attachment_commits.clear();
+        self.media_wants.clear();
+        self.media_fetching.clear();
+        self.media_cache.clear();
+        self.recording = None;
+        self.playing = None;
         self.sink.send(Event::Connection(Connection::Offline));
         self.sink.send(Event::SignedOut);
         self.sink.toast(
@@ -4515,15 +5553,35 @@ impl Worker {
             Opcode::Typing => self.on_typing(&frame),
             Opcode::ProfileFetch => self.on_profiles(&frame),
             Opcode::ProfileUpdate => self.on_profile_saved(&frame),
-            // The avatar upload's own replies. Matched by correlation against the pending
-            // state rather than decoded for the world: a ticket that was not asked for is a
-            // late answer to something else, ignored by the `take()` inside.
+            // The upload flows' replies, matched by correlation. The avatar and attachment
+            // flows share these opcodes; the correlation — minted once per request, never
+            // reused within a session — says whose reply this is. An attachment's
+            // correlation was stored when its request went out; anything else is the
+            // avatar's, whose own pending state ignores a late answer by taking nothing.
             Opcode::MediaUploadBegin => {
                 if let Ok(ticket) = gateway::decode::<migo_protocol::MediaTicket>(&frame) {
-                    self.avatar_ticket_arrived(ticket).await;
+                    let correlation = frame.header.correlation;
+                    if self.attachment_begins.contains_key(&correlation) {
+                        self.attachment_ticket_arrived(correlation, ticket).await;
+                    } else {
+                        self.avatar_ticket_arrived(ticket).await;
+                    }
                 }
             }
-            Opcode::MediaUploadCommit => self.avatar_committed().await,
+            Opcode::MediaUploadCommit => {
+                let correlation = frame.header.correlation;
+                if self.attachment_commits.contains_key(&correlation) {
+                    self.attachment_committed(correlation).await;
+                } else {
+                    self.avatar_committed().await;
+                }
+            }
+            // A fetch's signed URL, matched the same way to the want that asked for it.
+            Opcode::MediaFetchUrl => {
+                if let Ok(url) = gateway::decode::<migo_protocol::MediaUrl>(&frame) {
+                    self.media_url_arrived(frame.header.correlation, url).await;
+                }
+            }
             Opcode::RelationshipList => self.on_relationships(&frame).await,
             // The acknowledgement of a FRIEND_REQUEST or FRIEND_RESPOND. Both mean the graph
             // moved and the list in the UI is now stale, so both take the same action: re-read.
@@ -4717,6 +5775,16 @@ impl Worker {
                         ids: members.clone(),
                         complete: false,
                     });
+                // Whether the conversation is end-to-end encrypted: the fact the attachment
+                // upload path turns on, filed from the summary because the summary is the one
+                // wire moment that states it. End-to-end seals its uploads; anything else is
+                // the room path. A removal on the room side matters as much as the insert —
+                // a conversation the server turned into a room must stop sealing.
+                if summary.encryption == EncryptionMode::EndToEnd {
+                    signed.e2e.insert(summary.conversation_id);
+                } else {
+                    signed.e2e.remove(&summary.conversation_id);
+                }
                 if signed.conversations_watched.insert(summary.conversation_id) {
                     to_watch.push(summary.conversation_id);
                 }
@@ -4786,6 +5854,13 @@ impl Worker {
                     complete: true,
                 },
             );
+            // The encryption fact, the same filing the list read makes: the create answer
+            // states it, and an attachment sent before the first list refresh needs it.
+            if summary.encryption == EncryptionMode::EndToEnd {
+                signed.e2e.insert(summary.conversation_id);
+            } else {
+                signed.e2e.remove(&summary.conversation_id);
+            }
             if signed.conversations_watched.insert(summary.conversation_id) {
                 to_watch.push(summary.conversation_id);
             }
@@ -5126,6 +6201,12 @@ impl Worker {
                     if self.adopt_call_key(&content) {
                         return None;
                     }
+                    // An attachment's key material travels only inside its message, so the
+                    // one place it can be filed is here — before the content is consumed
+                    // into a body, and on every path that opens one (live, history,
+                    // held-and-drained), because the fetch it enables may come minutes or
+                    // days after the message that carried it.
+                    self.file_media_keys(&content);
                     body_of(content)
                 }
             }
@@ -5315,14 +6396,29 @@ fn body_of(content: Content) -> Body {
     match content {
         Content::Text { text, .. } => Body::Text(text),
         Content::MediaRef {
+            media_id,
             mime_type,
             size_bytes,
+            width,
+            height,
+            caption,
             ..
         } => Body::Media {
+            media_id,
             mime_type,
             size_bytes,
+            width,
+            height,
+            caption,
         },
-        Content::VoiceNoteRef { duration_ms, .. } => Body::VoiceNote { duration_ms },
+        Content::VoiceNoteRef {
+            media_id,
+            duration_ms,
+            ..
+        } => Body::VoiceNote {
+            media_id,
+            duration_ms,
+        },
         Content::Reaction {
             emoji,
             target_message_id,
@@ -5334,6 +6430,117 @@ fn body_of(content: Content) -> Body {
         Content::ControlEvent { .. } => Body::Unsupported { content_type: 5 },
         Content::Unsupported { content_type } => Body::Unsupported { content_type },
     }
+}
+
+/// The capture pump for a voice-note recording.
+///
+/// A plain thread, not a task, because the microphone's chunks arrive on a *blocking* std
+/// channel — a runtime thread would sit parked on `recv()` anyway, and a plain thread says
+/// so honestly. The pump owns the receiver and nothing else; the worker keeps the device
+/// handle, and dropping that handle is what stops capture and (via the closed channel) ends
+/// this thread. The samples append at whatever rate the host granted, resampled to the
+/// note's own rate when the host insisted on another.
+fn spawn_recording_pump(
+    mut frames: std_mpsc::Receiver<Vec<i16>>,
+    source_rate: u32,
+    samples: Arc<Mutex<Vec<i16>>>,
+    stop: Arc<AtomicBool>,
+) {
+    std::thread::Builder::new()
+        .name("migo-voice-record".to_owned())
+        .spawn(move || {
+            let mut resampler = (source_rate != media::VOICE_NOTE_SAMPLE_RATE)
+                .then(|| call_audio::Resampler::new(source_rate, media::VOICE_NOTE_SAMPLE_RATE));
+            let mut resampled: Vec<i16> = Vec::new();
+            loop {
+                match frames.recv() {
+                    Ok(chunk) => {
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        match resampler.as_mut() {
+                            Some(resampler) => {
+                                resampled.clear();
+                                resampler.process(&chunk, &mut resampled);
+                                if let Ok(mut buffer) = samples.lock() {
+                                    buffer.extend_from_slice(&resampled);
+                                }
+                            }
+                            None => {
+                                if let Ok(mut buffer) = samples.lock() {
+                                    buffer.extend_from_slice(&chunk);
+                                }
+                            }
+                        }
+                    }
+                    // The microphone was dropped: the recording is over, whatever the flag
+                    // says. Everything appended so far is the note.
+                    Err(_) => break,
+                }
+            }
+        })
+        .ok();
+}
+
+/// The playback pump for a voice note.
+///
+/// Feeds the speaker a hundred milliseconds of samples at a time and sleeps just under a
+/// chunk between sends, so the pump stays ahead of the device without queuing the whole
+/// note into a channel that would outlive a stop. The pace is a sleep, not a clock: a
+/// desktop voice note is a bubble's button, not a studio monitor, and the speaker's own
+/// buffer is the timing authority — the pump only has to not run dry.
+///
+/// When the samples run out the pump reports the ending into the worker's own loop (the
+/// same self-addressing a chain tracker's completion takes), because the playing state —
+/// and the stopped button that turns back into a play button — belongs to the loop.
+fn spawn_playback_pump(
+    frames: std_mpsc::Sender<Vec<i16>>,
+    sink_rate: u32,
+    samples: Arc<Vec<i16>>,
+    rate: u32,
+    stop: Arc<AtomicBool>,
+    commands: mpsc::UnboundedSender<Command>,
+    media_id: Id,
+) {
+    std::thread::Builder::new()
+        .name("migo-voice-play".to_owned())
+        .spawn(move || {
+            let mut resampler =
+                (rate != sink_rate).then(|| call_audio::Resampler::new(rate, sink_rate));
+            let mut resampled: Vec<i16> = Vec::new();
+            // A tenth of a second of source audio per chunk, floored at one sample so a
+            // pathological rate cannot produce an empty chunk loop.
+            let chunk_len = (rate as usize / 10).max(1);
+            let mut cursor = 0usize;
+            while cursor < samples.len() {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                let end = (cursor + chunk_len).min(samples.len());
+                let chunk = &samples[cursor..end];
+                let out: &[i16] = match resampler.as_mut() {
+                    Some(resampler) => {
+                        resampled.clear();
+                        resampler.process(chunk, &mut resampled);
+                        &resampled
+                    }
+                    None => chunk,
+                };
+                if frames.send(out.to_vec()).is_err() {
+                    // The speaker was dropped: playback is over, stopped or not.
+                    return;
+                }
+                cursor = end;
+                // Just under a chunk of pacing, so the pump re-checks the stop flag while
+                // the device still has audio buffered.
+                std::thread::sleep(Duration::from_millis(90));
+            }
+            // The note finished on its own. Tell the loop, unless a stop already did.
+            if !stop.load(Ordering::Relaxed) {
+                let _ = commands.send(Command::VoiceNoteEnded { media_id });
+            }
+        })
+        .ok();
 }
 
 #[cfg(test)]

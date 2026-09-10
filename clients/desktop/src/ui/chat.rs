@@ -14,7 +14,8 @@
 //! message id and keeps the vector ordered, rather than pushing and hoping. Anything less and the
 //! thread visibly reorders itself while someone is reading it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use egui::{Align, Key, Layout, RichText, Ui};
 use migo_core::Id;
@@ -24,6 +25,11 @@ use crate::net::Command;
 use crate::theme::{font, palette, space};
 use crate::ui::widgets::{self, BubbleTone};
 use crate::ui::Context;
+
+/// The emoji a reaction picker offers — the same three the web and Android clients offer, in
+/// the same order, so the same thread shows the same vocabulary on every screen it is read
+/// on.
+pub const REACTIONS: [&str; 3] = ["\u{1F44D}", "\u{2764}\u{FE0F}", "\u{1F602}"];
 
 /// Everything the chat screen holds between frames.
 #[derive(Default)]
@@ -77,6 +83,63 @@ pub struct ChatState {
     /// then, because a placeholder that promised "safe" before any key was seen would be the
     /// opposite of the block's purpose.
     pub peers: HashMap<Id, Vec<PeerIdentity>>,
+    /// The attachments' own state: decoded images, their textures, what has been asked for,
+    /// what failed, and which voice note is playing.
+    pub media: MediaState,
+    /// Reactions by target message: who reacted, with what. Chips on the message they name,
+    /// never rows of their own — a reaction is a fact about another message, and drawing it
+    /// as one would bury the thing it answers.
+    pub reactions: HashMap<Id, Vec<(Id, String)>>,
+    /// The conversation being recorded into, and when the recording began. `None` when no
+    /// recording runs. The conversation id rides along so a bar left behind by a window
+    /// switch clears when its own conversation's recording ends, not whichever one is open.
+    pub recording: Option<(Id, std::time::Instant)>,
+    /// The attach panel's own state, per conversation: whether it is open and the path typed
+    /// into it. egui offers no file dialog, so the path is typed — the same trade the avatar
+    /// picker makes — and it is kept per conversation the way drafts are.
+    pub attach: HashMap<Id, AttachPanel>,
+}
+
+/// One fetched image, as the worker decoded it: the pixels and their size.
+///
+/// The blob arrives once and the texture is built from it lazily, because a texture is a GPU
+/// resource whose lifetime belongs to the paint loop, not to the event that produced the
+/// pixels.
+pub struct ImageBlob {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// The attach panel's state for one conversation.
+#[derive(Default)]
+pub struct AttachPanel {
+    /// Whether the panel is showing under the composer.
+    pub open: bool,
+    /// The path typed into it, kept between frames so closing the panel on a mistake does
+    /// not cost the whole path.
+    pub path: String,
+}
+
+/// The attachments' state between frames.
+#[derive(Default)]
+pub struct MediaState {
+    /// Decoded images by media id, from the worker's `MediaImage` events.
+    pub images: HashMap<Id, ImageBlob>,
+    /// The GPU textures built from those blobs, one per image, built the first frame an
+    /// image is drawn and dropped when a re-fetch replaces the blob (or sign-out clears
+    /// the whole chat state).
+    pub textures: HashMap<Id, egui::TextureHandle>,
+    /// Media ids a fetch has been issued for, so a thread that draws the same bubble on
+    /// every frame asks once, not sixty times a second.
+    pub requested: HashSet<Id>,
+    /// Fetch failures by media id, drawn in the bubble they belong to.
+    pub failures: HashMap<Id, String>,
+    /// The voice note currently playing, if one is.
+    pub playing: Option<Id>,
+    /// Save destinations typed against a document bubble, kept between frames so a retry of
+    /// a failed save does not cost the path.
+    pub save_paths: HashMap<Id, String>,
 }
 
 /// One peer device's observed E2EE identity, as the worker reported it from a bundle.
@@ -130,6 +193,21 @@ impl ChatState {
 
     /// Inserts or updates one message, keeping the thread ordered and free of duplicates.
     pub fn absorb(&mut self, message: Message) {
+        // A reaction is not a row: it is a chip on the message it names. Filed here — the
+        // one gate every message passes through, live and history both — and answered with
+        // an early return, so a reaction never scrolls the thread, never marks it unread,
+        // and never renders as a message of its own. The pair `(sender, emoji)` is the
+        // dedupe key: the same sender's same emoji twice (an echo racing a re-fetch) is one
+        // chip, while a second emoji from the same sender is a second chip, which is what
+        // every other client shows.
+        if let Body::Reaction { emoji, target } = &message.body {
+            let chips = self.reactions.entry(*target).or_default();
+            let pair = (message.sender_id, emoji.clone());
+            if !chips.contains(&pair) {
+                chips.push(pair);
+            }
+            return;
+        }
         let thread = self.messages.entry(message.conversation_id).or_default();
         if let Some(existing) = thread
             .iter_mut()
@@ -416,7 +494,21 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
                             .read_up_to
                             .get(&conversation_id)
                             .is_some_and(|mark| message.seq <= *mark);
-                    message_row(ui, context, message, sender.as_deref(), avatar_seed, read);
+                    // The media and reactions state is threaded through by field, beside the
+                    // immutable `messages` borrow the loop reads: a bubble that fetches its
+                    // image or files a reaction chip writes those maps while the thread is
+                    // being walked, and the field-by-field borrow is what says the two never
+                    // fight over the same data.
+                    message_row(
+                        ui,
+                        context,
+                        message,
+                        sender.as_deref(),
+                        avatar_seed,
+                        read,
+                        &mut state.media,
+                        &mut state.reactions,
+                    );
                     ui.add_space(space::SM);
                 }
             }
@@ -667,39 +759,22 @@ fn day_separator(ui: &mut Ui, context: &Context<'_>, day: &str) {
 /// Incoming messages carry a small avatar beside the bubble — the peer's monogram in a direct
 /// chat, the sender's in a group — because with avatars the eye tracks who said what by colour
 /// instead of by reading a name, and a thread that can be followed peripherally reads faster.
+///
+/// Text renders as the plain bubble; an attachment or a voice note renders as its own kind of
+/// row (an image, a save affordance, a play button), because what a message *is* decides what
+/// touching it does. The media and reactions state is passed in mutable: the row that draws
+/// an unfetched image is the row that asks for it, and the row that can be reacted to is the
+/// row that carries the picker.
 fn message_row(
     ui: &mut Ui,
-    context: &Context<'_>,
+    context: &mut Context<'_>,
     message: &Message,
     sender: Option<&str>,
     avatar_seed: Option<&str>,
     read: bool,
+    media: &mut MediaState,
+    reactions: &mut HashMap<Id, Vec<(Id, String)>>,
 ) {
-    let (text, tone) = match &message.body {
-        Body::Text(text) => (text.clone(), BubbleTone::Normal),
-        Body::Media {
-            mime_type,
-            size_bytes,
-        } => (
-            format!("Attachment ({mime_type}, {})", human_bytes(*size_bytes)),
-            BubbleTone::Normal,
-        ),
-        Body::VoiceNote { duration_ms } => (
-            format!("Voice note ({})", human_duration(*duration_ms)),
-            BubbleTone::Normal,
-        ),
-        // Named by target rather than drawn on the message it reacts to: attaching it would mean
-        // finding that message, which may not have arrived or may be older than the loaded history.
-        // A reaction whose target is off screen still says something; one silently dropped does not.
-        Body::Reaction { emoji, target } => (
-            format!("Reacted {emoji} to message {}", model::short_id(*target)),
-            BubbleTone::Normal,
-        ),
-        Body::Unsupported { content_type } => (
-            format!("Unsupported message (type {content_type}). Update Migo to read it."),
-            BubbleTone::Problem,
-        ),
-    };
     let meta = format!(
         "{} {}{}",
         model::clock(message.sent_at),
@@ -728,8 +803,368 @@ fn message_row(
         ui.allocate_ui_with_layout(
             egui::vec2(ui.available_width() - space::LG, 0.0),
             Layout::top_down(Align::Min),
-            |ui| widgets::bubble(ui, context.theme, &text, &meta, message.outgoing, tone),
+            |ui| {
+                match &message.body {
+                    Body::Text(text) => {
+                        widgets::bubble(ui, context.theme, text, &meta, message.outgoing, BubbleTone::Normal);
+                    }
+                    Body::Media {
+                        media_id,
+                        mime_type,
+                        size_bytes,
+                        width,
+                        height,
+                        caption,
+                    } => {
+                        attachment_bubble(
+                            ui,
+                            context,
+                            message.outgoing,
+                            *media_id,
+                            mime_type,
+                            *size_bytes,
+                            *width,
+                            *height,
+                            caption.as_deref(),
+                            &meta,
+                            media,
+                        );
+                    }
+                    Body::VoiceNote {
+                        media_id,
+                        duration_ms,
+                    } => {
+                        voice_bubble(ui, context, message.outgoing, *media_id, *duration_ms, &meta, media);
+                    }
+                    // A reaction never reaches a row: absorb files it as a chip on its
+                    // target. The arm stays because the match must be exhaustive, and a
+                    // body that somehow arrives here is drawn as nothing rather than as a
+                    // message that buries its own target.
+                    Body::Reaction { .. } => {}
+                    Body::Unsupported { content_type } => {
+                        widgets::bubble(
+                            ui,
+                            context.theme,
+                            &format!("Unsupported message (type {content_type}). Update Migo to read it."),
+                            &meta,
+                            message.outgoing,
+                            BubbleTone::Problem,
+                        );
+                    }
+                }
+                reaction_chips(ui, context, message, reactions);
+            },
         );
+    });
+}
+
+/// One image or document attachment, as its own kind of bubble.
+///
+/// An image is shown as the image — fitted to the column but never beyond its own pixels —
+/// once it has been fetched, and as a quiet placeholder naming its dimensions until then,
+/// because a bubble that reserves no room would resize the whole thread when the picture
+/// lands. A document is a row: what it claims to be, how big it is, and where to save it.
+/// egui offers no save dialog, so the destination is typed — the same trade the attach
+/// panel and the avatar picker make.
+fn attachment_bubble(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    outgoing: bool,
+    media_id: Id,
+    mime_type: &str,
+    size_bytes: u64,
+    width: Option<u32>,
+    height: Option<u32>,
+    caption: Option<&str>,
+    meta: &str,
+    media: &mut MediaState,
+) {
+    if mime_type.starts_with("image/") {
+        image_bubble(
+            ui, context, outgoing, media_id, width, height, caption, meta, media,
+        );
+        return;
+    }
+    let colors = palette(context.theme);
+    widgets::bubble(
+        ui,
+        context.theme,
+        &format!(
+            "\u{1F4C4} Document \u{00B7} {mime_type} \u{00B7} {}",
+            human_bytes(size_bytes)
+        ),
+        meta,
+        outgoing,
+        BubbleTone::Normal,
+    );
+    if let Some(reason) = media.failures.get(&media_id) {
+        ui.label(
+            RichText::new(reason)
+                .font(egui::FontId::proportional(font::TINY))
+                .color(colors.danger),
+        );
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.add_space(space::SM);
+        // The destination, kept between frames so a failed save retries without retyping.
+        let path = media.save_paths.entry(media_id).or_default();
+        let field = egui::TextEdit::singleline(path)
+            .hint_text("/path/to/save")
+            .desired_width(200.0);
+        let response = ui.add(field);
+        if ui.button("Save").clicked() {
+            let typed = path.trim().to_owned();
+            if typed.is_empty() {
+                response.request_focus();
+            } else {
+                context.issue(Command::SaveMedia {
+                    media_id,
+                    path: PathBuf::from(typed),
+                });
+            }
+        }
+    });
+}
+
+/// One image attachment: the picture when it has arrived, a named placeholder until then.
+fn image_bubble(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    outgoing: bool,
+    media_id: Id,
+    width: Option<u32>,
+    height: Option<u32>,
+    caption: Option<&str>,
+    meta: &str,
+    media: &mut MediaState,
+) {
+    let colors = palette(context.theme);
+    if let Some(blob) = media.images.get(&media_id) {
+        // One upload per image: the texture is built the first frame the blob is drawn, and
+        // dropped with the blob when a re-fetch replaces it (the app layer removes the old
+        // texture beside the new blob, so stale pixels never outlive their bytes).
+        let texture = media.textures.entry(media_id).or_insert_with(|| {
+            ui.ctx().load_texture(
+                format!("media-{media_id}"),
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [blob.width as usize, blob.height as usize],
+                    &blob.rgba,
+                ),
+                egui::TextureOptions::default(),
+            )
+        });
+        // Fitted to the column, capped at a reasonable height, never beyond the image's own
+        // pixels: a thumbnail smaller than the column is shown at its own size, the way the
+        // web client shows one.
+        let available = (ui.available_width() - space::LG).min(320.0);
+        let cap = 320.0;
+        let (w, h) = (f64::from(blob.width.max(1)), f64::from(blob.height.max(1)));
+        let scale = (available / w as f32).min(cap / h as f32).min(1.0);
+        let size = egui::vec2(w as f32 * scale, h as f32 * scale);
+        ui.image((texture.id(), size));
+        if let Some(caption) = caption.filter(|caption| !caption.is_empty()) {
+            ui.label(
+                RichText::new(caption)
+                    .font(egui::FontId::proportional(font::SMALL))
+                    .color(colors.text),
+            );
+        }
+        ui.label(
+            RichText::new(meta)
+                .font(egui::FontId::proportional(font::TINY))
+                .color(colors.text_muted),
+        );
+        return;
+    }
+    if let Some(reason) = media.failures.get(&media_id) {
+        // The fetch refused: say so in the bubble it belongs to, and offer the one honest
+        // action again — a retry, for whatever changed since.
+        widgets::bubble(
+            ui,
+            context.theme,
+            reason,
+            meta,
+            outgoing,
+            BubbleTone::Problem,
+        );
+        if ui.button("Try again").clicked() {
+            media.requested.remove(&media_id);
+            media.failures.remove(&media_id);
+        }
+        return;
+    }
+    // Not fetched yet. The first frame that draws this bubble is the frame that asks; every
+    // later frame reads `requested` and draws the placeholder without another command.
+    if media.requested.insert(media_id) {
+        context.issue(Command::FetchMedia { media_id });
+    }
+    let dims = match (width, height) {
+        (Some(width), Some(height)) => format!(" \u{00B7} {width}\u{00D7}{height}"),
+        _ => String::new(),
+    };
+    widgets::bubble(
+        ui,
+        context.theme,
+        &format!("Loading image{dims}\u{2026}"),
+        meta,
+        outgoing,
+        BubbleTone::Normal,
+    );
+}
+
+/// One voice note: a play/stop button, the note's length, and the delivery state.
+///
+/// The button is the bubble — the whole point of a voice note is that it is pressed, and a
+/// row whose only control sits outside its shape is a row that has to explain itself.
+fn voice_bubble(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    outgoing: bool,
+    media_id: Id,
+    duration_ms: u32,
+    meta: &str,
+    media: &mut MediaState,
+) {
+    let colors = palette(context.theme);
+    let playing = media.playing == Some(media_id);
+    if let Some(reason) = media.failures.get(&media_id) {
+        widgets::bubble(
+            ui,
+            context.theme,
+            reason,
+            meta,
+            outgoing,
+            BubbleTone::Problem,
+        );
+        if ui.button("Try again").clicked() {
+            media.requested.remove(&media_id);
+            media.failures.remove(&media_id);
+        }
+        return;
+    }
+    ui.horizontal(|ui| {
+        let glyph = if playing { "\u{23F9}" } else { "\u{25B6}" };
+        if ui
+            .add(
+                egui::Button::new(
+                    RichText::new(glyph)
+                        .font(egui::FontId::proportional(font::BODY))
+                        .color(colors.text_on_accent),
+                )
+                .fill(colors.accent)
+                .min_size(egui::vec2(30.0, 30.0)),
+            )
+            .on_hover_text(if playing { "Stop" } else { "Play" })
+            .clicked()
+        {
+            // One button, both meanings: the note that is playing is the note the press
+            // stops, and any other note is the note the press starts (the worker stops the
+            // old one itself).
+            if playing {
+                context.issue(Command::StopVoiceNote);
+            } else {
+                context.issue(Command::PlayVoiceNote { media_id });
+            }
+        }
+        ui.add_space(space::XS);
+        widgets::bubble(
+            ui,
+            context.theme,
+            &format!(
+                "\u{1F3A4} Voice note \u{00B7} {}",
+                human_duration(duration_ms)
+            ),
+            meta,
+            outgoing,
+            BubbleTone::Normal,
+        );
+    });
+}
+
+/// The reaction chips under one message, and the picker that adds to them.
+///
+/// Grouped by emoji with a count, the same grouping every client shows; the account's own
+/// chip is the accented one, so "did mine land?" is answered at a glance. The picker is the
+/// same three emoji the web and Android clients offer, and picking files an optimistic chip
+/// immediately — this device's own echo is suppressed in the worker, so the click is the
+/// only moment the own chip is ever drawn from.
+fn reaction_chips(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    message: &Message,
+    reactions: &mut HashMap<Id, Vec<(Id, String)>>,
+) {
+    let colors = palette(context.theme);
+    let me = context.account.map(|account| account.account_id);
+    ui.menu_button(
+        RichText::new("\u{1F642}")
+            .font(egui::FontId::proportional(font::SMALL))
+            .color(colors.text_muted),
+        |ui| {
+            for emoji in REACTIONS {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(emoji).font(egui::FontId::proportional(font::TITLE)),
+                        )
+                        .fill(egui::Color32::TRANSPARENT),
+                    )
+                    .clicked()
+                {
+                    context.issue(Command::SendReaction {
+                        conversation_id: message.conversation_id,
+                        target_message_id: message.message_id,
+                        emoji: emoji.to_owned(),
+                    });
+                    if let Some(me) = me {
+                        let chips = reactions.entry(message.message_id).or_default();
+                        let pair = (me, emoji.to_owned());
+                        if !chips.contains(&pair) {
+                            chips.push(pair);
+                        }
+                    }
+                }
+            }
+        },
+    );
+    // Drawn after the picker so the closure's mutable borrow of the reactions map ends
+    // before this read — the chips are whatever they are by the time the row paints.
+    let Some(chips) = reactions.get(&message.message_id) else {
+        return;
+    };
+    if chips.is_empty() {
+        return;
+    }
+    // Grouped by emoji, first-seen order, with each group marked when it holds this
+    // account's own chip.
+    let mut groups: Vec<(String, usize, bool)> = Vec::new();
+    for (sender, emoji) in chips {
+        let own = me == Some(*sender);
+        match groups.iter_mut().find(|(held, _, _)| held == emoji) {
+            Some((_, count, own_seen)) => {
+                *count += 1;
+                *own_seen |= own;
+            }
+            None => groups.push((emoji.clone(), 1, own)),
+        }
+    }
+    ui.horizontal(|ui| {
+        ui.add_space(space::SM);
+        for (emoji, count, own) in groups {
+            let text = if count > 1 {
+                format!("{emoji} {count}")
+            } else {
+                emoji.clone()
+            };
+            let (foreground, background) = if own {
+                (colors.text_on_accent, colors.accent)
+            } else {
+                (colors.text, colors.surface_raised)
+            };
+            widgets::pill(ui, &text, foreground, background);
+            ui.add_space(space::XS);
+        }
     });
 }
 
@@ -786,16 +1221,60 @@ fn typing_line(ui: &mut Ui, context: &Context<'_>, state: &ChatState, conversati
 ///
 /// Enter sends, Shift+Enter inserts a newline. That is the convention every chat client uses, and
 /// reversing it means every third message is sent half-finished.
+///
+/// A message can be three things — text, a voice note, a file — and all three start here: the
+/// field types the first, the microphone records the second, the paperclip folds out a panel for
+/// the third. While a note is being recorded the composer is replaced by the recording bar,
+/// because a field that still accepts typing invites a message that arrives after — and
+/// interrupts — the note it would replace.
 fn composer(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conversation_id: Id) {
     let colors = palette(context.theme);
     let online = context.connection.is_online();
+
+    // The recording bar: this conversation's live note, a ticking length, and the only two
+    // honest actions — keep it or throw it away.
+    if let Some((recording_conversation, started)) = state.recording {
+        if recording_conversation == conversation_id {
+            egui::Frame::new()
+                .fill(colors.surface)
+                .inner_margin(egui::Margin::symmetric(space::LG as i8, space::MD as i8))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("\u{25CF} Recording")
+                                .font(egui::FontId::proportional(font::BODY))
+                                .color(colors.danger),
+                        );
+                        let elapsed = started.elapsed().as_millis() as u32;
+                        ui.label(
+                            RichText::new(human_duration(elapsed))
+                                .font(egui::FontId::proportional(font::BODY))
+                                .color(colors.text_muted),
+                        );
+                        // The length is a clock: ask for frames on a cadence so it ticks
+                        // instead of freezing between interactions.
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(500));
+                        if ui.button("Cancel").clicked() {
+                            context.issue(Command::StopRecording { send: false });
+                        }
+                        if ui.button("Send").clicked() {
+                            context.issue(Command::StopRecording { send: true });
+                        }
+                    });
+                });
+            return;
+        }
+    }
 
     egui::Frame::new()
         .fill(colors.surface)
         .inner_margin(egui::Margin::symmetric(space::LG as i8, space::SM as i8))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let send_width = 56.0;
+                // Room for everything that shares the field's row: the send button and the
+                // two attachment affordances beside it.
+                let send_width = 56.0 + 2.0 * (32.0 + space::SM);
                 // This conversation's own draft, born empty the first time it is typed into and
                 // left exactly as it stands when the window closes.
                 let draft = state.drafts.entry(conversation_id).or_default();
@@ -886,7 +1365,50 @@ fn composer(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conve
                     });
                     state.typing_sent.insert(conversation_id, has_text);
                 }
+
+                // The microphone and the paperclip: the two things a message can be besides
+                // text, one press away from the field that types the third.
+                if ui
+                    .button(RichText::new("\u{1F3A4}").font(egui::FontId::proportional(font::BODY)))
+                    .on_hover_text("Record a voice note")
+                    .clicked()
+                {
+                    context.issue(Command::StartRecording { conversation_id });
+                }
+                if ui
+                    .button(RichText::new("\u{1F4CE}").font(egui::FontId::proportional(font::BODY)))
+                    .on_hover_text("Attach a file")
+                    .clicked()
+                {
+                    let panel = state.attach.entry(conversation_id).or_default();
+                    panel.open = !panel.open;
+                }
             });
+
+            // The paperclip's fold-out. egui offers no file dialog, so the source of an
+            // attachment is typed — the same trade the avatar picker makes, and the same
+            // "/path" hint the document save row gives.
+            let panel = state.attach.entry(conversation_id).or_default();
+            if panel.open {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut panel.path)
+                            .hint_text("/path/to/file")
+                            .desired_width(240.0),
+                    );
+                    if ui.button("Attach").clicked() {
+                        let typed = panel.path.trim().to_owned();
+                        if !typed.is_empty() {
+                            context.issue(Command::SendAttachment {
+                                conversation_id,
+                                path: PathBuf::from(typed),
+                            });
+                            panel.open = false;
+                            panel.path.clear();
+                        }
+                    }
+                });
+            }
         });
 }
 
@@ -969,5 +1491,75 @@ mod tests {
             .expect("the device is filed");
         assert_eq!(phone_row.safety_number, "99999");
         assert!(phone_row.changed);
+    }
+
+    /// A message to react to, and a reaction to it, in the shapes the worker delivers.
+    fn reaction_fixture() -> (Message, Message) {
+        let conversation = Id::from_bytes([3; 16]);
+        let target = Id::from_bytes([4; 16]);
+        let target_message = Message {
+            message_id: target,
+            conversation_id: conversation,
+            seq: 1,
+            sender_id: Id::from_bytes([9; 16]),
+            outgoing: false,
+            body: Body::Text("a message to react to".to_owned()),
+            sent_at: migo_core::Timestamp::from_millis(1_000),
+            delivery: Delivery::Received,
+        };
+        let reaction = Message {
+            message_id: Id::from_bytes([5; 16]),
+            conversation_id: conversation,
+            seq: 2,
+            sender_id: Id::from_bytes([9; 16]),
+            outgoing: false,
+            body: Body::Reaction {
+                emoji: "\u{1F44D}".to_owned(),
+                target,
+            },
+            sent_at: migo_core::Timestamp::from_millis(2_000),
+            delivery: Delivery::Received,
+        };
+        (target_message, reaction)
+    }
+
+    /// The reaction filing rules in one test: a reaction lands as a chip on its target,
+    /// never as a row; the same sender's same emoji twice is one chip (an echo racing a
+    /// re-fetch), while a second emoji from the same sender is a second chip; and a
+    /// reaction to a message that has not arrived yet still files, so the chip is there
+    /// when the target lands.
+    #[test]
+    fn reactions_file_as_chips_never_rows() {
+        let (target_message, reaction) = reaction_fixture();
+        let mut state = ChatState::default();
+        let conversation = target_message.conversation_id;
+        let target = target_message.message_id;
+        let sender = reaction.sender_id;
+
+        // The reaction arrives before its target — history out of order, or the target
+        // still behind a page boundary. The chip files anyway.
+        state.absorb(reaction.clone());
+        assert_eq!(
+            state.reactions.get(&target),
+            Some(&vec![(sender, "\u{1F44D}".to_owned())])
+        );
+        assert!(state.messages.get(&conversation).is_none());
+
+        // The same reaction again — an echo, or a re-fetch. One chip, not two.
+        state.absorb(reaction.clone());
+        assert_eq!(state.reactions.get(&target).len(), 1);
+
+        // A second emoji from the same sender is a second chip.
+        let mut second = reaction;
+        second.body = Body::Reaction {
+            emoji: "\u{2764}\u{FE0F}".to_owned(),
+            target,
+        };
+        state.absorb(second);
+        assert_eq!(state.reactions.get(&target).len(), 2);
+
+        // The target itself arrives afterwards and lands as the one row it is.
+        state.absorb(target_message);
+        assert_eq!(state.messages.get(&conversation).map(Vec::len), Some(1));
     }
 }

@@ -65,13 +65,22 @@ pub enum Delivery {
 /// What a message turned out to be once it was opened.
 #[derive(Debug, Clone)]
 pub enum Body {
-    /// Text, the only body this client composes.
+    /// Text, the only body this client composes by hand.
     Text(String),
-    /// A reference to encrypted media. Rendered as a chip; downloading is not wired up yet, and
-    /// pretending otherwise with a dead button would be worse than saying so.
-    Media { mime_type: String, size_bytes: u64 },
-    /// A voice note reference, likewise a chip.
-    VoiceNote { duration_ms: u32 },
+    /// An image or document attachment: what the message claimed about the object, plus the
+    /// media id that identifies it to the fetch flow. The image itself arrives later, as a
+    /// `MediaImage` event, because a download is a round trip the paint loop must never wait on.
+    Media {
+        media_id: Id,
+        mime_type: String,
+        size_bytes: u64,
+        width: Option<u32>,
+        height: Option<u32>,
+        caption: Option<String>,
+    },
+    /// A voice note: the media id for the fetch flow, and the playing time the sender
+    /// measured, which is all the bubble can show before anyone presses play.
+    VoiceNote { media_id: Id, duration_ms: u32 },
     /// An emoji reaction to another message.
     Reaction { emoji: String, target: Id },
     /// A body this build understands the envelope of but not the content type — a newer peer.
@@ -85,7 +94,7 @@ impl Body {
         match self {
             Self::Text(text) => text.lines().next().unwrap_or_default().to_string(),
             Self::Media { mime_type, .. } => format!("Attachment ({mime_type})"),
-            Self::VoiceNote { duration_ms } => {
+            Self::VoiceNote { duration_ms, .. } => {
                 format!(
                     "Voice note ({}s)",
                     (*duration_ms as f32 / 1000.0).round() as u32

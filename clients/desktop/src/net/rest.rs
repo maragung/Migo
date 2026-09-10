@@ -1020,6 +1020,37 @@ impl Rest {
         }
     }
 
+    /// The media data plane's other half: GETs an object back from the signed URL a
+    /// fetch carried.
+    ///
+    /// As unauthenticated and as opaque as the PUT — the same signature, the same
+    /// "the URL is the authorisation" reasoning, bytes the HTTP layer never inspects.
+    /// Whether those bytes are a sealed blob or a room's plaintext is the caller's
+    /// judgement to make, not this one's.
+    pub async fn get_download_bytes(&self, url: &str) -> Result<Vec<u8>, RestError> {
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| RestError::Transport)?;
+        if !response.status().is_success() {
+            return Err(self.failure(response).await);
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|_| RestError::Transport)?
+            .to_vec();
+        if bytes.is_empty() {
+            // An empty body on a success status is not media and not a diagnosis either;
+            // call it malformed so the caller reports "could not fetch" rather than
+            // handing the decoder a zero-byte file.
+            return Err(RestError::Malformed);
+        }
+        Ok(bytes)
+    }
+
     /// One authenticated request that answers with a JSON body.
     async fn auth_json<B: Serialize, T: DeserializeOwned>(
         &self,
