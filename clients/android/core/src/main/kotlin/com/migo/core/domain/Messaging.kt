@@ -1,6 +1,7 @@
 package com.migo.core.domain
 
 import com.migo.core.crypto.Content
+import com.migo.core.protocol.Acknowledged
 import com.migo.core.protocol.MessageAccepted
 import com.migo.core.protocol.MessageDelete
 import com.migo.core.protocol.MessageEvent
@@ -8,6 +9,7 @@ import com.migo.core.protocol.MessageKind
 import com.migo.core.protocol.MessageReceipt
 import com.migo.core.protocol.MessageSend
 import com.migo.core.protocol.Op
+import com.migo.core.protocol.ReactionSet
 import com.migo.core.protocol.ReceiptKind
 import com.migo.core.session.GroupCrypto
 import com.migo.core.session.SessionCrypto
@@ -357,6 +359,43 @@ class MessagingDomain(
             Op.MESSAGE_SEND,
             { w -> request.encode(w) },
             { r -> MessageAccepted.decode(r) },
+        )
+    }
+
+    /**
+     * Sets one reaction on a message: the emoji is sealed before it rides the wire, so the server
+     * learns only that *some* reaction was set on [targetMessageId], never which.
+     *
+     * The same rotate-distribute-seal order [send] keeps, because the reaction's envelope is a
+     * sender-key sealed body exactly like a message's is — the web client seals it with a separate
+     * crypto instance and hands the envelope to its SDK, a seam forced by this SDK's surface there;
+     * this port seals with the domain's own chain instead, which is the same chain [send] advances
+     * and therefore one the distribution pass has already covered. Setting a different reaction or
+     * the same one again is a server-side replace; a reaction reaches the conversation's other
+     * participants as an ordinary message whose ciphertext decodes to a [Content.Reaction].
+     */
+    suspend fun sendReaction(conversationId: Id, targetMessageId: Id, emoji: String) {
+        if (groupCrypto.needsRotation(conversationId)) {
+            groupCrypto.rotate(conversationId)
+        }
+        distribute(conversationId)
+
+        val plaintext = Content.Reaction(targetMessageId, emoji, remove = false).encode()
+        val sealed = try {
+            groupCrypto.sealContent(conversationId, plaintext)
+        } finally {
+            plaintext.fill(0)
+        }
+
+        val request = ReactionSet(
+            targetMessageId = targetMessageId,
+            conversationId = conversationId,
+            envelope = sealed.envelope,
+        )
+        rpc.call(
+            Op.REACTION_SET,
+            { w -> request.encode(w) },
+            { r -> Acknowledged.decode(r) },
         )
     }
 

@@ -818,6 +818,28 @@ class Rest(baseUrl: String, client: OkHttpClient? = null) {
     }
 
     /**
+     * GETs the bytes a signed download URL serves: the other half of the media data plane.
+     *
+     * The same rules as [putUploadBytes]: the URL is absolute, server-minted, and carries its own
+     * authorisation, so no bearer token is attached. The bytes are opaque to this layer — sealed
+     * ciphertext, or a legacy plaintext object — and whether they open is the caller's crypto, not
+     * this transport's. A non-2xx answer is mapped by the same [failure] every other response is,
+     * and a body that cannot be read at all is the same [RestError.Transport] the bootstrap
+     * endpoints report, never the [IOException] with its host-naming message.
+     */
+    suspend fun getDownloadBytes(url: String): ByteArray {
+        val request = Request.Builder().url(url).get().build()
+        return execute(request).use {
+            if (!it.isSuccessful) throw failure(it)
+            try {
+                it.body?.bytes() ?: ByteArray(0)
+            } catch (_: IOException) {
+                throw RestError.Transport
+            }
+        }
+    }
+
+    /**
      * Posts a JSON body to one of the four bootstrap endpoints and reads a [Grant] back.
      *
      * The request serializer arrives as a value rather than through a reified type parameter, because

@@ -2,14 +2,26 @@ package com.migo.app
 
 import android.app.Application
 import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.migo.app.call.CallManager
 import com.migo.app.call.CallUiState
 import com.migo.app.call.MICROPHONE_UNAVAILABLE
+import com.migo.app.media.MEDIA_SEAL_DOMAIN
+import com.migo.app.media.VOICE_NOTE_MAX_MS
+import com.migo.app.media.VOICE_SEAL_DOMAIN
+import com.migo.app.media.VoiceNoteRecorder
+import com.migo.app.media.isLegacyPlaintext
+import com.migo.app.media.openMedia
+import com.migo.app.media.uploadDocumentAttachment
+import com.migo.app.media.uploadImageAttachment
+import com.migo.app.media.uploadVoiceNote
 import com.migo.app.model.ActivityCategory
 import com.migo.app.model.ActivityRow
 import com.migo.app.model.AppState
+import com.migo.app.model.Attachment
+import com.migo.app.model.AttachmentKind
 import com.migo.app.model.ChainNetworkChoice
 import com.migo.app.model.ChainTxRow
 import com.migo.app.model.ChatMessage
@@ -17,6 +29,7 @@ import com.migo.app.model.ChatSafety
 import com.migo.app.model.ChatState
 import com.migo.app.model.ConversationRow
 import com.migo.app.model.GAME_STATUS_OPEN
+import com.migo.app.model.MediaObject
 import com.migo.app.model.PreparedChainTx
 import com.migo.app.model.RoomLiveInfo
 import com.migo.app.model.RoomNotice
@@ -156,6 +169,54 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * answer is this class's to know.
      */
     private var stagedVoiceCall: Pair<Id, Id>? = null
+
+    /**
+     * A voice note waiting on the microphone permission, as the conversation it will record into.
+     * The same moment-of-use pattern the staged call keeps, shared with the same permission — the
+     * recording that needs the microphone is the one that explains why.
+     */
+    private var stagedVoiceNote: Id? = null
+
+    /** The live recording, or null while the composer is the text field. */
+    private var noteRecorder: VoiceNoteRecorder? = null
+
+    /** The auto-stop that enforces the five-minute cap on a recording left running. */
+    private var noteCapJob: Job? = null
+
+    /**
+     * A document whose Save button was pressed, waiting for the create-document picker to name a
+     * destination. Held off [AppState] for the same reason every credential is kept off it: the
+     * bytes appear in no recomposition, and the write happens once, here.
+     */
+    private var pendingDocumentSave: Attachment? = null
+
+    private val _mediaObjects = MutableStateFlow<Map<Id, MediaObject>>(emptyMap())
+
+    /**
+     * The session's resolved media, by media id: what a bubble's attachment reads back after it
+     * asks [resolveMedia] to fetch. A stable flow of its own rather than a field on [ChatState],
+     * because the objects are session-scoped — two conversations may share an id, and a window
+     * closing must not forget bytes a reopen would refetch.
+     */
+    val mediaObjects: StateFlow<Map<Id, MediaObject>> = _mediaObjects.asStateFlow()
+
+    /** Which media ids have a fetch in flight, so concurrent bubbles share one download. */
+    private val mediaInFlight = HashSet<Id>()
+
+    /** Insertion order of the resolved objects, oldest first — the eviction the byte budget walks. */
+    private val mediaOrder = ArrayDeque<Id>()
+
+    /** How many resolved bytes the session keeps; the oldest object is dropped past it. */
+    private var mediaBytes = 0L
+
+    /**
+     * The byte budget the resolved-media cache keeps — the size of one maximal document, so the
+     * worst a cache full of the largest legal objects costs is one more document's worth of memory
+     * while the newest settles. An object being displayed is still evictable: the bubble re-asks
+     * and the cache refetches, which is the correct behaviour for bytes that were always meant to
+     * be transient.
+     */
+    private val mediaCacheMaxBytes = 32L * 1024L * 1024L
 
     /**
      * The sealed `.migo` container a registration minted and nobody has saved yet, or null.
@@ -567,6 +628,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         registrationContainer = null
         session = null
         detach()
+        // The resolved-media cache is this session's decrypted surface too: the keys that opened
+        // the objects are gone with the ratchets, so the bytes are unreadable originals a reopen
+        // must refetch rather than a cache worth keeping.
+        _mediaObjects.value = emptyMap()
+        mediaInFlight.clear()
+        mediaOrder.clear()
+        mediaBytes = 0
+        pendingDocumentSave = null
         _state.value = AppState.Starting
         viewModelScope.launch {
             val endpoint = settings.current().serverEndpoint
@@ -608,14 +677,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * The microphone permission launcher's answer: the staged call proceeds on a grant, and on a
      * refusal is stated as a fact on the call screen -- a call button that silently did nothing
-     * would be the interface lying about what it did.
+     * would be the interface lying about what it did. A staged voice note proceeds the same way,
+     * with its refusal stated in the banner a refused send would use.
      */
     fun microphonePermission(granted: Boolean) {
         val staged = stagedVoiceCall
         stagedVoiceCall = null
+        val stagedNote = stagedVoiceNote
+        stagedVoiceNote = null
         when {
             staged != null && granted -> startVoiceCall(staged.first, staged.second)
             staged != null -> callManager?.placementFailed(MICROPHONE_UNAVAILABLE)
+            stagedNote != null && granted -> startVoiceNote()
+            stagedNote != null -> signedIn {
+                it.copy(failure = "The microphone permission is needed to record a voice note.")
+            }
         }
     }
 
@@ -947,6 +1023,298 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 is AppState.SignedIn -> current.copy(failure = null)
                 is AppState.SignedOut -> current.copy(failure = null)
                 AppState.Starting -> current
+            }
+        }
+    }
+
+    // --- attachments, reactions, and the media they reference ---
+
+    /**
+     * Sets one of the quick reactions on a message.
+     *
+     * Fire-and-forget in the UI, exactly as the web client keeps it: the reaction surfaces through
+     * the conversation's own stream when the server broadcasts it (as an ordinary message whose
+     * body decodes to a reaction), and a failure costs nothing to leave unshown — the control is
+     * still there to press again.
+     */
+    fun react(messageId: Id, emoji: String) {
+        val live = session ?: return
+        val chat = (_state.value as? AppState.SignedIn)?.open ?: return
+        viewModelScope.launch {
+            try {
+                live.client.messaging.sendReaction(chat.conversationId, messageId, emoji)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // A reaction is a decoration, not a delivery; the long-press bar stays.
+            }
+        }
+    }
+
+    /**
+     * Uploads a picked file and sends the message that references it.
+     *
+     * An image goes down the image path (which keeps the room-plaintext branch, because an image
+     * may legitimately be sent into a server-readable room); anything else is a document, which is
+     * a private-and-group feature — the composer offers no attach button in a room, and a caller
+     * that reaches here from one is a caller that ignored the gating. The upload completes before
+     * any message is sent, so a failed upload lands in the banner without the conversation ever
+     * seeing a dangling reference.
+     */
+    fun sendAttachment(uri: Uri) {
+        val live = session ?: return
+        val chat = (_state.value as? AppState.SignedIn)?.open ?: return
+        if (chat.uploading || chat.recording) return
+
+        inChat(chat.conversationId) { it.copy(uploading = true) }
+        viewModelScope.launch {
+            try {
+                val app = getApplication<Application>()
+                val bytes = withContext(Dispatchers.IO) {
+                    app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: throw IOException("the chosen file could not be read")
+                }
+                val mime = app.contentResolver.getType(uri).orEmpty()
+                val endToEnd = chat.kind != ConversationKind.Room
+                val content = if (mime.startsWith("image/")) {
+                    uploadImageAttachment(live.client.media, chat.conversationId, bytes, mime, endToEnd)
+                } else {
+                    uploadDocumentAttachment(
+                        live.client.media,
+                        chat.conversationId,
+                        bytes,
+                        mime,
+                        displayNameOf(uri) ?: "Attachment",
+                    )
+                }
+                sendContent(chat.conversationId, content)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                inChat(chat.conversationId) { it.copy(uploading = false) }
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Starts recording a voice note for the open conversation.
+     *
+     * The microphone must already be permitted — [stageVoiceNote] is the path that asks — because
+     * the first moment of a recording cannot be recovered once the permission dialog has eaten it.
+     * A recording left running stops itself at the cap, so the five-minute ceiling is enforced
+     * even by a phone put in a pocket.
+     */
+    fun startVoiceNote() {
+        val chat = (_state.value as? AppState.SignedIn)?.open ?: return
+        if (chat.recording || chat.uploading) return
+        val recorder = try {
+            VoiceNoteRecorder(getApplication<Application>())
+        } catch (failure: Exception) {
+            signedIn { it.copy(failure = readable(failure)) }
+            return
+        }
+        noteRecorder = recorder
+        inChat(chat.conversationId) { it.copy(recording = true) }
+        noteCapJob = viewModelScope.launch {
+            delay(VOICE_NOTE_MAX_MS - recorder.elapsedMs())
+            stopVoiceNote()
+        }
+    }
+
+    /** Stages a voice note whose microphone permission has not been granted yet. */
+    fun stageVoiceNote() {
+        val chat = (_state.value as? AppState.SignedIn)?.open ?: return
+        stagedVoiceNote = chat.conversationId
+    }
+
+    /**
+     * Finishes the recording and sends it: the note is uploaded, then the message that references
+     * it — the same ordering rule [sendAttachment] keeps, so a failed upload never leaves the
+     * conversation holding a reference to nothing.
+     */
+    fun stopVoiceNote() {
+        val live = session ?: return
+        val chat = (_state.value as? AppState.SignedIn)?.open ?: return
+        val recorder = noteRecorder ?: return
+        noteCapJob?.cancel()
+        noteCapJob = null
+        noteRecorder = null
+        val note = try {
+            recorder.stop()
+        } catch (failure: Exception) {
+            inChat(chat.conversationId) { it.copy(recording = false) }
+            signedIn { it.copy(failure = readable(failure)) }
+            return
+        }
+        inChat(chat.conversationId) { it.copy(recording = false, uploading = true) }
+        viewModelScope.launch {
+            try {
+                val content = uploadVoiceNote(
+                    live.client.media,
+                    chat.conversationId,
+                    note.bytes,
+                    note.mimeType,
+                    note.durationMs,
+                    endToEnd = chat.kind != ConversationKind.Room,
+                )
+                note.bytes.fill(0)
+                sendContent(chat.conversationId, content)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                inChat(chat.conversationId) { it.copy(uploading = false) }
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /** Throws the recording away. Nothing was said if nobody will hear it. */
+    fun cancelVoiceNote() {
+        val chat = (_state.value as? AppState.SignedIn)?.open ?: return
+        noteCapJob?.cancel()
+        noteCapJob = null
+        noteRecorder?.cancel()
+        noteRecorder = null
+        inChat(chat.conversationId) { it.copy(recording = false) }
+    }
+
+    /**
+     * Sends an already-built media content and echoes it locally, the one shared tail of the
+     * attachment and voice-note paths. The echo carries the same decoded [Attachment] a received
+     * message would, so the sender's own bubble renders the object and not a placeholder.
+     */
+    private suspend fun sendContent(conversationId: Id, content: Content) {
+        val live = session ?: throw IOException("the session ended before the message was sent")
+        val accepted = live.client.messaging.send(conversationId, content, SendOptions())
+        val body = describe(content)
+        val mine = ChatMessage(
+            messageId = accepted.messageId,
+            seq = accepted.seq,
+            mine = true,
+            author = live.username,
+            text = body.text,
+            at = accepted.createdAt,
+            attachment = body.attachment,
+        )
+        inChat(conversationId) { it.copy(uploading = false, messages = merge(it.messages, mine)) }
+        cacheTranscript(conversationId, mine)
+        bump(conversationId, body.text, accepted.createdAt, unread = false)
+    }
+
+    /**
+     * The display name of a picked file, from the content resolver's own column — the document
+     * row's name line and the save picker's suggestion. Null when the provider offers none, which
+     * a caller handles with a generic label.
+     */
+    private fun displayNameOf(uri: Uri): String? {
+        val app = getApplication<Application>()
+        return try {
+            app.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        cursor.getString(0)?.takeIf { it.isNotBlank() }
+                    } else {
+                        null
+                    }
+                }
+        } catch (_: Exception) {
+            // A provider that refuses the query is one whose name we do not get; the label falls
+            // back rather than failing the send over a decoration.
+            null
+        }
+    }
+
+    /**
+     * Fetches and opens one media object, for a bubble that has asked.
+     *
+     * Cached by media id for the session, bounded by bytes (the oldest object drops past the
+     * budget), and shared in flight — two bubbles that reference one object make one download.
+     * The bytes are held in memory only, and a failure is not cached: the next ask retries,
+     * because a media server briefly unavailable is not a verdict about the object.
+     */
+    fun resolveMedia(attachment: Attachment) {
+        val live = session ?: return
+        val held = _mediaObjects.value[attachment.mediaId]
+        if (held is MediaObject.Ready || held is MediaObject.Loading) return
+        if (attachment.mediaId in mediaInFlight) return
+        mediaInFlight += attachment.mediaId
+        _mediaObjects.value =
+            _mediaObjects.value + (attachment.mediaId to MediaObject.Loading(attachment.mediaId))
+        viewModelScope.launch {
+            val opened = try {
+                val stored = withContext(Dispatchers.IO) {
+                    live.client.media.download(attachment.mediaId)
+                }
+                if (isLegacyPlaintext(attachment.key)) {
+                    stored
+                } else {
+                    val domain = if (attachment.kind == AttachmentKind.Voice) VOICE_SEAL_DOMAIN else MEDIA_SEAL_DOMAIN
+                    openMedia(attachment.key, attachment.nonce, domain, stored)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // The download or the open failed; the bubble keeps its label and a re-ask
+                // retries. Which half failed is not the reader's business.
+                mediaInFlight -= attachment.mediaId
+                _mediaObjects.value =
+                    _mediaObjects.value + (attachment.mediaId to MediaObject.Failed(attachment.mediaId))
+                return@launch
+            }
+            mediaInFlight -= attachment.mediaId
+            rememberMedia(attachment.mediaId, opened)
+        }
+    }
+
+    /** Files one opened object, evicting oldest entries past the session's byte budget. */
+    private fun rememberMedia(mediaId: Id, bytes: ByteArray) {
+        _mediaObjects.value = _mediaObjects.value + (mediaId to MediaObject.Ready(mediaId, bytes))
+        mediaOrder.addLast(mediaId)
+        mediaBytes += bytes.size
+        while (mediaBytes > mediaCacheMaxBytes && mediaOrder.size > 1) {
+            val oldest = mediaOrder.removeFirst()
+            val dropped = (_mediaObjects.value[oldest] as? MediaObject.Ready) ?: continue
+            mediaBytes -= dropped.bytes.size
+            _mediaObjects.value = _mediaObjects.value - oldest
+        }
+    }
+
+    /**
+     * Remembers which document a Save press meant, so the create-document picker's answer can
+     * finish it. The picker is the activity's to show; what to do with its answer is this
+     * class's to know.
+     */
+    fun stageDocumentSave(attachment: Attachment) {
+        pendingDocumentSave = attachment
+    }
+
+    /**
+     * Writes the staged document's bytes to the destination the picker named.
+     *
+     * The bytes come from the resolved object — a document whose download has not landed yet is a
+     * Save pressed before the row was ready, which the guard refuses rather than writing an empty
+     * file under the name the sender chose.
+     */
+    fun saveDocumentTo(destination: Uri) {
+        val attachment = pendingDocumentSave ?: return
+        pendingDocumentSave = null
+        val ready = _mediaObjects.value[attachment.mediaId] as? MediaObject.Ready
+        if (ready == null) {
+            signedIn { it.copy(failure = "That document has not finished downloading yet.") }
+            return
+        }
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    getApplication<Application>().contentResolver.openOutputStream(destination)
+                        ?.use { it.write(ready.bytes) }
+                        ?: throw IOException("the destination could not be opened")
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(failure = readable(failure)) }
             }
         }
     }
@@ -2888,6 +3256,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         callManager?.close()
         callManager = null
         stagedVoiceCall = null
+        // A recording in flight dies with the session it was for; the recorder deletes its own
+        // file, so there is nothing on disk to clean up here.
+        noteCapJob?.cancel()
+        noteCapJob = null
+        noteRecorder?.cancel()
+        noteRecorder = null
+        stagedVoiceNote = null
         _callState.value = CallUiState()
         subscriptions.forEach { it.cancel() }
         subscriptions.clear()
@@ -2923,6 +3298,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             text = body.text,
             at = message.createdAt,
             unsupported = body.placeholder,
+            attachment = body.attachment,
         )
         val onScreen = opened(message.conversationId)
         // Filed in the transcript cache whatever the window state: a message that arrives while no
@@ -3315,21 +3691,65 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * What to draw for a body, and whether this build understood it.
      *
-     * Media, voice notes and reactions decode correctly here but have no screen yet, so they are
-     * labelled rather than rendered. A newer peer's content type reaches [Content.Unsupported] and is
-     * labelled too, which is the whole reason that variant exists instead of a decode failure.
+     * A media or voice-note body maps to the one [Attachment] its bubble renders from — the single
+     * place a [Content] becomes UI state, so no composable ever holds raw message bytes. A reaction
+     * is a transcript line (`Reacted ❤️`), exactly the sentence the web client renders; nothing
+     * aggregates chips, because the server stores a reaction as an ordinary message and neither
+     * client pretends otherwise. A newer peer's content type reaches [Content.Unsupported] and is
+     * labelled, which is the whole reason that variant exists instead of a decode failure.
      */
     private fun describe(content: Content): Rendered = when (content) {
         is Content.Text -> Rendered(content.text, placeholder = false)
-        is Content.MediaRef -> Rendered(content.caption?.takeIf { it.isNotBlank() } ?: "Photo")
-        is Content.VoiceNoteRef -> Rendered("Voice note")
-        is Content.Reaction -> Rendered(content.emoji)
+        is Content.MediaRef -> {
+            val isImage = content.mimeType.startsWith("image/")
+            Rendered(
+                if (isImage) {
+                    content.caption?.takeIf { it.isNotBlank() } ?: "Photo"
+                } else {
+                    content.caption?.takeIf { it.isNotBlank() } ?: "Attachment"
+                },
+                placeholder = false,
+                attachment = Attachment(
+                    mediaId = content.mediaId,
+                    mimeType = content.mimeType,
+                    sizeBytes = content.sizeBytes,
+                    key = content.key,
+                    nonce = content.nonce,
+                    kind = if (isImage) AttachmentKind.Image else AttachmentKind.Document,
+                    width = content.width,
+                    height = content.height,
+                    caption = content.caption,
+                ),
+            )
+        }
+        is Content.VoiceNoteRef -> Rendered(
+            "Voice note",
+            placeholder = false,
+            attachment = Attachment(
+                mediaId = content.mediaId,
+                mimeType = content.mimeType,
+                sizeBytes = content.sizeBytes,
+                key = content.key,
+                nonce = content.nonce,
+                kind = AttachmentKind.Voice,
+                durationMs = content.durationMs,
+                waveform = content.waveform,
+            ),
+        )
+        is Content.Reaction -> Rendered("Reacted " + content.emoji, placeholder = false)
         is Content.ControlEvent -> Rendered("Updated the conversation")
         is Content.Unsupported -> Rendered("Message this version cannot show")
     }
 
-    /** A body reduced to what a row shows: the text, and whether it stands in for something. */
-    private class Rendered(val text: String, val placeholder: Boolean = true)
+    /**
+     * A body reduced to what a row shows: the text, whether it stands in for something, and the
+     * attachment a media or voice body resolved to. The attachment is null for every textual body.
+     */
+    private class Rendered(
+        val text: String,
+        val placeholder: Boolean = true,
+        val attachment: Attachment? = null,
+    )
 
     /** The first eight characters of an id: enough to tell two apart, short enough to read. */
     private fun shortId(id: Id): String = id.value.take(8)

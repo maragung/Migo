@@ -542,6 +542,17 @@ data class ChatState(
     val loading: Boolean = false,
     /** True from the moment Send is pressed until the server accepts or rejects. */
     val sending: Boolean = false,
+    /**
+     * True from the moment an attachment is picked (or a recording finishes) until the message
+     * that references it is accepted. Separate from [sending] so the composer can say which of
+     * the two waits it is showing, the way the web client's composer does.
+     */
+    val uploading: Boolean = false,
+    /**
+     * True while this device is recording a voice note for the conversation. While it holds, the
+     * composer is the recording bar — no text can be typed into a moment that is being recorded.
+     */
+    val recording: Boolean = false,
     /** Ids of accounts currently typing, other than this one. */
     val typing: Set<Id> = emptySet(),
     /** The text in the composer. Held here so a rotation does not lose a half-written message. */
@@ -653,7 +664,10 @@ data class VoteTally(
  *
  * [text] is already the display string. A bubble never holds a [com.migo.core.crypto.Content], so
  * there is no path by which a media key or a control payload reaches a `Text` composable -- the
- * mapping happens once, where the content is decoded.
+ * mapping happens once, where the content is decoded. An [Attachment] is the one thing a bubble
+ * may hold besides text: it is the decoded descriptor a resolver needs to fetch and open the
+ * object, and its key and nonce reach the resolver and only the resolver -- never a `Text`, never
+ * a log line.
  */
 data class ChatMessage(
     val messageId: Id,
@@ -673,7 +687,79 @@ data class ChatMessage(
      * silently renders as nothing looks like a delivery failure.
      */
     val unsupported: Boolean = false,
+    /**
+     * The media body when the message is an image, a document or a voice note. [text] stays the
+     * row's label (the caption, the file name, "Photo", "Voice note") so the conversation list and
+     * the placeholder states need nothing from this field.
+     */
+    val attachment: Attachment? = null,
 )
+
+/**
+ * What a media message is, decided once where the content was decoded.
+ *
+ * The web client tells a document from an image by the claimed MIME type and a voice note by its
+ * content shape; this is the same decision recorded as a value, so the bubble switch is a `when`
+ * over three cases rather than a mime-string test the renderer re-derives per draw.
+ */
+enum class AttachmentKind { Image, Document, Voice }
+
+/**
+ * One media body, decoded once where the content was decoded -- the app-side mirror of a
+ * `Content.MediaRef` or `Content.VoiceNoteRef`, with the discriminator resolved and nothing else
+ * carried along.
+ *
+ * [key] and [nonce] are the slots that open the sealed object; they exist here because a resolver
+ * needs them, and the rule that keeps them safe is the [ChatMessage] one: they are passed to the
+ * resolver and never reach a `Text` composable or a log. [mimeType] is the sender's claim,
+ * authenticated by the message's own seal, and is a label for playback -- never a fact this client
+ * acts on beyond choosing how to render (brief section 122).
+ */
+class Attachment(
+    /** The storage id of the object. */
+    val mediaId: Id,
+    /** The sender's claimed MIME type -- a label for the renderer, re-judged nowhere here. */
+    val mimeType: String,
+    /** The claimed plaintext length, for the document row's size line. */
+    val sizeBytes: Long,
+    /** The symmetric key that opens the object, or all zeroes for a legacy plaintext upload. */
+    val key: ByteArray,
+    /** The nonce that opens the object, or all zeroes for a legacy plaintext upload. */
+    val nonce: ByteArray,
+    /** Which of the three bodies this is; decided at decode, never re-derived. */
+    val kind: AttachmentKind,
+    /** Pixel width when the sender supplied it, so an image reserves its shape before loading. */
+    val width: Long? = null,
+    /** Pixel height when the sender supplied it. */
+    val height: Long? = null,
+    /** A document's file name (the caption slot) or an image's caption. */
+    val caption: String? = null,
+    /** A voice note's playback duration. */
+    val durationMs: Long? = null,
+    /** A voice note's amplitude preview, when the sender supplied one. */
+    val waveform: ByteArray? = null,
+)
+
+/** The quick reactions the long-press bar offers, in order -- the web client's own list. */
+val QUICK_REACTIONS: List<String> = listOf("👍", "❤️", "😂")
+
+/**
+ * One media object's resolve state, session-scoped: a bubble asks the resolver for its [Attachment]
+ * and reads the answer back from here, so a re-render never refetches and two bubbles that share a
+ * media id share one download.
+ */
+sealed interface MediaObject {
+    val mediaId: Id
+
+    /** The fetch is in flight; the bubble keeps its placeholder. */
+    class Loading(override val mediaId: Id) : MediaObject
+
+    /** The opened bytes. Held only in memory, for the session, never written to disk. */
+    class Ready(override val mediaId: Id, val bytes: ByteArray) : MediaObject
+
+    /** The download or the open failed; the placeholder says so, and a re-ask retries. */
+    class Failed(override val mediaId: Id) : MediaObject
+}
 
 /**
  * A wei amount as AVAX, 18 decimals, trailing zeros trimmed: the amount a person typed is the

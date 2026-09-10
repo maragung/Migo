@@ -42,6 +42,7 @@ import com.migo.app.ui.SearchScreen
 import com.migo.app.ui.SignInScreen
 import com.migo.app.ui.WalletScreen
 import com.migo.app.ui.panelTitle
+import com.migo.core.protocol.ConversationKind
 import com.migo.core.wire.Id
 
 /**
@@ -109,6 +110,20 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
             microphone.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
+    // The same moment-of-use asking for the composer's microphone: the mic button is the one
+    // control that explains why the permission exists, and the model's staged note is what carries
+    // the intent across the dialog's answer. The permission itself is shared with the call -- one
+    // microphone, one question.
+    val requestVoiceNote: () -> Unit = {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            model.startVoiceNote()
+        } else {
+            model.stageVoiceNote()
+            microphone.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -137,6 +152,7 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
                     state = current,
                     model = model,
                     onRequestVoiceCall = requestVoiceCall,
+                    onRequestVoiceNote = requestVoiceNote,
                 )
             }
         }
@@ -172,8 +188,29 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
  * strip still shows, held in [AppState.SignedIn.stripSection].
  */
 @Composable
-private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel, onRequestVoiceCall: (Id, Id) -> Unit) {
+private fun ShellScreen(
+    state: AppState.SignedIn,
+    model: AppViewModel,
+    onRequestVoiceCall: (Id, Id) -> Unit,
+    onRequestVoiceNote: () -> Unit,
+) {
     val open = state.open
+    // The attachment picker and the document destination picker, both the system's own sheets: a
+    // GetContent for anything a person might attach (the image/document split is the model's, by
+    // the picked file's own MIME type), and a CreateDocument for the save a document row asks for
+    // -- no storage permission either way, because the person's own pick is the person's own
+    // grant. The staged document is what carries the Save press across the picker's answer.
+    val pickAttachment = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri ->
+        if (uri != null) model.sendAttachment(uri)
+    }
+    val saveDocument = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        if (uri != null) model.saveDocumentTo(uri)
+    }
+    val mediaObjects by model.mediaObjects.collectAsState()
     // Back means "close this, not the app", in the order a person reads the screen: the members
     // sheet (handled inside the chat, composed deeper so it wins while it is up), then the visible
     // window's tab, then a panel. The strip and the home screen are the resting state back stands
@@ -248,6 +285,24 @@ private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel, onRequest
                     selfId = state.accountId,
                     onAcknowledgeSafety = model::acknowledgeSafetyChange,
                     onStartCall = { peerId -> onRequestVoiceCall(open.conversationId, peerId) },
+                    // Attachments are an end-to-end feature: the control is offered only where the
+                    // conversation has a key channel to hand the recipients the object's key --
+                    // every direct chat and group, never a server-readable room.
+                    onAttach = if (open.kind != ConversationKind.Room) {
+                        { pickAttachment.launch("*/*") }
+                    } else {
+                        null
+                    },
+                    onVoiceNote = onRequestVoiceNote,
+                    onStopVoiceNote = model::stopVoiceNote,
+                    onCancelVoiceNote = model::cancelVoiceNote,
+                    onReact = model::react,
+                    onResolveMedia = model::resolveMedia,
+                    onSaveDocument = { attachment ->
+                        model.stageDocumentSave(attachment)
+                        saveDocument.launch(attachment.caption ?: "document")
+                    },
+                    mediaObjects = mediaObjects,
                     modifier = Modifier.weight(1f),
                 )
             } else {

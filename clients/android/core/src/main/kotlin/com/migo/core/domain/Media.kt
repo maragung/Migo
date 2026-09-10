@@ -5,11 +5,41 @@ import com.migo.core.protocol.Acknowledged
 import com.migo.core.protocol.MediaAbort
 import com.migo.core.protocol.MediaBegin
 import com.migo.core.protocol.MediaCommit
+import com.migo.core.protocol.MediaFetch
 import com.migo.core.protocol.MediaTicket
+import com.migo.core.protocol.MediaUrl
 import com.migo.core.protocol.Op
 import com.migo.core.wire.Id
 import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
+
+/**
+ * The media domain's own kind numbering, the wire's one-byte authorisation boundary.
+ *
+ * Not an enum on the protocol object because the wire carries it as a plain `u32`: the number is
+ * what the server's media policy scopes a stored object by, and a display hint is the caller's
+ * business. `Avatar` is the zero value a profile-scoped upload uses; every other kind is scoped
+ * to the conversation the upload names.
+ */
+object MediaKinds {
+    /** A profile picture; readable by anyone who can see the profile. */
+    const val AVATAR: Long = 0L
+
+    /** A still image. */
+    const val IMAGE: Long = 1L
+
+    /** A video. */
+    const val VIDEO: Long = 2L
+
+    /** Music or a recording that is not a voice note. */
+    const val AUDIO: Long = 3L
+
+    /** A push-to-talk recording. */
+    const val VOICE_NOTE: Long = 4L
+
+    /** Anything else a user attaches. */
+    const val DOCUMENT: Long = 5L
+}
 
 /**
  * The media object plane: uploads and download URLs, the byte side of the wire.
@@ -33,21 +63,30 @@ class MediaDomain(
      *
      * The claim is the caller's belief — the MIME type it thinks the bytes are, and their size; the
      * server is the authority and re-judges the bytes at commit, so a wrong claim is refused there
-     * rather than here. [kind] is the media domain's own numbering (an avatar is 0); a
+     * rather than here. [kind] is the media domain's own numbering ([MediaKinds]); a
      * [conversationId] scopes a conversation object, and is null for profile-scoped media like an
      * avatar, whose audience is whoever may see the profile, not a conversation's members.
+     * [width], [height] and [durationMs] are the claim's optional layout facts — a receiver can
+     * lay out an image or size a voice player before downloading anything — and ride the upload
+     * exactly when the caller knows them.
      */
     suspend fun begin(
         kind: Long,
         contentType: String,
         size: Long,
         conversationId: Id? = null,
+        width: Long? = null,
+        height: Long? = null,
+        durationMs: Long? = null,
     ): MediaTicket {
         val request = MediaBegin(
             kind = kind,
             contentType = contentType,
             size = size,
             conversationId = conversationId,
+            width = width,
+            height = height,
+            durationMs = durationMs,
         )
         return rpc.call(
             Op.MEDIA_UPLOAD_BEGIN,
@@ -109,8 +148,19 @@ class MediaDomain(
         contentType: String,
         bytes: ByteArray,
         conversationId: Id? = null,
+        width: Long? = null,
+        height: Long? = null,
+        durationMs: Long? = null,
     ): Id {
-        val ticket = begin(kind, contentType, bytes.size.toLong(), conversationId)
+        val ticket = begin(
+            kind = kind,
+            contentType = contentType,
+            size = bytes.size.toLong(),
+            conversationId = conversationId,
+            width = width,
+            height = height,
+            durationMs = durationMs,
+        )
         try {
             uploadBytes(ticket.uploadUrl, bytes)
             commit(ticket.uploadId, sha256(bytes))
@@ -124,6 +174,34 @@ class MediaDomain(
             throw cause
         }
         return ticket.uploadId
+    }
+
+    /**
+     * Requests a short-lived download URL for a committed object.
+     *
+     * The URL is membership-checked at issue time and expires on its own; a [conversationId]
+     * scopes the request when the caller holds a specific conversation view of the object.
+     * Request a fresh one when [MediaUrl.expiresAt] passes rather than caching past the deadline.
+     */
+    suspend fun fetchUrl(objectId: Id, conversationId: Id? = null): MediaUrl {
+        val request = MediaFetch(objectId = objectId, conversationId = conversationId)
+        return rpc.call(
+            Op.MEDIA_FETCH_URL,
+            { w -> request.encode(w) },
+            { r -> MediaUrl.decode(r) },
+        )
+    }
+
+    /**
+     * "This object, fetched": resolves the signed URL and GETs the bytes it serves.
+     *
+     * The one call a renderer's download needs. What the bytes are — sealed ciphertext, or a
+     * legacy plaintext object — is the message layer's business: this domain stores and serves
+     * bytes it cannot read, and the key that opens them never crosses this plane.
+     */
+    suspend fun download(objectId: Id, conversationId: Id? = null): ByteArray {
+        val granted = fetchUrl(objectId, conversationId)
+        return rest.getDownloadBytes(granted.url)
     }
 }
 

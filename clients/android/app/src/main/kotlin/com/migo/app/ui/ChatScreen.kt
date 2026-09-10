@@ -1,12 +1,18 @@
 package com.migo.app.ui
 
+import android.graphics.BitmapFactory
+import android.media.MediaPlayer
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -15,6 +21,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -30,12 +37,19 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -48,11 +62,17 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.migo.app.media.formatBytes
+import com.migo.app.media.formatDuration
+import com.migo.app.model.Attachment
+import com.migo.app.model.AttachmentKind
 import com.migo.app.model.ChatMessage
 import com.migo.app.model.ChatSafety
 import com.migo.app.model.ChatState
 import com.migo.app.model.GAME_KIND_GUESS_NUMBER
 import com.migo.app.model.GAME_STATUS_OPEN
+import com.migo.app.model.MediaObject
+import com.migo.app.model.QUICK_REACTIONS
 import com.migo.app.model.RoomNotice
 import com.migo.app.model.RosterMember
 import com.migo.app.model.VoteTally
@@ -66,6 +86,8 @@ import com.migo.core.protocol.GameViewWire
 import com.migo.core.protocol.RoomRole
 import com.migo.core.protocol.SanctionAction
 import com.migo.core.wire.Id
+import java.io.File
+import kotlinx.coroutines.delay
 
 /**
  * One conversation, shown full-bleed beneath the window strip: its messages, and the field for
@@ -129,6 +151,33 @@ fun ChatScreen(
      * no 1:1 to call. Null when the shell cannot place calls.
      */
     onStartCall: ((Id) -> Unit)? = null,
+    /**
+     * Opens the file picker for an attachment, whose answer is sent into the conversation. Null in
+     * a server-readable room — attachments are an end-to-end feature (a room has no key channel to
+     * hand the recipients a sealed object's key), mirroring the web composer's own gating.
+     */
+    onAttach: (() -> Unit)? = null,
+    /**
+     * Starts a voice note: asks the microphone permission at the moment of use and begins the
+     * recording. Offered in every conversation kind, because a voice note is speech and speech is
+     * what every conversation is for.
+     */
+    onVoiceNote: () -> Unit = {},
+    /** Finishes the recording and sends it. Offered only while [ChatState.recording] holds. */
+    onStopVoiceNote: () -> Unit = {},
+    /** Throws the recording away. Offered only while [ChatState.recording] holds. */
+    onCancelVoiceNote: () -> Unit = {},
+    /** Sets one of the quick reactions on a message, from the long-press bar. */
+    onReact: (Id, String) -> Unit = { _, _ -> },
+    /** Asks the resolver to fetch and open the given attachment's object. */
+    onResolveMedia: (Attachment) -> Unit = {},
+    /**
+     * Saves the given document, handed the attachment so the shell can stage it and name the
+     * destination picker's suggestion after the sender's file name.
+     */
+    onSaveDocument: (Attachment) -> Unit = {},
+    /** The session's resolved media, by media id — what an attachment bubble reads its object from. */
+    mediaObjects: Map<Id, MediaObject> = emptyMap(),
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -234,6 +283,10 @@ fun ChatScreen(
                                 is TimelineItem.Message -> MessageLine(
                                     message = item.message,
                                     head = heads[item.key] == true,
+                                    onReact = onReact,
+                                    onResolveMedia = onResolveMedia,
+                                    onSaveDocument = onSaveDocument,
+                                    mediaObject = mediaObjects[item.message.attachment?.mediaId],
                                 )
                                 is TimelineItem.Notice -> SystemNotice(text = item.notice.text)
                             }
@@ -259,12 +312,22 @@ fun ChatScreen(
                 ?.takeIf { it.kind == GAME_KIND_GUESS_NUMBER && it.status == GAME_STATUS_OPEN && it.yourTurn == true }
                 ?.let { active -> GuessCard(game = active, busy = chat.gameBusy, onGuess = onGuess) }
 
-            Composer(
-                draft = chat.draft,
-                sending = chat.sending,
-                onDraft = onDraft,
-                onSend = onSend,
-            )
+            // While a recording runs, the composer is the recording bar: no text can be typed into a
+            // moment that is being recorded, and the bar that says so is the same surface that
+            // stops or throws it away.
+            if (chat.recording) {
+                RecordingBar(onStop = onStopVoiceNote, onCancel = onCancelVoiceNote)
+            } else {
+                Composer(
+                    draft = chat.draft,
+                    sending = chat.sending,
+                    uploading = chat.uploading,
+                    onDraft = onDraft,
+                    onSend = onSend,
+                    onAttach = onAttach,
+                    onVoiceNote = onVoiceNote,
+                )
+            }
         }
 
         // The member sheet covers the thread rather than sitting beside it, so back closes the sheet
@@ -683,9 +746,21 @@ private fun GuessCard(
  * The sender's name is coloured by a stable hash of the name, which keeps one speaker one colour
  * for the length of a conversation; own messages are the exception, pinned to the teal head so
  * one's own words are always the same colour to oneself.
+ *
+ * A long-press opens the quick-reaction bar — the reactions affordance, offered on every line
+ * (one's own included, because reacting to one's own words is legal speech). A media or voice body
+ * draws its [AttachmentBlock] under the line, in the same avatar-indented column the text sits in.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MessageLine(message: ChatMessage, head: Boolean) {
+private fun MessageLine(
+    message: ChatMessage,
+    head: Boolean,
+    onReact: (Id, String) -> Unit,
+    onResolveMedia: (Attachment) -> Unit,
+    onSaveDocument: (Attachment) -> Unit,
+    mediaObject: MediaObject?,
+) {
     val scheme = MaterialTheme.colorScheme
     // The dark scheme's surfaces are too deep for the light ink the reference's name colours were
     // measured against, so the own-message name and the body follow the theme and the hashed
@@ -693,6 +768,9 @@ private fun MessageLine(message: ChatMessage, head: Boolean) {
     val ownName = if (isSystemInDarkTheme()) Color(0xFF6FD0E6) else Color(0xFF0D6373)
     val stampInk = LocalMigoExtra.current.faint
     val name = if (message.mine) message.author.ifEmpty { "You" } else message.author
+    // The reaction bar opens under the line it belongs to, so a press lands on the message the
+    // reader was looking at -- the state is local because the bar's life is the press's life.
+    val reactionBarOpen = remember { mutableStateOf(false) }
     val line = buildAnnotatedString {
         withStyle(
             SpanStyle(
@@ -726,6 +804,10 @@ private fun MessageLine(message: ChatMessage, head: Boolean) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .combinedClickable(
+                onClick = { reactionBarOpen.value = !reactionBarOpen.value },
+                onLongClick = { reactionBarOpen.value = true },
+            )
             .padding(horizontal = 12.dp, vertical = 2.dp),
     ) {
         Box(modifier = Modifier.width(24.dp)) {
@@ -733,12 +815,338 @@ private fun MessageLine(message: ChatMessage, head: Boolean) {
                 Monogram(name = name, size = 22.dp, modifier = Modifier.padding(top = 1.dp))
             }
         }
-        Text(
-            text = line,
-            fontSize = 12.sp,
-            lineHeight = 17.sp,
-            modifier = Modifier.weight(1f),
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = line,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+            )
+            message.attachment?.let { attachment ->
+                AttachmentBlock(
+                    attachment = attachment,
+                    mediaObject = mediaObject,
+                    onResolve = onResolveMedia,
+                    onSave = onSaveDocument,
+                )
+            }
+            if (reactionBarOpen.value) {
+                ReactionBar(onPick = { emoji ->
+                    reactionBarOpen.value = false
+                    onReact(message.messageId, emoji)
+                })
+            }
+        }
+    }
+}
+
+/**
+ * The quick-reaction bar under a long-pressed line: the web client's own three, as glyph buttons.
+ * No aggregation into chips -- the server stores a reaction as an ordinary message and the
+ * transcript says `Reacted ❤️` when it arrives, which is the whole of the feature's shape.
+ */
+@Composable
+private fun ReactionBar(onPick: (String) -> Unit) {
+    Row(modifier = Modifier.padding(top = 2.dp)) {
+        for (emoji in QUICK_REACTIONS) {
+            TextButton(onClick = { onPick(emoji) }, modifier = Modifier.size(40.dp)) {
+                Text(text = emoji, fontSize = 18.sp)
+            }
+        }
+    }
+}
+
+/**
+ * One message's media body: the image, the document row, or the voice player, switched on the
+ * discriminator decided at decode. Nothing here holds a [com.migo.core.crypto.Content] or a key --
+ * the attachment is the decoded mirror, and the bytes come from the resolver's map.
+ */
+@Composable
+private fun AttachmentBlock(
+    attachment: Attachment,
+    mediaObject: MediaObject?,
+    onResolve: (Attachment) -> Unit,
+    onSave: (Attachment) -> Unit,
+) {
+    when (attachment.kind) {
+        AttachmentKind.Image -> ImageBubble(attachment, mediaObject, onResolve)
+        AttachmentKind.Document -> DocumentRow(attachment, mediaObject, onResolve, onSave)
+        AttachmentKind.Voice -> VoiceBubble(attachment, mediaObject, onResolve)
+    }
+}
+
+/**
+ * An image, inline in the transcript. Resolved on first display (the same moment the reader asks
+ * to see it), laid out at the sender's claimed dimensions when it supplied them so the line's
+ * height is reserved before a single byte arrives, and capped at 220dp wide -- a photo that
+ * commandeered the whole thread width would be the transcript serving the image.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ImageBubble(
+    attachment: Attachment,
+    mediaObject: MediaObject?,
+    onResolve: (Attachment) -> Unit,
+) {
+    LaunchedEffect(attachment.mediaId) { onResolve(attachment) }
+    val bitmap = (mediaObject as? MediaObject.Ready)?.bytes?.let {
+        BitmapFactory.decodeByteArray(it, 0, it.size)
+    }
+    val shape = RoundedCornerShape(12.dp)
+    Column(modifier = Modifier.padding(top = 4.dp)) {
+        when {
+            bitmap != null -> Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = attachment.caption ?: "Photo",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .widthIn(max = 220.dp)
+                    .let { base ->
+                        val w = attachment.width
+                        val h = attachment.height
+                        if (w != null && h != null && w > 0 && h > 0) {
+                            base.aspectRatio(w.toFloat() / h.toFloat())
+                        } else {
+                            base
+                        }
+                    }
+                    .clip(shape),
+            )
+
+            mediaObject is MediaObject.Failed -> Text(
+                text = "Could not load the image — tap to retry",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier
+                    .clip(shape)
+                    .combinedClickable(onClick = { onResolve(attachment) })
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            )
+
+            // Loading, or the resolver has not been asked yet: a reserved block in the claimed
+            // shape, so the transcript does not jump when the bytes land.
+            else -> Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = shape,
+                modifier = Modifier
+                    .widthIn(max = 220.dp)
+                    .let { base ->
+                        val w = attachment.width
+                        val h = attachment.height
+                        if (w != null && h != null && w > 0 && h > 0) {
+                            base.aspectRatio(w.toFloat() / h.toFloat())
+                        } else {
+                            base.height(120.dp)
+                        }
+                    },
+            ) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                }
+            }
+        }
+        attachment.caption?.takeIf { it.isNotBlank() }
+            ?.let { caption ->
+                Text(
+                    text = caption,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 4.dp, top = 2.dp),
+                )
+            }
+    }
+}
+
+/**
+ * The document row: glyph, the sender's file name, the claimed size, and Save. The save writes the
+ * resolved bytes, so the button waits for them and says so with a spinner rather than offering a
+ * press that would have to fail.
+ */
+@Composable
+private fun DocumentRow(
+    attachment: Attachment,
+    mediaObject: MediaObject?,
+    onResolve: (Attachment) -> Unit,
+    onSave: (Attachment) -> Unit,
+) {
+    LaunchedEffect(attachment.mediaId) { onResolve(attachment) }
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.padding(top = 4.dp).widthIn(max = 280.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+        ) {
+            Text(text = "📄", fontSize = 20.sp)
+            Spacer(modifier = Modifier.width(8.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = attachment.caption ?: "Attachment",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (mediaObject is MediaObject.Failed) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                    maxLines = 1,
+                )
+                Text(
+                    text = when (mediaObject) {
+                        is MediaObject.Failed -> "Could not load — tap to retry"
+                        else -> formatBytes(attachment.sizeBytes)
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            when {
+                mediaObject is MediaObject.Ready -> TextButton(onClick = { onSave(attachment) }) {
+                    Text("Save")
+                }
+                mediaObject is MediaObject.Failed -> TextButton(onClick = { onResolve(attachment) }) {
+                    Text("Retry")
+                }
+                else -> CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+            }
+        }
+    }
+}
+
+/**
+ * The voice player: a play/pause glyph, the duration label, and a progress line that walks while
+ * it plays. Playback is the platform's [MediaPlayer] over a temp file in this app's own cache --
+ * the only handle it accepts -- deleted and the player released the moment the bubble leaves the
+ * composition, so an opened note outlives its bubble by no longer than the scroll that took it away.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun VoiceBubble(
+    attachment: Attachment,
+    mediaObject: MediaObject?,
+    onResolve: (Attachment) -> Unit,
+) {
+    LaunchedEffect(attachment.mediaId) { onResolve(attachment) }
+    val context = LocalContext.current
+    var playing by remember { mutableStateOf(false) }
+    var positionMs by remember { mutableStateOf(0L) }
+    var totalMs by remember { mutableStateOf(attachment.durationMs ?: 0L) }
+    var failed by remember { mutableStateOf(false) }
+    // The player and its file live for the bubble's composition, not the note's session: two
+    // bubbles for one media id (a sender's echo and the received copy) are two players, which is
+    // the cheap correct answer -- one shared player would race two play buttons.
+    val player = remember { mutableStateOf<MediaPlayer?>(null) }
+    val file = remember(attachment.mediaId) {
+        File(context.cacheDir, "voice-${attachment.mediaId.value}.play")
+    }
+    DisposableEffect(attachment.mediaId) {
+        onDispose {
+            player.value?.release()
+            player.value = null
+            file.delete()
+        }
+    }
+    // The progress read is a poll rather than a listener because the listener answers in callbacks
+    // the composition would have to marshal anyway; a tenth of a second is finer than a progress
+    // line can show.
+    LaunchedEffect(playing) {
+        while (playing) {
+            player.value?.let { live ->
+                if (live.isPlaying) positionMs = live.currentPosition.toLong()
+            }
+            delay(100)
+        }
+    }
+
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.padding(top = 4.dp).widthIn(max = 280.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .combinedClickable(onClick = {
+                    val live = player.value
+                    when {
+                        failed || mediaObject is MediaObject.Failed -> onResolve(attachment)
+                        playing -> {
+                            live?.pause()
+                            playing = false
+                        }
+                        // Not resolved yet: the first tap on a still-loading note is the reader
+                        // telling the resolver to hurry, not a play command to drop on the floor.
+                        mediaObject !is MediaObject.Ready -> onResolve(attachment)
+                        else -> {
+                            val held = live ?: try {
+                                file.writeBytes(mediaObject.bytes)
+                                MediaPlayer().apply {
+                                    setDataSource(file.absolutePath)
+                                    prepare()
+                                    setOnCompletionListener {
+                                        playing = false
+                                        positionMs = 0
+                                        seekTo(0)
+                                    }
+                                    totalMs = duration.toLong()
+                                }.also { player.value = it }
+                            } catch (_: Exception) {
+                                // A note the platform's player cannot open is a note this bubble
+                                // cannot play; the label says so and the press becomes a retry.
+                                failed = true
+                                null
+                            }
+                            if (held != null && !failed) {
+                                held.start()
+                                playing = true
+                            } else {
+                                playing = false
+                            }
+                        }
+                    }
+                })
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+        ) {
+            Text(
+                text = when {
+                    failed || mediaObject is MediaObject.Failed -> "⚠️"
+                    playing -> "⏸"
+                    else -> "▶"
+                },
+                fontSize = 16.sp,
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                val total = if (totalMs > 0) totalMs else (attachment.durationMs ?: 0L)
+                Text(
+                    text = when {
+                        failed || mediaObject is MediaObject.Failed ->
+                            "Could not load the note — tap to retry"
+                        else -> "${formatDuration(positionMs)} / ${formatDuration(total)}"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (failed || mediaObject is MediaObject.Failed) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                    maxLines = 1,
+                )
+                if (total > 0 && !failed && mediaObject !is MediaObject.Failed) {
+                    val played = (positionMs.coerceIn(0, total)).toFloat() / total.toFloat()
+                    Surface(
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                        modifier = Modifier.fillMaxWidth().height(3.dp),
+                    ) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.fillMaxWidth(played).height(3.dp),
+                        ) {}
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -762,13 +1170,22 @@ private fun nameColor(name: String): Color {
  *
  * `imePadding` and `navigationBarsPadding` together, because this is the one row that has to stay above
  * the keyboard: a composer under the keyboard is a person typing into something they cannot see.
+ *
+ * The attach control is handed in as null for a room (attachments are end-to-end speech, and a
+ * server-readable room has no key channel to deliver one through); the microphone is offered in
+ * every conversation, because a voice note is speech and speech is what every conversation is for.
+ * While an upload runs, the attach slot holds the spinner -- the one honest picture of a file on
+ * its way -- and every control stands down until it lands.
  */
 @Composable
 private fun Composer(
     draft: String,
     sending: Boolean,
+    uploading: Boolean,
     onDraft: (String) -> Unit,
     onSend: () -> Unit,
+    onAttach: (() -> Unit)?,
+    onVoiceNote: () -> Unit,
 ) {
     Surface(color = MaterialTheme.colorScheme.surface) {
         Row(
@@ -779,6 +1196,20 @@ private fun Composer(
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
+            if (onAttach != null) {
+                if (uploading) {
+                    Box(
+                        modifier = Modifier.size(52.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    }
+                } else {
+                    TextButton(onClick = onAttach, enabled = !sending, modifier = Modifier.size(52.dp)) {
+                        Text(text = "📎", fontSize = 18.sp)
+                    }
+                }
+            }
             OutlinedTextField(
                 value = draft,
                 onValueChange = onDraft,
@@ -791,10 +1222,17 @@ private fun Composer(
                 ),
                 modifier = Modifier.weight(1f),
             )
-            Spacer(modifier = Modifier.width(8.dp))
+            TextButton(
+                onClick = onVoiceNote,
+                enabled = !sending && !uploading,
+                modifier = Modifier.size(52.dp),
+            ) {
+                Text(text = "🎤", fontSize = 18.sp)
+            }
+            Spacer(modifier = Modifier.width(4.dp))
             FilledIconButton(
                 onClick = onSend,
-                enabled = draft.isNotBlank() && !sending,
+                enabled = draft.isNotBlank() && !sending && !uploading,
                 modifier = Modifier.size(52.dp),
             ) {
                 if (sending) {
@@ -812,6 +1250,59 @@ private fun Composer(
                         drawGlyphSend(sendInk)
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * The composer's other face: the bar a running recording replaces it with. A red dot and a timer
+ * that counts what is being said, a Cancel that throws it away, and the Send that finishes it --
+ * the whole vocabulary of a recording, with nothing to type over it.
+ *
+ * The timer ticks from this composition's own start, which is the same instant [ChatState.recording]
+ * turned true; it is a display clock, not a measurement, so it cannot drift from the recorder's
+ * own cap without the cap itself having already stopped the recording.
+ */
+@Composable
+private fun RecordingBar(
+    onStop: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    var elapsedMs by remember { mutableStateOf(0L) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1000)
+            elapsedMs += 1000
+        }
+    }
+    Surface(color = MaterialTheme.colorScheme.surface) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .imePadding()
+                .navigationBarsPadding()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(text = "●", color = MaterialTheme.colorScheme.error, fontSize = 14.sp)
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = formatDuration(elapsedMs),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = "  recording",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(modifier = Modifier.weight(1f))
+            TextButton(onClick = onCancel) {
+                Text("Cancel")
+            }
+            Button(onClick = onStop) {
+                Text("Send")
             }
         }
     }
