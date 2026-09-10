@@ -7,8 +7,9 @@
          (a runtime permission, asked for at the call button rather than at first launch, because
          the call that needs it is the one that explains why), and MODIFY_AUDIO_SETTINGS is what
          lets the WebRTC audio module put the phone in communication mode and route the call
-         audio to the earpiece. Neither is core's business -- core is pure signaling -- so both
-         live here in :app, the module that owns the media plane. -->
+         audio to the earpiece. Neither is core's business (core is pure signaling), so both
+         live here in :app, the module that owns the media plane. XML comments cannot contain a
+         double hyphen, so this comment uses parentheses where prose would reach for one. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 

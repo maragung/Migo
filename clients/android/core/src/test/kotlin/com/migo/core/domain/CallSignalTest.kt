@@ -9,6 +9,7 @@ import com.migo.core.wire.Id
 import com.migo.core.wire.NIL_ID
 import com.migo.core.wire.parseId
 import java.time.Instant
+import kotlin.reflect.KClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
@@ -89,14 +90,20 @@ class CallSignalTest {
             return false
         }
 
-        private inline fun <reified T : Throwable> assertThrows(what: String, block: () -> Unit) {
+        /**
+         * The exception assertion, on the KClass rather than a reified parameter: a reified catch
+         * (`catch (expected: T)`) is prohibited in Kotlin, and the call sites all pass the class
+         * through (`CallSignalFormatException::class`), so this shape is the one that reads the
+         * same at every site.
+         */
+        private fun assertThrows(what: String, type: KClass<out Throwable>, block: () -> Unit) {
             try {
                 block()
-                fail("$what: expected ${T::class.simpleName}")
-            } catch (expected: T) {
-                // the expected failure
-            } catch (other: Throwable) {
-                fail("$what: expected ${T::class.simpleName}, got ${other::class.simpleName}")
+                fail("$what: expected ${type.simpleName}")
+            } catch (expected: Throwable) {
+                if (!type.isInstance(expected)) {
+                    fail("$what: expected ${type.simpleName}, got ${expected::class.simpleName}")
+                }
             }
         }
     }
