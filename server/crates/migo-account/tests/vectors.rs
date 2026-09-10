@@ -326,7 +326,7 @@ fn containers_reproduce_byte_for_byte_and_open() {
         if let Some(seed_hex) = case["rotated_identity"].as_str() {
             let seed: [u8; 32] = unhex(seed_hex)
                 .try_into()
-                .unwrap_or_else(|| panic!("{path} {name}: rotated identity seed is not 32 bytes"));
+                .unwrap_or_else(|_| panic!("{path} {name}: rotated identity seed is not 32 bytes"));
             file_payload = file_payload.for_identity(&seed);
             seen_rotated_case = true;
         }
@@ -351,7 +351,7 @@ fn containers_reproduce_byte_for_byte_and_open() {
         if let Some(seed_hex) = case["rotated_identity"].as_str() {
             let seed: [u8; 32] = unhex(seed_hex)
                 .try_into()
-                .unwrap_or_else(|| panic!("{path} {name}: rotated identity seed is not 32 bytes"));
+                .unwrap_or_else(|_| panic!("{path} {name}: rotated identity seed is not 32 bytes"));
             assert_eq!(
                 opened.rotated_identity_seed().unwrap_or_else(|e| {
                     panic!("{path} {name}: rotated identity seed does not parse: {e:?}")

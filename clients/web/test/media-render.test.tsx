@@ -187,7 +187,10 @@ test('a document renders as the file row: name and size, never an image embed', 
   assert.ok(docMarkup.includes('doc-attachment'), 'the document row rendered');
   assert.ok(docMarkup.includes('doc-name'), 'the filename element rendered');
   assert.ok(docMarkup.includes('2.0 KB'), 'the size is formatted beside the name');
-  for (const tag of ['<img', '<script', '<svg', '<iframe', '<object', '<embed', '<video']) {
+  // React escapes every text node, so a literal tag in this markup is an element the
+  // app itself rendered — which for a document must be none of these. The row's own
+  // file/download icons are svg and are not on the list for exactly that reason.
+  for (const tag of ['<img', '<script', '<iframe', '<object', '<embed', '<video']) {
     assert.ok(!docMarkup.includes(tag), `rendered a live ${tag}> element for a document`);
   }
 });
