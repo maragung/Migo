@@ -168,7 +168,12 @@ class CallManager(
     val state: StateFlow<CallUiState> = _state.asStateFlow()
 
     /** Whether a call occupies this device; an ended one on screen does not block a new one. */
-    private fun callInProgress(): Boolean = active != null && active.state != CallState.Ended
+    private fun callInProgress(): Boolean {
+        // A local read, so the null check and the state check see the same call: `active` is a
+        // volatile another thread may retire between the two, and a smart cast cannot bridge it.
+        val call = active ?: return false
+        return call.state != CallState.Ended
+    }
 
     // --- shared refs (see the threading note in the class doc) ---
 
