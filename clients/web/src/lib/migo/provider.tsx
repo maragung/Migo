@@ -404,10 +404,12 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
         const record = await loadDeviceRecord(accountId);
         // The account's identity key this browser answers with: the rotated successor when this
         // browser rotated (the record's copy is the half of the successor that survives a
-        // sign-out), the root's derivation until then. The file itself can only ever reproduce
-        // the root's derivation — the successor is fresh randomness — so a browser that rotated
-        // and then signed out would sign with the retired key and be refused without this.
-        const activeSeed = record?.rotatedIdentitySeed;
+        // sign-out), the container's own when the file was sealed after a rotation on the device
+        // that made it — the successor is fresh randomness, so the file is the only other place
+        // it can ride — and the root's derivation until then. A v1 file sealed before a rotation
+        // carries no successor half, and the root's derivation is all it can offer.
+        const fileSeed = opened.rotatedIdentitySeed();
+        const activeSeed = record?.rotatedIdentitySeed ?? fileSeed ?? undefined;
         const identity =
           activeSeed !== undefined
             ? account.IdentityKey.fromSeed(activeSeed)

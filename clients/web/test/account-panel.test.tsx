@@ -19,6 +19,10 @@
  *   4. **The key file is offered only where it can be produced.** A device without the account
  *      root has no key file to download, so the panel says so and offers no button that could not
  *      work — the honest no-root state, pinned here so it cannot quietly become a dead control.
+ *   5. **A completed rotation is not dismissable at advice.** Its only way forward is the forced
+ *      seal of a fresh key file, whose download counts only once the sealed bytes have been
+ *      re-opened and their identity half verified against the account's active key — pinned here
+ *      so neither the plain Done nor the plain "downloaded" hint can quietly come back.
  *
  * The full panel is rendered once under a minimal context double (the same shape app-shell.test.tsx
  * and calls.test.tsx feed), with `client: null` so it takes the no-root branch; `renderToStaticMarkup`
@@ -32,6 +36,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import type { ReactNode } from 'react';
 
+import { account } from '@migo/sdk';
 import type { Id } from '@migo/sdk';
 
 import {
@@ -43,12 +48,15 @@ import {
   PassphraseFormView,
   ROTATED_BACKUP_ADVICE,
   ROTATED_NOTICE,
+  ROTATED_SEAL_EXPLANATION,
+  ROTATED_SEAL_VALIDATED,
   ROTATE_COSTLY_HALF,
   ROTATE_EXPLANATION,
   ROTATE_NO_ROOT,
   ROTATE_QUIET_HALF,
   RotateIdentityView,
   isLikelyEmail,
+  sealedIdentityVouches,
 } from '../src/components/account-panel.js';
 import type { RotationResult } from '../src/components/account-panel.js';
 import { MigoContext } from '../src/lib/migo/provider.js';
@@ -64,6 +72,15 @@ function disabledCount(markup: string): number {
  */
 function textOf(markup: string): string {
   return markup.replaceAll('&#x27;', "'").replaceAll('&quot;', '"').replaceAll('&amp;', '&');
+}
+
+/** Lowercase hex for the seed bytes the container's `rotated_identity` field carries. */
+function hexOf(bytes: Uint8Array): string {
+  let out = '';
+  for (const byte of bytes) {
+    out += byte.toString(16).padStart(2, '0');
+  }
+  return out;
 }
 
 // --- isLikelyEmail: the local typo gate, not RFC validation -----------------------------------
@@ -452,6 +469,7 @@ test('the rotation confirmation states both halves before the button can be pres
         result={null}
         error={null}
         onConfirm={() => {}}
+        onSealKeyFile={() => {}}
         onClose={() => {}}
       />,
     ),
@@ -480,6 +498,7 @@ test('an in-flight rotation disables both buttons rather than offering a second 
       result={null}
       error={null}
       onConfirm={() => {}}
+      onSealKeyFile={() => {}}
       onClose={() => {}}
     />,
   );
@@ -495,6 +514,7 @@ test('a refusal is shown as the sentence it is, with the way back in', () => {
       result={null}
       error="The identity key was not rotated."
       onConfirm={() => {}}
+      onSealKeyFile={() => {}}
       onClose={() => {}}
     />,
   );
@@ -506,13 +526,14 @@ test('a refusal is shown as the sentence it is, with the way back in', () => {
   );
 });
 
-test('a completed rotation carries the fresh-backup advice in the same breath as the notice', () => {
+test('a completed rotation offers only the seal it owes, not a way past it', () => {
   const markup = renderToStaticMarkup(
     <RotateIdentityView
       busy={false}
       result={{ kind: 'done', message: ROTATED_NOTICE } satisfies RotationResult}
       error={null}
       onConfirm={() => {}}
+      onSealKeyFile={() => {}}
       onClose={() => {}}
     />,
   );
@@ -520,9 +541,16 @@ test('a completed rotation carries the fresh-backup advice in the same breath as
   assert.ok(markup.includes(ROTATED_NOTICE));
   assert.ok(
     markup.includes(ROTATED_BACKUP_ADVICE),
-    'the one act a completed rotation asks for — seal a backup that can vouch for the account',
+    'the one act a completed rotation asks for — seal a file that carries the new key',
   );
-  assert.ok(markup.includes('Done'));
+  assert.ok(
+    markup.includes('Seal new key file'),
+    'the done result forwards to the forced seal rather than stopping at advice',
+  );
+  assert.ok(
+    !markup.includes('>Done</button>'),
+    'no plain Done: the successor exists only here, and the moment cannot be skipped past',
+  );
   assert.ok(!markup.includes('Rotate identity key</button>'), 'the confirmation is gone once done');
 });
 
@@ -538,6 +566,7 @@ test('an unfinished rotation is its own state, not an error: the message, no bac
       }
       error={null}
       onConfirm={() => {}}
+      onSealKeyFile={() => {}}
       onClose={() => {}}
     />,
   );
@@ -546,6 +575,111 @@ test('an unfinished rotation is its own state, not an error: the message, no bac
   assert.ok(
     !markup.includes(ROTATED_BACKUP_ADVICE),
     'nothing was confirmed as rotated, so no backup advice is owed yet',
+  );
+  assert.ok(
+    markup.includes('>Done</button>'),
+    'the unfinished end keeps its plain exit: nothing is owed yet',
+  );
+});
+
+// --- the forced post-rotation seal: downloaded is not done until it is verified ----------------
+
+test('the forced key-file form states the verification and never claims done on a download', () => {
+  const markup = textOf(
+    renderToStaticMarkup(
+      <KeyFileFormView
+        credential="correct horse battery"
+        confirm="correct horse battery"
+        sealing={false}
+        error={null}
+        saved={false}
+        forced={true}
+        validated={false}
+        onChange={() => {}}
+        onSubmit={() => {}}
+      />,
+    ),
+  );
+
+  assert.ok(
+    markup.includes(ROTATED_SEAL_EXPLANATION),
+    'the forced form says the download is verified before it counts',
+  );
+  assert.ok(
+    markup.includes('Download and verify key file'),
+    'the button names both halves of the ceremony',
+  );
+  assert.ok(
+    !markup.includes('keep it somewhere safe'),
+    'the plain downloaded hint must not appear: a download alone is not the success state',
+  );
+  assert.ok(
+    !markup.includes('>Done</button>'),
+    'no way out before validation — the sheet is the forced half of the promise',
+  );
+});
+
+test('the validated forced form is the only state with a way out', () => {
+  const markup = textOf(
+    renderToStaticMarkup(
+      <KeyFileFormView
+        credential="correct horse battery"
+        confirm="correct horse battery"
+        sealing={false}
+        error={null}
+        saved={false}
+        forced={true}
+        validated={true}
+        onChange={() => {}}
+        onSubmit={() => {}}
+        onDone={() => {}}
+      />,
+    ),
+  );
+
+  assert.ok(
+    markup.includes(ROTATED_SEAL_VALIDATED),
+    'the validated line says what was actually checked: the file carries the new key',
+  );
+  assert.ok(
+    markup.includes('>Done</button>'),
+    'the validated state offers the exit the whole ceremony was holding back',
+  );
+  assert.ok(
+    !markup.includes('Download and verify key file'),
+    'the submit is gone once validated — re-sealing is not offered mid-ceremony',
+  );
+});
+
+test("sealedIdentityVouches accepts only the account's active key, never an absent half", () => {
+  const seed = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
+  const other = Uint8Array.from({ length: 32 }, (_, index) => 255 - index);
+  const successor = account.IdentityKey.fromSeed(seed);
+  const plainFile = account.AccountFile.forRoot(
+    account.MigoRoot.fromBytes(Uint8Array.from({ length: 32 }, (_, index) => index + 7)),
+    1700000000,
+  ).forAccount('MGO-ABCD1234');
+  const carryingFile = plainFile.forRotatedIdentity(hexOf(seed));
+
+  assert.equal(
+    sealedIdentityVouches(carryingFile, successor.publicKey()),
+    true,
+    'a container carrying the successor seed vouches for the successor public key',
+  );
+  assert.equal(
+    sealedIdentityVouches(plainFile, successor.publicKey()),
+    false,
+    'a pre-rotation container has no identity half to vouch with',
+  );
+  assert.equal(
+    sealedIdentityVouches(carryingFile, account.IdentityKey.fromSeed(other).publicKey()),
+    false,
+    'a different key does not vouch — byte-for-byte, not approximately',
+  );
+  assert.equal(
+    sealedIdentityVouches(carryingFile, null),
+    false,
+    'no active key to compare against is a refusal, not a pass',
   );
 });
 

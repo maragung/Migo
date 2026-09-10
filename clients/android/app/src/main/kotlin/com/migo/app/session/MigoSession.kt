@@ -17,6 +17,7 @@ import com.migo.core.crypto.PeerSafetyNumber
 import com.migo.core.crypto.pairSafetyNumber
 import com.migo.core.domain.KeyStore
 import com.migo.core.domain.SdkError
+import com.migo.core.domain.withRotatedIdentityFrom
 import com.migo.core.net.CaptchaProof
 import com.migo.core.store.DeviceKeys
 import com.migo.core.store.GatewayScheme
@@ -354,6 +355,7 @@ class MigoSession private constructor(
                 val file = AccountFile
                     .new(root, System.currentTimeMillis() / 1000)
                     .forAccount(client.accountId.value)
+                    .withRotatedIdentityFrom(client.keyStore)
                 // Argon2 at the container's own cost is CPU work, so the seal runs on the default
                 // dispatcher, exactly as the restore path's open does.
                 withContext(Dispatchers.Default) { sealContainer(passphrase, file) }
@@ -528,9 +530,9 @@ class MigoSession private constructor(
                 // vault holds as the account's active one: the rotated key when this device
                 // rotated one (the root's derivation was retired by the very ceremony that minted
                 // it, and signing with it is refused), and the root's derivation until then. The
-                // add-device door below has no such choice — the container seals the root, and
-                // after a rotation that root's identity half can no longer vouch for the account,
-                // which is the documented cost of rotating.
+                // add-device door below makes the same choice through the container's own
+                // rotated-identity half when the file carries one — a v1 container sealed before
+                // any rotation offers the root's derivation and nothing else.
                 client.identityLogin(
                     stored.session.username,
                     stored.session.deviceId,
@@ -547,7 +549,18 @@ class MigoSession private constructor(
             val client =
                 build(endpoint, appVersion, null, KeyStore.restored(root, deviceCredential), store, hooks)
             val session = MigoSession(client, name, vault, store)
-            client.addDevice(accountId, IdentityKey.fromRoot(root), deviceCredential)
+            // A container sealed after a rotation carries the successor's seed, and the
+            // successor — not the root's derivation — is the key the server knows as the
+            // account's active one. Installing it into the store before the ceremony keeps the
+            // add-device signature, every later ceremony, and every later sealed backup on the
+            // active key; a v1 container sealed before any rotation carries no seed, and the
+            // root's derivation is then still the right key.
+            val activeIdentity = file.rotatedIdentitySeed()?.let { seed ->
+                IdentityKey.fromSeed(seed).also { successor ->
+                    client.keyStore.installRotatedIdentity(successor)
+                }
+            } ?: IdentityKey.fromRoot(root)
+            client.addDevice(accountId, activeIdentity, deviceCredential)
             session.enrolAccountMaterial()
             session.persist()
             return session

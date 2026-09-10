@@ -41,6 +41,7 @@ import com.migo.core.domain.IncomingMessage
 import com.migo.core.domain.MessageDeletion
 import com.migo.core.domain.SendOptions
 import com.migo.core.domain.Subscription
+import com.migo.core.domain.withRotatedIdentityFrom
 import com.migo.core.net.CaptchaChallenge
 import com.migo.core.net.CaptchaProof
 import com.migo.core.net.ChainClient
@@ -488,6 +489,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val file = AccountFile
                     .new(root, System.currentTimeMillis() / 1000)
                     .forAccount(live.client.accountId.value)
+                    .withRotatedIdentityFrom(live.client.keyStore)
                 // Argon2 at the container's own cost is CPU work, so the seal runs on the default
                 // dispatcher; only the stream to the chosen file is IO.
                 val bytes = withContext(Dispatchers.Default) { sealContainer(credential, file) }

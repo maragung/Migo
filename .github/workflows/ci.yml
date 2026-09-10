@@ -402,3 +402,77 @@ jobs:
         run: |
           cargo install cargo-audit --locked
           cargo audit
+
+  # ---------------------------------------------------------------- vectors-regen
+  # The two rust-reference vector files (ML-DSA, the .migo container) are written
+  # by the migo-account example binary, so regenerating them is a cargo build —
+  # exactly the thing a laptop should not have to run to land a JSON. When a
+  # change to migo-account moves those bytes, this job rewrites the files on a
+  # runner and commits them: the byte-for-byte runners tolerate a missing case
+  # for the one run that lands with stale JSON, and the commit pushed here is
+  # what the next run pins against. It needs the server job green first, so a
+  # broken example never gets to rewrite the vectors it is wrong about.
+  #
+  # The grep is the guard a "the case must exist" test cannot be: regeneration
+  # is the only moment the case list can shrink unnoticed, so it is the moment
+  # the list is checked. The dispatch at the end exists because a push made
+  # with GITHUB_TOKEN triggers no workflows — without it the regenerated tree
+  # would sit on main with no run to prove the ports agree on its bytes.
+  vectors-regen:
+    name: Regenerate rust-reference vectors when stale
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [gates, server]
+    # main only: on a pull request there is no branch this job may push to.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          key: vectors-regen
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The same modules the gates job installs, for the same reason: `make
+      # vectors` runs the same generators, and pydeps-audit reads every install
+      # line in this file against the imports under tools/.
+      - name: Python modules the vector generators import
+        run: python3 -m pip install --quiet --disable-pip-version-check pyyaml cryptography
+
+      - name: Regenerate, and commit when the files moved
+        id: regen
+        run: |
+          make vectors
+          # The regenerated file must still name the rotated-identity case: a
+          # generator change that quietly drops it is the one way the case
+          # count can shrink with every other gate green.
+          grep -q 'container_root_a_rotated' shared/protocol/vectors/crypto/account-container.json
+          if git diff --quiet; then
+            echo 'vectors are current — nothing to commit'
+            echo 'committed=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name 'migo-vectors-bot'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add shared/protocol/vectors
+          git commit -m 'chore: regenerate the rust-reference conformance vectors'
+          git push
+          echo 'committed=true' >> "$GITHUB_OUTPUT"
+
+      - name: Run CI once on the regenerated tree
+        if: steps.regen.outputs.committed == 'true'
+        run: |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/ci.yml/dispatches" \
+            -d '{"ref":"${{ github.ref_name }}"}'

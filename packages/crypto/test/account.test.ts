@@ -101,6 +101,11 @@ function unhex(value: string): Uint8Array {
   return out;
 }
 
+// The container unit tests' two fixed roots, matching the vector file's A and B: hex literals the
+// byte-form assertions splice directly, so they live here rather than being derived at runtime.
+const ROOT_A_HEX_LOCAL = '8f2a1c9d4e6b3a7f5d0c8e1b9a2f4d6c8e0a2b4d6f8c0e2a4b6d8f0a2c4e6d80';
+const ROOT_B_HEX_LOCAL = '1a3c5e7f9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7b9d1f3a';
+
 function hex(bytes: Uint8Array): string {
   let out = '';
   for (const byte of bytes) {
@@ -370,8 +375,13 @@ test('containers reproduce byte for byte and open', async () => {
     const expected = bytesOf(item, 'container');
 
     // Reseating the same inputs must produce the same file: the format has no hidden entropy beyond
-    // the salt and nonce, which are pinned here.
-    const payload = account.AccountFile.forRoot(root, createdAt);
+    // the salt and nonce, which are pinned here. A case that names a `rotated_identity` input
+    // exercises the fifth field; a case without one is the pre-rotation three/four-field form.
+    let payload = account.AccountFile.forRoot(root, createdAt);
+    const rotatedHex = item.rotated_identity;
+    if (rotatedHex !== undefined) {
+      payload = payload.forRotatedIdentity(text(item, 'rotated_identity'));
+    }
     const actual = await account.sealContainerWith(credential, payload, params, salt, nonce);
     assert.equal(
       hex(actual),
@@ -382,6 +392,24 @@ test('containers reproduce byte for byte and open', async () => {
     // And the pinned file opens back to the same root with its credential.
     const opened = await account.openContainer(credential, expected);
     assert.ok(opened.rootSecret().equals(root), `\`${caseName(item)}\` opened root differs`);
+
+    // The rotated seed, when the case carries one, opens to the exact pinned seed — and a case
+    // without the field opens with the seed absent, which is the pre-rotation container's shape.
+    if (rotatedHex !== undefined) {
+      const seed = opened.rotatedIdentitySeed();
+      assert.ok(seed !== null, `\`${caseName(item)}\` opened without the rotated seed`);
+      assert.equal(
+        hex(seed),
+        text(item, 'rotated_identity'),
+        `\`${caseName(item)}\` opened rotated seed differs`,
+      );
+    } else {
+      assert.equal(
+        opened.rotatedIdentitySeed(),
+        null,
+        `\`${caseName(item)}\` carries a rotated seed the case does not name`,
+      );
+    }
 
     // A wrong credential is refused identically to a tampered byte: both `OpenFailed`, so a caller
     // cannot tell how far a guess got.
@@ -400,6 +428,102 @@ test('containers reproduce byte for byte and open', async () => {
       `\`${caseName(item)}\` tampered byte`,
     );
   }
+});
+
+test('the rotated identity field rides the payload without moving the old bytes', () => {
+  // The three- and four-field forms are byte contracts: a build that has never heard of
+  // `rotated_identity` must keep producing and reading exactly these bytes.
+  const root = account.MigoRoot.fromBytes(unhex(ROOT_A_HEX_LOCAL));
+  const plain = account.AccountFile.forRoot(root, 1_700_000_000);
+  assert.equal(
+    new TextDecoder().decode(plain.toJsonBytes()),
+    '{"version":1,"created_at":1700000000,"root":"' + ROOT_A_HEX_LOCAL + '"}',
+    'three-field form is unchanged',
+  );
+  const named = plain.forAccount('mgo-0123456789abcdef');
+  assert.equal(
+    new TextDecoder().decode(named.toJsonBytes()),
+    '{"version":1,"created_at":1700000000,"root":"' +
+      ROOT_A_HEX_LOCAL +
+      '","account_id":"mgo-0123456789abcdef"}',
+    'four-field form is unchanged',
+  );
+
+  // The fifth field appears only when set, after account_id, in compact JSON — the same order
+  // serde writes, which is what lets a container sealed on one platform open on another.
+  const rotated = ROOT_B_HEX_LOCAL;
+  const carried = named.forRotatedIdentity(rotated);
+  assert.equal(
+    new TextDecoder().decode(carried.toJsonBytes()),
+    '{"version":1,"created_at":1700000000,"root":"' +
+      ROOT_A_HEX_LOCAL +
+      '","account_id":"mgo-0123456789abcdef","rotated_identity":"' +
+      rotated +
+      '"}',
+    'five-field form carries the seed last',
+  );
+  // And the builder composes the other way too: identity first, account name second.
+  assert.equal(
+    plain.forRotatedIdentity(rotated).forAccount('mgo-0123456789abcdef').toJsonBytes().length,
+    carried.toJsonBytes().length,
+    'field order in the bytes does not depend on builder order',
+  );
+});
+
+test('fromJsonBytes accepts, rejects, and defaults the rotated identity field', () => {
+  const root = account.MigoRoot.fromBytes(unhex(ROOT_A_HEX_LOCAL));
+  const base = account.AccountFile.forRoot(root, 1_700_000_000);
+
+  // Present and well-formed: round-trips through the payload bytes.
+  const roundTrip = account.AccountFile.fromJsonBytes(
+    base.forRotatedIdentity(ROOT_B_HEX_LOCAL).toJsonBytes(),
+  );
+  assert.ok(roundTrip.rotatedIdentitySeed() !== null, 'the seed survives the round trip');
+  assert.equal(hex(roundTrip.rotatedIdentitySeed() ?? new Uint8Array()), ROOT_B_HEX_LOCAL);
+
+  // Absent and null-JSON both read as absent — a build older than the field serialises nothing,
+  // and one that writes explicit null must not be treated as carrying a seed.
+  assert.equal(account.AccountFile.fromJsonBytes(base.toJsonBytes()).rotatedIdentitySeed(), null);
+  assert.equal(
+    account.AccountFile.fromJsonBytes(
+      new TextEncoder().encode(
+        '{"version":1,"created_at":1,"root":"' + ROOT_A_HEX_LOCAL + '","rotated_identity":null}',
+      ),
+    ).rotatedIdentitySeed(),
+    null,
+  );
+
+  // Wrong type is the same structural refusal every other field answers with.
+  assert.throws(
+    () =>
+      account.AccountFile.fromJsonBytes(
+        new TextEncoder().encode(
+          '{"version":1,"created_at":1,"root":"' + ROOT_A_HEX_LOCAL + '","rotated_identity":5}',
+        ),
+      ),
+    (cause: unknown) => cause instanceof AccountError && cause.kind === 'OpenFailed',
+  );
+});
+
+test('rotatedIdentitySeed pins the width and refuses a malformed hex', () => {
+  const root = account.MigoRoot.fromBytes(unhex(ROOT_A_HEX_LOCAL));
+  const base = account.AccountFile.forRoot(root, 1_700_000_000);
+
+  // Too short: a 31-byte seed is a format violation, not an absence.
+  const shortSeed = ROOT_B_HEX_LOCAL.slice(0, 62);
+  assert.throws(
+    () => base.forRotatedIdentity(shortSeed).rotatedIdentitySeed(),
+    (cause: unknown) => cause instanceof AccountError && cause.kind === 'BadLength',
+  );
+  // Not hex at all: the decode failure is reported as the width it could not reach, the same
+  // sentence rootSecret() hands a non-hex root.
+  assert.throws(
+    () => base.forRotatedIdentity('zz' + ROOT_B_HEX_LOCAL.slice(2)).rotatedIdentitySeed(),
+    (cause: unknown) => cause instanceof AccountError && cause.kind === 'BadLength',
+  );
+  // The full 32 bytes: the happy path is exactly the seed that was set.
+  const seed = base.forRotatedIdentity(ROOT_B_HEX_LOCAL).rotatedIdentitySeed();
+  assert.ok(seed !== null && seed.length === 32);
 });
 
 // --- the transactions (independent-python + chain-sourced) -------------------

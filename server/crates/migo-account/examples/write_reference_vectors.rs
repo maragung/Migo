@@ -57,6 +57,12 @@ const ROOT_B_HEX: &str = "1a3c5e7f9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c
 /// (nonexistent, by design) derivation from the root.
 const DEVICE_SEED_HEX: &str = "d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3";
 
+/// A fixed rotated-identity seed for the container case that carries one: a
+/// rotation's successor is fresh randomness, so there is no root it could be
+/// derived from — this literal stands in for exactly that, a seed with no
+/// relation to ROOT_A it is sealed beside.
+const ROTATED_SEED_HEX: &str = "2b7e151628aed2a6abf7158809cf4f3c2b7e151628aed2a6abf7158809cf4f3c";
+
 /// The recovery credential for the container vectors.
 const CREDENTIAL: &str = "recovery-credential-vector-1";
 
@@ -97,6 +103,11 @@ struct ContainerCase {
     created_at: u64,
     /// The complete container file, hex: header and sealed body.
     container: String,
+    /// The rotated identity seed the container carries, hex, when the case
+    /// exercises one. Absent from the two plain cases so their JSON bytes
+    /// are exactly what they were before this field existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rotated_identity: Option<String>,
     provenance: &'static str,
 }
 
@@ -214,24 +225,32 @@ fn main() {
     );
 
     let container_cases = [
-        (ROOT_A_HEX, 1_700_000_000u64),
-        (ROOT_B_HEX, 1_710_000_000u64),
+        (ROOT_A_HEX, 1_700_000_000u64, None),
+        (ROOT_B_HEX, 1_710_000_000u64, None),
+        // A container sealed after a rotation: same root, the successor seed
+        // beside it. This is the case that pins the field's place in the
+        // sealed payload and the bytes the ports must reproduce once they
+        // write the same field.
+        (ROOT_A_HEX, 1_720_000_000u64, Some(ROTATED_SEED_HEX)),
     ]
     .into_iter()
     .enumerate()
-    .map(|(i, (root_hex, created_at))| {
+    .map(|(i, (root_hex, created_at, rotated_identity))| {
         let root = root(root_hex);
-        let file = AccountFile::new(&root, created_at);
+        let mut file = AccountFile::new(&root, created_at);
+        if let Some(seed_hex) = rotated_identity {
+            file = file.for_identity(&unhex(seed_hex).try_into().expect("fixed seed is 32 bytes"));
+        }
         let salt = [(i as u8) + 1; 16];
         let mut nonce = [0u8; 24];
         nonce[0] = i as u8 + 1;
         let container = seal_container_with(CREDENTIAL, &file, VECTOR_PARAMS, &salt, &nonce)
             .expect("deterministic sealing");
         ContainerCase {
-            name: if i == 0 {
-                "container_root_a"
-            } else {
-                "container_root_b"
+            name: match i {
+                0 => "container_root_a",
+                1 => "container_root_b",
+                _ => "container_root_a_rotated",
             },
             root: root_hex.to_owned(),
             credential: CREDENTIAL,
@@ -242,6 +261,7 @@ fn main() {
             lanes: VECTOR_PARAMS.lanes,
             created_at,
             container: hex(&container),
+            rotated_identity: rotated_identity.map(str::to_owned),
             provenance: "rust-reference",
         }
     })

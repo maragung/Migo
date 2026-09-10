@@ -3425,7 +3425,15 @@ impl Worker {
         let account_id = signed.account.account_id;
         let now = u64::try_from(Timestamp::now().as_unix_ms().max(0) / 1000)
             .expect("unix seconds fit in u64 by construction");
-        let file = migo_account::AccountFile::new(&root, now).for_account(&account_id.to_text());
+        let mut file =
+            migo_account::AccountFile::new(&root, now).for_account(&account_id.to_text());
+        // A device that has rotated its identity seals the successor's seed beside the root:
+        // the successor is fresh randomness with no derivation from the root, so a container
+        // without it restores a device whose add-device signature the server refuses — the
+        // container format grew the field for exactly this export.
+        if let Some(seed) = signed.sessions.keys().rotated_identity_seed {
+            file = file.for_identity(&seed);
+        }
         let container = match migo_account::seal_container(&credential, &file, &mut OsRandom) {
             Ok(bytes) => bytes,
             Err(error) => return self.sink.toast(error.to_string(), ToastKind::Error),
@@ -3548,9 +3556,24 @@ impl Worker {
         };
 
         // The new device: fresh E2EE identity, fresh credential, plus the root the container carried.
+        // A container sealed after a rotation carries the successor's seed as well, and that half
+        // decides the ceremony's signature: the server knows the successor as the account's active
+        // key, while the root's own derivation — the only key a pre-rotation container restores —
+        // is retired, and a ceremony signed with it is refused. Installing the seed into the vault
+        // alongside is what keeps every later ceremony on this device signing with the active key.
         let mut keys = DeviceKeys::additional();
         keys.root = Some(root_bytes);
-        let identity = migo_account::IdentityKey::from_root(&root);
+        let identity = match file.rotated_identity_seed() {
+            Ok(Some(seed)) => {
+                keys.rotated_identity_seed = Some(seed);
+                match migo_account::IdentityKey::from_seed(&seed) {
+                    Ok(key) => key,
+                    Err(error) => return self.fail(error.to_string()),
+                }
+            }
+            Ok(None) => migo_account::IdentityKey::from_root(&root),
+            Err(error) => return self.fail(error.to_string()),
+        };
         let device_credential = keys
             .device_credential()
             .expect("additional() mints a credential");

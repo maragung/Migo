@@ -1,5 +1,6 @@
 package com.migo.core.domain
 
+import com.migo.core.account.AccountFile
 import com.migo.core.account.DeviceCredential
 import com.migo.core.account.IdentityKey
 import com.migo.core.account.MigoRoot
@@ -10,6 +11,7 @@ import com.migo.core.crypto.KeyPair
 import com.migo.core.crypto.OneTimePrekey
 import com.migo.core.crypto.PrekeyBundle
 import com.migo.core.crypto.SignedPrekey
+import com.migo.core.crypto.hexOf
 import com.migo.core.protocol.KeyBundle
 import com.migo.core.protocol.KeyBundleRequest
 import com.migo.core.protocol.KeyBundleResponse
@@ -131,8 +133,8 @@ class KeyStore private constructor(
      *
      * Var rather than val because a rotation installs it mid-session, under the lock, and the next
      * [export] (the caller's persist after the ceremony) is what seals it into the vault. The
-     * seed lives only here and in the vault -- never in the `.migo` container, which seals the root
-     * and derives the *retired* key once a rotation has happened.
+     * seed lives here, in the vault, and -- since containers learned to carry it -- in the `.migo`
+     * file the sealing device exports, which is what lets a new device restore *after* a rotation.
      */
     private var heldRotatedIdentity: IdentityKey? = null,
 ) : LocalKeyStore, IdentityProvider {
@@ -553,4 +555,18 @@ private fun toPrekeyBundle(wire: KeyBundle): PrekeyBundle {
         else -> throw SdkError("keys: bundle carries half a one-time prekey")
     }
     return PrekeyBundle(identity, signedPrekey, oneTimePrekey)
+}
+
+/**
+ * Carries this key store's rotated identity seed in `file`, when it holds one.
+ *
+ * The one line every container-sealing site needs, kept here rather than repeated at each caller:
+ * the rule is the key store's (the rotated key exists only on the device that rotated), the
+ * container's (the field is last and optional), and neither module should know about the other's
+ * callers. A store with no rotated key returns the file unchanged, so the two seal shapes —
+ * before any rotation and after one — are one expression at every call site.
+ */
+fun AccountFile.withRotatedIdentityFrom(store: KeyStore): AccountFile {
+    val rotated = store.rotatedIdentity ?: return this
+    return forRotatedIdentity(hexOf(rotated.seed()))
 }

@@ -101,7 +101,10 @@ pub struct DeviceKeys {
     /// supersedes. [`Self::identity_key`] prefers it, which is what keeps every ceremony after
     /// a rotation — the unlock fallback's login, the next rotation, a re-publish on the next
     /// sign-in — signing with the key the server actually knows. The root stays: the wallets are
-    /// still derived from it, and `.migo` backups still seal it.
+    /// still derived from it, and `.migo` backups still seal it — and, since the container format
+    /// grew a `rotated_identity` field, a backup sealed by this device carries the successor's
+    /// seed beside it, which is what lets a fresh container vouch for the account after a
+    /// rotation where one sealed before it cannot.
     pub rotated_identity_seed: Option<[u8; 32]>,
     /// The last-seen E2EE identity fingerprint of each peer device this account has spoken to,
     /// sealed into the vault as FIELD_PEER_FINGERPRINTS.

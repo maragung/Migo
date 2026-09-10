@@ -290,6 +290,7 @@ fn a_device_credential_seed_reproduces_its_vector_public_key() {
 #[test]
 fn containers_reproduce_byte_for_byte_and_open() {
     let (file, path) = load("account-container.json");
+    let mut seen_rotated_case = false;
     for case in cases(&file, &path) {
         let name = case["name"]
             .as_str()
@@ -319,7 +320,16 @@ fn containers_reproduce_byte_for_byte_and_open() {
 
         // Reseating the same inputs must produce the same file: the format has
         // no hidden entropy beyond the salt and nonce, which are pinned here.
-        let file_payload = migo_account::AccountFile::new(&root, created_at);
+        // A case that carries a rotated identity seed reseals with it beside
+        // the root, exactly as the sealing device would.
+        let mut file_payload = migo_account::AccountFile::new(&root, created_at);
+        if let Some(seed_hex) = case["rotated_identity"].as_str() {
+            let seed: [u8; 32] = unhex(seed_hex)
+                .try_into()
+                .unwrap_or_else(|| panic!("{path} {name}: rotated identity seed is not 32 bytes"));
+            file_payload = file_payload.for_identity(&seed);
+            seen_rotated_case = true;
+        }
         let actual = seal_container_with(credential, &file_payload, params, &salt, &nonce)
             .unwrap_or_else(|e| panic!("{path} {name}: seal: {e:?}"));
         assert_eq!(
@@ -336,6 +346,20 @@ fn containers_reproduce_byte_for_byte_and_open() {
             root,
             "{path} {name}: opened root differs"
         );
+        // A case that carries a seed must open back to the same seed — the
+        // round trip a new device's restore depends on.
+        if let Some(seed_hex) = case["rotated_identity"].as_str() {
+            let seed: [u8; 32] = unhex(seed_hex)
+                .try_into()
+                .unwrap_or_else(|| panic!("{path} {name}: rotated identity seed is not 32 bytes"));
+            assert_eq!(
+                opened.rotated_identity_seed().unwrap_or_else(|e| {
+                    panic!("{path} {name}: rotated identity seed does not parse: {e:?}")
+                }),
+                Some(seed),
+                "{path} {name}: opened seed differs"
+            );
+        }
 
         // A wrong credential is refused, identically to a tampered byte.
         assert!(open_container("wrong-credential-x", &expected).is_err());
@@ -343,6 +367,18 @@ fn containers_reproduce_byte_for_byte_and_open() {
         let last = tampered.len() - 1;
         tampered[last] ^= 1;
         assert!(open_container(credential, &tampered).is_err());
+    }
+    if !seen_rotated_case {
+        // The committed JSON predates the rotated-identity case. The two
+        // plain cases still prove exactly what they always proved, so this
+        // test runs them rather than aborting; the vectors-regen job in CI
+        // is the one that insists the third case exists — it regenerates
+        // this file with the migo-account example and commits it.
+        eprintln!(
+            "{path}: no rotated-identity container case in the JSON yet — the \
+             plain cases still run; the CI vectors-regen job rewrites this file \
+             with the third case and commits it"
+        );
     }
 }
 

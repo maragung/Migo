@@ -29,7 +29,10 @@
  *     never touches. The confirmation states both halves honestly, the quiet half (nothing anyone
  *     has verified needs verifying again) and the costly one (the new key exists only here, so a
  *     backup made before the rotation is no longer enough on its own), because a rotation sold as a
- *     privacy control would be lying about what it does.
+ *     privacy control would be lying about what it does. A completed rotation does not stop at
+ *     advice: the result's only way forward is the forced seal of a fresh key file, whose download
+ *     is verified against the account's active key before it counts — and neither sheet can be
+ *     dismissed until it has been.
  *
  * The presentational halves are exported as controlled components over plain data, so the rules
  * (the submit gates, the honest no-root state, the post-change key-file offer) are testable without
@@ -71,17 +74,68 @@ export function isLikelyEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
 }
 
-/** Seals the account root into a `.migo` container under `credential`, ready to download. */
+/** Lowercase hex for the seed bytes the container's `rotated_identity` field carries. */
+function seedHex(seed: Uint8Array): string {
+  let out = '';
+  for (const byte of seed) {
+    out += byte.toString(16).padStart(2, '0');
+  }
+  return out;
+}
+
+/**
+ * Seals the account root into a `.migo` container under `credential`, ready to download.
+ *
+ * When this device holds a rotated identity seed, it rides the payload too: the successor is fresh
+ * randomness that exists nowhere else, so a container without it restores a device whose add-device
+ * signature the server will refuse. A device that holds no successor seals the plain root — the
+ * format every backup made before a rotation already carries.
+ */
 async function sealKeyFileBytes(
   rootBytes: Uint8Array,
   accountId: string,
   credential: string,
+  rotatedSeed: Uint8Array | null,
 ): Promise<Uint8Array> {
   const file = account.AccountFile.forRoot(
     account.MigoRoot.fromBytes(rootBytes),
     Math.floor(Date.now() / 1000),
   ).forAccount(accountId);
-  return account.sealContainer(credential, file);
+  return account.sealContainer(
+    credential,
+    rotatedSeed === null ? file : file.forRotatedIdentity(seedHex(rotatedSeed)),
+  );
+}
+
+/**
+ * Whether an opened container vouches for the identity key the account now answers with.
+ *
+ * The forced post-rotation seal's test: the sealed bytes are re-opened with the typed credential,
+ * and the identity half they carry is compared byte-for-byte with the store's active key. An
+ * absent half (a pre-rotation container), a half that will not even decode, or any mismatch
+ * refuses — the flow never counts itself done on the strength of a download alone.
+ */
+export function sealedIdentityVouches(
+  opened: account.AccountFile,
+  activePublicKey: Uint8Array | null,
+): boolean {
+  try {
+    if (activePublicKey === null) {
+      return false;
+    }
+    const seed = opened.rotatedIdentitySeed();
+    if (seed === null) {
+      return false;
+    }
+    const sealed = account.IdentityKey.fromSeed(seed).publicKey();
+    return (
+      sealed.length === activePublicKey.length &&
+      sealed.every((byte, index) => byte === activePublicKey[index])
+    );
+  } catch {
+    // A half that will not decode cannot vouch for anything.
+    return false;
+  }
 }
 
 /** The account's read-only identity: its `@username`, its public id, and the immutability note. */
@@ -282,6 +336,11 @@ export function PassphraseFormView({
  * The key-file download form: a passphrase and its confirmation, judged locally before any Argon2id
  * work is spent, then the download control. Modelled on the registration save offer, but framed as
  * a replacement — re-downloading seals a new file under the passphrase typed here.
+ *
+ * In forced mode — the seal a completed identity rotation owes — the download is only half the
+ * ceremony: the sealed bytes are re-opened and their identity half verified before the file is
+ * offered at all, so the plain "downloaded" hint never appears and the only success state is
+ * `validated`, which is also the only state that offers a way out of the sheet.
  */
 export function KeyFileFormView({
   credential,
@@ -289,14 +348,23 @@ export function KeyFileFormView({
   sealing,
   error,
   saved,
+  forced = false,
+  validated = false,
   onChange,
   onSubmit,
+  onDone,
 }: {
   credential: string;
   confirm: string;
   sealing: boolean;
   error: string | null;
   saved: boolean;
+  /** Forced mode: the download is only half the ceremony — `validated` is the success state. */
+  forced?: boolean;
+  /** True once the sealed bytes were re-opened and vouched for the account's active identity key. */
+  validated?: boolean;
+  /** Forced mode's exit, offered only once validated. */
+  onDone?: () => void;
   onChange: (field: 'credential' | 'confirm', value: string) => void;
   onSubmit: () => void;
 }): ReactNode {
@@ -308,9 +376,14 @@ export function KeyFileFormView({
         Your account key file (.migo), with the passphrase you set here, is the only way to sign in
         on a new device — no server holds a copy of your keys.
       </p>
-      <p className="hint">
-        Re-downloading replaces your previous file — the passphrase you type here seals the new one.
-      </p>
+      {forced ? (
+        <p className="hint">{ROTATED_SEAL_EXPLANATION}</p>
+      ) : (
+        <p className="hint">
+          Re-downloading replaces your previous file — the passphrase you type here seals the new
+          one.
+        </p>
+      )}
       <label className="field-label">
         Passphrase
         <PassphraseInput
@@ -336,10 +409,25 @@ export function KeyFileFormView({
       </label>
       {credential.length > 0 && problem !== null ? <p className="form-error">{problem}</p> : null}
       {error !== null ? <p className="form-error">{error}</p> : null}
-      {saved ? <p className="hint">Key file downloaded — keep it somewhere safe.</p> : null}
-      <button type="button" className="btn btn-primary" disabled={!canSeal} onClick={onSubmit}>
-        {sealing ? <Spinner /> : 'Download key file'}
-      </button>
+      {validated ? (
+        <>
+          <p className="hint">{ROTATED_SEAL_VALIDATED}</p>
+          {onDone !== undefined ? (
+            <button type="button" className="btn btn-primary" onClick={onDone}>
+              Done
+            </button>
+          ) : null}
+        </>
+      ) : (
+        <>
+          {!forced && saved ? (
+            <p className="hint">Key file downloaded — keep it somewhere safe.</p>
+          ) : null}
+          <button type="button" className="btn btn-primary" disabled={!canSeal} onClick={onSubmit}>
+            {sealing ? <Spinner /> : forced ? 'Download and verify key file' : 'Download key file'}
+          </button>
+        </>
+      )}
     </div>
   );
 }
@@ -364,9 +452,33 @@ export const ROTATE_COSTLY_HALF =
 export const ROTATED_NOTICE =
   'Identity key rotated; sessions, chats and safety numbers continue unchanged.';
 
-/** The fresh-backup advice a completed rotation owes, in the same breath as the notice. */
+/**
+ * The fresh-backup advice a completed rotation owes, in the same breath as the notice.
+ *
+ * Now that the container can carry the successor's seed, the sentence states the real rule: a file
+ * sealed after the rotation restores a device the server will accept; one sealed before does not.
+ */
 export const ROTATED_BACKUP_ADVICE =
-  'Seal a fresh key file now: a .migo backup made before the rotation carries the retired key, and a restore from it will be refused.';
+  'Seal a fresh key file now: the new identity key lives only on this device, and only a file sealed after the rotation carries it — a backup made before restores the retired key and will be refused.';
+
+/** Why the post-rotation seal is forced and verified, in the sheet that runs it. */
+export const ROTATED_SEAL_EXPLANATION =
+  'The file sealed here carries the new identity key — the download is verified against the key your account now answers with before it counts as done.';
+
+/** The forced seal's success line: the sealed bytes were re-opened and vouched for the new key. */
+export const ROTATED_SEAL_VALIDATED =
+  'Key file downloaded and verified — it carries the new identity key and opens with the passphrase you set.';
+
+/** The forced seal's refusal: the file's identity half does not vouch for the account's active key. */
+export const ROTATED_SEAL_MISMATCH =
+  'The sealed file does not carry the identity key this account answers with, so it was not downloaded. Nothing was faked.';
+
+/**
+ * The honest state when the forced seal has nothing to seal: this browser holds no successor seed,
+ * so no file sealed here could carry the new key. The rotation cannot be undone into a success.
+ */
+export const ROTATED_SEAL_NO_SEED =
+  'This browser no longer holds the new identity key, so no key file sealed here can carry it. Nothing was downloaded — reload this page and try again.';
 
 /** How a rotation attempt ended, for the view that reports it. */
 export interface RotationResult {
@@ -382,31 +494,43 @@ export interface RotationResult {
  * one — because the pane says what the button *is* and the sheet says what it *does*, and nobody
  * should reach the button without both. The `unfinished` end (the server's answer was lost, the new
  * key is sealed here) is reported as its own state rather than an error, which is what it is: the
- * next attempt settles it either way. The `done` end carries the fresh-backup advice in the same
- * breath as the notice, because the one act a completed rotation asks for is sealing a backup that
- * can actually vouch for the account.
+ * next attempt settles it either way. The `done` end does not stop at advice: its only way forward
+ * is the forced seal of a fresh key file, and there is no plain Done to skip past it with — the
+ * successor exists only on this device, and the panel's whole duty is to see it onto a file that
+ * has been verified to carry it.
  */
 export function RotateIdentityView({
   busy,
   result,
   error,
   onConfirm,
+  onSealKeyFile,
   onClose,
 }: {
   busy: boolean;
   result: RotationResult | null;
   error: string | null;
   onConfirm: () => void;
+  /** Opens the key-file sheet the completed rotation owes — forced, and verified before it counts. */
+  onSealKeyFile: () => void;
   onClose: () => void;
 }): ReactNode {
   if (result !== null) {
     return (
       <div className="rotate-result">
         <p className="hint">{result.message}</p>
-        {result.kind === 'done' ? <p className="hint">{ROTATED_BACKUP_ADVICE}</p> : null}
-        <button type="button" className="btn btn-primary" onClick={onClose}>
-          Done
-        </button>
+        {result.kind === 'done' ? (
+          <>
+            <p className="hint">{ROTATED_BACKUP_ADVICE}</p>
+            <button type="button" className="btn btn-primary" onClick={onSealKeyFile}>
+              Seal new key file
+            </button>
+          </>
+        ) : (
+          <button type="button" className="btn btn-primary" onClick={onClose}>
+            Done
+          </button>
+        )}
       </div>
     );
   }
@@ -440,9 +564,11 @@ export function RotateIdentityView({
  * The "My Account" panel: identity, email, passphrase, the account key file, and the identity key.
  *
  * The panel owns every draft and every in-flight flag; the four exported views above are the
- * presentation, controlled entirely from here. The two flows that touch the key file — the
- * post-passphrase refresh and the standalone download — seal the same root bytes through the same
- * helper, differing only in which passphrase they seal under.
+ * presentation, controlled entirely from here. The three flows that touch the key file — the
+ * post-passphrase refresh, the standalone download, and the forced post-rotation seal — seal the
+ * same root bytes through the same helper, differing only in which passphrase they seal under;
+ * all three embed the rotated identity seed whenever this device holds one, so a fresh file
+ * always carries the key the account actually answers with.
  */
 export function AccountPanel(): ReactNode {
   const { client, accountId } = useMigo();
@@ -452,6 +578,8 @@ export function AccountPanel(): ReactNode {
   const root = client ? client.keyStore.root() : null;
   const hasRoot = root !== null;
   const fileName = containerFileName(self?.username ?? '');
+  // The successor seed, held from a rotation's pre-commit on this browser; what a fresh seal embeds.
+  const rotatedSeedHeld = client ? client.keyStore.rotatedIdentitySeed() : null;
 
   // --- email ---
   const [email, setEmail] = useState('');
@@ -474,6 +602,10 @@ export function AccountPanel(): ReactNode {
 
   // --- key-file sheet ---
   const [keyFileOpen, setKeyFileOpen] = useState(false);
+  // Forced mode — the seal a completed rotation owes. The sheet cannot be dismissed until the
+  // download has been verified, and the standalone flow's plain "downloaded" hint never applies.
+  const [keyFileForced, setKeyFileForced] = useState(false);
+  const [forcedValidated, setForcedValidated] = useState(false);
   const [credential, setCredential] = useState('');
   const [credentialConfirm, setCredentialConfirm] = useState('');
   const [sealing, setSealing] = useState(false);
@@ -514,6 +646,70 @@ export function AccountPanel(): ReactNode {
       }
     })();
   }, [client, accountId, rotating]);
+
+  /**
+   * Closes the rotation sheet — except after a completed rotation, which is not dismissable until
+   * its key file is sealed and verified. The successor exists only on this device, and the one act
+   * the result asks for cannot be skipped past with the sheet's own close control.
+   */
+  const closeRotateSheet = useCallback((): void => {
+    if (rotateResult !== null && rotateResult.kind === 'done' && !forcedValidated) {
+      return;
+    }
+    setRotateOpen(false);
+    setRotateResult(null);
+    setRotateError(null);
+  }, [rotateResult, forcedValidated]);
+
+  /** The done result's only button: hand the sheet over to the forced, verified seal. */
+  const openForcedSeal = useCallback((): void => {
+    setRotateOpen(false);
+    setKeyFileForced(true);
+    setForcedValidated(false);
+    setCredential('');
+    setCredentialConfirm('');
+    setKeyFileError(null);
+    setKeyFileSaved(false);
+    setKeyFileOpen(true);
+  }, []);
+
+  /**
+   * Closes the key-file sheet — except in forced mode before validation, where there is no way out.
+   * A browser that holds no successor seed is the one exception: it has nothing to seal, and
+   * locking an honest dead end behind a sheet would be forcing for its own sake.
+   */
+  const closeKeyFileSheet = useCallback((): void => {
+    if (keyFileForced && !forcedValidated && rotatedSeedHeld !== null) {
+      return;
+    }
+    setKeyFileOpen(false);
+    setKeyFileForced(false);
+    setForcedValidated(false);
+    setCredential('');
+    setCredentialConfirm('');
+    setKeyFileError(null);
+    setKeyFileSaved(false);
+  }, [keyFileForced, forcedValidated, rotatedSeedHeld]);
+
+  /** The validated forced seal's Done: the whole rotation ceremony finally closes. */
+  const finishForcedSeal = useCallback((): void => {
+    setKeyFileOpen(false);
+    setKeyFileForced(false);
+    setForcedValidated(false);
+    setCredential('');
+    setCredentialConfirm('');
+    setKeyFileError(null);
+    setKeyFileSaved(false);
+    setRotateResult(null);
+    setRotateError(null);
+  }, []);
+
+  /** The panel's own download control: the standalone seal, never the forced one. */
+  const openStandaloneKeyFile = useCallback((): void => {
+    setKeyFileForced(false);
+    setForcedValidated(false);
+    setKeyFileOpen(true);
+  }, []);
 
   const saveEmail = useCallback((): void => {
     if (!client || emailBusy) {
@@ -596,7 +792,12 @@ export function AccountPanel(): ReactNode {
     setRefreshSaved(false);
     void (async (): Promise<void> => {
       try {
-        const bytes = await sealKeyFileBytes(live.asBytes(), String(accountId), next);
+        const bytes = await sealKeyFileBytes(
+          live.asBytes(),
+          String(accountId),
+          next,
+          client.keyStore.rotatedIdentitySeed(),
+        );
         downloadAccountFile(bytes, fileName);
         // The export is what the checkup's Backup row vouches for, so the download is the moment
         // the record is written — best-effort, because a failed bookkeeping write must not turn a
@@ -642,20 +843,53 @@ export function AccountPanel(): ReactNode {
     setKeyFileSaved(false);
     void (async (): Promise<void> => {
       try {
-        const bytes = await sealKeyFileBytes(live.asBytes(), String(accountId), credential);
+        const bytes = await sealKeyFileBytes(
+          live.asBytes(),
+          String(accountId),
+          credential,
+          client.keyStore.rotatedIdentitySeed(),
+        );
+        if (keyFileForced) {
+          // The download is only half the ceremony: the sealed bytes are re-opened with the typed
+          // credential and their identity half compared against the key this account now answers
+          // with. A refusal means no file is offered at all — the forced seal never counts a
+          // download it cannot vouch for, and the sheet stays open.
+          const opened = await account.openContainer(credential, bytes);
+          if (
+            !sealedIdentityVouches(
+              opened,
+              client.keyStore.accountIdentityKey()?.publicKey() ?? null,
+            )
+          ) {
+            throw new Error(ROTATED_SEAL_MISMATCH);
+          }
+        } else {
+          setKeyFileSaved(true);
+        }
         downloadAccountFile(bytes, fileName);
+        if (keyFileForced) {
+          // Only now, with the bytes on disk, is the ceremony's success state
+          // entered — a download control that threw must not leave the sheet
+          // claiming a file it never handed over.
+          setForcedValidated(true);
+        }
         // Same rule as the post-passphrase re-seal: the export is the event the Backup row records.
         await recordBackupExport(accountId).catch(() => {});
-        setKeyFileSaved(true);
       } catch (cause) {
-        setKeyFileError(
-          cause instanceof Error ? cause.message : 'The key file could not be sealed.',
-        );
+        if (keyFileForced && cause instanceof account.AccountError) {
+          // A container that will not re-open with the credential it was just sealed under cannot
+          // vouch for anything; the refusal gets the honest sentence, not a raw variant name.
+          setKeyFileError(ROTATED_SEAL_MISMATCH);
+        } else {
+          setKeyFileError(
+            cause instanceof Error ? cause.message : 'The key file could not be sealed.',
+          );
+        }
       } finally {
         setSealing(false);
       }
     })();
-  }, [client, accountId, credential, credentialConfirm, fileName, sealing]);
+  }, [client, accountId, credential, credentialConfirm, fileName, sealing, keyFileForced]);
 
   return (
     <div className="panel">
@@ -698,7 +932,7 @@ export function AccountPanel(): ReactNode {
           holds a copy of your keys.
         </p>
         {hasRoot ? (
-          <button type="button" className="btn btn-primary" onClick={() => setKeyFileOpen(true)}>
+          <button type="button" className="btn btn-primary" onClick={openStandaloneKeyFile}>
             Download key file
           </button>
         ) : (
@@ -759,46 +993,41 @@ export function AccountPanel(): ReactNode {
 
       {keyFileOpen ? (
         <BottomSheet
-          title="Download key file"
-          onClose={() => {
-            setKeyFileOpen(false);
-            setCredential('');
-            setCredentialConfirm('');
-            setKeyFileError(null);
-            setKeyFileSaved(false);
-          }}
+          title={keyFileForced ? 'Seal new key file' : 'Download key file'}
+          onClose={closeKeyFileSheet}
         >
-          <KeyFileFormView
-            credential={credential}
-            confirm={credentialConfirm}
-            sealing={sealing}
-            error={keyFileError}
-            saved={keyFileSaved}
-            onChange={onKeyFileField}
-            onSubmit={downloadKeyFile}
-          />
+          {keyFileForced && rotatedSeedHeld === null ? (
+            // The honest dead end: a browser with no successor seed cannot seal what the rotation
+            // owes, and the forced flow says so rather than faking a validated download.
+            <div className="save-account">
+              <p className="hint">{ROTATED_SEAL_NO_SEED}</p>
+            </div>
+          ) : (
+            <KeyFileFormView
+              credential={credential}
+              confirm={credentialConfirm}
+              sealing={sealing}
+              error={keyFileError}
+              saved={keyFileSaved}
+              forced={keyFileForced}
+              validated={forcedValidated}
+              onChange={onKeyFileField}
+              onSubmit={downloadKeyFile}
+              onDone={keyFileForced ? finishForcedSeal : undefined}
+            />
+          )}
         </BottomSheet>
       ) : null}
 
       {rotateOpen ? (
-        <BottomSheet
-          title="Rotate identity key"
-          onClose={() => {
-            setRotateOpen(false);
-            setRotateResult(null);
-            setRotateError(null);
-          }}
-        >
+        <BottomSheet title="Rotate identity key" onClose={closeRotateSheet}>
           <RotateIdentityView
             busy={rotating}
             result={rotateResult}
             error={rotateError}
             onConfirm={rotateIdentity}
-            onClose={() => {
-              setRotateOpen(false);
-              setRotateResult(null);
-              setRotateError(null);
-            }}
+            onSealKeyFile={openForcedSeal}
+            onClose={closeRotateSheet}
           />
         </BottomSheet>
       ) : null}

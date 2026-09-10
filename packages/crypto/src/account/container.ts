@@ -61,6 +61,7 @@ import { NONCE_LEN as AEAD_NONCE_LEN, open, sealWithNonce, SymmetricKey } from '
 import { derive } from '../kdf.js';
 import { randomBytes } from '../random.js';
 import { AccountError } from './errors.js';
+import { SEED_LEN } from './identity.js';
 import { DOMAIN_BACKUP, MigoRoot, ROOT_LEN } from './root.js';
 
 const ENCODER = new TextEncoder();
@@ -169,27 +170,65 @@ export class AccountFile {
    * rather than guessing at an account.
    */
   readonly accountId: string | undefined;
+  /**
+   * The seed of the account's *rotated* identity key, hex-encoded (64 characters), when the
+   * sealing device holds one.
+   *
+   * A rotation's successor is minted from fresh randomness, deliberately not derived from the
+   * root, and exists nowhere except the device that rotated — which is why the field is needed
+   * at all: after the server accepts a rotation, the root's own identity derivation is the
+   * *retired* key, and a new device restoring from a container without this field would sign
+   * its add-device ceremony with a key the server no longer knows. Sealing the successor's seed
+   * here is what keeps a `.migo` file able to vouch for the account across a rotation.
+   *
+   * Deliberately the last field and deliberately optional — mirrors `account_id`'s rationale
+   * exactly: containers sealed before the field existed must keep opening, and the conformance
+   * vectors that pin the three- and four-field byte forms must not move by one byte, so
+   * {@link AccountFile.toJsonBytes} omits it when absent. Absent means the sealing device held
+   * no rotated key — sealed before any rotation happened on it, or by a build that predates the
+   * field — and a restoring device in that state says so rather than guessing at a ceremony.
+   */
+  readonly rotatedIdentity: string | undefined;
 
   private constructor(
     version: number,
     createdAt: number,
     root: string,
     accountId: string | undefined,
+    rotatedIdentity: string | undefined,
   ) {
     this.version = version;
     this.createdAt = createdAt;
     this.root = root;
     this.accountId = accountId;
+    this.rotatedIdentity = rotatedIdentity;
   }
 
   /** Builds a payload for `root`, stamped `now` (Unix seconds), with no account id. */
   static forRoot(root: MigoRoot, now: number): AccountFile {
-    return new AccountFile(FORMAT_VERSION, now, bytesToHex(root.asBytes()), undefined);
+    return new AccountFile(FORMAT_VERSION, now, bytesToHex(root.asBytes()), undefined, undefined);
   }
 
   /** Names the account this container restores, returning a copy with the id set. */
   forAccount(accountId: string): AccountFile {
-    return new AccountFile(this.version, this.createdAt, this.root, accountId);
+    return new AccountFile(
+      this.version,
+      this.createdAt,
+      this.root,
+      accountId,
+      this.rotatedIdentity,
+    );
+  }
+
+  /**
+   * Carries the rotated identity key's seed, returning a copy with it set.
+   *
+   * The builder mirrors {@link AccountFile.forAccount} on purpose: the same one-field-at-a-time
+   * shape, so a sealing device composes the payload from what it actually holds and nothing it
+   * has to guess at.
+   */
+  forRotatedIdentity(seedHex: string): AccountFile {
+    return new AccountFile(this.version, this.createdAt, this.root, this.accountId, seedHex);
   }
 
   /**
@@ -211,10 +250,17 @@ export class AccountFile {
 
   /**
    * The compact JSON bytes serde produces, byte for byte: keys `version`, `created_at`, `root`,
-   * and `account_id` only when present, in that order, with no whitespace.
+   * `account_id` only when present, `rotated_identity` only when present, in that order, with no
+   * whitespace.
    */
   toJsonBytes(): Uint8Array {
-    const object: { version: number; created_at: number; root: string; account_id?: string } = {
+    const object: {
+      version: number;
+      created_at: number;
+      root: string;
+      account_id?: string;
+      rotated_identity?: string;
+    } = {
       version: this.version,
       created_at: this.createdAt,
       root: this.root,
@@ -223,6 +269,10 @@ export class AccountFile {
     // three-field form the vectors pin is not moved by one byte.
     if (this.accountId !== undefined) {
       object.account_id = this.accountId;
+    }
+    // Same rule for the rotated seed: its absence is the pre-rotation container, byte-pinned.
+    if (this.rotatedIdentity !== undefined) {
+      object.rotated_identity = this.rotatedIdentity;
     }
     return ENCODER.encode(JSON.stringify(object));
   }
@@ -274,7 +324,43 @@ export class AccountFile {
     } else {
       throw AccountError.openFailed();
     }
-    return new AccountFile(version, createdAt, root, accountId);
+    const rawRotatedIdentity = object.rotated_identity;
+    let rotatedIdentity: string | undefined;
+    if (rawRotatedIdentity === undefined || rawRotatedIdentity === null) {
+      rotatedIdentity = undefined;
+    } else if (typeof rawRotatedIdentity === 'string') {
+      rotatedIdentity = rawRotatedIdentity;
+    } else {
+      throw AccountError.openFailed();
+    }
+    return new AccountFile(version, createdAt, root, accountId, rotatedIdentity);
+  }
+
+  /**
+   * The rotated identity key's seed, when this container carries one.
+   *
+   * @throws {AccountError} `BadLength` if the hex does not decode to the seed width, which for a
+   * payload that passed the AEAD tag means the container was written by something else that
+   * shares the format — the same discipline {@link AccountFile.rootSecret} keeps for the root.
+   */
+  rotatedIdentitySeed(): Uint8Array | null {
+    if (this.rotatedIdentity === undefined) {
+      return null;
+    }
+    let decoded: Uint8Array;
+    try {
+      decoded = hexToBytes(this.rotatedIdentity);
+    } catch {
+      throw AccountError.badLength(
+        'container rotated identity',
+        SEED_LEN,
+        Math.floor(this.rotatedIdentity.length / 2),
+      );
+    }
+    if (decoded.length !== SEED_LEN) {
+      throw AccountError.badLength('container rotated identity', SEED_LEN, decoded.length);
+    }
+    return decoded;
   }
 }
 
@@ -399,8 +485,10 @@ export async function openContainer(credential: string, bytes: Uint8Array): Prom
   plaintext.fill(0);
   // A payload that decrypted but carries a root that is not 32 bytes is a `BadLength`, propagated
   // rather than folded into `OpenFailed`: the tag passed, so this is a container from something
-  // else that shares the format, not a wrong-credential guess.
+  // else that shares the format, not a wrong-credential guess. The rotated seed, when present,
+  // answers to the same rule — a malformed one is a format violation, not an open failure.
   file.rootSecret();
+  file.rotatedIdentitySeed();
   return file;
 }
 

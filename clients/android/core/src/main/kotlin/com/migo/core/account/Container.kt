@@ -27,6 +27,9 @@ const val KDF_ARGON2ID = 1
 /** Argon2id salt length in bytes. */
 const val SALT_LEN = 16
 
+/** The rotated identity seed this container carries, in bytes: the ML-DSA seed width. */
+const val SEED_LEN = 32
+
 /** The AEAD nonce length in bytes (XChaCha20-Poly1305). */
 const val NONCE_LEN = 24
 
@@ -100,19 +103,37 @@ data class AccountFile(
     val version: Int,
     /** When this container was sealed, Unix seconds. Display material, not security material. */
     @SerialName("created_at") val createdAt: Long,
-    /** The root secret, hex-encoded: 64 characters. The only secret in the file. */
+    /** The root secret, hex-encoded: 64 characters. The seed everything else derives from. */
     val root: String,
     /**
      * The public id of the account this container restores, when the sealing device knew it.
      *
-     * Last, optional, and omitted when null — the codec's `encodeDefaults` is off, which is the
-     * same shape as the Rust reference's `skip_serializing_if` — so a container sealed for the
-     * same root by either port carries byte-identical payload bytes, and a build that does not
-     * know the field still opens one that carries it. A container from before accounts were
-     * named in the file decodes it as null, and a restore from it is refused with a remedy
-     * rather than guessed at.
+     * Optional, and omitted when null — the codec's `encodeDefaults` is off, which is the same
+     * shape as the Rust reference's `skip_serializing_if` — so a container sealed for the same
+     * root by either port carries byte-identical payload bytes, and a build that does not know
+     * the field still opens one that carries it. A container from before accounts were named in
+     * the file decodes it as null, and a restore from it is refused with a remedy rather than
+     * guessed at.
      */
     @SerialName("account_id") val accountId: String? = null,
+    /**
+     * The rotated identity key's 32-byte ML-DSA seed, hex-encoded: 64 characters, when the
+     * sealing device holds one.
+     *
+     * A rotation's successor is *fresh randomness*, deliberately not derived from the root — so
+     * before this field existed, the one key the server knew as active existed nowhere a
+     * container could carry it, and a new device restoring from a backup sealed after a
+     * rotation could only sign with the root's derivation, which the server refuses. Carrying
+     * the seed here closes that: a container sealed by the device that rotated can put a new
+     * device through the add-device ceremony with the key the account actually trusts.
+     *
+     * Last, optional, and omitted when null — the same byte-contract shape as `account_id`, and
+     * for the same reason: containers sealed before any rotation, and the conformance vectors
+     * that pin those bytes, carry exactly the fields they always did. Absent means the sealing
+     * device had no rotated key — either no rotation ever happened, or it happened on another
+     * device, whose own backup is the one that must carry the seed.
+     */
+    @SerialName("rotated_identity") val rotatedIdentity: String? = null,
 ) {
     companion object {
         /** Builds a payload for `root`, stamped `now` (Unix seconds). */
@@ -126,10 +147,33 @@ data class AccountFile(
      */
     fun forAccount(accountId: String): AccountFile = copy(accountId = accountId)
 
+    /**
+     * Carries a rotated identity seed in this container, from the key store's rotated key —
+     * the builder the Rust reference calls `for_rotated_identity`.
+     */
+    fun forRotatedIdentity(seedHex: String): AccountFile = copy(rotatedIdentity = seedHex)
+
     /** The root secret. */
     fun root(): MigoRoot {
         val decoded = unhex(root) ?: throw AccountError.badLength("container root", MigoRoot.LEN, root.length / 2)
         return MigoRoot.fromBytes(decoded)
+    }
+
+    /**
+     * The rotated identity key's seed, or null when this container carries none.
+     *
+     * Mirrors [root]: exactly 32 bytes or a [AccountErrorKind.BadLength], because a payload that
+     * passed the AEAD tag and still holds a seed of the wrong width was written by something
+     * else that shares the format — a fact worth its own error, not the wrong-credential one.
+     */
+    fun rotatedIdentitySeed(): ByteArray? {
+        if (rotatedIdentity == null) return null
+        val decoded = unhex(rotatedIdentity)
+            ?: throw AccountError.badLength("container rotated identity", SEED_LEN, rotatedIdentity.length / 2)
+        if (decoded.size != SEED_LEN) {
+            throw AccountError.badLength("container rotated identity", SEED_LEN, decoded.size)
+        }
+        return decoded
     }
 }
 

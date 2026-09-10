@@ -61,6 +61,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 use crate::error::{AccountError, Result};
+use crate::identity::SEED_LEN;
 use crate::root::{MigoRoot, DOMAIN_BACKUP, ROOT_LEN};
 
 /// The container magic. The trailing digit is the format generation: a file
@@ -176,6 +177,24 @@ pub struct AccountFile {
     /// says so, rather than guessing at an account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    /// The seed of the rotated identity key, hex-encoded (64 characters),
+    /// when the sealing device holds one.
+    ///
+    /// A rotation's successor is deliberately fresh randomness, not derived
+    /// from the root — which is exactly why it exists nowhere else: the
+    /// server holds the public key, and the rotating device holds the seed.
+    /// A container sealed after a rotation carries the seed so a new device
+    /// restoring from it can sign the add-device ceremony with the key the
+    /// server now knows as active; without it, the root's derivation signs
+    /// with a key the server already retired, and the restore is refused.
+    /// Absent means the sealing device held no rotated key — sealed before
+    /// any rotation happened on it — and a build that does not know the
+    /// field still opens a container carrying it, because absent and unknown
+    /// are the same thing to serde. Deliberately last, after `account_id`,
+    /// and `skip_serializing_if` keeps the three- and four-field byte forms
+    /// the conformance vectors pin exactly where they were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotated_identity: Option<String>,
 }
 
 impl AccountFile {
@@ -187,6 +206,7 @@ impl AccountFile {
             created_at: now,
             root: hex(root.as_bytes()),
             account_id: None,
+            rotated_identity: None,
         }
     }
 
@@ -196,6 +216,42 @@ impl AccountFile {
     pub fn for_account(mut self, account_id: &str) -> Self {
         self.account_id = Some(account_id.to_owned());
         self
+    }
+
+    /// Carries a rotated identity key's seed, from the key store of the
+    /// device that rotated — the only place the seed lives besides the
+    /// server's record of its public key. Typed to the seed length so a
+    /// caller cannot seal a container whose field only opens as a length
+    /// error.
+    #[must_use]
+    pub fn for_identity(mut self, seed: &[u8; SEED_LEN]) -> Self {
+        self.rotated_identity = Some(hex(seed));
+        self
+    }
+
+    /// The rotated identity seed, when this container carries one.
+    ///
+    /// # Errors
+    ///
+    /// [`AccountError::BadLength`] if the hex does not decode to 32 bytes,
+    /// which for a payload that passed the AEAD tag means the container was
+    /// written by something else that shares the format — the same reasoning
+    /// as [`AccountFile::root`].
+    pub fn rotated_identity_seed(&self) -> Result<Option<[u8; SEED_LEN]>> {
+        let Some(text) = self.rotated_identity.as_deref() else {
+            return Ok(None);
+        };
+        let decoded = unhex(text).ok_or(AccountError::BadLength {
+            what: "rotated identity seed",
+            expected: SEED_LEN,
+            actual: text.len() / 2,
+        })?;
+        let seed: [u8; SEED_LEN] = decoded.try_into().map_err(|_| AccountError::BadLength {
+            what: "rotated identity seed",
+            expected: SEED_LEN,
+            actual: decoded.len(),
+        })?;
+        Ok(Some(seed))
     }
 
     /// The root secret.
@@ -462,6 +518,15 @@ mod tests {
         (root, file)
     }
 
+    /// The sample container, sealed and opened: the rotated-identity field of
+    /// a container that never carried one.
+    fn opened_rotated_absent() -> Option<[u8; SEED_LEN]> {
+        let (_, file) = sample();
+        let container = seal_fast("credential", &file);
+        let opened = open_container("credential", &container).expect("opens");
+        opened.rotated_identity_seed().expect("absent parses")
+    }
+
     #[test]
     fn the_round_trip_returns_the_same_root() {
         let (root, file) = sample();
@@ -504,6 +569,62 @@ mod tests {
         let named_bytes = serde_json::to_vec(&named).expect("serialises");
         let decoded: AccountFile = serde_json::from_slice(&named_bytes).expect("parses");
         assert_eq!(decoded, named);
+    }
+
+    #[test]
+    fn the_rotated_seed_rides_along_and_the_plainer_bytes_do_not_move() {
+        let (_, file) = sample();
+        // The named form without a rotation is pinned exactly as it was
+        // before this field existed: an optional field must not move the
+        // bytes a container sealed in that state already carries.
+        let named = file.for_account("01j8y0migo0migo0migo0migo0migo");
+        let named_bytes = serde_json::to_string(&named).expect("serialises");
+        assert_eq!(
+            named_bytes,
+            format!(
+                "{{\"version\":1,\"created_at\":{},\"root\":\"{}\",\"account_id\":\"01j8y0migo0migo0migo0migo0migo\"}}",
+                file.created_at, file.root
+            )
+        );
+
+        // A container sealed after a rotation round-trips the seed through
+        // the seal, and the getter hands back the bytes that went in.
+        let seed: [u8; SEED_LEN] =
+            core::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(3));
+        let rotated = file.for_identity(&seed);
+        let container = seal_fast("credential", &rotated);
+        let opened = open_container("credential", &container).expect("opens");
+        assert_eq!(opened.rotated_identity_seed().expect("seed"), Some(seed));
+
+        // The serialised form carries the field last, after the account id,
+        // so a port reading fields positionally still finds it where the
+        // byte contract says it is.
+        let rotated_bytes =
+            serde_json::to_string(&rotated.for_account("01j8y0migo0migo0migo0migo0migo"))
+                .expect("serialises");
+        assert!(rotated_bytes.ends_with(&format!(
+            "\"account_id\":\"01j8y0migo0migo0migo0migo0migo\",\"rotated_identity\":\"{}\"}}",
+            hex(&seed)
+        )));
+
+        // Absent is `None`, not a guess: the sample was sealed without a
+        // rotation and must open without one.
+        assert_eq!(opened_rotated_absent(), None);
+    }
+
+    #[test]
+    fn a_rotated_seed_of_the_wrong_length_is_a_bad_length_not_an_open_failure() {
+        let (_, file) = sample();
+        // Not via the builder — the builder cannot produce this shape; this
+        // is a container written by something else that shares the format,
+        // and the honest answer is the one `root()` gives for the same
+        // situation.
+        let mut alien = file.clone();
+        alien.rotated_identity = Some("0f".repeat(31));
+        let bytes = serde_json::to_vec(&alien).expect("serialises");
+        let decoded: AccountFile = serde_json::from_slice(&bytes).expect("parses");
+        let error = decoded.rotated_identity_seed().unwrap_err();
+        assert!(matches!(error, AccountError::BadLength { .. }));
     }
 
     #[test]

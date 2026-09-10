@@ -500,9 +500,9 @@ private fun TriStateSwitch(choice: Int, onChoice: (Int) -> Unit, enabled: Boolea
  * keeps its typed text (the person is mid-edit), a successful one starts fresh.
  *
  * The rotation door asks for confirmation for the same reason the device removal above does: it
- * is a control that works, and its one permanent cost — a container's identity half retiring with
- * the key it sealed — belongs in words the person reads before pressing the button, not in a
- * surprise afterwards.
+ * is a control that works, and its one lasting cost — every backup exported before the rotation
+ * carrying the retired key — belongs in words the person reads before pressing the button, not in
+ * a surprise afterwards.
  */
 @Composable
 private fun AccountSecuritySection(
@@ -657,9 +657,9 @@ private fun AccountSecuritySection(
                     "A new signing key takes over this account's sign-in and add-device " +
                         "ceremonies, and the old one is retired for good. Your conversations, " +
                         "safety numbers and this session are untouched.\n\n" +
-                        "The cost is permanent: a .migo backup can no longer vouch for the " +
-                        "account onto a new device, because its identity half is the retired " +
-                        "key. The new key is sealed only in this device's vault.",
+                        "A .migo backup exported before this moment can no longer vouch for " +
+                        "the account onto a new device — its identity half is the retired key. " +
+                        "A backup exported after it carries the new key, so make a fresh one.",
                 )
             },
             confirmButton = {
@@ -768,7 +768,8 @@ private fun SecurityCheckupSection(
             CheckupRow(label = "Backup", status = "✓ Backed up " + backupDateLabel(freshness.atMs))
             CheckupWarning(
                 text = "Backup outdated — the identity key was rotated after this backup was " +
-                    "made, so it can no longer vouch for the account onto a new device.",
+                    "made, so it can no longer vouch for the account onto a new device. " +
+                    "Export a fresh one: it carries the rotated key.",
             )
         }
     }

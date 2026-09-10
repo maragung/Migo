@@ -2,7 +2,11 @@ package com.migo.core.account
 
 import com.goterl.lazysodium.LazySodiumJava
 import com.goterl.lazysodium.SodiumJava
+import com.migo.core.crypto.Aead
+import com.migo.core.crypto.Argon2
+import com.migo.core.crypto.Kdf
 import com.migo.core.crypto.Sodium
+import com.migo.core.crypto.SymmetricKey
 import com.migo.core.crypto.hexOf
 import java.io.File
 import kotlinx.serialization.json.Json
@@ -68,6 +72,32 @@ class AccountVectorsTest {
 
         private fun assertHexBytes(what: String, expected: String, actual: ByteArray) {
             assertEquals(what, expected, hexOf(actual))
+        }
+
+        /** Reads the big-endian u32 at [offset] — the header parse the plaintext helper needs. */
+        private fun u32at(bytes: ByteArray, offset: Int): Long =
+            ((bytes[offset].toInt() and 0xff).toLong() shl 24) or
+                ((bytes[offset + 1].toInt() and 0xff).toLong() shl 16) or
+                ((bytes[offset + 2].toInt() and 0xff).toLong() shl 8) or
+                (bytes[offset + 3].toInt() and 0xff).toLong()
+
+        /**
+         * The sealed payload's plaintext, re-derived and decrypted through the same public
+         * primitives the container module uses — so a test can assert on the exact wire bytes,
+         * not only on the values that come back out of them.
+         */
+        private fun plaintextOf(credential: String, sealed: ByteArray): String {
+            val stretched = Argon2.derive(
+                credential.toByteArray(Charsets.UTF_8),
+                sealed.copyOfRange(26, 26 + SALT_LEN),
+                u32at(sealed, 14).toInt(),
+                u32at(sealed, 18).toInt(),
+                u32at(sealed, 22).toInt(),
+                32,
+            )
+            val key = SymmetricKey.fromBytes(Kdf.derive(stretched, null, AccountDomains.BACKUP, 32))
+            return Aead.open(key, sealed.copyOfRange(0, HEADER_LEN), sealed.copyOfRange(HEADER_LEN, sealed.size))
+                .toString(Charsets.UTF_8)
         }
     }
 
@@ -145,10 +175,19 @@ class AccountVectorsTest {
 
     @Test
     fun containersMatchTheVectorsByteForByte() {
+        var sawRotated = false
         for (case in cases("account-container.json")) {
             val name = field(case, "name")
             val root = MigoRoot.fromBytes(hex(field(case, "root")))
-            val file = AccountFile.new(root, case["created_at"]!!.jsonPrimitive.longOrNull!!)
+            var file = AccountFile.new(root, case["created_at"]!!.jsonPrimitive.longOrNull!!)
+            // The rotated case carries its successor seed as an input field, exactly as the Rust
+            // reference's `for_rotated_identity` does; a case without one seals the bytes it
+            // always did, which the pinned `container` hex is there to prove.
+            val rotatedSeed = case["rotated_identity"]?.jsonPrimitive?.content
+            if (rotatedSeed != null) {
+                file = file.forRotatedIdentity(rotatedSeed)
+                sawRotated = true
+            }
             val params = ContainerParams(
                 memoryKib = case["memory_kib"]!!.jsonPrimitive.longOrNull!!,
                 timeCost = case["time_cost"]!!.jsonPrimitive.longOrNull!!,
@@ -168,7 +207,72 @@ class AccountVectorsTest {
             val opened = openContainer(field(case, "credential"), sealed)
             assertEquals("created_at survives the round trip for $name", file.createdAt, opened.createdAt)
             assertEquals("root survives the round trip for $name", root.asBytes().toList(), opened.root().asBytes().toList())
+            if (rotatedSeed != null) {
+                assertHexBytes("rotated identity seed survives the round trip for $name", rotatedSeed, opened.rotatedIdentitySeed()!!)
+            }
         }
+        // Tolerated while the Rust reference has not landed a rotated case: this suite passes
+        // without one, so the ports can merge in either order — but the note keeps the absence
+        // visible in the run log instead of silent.
+        if (!sawRotated) {
+            println("account-container.json carries no rotated_identity case yet — tolerated until the Rust reference lands one")
+        }
+    }
+
+    @Test
+    fun thePayloadCarriesRotatedIdentityOnlyWhenThereIsOne() {
+        val case = cases("account-container.json").first()
+        val root = MigoRoot.fromBytes(hex(field(case, "root")))
+        val credential = field(case, "credential")
+        val rootHex = hexOf(root.asBytes())
+
+        // The form every container sealed before any rotation — asserted as an exact string,
+        // because "the field is omitted" is a claim about bytes, not about decoded values.
+        val plain = AccountFile.new(root, 1234567890L)
+        assertEquals(
+            "the pre-rotation payload",
+            """{"version":1,"created_at":1234567890,"root":"$rootHex"}""",
+            plaintextOf(credential, sealContainer(credential, plain)),
+        )
+
+        // With a rotated seed the field appears, last, spelled exactly as the Rust reference
+        // writes it — and the seed that sealed in is the seed the same bytes give back.
+        val seed = IdentityKey.generate().seed()
+        val rotated = plain.forRotatedIdentity(hexOf(seed))
+        assertEquals(
+            "the post-rotation payload",
+            """{"version":1,"created_at":1234567890,"root":"$rootHex","rotated_identity":"${hexOf(seed)}"}""",
+            plaintextOf(credential, sealContainer(credential, rotated)),
+        )
+
+        // A container that names its account carries both optionals in the declared order —
+        // account_id, then rotated_identity — which is the field order the cross-port contract
+        // pins, and the reason the new field had to be last.
+        val named = rotated.forAccount("acct-vector")
+        assertEquals(
+            "the named and rotated payload",
+            """{"version":1,"created_at":1234567890,"root":"$rootHex","account_id":"acct-vector","rotated_identity":"${hexOf(seed)}"}""",
+            plaintextOf(credential, sealContainer(credential, named)),
+        )
+    }
+
+    @Test
+    fun aRotatedSeedOfTheWrongWidthIsNamed() {
+        val case = cases("account-container.json").first()
+        val root = MigoRoot.fromBytes(hex(field(case, "root")))
+        val file = AccountFile.new(root, 1L)
+
+        // No rotation: the getter is null, not an empty seed or a zero seed.
+        assertEquals("a container without a rotated key carries no seed", null, file.rotatedIdentitySeed())
+
+        // A seed that is not 32 bytes made it past the AEAD tag only by being sealed by something
+        // else that shares the format — a named refusal, not the wrong-credential one.
+        val short = file.forRotatedIdentity(hexOf(ByteArray(31)))
+        assertEquals(AccountErrorKind.BadLength, failureKindOf { short.rotatedIdentitySeed() })
+
+        // And a field that is not hex at all fails the same way, through the same check.
+        val notHex = file.forRotatedIdentity("zz" + "00".repeat(31))
+        assertEquals(AccountErrorKind.BadLength, failureKindOf { notHex.rotatedIdentitySeed() })
     }
 
     @Test
@@ -244,6 +348,15 @@ class AccountVectorsTest {
             // `fail` returns Unit on the JVM, which would widen this block's type past the
             // declared one; a throw is Nothing and keeps the expression a kind.
             throw AssertionError("the container must not open")
+        } catch (e: AccountError) {
+            e.kind
+        }
+
+    /** The kind of the failure [block] reports. */
+    private fun failureKindOf(block: () -> Unit): AccountErrorKind =
+        try {
+            block()
+            throw AssertionError("the call must not succeed")
         } catch (e: AccountError) {
             e.kind
         }
