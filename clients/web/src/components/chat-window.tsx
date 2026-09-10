@@ -649,7 +649,10 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
       {giftError ? <p className="composer-meta composer-error">{giftError}</p> : null}
       <MessageComposer
         onSend={send}
-        onAttach={sendAttachment}
+        // File send is a private-and-group feature: in a server-readable room the attach button is
+        // hidden entirely (the composer renders no picker when onAttach is undefined), while the mic
+        // below stays for every conversation kind.
+        onAttach={endToEnd ? sendAttachment : undefined}
         onVoiceNote={sendVoiceNote}
         onTyping={setTyping}
         disabled={!!error}

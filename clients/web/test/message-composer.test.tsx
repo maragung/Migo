@@ -28,7 +28,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { MessageComposer } from '../src/components/message-composer.js';
 import { friendlyError } from '../src/lib/migo/errors.js';
 
-function render(): string {
+function render(props: Partial<Parameters<typeof MessageComposer>[0]> = {}): string {
   return renderToStaticMarkup(
     <MessageComposer
       onSend={async () => {}}
@@ -37,6 +37,7 @@ function render(): string {
       onTyping={() => {}}
       disabled={false}
       insertRef={undefined}
+      {...props}
     />,
   );
 }
@@ -71,3 +72,35 @@ function readCss(): string {
   // The one stylesheet the app ships; read from source so the test tracks the file, not a build.
   return readFileSync(new URL('../../src/app/globals.css', import.meta.url), 'utf8');
 }
+
+// --- the attach and mic gating ---
+
+test('a composer with onAttach renders the attach button; without it, none renders', () => {
+  // File send is a private-and-group feature: a room (server-readable) hands the composer no
+  // onAttach, and the composer answers by rendering no picker or button at all.
+  const withAttach = render();
+  assert.ok(withAttach.includes('aria-label="Attach a file"'), 'the attach button renders');
+
+  const withoutAttach = render({ onAttach: undefined });
+  assert.ok(
+    !withoutAttach.includes('aria-label="Attach a file"'),
+    'no attach button where onAttach is absent',
+  );
+  assert.ok(
+    !withoutAttach.includes('type="file"'),
+    'no hidden file picker where onAttach is absent',
+  );
+});
+
+test('the mic renders independently of the attach button, so rooms keep voice notes', () => {
+  const roomComposer = render({ onAttach: undefined });
+  assert.ok(
+    roomComposer.includes('aria-label="Record a voice note"'),
+    'the mic must stay when file send is hidden',
+  );
+  const noVoice = render({ onVoiceNote: undefined });
+  assert.ok(
+    noVoice.includes('aria-label="Attach a file"'),
+    'the attach button must stay when the mic is hidden',
+  );
+});

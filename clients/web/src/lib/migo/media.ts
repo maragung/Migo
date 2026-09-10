@@ -242,6 +242,78 @@ export async function uploadImageAttachment(
 }
 
 /**
+ * The ceiling a document attachment may not exceed, matching the server's `Document` media kind.
+ * Checked before any upload call so an oversized file fails with an honest sentence instead of a
+ * server round-trip that was always going to refuse.
+ */
+export const DOCUMENT_MAX_BYTES = 32 * 1024 * 1024;
+
+/**
+ * The message body for an uploaded document: the same `MediaRef` shape an image rides, in the
+ * sender's claim of type and size, with the key material that opens the sealed object.
+ *
+ * Extracted from {@link uploadDocumentAttachment} for the same reason {@link imageAttachmentContent}
+ * is: the content shape is a pure function a test can pin.
+ */
+export function documentAttachmentContent(
+  uploaded: UploadResult,
+  claim: { mimeType: string; sizeBytes: number; fileName: string },
+  keyMaterial: { key: Uint8Array; nonce: Uint8Array },
+): MediaRefContent {
+  return {
+    type: ContentType.MediaRef,
+    mediaId: uploaded.mediaId,
+    mimeType: claim.mimeType,
+    sizeBytes: claim.sizeBytes,
+    key: keyMaterial.key,
+    nonce: keyMaterial.nonce,
+    caption: claim.fileName,
+  };
+}
+
+/**
+ * Uploads a picked document file into an end-to-end conversation and returns the message body that
+ * references it.
+ *
+ * Documents are a private-and-group feature, and every direct conversation and group is
+ * end-to-end, so there is no plaintext branch to keep: the bytes are always sealed (see the module
+ * doc), and a caller that reaches here from a room is a caller that ignored the composer's gating.
+ * The file's name rides in the `MediaRef`'s caption slot — the only free-text field the content
+ * shape has — and the receiver's renderer tells a document from an image by the claimed MIME type.
+ *
+ * @throws RangeError when the file exceeds {@link DOCUMENT_MAX_BYTES}, before anything is uploaded.
+ */
+export async function uploadDocumentAttachment(
+  client: MediaClient,
+  conversationId: Id,
+  file: File,
+): Promise<MediaRefContent> {
+  const bytes = await readFileBytes(file);
+  if (bytes.length > DOCUMENT_MAX_BYTES) {
+    throw new RangeError(
+      `migo: document is ${bytes.length} bytes, over the ${DOCUMENT_MAX_BYTES} byte ceiling`,
+    );
+  }
+  const mime = claimMime(file);
+  const sealed = sealing.seal(bytes, MEDIA_DOMAIN);
+  const uploaded = await client.media.upload(
+    {
+      kind: MediaKind.Document,
+      // The stored object is opaque ciphertext; the honest claim for it is the neutral one.
+      contentType: 'application/octet-stream',
+      size: sealed.sealed.length,
+      conversationId,
+    },
+    sealed.sealed,
+  );
+  return documentAttachmentContent(
+    uploaded,
+    { mimeType: mime, sizeBytes: bytes.length, fileName: file.name },
+    sealed,
+  );
+}
+
+/**
  * Uploads a picked image file as the caller's new avatar and returns its media id, for
  * `profile.updateProfile({ avatarMediaId })`.
  *

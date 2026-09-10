@@ -14,11 +14,12 @@ import type {
   VoiceNoteRefContent,
 } from '@migo/sdk';
 
-import { formatClock, formatDayLabel } from '@/lib/format.js';
+import { formatBytes, formatClock, formatDayLabel } from '@/lib/format.js';
 import { messagePreview } from '@/lib/message-preview.js';
 import type { ThreadMessage } from '@/lib/migo/use-chat.js';
 
 import { Avatar } from './avatar.js';
+import { Icon } from './icons.js';
 import { Spinner } from './spinner.js';
 import { TokenText } from './token-reference.js';
 import { VoiceNoteBubble } from './voice-player.js';
@@ -49,6 +50,76 @@ export type MediaObjectResolver = (
 /** The text a media message shows while (or instead of) its image: its caption, or a generic label. */
 export function mediaLabel(content: MediaRefContent): string {
   return content.caption?.trim() || 'Attachment';
+}
+
+/**
+ * Whether a `MediaRef` carries a document rather than an image. The content shape has no separate
+ * document type, so the sender's claimed MIME type is the discriminator: an image renders as an
+ * embedded `<img>`, anything else renders as the document row. The claim is authenticated by the
+ * message's own end-to-end seal and is never acted on beyond this rendering choice.
+ */
+export function isDocumentContent(content: MediaRefContent): boolean {
+  return !content.mimeType.startsWith('image/');
+}
+
+/**
+ * One document reference, resolved to a decrypted object URL and rendered as a file row.
+ *
+ * The filename and size come straight from the message (the filename rides the caption slot), so
+ * they render immediately as escaped text; only the download link waits for the object URL — the
+ * same pending-then-resolved shape {@link MediaAttachment} uses, and the same failure fallback to
+ * the label plus no link. The sender's claimed `mimeType` is never printed and never handed to any
+ * decoder: the resolved anchor carries the `download` attribute, so the browser saves the bytes
+ * under the filename instead of ever rendering them as a document.
+ */
+function DocumentAttachment({
+  content,
+  resolveUrl,
+}: {
+  content: MediaRefContent;
+  resolveUrl: MediaObjectResolver;
+}): ReactNode {
+  const [url, setUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    resolveUrl(content)
+      .then((resolved) => {
+        if (!cancelled && resolved !== null) {
+          setUrl(resolved);
+        }
+      })
+      .catch(() => {
+        /* A failed resolve keeps the row: the name and size are facts about the message, and a
+           download that is briefly unavailable is not a verdict about the file. */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [content, resolveUrl]);
+
+  const name = mediaLabel(content);
+
+  return (
+    <span className="media-attachment doc-attachment">
+      <span className="doc-row">
+        <span className="doc-icon" aria-hidden="true">
+          <Icon name="file" size={20} />
+        </span>
+        <span className="doc-details">
+          <span className="doc-name">{name}</span>
+          <span className="doc-size">{formatBytes(content.sizeBytes)}</span>
+        </span>
+        {url === null ? (
+          <Spinner />
+        ) : (
+          <a className="doc-download" href={url} download={name} aria-label={`Download ${name}`}>
+            <Icon name="download" size={16} />
+          </a>
+        )}
+      </span>
+    </span>
+  );
 }
 
 /**
@@ -158,8 +229,16 @@ function renderBody(
         placeholder: false,
       };
     case ContentType.MediaRef:
-      return mediaObjectFor === undefined
-        ? { node: `📎 ${mediaLabel(content)}`, placeholder: true }
+      if (mediaObjectFor === undefined) {
+        return { node: `📎 ${mediaLabel(content)}`, placeholder: true };
+      }
+      // A document rides the same content shape an image does; the claimed MIME type decides which
+      // renderer it gets, and both agree with the placeholder above on what the message is.
+      return isDocumentContent(content)
+        ? {
+            node: <DocumentAttachment content={content} resolveUrl={mediaObjectFor} />,
+            placeholder: false,
+          }
         : {
             node: <MediaAttachment content={content} resolveUrl={mediaObjectFor} />,
             placeholder: false,

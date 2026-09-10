@@ -2,12 +2,14 @@
  * What the message list is allowed to turn server-controlled content into.
  *
  * Section 122 is blunt: a media message carries the sender's *claimed* `mimeType`, and it must never
- * be trusted. The web client honours this by never embedding media at all — `renderBody` turns every
- * non-text body into a short text placeholder (`📎 caption`, `🎤 Voice note`) and ignores the mime
- * type entirely. That is the safe design, and this test locks it in: a regression that "helpfully"
- * rendered `<img src=…>` or `<object>` off the sender's claim, or printed the mime type, would open
- * an XSS / content-sniffing hole that no functional test would notice, because the placeholder text
- * would still look right beside it.
+ * be trusted. The web client honours this by never letting the claim pick a renderer that executes
+ * anything: an image claim embeds the bytes inside an `<img>` (where neither HTML nor SVG scripts
+ * run), a non-image claim renders the document row (a download anchor, never an embed), and without
+ * a resolver both stay short text placeholders (`📎 caption`, `🎤 Voice note`). That is the safe
+ * design, and this test locks it in: a regression that "helpfully" rendered `<img src=…>` or
+ * `<object>` off the sender's claim, or printed the mime type, would open an XSS / content-sniffing
+ * hole that no functional test would notice, because the placeholder text would still look right
+ * beside it.
  *
  * The second half is escaping. Message text, captions, and reaction emoji are attacker-controlled
  * strings from the far end of an end-to-end channel the server cannot police. Rendered as React text
@@ -143,4 +145,57 @@ test('control events produce no bubble at all', () => {
   const bubbles = markup.match(/class="meta"/g) ?? [];
   assert.equal(bubbles.length, 5);
   assert.ok(!markup.includes('sender-key'), 'a control-event signal leaked into the transcript');
+});
+
+// --- the document row ---
+
+/**
+ * A document message (a `MediaRef` whose claimed mime is not an image) renders as the file row,
+ * under the same section-122 rules as everything above: the filename is attacker-controlled text
+ * that must stay inert, the claimed mime is never printed, and the renderer never embeds the bytes.
+ * `renderToStaticMarkup` runs no effects, so the row below is its pending state — icon, name, and
+ * size render immediately from the message; only the download link waits for the object URL.
+ */
+const docMarkup = renderToStaticMarkup(
+  <MessageList
+    messages={[
+      msg({
+        type: ContentType.MediaRef,
+        mediaId: 'media_doc' as Id,
+        mimeType: 'application/pdf', // the honest claim for this test's document
+        sizeBytes: 2_048,
+        key: KEY,
+        nonce: NONCE,
+        caption: '<script>evil.pdf</script>',
+      }),
+    ]}
+    selfId={'me' as Id}
+    showSenders={false}
+    profiles={new Map()}
+    readUpTo={0}
+    onReply={() => {}}
+    onDelete={() => {}}
+    deleting={false}
+    hasEarlier={false}
+    loadingEarlier={false}
+    onLoadEarlier={() => {}}
+    mediaObjectFor={() => Promise.resolve(null)}
+  />,
+);
+
+test('a document renders as the file row: name and size, never an image embed', () => {
+  assert.ok(docMarkup.includes('doc-attachment'), 'the document row rendered');
+  assert.ok(docMarkup.includes('doc-name'), 'the filename element rendered');
+  assert.ok(docMarkup.includes('2.0 KB'), 'the size is formatted beside the name');
+  for (const tag of ['<img', '<script', '<svg', '<iframe', '<object', '<embed', '<video']) {
+    assert.ok(!docMarkup.includes(tag), `rendered a live ${tag}> element for a document`);
+  }
+});
+
+test('a hostile document filename is shown, but only as inert escaped text', () => {
+  assert.ok(docMarkup.includes('&lt;script&gt;evil.pdf&lt;/script&gt;'), 'filename not rendered');
+});
+
+test("a document's claimed mime type is never printed", () => {
+  assert.ok(!docMarkup.includes('application/pdf'), 'the claimed mime leaked into the transcript');
 });

@@ -42,6 +42,21 @@ export function formatRelative(epochMs: number, nowMs: number = Date.now()): str
   return new Date(epochMs).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 }
 
+/** A byte count for a document row, e.g. `512 bytes`, `42.0 KB`, `3.1 MB` — the unit scales. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} bytes`;
+  }
+  const units = ['KB', 'MB', 'GB'];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${Math.round(value * 10) / 10} ${units[unit]}`;
+}
+
 /** Up to two initials from a display name, for an avatar fallback. */
 export function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);

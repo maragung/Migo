@@ -22,7 +22,7 @@ import { ContentType, ReceiptKind, TypingState } from '@migo/sdk';
 import type { Id, IncomingMessage, TextContent, TypingEvent } from '@migo/sdk';
 
 import { useMigo } from './use-migo.js';
-import { uploadImageAttachment } from './media.js';
+import { uploadDocumentAttachment, uploadImageAttachment } from './media.js';
 import { sealReaction, sealTextEdit } from './seal.js';
 import { uploadVoiceNote } from './voice.js';
 import type { VoiceRecording } from './voice.js';
@@ -360,18 +360,23 @@ export function useChat(conversationId: Id, options: ChatCryptoOptions = {}): Ch
   );
 
   /**
-   * Uploads a picked image file and sends the media message that references it.
+   * Uploads a picked file and sends the media message that references it.
    *
-   * The upload happens before any message is sent, so a failed upload rejects here without the
-   * conversation ever seeing a dangling reference. A reply target in flight applies to the media
-   * message exactly as it would to a text one.
+   * An image goes down the image path (which keeps the room-plaintext branch, because an image may
+   * legitimately be sent into a server-readable room). Anything else is a document, which rides the
+   * document path — sealed only, matching the composer's gating of the attach button to end-to-end
+   * conversations. The upload happens before any message is sent, so a failed upload rejects here
+   * without the conversation ever seeing a dangling reference. A reply target in flight applies to
+   * the media message exactly as it would to a text one.
    */
   const sendAttachment = useCallback(
     async (file: File): Promise<void> => {
       if (!client || !accountId) {
         return;
       }
-      const content = await uploadImageAttachment(client, conversationId, file, options);
+      const content = file.type.startsWith('image/')
+        ? await uploadImageAttachment(client, conversationId, file, options)
+        : await uploadDocumentAttachment(client, conversationId, file);
       const sendOptions = replyTo ? { replyTo: replyTo.messageId } : {};
       const accepted = await client.messaging.send(conversationId, content, sendOptions);
       upsert({

@@ -32,12 +32,15 @@ import { ContentType, MediaKind, sealing } from '@migo/sdk';
 import type { Id, MediaRefContent } from '@migo/sdk';
 
 import {
+  DOCUMENT_MAX_BYTES,
   LEGACY_PLAINTEXT_SLOTS,
+  documentAttachmentContent,
   imageAttachmentContent,
   isLegacyPlaintext,
   readFileBytes,
   resolveMediaObject,
   resolveMediaUrl,
+  uploadDocumentAttachment,
   uploadImageAttachment,
 } from '../src/lib/migo/media.js';
 import type { MediaClient } from '../src/lib/migo/media.js';
@@ -219,6 +222,79 @@ test('a server-readable destination keeps the legacy plaintext path', async () =
   );
   assert.deepEqual(content.nonce, LEGACY_PLAINTEXT_SLOTS.nonce);
   assert.equal(content.sizeBytes, bytes.length);
+});
+
+// --- the document upload ---
+
+/** A PDF-flavoured file of `bytes`, the shape a picker hands the document helper. */
+function documentFile(bytes: Uint8Array, name = 'report.pdf'): File {
+  return new File([bytes.slice()], name, { type: 'application/pdf' });
+}
+
+test('a document upload content carries the filename, mime, and plaintext size', () => {
+  const key = generateKey();
+  const nonce = new Uint8Array(24).fill(3);
+  const content = documentAttachmentContent(
+    { mediaId: 'media_doc' as Id },
+    { mimeType: 'application/pdf', sizeBytes: 2_048, fileName: 'report.pdf' },
+    { key, nonce },
+  );
+  assert.deepEqual(content, {
+    type: ContentType.MediaRef,
+    mediaId: 'media_doc' as Id,
+    mimeType: 'application/pdf',
+    sizeBytes: 2_048,
+    key,
+    nonce,
+    caption: 'report.pdf',
+  });
+});
+
+test('a document upload seals the bytes, claims Document, and rides the media seal domain', async () => {
+  const { client, calls } = uploadRecorder();
+  const bytes = new Uint8Array([9, 9, 9, 9]);
+  const content = await uploadDocumentAttachment(client, 'conv_1' as Id, documentFile(bytes));
+
+  assert.equal(calls.length, 1);
+  const [options, uploaded] = calls[0] as UploadCall;
+  assert.equal(options.kind, MediaKind.Document);
+  assert.equal(options.conversationId, 'conv_1' as Id);
+  assert.equal(
+    options.contentType,
+    'application/octet-stream',
+    'the stored object is ciphertext; the honest claim for it is the neutral one',
+  );
+  assert.equal(options.size, uploaded.length, 'the upload claims the sealed size');
+  assert.notDeepEqual(uploaded, bytes, 'plaintext must never cross the wire');
+
+  // The message carries the file's name in the caption slot, the real mime claim, and the
+  // plaintext size — and the slots open back to exactly the file, under the media domain.
+  assert.equal(content.caption, 'report.pdf');
+  assert.equal(content.mimeType, 'application/pdf');
+  assert.equal(content.sizeBytes, bytes.length);
+  assert.ok(!isLegacyPlaintext(content.key));
+  assert.deepEqual(
+    sealing.open(content.key, content.nonce, new TextEncoder().encode('migo-media'), uploaded),
+    bytes,
+  );
+});
+
+test('a file with no browser-known type claims the neutral mime', async () => {
+  const { client, calls } = uploadRecorder();
+  const bytes = new Uint8Array([1, 2]);
+  const file = new File([bytes.slice()], 'payload.bin', { type: '' });
+  const content = await uploadDocumentAttachment(client, 'conv_1' as Id, file);
+  assert.equal(content.mimeType, 'application/octet-stream');
+  assert.equal(content.caption, 'payload.bin');
+  assert.equal((calls[0] as UploadCall)[0]?.kind, MediaKind.Document);
+});
+
+test('a document over the ceiling rejects before any upload call', async () => {
+  const { client, calls } = uploadRecorder();
+  const huge = new Uint8Array(DOCUMENT_MAX_BYTES + 1);
+  const file = new File([huge.slice()], 'too-big.pdf', { type: 'application/pdf' });
+  await assert.rejects(uploadDocumentAttachment(client, 'conv_1' as Id, file), RangeError);
+  assert.equal(calls.length, 0, 'an over-ceiling file must never reach the upload');
 });
 
 // --- the resolved URL cache ---

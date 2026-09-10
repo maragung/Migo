@@ -23,10 +23,13 @@ export interface ReplyPreview {
 interface ComposerProps {
   onSend: (text: string) => Promise<void>;
   /**
-   * Uploads an attached image and sends the message that references it. Rejects on failure, so the
-   * composer can surface the error beside the input it belongs to.
+   * Uploads an attached file (image or document) and sends the message that references it.
+   * Rejects on failure, so the composer can surface the error beside the input it belongs to.
+   * Optional: a context without it renders no attach button at all — the way rooms hide file
+   * send, since a room conversation is server-readable and documents are a private-and-group
+   * feature.
    */
-  onAttach: (file: File) => Promise<void>;
+  onAttach?: (file: File) => Promise<void>;
   /**
    * Uploads a finished voice note recording and sends the message that references it. Rejects on
    * failure, so the composer can surface the error beside the mic that started it. Optional: a
@@ -159,6 +162,9 @@ export function MessageComposer({
 
   const attach = useCallback(
     async (file: File): Promise<void> => {
+      if (onAttach === undefined) {
+        return;
+      }
       setUploading(true);
       setUploadError(null);
       stopTyping();
@@ -166,7 +172,7 @@ export function MessageComposer({
         await onAttach(file);
       } catch {
         // The upload failed before any message was sent; say so beside the picker that started it.
-        setUploadError('That image could not be sent.');
+        setUploadError('That file could not be sent.');
       } finally {
         setUploading(false);
       }
@@ -289,23 +295,26 @@ export function MessageComposer({
             disabled={disabled || uploading}
             aria-label="Message"
           />
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            onChange={onFileChange}
-            hidden
-            aria-label="Attach an image"
-          />
-          <button
-            type="button"
-            className="attach-btn"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={disabled || uploading}
-            aria-label="Attach an image"
-          >
-            <Icon name="attach" size={20} />
-          </button>
+          {onAttach !== undefined ? (
+            <>
+              <input
+                ref={fileInputRef}
+                type="file"
+                onChange={onFileChange}
+                hidden
+                aria-label="Attach a file"
+              />
+              <button
+                type="button"
+                className="attach-btn"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={disabled || uploading}
+                aria-label="Attach a file"
+              >
+                <Icon name="attach" size={20} />
+              </button>
+            </>
+          ) : null}
           {onToggleEmoticon !== undefined ? (
             <button
               type="button"
@@ -368,7 +377,7 @@ export function MessageComposer({
           {uploading ? (
             <>
               <Spinner />
-              <span>Uploading image…</span>
+              <span>Uploading file…</span>
             </>
           ) : null}
           {sendingVoice ? (

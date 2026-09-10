@@ -1680,6 +1680,50 @@ main {
   font-size: var(--fs-body);
   opacity: 0.9;
 }
+/* A document is a row, not a frame: icon, name, and size side by side, with the download link
+   appearing once the bytes are decrypted. The name breaks anywhere so a long filename cannot
+   stretch the bubble. */
+.doc-attachment .doc-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-alt);
+  max-width: 300px;
+}
+.doc-attachment .doc-icon {
+  display: inline-grid;
+  place-items: center;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.doc-attachment .doc-details {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.doc-attachment .doc-name {
+  font-size: var(--fs-body);
+  overflow-wrap: anywhere;
+}
+.doc-attachment .doc-size {
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+}
+.doc-attachment .doc-download {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.doc-attachment .doc-download:hover {
+  color: var(--accent);
+}
 .lightbox {
   position: fixed;
   inset: 0;
