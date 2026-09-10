@@ -319,6 +319,15 @@ mod alsa {
     // receiving thread, never shared, never aliased.
     unsafe impl Send for OwnedPcm {}
 
+    /// Unwraps the handle on the far side of the spawn. A closure that reads
+    /// `pcm.0` directly would capture the *field* — a raw pointer, not `Send` —
+    /// because precise capture (RFC 2229) reaches into the struct; passing the
+    /// whole newtype through a function boundary is what makes the closure
+    /// capture the type the `Send` is stated on.
+    fn into_raw(handle: OwnedPcm) -> Pcm {
+        handle.0
+    }
+
     // The wire constants of `alsa/asoundlib.h` this module relies on.
     const STREAM_PLAYBACK: c_int = 0;
     const STREAM_CAPTURE: c_int = 1;
@@ -421,7 +430,7 @@ mod alsa {
         let thread = std::thread::Builder::new()
             .name("migo-call-capture".to_owned())
             .spawn(move || {
-                let pcm = pcm.0;
+                let pcm = into_raw(pcm);
                 let mut buffer = [0i16; 160];
                 loop {
                     let frames = unsafe {
@@ -460,7 +469,7 @@ mod alsa {
         let thread = std::thread::Builder::new()
             .name("migo-call-playback".to_owned())
             .spawn(move || {
-                let pcm = pcm.0;
+                let pcm = into_raw(pcm);
                 while let Ok(chunk) = receiver.recv() {
                     // `writei` may consume a partial chunk; the rest is written
                     // until it is all out or the device is beyond saving.
