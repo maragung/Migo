@@ -357,6 +357,22 @@ test-web: build-ts ## Run web/TypeScript tests
 	# by not existing.
 	$(PNPM) -r --if-present test
 
+# ---------------------------------------------------------------- smoke
+
+.PHONY: smoke-2node
+smoke-2node: ## Two-node end-to-end smoke: build migod, run tools/2node/run.sh
+	# The script owns the topology (two migod instances, one PostgreSQL database each,
+	# one shared Redis) and reads its environment from PG_*, REDIS_URL and MIGOD_BIN;
+	# this target guarantees the one thing the script assumes but cannot provide
+	# itself — the migod binary at exactly the path its default points at. The chatbot
+	# the script drives is built by `make build-ts` (the root solution file references
+	# tools/chatbot), so a caller who has run `make setup && make build-ts` needs
+	# nothing else. CI runs this against service containers on the default 5432/6379
+	# by exporting PG_PORT and REDIS_URL; locally, `make infra-up` provides the
+	# containers the script's own defaults (15432/16379) were written for.
+	$(CARGO) build $(MANIFEST) --bin migod
+	tools/2node/run.sh
+
 .PHONY: audit
 audit: ## Dependency vulnerability + licence audit
 	# cargo-audit reads the lockfile, not the manifest, so it takes --file rather

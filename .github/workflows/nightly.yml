@@ -1,0 +1,387 @@
+# Migo — the nightly full surface.
+#
+# Push-time CI (ci.yml) answers "is this commit green?". This workflow answers the
+# different question: "is main *still* green this morning?" A scheduled run re-proves
+# the whole surface against nothing but the committed tree, so it catches the failures
+# a push build cannot see: an advisory that turned red overnight on the same lockfile,
+# a GitHub-hosted image that quietly moved, a flaky test that passes on every push and
+# fails once a week. The dependency between the two is one-directional — ci.yml is the
+# gate of record for merges; this is the watchdog that barks between merges.
+#
+# Every step is a Makefile target, for the same reason ci.yml's are: `make ci` is the
+# single source of truth for what "green" means. The job list below is a deliberate
+# duplicate of ci.yml's rather than a reusable-workflow extraction — extracting would
+# edit ci.yml, and the point of this file is to *watch* that one, not to refactor it.
+# When a job appears there, it belongs here too; the duplication is the contract.
+#
+# Beyond what CI runs, this workflow adds the two-node smoke (`make smoke-2node`):
+# two real migod instances, each with its own PostgreSQL database, driving the
+# TypeScript chatbot through register → conversation → ten sealed round-trips over
+# the gateway. No unit test exercises the binary end to end; this one does.
+
+name: Nightly
+
+on:
+  schedule:
+    # 03:17 UTC, an off-peak minute chosen away from :00/:30 so this repo's run does
+    # not queue behind the fleet's synchronized midnight jobs. The cadence is daily
+    # because the failure classes it exists to catch (image drift, advisories,
+    # flakiness) all surface within a day of appearing.
+    - cron: '17 3 * * *'
+  # Manual, so a scheduled run's failure can be reproduced from the Actions tab
+  # without waiting for the next 03:17 — and so a fix can be proven before then.
+  workflow_dispatch:
+
+# Scheduled runs never cancel one another: a run that is cancelled leaves no record
+# of whether main was green at that moment, and the whole point of this workflow is
+# the record. Two overlapping runs cost a runner hour; a cancelled run costs the
+# answer.
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Same rationale as ci.yml: a CI runner is thrown away after the build, so nobody
+  # is left to read an incremental cache, and debug info is the largest thing in
+  # target/ that nobody here will ever open.
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ------------------------------------------------------------------ full-ci
+  # The same jobs CI runs, in the same order, against the same targets. See ci.yml
+  # for the per-job rationale; the comments here exist only where this file's copy
+  # differs in some way that matters (it does not — that is the point).
+  gates:
+    name: Brief and protocol gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Python modules the gates import
+        run: python3 -m pip install --quiet --disable-pip-version-check pyyaml cryptography
+
+      - name: Generated protocol code is not stale
+        run: make protocol-check
+
+      - name: Generated entities match the migrations
+        run: make entity-check
+
+      - name: The brief does not contradict the schema or the docs
+        run: make brief-check
+
+      - name: Conformance vectors are not stale
+        run: make vector-check
+
+      - name: Android Kotlin passes the static checks
+        run: make kotlin-check
+
+      - name: Infra files pass the static hygiene checks
+        run: make infra-check
+
+      - name: The gate installs exactly the Python modules it imports
+        run: make pydeps-check
+
+      - name: No secret-shaped string is committed
+        run: make secret-check
+
+  server:
+    name: Rust — fmt, clippy, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: gates
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: migo
+          POSTGRES_PASSWORD: migo
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U migo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      MIGO_TEST_DATABASE_URL: postgres://migo:migo@127.0.0.1:5432/postgres
+      MIGO_TEST_REDIS_URL: redis://127.0.0.1:6379/15
+      MIGO_TEST_REQUIRE_BACKENDS: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          key: server-tests
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Formatting
+        run: make fmt-check-rust
+
+      - name: Clippy, warnings denied
+        run: make lint-rust
+
+      - name: Documentation has no broken intra-doc links
+        run: make doc-check
+
+      - name: Tests, with PostgreSQL and Redis behind the contract suites
+        run: make test-server
+
+      - name: Cross-language conformance vectors, Rust side
+        run: make test-vectors-rust
+
+  msrv:
+    name: Compiles on Rust 1.94, as declared
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: gates
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.94
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          key: msrv
+
+      - name: cargo check on the declared minimum
+        run: |
+          cargo check --manifest-path server/Cargo.toml \
+            --workspace --all-targets --all-features
+
+  desktop:
+    name: Desktop client — fmt, clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: gates
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clients/desktop
+          key: desktop-lints
+
+      - name: Formatting
+        run: make fmt-check-desktop
+
+      - name: Clippy, warnings denied
+        run: make lint-desktop
+
+  desktop-windows:
+    name: Desktop client — Windows check
+    runs-on: windows-latest
+    timeout-minutes: 30
+    needs: gates
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clients/desktop
+          key: desktop-check-windows
+
+      - name: Check
+        working-directory: clients/desktop
+        shell: bash
+        run: cargo check --locked --workspace
+
+  web:
+    name: TypeScript — build, lint, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: gates
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: make build-ts
+
+      - name: Formatting
+        run: make fmt-check-js
+
+      - name: Lint
+        run: make lint-js
+
+      - name: Test
+        run: pnpm -r --if-present test
+
+      - name: Cross-language conformance vectors, TypeScript side
+        run: make test-vectors-ts
+
+      - name: Web and store production build
+        run: |
+          make build-web
+          make build-store
+
+  audit:
+    name: Dependency advisories (reports, does not gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          key: audit
+
+      - name: cargo-audit
+        working-directory: server
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
+  # ------------------------------------------------------------------ 2node smoke
+  # The one surface CI does not run: the real binary, end to end. `make smoke-2node`
+  # builds migod (debug — the point is the protocol path, not the throughput) and
+  # hands it to tools/2node/run.sh, which owns the topology: two nodes on 18080/18081,
+  # a database each, one shared Redis, then the chatbot's register → converse →
+  # ten sealed round-trips against node 1, then teardown. The script's exit code is
+  # the gate; there is nothing to parse.
+  #
+  # Environment plumbing is the whole job: the script's defaults (PG 15432, Redis
+  # 16379) were written for a developer's `infra` containers, but GitHub service
+  # containers publish on the standard 5432/6379, so both are overridden here. The
+  # chatbot half needs the workspace install (it depends on @migo/sdk via the
+  # workspace) plus `make build-ts`, which compiles tools/chatbot through the root
+  # solution's project references. psql has to be installed for the script's
+  # database-creation step; the runner image does not ship it.
+  #
+  # Not run on schedule-only schedules: this job also runs on workflow_dispatch, so
+  # a nightly failure in it can be reproduced by hand within minutes.
+  smoke-2node:
+    name: Two-node end-to-end smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: migo
+          POSTGRES_PASSWORD: migo
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U migo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # run.sh reads these directly. The databases the script creates (migo_2node1,
+      # migo_2node2) are fresh on every runner, so a scheduled run never inherits a
+      # previous night's accounts.
+      PG_PORT: '5432'
+      REDIS_URL: redis://127.0.0.1:6379/0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          key: server-smoke
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # psql is run.sh's database-creation tool and the ubuntu-latest image does not
+      # ship it. Version-aligned with the service container above, so the client
+      # never speaks a newer protocol than the server.
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the TypeScript half
+        # Compiles tools/chatbot (and @migo/sdk it depends on) through the root
+        # solution's project references. run.sh would attempt this itself if it
+        # found no dist/, but with its own fallback flags — doing it here means
+        # the workspace's frozen lockfile is what resolves, not a second install.
+        run: make build-ts
+
+      - name: Two-node smoke
+        run: make smoke-2node
+
+      # The node logs are the only artefact a failed nightly run needs: the chatbot
+      # prints its own transcript to the step log, and the failure one night in ten
+      # lives in a node's log, not in the bot's.
+      - name: Upload node logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 2node-logs
+          path: tools/2node/logs/
+          retention-days: 7
