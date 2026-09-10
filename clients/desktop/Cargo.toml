@@ -60,6 +60,11 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 # the two dependency graphs share one copy of the stack that must never fork.
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls", "log"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# The call engine's media plane: WebRTC for the peer connection, SDP, and ICE, with the media
+# engine carrying PCMU only (8 kHz µ-law, the one codec every Migo client speaks). The crate's
+# own default features are kept — the deny_once SRTP protection and the ICE mDNS candidate
+# support are both wanted on a desktop that may sit behind a hairpinning router.
+webrtc = "0.14"
 anyhow = "1"
 futures-util = "0.3"
 
@@ -89,6 +94,21 @@ thiserror = "2"
 directories = "6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Audio capture and playback are backend-split, and the split is deliberate:
+#
+# Linux is dlopen'd at runtime through libloading rather than linked, so a released binary runs
+# on a machine without ALSA (a bare container, a Nix host, a musl distro) instead of failing to
+# start on a missing `libasound.so.2`. Calls are an optional feature of a chat program; the
+# program must open without them.
+#
+# Windows and macOS link cpal normally — their audio stacks (WASAPI, CoreAudio) ship with the OS,
+# so runtime loading buys nothing there and costs a working default.
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading = "0.8"
+
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+cpal = "0.15"
 
 [profile.release]
 opt-level = 3

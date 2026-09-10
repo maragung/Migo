@@ -60,6 +60,10 @@ pub struct App {
     alerts: AlertsState,
     search: SearchState,
     wallet: WalletState,
+    /// The call overlay's subject: the one call this device is in, as the worker last projected
+    /// it. A clone of the worker's view, not a reference to it, because the overlay draws on the
+    /// context above the windows while the command buffer it pushes into is this frame's own.
+    call: Option<crate::net::call::CallView>,
     /// The merged activity stream, rebuilt whenever either durable half moves.
     activity: Vec<crate::model::ActivityRow>,
     toasts: Vec<Toast>,
@@ -130,6 +134,7 @@ impl App {
             alerts: AlertsState::default(),
             search: SearchState::default(),
             wallet: WalletState::default(),
+            call: None,
             activity: Vec::new(),
             toasts: Vec::new(),
             commands: Vec::new(),
@@ -239,6 +244,12 @@ impl App {
                     self.auth.busy = false;
                     self.auth.clear_secrets();
                     self.auth.captcha.reset();
+                    // The overlay goes with the session for the same reason the threads do: the
+                    // worker already tore its call state down with the keys, and an overlay out-
+                    // living its session would be a screen with nothing behind it. (The worker
+                    // sends its own CallGone when a call actually existed; this is the belt to
+                    // that braces, and the cheap one — one assignment on the way out.)
+                    self.call = None;
                     // Drop every decrypted message with the session. Leaving a thread on screen after
                     // sign-out would mean plaintext outliving the keys that produced it, which is the
                     // one thing a signed-out client must not do.
@@ -653,6 +664,14 @@ impl App {
                         self.search.people = Some(rows);
                         self.search.busy = false;
                     }
+                }
+                Event::Call(view) => {
+                    // The worker's projection of the one call this device can be in — a whole
+                    // overlay's worth of state in one small struct, arriving whenever it moves.
+                    self.call = Some(view);
+                }
+                Event::CallGone => {
+                    self.call = None;
                 }
                 Event::Toast { text, kind } => self.toasts.push(match kind {
                     ToastKind::Info => Toast::info(text),
@@ -1328,10 +1347,12 @@ impl eframe::App for App {
             // Escape closes the conversation window that is on top — the reference's windowing
             // reflex, and the one key this shell owns. Only a conversation window: Escape in a
             // menu belongs to the menu (any open popup keeps the key), Escape in the logout
-            // dialog cancels the dialog, Escape in the backup offer declines the offer, and a
-            // side window or the Contacts window is closed by its own button, not by a key that
-            // could take the lists away by accident.
+            // dialog cancels the dialog, Escape in the backup offer declines the offer, Escape
+            // over the call overlay answers the call (declines, ends, or dismisses — the call
+            // screen owns the key while it is up), and a side window or the Contacts window is
+            // closed by its own button, not by a key that could take the lists away by accident.
             if ctx.input(|i| i.key_pressed(egui::Key::Escape))
+                && self.call.is_none()
                 && !self.desktop.logout_dialog
                 && self.desktop.backup_offer.is_none()
                 && !ctx.any_popup_open()
@@ -1370,6 +1391,23 @@ impl eframe::App for App {
                     path: PathBuf::from(path),
                     credential,
                 });
+            }
+
+            // The call overlay, over everything except the toasts: a call is the foreground of
+            // the session while it runs, and an incoming ring is the one thing that may
+            // legitimately interrupt whatever the desktop was doing. The view is cloned out of
+            // the event store because the overlay pushes into this frame's command buffer,
+            // which borrows `self` mutably — the same one-small-struct-per-frame trade the
+            // toasts already make. The connected duration rides the signed-in frame's own
+            // one-second repaint, so no extra wake is asked for here.
+            if let Some(call) = self.call.clone() {
+                let peer_name = self
+                    .chat
+                    .names
+                    .get(&call.peer)
+                    .cloned()
+                    .unwrap_or_else(|| crate::model::short_id(call.peer));
+                crate::ui::call::overlay(&ctx, self.theme, &call, &peer_name, &mut self.commands);
             }
         }
 

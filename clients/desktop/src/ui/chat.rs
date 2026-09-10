@@ -553,7 +553,7 @@ fn room_notices(ui: &mut Ui, context: &Context<'_>, state: &ChatState, conversat
 
 /// The compact header over the open conversation: title, encryption state, and the counts that
 /// are true of the whole thread rather than of any one message in it.
-fn thread_header(ui: &mut Ui, context: &Context<'_>, state: &ChatState, conversation_id: Id) {
+fn thread_header(ui: &mut Ui, context: &mut Context<'_>, state: &ChatState, conversation_id: Id) {
     let colors = palette(context.theme);
     let Some(conversation) = state
         .conversations
@@ -606,6 +606,39 @@ fn thread_header(ui: &mut Ui, context: &Context<'_>, state: &ChatState, conversa
             // open on screen, so the badge appears here whenever it does.
             widgets::unread_badge(ui, context.theme, conversation.unread);
             ui.add_space(space::XS);
+            // The call button, on an encrypted two-member conversation only — the same gate the
+            // web and Android headers use. A call is sealed with the conversation's own E2EE
+            // group layer, so an unencrypted conversation has no key to seal with, and a group
+            // call is a different protocol this build does not speak. Busy is the worker's word:
+            // a second call while one runs is refused there with a toast, not hidden here,
+            // because the button's target (the one other member) does not change with call
+            // state and re-deriving that gate in the UI would be two opinions about one rule.
+            if conversation.encrypted && conversation.members.len() == 2 {
+                if let Some(me) = context.account.map(|account| account.account_id) {
+                    if let Some(peer) = conversation.members.iter().find(|id| **id != me) {
+                        let colors = palette(context.theme);
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("\u{1F4DE}")
+                                        .font(egui::FontId::proportional(font::BODY))
+                                        .color(colors.text),
+                                )
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::NONE),
+                            )
+                            .on_hover_text("Voice call")
+                            .clicked()
+                        {
+                            context.issue(Command::StartCall {
+                                conversation_id,
+                                callee_id: *peer,
+                            });
+                        }
+                        ui.add_space(space::XS);
+                    }
+                }
+            }
             if conversation.members.len() > 2 {
                 widgets::pill(
                     ui,

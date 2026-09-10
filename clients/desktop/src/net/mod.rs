@@ -25,6 +25,9 @@
 //! a node restarting with ten thousand clients attached gets them back in a spread rather than as one
 //! synchronised thundering herd.
 
+pub mod call;
+pub(crate) mod call_audio;
+pub(crate) mod call_signal;
 pub mod chain;
 pub mod gateway;
 pub mod quic;
@@ -391,6 +394,26 @@ pub enum Command {
         block: Option<u64>,
         gas_used: Option<u128>,
     },
+    /// Start a voice call to the one other member of a two-person conversation. The call key is
+    /// minted and distributed before the invite, so the callee can unseal the offer the moment
+    /// it rings; a call this device is already in — either end of one — is refused by the
+    /// worker with a toast rather than a second call.
+    StartCall { conversation_id: Id, callee_id: Id },
+    /// Answer the ringing incoming call. No payload: one call rings at a time, and the worker
+    /// knows which.
+    AcceptCall,
+    /// Decline the ringing incoming call with the Declined reason.
+    DeclineCall,
+    /// End whatever call this device is in — a placement, a ring it was about to answer, or a
+    /// live call. The worker picks the honest wire message for each (Cancel before the answer,
+    /// End after it, nothing at all for a placement that never reached the wire).
+    EndCall,
+    /// Flip this side's microphone mute. Muting is silence at the capture source, not a
+    /// signalling fact: the far side hears quiet, the same mute every other client shows.
+    ToggleCallMute,
+    /// Put an ended call's overlay away. The call is over on the wire; this only clears the
+    /// screen.
+    DismissCall,
     /// Stop the worker. Sent on window close.
     Shutdown,
 }
@@ -645,6 +668,14 @@ pub enum Event {
         safety_number: String,
         changed: bool,
     },
+    /// The one call this device is in — placement, ring, answer, or live call — projected for the
+    /// overlay. Arrives whenever the projection changes, so the overlay is always a frame behind
+    /// the truth at most. `None`-shaped news travels as [`Event::CallGone`].
+    Call(call::CallView),
+    /// The call overlay should go away: the last call ended and was dismissed (or was never
+    /// this device's to show anymore). Separate from [`Event::Call`] because "no call" is not a
+    /// view, and an `Option` in every event would tax every other reader of the enum.
+    CallGone,
     /// Something worth a line at the bottom of the window.
     Toast { text: String, kind: ToastKind },
 }
@@ -1098,6 +1129,10 @@ struct Worker {
     /// cloning it per operation is free, and the chain conversation stays off the Migo session's
     /// client entirely.
     chain_http: reqwest::Client,
+    /// The call engine: the one call this device can be in, the rings it hears, and the call
+    /// keys that unseal them. Lives on the worker because a call is a network session with its
+    /// own timers, and the loop below owns every other timed thing the same way.
+    calls: call::Calls,
 }
 
 impl Worker {
@@ -1119,6 +1154,7 @@ impl Worker {
             avatar_commit_pending: None,
             heartbeat: None,
             chain_http: reqwest::Client::new(),
+            calls: call::Calls::new(),
         }
     }
 
@@ -1168,6 +1204,15 @@ impl Worker {
                     None => std::future::pending::<()>().await,
                 }
             };
+            // The call engine's own timers, the same shape again: candidate batches lingering
+            // for the linger window, ring expiry, the reconnect window, the call-key wait, the
+            // TURN fetch's lenient timeout. Built from `next_tick` rather than a spawned task
+            // for the same reason the heartbeat is: the engine's state belongs to this loop,
+            // and a tick handled by a sibling task would race the loop's own transitions.
+            // `select!` drops the losing futures before running the chosen arm's handler, so
+            // the borrow this future holds on the engine ends before `on_call_tick` takes its
+            // own — the same discipline the frame arm follows with the gateway.
+            let call_tick = self.calls.next_tick();
 
             tokio::select! {
                 command = commands.recv() => {
@@ -1184,6 +1229,7 @@ impl Worker {
                 }
                 () = due => self.reconnect().await,
                 () = beat => self.send_heartbeat().await,
+                Some(tick) = call_tick => self.on_call_tick(tick).await,
             }
         }
 
@@ -1356,6 +1402,17 @@ impl Worker {
                 self.chain_settled(network, tx_hash, outcome, block, gas_used)
                     .await;
             }
+            Command::StartCall {
+                conversation_id,
+                callee_id,
+            } => {
+                self.start_call(conversation_id, callee_id).await;
+            }
+            Command::AcceptCall => self.accept_call().await,
+            Command::DeclineCall => self.decline_call().await,
+            Command::EndCall => self.end_call().await,
+            Command::ToggleCallMute => self.toggle_call_mute(),
+            Command::DismissCall => self.dismiss_call(),
             Command::Shutdown => {}
         }
     }
@@ -4401,6 +4458,10 @@ impl Worker {
                 .await;
         }
         self.retry = None;
+        // A call cannot survive the keys that sealed it: rings, placements, and any live call
+        // all end now, without a wire message — the gateway is already gone above, and the
+        // server tears the session down on its own.
+        self.calls_sign_out();
         self.sink.send(Event::Connection(Connection::Offline));
         self.sink.send(Event::SignedOut);
         self.sink.toast(
@@ -4484,6 +4545,16 @@ impl Worker {
             Opcode::GiftCatalogue => self.on_gifts(&frame),
             Opcode::GiftSend => self.on_gift_sent(&frame).await,
             Opcode::Search | Opcode::Suggestions => self.on_people(&frame),
+            // The call plane's own frames. Invite results and TURN answers are replies this
+            // device asked for; invite events, SDP/ICE relays, and state events are pushed at
+            // the devices a call concerns. All decode failures are the arm's own business —
+            // the server never sends a call frame this build did not ask for or cannot be in.
+            Opcode::CallInvite => self.on_call_invite_result(&frame).await,
+            Opcode::CallInviteEvent => self.on_call_invite_event(&frame).await,
+            Opcode::CallSdp => self.on_call_sdp(&frame).await,
+            Opcode::CallIce => self.on_call_ice(&frame).await,
+            Opcode::CallStateEvent => self.on_call_state(&frame).await,
+            Opcode::CallTurnFetch => self.on_call_turn(&frame).await,
             // Everything else is either an acknowledgement with nothing to show or a feature this
             // client did not negotiate.
             _ => {}
@@ -5045,7 +5116,18 @@ impl Worker {
                     self.buffer(event.clone());
                     return None;
                 }
-                Some(Ok(content)) => body_of(content),
+                Some(Ok(content)) => {
+                    // A call key rides a ControlEvent like any other system content, so the
+                    // group layer opens it like one and hands it here as opaque bytes. The
+                    // engine's intercept runs before the body is classified: an adopted key
+                    // is consumed on the spot and the message suppressed — otherwise the
+                    // "unsupported message" fallback below would render the caller's key
+                    // handoff as noise in the thread (the cross-client bug this fixes).
+                    if self.adopt_call_key(&content) {
+                        return None;
+                    }
+                    body_of(content)
+                }
             }
         };
 
@@ -5114,6 +5196,11 @@ impl Worker {
         // select loop's beat arm parks while disconnected, and re-armed by `connect` when a
         // WELCOME states a fresh interval.
         self.heartbeat = None;
+        // A live call cannot survive the socket its signalling rides — the reconnect that
+        // follows is a new session with no call state on the server side. Ended locally with
+        // the Network reason; a ring is deliberately left standing, because the invite that
+        // caused it is a durable server-side fact and may outlive this reconnect.
+        self.calls_offline();
         if self.signed.is_none() {
             self.retry = None;
             self.sink.send(Event::Connection(Connection::Offline));

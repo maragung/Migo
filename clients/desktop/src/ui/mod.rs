@@ -16,6 +16,7 @@
 pub mod admins;
 pub mod alerts;
 pub mod auth;
+pub mod call;
 pub mod captcha;
 pub mod chat;
 pub mod desktop;
