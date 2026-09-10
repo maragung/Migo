@@ -1060,6 +1060,26 @@ main {
   letter-spacing: 0.6px;
   color: var(--text-faint);
 }
+/* A sub-group inside one settings group: the same voice as the heading, one step quieter, so a
+   group can hold several lists (Devices and Sessions under Privasi & Keamanan) without the
+   section headings having to shout for both. */
+.panel-subheading {
+  margin: 6px 0 2px;
+  font-size: var(--fs-meta);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-faint);
+}
+/* The checkup door inside the security group: set off from the lists above it, because it is a
+   door rather than a fact — the one primary action in the group, with its own air around it. */
+.settings-checkup-door {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  margin-top: 6px;
+  border-top: 1px solid var(--border);
+}
 /* ── List rows ────────────────────────────────────────────────────────────────────────────────
    The design's lists are flush rows on a white panel, separated by a single hairline — not cards
    floating in a gapped column. A card list spends two borders and a gap on every row and still

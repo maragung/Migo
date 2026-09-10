@@ -40,9 +40,11 @@ export function truncate(text: string, maxChars: number): string {
  * The un-truncated preview text for a content type.
  *
  * Media and voice previews keep the emoji prefixes the message list's bubbles already use, so the
- * sidebar and the transcript describe the same message the same way.
+ * sidebar and the transcript describe the same message the same way. Exported because the chat-log
+ * exports (lib/chat-logs.js) quote the same vocabulary: a saved transcript must describe a message
+ * exactly as the bubble on screen did, not invent a second dialect for the file.
  */
-function previewText(content: MessageContent): string {
+export function previewText(content: MessageContent): string {
   switch (content.type) {
     case ContentType.Text:
       return content.text.trim();

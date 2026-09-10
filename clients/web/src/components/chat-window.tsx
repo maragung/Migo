@@ -13,6 +13,14 @@ import type {
 } from '@migo/sdk';
 
 import { messagePreview } from '@/lib/message-preview.js';
+import {
+  buildConversationLog,
+  downloadTextFile,
+  formatTranscriptText,
+  logFileName,
+} from '@/lib/chat-logs.js';
+import type { ConversationLog } from '@/lib/chat-logs.js';
+import { isAutoSaveEnabled, storeChatLogSnapshot } from '@/lib/storage/chat-log-store.js';
 import { useCall } from '@/lib/migo/call-manager.js';
 import { useChat } from '@/lib/migo/use-chat.js';
 import { useGameEvents } from '@/lib/migo/use-game-events.js';
@@ -53,6 +61,16 @@ const REPLY_PREVIEW_CHARS = 50;
 
 /** How many gifts the composer's inline picker offers. */
 const GIFT_PICKER_COUNT = 6;
+
+/**
+ * How often the auto-save tick runs while a conversation is open.
+ *
+ * Two triggers share one path: the tick catches a crash or a killed tab mid-conversation, and the
+ * teardown write (which also fires on a conversation switch, because the effect re-runs) catches
+ * the ordinary end of a read. Both are cheap — one IndexedDB put over state already in memory —
+ * so the interval does not need to be clever about when the transcript "changed enough".
+ */
+const AUTOSAVE_INTERVAL_MS = 2 * 60 * 1000;
 
 /**
  * A fresh idempotency key for one gift-picker session, from the platform CSPRNG.
@@ -295,6 +313,54 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
     markRead(conversationId);
   }, [conversationId, messages.length, markRead]);
 
+  // The transcript this window holds, as a portable log. The header's download and the auto-save
+  // tick render the same artifact through the same builder, so the wording in a saved file can
+  // never drift from the wording the bubbles show — the log's vocabulary is the preview's
+  // (lib/message-preview.js), reached through buildConversationLog.
+  const buildCurrentLog = useCallback((): ConversationLog | null => {
+    if (accountId === null || messages.length === 0) {
+      return null;
+    }
+    return buildConversationLog(conversationId, title, messages, (senderId) =>
+      senderNameOf(senderId, accountId, profiles),
+    );
+  }, [accountId, conversationId, messages, profiles, title]);
+
+  const buildLogRef = useRef(buildCurrentLog);
+  buildLogRef.current = buildCurrentLog;
+
+  // The auto-save: when armed (Settings → Chats & Log), a periodic tick and the teardown write
+  // both snapshot the current transcript into IndexedDB. The toggle is read at write time, so
+  // turning it off takes effect on the next tick with no provider wiring; the ref keeps the
+  // interval subscribed to the conversation, not to every message, so a busy room does not churn
+  // timers.
+  useEffect(() => {
+    function snapshotNow(): void {
+      if (!isAutoSaveEnabled()) {
+        return;
+      }
+      const log = buildLogRef.current();
+      if (log !== null) {
+        void storeChatLogSnapshot(log);
+      }
+    }
+    const timer = setInterval(snapshotNow, AUTOSAVE_INTERVAL_MS);
+    return () => {
+      clearInterval(timer);
+      // The teardown write: the effect re-runs on a conversation switch, so this is both "the
+      // window closed" and "the reader moved on" — the two moments a snapshot is most wanted.
+      snapshotNow();
+    };
+  }, [conversationId]);
+
+  // The header's download: the transcript as it stands, as a plain-text file.
+  const downloadTranscript = useCallback((): void => {
+    const log = buildCurrentLog();
+    if (log !== null) {
+      downloadTextFile(formatTranscriptText(log), logFileName(log.title, 'txt'), 'text/plain');
+    }
+  }, [buildCurrentLog]);
+
   // A removal from this group closes the thread: this account can no longer read the group, and a
   // thread it cannot read must not stay on screen. Joined and Reconnected keep the account seated;
   // every other change — a leave of our own (belt to the panel's braces), a kick, a ban, a drop —
@@ -475,6 +541,17 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
           title="Search this conversation"
         >
           <Icon name="search" size={20} />
+        </button>
+        {/* The transcript as a file: plaintext by design, saved only on this device — the same
+            honest framing the Settings → Chats & Log group carries. */}
+        <button
+          type="button"
+          className="icon-btn"
+          onClick={downloadTranscript}
+          aria-label="Download chat log"
+          title="Download this conversation as a text file"
+        >
+          <Icon name="download" size={20} />
         </button>
         {isRoom && roomInfo !== null ? (
           <button

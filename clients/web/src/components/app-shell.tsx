@@ -573,7 +573,12 @@ export function AppShell(): ReactNode {
       case 'account':
         return <AccountPanel />;
       case 'settings':
-        return <SettingsPanel onOpenCheckup={() => openPanelWindow('checkup')} />;
+        return (
+          <SettingsPanel
+            onOpenCheckup={() => openPanelWindow('checkup')}
+            onOpenAccount={() => openPanelWindow('account')}
+          />
+        );
       case 'checkup':
         // The checkup's rows open the surfaces their warnings are resolved in — the doors are
         // the shell's, because the panels are windows here.
