@@ -59,6 +59,13 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.datastore.preferences)
 
+    // The WebRTC engine of the voice call: SDP and ICE flow through :core as sealed opaque blobs,
+    // and this is the device-side half that produces and consumes them -- the peer connection,
+    // the microphone, the speaker. Declared here rather than in :core on purpose: core is pure
+    // signaling and holds no media engine, the same split the web client keeps between its SDK
+    // and its browser.
+    implementation(libs.stream.webrtc)
+
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.foundation)

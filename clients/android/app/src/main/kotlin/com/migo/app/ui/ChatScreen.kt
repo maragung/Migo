@@ -123,6 +123,12 @@ fun ChatScreen(
     selfId: Id,
     /** Acknowledges a changed safety number for this conversation, from the warning itself. */
     onAcknowledgeSafety: () -> Unit = {},
+    /**
+     * Places a voice call to the direct chat's peer, handed the peer's id. Offered only for a
+     * direct chat -- the call is the direct conversation's other half, and a room's audience has
+     * no 1:1 to call. Null when the shell cannot place calls.
+     */
+    onStartCall: ((Id) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -196,6 +202,7 @@ fun ChatScreen(
                 } else {
                     null
                 },
+                onStartCall = onStartCall,
             )
 
             // The change warning (§164) sits between the header and the thread, because it is about
@@ -316,6 +323,7 @@ private fun ChatHeader(
     onOpenMembers: (() -> Unit)?,
     onOpenGames: () -> Unit,
     onOpenSafety: (() -> Unit)? = null,
+    onStartCall: ((Id) -> Unit)? = null,
 ) {
     // Games are offered only where a game has an audience: a room or a group conversation, never a
     // direct chat — the web client's own rule, because a game is the room's shared spectacle.
@@ -355,6 +363,16 @@ private fun ChatHeader(
             if (chat.peerId != null && onOpenSafety != null) {
                 TextButton(onClick = onOpenSafety) {
                     Text("Safety")
+                }
+            }
+            // The direct chat's other extra: the voice call, the conversation's other half. Same
+            // peer-id gate as Safety -- the call button dials the peer, and a chat with no peer has
+            // no number to dial. The glyph is an emoji character, not an icon font, the app's own
+            // rule (and the web client's, whose button this is a port of).
+            if (chat.peerId != null && onStartCall != null) {
+                val peer = chat.peerId
+                TextButton(onClick = { onStartCall(peer) }) {
+                    Text("📞")
                 }
             }
             if (chat.roomId != null && onOpenMembers != null) {

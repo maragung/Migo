@@ -1,10 +1,14 @@
 package com.migo.app
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,10 +22,13 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.migo.app.model.AppState
 import com.migo.app.ui.AdminsScreen
 import com.migo.app.ui.AlertsScreen
+import com.migo.app.ui.CallOverlay
 import com.migo.app.ui.ChatScreen
 import com.migo.app.ui.ErrorBanner
 import com.migo.app.ui.GamesScreen
@@ -35,6 +42,7 @@ import com.migo.app.ui.SearchScreen
 import com.migo.app.ui.SignInScreen
 import com.migo.app.ui.WalletScreen
 import com.migo.app.ui.panelTitle
+import com.migo.core.wire.Id
 
 /**
  * The only activity.
@@ -79,28 +87,77 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun MigoApp(model: AppViewModel = viewModel()) {
     val state by model.state.collectAsState()
+    val callState by model.callState.collectAsState()
 
-    Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
-        when (val current = state) {
-            AppState.Starting -> Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
-            ) {
-                CircularProgressIndicator()
-            }
-
-            is AppState.SignedOut -> SignInScreen(
-                form = current,
-                onServerEndpoint = model::setServerEndpoint,
-                onIdentifier = model::setIdentifier,
-                onSubmit = model::signIn,
-                onRestore = model::restoreFromBackup,
-                onRefreshCaptcha = model::refreshCaptcha,
-                onDismissFailure = model::dismissFailure,
-            )
-
-            is AppState.SignedIn -> ShellScreen(state = current, model = model)
+    // The microphone permission is asked for at the moment of use, at the call button: a prompt
+    // at first launch teaches nothing (the user has not called anybody yet), and the call that
+    // needs the microphone is the one that explains why. The launcher lives here — the shell's
+    // only composition root — so the button deep in a chat header can reach it without threading
+    // an activity through the screens, and the model's staged call is what carries the intent
+    // across the permission dialog's asynchronous answer.
+    val context = LocalContext.current
+    val microphone = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted -> model.microphonePermission(granted) }
+    val requestVoiceCall: (Id, Id) -> Unit = { conversationId, peerId ->
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            model.startVoiceCall(conversationId, peerId)
+        } else {
+            model.stageVoiceCall(conversationId, peerId)
+            microphone.launch(Manifest.permission.RECORD_AUDIO)
         }
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background,
+    ) {
+        Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+            when (val current = state) {
+                AppState.Starting -> Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CircularProgressIndicator()
+                }
+
+                is AppState.SignedOut -> SignInScreen(
+                    form = current,
+                    onServerEndpoint = model::setServerEndpoint,
+                    onIdentifier = model::setIdentifier,
+                    onSubmit = model::signIn,
+                    onRestore = model::restoreFromBackup,
+                    onRefreshCaptcha = model::refreshCaptcha,
+                    onDismissFailure = model::dismissFailure,
+                )
+
+                is AppState.SignedIn -> ShellScreen(
+                    state = current,
+                    model = model,
+                    onRequestVoiceCall = requestVoiceCall,
+                )
+            }
+        }
+
+        // The call overlay renders above whatever the shell is showing — a call takes the screen
+        // from anything, the same rule the web client's overlay keeps — and renders nothing at all
+        // when no call is ringing, live, just ended, or failed to start. The peer's name is
+        // resolved here at the composition root, the one place that holds both the call state and
+        // the model that knows the names.
+        val callPeerId = callState.incoming?.callerId
+            ?: callState.call?.let { if (it.isCaller) it.calleeId else it.callerId }
+        CallOverlay(
+            state = callState,
+            peerName = if (callPeerId != null) model.displayName(callPeerId) else "",
+            onAccept = model::acceptCall,
+            onDecline = model::declineCall,
+            onCancel = model::cancelCall,
+            onHangUp = model::hangUpCall,
+            onToggleMute = model::toggleCallMute,
+            onDismiss = model::dismissCallScreen,
+        )
     }
 }
 
@@ -115,7 +172,7 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
  * strip still shows, held in [AppState.SignedIn.stripSection].
  */
 @Composable
-private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel) {
+private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel, onRequestVoiceCall: (Id, Id) -> Unit) {
     val open = state.open
     // Back means "close this, not the app", in the order a person reads the screen: the members
     // sheet (handled inside the chat, composed deeper so it wins while it is up), then the visible
@@ -190,6 +247,7 @@ private fun ShellScreen(state: AppState.SignedIn, model: AppViewModel) {
                     onGuess = { value -> model.submitGuess(open.conversationId, value) },
                     selfId = state.accountId,
                     onAcknowledgeSafety = model::acknowledgeSafetyChange,
+                    onStartCall = { peerId -> onRequestVoiceCall(open.conversationId, peerId) },
                     modifier = Modifier.weight(1f),
                 )
             } else {

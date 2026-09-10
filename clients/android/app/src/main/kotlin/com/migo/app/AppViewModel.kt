@@ -4,6 +4,9 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.migo.app.call.CallManager
+import com.migo.app.call.CallUiState
+import com.migo.app.call.MICROPHONE_UNAVAILABLE
 import com.migo.app.model.ActivityCategory
 import com.migo.app.model.ActivityRow
 import com.migo.app.model.AppState
@@ -37,6 +40,7 @@ import com.migo.core.account.eip55
 import com.migo.core.account.parseAddress
 import com.migo.core.account.sealContainer
 import com.migo.core.crypto.Content
+import com.migo.core.domain.CallMediaKind
 import com.migo.core.domain.IncomingMessage
 import com.migo.core.domain.MessageDeletion
 import com.migo.core.domain.SendOptions
@@ -127,6 +131,31 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private var session: MigoSession? = null
     private val subscriptions = ArrayList<Subscription>()
+
+    /**
+     * The live session's call manager: one per session, bridged in [attach] and closed in [detach].
+     * The screens never see it -- only the [callState] it is projected into and the action methods
+     * below, the same one-object discipline every other surface keeps.
+     */
+    private var callManager: CallManager? = null
+
+    private val _callState = MutableStateFlow(CallUiState())
+
+    /**
+     * The call overlay's state, forwarded from the session's call manager. A stable flow of this
+     * class rather than the manager's own, so the composition subscribes once and survives
+     * sessions changing underneath it.
+     */
+    val callState: StateFlow<CallUiState> = _callState.asStateFlow()
+
+    private var callStateJob: Job? = null
+
+    /**
+     * A voice call waiting on the microphone permission the activity has not asked for yet, as
+     * (conversation, peer). The permission dialog is the activity's to show; what to do with its
+     * answer is this class's to know.
+     */
+    private var stagedVoiceCall: Pair<Id, Id>? = null
 
     /**
      * The sealed `.migo` container a registration minted and nobody has saved yet, or null.
@@ -558,6 +587,73 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             _state.value = AppState.SignedOut(endpoint)
         }
     }
+
+    // --- calls ---
+
+    /** Places a voice call to the peer of a direct conversation. The microphone must already be
+     * permitted -- see [stageVoiceCall] for the path that asks. */
+    fun startVoiceCall(conversationId: Id, peerId: Id) {
+        callManager?.startCall(conversationId, peerId, CallMediaKind.Audio)
+    }
+
+    /**
+     * Stages a voice call whose microphone permission has not been granted yet, so the permission
+     * dialog's answer can finish what the call button started: the staged conversation and peer
+     * are what [microphonePermission] resumes.
+     */
+    fun stageVoiceCall(conversationId: Id, peerId: Id) {
+        stagedVoiceCall = conversationId to peerId
+    }
+
+    /**
+     * The microphone permission launcher's answer: the staged call proceeds on a grant, and on a
+     * refusal is stated as a fact on the call screen -- a call button that silently did nothing
+     * would be the interface lying about what it did.
+     */
+    fun microphonePermission(granted: Boolean) {
+        val staged = stagedVoiceCall
+        stagedVoiceCall = null
+        when {
+            staged != null && granted -> startVoiceCall(staged.first, staged.second)
+            staged != null -> callManager?.placementFailed(MICROPHONE_UNAVAILABLE)
+        }
+    }
+
+    /** Answers the ringing inbound call. */
+    fun acceptCall() {
+        callManager?.acceptCall()
+    }
+
+    /** Declines the ringing inbound call. */
+    fun declineCall() {
+        callManager?.declineCall()
+    }
+
+    /** Cancels the call this device placed while it still rings. */
+    fun cancelCall() {
+        callManager?.cancelCall()
+    }
+
+    /** Hangs up the established call, with the reason that says whose button ended it. */
+    fun hangUpCall() {
+        callManager?.hangUp()
+    }
+
+    /** Mutes or unmutes this side's microphone. */
+    fun toggleCallMute() {
+        callManager?.toggleMute()
+    }
+
+    /** Dismisses the ended screen (or a placement error), leaving no call tracked. */
+    fun dismissCallScreen() {
+        callManager?.dismissCall()
+    }
+
+    /**
+     * The display name a call screen shows for an account: the profile name the session has
+     * learned, else the short id -- the same fallback the transcript's author line uses.
+     */
+    fun displayName(id: Id): String = names[id] ?: shortId(id)
 
     // --- conversations ---
 
@@ -2706,6 +2802,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         // The game stream: a published event becomes a line in the open thread and a fresh view of
         // the game it moved. Added with the rest so a reconnect re-bridges it with them.
         subscriptions.add(opened.client.onGameEvent { gameEvent(it) })
+        // The call manager: one per session, bridged onto the client's reconnect-surviving call
+        // streams with the rest. It owns the WebRTC engine and the call's tracked state; its
+        // overlay state is forwarded into this class's stable flow so a session change does not
+        // resubscribe the composition. Its closing scope is the application's, because the manager
+        // must fire its last CALL_END even when the view model is being cleared and its own scope
+        // is already cancelled.
+        val manager = CallManager(
+            context = getApplication(),
+            client = opened.client,
+            accountId = opened.client.accountId,
+            scope = viewModelScope,
+            closingScope = getApplication<MigoApplication>().scope,
+        )
+        callManager = manager
+        subscriptions.addAll(manager.attach())
+        callStateJob?.cancel()
+        callStateJob = viewModelScope.launch { manager.state.collect { _callState.value = it } }
         refreshConversations()
         // The wallet's combined read also fills the banner's $MIG balance, so the session starts
         // with it -- the desktop client issues its wallet command at sign-in for the same reason.
@@ -2767,12 +2880,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun detach() {
+        callStateJob?.cancel()
+        callStateJob = null
+        // The manager's close does more than the subscriptions below: it tears down the microphone
+        // and the peer connection, and fires the session's last CALL_END on the application's
+        // scope -- the one still alive when the view model is being cleared.
+        callManager?.close()
+        callManager = null
+        stagedVoiceCall = null
+        _callState.value = CallUiState()
         subscriptions.forEach { it.cancel() }
         subscriptions.clear()
     }
 
     private fun hooks() = SessionHooks(
-        onState = { next -> signedIn { it.copy(connection = next) } },
+        onState = { next ->
+            // A Closed session leaves no signaling alive: a live call ends here as a network
+            // failure, the same fact the web build states when its client goes away mid-call. A
+            // Reconnecting session does not end anything -- media keeps flowing peer to peer while
+            // the signaling reconnects.
+            callManager?.onConnectionState(next)
+            signedIn { it.copy(connection = next) }
+        },
         onError = { failure ->
             // Only worth a banner once the client has given up on the current attempt; it keeps
             // retrying on its own, and a message per attempt would flicker.

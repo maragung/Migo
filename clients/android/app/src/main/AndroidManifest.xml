@@ -3,6 +3,15 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- The voice call's microphone and its audio routing: RECORD_AUDIO is the microphone itself
+         (a runtime permission, asked for at the call button rather than at first launch, because
+         the call that needs it is the one that explains why), and MODIFY_AUDIO_SETTINGS is what
+         lets the WebRTC audio module put the phone in communication mode and route the call
+         audio to the earpiece. Neither is core's business -- core is pure signaling -- so both
+         live here in :app, the module that owns the media plane. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
     <application
         android:name=".MigoApplication"
         android:allowBackup="false"

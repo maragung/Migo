@@ -3,6 +3,7 @@ package com.migo.core
 import com.migo.core.account.DeviceCredential
 import com.migo.core.account.IdentityKey
 import com.migo.core.crypto.PrekeyBundle
+import com.migo.core.domain.CallsDomain
 import com.migo.core.domain.ConversationsDomain
 import com.migo.core.domain.DeviceAddress
 import com.migo.core.domain.DeviceDirectory
@@ -43,6 +44,10 @@ import com.migo.core.net.TcpGateway
 import com.migo.core.net.WalletSummary
 import com.migo.core.protocol.Acknowledged
 import com.migo.core.protocol.BandwidthMode
+import com.migo.core.protocol.CallIce
+import com.migo.core.protocol.CallInviteEvent
+import com.migo.core.protocol.CallSdp
+import com.migo.core.protocol.CallStateEvent
 import com.migo.core.protocol.ClientInfo
 import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.ConversationListResponse
@@ -352,6 +357,11 @@ class MigoClient private constructor(
     private val notificationListeners =
         ListenerSet<NotificationEvent>(Op.NOTIFICATION_EVENT, options.onEventError)
     private val gameListeners = ListenerSet<GameEvent>(Op.GAME_EVENT, options.onEventError)
+    private val incomingCallListeners =
+        ListenerSet<CallInviteEvent>(Op.CALL_INVITE_EVENT, options.onEventError)
+    private val callStateListeners = ListenerSet<CallStateEvent>(Op.CALL_STATE_EVENT, options.onEventError)
+    private val callSdpListeners = ListenerSet<CallSdp>(Op.CALL_SDP, options.onEventError)
+    private val callIceListeners = ListenerSet<CallIce>(Op.CALL_ICE, options.onEventError)
 
     /** Conversation id to its member account ids and whether that set is known whole; backs [recipientDevices]. */
     private val members = HashMap<Id, MemberCache>()
@@ -448,6 +458,9 @@ class MigoClient private constructor(
     /** The media object plane of the live session: uploads and their URLs. */
     val media: MediaDomain get() = requireConnected().media
 
+    /** The call signaling plane of the live session: invite, answer, and the sealed relays. */
+    val calls: CallsDomain get() = requireConnected().calls
+
     /** Friendship changes, bridged across reconnects like every application-facing stream. */
     fun onFriendEvent(listener: Listener<FriendEvent>): Subscription = friendListeners.add(listener)
 
@@ -483,6 +496,18 @@ class MigoClient private constructor(
 
     /** Registers a handler for authoritative game events. */
     fun onGameEvent(listener: Listener<GameEvent>): Subscription = gameListeners.add(listener)
+
+    /** Registers a handler for inbound call invites: another account is calling this one. */
+    fun onIncomingCall(listener: Listener<CallInviteEvent>): Subscription = incomingCallListeners.add(listener)
+
+    /** Registers a handler for the authoritative state transitions of tracked calls. */
+    fun onCallState(listener: Listener<CallStateEvent>): Subscription = callStateListeners.add(listener)
+
+    /** Registers a handler for SDP relays addressed to this device. */
+    fun onCallSdp(listener: Listener<CallSdp>): Subscription = callSdpListeners.add(listener)
+
+    /** Registers a handler for batched ICE candidate relays addressed to this device. */
+    fun onCallIce(listener: Listener<CallIce>): Subscription = callIceListeners.add(listener)
 
     // --- bringing the client online ---
 
@@ -1330,6 +1355,7 @@ class MigoClient private constructor(
             social = SocialDomain(rpc, options.onEventError),
             economy = EconomyDomain(rpc),
             media = MediaDomain(rpc, rest),
+            calls = CallsDomain(rpc, deviceId, options.onEventError),
         )
         session.startAll()
         bridge(session)
@@ -1354,6 +1380,10 @@ class MigoClient private constructor(
         session.notifications.onNotification { notificationListeners.deliver(it) }
         session.games.onEvent { gameListeners.deliver(it) }
         session.social.onFriendEvent { friendListeners.deliver(it) }
+        session.calls.onIncomingCall { incomingCallListeners.deliver(it) }
+        session.calls.onCallState { callStateListeners.deliver(it) }
+        session.calls.onSdp { callSdpListeners.deliver(it) }
+        session.calls.onIce { callIceListeners.deliver(it) }
         // Membership movement keeps the membership cache true, so the sender-key audience the
         // next send builds is the group as it stands, not the group as a list row previewed
         // it. The live subscription lives on this session's Rpc, so it goes with the session
@@ -1564,6 +1594,7 @@ private class Session(
     val social: SocialDomain,
     val economy: EconomyDomain,
     val media: MediaDomain,
+    val calls: CallsDomain,
 ) {
     /** Registers every inbound handler. Called before the pump starts. */
     fun startAll() {
@@ -1574,6 +1605,7 @@ private class Session(
         notifications.start()
         games.start()
         social.start()
+        calls.start()
     }
 
     /** Unregisters them. The stateless domains have nothing to stop. */
@@ -1585,6 +1617,7 @@ private class Session(
         notifications.stop()
         games.stop()
         social.stop()
+        calls.stop()
     }
 }
 
