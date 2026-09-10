@@ -54,7 +54,9 @@ export function formatBytes(bytes: number): string {
     value /= 1024;
     unit += 1;
   }
-  return `${Math.round(value * 10) / 10} ${units[unit]}`;
+  // One decimal always, as the doc above promises: `2.0 KB`, not `2 KB` — a size
+  // that changes shape between magnitudes reads like two different formats.
+  return `${value.toFixed(1)} ${units[unit]}`;
 }
 
 /** Up to two initials from a display name, for an avatar fallback. */

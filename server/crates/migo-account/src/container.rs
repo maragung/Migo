@@ -246,10 +246,13 @@ impl AccountFile {
             expected: SEED_LEN,
             actual: text.len() / 2,
         })?;
+        // The length is read before the move `try_into` makes of the buffer, so
+        // the refusal names the width it actually saw.
+        let actual = decoded.len();
         let seed: [u8; SEED_LEN] = decoded.try_into().map_err(|_| AccountError::BadLength {
             what: "rotated identity seed",
             expected: SEED_LEN,
-            actual: decoded.len(),
+            actual,
         })?;
         Ok(Some(seed))
     }
@@ -576,14 +579,16 @@ mod tests {
         let (_, file) = sample();
         // The named form without a rotation is pinned exactly as it was
         // before this field existed: an optional field must not move the
-        // bytes a container sealed in that state already carries.
-        let named = file.for_account("01j8y0migo0migo0migo0migo0migo");
+        // bytes a container sealed in that state already carries. The clone
+        // exists because the builders consume: the file below still has its
+        // own rotations to carry.
+        let named = file.clone().for_account("01j8y0migo0migo0migo0migo0migo");
         let named_bytes = serde_json::to_string(&named).expect("serialises");
         assert_eq!(
             named_bytes,
             format!(
                 "{{\"version\":1,\"created_at\":{},\"root\":\"{}\",\"account_id\":\"01j8y0migo0migo0migo0migo0migo\"}}",
-                file.created_at, file.root
+                named.created_at, named.root
             )
         );
 
