@@ -34,7 +34,10 @@
 use std::fmt;
 use std::time::Duration;
 
-use migo_core::{Id, OsRandom, Random, Timestamp, ID_BYTE_LEN};
+// `ID_BYTE_LEN` lives in the `id` module and is not re-exported at the crate root, unlike
+// `Id` itself — the root re-exports the types, the module owns the constants.
+use migo_core::id::ID_BYTE_LEN;
+use migo_core::{Id, OsRandom, Random, Timestamp};
 use migo_crypto::aead::{self, SymmetricKey};
 use serde::{Deserialize, Serialize};
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;

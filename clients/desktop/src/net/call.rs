@@ -221,13 +221,11 @@ fn spawn_capture_pump(
                     let samples: Vec<i16> = frame.drain(..call_audio::FRAME_SAMPLES).collect();
                     // Mute is silence, not absence: the far end hears a quiet line, not a
                     // call that sounds hung up — the same semantics a disabled track has on
-                    // the web.
+                    // the web. The quiet line is bound to a name so it outlives the
+                    // statement that borrows it.
                     let quiet = muted.load(Ordering::Relaxed);
-                    let bytes = call_audio::ulaw_encode(if quiet {
-                        &vec![0i16; samples.len()]
-                    } else {
-                        &samples
-                    });
+                    let silence = vec![0i16; samples.len()];
+                    let bytes = call_audio::ulaw_encode(if quiet { &silence } else { &samples });
                     let sample = Sample {
                         data: Bytes::from(bytes),
                         duration: Duration::from_secs_f64(
@@ -717,8 +715,9 @@ impl Worker {
         }
 
         // One MESSAGE_SEND for the whole event: sealed once, fanned out by the server to every
-        // device the distributions reached.
-        let Ok(sealed) = self
+        // device the distributions reached. `seal` reports failure as an `Err` and absence of a
+        // signed session as a `None`, and both collapse here to "the event did not go out".
+        let Some(sealed) = self
             .signed
             .as_mut()
             .and_then(|signed| signed.groups.seal(conversation_id, &plaintext).ok())

@@ -16,7 +16,11 @@
 
 // The window is the product; a console behind it on Windows is not.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-#![forbid(unsafe_code)]
+// Deny, not forbid, for exactly one reason: `net::call_audio`'s ALSA backend speaks C through a
+// runtime dlopen, and FFI is unsafe by nature. The crate keeps `deny` so every other line still
+// refuses an `unsafe` block outright, while that one module states its exception — and its
+// safety invariants — at its own door.
+#![deny(unsafe_code)]
 
 mod app;
 mod config;

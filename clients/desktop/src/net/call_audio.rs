@@ -293,15 +293,31 @@ pub fn open_speaker() -> Result<Speaker, CallAudioError> {
 
 #[cfg(target_os = "linux")]
 mod alsa {
+    // The one module in the desktop that may write `unsafe`: every FFI call into
+    // `libasound.so.2` lives here, behind the `Alsa` struct whose `Library` outlives the
+    // function pointers copied out of it and the `OwnedPcm` newtype that moves a handle
+    // into exactly one thread. The crate root denies `unsafe_code` everywhere else; this
+    // is the stated exception, not an accident.
+    #![allow(unsafe_code)]
+
     use super::{unavailable, CallAudioError, Microphone, Speaker};
     use std::ffi::CString;
     use std::os::raw::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
     use std::sync::mpsc as std_mpsc;
     use std::sync::Arc;
-    use std::thread::JoinHandle;
 
     /// A PCM handle, opaque here exactly as it is in `alsa/asoundlib.h`.
     type Pcm = *mut c_void;
+
+    /// The handle as it crosses into the audio thread. ALSA's handles are not
+    /// thread-safe in general, but this one is owned exclusively by the one
+    /// thread it moves to and is never touched from anywhere else — opened
+    /// before the spawn, closed inside it — and that exclusive ownership is
+    /// exactly the invariant `Send` on this newtype states.
+    struct OwnedPcm(Pcm);
+    // SAFETY: see the newtype's doc comment: the handle is used only on the
+    // receiving thread, never shared, never aliased.
+    unsafe impl Send for OwnedPcm {}
 
     // The wire constants of `alsa/asoundlib.h` this module relies on.
     const STREAM_PLAYBACK: c_int = 0;
@@ -399,12 +415,13 @@ mod alsa {
     /// only the channel.
     pub fn open_microphone() -> Result<Microphone, CallAudioError> {
         let alsa = Arc::new(Alsa::load()?);
-        let pcm = alsa.open_stream(STREAM_CAPTURE)?;
+        let pcm = OwnedPcm(alsa.open_stream(STREAM_CAPTURE)?);
         let (sender, receiver) = std_mpsc::channel::<Vec<i16>>();
         let reader = alsa.clone();
         let thread = std::thread::Builder::new()
             .name("migo-call-capture".to_owned())
             .spawn(move || {
+                let pcm = pcm.0;
                 let mut buffer = [0i16; 160];
                 loop {
                     let frames = unsafe {
@@ -437,12 +454,13 @@ mod alsa {
     /// Opens the default speaker on a dedicated writer thread.
     pub fn open_speaker() -> Result<Speaker, CallAudioError> {
         let alsa = Arc::new(Alsa::load()?);
-        let pcm = alsa.open_stream(STREAM_PLAYBACK)?;
+        let pcm = OwnedPcm(alsa.open_stream(STREAM_PLAYBACK)?);
         let (sender, receiver) = std_mpsc::channel::<Vec<i16>>();
         let writer = alsa.clone();
         let thread = std::thread::Builder::new()
             .name("migo-call-playback".to_owned())
             .spawn(move || {
+                let pcm = pcm.0;
                 while let Ok(chunk) = receiver.recv() {
                     // `writei` may consume a partial chunk; the rest is written
                     // until it is all out or the device is beyond saving.
@@ -623,7 +641,7 @@ mod cpal_backend {
         to_device: fn(i16) -> T,
     ) -> Result<Stream, CallAudioError>
     where
-        T: cpal::SizedSample,
+        T: cpal::SizedSample + 'static,
     {
         device
             .build_output_stream::<T, _, _>(
@@ -796,7 +814,7 @@ mod tests {
         let mut out = Vec::new();
         // 40 chunks of 200 samples = 8_000 samples = one second at 8kHz.
         for chunk in 0..40 {
-            let input: Vec<i16> = (0..200).map(|i| i16::from((i + chunk) % 100)).collect();
+            let input: Vec<i16> = (0..200).map(|i| ((i + chunk) % 100) as i16).collect();
             up.process(&input, &mut out);
         }
         assert!(
@@ -808,7 +826,7 @@ mod tests {
         let mut down = Resampler::new(48_000, 8_000);
         let mut out = Vec::new();
         for chunk in 0..40 {
-            let input: Vec<i16> = (0..200).map(|i| i16::from((i + chunk) % 100)).collect();
+            let input: Vec<i16> = (0..200).map(|i| ((i + chunk) % 100) as i16).collect();
             down.process(&input, &mut out);
         }
         // 40 chunks of 200 = 8_000 input samples = one sixth of a second at 48kHz.
