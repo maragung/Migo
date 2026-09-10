@@ -472,8 +472,6 @@ impl Calls {
     fn placing_view(&self) -> Option<CallView> {
         let place = self.placing.as_ref()?;
         Some(CallView {
-            call_id: place.call_id,
-            conversation_id: place.conversation_id,
             peer: place.callee_id,
             outgoing: true,
             kind: place.kind,
@@ -490,8 +488,6 @@ impl Calls {
     fn answering_view(&self) -> Option<CallView> {
         let answer = self.answering.as_ref()?;
         Some(CallView {
-            call_id: answer.call_id,
-            conversation_id: answer.conversation_id,
             peer: answer.caller_id,
             outgoing: false,
             kind: answer.kind,
