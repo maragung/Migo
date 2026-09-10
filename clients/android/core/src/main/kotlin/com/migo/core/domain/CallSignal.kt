@@ -428,10 +428,18 @@ fun inviteEndReason(status: Long): CallEndReason =
  * The server answers a block and a call policy that excludes the caller with the same status,
  * deliberately, so the word must not say which it was — but it must still differ from a human's
  * "Declined", which is a different fact before the caller decides what to do next.
+ *
+ * The manager maps a refused invite to its reason the moment the reply lands, so an invite status
+ * and a live reason normally arrive together — but this is a pure function whose caller may hand
+ * over the status alone, and a refusal with no reason must still name itself rather than collapsing
+ * to the reasonless "Call ended". `RINGING` is the one status that is not a refusal, so it never
+ * substitutes a reason; the call it names simply proceeds.
  */
 fun endedReasonLine(inviteStatus: Long?, endReason: CallEndReason?): String =
     if (inviteStatus == INVITE_BLOCKED) {
         "Unavailable"
+    } else if (endReason == null && inviteStatus != null && inviteStatus != INVITE_RINGING) {
+        endReasonLabel(inviteEndReason(inviteStatus))
     } else {
         endReasonLabel(endReason)
     }

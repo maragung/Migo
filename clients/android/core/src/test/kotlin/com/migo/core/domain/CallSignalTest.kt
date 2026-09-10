@@ -317,11 +317,17 @@ class CallSignalTest {
             IncomingInviteDisposition.Ignore,
             incomingInviteDisposition(inviteEvent(), ringingCallId = null, activeCallId = CALL, busy = false, now = NOW),
         )
-        // A different call while this device is occupied — by a call in progress or a ring already
-        // showing — is answered Busy, which stops the new caller's ring without implying a refusal.
+        // A call that just ended and is still on screen does not occupy the device: `busy` is the
+        // truth about liveness, not the tracked call's mere presence, so a new call rings. Declining
+        // here would tell a fresh caller "busy" about a device staring at an ended-call screen.
+        assertEquals(
+            IncomingInviteDisposition.Ring,
+            incomingInviteDisposition(inviteEvent(OTHER_CALL), ringingCallId = null, activeCallId = CALL, busy = false, now = NOW),
+        )
+        // A different call while a live one runs is busy, as ever.
         assertEquals(
             IncomingInviteDisposition.DeclineBusy,
-            incomingInviteDisposition(inviteEvent(OTHER_CALL), ringingCallId = null, activeCallId = CALL, busy = false, now = NOW),
+            incomingInviteDisposition(inviteEvent(OTHER_CALL), ringingCallId = null, activeCallId = CALL, busy = true, now = NOW),
         )
         assertEquals(
             IncomingInviteDisposition.DeclineBusy,
