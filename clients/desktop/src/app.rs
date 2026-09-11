@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::chat_log::{self, ChatLogLine};
 use crate::config::ServerEndpoint;
 use crate::model::{Account, Connection, Toast, ToastKind};
 use crate::net::{Command, Event, Net};
@@ -36,7 +37,7 @@ use crate::ui::search::SearchState;
 use crate::ui::settings::SettingsState;
 use crate::ui::space::SpaceState;
 use crate::ui::wallet::{TrackingTx, WalletState};
-use crate::ui::{widgets, Context, Place, Screen};
+use crate::ui::{widgets, ChatLogAction, Context, Place, Screen};
 
 /// The whole application state.
 pub struct App {
@@ -69,6 +70,11 @@ pub struct App {
     toasts: Vec<Toast>,
     /// Reused each frame so a screen's command buffer costs no allocation per frame.
     commands: Vec<Command>,
+    /// Chat-log intent from the frame's screens, applied after the frame — the same
+    /// after-the-frame contract as `commands`, for writes the shell owns: the settings record,
+    /// the logs directory, and the toasts that report what became of them. Reused rather than
+    /// reallocated for the same reason.
+    chat_log_actions: Vec<ChatLogAction>,
     /// The persisted settings record: the source of truth for what gets written back to disk,
     /// updated field by field as the user changes things. Kept apart from the live values so
     /// that an environment override of the server (see `main`) never leaks into the file through
@@ -138,6 +144,7 @@ impl App {
             activity: Vec::new(),
             toasts: Vec::new(),
             commands: Vec::new(),
+            chat_log_actions: Vec::new(),
             settings,
             settings_path,
         }
@@ -252,8 +259,16 @@ impl App {
                     self.call = None;
                     // Drop every decrypted message with the session. Leaving a thread on screen after
                     // sign-out would mean plaintext outliving the keys that produced it, which is the
-                    // one thing a signed-out client must not do.
+                    // one thing a signed-out client must not do. The saved logs on disk are the same
+                    // promise at one remove — plaintext the keys produced — so they go too, exactly
+                    // as the phone's sign-out deletes its files. Keys and settings stay: they are
+                    // the next session's, not this session's words.
                     self.chat = ChatState::default();
+                    if let Some(dir) = chat_log::logs_dir() {
+                        if let Err(error) = chat_log::clear_all(&dir) {
+                            tracing::warn!("migo-desktop: could not clear saved chat logs on sign-out: {error}");
+                        }
+                    }
                     // The social graph is not secret in the way messages are, but it is an account's
                     // business: names, requests, who is online. It goes with the session for the same
                     // reason the threads do, and the pane starts its next session NotAsked.
@@ -1086,17 +1101,7 @@ impl App {
         theme_choice: &mut Option<Theme>,
         zoom_choice: &mut Option<f32>,
     ) {
-        let me = self.account.as_ref().map(|a| a.account_id);
-        let title = self
-            .chat
-            .conversations
-            .iter()
-            .find(|c| c.conversation_id == conversation_id)
-            .map(|c| {
-                me.map(|me| c.display_title(me, &self.chat.names))
-                    .unwrap_or_else(|| crate::model::short_id(conversation_id))
-            })
-            .unwrap_or_else(|| crate::model::short_id(conversation_id));
+        let title = self.conversation_title(conversation_id);
 
         let mut open = true;
         desktop::floating(
@@ -1115,6 +1120,8 @@ impl App {
                 account: self.account.as_ref(),
                 server: &self.auth.server,
                 commands: &mut self.commands,
+                chat_log_auto_save: self.settings.auto_save_chat_logs,
+                chat_log: &mut self.chat_log_actions,
                 navigate,
                 theme_choice,
                 zoom_choice,
@@ -1124,8 +1131,10 @@ impl App {
 
         // The window's own close button: closing the window closes the conversation, which is
         // the reference's whole model. The thread's history stays in the store, so reopening is
-        // one click away.
+        // one click away. When auto-save is on, the moment of leaving is the moment the
+        // transcript is written — the same moment the web client and the phone pin.
         if !open {
+            self.snapshot_chat_log(conversation_id);
             self.desktop.close_chat(conversation_id);
         }
     }
@@ -1180,6 +1189,8 @@ impl App {
             account: self.account.as_ref(),
             server: &self.auth.server,
             commands: &mut self.commands,
+            chat_log_auto_save: self.settings.auto_save_chat_logs,
+            chat_log: &mut self.chat_log_actions,
             navigate,
             theme_choice,
             zoom_choice,
@@ -1227,7 +1238,11 @@ impl App {
                     self.commands.push(Command::Suggestions);
                 }
             }
-            Place::Games | Place::Settings => {}
+            Place::Games => {}
+            // The saved-log list is a fact about the disk, not the frame: read on entry so the
+            // storage group's numbers are current, and after any action that touches the
+            // directory (see `apply_chat_log_action`).
+            Place::Settings => self.refresh_saved_logs(),
         }
     }
 
@@ -1242,6 +1257,10 @@ impl App {
         let mut navigate = None;
         let mut theme_choice = None;
         let mut zoom_choice = None;
+        // The chat-log buffer rides along for the same reason the command buffer does: the
+        // event that lands here arrives outside a frame, and the fields a Context carries
+        // must all be present even on a path that pushes nothing.
+        let mut chat_log_actions = std::mem::take(&mut self.chat_log_actions);
         let server = self.auth.server.clone();
         let mut context = Context {
             theme: self.theme,
@@ -1249,13 +1268,206 @@ impl App {
             account: self.account.as_ref(),
             server: &server,
             commands: &mut commands,
+            chat_log_auto_save: self.settings.auto_save_chat_logs,
+            chat_log: &mut chat_log_actions,
             navigate: &mut navigate,
             theme_choice: &mut theme_choice,
             zoom_choice: &mut zoom_choice,
         };
         crate::ui::chat::open(&mut context, &mut self.chat, conversation_id);
         self.commands = commands;
+        self.chat_log_actions = chat_log_actions;
         self.desktop.open_chat(conversation_id);
+    }
+
+    /// One conversation's title, resolved the way its window's title bar resolves it — the
+    /// logged title and the window's title must agree, or the file on disk names a conversation
+    /// the person cannot find on screen.
+    fn conversation_title(&self, conversation_id: migo_core::Id) -> String {
+        let me = self.account.as_ref().map(|a| a.account_id);
+        self.chat
+            .conversations
+            .iter()
+            .find(|c| c.conversation_id == conversation_id)
+            .map(|c| {
+                me.map(|me| c.display_title(me, &self.chat.names))
+                    .unwrap_or_else(|| crate::model::short_id(conversation_id))
+            })
+            .unwrap_or_else(|| crate::model::short_id(conversation_id))
+    }
+
+    /// One thread as transcript lines: full bodies (a transcript that cut a paragraph at its
+    /// first newline would misreport it), the thread's own order (already sequence-sorted), and
+    /// authors from the same name cache the bubbles use — "You" for this device's own words,
+    /// so a reader of the file and a reader of the window meet the same cast.
+    fn log_lines(&self, thread: &[crate::model::Message]) -> Vec<ChatLogLine> {
+        thread
+            .iter()
+            .map(|message| ChatLogLine {
+                at: message.sent_at,
+                author: if message.outgoing {
+                    "You".to_owned()
+                } else {
+                    self.chat
+                        .names
+                        .get(&message.sender_id)
+                        .cloned()
+                        .unwrap_or_else(|| crate::model::short_id(message.sender_id))
+                },
+                text: chat_log::body_text(&message.body),
+            })
+            .collect()
+    }
+
+    /// One conversation's transcript, or `None` when it holds no messages: a log of a
+    /// conversation that never said anything is a header with nothing under it, and writing
+    /// one would hand the person a file that looks like a record and records nothing.
+    fn transcript_of(&self, conversation_id: migo_core::Id) -> Option<String> {
+        let thread = self.chat.messages.get(&conversation_id)?;
+        if thread.is_empty() {
+            return None;
+        }
+        Some(chat_log::format_chat_log(
+            &self.conversation_title(conversation_id),
+            migo_core::Timestamp::now(),
+            &self.log_lines(thread),
+        ))
+    }
+
+    /// Every held conversation in one log, or `None` when none has messages — the same refusal
+    /// as [`Self::transcript_of`], for the same reason, at one file's scale. The account's own
+    /// name heads it, because a file of several conversations needs to say whose they were.
+    fn all_chats_log(&self) -> Option<String> {
+        let account = self.account.as_ref()?;
+        let mut chats: Vec<(String, Vec<ChatLogLine>)> = Vec::new();
+        for conversation in &self.chat.conversations {
+            let Some(thread) = self.chat.messages.get(&conversation.conversation_id) else {
+                continue;
+            };
+            if thread.is_empty() {
+                continue;
+            }
+            let title = conversation.display_title(account.account_id, &self.chat.names);
+            chats.push((title, self.log_lines(thread)));
+        }
+        if chats.is_empty() {
+            return None;
+        }
+        Some(chat_log::format_all_chats_log(
+            &account.username,
+            migo_core::Timestamp::now(),
+            &chats,
+        ))
+    }
+
+    /// Writes one conversation's snapshot, when auto-save is on. Called from both window-close
+    /// paths (the close button and Escape) — the moment the reference pins as "leaving the
+    /// conversation". Best-effort with a warn, not a toast: the person is closing a window, and
+    /// a farewell toast about a background file would be noise.
+    fn snapshot_chat_log(&self, conversation_id: migo_core::Id) {
+        if !self.settings.auto_save_chat_logs {
+            return;
+        }
+        let Some(dir) = chat_log::logs_dir() else {
+            return;
+        };
+        let Some(text) = self.transcript_of(conversation_id) else {
+            return;
+        };
+        let title = self.conversation_title(conversation_id);
+        if let Err(error) = chat_log::write_snapshot(&dir, &title, &text) {
+            tracing::warn!("migo-desktop: could not save the chat log: {error}");
+        }
+    }
+
+    /// Re-reads the logs directory into the settings panel: the saved list, its total size,
+    /// and where it lives. Called on entering Settings and after any action that changes the
+    /// directory, so the storage group's numbers are facts rather than memories of a frame ago.
+    fn refresh_saved_logs(&mut self) {
+        let Some(dir) = chat_log::logs_dir() else {
+            self.settings_panel.logs_dir = None;
+            self.settings_panel.saved_logs.clear();
+            self.settings_panel.logs_bytes = 0;
+            return;
+        };
+        let logs = chat_log::saved_logs(&dir);
+        self.settings_panel.logs_bytes = logs.iter().map(|log| log.bytes).sum();
+        self.settings_panel.saved_logs = logs;
+        self.settings_panel.logs_dir = Some(dir);
+    }
+
+    /// Applies one chat-log action the frame's screens asked for, after the frame: the shell
+    /// owns the settings record, the directory, and the toasts, because those outlive the
+    /// frame that asked.
+    fn apply_chat_log_action(&mut self, action: ChatLogAction) {
+        match action {
+            ChatLogAction::SetAutoSave(on) => {
+                self.settings.auto_save_chat_logs = on;
+                self.persist_settings();
+            }
+            ChatLogAction::SaveTranscript {
+                conversation_id,
+                path,
+            } => match self.transcript_of(conversation_id) {
+                Some(text) => match chat_log::write_file(&path, &text) {
+                    Ok(()) => self.toasts.push(Toast::success(format!(
+                        "Transcript saved to {}",
+                        path.display()
+                    ))),
+                    Err(error) => {
+                        tracing::warn!("migo-desktop: transcript export failed: {error}");
+                        self.toasts.push(Toast::error(format!(
+                            "Could not save the transcript: {error}"
+                        )));
+                    }
+                },
+                None => self.toasts.push(Toast::info(
+                    "Nothing to save: this conversation has no messages.",
+                )),
+            },
+            ChatLogAction::ExportAll { path } => match self.all_chats_log() {
+                Some(text) => match chat_log::write_file(&path, &text) {
+                    Ok(()) => self.toasts.push(Toast::success(format!(
+                        "All chats exported to {}",
+                        path.display()
+                    ))),
+                    Err(error) => {
+                        tracing::warn!("migo-desktop: chat log export failed: {error}");
+                        self.toasts.push(Toast::error(format!(
+                            "Could not export the chat logs: {error}"
+                        )));
+                    }
+                },
+                None => self.toasts.push(Toast::info(
+                    "Nothing to export: no conversation has messages yet.",
+                )),
+            },
+            ChatLogAction::DeleteSaved { path } => match std::fs::remove_file(&path) {
+                Ok(()) => self.refresh_saved_logs(),
+                Err(error) => {
+                    tracing::warn!("migo-desktop: could not delete a saved log: {error}");
+                    self.toasts.push(Toast::error(format!(
+                        "Could not delete the saved log: {error}"
+                    )));
+                }
+            },
+            ChatLogAction::ClearSaved => {
+                if let Some(dir) = chat_log::logs_dir() {
+                    match chat_log::clear_all(&dir) {
+                        Ok(()) => self.toasts.push(Toast::success(
+                            "Saved chat logs cleared. Keys and settings were left untouched.",
+                        )),
+                        Err(error) => {
+                            tracing::warn!("migo-desktop: could not clear the saved logs: {error}");
+                            self.toasts.push(Toast::error(format!(
+                                "Could not clear the saved logs: {error}"
+                            )));
+                        }
+                    }
+                }
+                self.refresh_saved_logs();
+            }
+        }
     }
 
     /// Rebuilds the merged activity stream from its durable halves.
@@ -1345,6 +1557,8 @@ impl eframe::App for App {
                         account: self.account.as_ref(),
                         server: &server,
                         commands: &mut self.commands,
+                        chat_log_auto_save: self.settings.auto_save_chat_logs,
+                        chat_log: &mut self.chat_log_actions,
                         navigate: &mut navigate,
                         theme_choice: &mut theme_choice,
                         zoom_choice: &mut zoom_choice,
@@ -1416,6 +1630,10 @@ impl eframe::App for App {
                         .copied()
                         .find(|id| desktop::chat_id(*id) == layer.id);
                     if let Some(conversation_id) = closed {
+                        // The same snapshot on the key path as on the button path: whichever
+                        // way the window goes, leaving the conversation is the one moment a
+                        // log is written.
+                        self.snapshot_chat_log(conversation_id);
                         self.desktop.close_chat(conversation_id);
                     }
                 }
@@ -1484,6 +1702,15 @@ impl eframe::App for App {
             ctx.set_zoom_factor(zoom);
             self.settings.ui_scale = Some((zoom * 100.0).round() as u8);
             self.persist_settings();
+        }
+
+        // The frame's chat-log intent, applied after the frame for the same reason the command
+        // buffer is: a write that ran mid-layout could block the paint loop on a slow disk. The
+        // buffer is taken out first because applying an action borrows `self` mutably — the
+        // same trade `open_conversation` makes with its command buffer.
+        let chat_log_actions = std::mem::take(&mut self.chat_log_actions);
+        for action in chat_log_actions {
+            self.apply_chat_log_action(action);
         }
 
         // The server disclosure commits a new value to `auth.server` only on a successful

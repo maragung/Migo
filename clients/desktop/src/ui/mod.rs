@@ -31,6 +31,8 @@ pub mod space;
 pub mod wallet;
 pub mod widgets;
 
+use std::path::PathBuf;
+
 use crate::config::ServerEndpoint;
 use crate::model::{Account, Connection};
 use crate::net::Command;
@@ -164,6 +166,40 @@ pub struct Context<'a> {
     /// settings panel hands the factor back and the shell applies it where the style lives —
     /// once, between frames, rather than from inside a layout closure mid-draw.
     pub zoom_choice: &'a mut Option<f32>,
+    /// Whether transcripts are written to the device when a conversation's window closes.
+    ///
+    /// Read-only: the toggle lives in the Settings screen, and its write goes back through
+    /// [`Context::chat_log`] like every other log action, so the settings record is touched in
+    /// exactly one place — the shell, between frames.
+    pub chat_log_auto_save: bool,
+    /// Chat-log intent pushed here is applied by the shell after the frame: writes, exports,
+    /// deletions, and the toggle itself. Kept beside the pointer to the settings record rather
+    /// than granted as a direct write for the same reason as [`Context::commands`]: a layout
+    /// function that could reach the file system mid-draw could block the paint loop on a slow
+    /// disk, and the boundary is what makes that structurally impossible.
+    pub chat_log: &'a mut Vec<ChatLogAction>,
+}
+
+/// What a screen asks the shell to do with a chat log, applied after the frame.
+///
+/// The variants carry everything the shell needs to act without borrowing back into the screen's
+/// state: paths as the person typed them, ids as the model holds them. The shell owns the
+/// consequences — toasts, the settings record, the directory — because those outlive the frame.
+#[derive(Debug, Clone)]
+pub enum ChatLogAction {
+    /// Turn automatic saving on or off; the shell persists the preference.
+    SetAutoSave(bool),
+    /// Write one conversation's transcript to a path the person typed.
+    SaveTranscript {
+        conversation_id: migo_core::Id,
+        path: PathBuf,
+    },
+    /// Write every held conversation into one file at a path the person typed.
+    ExportAll { path: PathBuf },
+    /// Delete one saved snapshot from the logs directory.
+    DeleteSaved { path: PathBuf },
+    /// Delete every saved snapshot: the storage group's broom.
+    ClearSaved,
 }
 
 impl Context<'_> {

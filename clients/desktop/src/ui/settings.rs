@@ -23,14 +23,17 @@
 //! available — on the strength of no evidence at all. So the failure is held and drawn as a
 //! sentence, and only a successful empty answer gets to say "this is the only session".
 
+use std::path::PathBuf;
+
 use egui::{Align, Layout, RichText, Ui};
 use migo_core::{Id, Timestamp};
 
+use crate::chat_log::SavedLog;
 use crate::model::{Connection, DeviceRow, EvmWalletRow, SessionRow};
 use crate::net::Command;
 use crate::theme::{font, palette, space, text_style};
 use crate::ui::widgets;
-use crate::ui::Context;
+use crate::ui::{ChatLogAction, Context};
 
 /// What the device list currently shows.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -207,12 +210,33 @@ pub struct SettingsState {
     pub last_backup_at: Option<u64>,
     /// The recovery-contact answer, for the checkup's Recovery row.
     pub recovery: RecoveryView,
+    /// The export-everything destination, typed: egui offers no file dialog, so the
+    /// export-all write takes a path the same way the attach panel and the document save
+    /// row do. Kept between frames so a failed write can be retried without retyping.
+    pub export_path: String,
+    /// The saved chat-log snapshots, as the shell last read the logs directory — on entering
+    /// this pane and after any action that touches the directory. The pane never reads the
+    /// disk itself: it draws what the shell hands it, the same read-only contract every other
+    /// fact on this pane follows.
+    pub saved_logs: Vec<SavedLog>,
+    /// Where the snapshots live, when the platform data directory is reachable — drawn so a
+    /// person backing this device up by hand knows where the plaintext is.
+    pub logs_dir: Option<PathBuf>,
+    /// The snapshots' total size, for the storage group's one line.
+    pub logs_bytes: u64,
 }
 
 /// Draws the settings pane.
 ///
 /// Scrolls as one document, so a device list long enough to push Sign out off the bottom of the
 /// window pushes it into reach of the wheel instead of out of the interface.
+///
+/// Five groups, in the web panel's order and words — Chats & Log, Privasi & Keamanan,
+/// Penyimpanan & Data, Tampilan, Akun — because a person who set something on one client
+/// should find it where they left it on the next. What each group holds is this pane's own:
+/// the web panel's groups are doors to other panels, while this window holds everything
+/// inline, so each group gathers the sections that already lived here into the heading a
+/// person coming from the web or the phone expects.
 pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
     let column = 460.0_f32.min(ui.available_width() - space::XL * 2.0);
 
@@ -227,21 +251,25 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
                     widgets::header(ui, context.theme, "Settings", None);
                     ui.add_space(space::LG);
 
-                    server_section(ui, context);
+                    widgets::subheader(ui, context.theme, "Chats & Log");
+                    chats_and_log_section(ui, context, state);
                     ui.add_space(space::LG);
+
+                    widgets::subheader(ui, context.theme, "Privasi & Keamanan");
+                    privacy_and_security_section(ui, context, state);
+                    ui.add_space(space::LG);
+
+                    widgets::subheader(ui, context.theme, "Penyimpanan & Data");
+                    storage_section(ui, context, state);
+                    ui.add_space(space::LG);
+
+                    widgets::subheader(ui, context.theme, "Tampilan");
                     appearance_section(ui, context);
                     ui.add_space(space::LG);
-                    security_checkup_section(ui, context, state);
-                    ui.add_space(space::LG);
-                    sessions_section(ui, context, state);
-                    ui.add_space(space::LG);
-                    account_section(ui, context, state);
-                    ui.add_space(space::LG);
-                    sign_in_section(ui, context, state);
-                    ui.add_space(space::LG);
-                    backup_section(ui, context, state);
+
+                    widgets::subheader(ui, context.theme, "Akun");
+                    account_group(ui, context, state);
                     ui.add_space(space::XL);
-                    sign_out_section(ui, context);
                 });
             });
         });
@@ -251,10 +279,267 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
     rotate_dialog(ui.ctx(), context, state);
 }
 
+/// A block label inside a group: smaller than the group heading, the same OVERLINE style the
+/// pane's own facts ("Safety number", the checkup rows) carry. The sections kept their own
+/// names — Server, Devices, Account backup — because a group with four blocks needs each
+/// block named, and the group heading alone names the collection, not the parts.
+fn block_label(ui: &mut Ui, context: &Context<'_>, text: &str) {
+    let colors = palette(context.theme);
+    ui.label(
+        RichText::new(text)
+            .text_style(crate::theme::named(text_style::OVERLINE))
+            .color(colors.text_muted),
+    );
+}
+
+/// The Chats & Log group: the honest sentence first, then the auto-save switch, the saved
+/// snapshots, and the export-everything walk — the same controls the web panel and the phone's
+/// settings screen draw, with this client's one difference: a desktop has no download shelf,
+/// so the exports are typed-path writes, the same trade the attach panel makes.
+fn chats_and_log_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
+    let colors = palette(context.theme);
+
+    // The sentence before the switch, on purpose: an E2EE app that offered to write plaintext
+    // to disk without saying so, in the same breath, would be keeping a copy the encryption
+    // never promised. The switch is below the sentence, not beside it.
+    ui.label(
+        RichText::new(
+            "Chat logs are decrypted plaintext. They are saved on this device only — the \
+             server never sees them.",
+        )
+        .font(egui::FontId::proportional(font::SMALL))
+        .color(colors.text_muted),
+    );
+    ui.add_space(space::SM);
+
+    // The switch, as two selected-state buttons — the same control the text-size row is, and
+    // the same shape the web panel's chip-row draws: Off and Auto-save, one of them always
+    // selected, because "off" is a state the pane must be able to show rather than merely
+    // imply by an unpressed toggle.
+    ui.label(
+        RichText::new("Auto-save chat logs")
+            .font(egui::FontId::proportional(font::BODY))
+            .color(colors.text),
+    );
+    ui.horizontal(|ui| {
+        for (on, label) in [(false, "Off"), (true, "Auto-save")] {
+            if ui
+                .add(egui::Button::new(label).selected(on == context.chat_log_auto_save))
+                .clicked()
+            {
+                context.chat_log.push(ChatLogAction::SetAutoSave(on));
+            }
+        }
+    });
+    ui.label(
+        RichText::new("Write a transcript of a conversation when its window closes.")
+            .font(egui::FontId::proportional(font::TINY))
+            .color(colors.text_muted),
+    );
+    ui.label(
+        RichText::new(
+            "A saved log is plaintext: readable without the app and without the keys, by \
+             anyone holding this device. One newest log per conversation, at most twenty \
+             conversations kept, and signing out deletes every saved log.",
+        )
+        .font(egui::FontId::proportional(font::TINY))
+        .color(colors.text_muted),
+    );
+    ui.add_space(space::MD);
+
+    // --- saved logs -------------------------------------------------------------
+    block_label(ui, context, "Saved logs");
+    ui.add_space(space::XS);
+    if state.saved_logs.is_empty() {
+        ui.label(
+            RichText::new("No saved logs yet.")
+                .font(egui::FontId::proportional(font::SMALL))
+                .color(colors.text_muted),
+        );
+    } else {
+        for log in &state.saved_logs {
+            saved_log_row(ui, context, log);
+            ui.add_space(space::XS);
+        }
+    }
+    if let Some(dir) = &state.logs_dir {
+        ui.label(
+            RichText::new(dir.display().to_string())
+                .font(egui::FontId::monospace(font::TINY))
+                .color(colors.text_muted),
+        );
+    }
+    ui.add_space(space::MD);
+
+    // --- export -----------------------------------------------------------------
+    block_label(ui, context, "Export");
+    ui.add_space(space::XS);
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut state.export_path)
+                .hint_text("/path/to/all-chats.txt")
+                .desired_width(200.0),
+        );
+        let typed = state.export_path.trim().to_owned();
+        if widgets::primary_button(ui, context.theme, "Export semua chat", !typed.is_empty())
+            .clicked()
+        {
+            context.chat_log.push(ChatLogAction::ExportAll {
+                path: PathBuf::from(typed),
+            });
+        }
+    });
+    ui.label(
+        RichText::new(
+            "Every conversation this account holds, as one text file. The per-conversation \
+             save lives in the conversation's own header.",
+        )
+        .font(egui::FontId::proportional(font::TINY))
+        .color(colors.text_muted),
+    );
+}
+
+/// One saved snapshot, as a row: the title it was written under, when and how big, and the one
+/// action a plaintext on disk honestly owes — deletion. The file's name is the sanitized title,
+/// and the row shows the same name so what is deleted reads as what was listed.
+fn saved_log_row(ui: &mut Ui, context: &mut Context<'_>, log: &SavedLog) {
+    let colors = palette(context.theme);
+    let mut delete = None;
+    egui::Frame::new()
+        .fill(colors.surface_raised)
+        .corner_radius(egui::CornerRadius::same(crate::theme::radius::MD))
+        .inner_margin(egui::Margin::same(space::MD as i8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(widgets::elide(&log.name, 40))
+                            .font(egui::FontId::proportional(font::BODY))
+                            .color(colors.text),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "saved {} \u{00B7} {}",
+                            crate::chat_log::log_stamp(log.modified),
+                            crate::model::human_bytes(log.bytes),
+                        ))
+                        .text_style(crate::theme::named(text_style::CAPTION))
+                        .color(colors.text_muted),
+                    );
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if widgets::ghost_button(ui, context.theme, "Delete")
+                        .on_hover_text(format!(
+                            "Removes {}. The conversation itself is not touched.",
+                            log.path.display()
+                        ))
+                        .clicked()
+                    {
+                        delete = Some(log.path.clone());
+                    }
+                });
+            });
+        });
+    if let Some(path) = delete {
+        context.chat_log.push(ChatLogAction::DeleteSaved { path });
+    }
+}
+
+/// The Privasi & Keamanan group: the checkup, the live sessions, and the sign-in doors — the
+/// three blocks that answer "who else can be me, and how do I close the doors", under the one
+/// heading the web panel gives them.
+fn privacy_and_security_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
+    let colors = palette(context.theme);
+    ui.label(
+        RichText::new(
+            "Every device that can sign in to your account, and every session now signed in.",
+        )
+        .font(egui::FontId::proportional(font::SMALL))
+        .color(colors.text_muted),
+    );
+    ui.add_space(space::MD);
+
+    security_checkup_section(ui, context, state);
+    ui.add_space(space::LG);
+    sessions_section(ui, context, state);
+    ui.add_space(space::LG);
+    sign_in_section(ui, context, state);
+}
+
+/// The Penyimpanan & Data group: what this device is holding for the app, and the one broom.
+///
+/// The web group reports the browser's own storage estimate; this client's honest equivalent
+/// is the logs directory it measured itself, in the same "bytes · count" shape the phone's
+/// FactRow draws. The broom is named in the same language the web and phone name it — Hapus
+/// data tersimpan — and says in its own breath exactly what it leaves alone.
+fn storage_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
+    let colors = palette(context.theme);
+
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("Chat logs")
+                .font(egui::FontId::proportional(font::BODY))
+                .color(colors.text),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let chats = state.saved_logs.len();
+            ui.label(
+                RichText::new(format!(
+                    "{} \u{00B7} {chats} chat{}",
+                    crate::model::human_bytes(state.logs_bytes),
+                    if chats == 1 { "" } else { "s" },
+                ))
+                .text_style(crate::theme::named(text_style::CAPTION))
+                .color(colors.text_muted),
+            );
+        });
+    });
+    ui.add_space(space::SM);
+
+    // The broom is always offered, the way the phone's is: clearing an empty directory is a
+    // no-op the toast answers for, and a button that appeared and vanished with the file list
+    // would be harder to find than a button that is always where it was last time.
+    if widgets::ghost_button(ui, context.theme, "Hapus data tersimpan")
+        .on_hover_text(format!(
+            "Removes the saved chat logs only. Your keys, your chosen server, and the theme stay \
+         exactly as they are.{}",
+            state
+                .logs_dir
+                .as_ref()
+                .map(|dir| format!(" Logs live in {}.", dir.display()))
+                .unwrap_or_default(),
+        ))
+        .clicked()
+    {
+        context.chat_log.push(ChatLogAction::ClearSaved);
+    }
+    ui.label(
+        RichText::new(
+            "Removes the saved chat logs only. Your keys, your chosen server, and the theme \
+             stay exactly as they are.",
+        )
+        .font(egui::FontId::proportional(font::TINY))
+        .color(colors.text_muted),
+    );
+}
+
+/// The Akun group: the server this session lives on, the account's own key material and its
+/// devices and wallets, the `.migo` backup, and the door out — everything that is the
+/// account's rather than the interface's, under the heading the web panel gives it.
+fn account_group(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
+    server_section(ui, context);
+    ui.add_space(space::LG);
+    account_section(ui, context, state);
+    ui.add_space(space::LG);
+    backup_section(ui, context, state);
+    ui.add_space(space::LG);
+    sign_out_section(ui, context);
+}
+
 /// The server this session lives on, and whether the socket to it is up.
 fn server_section(ui: &mut Ui, context: &mut Context<'_>) {
     let colors = palette(context.theme);
-    widgets::subheader(ui, context.theme, "Server");
+    block_label(ui, context, "Server");
 
     let url = crate::config::rest_base_url(context.server);
     ui.label(
@@ -293,9 +578,11 @@ fn server_section(ui: &mut Ui, context: &mut Context<'_>) {
 /// bars, spacing — as one piece, because that is what a person asking for a bigger interface
 /// means. The theme itself is the banner's sun/moon control, exactly as the web client draws it:
 /// one control per action, always visible, never a second copy hiding in a panel.
+///
+/// No subheading of its own: the Tampilan group heading above it is already this block's name,
+/// and a second, smaller label under it would say the same word twice.
 fn appearance_section(ui: &mut Ui, context: &mut Context<'_>) {
     let colors = palette(context.theme);
-    widgets::subheader(ui, context.theme, "Appearance");
 
     // The offered steps, as percentages. Discrete on purpose: four honest sizes beat a slider's
     // infinity of sizes nobody can tell apart, and a whole percent is what the settings file
@@ -351,7 +638,7 @@ fn appearance_section(ui: &mut Ui, context: &mut Context<'_>) {
 /// refresh at three different moments.
 fn security_checkup_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
     let colors = palette(context.theme);
-    widgets::subheader(ui, context.theme, "Security checkup");
+    block_label(ui, context, "Security checkup");
 
     let Some(account) = context.account else {
         // Signed out, there is no account to check: a sentence, not six rows of dashes that
@@ -666,7 +953,7 @@ fn checkup_row(
 /// the two would make the security story harder to read rather than easier.
 fn sessions_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
     let colors = palette(context.theme);
-    widgets::subheader(ui, context.theme, "Devices");
+    block_label(ui, context, "Devices");
 
     ui.horizontal(|ui| {
         ui.label(
@@ -795,7 +1082,7 @@ fn session_row(ui: &mut Ui, context: &Context<'_>, row: &SessionRow, revoke: &mu
 /// derived from the root. Reads both on the user's click, like the session list above.
 fn account_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
     let colors = palette(context.theme);
-    widgets::subheader(ui, context.theme, "Account");
+    block_label(ui, context, "Account");
 
     // --- safety number ---------------------------------------------------------
     // The fingerprint of this device's identity key, home here since the conversation list that
@@ -1126,7 +1413,7 @@ fn wallet_row(
 /// every other device signs in again with the new passphrase.
 fn sign_in_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
     let colors = palette(context.theme);
-    widgets::subheader(ui, context.theme, "Sign-in");
+    block_label(ui, context, "Sign-in");
 
     // --- recovery contact -------------------------------------------------------
     ui.label(
@@ -1229,7 +1516,7 @@ fn sign_in_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsS
 /// one-shot form would seal it under something nobody can reproduce.
 fn backup_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut SettingsState) {
     let colors = palette(context.theme);
-    widgets::subheader(ui, context.theme, "Account backup");
+    block_label(ui, context, "Account backup");
 
     let holds_root = context.account.is_some_and(|account| account.holds_root);
     if !holds_root {

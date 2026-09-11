@@ -46,6 +46,14 @@ pub struct Settings {
     /// `1.3000001`.
     #[serde(default)]
     pub ui_scale: Option<u8>,
+    /// Whether closing a conversation's window writes its transcript to the device as a
+    /// plaintext log. Off by default: an E2EE app that silently wrote decrypted chats to disk
+    /// by default would be keeping a copy the encryption never promised, so the copy begins
+    /// only when the person asks for it. `#[serde(default)]` — a file written before the
+    /// field existed simply predates the feature, and the old behaviour (no logs) is the
+    /// default.
+    #[serde(default)]
+    pub auto_save_chat_logs: bool,
 }
 
 impl Settings {
@@ -60,6 +68,7 @@ impl Settings {
             server: default_production_server_endpoint(),
             theme: None,
             ui_scale: None,
+            auto_save_chat_logs: false,
         }
     }
 
@@ -177,6 +186,7 @@ mod tests {
             server: Settings::default_for_dev().server,
             theme: Some(Theme::Light),
             ui_scale: None,
+            auto_save_chat_logs: false,
         };
         save(&path, &record).expect("save");
         let loaded = load(&path).expect("load");
@@ -204,6 +214,43 @@ mod tests {
         let _ = fs::remove_file(&path);
 
         assert_eq!(Settings::default_for_dev().zoom(), 1.0);
+    }
+
+    /// The chat-log preference round-trips, and a file written before the field existed reads
+    /// as off: an E2EE client that "upgraded" a pre-existing install into writing plaintext
+    /// transcripts would be turning the feature on for someone who never asked.
+    #[test]
+    fn auto_save_chat_logs_round_trips_and_defaults_off() {
+        let path = std::env::temp_dir().join("migo-desktop-test-chat-log-toggle.json");
+        let record = Settings {
+            auto_save_chat_logs: true,
+            ..Settings::default_for_dev()
+        };
+        save(&path, &record).expect("save");
+        let loaded = load(&path).expect("load");
+        assert!(loaded.auto_save_chat_logs);
+        let text = fs::read_to_string(&path).expect("read");
+        assert!(text.contains("\"auto_save_chat_logs\": true"));
+        let _ = fs::remove_file(&path);
+
+        assert!(!Settings::default_for_dev().auto_save_chat_logs);
+
+        let old_path = std::env::temp_dir().join("migo-desktop-test-chat-log-old.json");
+        let old = serde_json::json!({
+            "version": SETTINGS_VERSION,
+            "server": {
+                "host": "localhost",
+                "port": 18080,
+                "gateway_port": 18081,
+                "transport": "WebSocket",
+                "scheme": { "Ws": "Ws" },
+                "rest_scheme": "Http",
+            },
+        });
+        fs::write(&old_path, old.to_string()).expect("write");
+        let loaded = load(&old_path).expect("load");
+        assert!(!loaded.auto_save_chat_logs);
+        let _ = fs::remove_file(&old_path);
     }
 
     /// A settings file written before the theme field existed still loads, with the theme
@@ -248,6 +295,7 @@ mod tests {
             },
             theme: Some(Theme::Dark),
             ui_scale: None,
+            auto_save_chat_logs: false,
         };
         let healed = heal_stale_server(stale);
         assert_eq!(healed.server, default_production_server_endpoint());
@@ -274,6 +322,7 @@ mod tests {
             },
             theme: None,
             ui_scale: None,
+            auto_save_chat_logs: false,
         };
         assert_eq!(heal_stale_server(mine.clone()), mine);
     }

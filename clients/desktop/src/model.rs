@@ -868,6 +868,27 @@ pub fn date(ts: Timestamp) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
+/// A byte count in the largest unit that keeps it under four digits.
+///
+/// Shared by the document bubble's save row and the settings screen's storage group — one
+/// formatter, so a file's size never reads differently in the two places that name it. The
+/// same reason `date` and `clock` live here rather than in either screen.
+#[must_use]
+pub fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "kB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1000.0 && unit + 1 < UNITS.len() {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

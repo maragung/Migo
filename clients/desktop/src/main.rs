@@ -23,6 +23,7 @@
 #![deny(unsafe_code)]
 
 mod app;
+mod chat_log;
 mod config;
 mod crypto;
 mod model;

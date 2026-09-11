@@ -24,7 +24,7 @@ use crate::model::{self, Body, Conversation, Delivery, Message};
 use crate::net::Command;
 use crate::theme::{font, palette, space};
 use crate::ui::widgets::{self, BubbleTone};
-use crate::ui::Context;
+use crate::ui::{ChatLogAction, Context};
 
 /// The emoji a reaction picker offers — the same three the web and Android clients offer, in
 /// the same order, so the same thread shows the same vocabulary on every screen it is read
@@ -98,6 +98,19 @@ pub struct ChatState {
     /// into it. egui offers no file dialog, so the path is typed — the same trade the avatar
     /// picker makes — and it is kept per conversation the way drafts are.
     pub attach: HashMap<Id, AttachPanel>,
+    /// The transcript panel's own state, per conversation, keyed the way the attach panel is:
+    /// the floppy in the header folds out a typed-path save row under it, and the path is kept
+    /// between frames so closing the row on a mistake does not cost the whole path.
+    pub log_panels: HashMap<Id, LogPanel>,
+}
+
+/// The transcript panel's state for one conversation.
+#[derive(Default)]
+pub struct LogPanel {
+    /// Whether the save row is showing under the header.
+    pub open: bool,
+    /// The path typed into it.
+    pub path: String,
 }
 
 /// One fetched image, as the worker decoded it: the pixels and their size.
@@ -412,6 +425,17 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
     thread_header(ui, context, state, conversation_id);
     widgets::divider(ui, context.theme);
 
+    // The floppy's fold-out, before anything claims the window's edges: a save row that hands
+    // the write to the shell (the write is a `ChatLogAction`, not a command — the disk is not
+    // the worker's), drawn only while the header's button left it open.
+    let log_open = state
+        .log_panels
+        .get(&conversation_id)
+        .is_some_and(|panel| panel.open);
+    if log_open {
+        transcript_save_row(ui, context, state, conversation_id);
+    }
+
     // Read before the scroll area borrows `state`, and by member count rather than by conversation
     // kind: a group of two reads like a direct chat and should look like one.
     let conversation = state
@@ -517,6 +541,52 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
             // order, and a reader who wants the durable roster opens the rooms pane.
             room_notices(ui, context, state, conversation_id);
             ui.add_space(space::SM);
+        });
+}
+
+/// The transcript save row, under the header, while the header's floppy left it open.
+///
+/// egui offers no file dialog, so the destination is typed — the same trade the attach panel's
+/// fold-out and the document bubble's save row make, with the same `/path` hint. The write
+/// itself never happens here: it is pushed as a [`ChatLogAction`] for the shell to apply after
+/// the frame, because a layout closure that could reach the disk could block the paint loop on
+/// a slow one, and the boundary is what keeps it structurally unable to.
+fn transcript_save_row(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    state: &mut ChatState,
+    conversation_id: Id,
+) {
+    let colors = palette(context.theme);
+    let panel = state.log_panels.entry(conversation_id).or_default();
+    egui::Frame::new()
+        .fill(colors.surface_raised)
+        .corner_radius(egui::CornerRadius::same(crate::theme::radius::MD))
+        .inner_margin(egui::Margin::same(space::MD as i8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Save transcript")
+                        .text_style(crate::theme::named(crate::theme::text_style::OVERLINE))
+                        .color(colors.text_muted),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut panel.path)
+                        .hint_text("/path/to/transcript.txt")
+                        .desired_width(200.0),
+                );
+                let typed = panel.path.trim().to_owned();
+                if widgets::primary_button(ui, context.theme, "Save", !typed.is_empty()).clicked() {
+                    context.chat_log.push(ChatLogAction::SaveTranscript {
+                        conversation_id,
+                        path: PathBuf::from(typed),
+                    });
+                    // The row folds itself away on success the way the attach panel does: the
+                    // write's outcome arrives as a toast, and a row still open under it would
+                    // be the question twice.
+                    panel.open = false;
+                }
+            });
         });
 }
 
@@ -645,7 +715,16 @@ fn room_notices(ui: &mut Ui, context: &Context<'_>, state: &ChatState, conversat
 
 /// The compact header over the open conversation: title, encryption state, and the counts that
 /// are true of the whole thread rather than of any one message in it.
-fn thread_header(ui: &mut Ui, context: &mut Context<'_>, state: &ChatState, conversation_id: Id) {
+///
+/// Mutable state, unlike most headers, for one button: the floppy folds the transcript save row
+/// in and out, and that toggle is the conversation's own (kept the way drafts are), so the
+/// header writes it.
+fn thread_header(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    state: &mut ChatState,
+    conversation_id: Id,
+) {
     let colors = palette(context.theme);
     let Some(conversation) = state
         .conversations
@@ -658,6 +737,9 @@ fn thread_header(ui: &mut Ui, context: &mut Context<'_>, state: &ChatState, conv
         .account
         .map(|a| conversation.display_title(a.account_id, &state.names))
         .unwrap_or_else(|| model::short_id(conversation_id));
+    // Deferred, not written at the click: `conversation` above borrows `state`, and the toggle
+    // writes `state.log_panels` — one frame's worth of patience keeps the two borrows apart.
+    let mut want_log_panel = false;
 
     ui.add_space(space::MD);
     ui.horizontal(|ui| {
@@ -739,8 +821,31 @@ fn thread_header(ui: &mut Ui, context: &mut Context<'_>, state: &ChatState, conv
                     colors.surface_raised,
                 );
             }
+            // The floppy: this conversation's words as a file, on demand. The automatic copy
+            // (Settings, "save on close") is a preference; this button is the one-off that
+            // needs no preference — a person closing a contract negotiation wants the record
+            // whether or not they ever turned anything on.
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("\u{1F4BE}")
+                            .font(egui::FontId::proportional(font::BODY))
+                            .color(colors.text),
+                    )
+                    .fill(egui::Color32::TRANSPARENT)
+                    .stroke(egui::Stroke::NONE),
+                )
+                .on_hover_text("Save transcript")
+                .clicked()
+            {
+                want_log_panel = true;
+            }
         });
     });
+    if want_log_panel {
+        let panel = state.log_panels.entry(conversation_id).or_default();
+        panel.open = !panel.open;
+    }
     ui.add_space(space::MD);
 }
 
@@ -897,7 +1002,7 @@ fn attachment_bubble(
         context.theme,
         &format!(
             "\u{1F4C4} Document \u{00B7} {mime_type} \u{00B7} {}",
-            human_bytes(size_bytes)
+            model::human_bytes(size_bytes)
         ),
         meta,
         outgoing,
@@ -1438,22 +1543,6 @@ fn day_label(at: migo_core::Timestamp) -> String {
         1 => "Yesterday".to_owned(),
         n if n < 7 => format!("{n} days ago"),
         _ => model::date(at),
-    }
-}
-
-/// A byte count in the largest unit that keeps it under four digits.
-fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "kB", "MB", "GB", "TB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1000.0 && unit + 1 < UNITS.len() {
-        value /= 1000.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
     }
 }
 
