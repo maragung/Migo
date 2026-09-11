@@ -565,7 +565,12 @@ mod tests {
             author: "Alice".to_owned(),
             text: "Hello".to_owned(),
         };
-        let text = format_chat_log("Team room", stamp_of(1_700_000_000_000), &[line.clone()]);
+        // `from_ref`, not a clone into a one-element vector: one line, lent twice.
+        let text = format_chat_log(
+            "Team room",
+            stamp_of(1_700_000_000_000),
+            std::slice::from_ref(&line),
+        );
         write_snapshot(&dir, "Team room", &text).expect("write");
         assert_eq!(saved_logs(&dir).len(), 1, "one conversation, one file");
         assert_eq!(saved_logs(&dir)[0].name, "Team_room");
@@ -580,7 +585,11 @@ mod tests {
         // retired.
         for n in 0..=(KEEP_CONVERSATIONS as u8 + 3) {
             let title = format!("Conversation {n}");
-            let body = format_chat_log(&title, stamp_of(1_700_000_000_000), &[line.clone()]);
+            let body = format_chat_log(
+                &title,
+                stamp_of(1_700_000_000_000),
+                std::slice::from_ref(&line),
+            );
             write_snapshot(&dir, &title, &body).expect("write");
         }
         assert_eq!(saved_logs(&dir).len(), KEEP_CONVERSATIONS);
