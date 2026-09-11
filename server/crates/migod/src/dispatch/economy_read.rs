@@ -256,6 +256,8 @@ fn wire_reason(reason: Option<Reason>) -> String {
         Some(Reason::GameStake) => "game_stake",
         Some(Reason::GamePayout) => "game_payout",
         Some(Reason::Adjustment) => "adjustment",
+        Some(Reason::KickSpend) => "kick_spend",
+        Some(Reason::KickPointsPurchase) => "kick_points_purchase",
         None => "unknown",
     }
     .to_string()

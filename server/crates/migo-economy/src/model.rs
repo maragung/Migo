@@ -49,6 +49,16 @@ pub enum Reason {
     GamePayout = 6,
     /// A manual correction by an operator, always with an audit row beside it.
     Adjustment = 7,
+    /// An outright group kick settled its price: a Kick Point burned back to the
+    /// Mint, or one coin taken to the Fee account when the kicker held none.
+    ///
+    /// One reason for both settlement paths because the product's question is
+    /// "what did this kick cost" and not "which balance did it touch" — the
+    /// currency column already answers the second.
+    KickSpend = 8,
+    /// A Kick Point pack was bought: the coin leg out to the Fee account and the
+    /// mint leg that issues the points, one reason across both transactions.
+    KickPointsPurchase = 9,
 }
 
 impl Reason {
@@ -70,6 +80,8 @@ impl Reason {
             5 => Self::GameStake,
             6 => Self::GamePayout,
             7 => Self::Adjustment,
+            8 => Self::KickSpend,
+            9 => Self::KickPointsPurchase,
             _ => return None,
         })
     }
@@ -773,9 +785,9 @@ pub struct Caller {
     pub request_id: Option<String>,
 }
 
-/// An account's three balances at one instant.
+/// An account's four balances at one instant.
 ///
-/// Named fields rather than a map, because the three currencies are fixed and a caller
+/// Named fields rather than a map, because the currencies are fixed and a caller
 /// asking for the coins balance should not have to handle the case where the map has no
 /// `coins` key. A balance the account has never held reads as zero, which is what it is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -786,6 +798,8 @@ pub struct Wallet {
     pub gems: i64,
     /// Non-transferable reputation.
     pub points: i64,
+    /// Prepaid kick credit: one point settles one outright kick before any coin is asked.
+    pub kick_points: i64,
 }
 
 impl Wallet {
@@ -796,6 +810,7 @@ impl Wallet {
             Currency::Coins => self.coins,
             Currency::Gems => self.gems,
             Currency::Points => self.points,
+            Currency::KickPoints => self.kick_points,
         }
     }
 
@@ -805,6 +820,7 @@ impl Wallet {
             Currency::Coins => self.coins = amount,
             Currency::Gems => self.gems = amount,
             Currency::Points => self.points = amount,
+            Currency::KickPoints => self.kick_points = amount,
         }
     }
 }
@@ -1027,6 +1043,41 @@ pub struct PurchaseOutcome {
     pub duplicate: bool,
 }
 
+/// The Kick Point packs a deployment sells: `(points, price in coins)`, ascending.
+///
+/// A table rather than a formula because a price is a merchandising decision, not
+/// arithmetic: the bulk discount is what makes buying points cheaper than paying one
+/// coin per kick, and the size of that discount is chosen, not derived. The `1` pack
+/// prices parity — a founder who expects to kick once should not be forced into a
+/// bundle — while the larger packs reward the founders who police their groups often.
+pub const KP_PACKS: &[(u32, i64)] = &[(1, 1), (10, 9), (50, 40)];
+
+/// What settling one outright kick produced.
+///
+/// Which path the price took, for the caller's ledger and the dashboards: a spent
+/// Kick Point is a different story than a paid coin, and the tariff's contract is
+/// to tell it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KickCharge {
+    /// Whether one Kick Point was burned to settle the price.
+    pub spent_kick_point: bool,
+    /// How many coins were charged: one when the kicker held no Kick Point, zero
+    /// when one was spent instead.
+    pub paid_coins: i64,
+}
+
+/// What buying a Kick Point pack produced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KpPurchase {
+    /// The caller's Kick Point balance after the buy.
+    pub kick_points: i64,
+    /// What the pack cost, in coins.
+    pub price: i64,
+    /// Whether a repeated idempotency key returned the earlier buy rather than
+    /// charging again.
+    pub duplicate: bool,
+}
+
 /// Which population a leaderboard ranks, owned so the trait method holds no borrow.
 ///
 /// A mirror of [`migo_store::model::Scope`] that owns its country string. The store's `Scope`
@@ -1136,6 +1187,8 @@ mod tests {
             Reason::GameStake,
             Reason::GamePayout,
             Reason::Adjustment,
+            Reason::KickSpend,
+            Reason::KickPointsPurchase,
         ] {
             assert_eq!(Reason::from_i16(r.to_i16()), Some(r));
         }

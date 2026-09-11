@@ -67,8 +67,8 @@ pub use crate::catalogue::Catalogue;
 pub use crate::model::{
     level_for_xp, xp_for_level, Attributes, Award, AwardOutcome, Badge, BadgeGrant, Board,
     BoardScope, Caller, Category, EconomyConfig, Gift, GiftOutcome, GiftTally, Grant, GrantReceipt,
-    LedgerEntry, Listing, Price, ProgressionView, PurchaseOutcome, Rank, Reason, SendGift, Sku,
-    Source, Wallet, Window, MAX_SKU_LEN,
+    KickCharge, KpPurchase, LedgerEntry, Listing, Price, ProgressionView, PurchaseOutcome, Rank,
+    Reason, SendGift, Sku, Source, Wallet, Window, KP_PACKS, MAX_SKU_LEN,
 };
 pub use crate::service::{open, Economy};
 pub use crate::traits::{

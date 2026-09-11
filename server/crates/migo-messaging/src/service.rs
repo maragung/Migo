@@ -88,7 +88,7 @@ use crate::model::{
     Caller, DEFAULT_CONVERSATION_PAGE, MAX_EXPIRY_MS, MAX_GROUP_MEMBERS, MAX_TITLE_LEN,
     MEMBER_PREVIEW, SYNC_BUDGET_BYTES, TYPING_TTL_MS, VOTE_TTL_MS,
 };
-use crate::traits::{Messaging, RoomSpeak, SharedMessageGate};
+use crate::traits::{KickTariff, Messaging, RoomSpeak, SharedKickTariff, SharedMessageGate};
 
 /// A shared, fully erased messaging service.
 pub type SharedMessaging = Arc<dyn Messaging>;
@@ -107,6 +107,11 @@ pub struct Messages<S: ?Sized = dyn Store, C: ?Sized = dyn Cache, L: ?Sized = dy
     /// process that matters and the tests want to swap it wholesale, not
     /// specialise it.
     gate: SharedMessageGate,
+    /// The kick's one pricing question, asked of the economy through the port
+    /// [`KickTariff`] — erased for the same reason the gate is: exactly one
+    /// implementation matters in any process, and the tests want to swap it
+    /// wholesale.
+    tariff: SharedKickTariff,
     /// The randomness source, behind a lock because [`Random`] is `Send` and not
     /// `Sync`.
     ///
@@ -159,6 +164,7 @@ pub fn open(
     cache: SharedCache,
     limiter: SharedRateLimiter,
     gate: SharedMessageGate,
+    tariff: SharedKickTariff,
     registry: &Registry,
 ) -> SharedMessaging {
     Arc::new(Messages::new(
@@ -166,6 +172,7 @@ pub fn open(
         cache,
         limiter,
         gate,
+        tariff,
         registry,
         Box::new(OsRandom) as Box<dyn Random>,
     ))
@@ -186,6 +193,7 @@ where
         cache: Arc<C>,
         limiter: Arc<L>,
         gate: SharedMessageGate,
+        tariff: SharedKickTariff,
         registry: &Registry,
         random: Box<dyn Random>,
     ) -> Self {
@@ -194,6 +202,7 @@ where
             cache,
             limiter,
             gate,
+            tariff,
             random: Mutex::new(random),
             meters: Meters::new(registry),
             votes: Mutex::new(HashMap::new()),
@@ -1572,6 +1581,20 @@ where
                 "the other founder is beyond a founder's kick",
             ));
         }
+
+        // The kick's price, settled between the last validation and the removal
+        // itself: a tariff that refuses leaves the member exactly where they
+        // were, with nothing spent and nothing removed. Ordering the other way —
+        // charging first — would let an error in the membership checks above
+        // charge a founder for a kick that never happens.
+        self.tariff
+            .charge_kick(
+                caller.account_id,
+                request.conversation_id,
+                request.target_id,
+                caller.now,
+            )
+            .await?;
 
         self.store
             .remove_member(request.conversation_id, request.target_id, caller.now)

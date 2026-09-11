@@ -2950,13 +2950,18 @@ export function decodeWalletReq(r: Reader): WalletReq {
 export interface WalletView {
   balance: number;
   points: number;
+  /** Kick Points held; absent on nodes that predate them (reads as zero). */
+  kickPoints?: number;
 }
 
 export function encodeWalletView(w: Writer, v: WalletView): void {
   w.enter();
   w.u64(v.balance);
   w.u64(v.points);
-  w.u32(0);
+  let present = 0;
+  if (v.kickPoints !== undefined) present++;
+  w.u32(present);
+  if (v.kickPoints !== undefined) { const value = v.kickPoints; w.optional(1, (w) => { w.u64(value); }); }
   w.leave();
 }
 
@@ -2966,9 +2971,13 @@ export function decodeWalletView(r: Reader): WalletView {
   const points = r.u64();
   const out: WalletView = { balance, points } as WalletView;
   const optionalCount = r.u32();
-  // No optional fields in this version of the struct. Each entry is length-delimited,
-  // so reading it is skipping it, and a newer peer may well have sent one.
-  for (let i = 0; i < optionalCount; i++) r.optional();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.kickPoints = sub.u64(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
   r.leave();
   return out;
 }
@@ -6644,6 +6653,68 @@ export function decodeStorePurchaseResult(r: Reader): StorePurchaseResult {
   return out;
 }
 
+/** Buys one Kick Point pack: the price of an outright kick, prepaid at a bulk discount. */
+export interface KickPointsBuy {
+  /** Pack size, one of the node's packs — 1, 10, or 50 KP. */
+  packKp: number;
+  /** Caller's idempotency key; a repeat returns the first purchase. */
+  clientKey: string;
+}
+
+export function encodeKickPointsBuy(w: Writer, v: KickPointsBuy): void {
+  w.enter();
+  w.u32(v.packKp);
+  w.str(v.clientKey);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeKickPointsBuy(r: Reader): KickPointsBuy {
+  r.enter();
+  const packKp = r.u32();
+  const clientKey = r.str();
+  const out: KickPointsBuy = { packKp, clientKey } as KickPointsBuy;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
+/** The buy's answer: the new Kick Point balance, what the pack cost, and whether this call was a repeat. */
+export interface KickPointsBuyResult {
+  /** The Kick Point balance after the buy. */
+  kickPoints: number;
+  /** What the pack cost, in coins. */
+  price: number;
+  /** True when a repeated client_key returned the earlier buy rather than charging again. */
+  duplicate: boolean;
+}
+
+export function encodeKickPointsBuyResult(w: Writer, v: KickPointsBuyResult): void {
+  w.enter();
+  w.u64(v.kickPoints);
+  w.u64(v.price);
+  w.bool(v.duplicate);
+  w.u32(0);
+  w.leave();
+}
+
+export function decodeKickPointsBuyResult(r: Reader): KickPointsBuyResult {
+  r.enter();
+  const kickPoints = r.u64();
+  const price = r.u64();
+  const duplicate = r.bool();
+  const out: KickPointsBuyResult = { kickPoints, price, duplicate } as KickPointsBuyResult;
+  const optionalCount = r.u32();
+  // No optional fields in this version of the struct. Each entry is length-delimited,
+  // so reading it is skipping it, and a newer peer may well have sent one.
+  for (let i = 0; i < optionalCount; i++) r.optional();
+  r.leave();
+  return out;
+}
+
 /** Empty; the caller's own entitlements are the session's. */
 export interface EntitlementsReq {
 }
@@ -6897,6 +6968,7 @@ export const OP = {
   STORE_PURCHASE: 239,
   /** Everything the caller owns, oldest first. */
   ENTITLEMENTS: 240,
+  KICK_POINTS_BUY: 168,
 } as const;
 export type OpcodeValue = (typeof OP)[keyof typeof OP];
 
@@ -7032,6 +7104,7 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   52: { code: 52, name: 'CONVERSATION_STATE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ConversationStateEvent', coalesceKey: 'conversation_id' },
   239: { code: 239, name: 'STORE_PURCHASE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'StorePurchase', response: 'StorePurchaseResult' },
   240: { code: 240, name: 'ENTITLEMENTS', cost: 1, cls: 'Droppable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'EntitlementsReq', response: 'EntitlementsResponse' },
+  168: { code: 168, name: 'KICK_POINTS_BUY', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'KickPointsBuy', response: 'KickPointsBuyResult' },
 };
 
 export function opcodeName(code: number): string {

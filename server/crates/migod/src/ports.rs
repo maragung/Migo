@@ -16,6 +16,10 @@
 //!   the seam that lets a finished game credit experience and a win confer a badge. It is the one
 //!   place two sibling domains (games and economy) meet, and by layering rule they meet only here,
 //!   in the composition root, never by depending on each other.
+//! - [`EconomyKickTariff`] implements [`migo_messaging::KickTariff`] over
+//!   [`migo_economy::SharedTreasurer`]: the seam that lets an outright kick carry its price — a
+//!   Kick Point spent first, a coin when there is none, a refusal when the kicker holds neither.
+//!   Messaging and economy are siblings too, and they meet only here as well.
 //! - [`StoreCallGate`] implements [`migo_calls::CallGate`]: the membership, block, and
 //!   social-graph questions the call service must ask before it lets one account ring
 //!   another. Calls cannot read those tables themselves — same layering rule, same answer:
@@ -37,6 +41,7 @@ use migo_core::{Id, Result, Timestamp};
 use migo_economy::{Award, Badge, BadgeGrant, SharedTreasurer, Source};
 use migo_games::Rewards;
 use migo_media::{Grant, Head, Storage, SNIFF_BYTES};
+use migo_messaging::KickTariff;
 use migo_moderation::{Powers, Roster};
 use migo_protocol::fault;
 
@@ -254,6 +259,46 @@ impl Rewards for EconomyRewards {
             })
             .await?;
         Ok(())
+    }
+}
+
+/// Implements [`migo_messaging::KickTariff`] over [`migo_economy::SharedTreasurer`]:
+/// the seam that lets a founder's outright kick carry its price. It is the one place
+/// messaging and economy meet, and by the layering rule they meet only here, in the
+/// composition root — the same answer the games seam above gives, never a dependency
+/// between the sibling crates.
+///
+/// The adapter is thin on purpose: the treasurer's own
+/// [`charge_kick`](migo_economy::Treasurer::charge_kick) owns the pricing order (a
+/// Kick Point spent before a coin is asked, a refusal when the kicker holds neither)
+/// and the idempotency that keeps a retried kick from paying twice. All this adapter
+/// adds is the `Result` that says "the price was settled"; the `KickCharge` detail the
+/// treasurer returns is the ledger's business, not the kick's.
+pub struct EconomyKickTariff {
+    treasurer: SharedTreasurer,
+}
+
+impl EconomyKickTariff {
+    /// Wraps a treasurer as the messaging kick tariff.
+    #[must_use]
+    pub fn new(treasurer: SharedTreasurer) -> Self {
+        Self { treasurer }
+    }
+}
+
+#[async_trait]
+impl KickTariff for EconomyKickTariff {
+    async fn charge_kick(
+        &self,
+        kicker: Id,
+        conversation_id: Id,
+        target_id: Id,
+        at: Timestamp,
+    ) -> Result<()> {
+        self.treasurer
+            .charge_kick(kicker, conversation_id, target_id, at)
+            .await
+            .map(|_| ())
     }
 }
 

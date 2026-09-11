@@ -31,17 +31,23 @@ use crate::model::{Badge, Category, Gift, Source};
 ///
 /// [`Currency`] lives in `migo-store` and carries no label of its own — a store has no
 /// reason to name a currency for a dashboard — so the label is defined here, where the
-/// dashboard is. Three values, closed.
+/// dashboard is. Four values, closed.
 const fn currency_label(currency: Currency) -> &'static str {
     match currency {
         Currency::Coins => "coins",
         Currency::Gems => "gems",
         Currency::Points => "points",
+        Currency::KickPoints => "kick_points",
     }
 }
 
-/// The three currencies, in wire order, for registering every grant series at zero.
-const CURRENCIES: [Currency; 3] = [Currency::Coins, Currency::Gems, Currency::Points];
+/// The four currencies, in wire order, for registering every grant series at zero.
+const CURRENCIES: [Currency; 4] = [
+    Currency::Coins,
+    Currency::Gems,
+    Currency::Points,
+    Currency::KickPoints,
+];
 
 /// What happened when a transaction was posted.
 ///

@@ -138,6 +138,7 @@ mod tests {
             std::sync::Arc::new(migo_cache::MemoryCache::new()),
             limiter.into(),
             gate,
+            std::sync::Arc::new(migo_messaging::FreeKicks),
             &registry,
             Box::new(migo_core::SeededRandom::new(0x5eed_9001)) as Box<dyn migo_core::Random>,
         ));

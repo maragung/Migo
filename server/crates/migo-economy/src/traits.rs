@@ -3,12 +3,13 @@
 //! # Two shapes of method, and why they differ
 //!
 //! Every method that a client reaches takes a [`Caller`]: it is spending its own money or
-//! reading its own standing, and the rate limiter charges its budget. The three that do not
-//! — [`Treasurer::grant`], [`Treasurer::award`], [`Treasurer::award_badge`] — are the
-//! server crediting somebody, on behalf of an event it already observed. A client cannot ask
-//! for XP, currency, or a badge, because there is no method with which to ask; the crate that
-//! observed the game or the event calls those through its own port, and the composition root
-//! wires this service in as the implementation.
+//! reading its own standing, and the rate limiter charges its budget. The ones that do not
+//! — [`Treasurer::grant`], [`Treasurer::award`], [`Treasurer::award_badge`], and
+//! [`Treasurer::charge_kick`] — are the server acting on somebody's balance, on behalf of
+//! an event it already observed or a kick it already priced. A client cannot ask for XP,
+//! currency, or a badge, because there is no method with which to ask; the crate that
+//! observed the game or the event calls those through its own port, and the composition
+//! root wires this service in as the implementation.
 //!
 //! # Why awarding does not depend on `migo-games` or `migo-notify`
 //!
@@ -29,7 +30,8 @@ use migo_store::model::{BadgeAward, Currency, Entitlement, GiftSent};
 
 use crate::model::{
     Award, AwardOutcome, BadgeGrant, Board, Caller, GiftOutcome, GiftTally, Grant, GrantReceipt,
-    LedgerEntry, Listing, ProgressionView, PurchaseOutcome, Rank, SendGift, Sku, Wallet,
+    KickCharge, KpPurchase, LedgerEntry, Listing, ProgressionView, PurchaseOutcome, Rank, SendGift,
+    Sku, Wallet,
 };
 
 /// One thing worth telling somebody about: a gift arrived, a level rose, a badge was earned.
@@ -98,7 +100,7 @@ pub trait Treasurer: Send + Sync {
     /// The listing for one code, if it is sold.
     fn listing(&self, sku: &Sku) -> Option<Listing>;
 
-    /// The caller's three balances.
+    /// The caller's balances, one field per currency.
     async fn wallet(&self, caller: &Caller) -> Result<Wallet>;
 
     /// The caller's recent movements in one currency, newest first.
@@ -181,6 +183,34 @@ pub trait Treasurer: Send + Sync {
     /// [`Announcer`]; a repeat grant is silent, because nobody wants to be congratulated
     /// twice for the same badge.
     async fn award_badge(&self, grant: BadgeGrant) -> Result<bool>;
+
+    /// Prices one outright group kick for the kicker and settles it.
+    ///
+    /// A held Kick Point is spent first; without one, one coin is charged; without
+    /// either, the kick is refused with `INSUFFICIENT_BALANCE` naming both. Server-facing
+    /// — no `Caller` and no rate charge, because the call rides inside the messaging
+    /// tariff's kick, which has already charged the kick's own budget. Idempotent on
+    /// the (kicker, conversation, target) triple, so a retried kick never pays twice.
+    async fn charge_kick(
+        &self,
+        kicker: Id,
+        conversation_id: Id,
+        target_id: Id,
+        at: Timestamp,
+    ) -> Result<KickCharge>;
+
+    /// Buys one Kick Point pack for the caller's own account.
+    ///
+    /// Coins out to the Fee account, points in from the Mint, both legs idempotent on
+    /// the caller's client key. A `pack_kp` the deployment does not sell is refused with
+    /// `VALIDATION_FAILED` before anything moves; an unaffordable pack is refused with
+    /// `INSUFFICIENT_BALANCE` before the mint leg runs.
+    async fn buy_kick_points(
+        &self,
+        caller: &Caller,
+        pack_kp: u32,
+        client_key: &str,
+    ) -> Result<KpPurchase>;
 }
 
 /// The economy service, shared.

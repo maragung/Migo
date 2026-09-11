@@ -23,7 +23,9 @@ use migo_core::{Id, Random, Result, SeededRandom, Timestamp};
 use migo_messaging::fanout::Broadcast;
 use migo_messaging::model::{Caller, MAX_GROUP_MEMBERS};
 use migo_messaging::service::Messages;
-use migo_messaging::traits::{MessageGate, Messaging, RoomSpeak};
+use migo_messaging::traits::{
+    FreeKicks, KickTariff, MessageGate, Messaging, RoomSpeak, SharedKickTariff,
+};
 use migo_protocol::{
     codes, ConversationCreateRequest, ConversationInviteRequest, ConversationKickRequest,
     ConversationKind, ConversationLeaveRequest, ConversationListRequest, ConversationMuteRequest,
@@ -124,6 +126,44 @@ impl Harness {
             Arc::clone(&cache),
             limiter,
             erased,
+            std::sync::Arc::new(FreeKicks),
+            &registry,
+            Box::new(SeededRandom::new(0x5eed_9001)) as Box<dyn Random>,
+        );
+        Self {
+            messaging,
+            store,
+            cache,
+            registry,
+            gate,
+        }
+    }
+
+    /// The harness with a chosen kick tariff, for the tests that price kicks.
+    ///
+    /// The same collaborators as [`Harness::new`] with one swap: the tariff the
+    /// kick path asks. Everything else — store, cache, limiter, gate — is the
+    /// same, so a difference in behaviour is the tariff's and nothing else's.
+    fn with_tariff(tariff: SharedKickTariff) -> Self {
+        let config = Config::default();
+        let store = Arc::new(MemoryStore::new());
+        let cache = Arc::new(MemoryCache::new());
+        let registry = Registry::new();
+        let policies =
+            Policies::from_config(&config.rate_limit).expect("default policies are valid");
+        let limiter = Arc::new(CacheRateLimiter::new(
+            Arc::clone(&cache),
+            policies,
+            &registry,
+        ));
+        let gate = Arc::new(TestGate::open());
+        let erased: Arc<dyn MessageGate> = gate.clone();
+        let messaging = Messages::new(
+            Arc::clone(&store),
+            Arc::clone(&cache),
+            limiter,
+            erased,
+            tariff,
             &registry,
             Box::new(SeededRandom::new(0x5eed_9001)) as Box<dyn Random>,
         );
@@ -2332,6 +2372,150 @@ async fn a_founder_kicks_without_a_vote_and_the_other_founder_is_beyond_it() {
             )
             .await,
         codes::VALIDATION_FAILED,
+    );
+}
+
+/// A tariff that records every question it is asked.
+///
+/// The kick path's contract with the tariff is one question with three ids and a time;
+/// this double answers it and keeps what it was asked, so a test can assert the kicker,
+/// the conversation, and the target the service named — the triple the economy's
+/// idempotency key is built from, which makes the exact values load-bearing rather than
+/// incidental.
+struct RecordingTariff {
+    asked: std::sync::Mutex<Vec<(Id, Id, Id)>>,
+}
+
+impl RecordingTariff {
+    fn new() -> Self {
+        Self {
+            asked: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Every question, in order.
+    fn questions(&self) -> Vec<(Id, Id, Id)> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl KickTariff for RecordingTariff {
+    async fn charge_kick(
+        &self,
+        kicker: Id,
+        conversation_id: Id,
+        target_id: Id,
+        _at: Timestamp,
+    ) -> Result<()> {
+        self.asked.lock().unwrap().push((kicker, conversation_id, target_id));
+        Ok(())
+    }
+}
+
+/// A tariff that refuses every kick, for the refusal path.
+struct RefusingTariff;
+
+#[async_trait::async_trait]
+impl KickTariff for RefusingTariff {
+    async fn charge_kick(
+        &self,
+        _kicker: Id,
+        _conversation_id: Id,
+        _target_id: Id,
+        _at: Timestamp,
+    ) -> Result<()> {
+        Err(migo_core::Error::new(
+            codes::INSUFFICIENT_BALANCE,
+            "a kick needs a Kick Point or 1 MGO",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn a_kick_prices_through_the_tariff_and_a_refusal_leaves_the_member_in_place() {
+    let tariff = Arc::new(RecordingTariff::new());
+    let harness = Harness::with_tariff(tariff.clone());
+    let conversation = harness.group(MINUTE).await;
+
+    // The happy path: the tariff is asked once, with the triple the economy keys its
+    // idempotency on — the founder who kicks, the group, the member removed — and the
+    // removal then lands.
+    harness
+        .messaging
+        .kick(
+            &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+            ConversationKickRequest {
+                conversation_id: conversation,
+                target_id: id(CAROL),
+            },
+        )
+        .await
+        .expect("a priced kick still lands");
+    assert_eq!(
+        tariff.questions(),
+        vec![(id(ALICE), conversation, id(CAROL))],
+        "the tariff is asked exactly the kicker, conversation, and target"
+    );
+
+    // The refusal: a founder the tariff refuses keeps their member. Nothing about the
+    // group changed — the roster still carries the target — and the error is the
+    // tariff's own, because the price is the economy's to state.
+    let harness = Harness::with_tariff(Arc::new(RefusingTariff));
+    let conversation = harness.group(MINUTE).await;
+    expect_code(
+        harness
+            .messaging
+            .kick(
+                &caller(ALICE, ALICE_PHONE, 2 * MINUTE),
+                ConversationKickRequest {
+                    conversation_id: conversation,
+                    target_id: id(CAROL),
+                },
+            )
+            .await,
+        codes::INSUFFICIENT_BALANCE,
+    );
+    let roster = harness
+        .messaging
+        .roster(
+            &caller(ALICE, ALICE_PHONE, 3 * MINUTE),
+            ConversationRosterRequest {
+                conversation_id: conversation,
+                ..ConversationRosterRequest::default()
+            },
+        )
+        .await
+        .expect("the roster still reads");
+    assert!(
+        roster
+            .members
+            .iter()
+            .any(|member| member.user_id == id(CAROL)),
+        "a refused price leaves the member exactly where they were"
+    );
+
+    // And a non-founder is refused before the tariff is ever asked: the price of a kick
+    // is only a founder's to pay.
+    let tariff = Arc::new(RecordingTariff::new());
+    let harness = Harness::with_tariff(tariff.clone());
+    let conversation = harness.group(MINUTE).await;
+    expect_code(
+        harness
+            .messaging
+            .kick(
+                &caller(CAROL, 103, 2 * MINUTE),
+                ConversationKickRequest {
+                    conversation_id: conversation,
+                    target_id: id(BOB),
+                },
+            )
+            .await,
+        codes::PERMISSION_DENIED,
+    );
+    assert!(
+        tariff.questions().is_empty(),
+        "the permission check runs before the price"
     );
 }
 

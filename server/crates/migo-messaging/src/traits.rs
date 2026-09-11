@@ -399,3 +399,51 @@ impl MessageGate for OpenGate {
         }
     }
 }
+
+/// The one pricing question an outright kick must ask: what does removing this
+/// member cost the kicker, and can they afford it?
+///
+/// The port exists for the same layering reason [`MessageGate`] does: pricing
+/// is the economy's to answer, and a layer-3 crate never depends on a sibling.
+/// The composition root joins them, handing this service a tariff backed by the
+/// treasurer — which spends a held Kick Point first, charges one coin when
+/// there is none, and refuses the kick when the founder holds neither. A
+/// refusal propagates as the tariff's own error, and the kick is then the
+/// caller's problem to relabel, not this crate's.
+#[async_trait]
+pub trait KickTariff: Send + Sync {
+    /// Settles the price of one outright kick. `Err` refuses the kick.
+    async fn charge_kick(
+        &self,
+        kicker: Id,
+        conversation_id: Id,
+        target_id: Id,
+        at: Timestamp,
+    ) -> Result<()>;
+}
+
+/// The tariff that charges nothing.
+///
+/// The default when a deployment has wired no economy, which is the normal
+/// state of a development node and of every test that is not testing the kick
+/// price. Kicks stay free rather than refused because a missing price is not a
+/// policy decision anyone made — the same reasoning that makes [`OpenGate`]
+/// permissive for the send path's gate questions.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FreeKicks;
+
+#[async_trait]
+impl KickTariff for FreeKicks {
+    async fn charge_kick(
+        &self,
+        _kicker: Id,
+        _conversation_id: Id,
+        _target_id: Id,
+        _at: Timestamp,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// A shared, fully erased tariff.
+pub type SharedKickTariff = Arc<dyn KickTariff>;

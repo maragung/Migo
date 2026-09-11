@@ -54,8 +54,9 @@ use crate::catalogue::Catalogue;
 use crate::metrics::{CacheOutcome, Meters, TxOutcome};
 use crate::model::{
     level_for_xp, Award, AwardOutcome, BadgeGrant, Board, BoardScope, Caller, Category,
-    EconomyConfig, GiftOutcome, GiftTally, Grant, GrantReceipt, LedgerEntry, Listing,
-    ProgressionView, PurchaseOutcome, Rank, Reason, SendGift, Sku, Wallet, Window,
+    EconomyConfig, GiftOutcome, GiftTally, Grant, GrantReceipt, KickCharge, KpPurchase,
+    LedgerEntry, Listing, ProgressionView, PurchaseOutcome, Rank, Reason, SendGift, Sku, Wallet,
+    Window, KP_PACKS,
 };
 use crate::traits::{Announcement, Announcer, SharedAnnouncer, SharedTreasurer, Treasurer};
 
@@ -70,6 +71,10 @@ const READ_COST: u32 = 3;
 /// What a leaderboard page costs. Dearer than a plain read: even cached, it is a page a client
 /// polls, and the budget is what stops one client polling a board into a hot loop.
 const LEADERBOARD_COST: u32 = 5;
+/// What buying a Kick Point pack costs the buyer's budget (`KICK_POINTS_BUY`). Priced like a
+/// leaderboard read rather than a gift: the buy is small and infrequent, but it is still a
+/// wallet write the budget should meter.
+const KP_BUY_COST: u32 = 5;
 
 /// One day in milliseconds, the span of section 30's anti-farming caps.
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -303,7 +308,12 @@ where
         // One balance per currency. Reading creates the account if it is absent, which is the
         // only way the store exposes a balance and is harmless: a fresh account reads as zero.
         let mut wallet = Wallet::default();
-        for currency in [Currency::Coins, Currency::Gems, Currency::Points] {
+        for currency in [
+            Currency::Coins,
+            Currency::Gems,
+            Currency::Points,
+            Currency::KickPoints,
+        ] {
             let account = self
                 .account_for(
                     Some(caller.account_id),
@@ -832,6 +842,209 @@ where
             .await;
         }
         Ok(granted)
+    }
+
+    async fn charge_kick(
+        &self,
+        kicker: Id,
+        conversation_id: Id,
+        target_id: Id,
+        at: Timestamp,
+    ) -> Result<KickCharge> {
+        // The prepaid path first: a held Kick Point settles the kick before any coin is
+        // asked for. Reading the balance (which creates the account if absent — a fresh
+        // account reads as zero) and then posting is the same shape `purchase` takes: the
+        // overdraft floor below is the authority on affordability, not a check here, so a
+        // balance spent between the read and the post is refused by the store rather than
+        // honoured by a stale number.
+        let points = self
+            .account_for(
+                Some(kicker),
+                LedgerAccountKind::User,
+                Currency::KickPoints,
+                at,
+            )
+            .await?;
+        if self.store.balance(points).await? >= 1 {
+            let mint = self
+                .account_for(None, LedgerAccountKind::Mint, Currency::KickPoints, at)
+                .await?;
+            self.post(NewTransaction {
+                tx_id: self.new_id(at),
+                reason: Reason::KickSpend.to_i16(),
+                ref_id: Some(conversation_id),
+                idempotency_key: format!("kick:{kicker}:{conversation_id}:{target_id}"),
+                created_by: Some(kicker),
+                currency: Currency::KickPoints,
+                legs: vec![
+                    LedgerLeg {
+                        ledger_account_id: points,
+                        amount: -1,
+                    },
+                    LedgerLeg {
+                        ledger_account_id: mint,
+                        amount: 1,
+                    },
+                ],
+                receipt: None,
+                created_at: at,
+            })
+            .await?;
+            return Ok(KickCharge {
+                spent_kick_point: true,
+                paid_coins: 0,
+            });
+        }
+
+        // No Kick Point: the kick costs one coin, taken to the Fee account. A kicker who
+        // holds neither is refused here by the overdraft floor — the one answer that keeps
+        // the member in place — and the message names both doors out, because "balance too
+        // low" does not tell a founder they could have bought a point instead.
+        let payer = self
+            .account_for(Some(kicker), LedgerAccountKind::User, Currency::Coins, at)
+            .await?;
+        let fee = self
+            .account_for(None, LedgerAccountKind::Fee, Currency::Coins, at)
+            .await?;
+        let posted = self
+            .post(NewTransaction {
+                tx_id: self.new_id(at),
+                reason: Reason::KickSpend.to_i16(),
+                ref_id: Some(conversation_id),
+                idempotency_key: format!("kick:{kicker}:{conversation_id}:{target_id}"),
+                created_by: Some(kicker),
+                currency: Currency::Coins,
+                legs: vec![
+                    LedgerLeg {
+                        ledger_account_id: payer,
+                        amount: -1,
+                    },
+                    LedgerLeg {
+                        ledger_account_id: fee,
+                        amount: 1,
+                    },
+                ],
+                receipt: None,
+                created_at: at,
+            })
+            .await;
+        match posted {
+            Ok(_) => Ok(KickCharge {
+                spent_kick_point: false,
+                paid_coins: 1,
+            }),
+            // The overdraft floor's own message speaks of a balance; a founder who cannot
+            // kick needs the product's price, not the ledger's mechanics.
+            Err(error) if error.code() == codes::INSUFFICIENT_BALANCE => Err(fault::error(
+                codes::INSUFFICIENT_BALANCE,
+                "a kick needs a Kick Point or 1 MGO",
+            )),
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn buy_kick_points(
+        &self,
+        caller: &Caller,
+        pack_kp: u32,
+        client_key: &str,
+    ) -> Result<KpPurchase> {
+        self.charge(caller, KP_BUY_COST).await?;
+        // The pack table is the deployment's price list; a size it does not sell is a
+        // malformed request rather than a best-effort guess at what was meant, refused
+        // before anything is priced.
+        let price = KP_PACKS
+            .iter()
+            .find(|(kp, _)| *kp == pack_kp)
+            .map(|(_, price)| *price)
+            .ok_or_else(|| fault::validation("pack_kp", "not a pack this node sells"))?;
+
+        // Transaction one — the caller pays, coins out to the Fee account, keyed on the
+        // caller's client key so a retry returns the original rather than charging twice.
+        let payer = self
+            .account_for(
+                Some(caller.account_id),
+                LedgerAccountKind::User,
+                Currency::Coins,
+                caller.now,
+            )
+            .await?;
+        let fee = self
+            .account_for(None, LedgerAccountKind::Fee, Currency::Coins, caller.now)
+            .await?;
+        let posted = self
+            .post(NewTransaction {
+                tx_id: self.new_id(caller.now),
+                reason: Reason::KickPointsPurchase.to_i16(),
+                ref_id: None,
+                idempotency_key: format!("kp_buy_pay:{}:{client_key}", caller.account_id),
+                created_by: Some(caller.account_id),
+                currency: Currency::Coins,
+                legs: vec![
+                    LedgerLeg {
+                        ledger_account_id: payer,
+                        amount: -price,
+                    },
+                    LedgerLeg {
+                        ledger_account_id: fee,
+                        amount: price,
+                    },
+                ],
+                receipt: None,
+                created_at: caller.now,
+            })
+            .await?;
+
+        // Transaction two — the points are issued from the Mint, keyed on the same client
+        // key so a retry that already minted does not mint again. The two legs are separate
+        // transactions because a transaction carries one currency and this one is Kick
+        // Points while the payment was Coins — the same reason a gift's purchase and its
+        // reputation half are two. If the process dies between them, the retry re-posts
+        // both keys: the payment reads as a duplicate and the mint still happens, so a
+        // caller is never left having paid for points that never arrived.
+        let buyer = self
+            .account_for(
+                Some(caller.account_id),
+                LedgerAccountKind::User,
+                Currency::KickPoints,
+                caller.now,
+            )
+            .await?;
+        let mint = self
+            .account_for(
+                None,
+                LedgerAccountKind::Mint,
+                Currency::KickPoints,
+                caller.now,
+            )
+            .await?;
+        self.post(NewTransaction {
+            tx_id: self.new_id(caller.now),
+            reason: Reason::KickPointsPurchase.to_i16(),
+            ref_id: None,
+            idempotency_key: format!("kp_buy_mint:{}:{client_key}", caller.account_id),
+            created_by: Some(caller.account_id),
+            currency: Currency::KickPoints,
+            legs: vec![
+                LedgerLeg {
+                    ledger_account_id: mint,
+                    amount: -i64::from(pack_kp),
+                },
+                LedgerLeg {
+                    ledger_account_id: buyer,
+                    amount: i64::from(pack_kp),
+                },
+            ],
+            receipt: None,
+            created_at: caller.now,
+        })
+        .await?;
+
+        Ok(KpPurchase {
+            kick_points: self.store.balance(buyer).await?,
+            price,
+            duplicate: !posted.is_new(),
+        })
     }
 }
 

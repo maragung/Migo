@@ -5003,6 +5003,8 @@ impl Decode for WalletReq {
 pub struct WalletView {
     pub balance: u64,
     pub points: u64,
+    /// Kick Points held; absent on nodes that predate them (reads as zero).
+    pub kick_points: Option<u64>,
 }
 
 impl Encode for WalletView {
@@ -5010,7 +5012,14 @@ impl Encode for WalletView {
         w.enter()?;
         w.write_u64(self.balance);
         w.write_u64(self.points);
-        w.write_u32(0);
+        let present = usize::from(self.kick_points.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.kick_points {
+            w.optional(1, |w| {
+                w.write_u64(*v);
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -5024,9 +5033,12 @@ impl Decode for WalletView {
         out.points = r.read_u64()?;
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
-            // No optional fields are defined for this struct in this
-            // protocol build; a newer peer's fields are skipped by length.
-            let _ = r.read_optional()?;
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.kick_points = Some(sub.read_u64()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
         }
         r.leave();
         Ok(out)
@@ -10060,6 +10072,84 @@ impl Decode for StorePurchaseResult {
     }
 }
 
+/// Buys one Kick Point pack: the price of an outright kick, prepaid at a bulk discount.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct KickPointsBuy {
+    /// Pack size, one of the node's packs — 1, 10, or 50 KP.
+    pub pack_kp: u32,
+    /// Caller's idempotency key; a repeat returns the first purchase.
+    pub client_key: String,
+}
+
+impl Encode for KickPointsBuy {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u32(self.pack_kp);
+        w.write_str(&self.client_key)?;
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for KickPointsBuy {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.pack_kp = r.read_u32()?;
+        out.client_key = r.read_string()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
+/// The buy's answer: the new Kick Point balance, what the pack cost, and whether this call was a repeat.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct KickPointsBuyResult {
+    /// The Kick Point balance after the buy.
+    pub kick_points: u64,
+    /// What the pack cost, in coins.
+    pub price: u64,
+    /// True when a repeated client_key returned the earlier buy rather than charging again.
+    pub duplicate: bool,
+}
+
+impl Encode for KickPointsBuyResult {
+    fn encode(&self, w: &mut Writer) -> Result<()> {
+        w.enter()?;
+        w.write_u64(self.kick_points);
+        w.write_u64(self.price);
+        w.write_bool(self.duplicate);
+        w.write_u32(0);
+        w.leave();
+        Ok(())
+    }
+}
+
+impl Decode for KickPointsBuyResult {
+    fn decode(r: &mut Reader) -> Result<Self> {
+        r.enter()?;
+        let mut out = Self::default();
+        out.kick_points = r.read_u64()?;
+        out.price = r.read_u64()?;
+        out.duplicate = r.read_bool()?;
+        let optional_count = r.read_u32()?;
+        for _ in 0..optional_count {
+            // No optional fields are defined for this struct in this
+            // protocol build; a newer peer's fields are skipped by length.
+            let _ = r.read_optional()?;
+        }
+        r.leave();
+        Ok(out)
+    }
+}
+
 /// Empty; the caller's own entitlements are the session's.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EntitlementsReq {}
@@ -10379,6 +10469,7 @@ pub enum Opcode {
     StorePurchase = 239,
     /// Everything the caller owns, oldest first.
     Entitlements = 240,
+    KickPointsBuy = 168,
 }
 
 impl Opcode {
@@ -10509,6 +10600,7 @@ impl Opcode {
             52 => Self::ConversationStateEvent,
             239 => Self::StorePurchase,
             240 => Self::Entitlements,
+            168 => Self::KickPointsBuy,
             _ => return None,
         })
     }
@@ -10634,6 +10726,7 @@ impl Opcode {
             Self::ConversationStateEvent => "CONVERSATION_STATE_EVENT",
             Self::StorePurchase => "STORE_PURCHASE",
             Self::Entitlements => "ENTITLEMENTS",
+            Self::KickPointsBuy => "KICK_POINTS_BUY",
         }
     }
 
@@ -10759,6 +10852,7 @@ impl Opcode {
             Self::ConversationStateEvent => 0,
             Self::StorePurchase => 5,
             Self::Entitlements => 1,
+            Self::KickPointsBuy => 5,
         }
     }
 
@@ -10883,6 +10977,7 @@ impl Opcode {
             Self::ConversationStateEvent => DeliveryClass::Coalescable,
             Self::StorePurchase => DeliveryClass::Critical,
             Self::Entitlements => DeliveryClass::Droppable,
+            Self::KickPointsBuy => DeliveryClass::Critical,
         }
     }
 
@@ -11007,6 +11102,7 @@ impl Opcode {
             Self::ConversationStateEvent => AuthLevel::User,
             Self::StorePurchase => AuthLevel::User,
             Self::Entitlements => AuthLevel::User,
+            Self::KickPointsBuy => AuthLevel::User,
         }
     }
 
@@ -11131,6 +11227,7 @@ impl Opcode {
             Self::ConversationStateEvent => Direction::ServerToClient,
             Self::StorePurchase => Direction::ClientToServer,
             Self::Entitlements => Direction::ClientToServer,
+            Self::KickPointsBuy => Direction::ClientToServer,
         }
     }
 
@@ -11256,6 +11353,7 @@ impl Opcode {
             Self::ConversationStateEvent => false,
             Self::StorePurchase => false,
             Self::Entitlements => false,
+            Self::KickPointsBuy => false,
         }
     }
 
@@ -11388,5 +11486,6 @@ impl Opcode {
         Self::ConversationStateEvent,
         Self::StorePurchase,
         Self::Entitlements,
+        Self::KickPointsBuy,
     ];
 }

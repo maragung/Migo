@@ -10,10 +10,13 @@
 //!
 //! # Opcode → method map
 //!
-//! | Opcode         | Wire payload    | Service method           | Response        |
-//! |----------------|-----------------|--------------------------|-----------------|
-//! | `GIFT_SEND`    | `GiftSend`      | `Treasurer::send_gift`   | `GiftSendResult`|
-//! | `BALANCE_FETCH`| `WalletReq`     | `Treasurer::wallet`      | `WalletView`    |
+//! | Opcode           | Wire payload      | Service method              | Response             |
+//! |------------------|-------------------|-----------------------------|----------------------|
+//! | `GIFT_SEND`      | `GiftSend`        | `Treasurer::send_gift`      | `GiftSendResult`     |
+//! | `BALANCE_FETCH`  | `WalletReq`       | `Treasurer::wallet`         | `WalletView`         |
+//! | `STORE_PURCHASE` | `StorePurchase`   | `Treasurer::purchase`       | `StorePurchaseResult`|
+//! | `ENTITLEMENTS`   | `EntitlementsReq` | `Treasurer::entitlements`   | `EntitlementsResponse`|
+//! | `KICK_POINTS_BUY`| `KickPointsBuy`   | `Treasurer::buy_kick_points`| `KickPointsBuyResult`|
 //!
 //! The wire names the gift by its catalogue slug (`GiftSend.gift`) and the recipient by id; the
 //! handler maps the slug onto the closed [`Gift`](migo_economy::Gift) enum the service prices
@@ -26,9 +29,11 @@ use migo_economy::{Caller as EconomyCaller, Gift, SendGift, SharedTreasurer, Sku
 use migo_gateway::ClientContext;
 use migo_protocol::{
     fault, from_frame, EconomyEvent, Entitlement, EntitlementsReq, EntitlementsResponse, Frame,
-    GiftSend, GiftSendResult, NotificationEvent, NotificationKind, Opcode, StorePurchase,
-    StorePurchaseResult, Topic, TopicKind, WalletReq, WalletView,
+    GiftSend, GiftSendResult, KickPointsBuy, KickPointsBuyResult, NotificationEvent,
+    NotificationKind, Opcode, StorePurchase, StorePurchaseResult, Topic, TopicKind, WalletReq,
+    WalletView,
 };
+use migo_store::model::Currency;
 
 /// Sends a gift from the session account to `GiftSend.recipient` and replies with the result.
 ///
@@ -146,6 +151,7 @@ pub(crate) async fn handle_balance_fetch(
     ctx.reply(&WalletView {
         balance: wallet.coins.max(0) as u64,
         points: wallet.points.max(0) as u64,
+        kick_points: Some(wallet.kick_points.max(0) as u64),
     })
 }
 
@@ -243,4 +249,58 @@ pub(crate) async fn handle_entitlements(
             })
             .collect(),
     })
+}
+
+/// Buys one Kick Point pack for the session account and replies with the new balance.
+///
+/// The wire carries the pack size and the caller's idempotency key; the service owns every
+/// rule — which packs exist, what each costs, whether the caller can afford one — and posts
+/// both legs (coins out, points in) idempotently. A first buy moves the caller's own wallet,
+/// so the same live balance tick a gift or a store purchase publishes follows the reply; a
+/// deduplicated retry is not a second buy and must not tick twice.
+pub(crate) async fn handle_kick_points_buy(
+    ctx: &ClientContext<'_>,
+    frame: &Frame,
+    svc: &SharedTreasurer,
+) -> Result<(), Error> {
+    let caller = EconomyCaller {
+        account_id: ctx.identity().account_id(),
+        device_id: ctx.identity().device_id(),
+        tier: ctx.identity().tier,
+        now: ctx.now(),
+        request_id: None,
+    };
+    let request: KickPointsBuy = from_frame(frame).map_err(fault::from_wire)?;
+    let outcome = svc
+        .buy_kick_points(&caller, request.pack_kp, &request.client_key)
+        .await?;
+    tracing::info!(
+        account = %caller.account_id,
+        pack_kp = request.pack_kp,
+        duplicate = outcome.duplicate,
+        "kick points bought"
+    );
+    ctx.reply(&KickPointsBuyResult {
+        kick_points: outcome.kick_points.max(0) as u64,
+        price: outcome.price.max(0) as u64,
+        duplicate: outcome.duplicate,
+    })?;
+
+    if !outcome.duplicate {
+        let topic = Topic {
+            kind: TopicKind::User,
+            id: caller.account_id,
+        };
+        ctx.publish(
+            &topic,
+            Opcode::EconomyEvent,
+            &EconomyEvent {
+                kind: "kick_points_bought".to_string(),
+                amount: u64::try_from(outcome.price).unwrap_or(0),
+                currency: Currency::Coins.as_str().to_string(),
+            },
+            None,
+        )?;
+    }
+    Ok(())
 }

@@ -1650,6 +1650,13 @@
         {
           "name": "points",
           "type": "u64"
+        },
+        {
+          "name": "kick_points",
+          "type": "u64",
+          "optional": true,
+          "id": 1,
+          "doc": "Kick Points held; absent on nodes that predate them (reads as zero)."
         }
       ]
     },
@@ -3778,6 +3785,43 @@
         {
           "name": "duplicate",
           "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "KickPointsBuy",
+      "doc": "Buys one Kick Point pack: the price of an outright kick, prepaid at a bulk discount.",
+      "fields": [
+        {
+          "name": "pack_kp",
+          "type": "u32",
+          "doc": "Pack size, one of the node's packs — 1, 10, or 50 KP."
+        },
+        {
+          "name": "client_key",
+          "type": "string",
+          "doc": "Caller's idempotency key; a repeat returns the first purchase."
+        }
+      ]
+    },
+    {
+      "name": "KickPointsBuyResult",
+      "doc": "The buy's answer: the new Kick Point balance, what the pack cost, and whether this call was a repeat.",
+      "fields": [
+        {
+          "name": "kick_points",
+          "type": "u64",
+          "doc": "The Kick Point balance after the buy."
+        },
+        {
+          "name": "price",
+          "type": "u64",
+          "doc": "What the pack cost, in coins."
+        },
+        {
+          "name": "duplicate",
+          "type": "bool",
+          "doc": "True when a repeated client_key returned the earlier buy rather than charging again."
         }
       ]
     },

@@ -339,9 +339,43 @@ impl App {
             &registry,
             migo_social::SocialConfig::default(),
         );
+        // No push sender is wired in this build: registrations are stored, deliveries are dropped.
+        let sender: SharedPushSender = Arc::new(NoPush);
+        let notify = migo_notify::open(
+            store.clone(),
+            cache.clone(),
+            limiter.clone(),
+            sender,
+            Box::new(OsRandom),
+            &node_secret,
+            migo_notify::NotifyConfig::default(),
+            &registry,
+        );
+
+        // The economy's announcements become notification rows: a gift that arrives
+        // while its recipient is offline is waiting in their inbox, not lost. The push
+        // half is `NoPush` (above) and the realtime half is the dispatcher's to publish
+        // — this adapter only stores, because the Announcer port fires inside the
+        // service where no connection context exists to broadcast with.
+        let announcer: SharedAnnouncer =
+            Arc::new(crate::ports::NotifyingAnnouncer::new(notify.clone()));
+        let economy = migo_economy::open(
+            store.clone(),
+            cache.clone(),
+            limiter.clone(),
+            announcer,
+            store_catalogue(),
+            migo_economy::EconomyConfig::default(),
+            &registry,
+        );
+
         // Messaging: sequencing and fanout over the store, asking the gate
         // (backed by the graph and the room aggregate above) before a direct
-        // send passes a peer's privacy or a room send passes a mute.
+        // send passes a peer's privacy or a room send passes a mute, and
+        // asking the tariff (backed by the economy above) for the kick's
+        // price before a founder's removal lands — the same layering rule,
+        // joined here because neither messaging nor economy may depend on the
+        // other. The economy is built above messaging for exactly this seam.
         let messaging = migo_messaging::open(
             store.clone(),
             cache.clone(),
@@ -351,6 +385,7 @@ impl App {
                 social.clone(),
                 rooms.clone(),
             )),
+            Arc::new(EconomyKickTariff::new(economy.clone())),
             &registry,
         );
         let presence = migo_presence::open(
@@ -428,36 +463,6 @@ impl App {
             roster,
             Box::new(OsRandom),
             migo_moderation::ModerationConfig::default(),
-            &registry,
-        );
-
-        // No push sender is wired in this build: registrations are stored, deliveries are dropped.
-        let sender: SharedPushSender = Arc::new(NoPush);
-        let notify = migo_notify::open(
-            store.clone(),
-            cache.clone(),
-            limiter.clone(),
-            sender,
-            Box::new(OsRandom),
-            &node_secret,
-            migo_notify::NotifyConfig::default(),
-            &registry,
-        );
-
-        // The economy's announcements become notification rows: a gift that arrives
-        // while its recipient is offline is waiting in their inbox, not lost. The push
-        // half is `NoPush` (above) and the realtime half is the dispatcher's to publish
-        // — this adapter only stores, because the Announcer port fires inside the
-        // service where no connection context exists to broadcast with.
-        let announcer: SharedAnnouncer =
-            Arc::new(crate::ports::NotifyingAnnouncer::new(notify.clone()));
-        let economy = migo_economy::open(
-            store.clone(),
-            cache.clone(),
-            limiter.clone(),
-            announcer,
-            store_catalogue(),
-            migo_economy::EconomyConfig::default(),
             &registry,
         );
 

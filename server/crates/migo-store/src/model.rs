@@ -1103,6 +1103,11 @@ pub enum Currency {
     Gems = 1,
     /// Non-transferable reputation points.
     Points = 2,
+    /// Kick Points: prepaid kick credit. Held like any balance, spent by the
+    /// messaging tariff the moment a founder removes a member outright — one
+    /// point per kick, before any coin is asked for. Burned back to the Mint
+    /// on spend, so the sum of every KP balance stays zero.
+    KickPoints = 3,
 }
 
 impl Currency {
@@ -1119,6 +1124,7 @@ impl Currency {
             0 => Self::Coins,
             1 => Self::Gems,
             2 => Self::Points,
+            3 => Self::KickPoints,
             _ => return None,
         })
     }
@@ -1134,6 +1140,7 @@ impl Currency {
             Self::Coins => "coins",
             Self::Gems => "gems",
             Self::Points => "points",
+            Self::KickPoints => "kick_points",
         }
     }
 }
