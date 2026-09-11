@@ -411,7 +411,7 @@ fn decode_opus(
         if packet.track_id() != track_id {
             continue;
         }
-        let frames = match decoder.decode(&packet.buf, &mut pcm, false) {
+        let frames = match decoder.decode(packet.data(), &mut pcm, false) {
             Ok(frames) => frames,
             Err(_) => continue,
         };

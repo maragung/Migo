@@ -1547,7 +1547,10 @@ mod tests {
 
         // The same reaction again — an echo, or a re-fetch. One chip, not two.
         state.absorb(reaction.clone());
-        assert_eq!(state.reactions.get(&target).len(), 1);
+        assert_eq!(
+            state.reactions.get(&target).map_or(0, |chips| chips.len()),
+            1
+        );
 
         // A second emoji from the same sender is a second chip.
         let mut second = reaction;
@@ -1556,7 +1559,10 @@ mod tests {
             target,
         };
         state.absorb(second);
-        assert_eq!(state.reactions.get(&target).len(), 2);
+        assert_eq!(
+            state.reactions.get(&target).map_or(0, |chips| chips.len()),
+            2
+        );
 
         // The target itself arrives afterwards and lands as the one row it is.
         state.absorb(target_message);

@@ -2784,7 +2784,13 @@ impl Worker {
         // decode refuses — anything that does not decode is a document, which is the honest
         // claim for it.
         let decoded = image::load_from_memory(&bytes).ok();
-        let (plan, plaintext) = match decoded.as_ref().map(image::DynamicImage::dimensions) {
+        // `dimensions` is a `GenericImageView` method, not an inherent one, so the trait has to
+        // be in scope for the call to resolve at all — image's own docs import it in exactly
+        // this one-method form.
+        let (plan, plaintext) = match decoded.as_ref().map(|img| {
+            use image::GenericImageView as _;
+            img.dimensions()
+        }) {
             Some((width, height)) => {
                 if bytes.len() as u64 > media::IMAGE_MAX_BYTES {
                     self.sink.toast(
@@ -3093,7 +3099,10 @@ impl Worker {
         if self.recording.is_some() {
             return;
         }
-        let microphone = match call_audio::open_microphone() {
+        // `mut` because `take_frames` hands the receiver out of the microphone by &mut self —
+        // the handle keeps working afterwards (mute and stop go through it), but the one-time
+        // handover is still a mutation of the source.
+        let mut microphone = match call_audio::open_microphone() {
             Ok(microphone) => microphone,
             Err(error) => {
                 self.sink.toast(
@@ -6441,7 +6450,7 @@ fn body_of(content: Content) -> Body {
 /// this thread. The samples append at whatever rate the host granted, resampled to the
 /// note's own rate when the host insisted on another.
 fn spawn_recording_pump(
-    mut frames: std_mpsc::Receiver<Vec<i16>>,
+    frames: std_mpsc::Receiver<Vec<i16>>,
     source_rate: u32,
     samples: Arc<Mutex<Vec<i16>>>,
     stop: Arc<AtomicBool>,

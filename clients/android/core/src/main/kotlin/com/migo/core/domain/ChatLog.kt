@@ -109,12 +109,16 @@ fun logStamp(epochMs: Long): String {
  * suggest.
  */
 fun sanitizeFilename(raw: String): String {
+    // A space is an underscore here, not a kept character: a filename with spaces is quoted by
+    // every shell that touches it, and the picker suggests it with %20 ugliness — while the
+    // underscore reads the same and never needs quoting. The same argument retires leading and
+    // trailing underscores along with the dots and spaces in the trim.
     val cleaned = raw
-        .map { character -> if (character.isLetterOrDigit() || character == ' ' || character == '-' || character == '_' || character == '.') character else '_' }
+        .map { character -> if (character.isLetterOrDigit() || character == '-' || character == '_' || character == '.') character else '_' }
         .joinToString("")
         .replace(Regex("_+"), "_")
         .replace(Regex("\\.{2,}"), ".")
-        .trim('.', ' ')
+        .trim('.', '_', ' ')
     val bounded = if (cleaned.length > 48) cleaned.take(48) else cleaned
     return bounded.ifEmpty { "chat" }
 }
@@ -138,6 +142,10 @@ fun chatLogFilename(title: String): String = sanitizeFilename(title) + ".txt"
  * the file system is anything but.
  */
 fun <T> snapshotEvictions(oldestFirst: List<T>, keep: Int): List<T> {
-    if (keep < 0) return oldestFirst
-    return if (oldestFirst.size > keep) oldestFirst.subList(keep, oldestFirst.size).toList() else emptyList()
+    // A negative cap is read as zero — refusing to guess a meaning the caller never has — so
+    // both it and a zero say "keep none of these". The deletions are the FRONT of the list:
+    // the caller sorts oldest-first, so what survives a cap is the newest `keep`, and
+    // everything before them is exactly what the cap retired.
+    val cap = if (keep < 0) 0 else keep
+    return if (oldestFirst.size > cap) oldestFirst.subList(0, oldestFirst.size - cap).toList() else emptyList()
 }

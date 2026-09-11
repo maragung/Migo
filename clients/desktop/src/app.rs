@@ -706,7 +706,7 @@ impl App {
                     if self
                         .chat
                         .recording
-                        .is_some_and(|(recording, _)| *recording == conversation_id)
+                        .is_some_and(|(recording, _)| recording == &conversation_id)
                     {
                         self.chat.recording = None;
                     }

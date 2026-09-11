@@ -1665,6 +1665,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
             AppState.Section.ADMINS -> if (signedInState?.admins?.owner == false) loadAdmins()
             AppState.Section.GAMES -> if (signedInState?.games?.catalogue == null) loadGameCatalogue()
+            // Settings holds no remote reads of its own — the storage sizes it shows are measured
+            // on entry, and the preferences it lists are already live — so entering the section
+            // asks the session for nothing.
+            AppState.Section.SETTINGS -> Unit
         }
     }
 

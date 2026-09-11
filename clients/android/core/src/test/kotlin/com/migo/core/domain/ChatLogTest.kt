@@ -75,7 +75,10 @@ class ChatLogTest {
 
     @Test
     fun `a title becomes a writable file name and the txt suffix`() {
-        assertEquals("Team room.txt", chatLogFilename("Team room"))
+        // Internal spaces are underscores too, not just the dangerous characters: one rule for
+        // everything the shell would have to quote keeps the mapping from the title a reader
+        // can predict — and the picker never suggests a name with %20 in it.
+        assertEquals("Team_room.txt", chatLogFilename("Team room"))
         assertEquals("Bob.txt", chatLogFilename("Bob"))
     }
 

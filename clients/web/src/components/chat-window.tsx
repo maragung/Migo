@@ -313,54 +313,6 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
     markRead(conversationId);
   }, [conversationId, messages.length, markRead]);
 
-  // The transcript this window holds, as a portable log. The header's download and the auto-save
-  // tick render the same artifact through the same builder, so the wording in a saved file can
-  // never drift from the wording the bubbles show — the log's vocabulary is the preview's
-  // (lib/message-preview.js), reached through buildConversationLog.
-  const buildCurrentLog = useCallback((): ConversationLog | null => {
-    if (accountId === null || messages.length === 0) {
-      return null;
-    }
-    return buildConversationLog(conversationId, title, messages, (senderId) =>
-      senderNameOf(senderId, accountId, profiles),
-    );
-  }, [accountId, conversationId, messages, profiles, title]);
-
-  const buildLogRef = useRef(buildCurrentLog);
-  buildLogRef.current = buildCurrentLog;
-
-  // The auto-save: when armed (Settings → Chats & Log), a periodic tick and the teardown write
-  // both snapshot the current transcript into IndexedDB. The toggle is read at write time, so
-  // turning it off takes effect on the next tick with no provider wiring; the ref keeps the
-  // interval subscribed to the conversation, not to every message, so a busy room does not churn
-  // timers.
-  useEffect(() => {
-    function snapshotNow(): void {
-      if (!isAutoSaveEnabled()) {
-        return;
-      }
-      const log = buildLogRef.current();
-      if (log !== null) {
-        void storeChatLogSnapshot(log);
-      }
-    }
-    const timer = setInterval(snapshotNow, AUTOSAVE_INTERVAL_MS);
-    return () => {
-      clearInterval(timer);
-      // The teardown write: the effect re-runs on a conversation switch, so this is both "the
-      // window closed" and "the reader moved on" — the two moments a snapshot is most wanted.
-      snapshotNow();
-    };
-  }, [conversationId]);
-
-  // The header's download: the transcript as it stands, as a plain-text file.
-  const downloadTranscript = useCallback((): void => {
-    const log = buildCurrentLog();
-    if (log !== null) {
-      downloadTextFile(formatTranscriptText(log), logFileName(log.title, 'txt'), 'text/plain');
-    }
-  }, [buildCurrentLog]);
-
   // A removal from this group closes the thread: this account can no longer read the group, and a
   // thread it cannot read must not stay on screen. Joined and Reconnected keep the account seated;
   // every other change — a leave of our own (belt to the panel's braces), a kick, a ban, a drop —
@@ -406,6 +358,56 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   // Sender names and avatars are for multi-party conversations; in a 1:1 the alignment already
   // says who spoke.
   const showSenders = summary !== undefined && !isDirect;
+
+  // The transcript this window holds, as a portable log. The header's download and the auto-save
+  // tick render the same artifact through the same builder, so the wording in a saved file can
+  // never drift from the wording the bubbles show — the log's vocabulary is the preview's
+  // (lib/message-preview.js), reached through buildConversationLog. It sits below the title's
+  // declaration because it closes over the title; a hoisted read of a `const` is a build error,
+  // and this comment is what stops a future move from re-introducing it.
+  const buildCurrentLog = useCallback((): ConversationLog | null => {
+    if (accountId === null || messages.length === 0) {
+      return null;
+    }
+    return buildConversationLog(conversationId, title, messages, (senderId) =>
+      senderNameOf(senderId, accountId, profiles),
+    );
+  }, [accountId, conversationId, messages, profiles, title]);
+
+  const buildLogRef = useRef(buildCurrentLog);
+  buildLogRef.current = buildCurrentLog;
+
+  // The auto-save: when armed (Settings → Chats & Log), a periodic tick and the teardown write
+  // both snapshot the current transcript into IndexedDB. The toggle is read at write time, so
+  // turning it off takes effect on the next tick with no provider wiring; the ref keeps the
+  // interval subscribed to the conversation, not to every message, so a busy room does not churn
+  // timers.
+  useEffect(() => {
+    function snapshotNow(): void {
+      if (!isAutoSaveEnabled()) {
+        return;
+      }
+      const log = buildLogRef.current();
+      if (log !== null) {
+        void storeChatLogSnapshot(log);
+      }
+    }
+    const timer = setInterval(snapshotNow, AUTOSAVE_INTERVAL_MS);
+    return () => {
+      clearInterval(timer);
+      // The teardown write: the effect re-runs on a conversation switch, so this is both "the
+      // window closed" and "the reader moved on" — the two moments a snapshot is most wanted.
+      snapshotNow();
+    };
+  }, [conversationId]);
+
+  // The header's download: the transcript as it stands, as a plain-text file.
+  const downloadTranscript = useCallback((): void => {
+    const log = buildCurrentLog();
+    if (log !== null) {
+      downloadTextFile(formatTranscriptText(log), logFileName(log.title, 'txt'), 'text/plain');
+    }
+  }, [buildCurrentLog]);
 
   const replyPreview =
     replyTo && accountId
