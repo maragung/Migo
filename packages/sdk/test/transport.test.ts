@@ -20,7 +20,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { GatewayTransport, encodeBody } from '../src/index.js';
+import { GatewayTransport, encodeBody, decodeBody } from '../src/index.js';
 import type { ServerEndpoint } from '../src/index.js';
 import { decodeFrame, encodeFrame, frameHeader } from '@migo/wire';
 import {
@@ -28,6 +28,8 @@ import {
   CODE,
   OP,
   Platform,
+  decodeAuthenticate,
+  encodeAuthenticated,
   encodeError,
   encodeWelcome,
   FLAG,
@@ -106,6 +108,30 @@ function welcomeFrame(): Uint8Array {
       heartbeatMs: 30_000,
     },
     authenticatedUser: idOf(10),
+  };
+  return encodeFrame({
+    header: frameHeader(OP.HELLO, 1),
+    payload: encodeBody(encodeWelcome, welcome),
+  });
+}
+
+/**
+ * A WELCOME that names no identity — the server could not authenticate the token inside the
+ * HELLO and left the session awaiting a follow-up AUTHENTICATE (gateway section 139: a bad
+ * inline token is not fatal). The handshake must not be over yet.
+ */
+function unauthenticatedWelcomeFrame(): Uint8Array {
+  const welcome: Welcome = {
+    sessionId: idOf(2),
+    node: { nodeId: 'node-1', region: 'eu', country: 'DE' },
+    features: 0n,
+    serverTime: 1_700_000_000_000,
+    limits: {
+      maxFrameBytes: 1 << 20,
+      maxBatchItems: 64,
+      maxSubscriptions: 256,
+      heartbeatMs: 30_000,
+    },
   };
   return encodeFrame({
     header: frameHeader(OP.HELLO, 1),
@@ -436,5 +462,82 @@ test('a RESUME_REQUIRED answer reconnects fresh instead of dying closed', async 
   // exactly once, and a terminal transport would have fired none.
   assert.equal(resets.length, 1, 'the unresumable session did not fire onReset');
 
+  transport.close();
+});
+
+test('a WELCOME without an identity falls back to AUTHENTICATE and still reaches Ready', async () => {
+  // The server answers a HELLO whose inline token it could not authenticate with a WELCOME that
+  // names no identity — not fatal, the session may present the token again (gateway section
+  // 139). The transport's own AUTHENTICATE is sent while the state is `authenticating`, so the
+  // public request() guard ("transport is ready") must not apply to the handshake's own frame:
+  // a regression here kills every client whose HELLO token was refused — the fallback that was
+  // designed to rescue them throws before it can send. The smoke bot drove exactly this against
+  // a real node: `cannot send AUTHENTICATE: transport is authenticating`.
+  const sockets: FakeSocket[] = [];
+  const server: ServerEndpoint = {
+    host: 'node.example',
+    port: 443,
+    gatewayPort: 443,
+    transport: 'WebSocket',
+    scheme: 'Wss',
+    restScheme: 'Https',
+  };
+  const transport = new GatewayTransport({
+    server,
+    hello: {
+      platform: Platform.Web,
+      appVersion: '1.0.0',
+      locale: 'en',
+      bandwidthMode: BandwidthMode.Normal,
+      accessToken: 'test-token',
+      deviceId: idOf(11),
+      features: 0n,
+    },
+    heartbeatMs: 600_000,
+    webSocketFactory: (url: string) => {
+      const socket = new FakeSocket(url);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+  });
+
+  const ready = transport.connect();
+  const socket = sockets[0];
+  assert.ok(socket !== undefined, 'the transport did not build a socket synchronously');
+  socket.fireOpen();
+  await tick(); // the HELLO is built and sent
+  socket.deliver(unauthenticatedWelcomeFrame());
+  await tick(); // the fallback AUTHENTICATE is built and sent
+
+  // Mid-handshake: the session exists but is not Ready, and the second frame on the wire is the
+  // AUTHENTICATE itself — not a victim of the request() Ready guard.
+  assert.equal(transport.state, 'authenticating', 'the fallback did not enter authenticating');
+  const authenticate = socket.sent[1];
+  assert.ok(authenticate instanceof Uint8Array, 'no AUTHENTICATE frame followed the WELCOME');
+  const frame = decodeFrame(authenticate);
+  assert.equal(frame.header.opcode, OP.AUTHENTICATE, 'the second frame was not AUTHENTICATE');
+  const presented = decodeBody(decodeAuthenticate, frame.payload);
+  assert.equal(presented.accessToken, 'test-token', 'the fallback presented the wrong token');
+  assert.equal(presented.deviceId, idOf(11), 'the fallback presented the wrong device');
+
+  // The server accepts it: the AUTHENTICATED reply rides the AUTHENTICATE opcode and the
+  // correlation the frame above allocated, the same correlated-reply shape WELCOME uses.
+  socket.deliver(
+    encodeFrame({
+      header: frameHeader(OP.AUTHENTICATE, frame.header.correlation),
+      payload: encodeBody(encodeAuthenticated, {
+        userId: idOf(10),
+        deviceId: idOf(11),
+        capabilities: 0n,
+      }),
+    }),
+  );
+  await ready;
+  assert.equal(transport.state, 'ready', 'the authenticated session did not reach Ready');
+  assert.equal(
+    transport.session?.authenticatedUser,
+    idOf(10),
+    'the session did not record the identity the reply named',
+  );
   transport.close();
 });

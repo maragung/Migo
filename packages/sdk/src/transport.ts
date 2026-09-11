@@ -298,6 +298,17 @@ export class GatewayTransport {
     if (this.#state !== 'ready' || this.#ws === null || this.#ws.readyState !== WS_OPEN) {
       throw new TransportError(`cannot send ${opcodeLabel(opcode)}: transport is ${this.#state}`);
     }
+    return await this.#sendRequest(opcode, body);
+  }
+
+  /**
+   * Allocates a correlation, sends the frame, and awaits its reply — the machinery every
+   * request rides on, with no state guard of its own. The guards live with the callers, each
+   * of which names the states its frame is legal in: the public {@link request} only runs
+   * from `ready`, while the handshake's own AUTHENTICATE runs from `authenticating` (and a
+   * mid-session refresh from `ready` again).
+   */
+  async #sendRequest(opcode: number, body: Uint8Array): Promise<Frame> {
     const correlation = this.#allocateCorrelation();
     const bytes = await this.#buildFrame(opcode, correlation, body);
     return await new Promise<Frame>((resolve, reject) => {
@@ -530,11 +541,25 @@ export class GatewayTransport {
     if (this.#accessToken === undefined || this.#deviceId === undefined) {
       throw new RemoteError(1100, 'UNAUTHENTICATED', 'no access token to authenticate with');
     }
+    // AUTHENTICATE is the one request that may ride a state other than Ready: the handshake
+    // sends it while `authenticating` (the WELCOME named no identity, so the session is still
+    // opening), and a mid-session token refresh sends it from `ready`. The public request()
+    // refuses every non-Ready send and must keep doing so — this frame names its own two
+    // legal states instead.
+    if (
+      (this.#state !== 'authenticating' && this.#state !== 'ready') ||
+      this.#ws === null ||
+      this.#ws.readyState !== WS_OPEN
+    ) {
+      throw new TransportError(
+        `cannot send ${opcodeLabel(OP.AUTHENTICATE)}: transport is ${this.#state}`,
+      );
+    }
     const body = encodeBody(encodeAuthenticate, {
       accessToken: this.#accessToken,
       deviceId: this.#deviceId,
     });
-    const reply = await this.request(OP.AUTHENTICATE, body);
+    const reply = await this.#sendRequest(OP.AUTHENTICATE, body);
     const authenticated = decodeBody(decodeAuthenticated, reply.payload);
     if (this.#session !== null) {
       this.#session = { ...this.#session, authenticatedUser: authenticated.userId };

@@ -392,13 +392,25 @@ impl<T: Transport> Connection<'_, T> {
         if let (Some(token), Some(device_id)) = (token, device_id) {
             let mut context = self.base.clone();
             context.now = now;
-            if let Ok(identity) = self
+            match self
                 .gateway
                 .authenticator
                 .authenticate(token, device_id, &context)
                 .await
             {
-                return (Phase::Ready, Some(identity));
+                Ok(identity) => return (Phase::Ready, Some(identity)),
+                Err(error) => {
+                    // Not fatal — the session stays awaiting AUTHENTICATE — but silent: the
+                    // client's fallback AUTHENTICATE presents the same token again, so a wiring
+                    // fault here surfaces (if at all) as a second refusal with the same cause,
+                    // and the operator is left reading a client stack trace to learn why a
+                    // freshly minted token was turned away. The fault — never the token — is
+                    // what the log owes them.
+                    tracing::warn!(
+                        ?error,
+                        "a token presented in HELLO was refused; the session stays awaiting AUTHENTICATE"
+                    );
+                }
             }
         }
         (Phase::AwaitingAuth, None)
