@@ -398,3 +398,272 @@ async fn concurrent_xp_awards_cannot_spend_the_cap_twice() {
         "both answers see the same final progression row"
     );
 }
+
+/// A grant helper for coins, so the seeds below say what they mean.
+async fn grant(svc: &migo_economy::SharedTreasurer, account: u128, coins: i64) {
+    svc.grant(Grant {
+        account_id: Id::from(account),
+        currency: Currency::Coins,
+        amount: coins,
+        reason: Reason::Grant,
+        ref_id: None,
+        idempotency_key: format!("seed:coins:{account}"),
+        created_by: None,
+        at: Timestamp::from_millis(NOW),
+    })
+    .await
+    .expect("coin grant succeeds");
+}
+
+/// A grant helper for KP, mirroring the coins seed above.
+async fn grant_kp(svc: &migo_economy::SharedTreasurer, account: u128, kp: i64, key: &str) {
+    svc.grant(Grant {
+        account_id: Id::from(account),
+        currency: Currency::KickPoints,
+        amount: kp,
+        reason: Reason::Grant,
+        ref_id: None,
+        idempotency_key: key.to_string(),
+        created_by: None,
+        at: Timestamp::from_millis(NOW),
+    })
+    .await
+    .expect("kp grant succeeds");
+}
+
+/// The kick price, prepaid path: a kicker holding one Kick Point spends it and no coin
+/// moves. This is the same `charge_kick` method the messaging tariff calls.
+#[tokio::test]
+async fn charge_kick_spends_a_held_kick_point_before_any_coin() {
+    let (svc, store) = harness();
+    seed_account(&store, 1, "kicker").await;
+    grant(&svc, 1, 5).await;
+    grant_kp(&svc, 1, 1, "seed:kp:1").await;
+
+    let charge = svc
+        .charge_kick(
+            Id::from(1u128),
+            Id::from(50u128),
+            Id::from(2u128),
+            Timestamp::from_millis(NOW),
+        )
+        .await
+        .expect("the kick is priced");
+    assert!(charge.spent_kick_point, "the held point settles the kick");
+    assert_eq!(charge.paid_coins, 0);
+
+    let wallet = svc.wallet(&caller(1, 101)).await.expect("wallet read");
+    assert_eq!(wallet.kick_points, 0, "the point was spent");
+    assert_eq!(wallet.coins, 5, "no coin moved while a point was held");
+}
+
+/// The kick price, coin path: a kicker holding no Kick Point pays exactly one coin.
+#[tokio::test]
+async fn charge_kick_falls_back_to_one_coin_when_no_point_is_held() {
+    let (svc, store) = harness();
+    seed_account(&store, 1, "kicker").await;
+    grant(&svc, 1, 5).await;
+
+    let charge = svc
+        .charge_kick(
+            Id::from(1u128),
+            Id::from(50u128),
+            Id::from(2u128),
+            Timestamp::from_millis(NOW),
+        )
+        .await
+        .expect("the kick is priced");
+    assert!(!charge.spent_kick_point);
+    assert_eq!(charge.paid_coins, 1);
+
+    let wallet = svc.wallet(&caller(1, 101)).await.expect("wallet read");
+    assert_eq!(wallet.coins, 4, "the coin path costs exactly one coin");
+    assert_eq!(wallet.kick_points, 0);
+}
+
+/// The kick price, refusal: a kicker holding neither a Kick Point nor a coin is refused,
+/// and the refusal names both doors out.
+#[tokio::test]
+async fn charge_kick_refuses_a_kicker_who_holds_neither() {
+    let (svc, store) = harness();
+    seed_account(&store, 1, "kicker").await;
+
+    let error = svc
+        .charge_kick(
+            Id::from(1u128),
+            Id::from(50u128),
+            Id::from(2u128),
+            Timestamp::from_millis(NOW),
+        )
+        .await
+        .expect_err("the kick is refused");
+    assert_eq!(error.code(), migo_protocol::codes::INSUFFICIENT_BALANCE);
+    let detail = error.to_string();
+    assert!(
+        detail.contains("Kick Point") && detail.contains("MGO"),
+        "the refusal names both the point and the coin: {detail}"
+    );
+}
+
+/// A retried kick does not pay twice: the (kicker, conversation, target) triple keys the
+/// idempotency, so the retry reads back the first settlement. The accepted edge — a
+/// founder re-kicking the same rejoined member later is not charged again — is the price
+/// of a kick that can never double-charge, and it is paid deliberately.
+#[tokio::test]
+async fn charge_kick_retry_does_not_double_charge() {
+    let (svc, store) = harness();
+    seed_account(&store, 1, "kicker").await;
+    grant(&svc, 1, 5).await;
+
+    for _ in 0..2 {
+        svc.charge_kick(
+            Id::from(1u128),
+            Id::from(50u128),
+            Id::from(2u128),
+            Timestamp::from_millis(NOW),
+        )
+        .await
+        .expect("both the kick and its retry succeed");
+    }
+    let wallet = svc.wallet(&caller(1, 101)).await.expect("wallet read");
+    assert_eq!(wallet.coins, 4, "the retry charged nothing further");
+}
+
+/// Each pack on the table buys: coins out, points in, at the table's price.
+#[tokio::test]
+async fn kick_point_packs_buy_at_their_table_price() {
+    let (svc, store) = harness();
+    seed_account(&store, 1, "buyer").await;
+    grant(&svc, 1, 100).await;
+    let buyer = caller(1, 101);
+
+    for (pack_kp, price) in migo_economy::KP_PACKS {
+        let outcome = svc
+            .buy_kick_points(&buyer, *pack_kp, &format!("spec:kp:{pack_kp}"))
+            .await
+            .expect("the pack buys");
+        assert_eq!(
+            outcome.price, *price,
+            "pack {pack_kp} costs its table price"
+        );
+        assert!(!outcome.duplicate);
+    }
+
+    let wallet = svc.wallet(&buyer).await.expect("wallet read");
+    let expected_kp: i64 = migo_economy::KP_PACKS
+        .iter()
+        .map(|(kp, _)| i64::from(*kp))
+        .sum();
+    assert_eq!(
+        wallet.kick_points, expected_kp,
+        "every point of every pack arrived"
+    );
+    let expected_coins = 100
+        - migo_economy::KP_PACKS
+            .iter()
+            .map(|(_, price)| price)
+            .sum::<i64>();
+    assert_eq!(wallet.coins, expected_coins, "every pack was paid in full");
+}
+
+/// A size the deployment does not sell is refused before anything moves.
+#[tokio::test]
+async fn kick_point_pack_unknown_size_is_refused_before_anything_moves() {
+    let (svc, store) = harness();
+    seed_account(&store, 1, "buyer").await;
+    grant(&svc, 1, 100).await;
+
+    let error = svc
+        .buy_kick_points(&caller(1, 101), 7, "spec:kp:7")
+        .await
+        .expect_err("an unsold size is refused");
+    assert_eq!(error.code(), migo_protocol::codes::VALIDATION_FAILED);
+
+    let wallet = svc.wallet(&caller(1, 101)).await.expect("wallet read");
+    assert_eq!(wallet.coins, 100, "nothing was charged for the refusal");
+    assert_eq!(wallet.kick_points, 0, "nothing was minted for the refusal");
+}
+
+/// An unaffordable pack is refused and no points arrive: the coin leg refuses before the
+/// mint leg runs, so a caller is never left holding points they did not pay for.
+#[tokio::test]
+async fn kick_point_pack_unaffordable_is_refused_before_the_mint_leg() {
+    let (svc, store) = harness();
+    seed_account(&store, 1, "buyer").await;
+    grant(&svc, 1, 1).await;
+
+    let error = svc
+        .buy_kick_points(&caller(1, 101), 50, "spec:kp:poor")
+        .await
+        .expect_err("an unaffordable pack is refused");
+    assert_eq!(error.code(), migo_protocol::codes::INSUFFICIENT_BALANCE);
+
+    let wallet = svc.wallet(&caller(1, 101)).await.expect("wallet read");
+    assert_eq!(wallet.kick_points, 0, "the mint leg never ran");
+    assert_eq!(wallet.coins, 1, "the single coin was not spent");
+}
+
+/// A repeated client key is the first buy answered again: no second charge, no second
+/// mint, and `duplicate` says which of the two calls this was.
+#[tokio::test]
+async fn kick_point_buy_retry_is_a_duplicate_and_does_not_double_mint() {
+    let (svc, store) = harness();
+    seed_account(&store, 1, "buyer").await;
+    grant(&svc, 1, 100).await;
+    let buyer = caller(1, 101);
+
+    let first = svc
+        .buy_kick_points(&buyer, 10, "spec:kp:retry")
+        .await
+        .expect("the first buy lands");
+    assert!(!first.duplicate);
+    let second = svc
+        .buy_kick_points(&buyer, 10, "spec:kp:retry")
+        .await
+        .expect("the retry answers the first buy");
+    assert!(second.duplicate);
+    assert_eq!(
+        second.kick_points, first.kick_points,
+        "the retry minted nothing further"
+    );
+
+    let wallet = svc.wallet(&buyer).await.expect("wallet read");
+    assert_eq!(wallet.kick_points, 10, "one buy's worth of points, not two");
+    assert_eq!(wallet.coins, 100 - 9, "one pack's price, not two");
+}
+
+/// The zero-sum invariant the nightly audit re-asserts over the whole ledger, held here
+/// for the new currency across both of its movements: a grant issues from the Mint, a
+/// kick returns the point to it, and the sum stays zero whatever a user holds.
+#[tokio::test]
+async fn kick_points_sum_to_zero_across_a_grant_and_a_spend() {
+    let (svc, store) = harness();
+    seed_account(&store, 1, "kicker").await;
+    grant_kp(&svc, 1, 3, "seed:kp:sum").await;
+
+    for target in 2u128..=3u128 {
+        svc.charge_kick(
+            Id::from(1u128),
+            Id::from(50u128),
+            Id::from(target),
+            Timestamp::from_millis(NOW),
+        )
+        .await
+        .expect("each kick is priced");
+    }
+
+    let sum = store
+        .currency_sum(Currency::KickPoints)
+        .await
+        .expect("the sum reads");
+    assert_eq!(
+        sum, 0,
+        "spent points return to the Mint; nothing is created or destroyed"
+    );
+
+    let wallet = svc.wallet(&caller(1, 101)).await.expect("wallet read");
+    assert_eq!(
+        wallet.kick_points, 1,
+        "the kicker holds what the grants left them"
+    );
+}

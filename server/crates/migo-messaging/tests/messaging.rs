@@ -2408,7 +2408,10 @@ impl KickTariff for RecordingTariff {
         target_id: Id,
         _at: Timestamp,
     ) -> Result<()> {
-        self.asked.lock().unwrap().push((kicker, conversation_id, target_id));
+        self.asked
+            .lock()
+            .unwrap()
+            .push((kicker, conversation_id, target_id));
         Ok(())
     }
 }
@@ -2425,7 +2428,7 @@ impl KickTariff for RefusingTariff {
         _target_id: Id,
         _at: Timestamp,
     ) -> Result<()> {
-        Err(migo_core::Error::new(
+        Err(migo_protocol::fault::error(
             codes::INSUFFICIENT_BALANCE,
             "a kick needs a Kick Point or 1 MGO",
         ))
@@ -2482,16 +2485,15 @@ async fn a_kick_prices_through_the_tariff_and_a_refusal_leaves_the_member_in_pla
             &caller(ALICE, ALICE_PHONE, 3 * MINUTE),
             ConversationRosterRequest {
                 conversation_id: conversation,
-                ..ConversationRosterRequest::default()
             },
         )
         .await
         .expect("the roster still reads");
     assert!(
         roster
-            .members
+            .entries
             .iter()
-            .any(|member| member.user_id == id(CAROL)),
+            .any(|entry| entry.account_id == id(CAROL)),
         "a refused price leaves the member exactly where they were"
     );
 
