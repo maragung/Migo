@@ -88,7 +88,7 @@ use crate::model::{
     Caller, DEFAULT_CONVERSATION_PAGE, MAX_EXPIRY_MS, MAX_GROUP_MEMBERS, MAX_TITLE_LEN,
     MEMBER_PREVIEW, SYNC_BUDGET_BYTES, TYPING_TTL_MS, VOTE_TTL_MS,
 };
-use crate::traits::{KickTariff, Messaging, RoomSpeak, SharedKickTariff, SharedMessageGate};
+use crate::traits::{Messaging, RoomSpeak, SharedKickTariff, SharedMessageGate};
 
 /// A shared, fully erased messaging service.
 pub type SharedMessaging = Arc<dyn Messaging>;

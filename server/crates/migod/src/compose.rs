@@ -63,7 +63,9 @@ use migo_rooms::SharedRooms;
 use migo_social::SharedSocial;
 
 use crate::dispatch::AppDispatcher;
-use crate::ports::{EconomyRewards, FsStorage, StaffRoster, StoreCallGate, StoreMessageGate};
+use crate::ports::{
+    EconomyKickTariff, EconomyRewards, FsStorage, StaffRoster, StoreCallGate, StoreMessageGate,
+};
 use crate::room_presence::GatewayHandle;
 
 /// The feature bits this node advertises to clients in the handshake and the `/v1/config`
