@@ -1837,8 +1837,8 @@ fn own_message_actions(
         ui.add_space(space::SM);
         // Edit is offered on the one body this client composes: a text message. An
         // attachment cannot be re-typed, and the web client offers nothing there either.
-        if matches!(message.body, Body::Text(ref text) if !text.is_empty()) {
-            if ui
+        if matches!(message.body, Body::Text(ref text) if !text.is_empty())
+            && ui
                 .add(
                     egui::Button::new(
                         RichText::new("Edit")
@@ -1850,15 +1850,14 @@ fn own_message_actions(
                 )
                 .on_hover_text("Fix this message for everyone")
                 .clicked()
-            {
-                let draft = edits.entry(message.message_id).or_default();
-                if draft.text.is_empty() {
-                    if let Body::Text(text) = &message.body {
-                        draft.text = text.clone();
-                    }
+        {
+            let draft = edits.entry(message.message_id).or_default();
+            if draft.text.is_empty() {
+                if let Body::Text(text) = &message.body {
+                    draft.text = text.clone();
                 }
-                draft.claim_focus = true;
             }
+            draft.claim_focus = true;
         }
         if ui
             .add(
