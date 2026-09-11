@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.migo.app.model.AppState
+import com.migo.core.protocol.PresenceState
 import com.migo.core.protocol.RoomSummary
 import com.migo.core.protocol.SuggestedUser
 import kotlinx.coroutines.delay
@@ -92,7 +93,17 @@ fun SearchScreen(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Monogram(name = row.title, size = 36.dp)
+                            // A direct chat's avatar wears the peer's presence ring, the same live
+                            // fact the friends list carries; a group or a room has no one presence
+                            // to wear, so it takes the plain monogram.
+                            if (row.peerId != null) {
+                                ListRowAvatar(
+                                    name = row.title,
+                                    online = state.presence[row.peerId] != PresenceState.Offline,
+                                )
+                            } else {
+                                Monogram(name = row.title, size = 38.dp)
+                            }
                             Spacer(modifier = Modifier.width(10.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(row.title, style = MaterialTheme.typography.titleMedium, maxLines = 1)

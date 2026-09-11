@@ -983,6 +983,20 @@ class MigoClient private constructor(
         subscribe(listOf(Topic(TopicKind.User, userId)))
     }
 
+    /**
+     * Subscribes to many accounts' topics in ONE SUBSCRIBE frame.
+     *
+     * A contact list wants presence for every friend it shows, and one frame per friend is exactly
+     * the burst the rate limiter prices worst -- the wire carries a topic *list* on purpose: one
+     * round trip subscribes them all. Per-topic refusals (a privacy limit, a capped subscription
+     * set) are answered in the response's rejected set and tolerated here the way [watchUser]
+     * tolerates its single refusal.
+     */
+    suspend fun watchUsers(userIds: List<Id>) {
+        if (userIds.isEmpty()) return
+        subscribe(userIds.map { Topic(TopicKind.User, it) })
+    }
+
     /** Subscribes to a game's topic, for its authoritative events. */
     suspend fun watchGame(gameId: Id) {
         subscribe(listOf(Topic(TopicKind.Game, gameId)))

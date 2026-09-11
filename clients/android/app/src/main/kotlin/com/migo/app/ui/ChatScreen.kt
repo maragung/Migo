@@ -214,6 +214,13 @@ fun ChatScreen(
     onCancelVoiceNote: () -> Unit = {},
     /** Sets one of the quick reactions on a message, from the long-press bar. */
     onReact: (Id, String) -> Unit = { _, _ -> },
+    /**
+     * Commits an edit of one of this device's own text lines, handed the message id and the
+     * replacement text. Offered only where the shell can seal and send the replacement.
+     */
+    onEdit: (Id, String) -> Unit = { _, _ -> },
+    /** Withdraws one of this device's own messages from everyone's copy, from the bar's Delete. */
+    onDelete: (Id) -> Unit = {},
     /** Asks the resolver to fetch and open the given attachment's object. */
     onResolveMedia: (Attachment) -> Unit = {},
     /**
@@ -372,6 +379,8 @@ fun ChatScreen(
                                     message = item.message,
                                     head = heads[item.key] == true,
                                     onReact = onReact,
+                                    onEdit = onEdit,
+                                    onDelete = onDelete,
                                     onResolveMedia = onResolveMedia,
                                     onSaveDocument = onSaveDocument,
                                     autoFetchMedia = autoFetchMedia,
@@ -906,6 +915,8 @@ private fun MessageLine(
     message: ChatMessage,
     head: Boolean,
     onReact: (Id, String) -> Unit,
+    onEdit: (Id, String) -> Unit,
+    onDelete: (Id) -> Unit,
     onResolveMedia: (Attachment) -> Unit,
     onSaveDocument: (Attachment) -> Unit,
     autoFetchMedia: Boolean,
@@ -921,6 +932,12 @@ private fun MessageLine(
     // The reaction bar opens under the line it belongs to, so a press lands on the message the
     // reader was looking at -- the state is local because the bar's life is the press's life.
     val reactionBarOpen = remember { mutableStateOf(false) }
+    // The own-line editor: opened from the bar's Edit, closed by Save or Cancel. Local for the
+    // same reason -- its life is the edit's life, not the screen's.
+    val editing = remember { mutableStateOf(false) }
+    // A text line this device sent, and so the one line Edit may be offered on: the server only
+    // permits the sender to edit, and only a text body has a text to replace.
+    val editable = message.mine && message.attachment == null && !message.unsupported
     val line = buildAnnotatedString {
         withStyle(
             SpanStyle(
@@ -941,12 +958,14 @@ private fun MessageLine(
             append(message.text)
         }
         // The trailing state: the clock when the server has accepted the line, the word while it
-        // has not, and the tick only on one's own messages -- the one delivery mark this build can
-        // honestly draw, because it has seen the acceptance.
+        // has not, the edited stamp when the text has been replaced, and the tick only on one's
+        // own messages -- the one delivery mark this build can honestly draw, because it has seen
+        // the acceptance.
         val stamp = if (message.pending) "Sending…" else clockTime(message.at)
-        if (stamp.isNotEmpty() || message.mine) {
+        if (stamp.isNotEmpty() || message.mine || message.editedAt != null) {
             withStyle(SpanStyle(fontSize = 9.5.sp, color = stampInk)) {
                 if (stamp.isNotEmpty()) append("  $stamp")
+                if (message.editedAt != null) append("  (edited)")
                 if (message.mine && !message.pending) append(" ✓")
             }
         }
@@ -966,43 +985,111 @@ private fun MessageLine(
             }
         }
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = line,
-                fontSize = 12.sp,
-                lineHeight = 17.sp,
-            )
-            message.attachment?.let { attachment ->
-                AttachmentBlock(
-                    attachment = attachment,
-                    mediaObject = mediaObject,
-                    onResolve = onResolveMedia,
-                    onSave = onSaveDocument,
-                    autoFetchMedia = autoFetchMedia,
+            if (editing.value) {
+                EditLine(
+                    initialText = message.text,
+                    onSave = { text ->
+                        editing.value = false
+                        onEdit(message.messageId, text)
+                    },
+                    onCancel = { editing.value = false },
                 )
-            }
-            if (reactionBarOpen.value) {
-                ReactionBar(onPick = { emoji ->
-                    reactionBarOpen.value = false
-                    onReact(message.messageId, emoji)
-                })
+            } else {
+                Text(
+                    text = line,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                )
+                message.attachment?.let { attachment ->
+                    AttachmentBlock(
+                        attachment = attachment,
+                        mediaObject = mediaObject,
+                        onResolve = onResolveMedia,
+                        onSave = onSaveDocument,
+                        autoFetchMedia = autoFetchMedia,
+                    )
+                }
+                if (reactionBarOpen.value) {
+                    LineActions(
+                        editable = editable,
+                        onReact = { emoji ->
+                            reactionBarOpen.value = false
+                            onReact(message.messageId, emoji)
+                        },
+                        onEdit = {
+                            reactionBarOpen.value = false
+                            editing.value = true
+                        },
+                        onDelete = {
+                            reactionBarOpen.value = false
+                            onDelete(message.messageId)
+                        },
+                    )
+                }
             }
         }
     }
 }
 
 /**
- * The quick-reaction bar under a long-pressed line: the web client's own three, as glyph buttons.
- * No aggregation into chips -- the server stores a reaction as an ordinary message and the
- * transcript says `Reacted ❤️` when it arrives, which is the whole of the feature's shape.
+ * The long-press bar's own rows, beneath the quick reactions: the two acts a sender has on their
+ * own line. Edit appears only on a text line this device sent (the server refuses anyone else's,
+ * and an attachment or an unsupported body has no text to edit); Delete appears on any own line,
+ * because withdrawing is not text-shaped -- a photo can be unsent as surely as a sentence.
  */
 @Composable
-private fun ReactionBar(onPick: (String) -> Unit) {
-    Row(modifier = Modifier.padding(top = 2.dp)) {
-        for (emoji in QUICK_REACTIONS) {
-            TextButton(onClick = { onPick(emoji) }, modifier = Modifier.size(40.dp)) {
-                Text(text = emoji, fontSize = 18.sp)
+private fun LineActions(
+    editable: Boolean,
+    onReact: (String) -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Column(modifier = Modifier.padding(top = 2.dp)) {
+        Row {
+            for (emoji in QUICK_REACTIONS) {
+                TextButton(onClick = { onReact(emoji) }, modifier = Modifier.size(40.dp)) {
+                    Text(text = emoji, fontSize = 18.sp)
+                }
             }
         }
+        Row {
+            if (editable) {
+                TextButton(onClick = onEdit) { Text("Edit") }
+            }
+            TextButton(onClick = onDelete) { Text("Delete") }
+        }
+    }
+}
+
+/**
+ * The inline editor for one of our own text lines: the line becomes a field with Save and Cancel.
+ * The draft starts as the line's current text, Save commits only a change (an untouched draft is a
+ * cancel in disguise), and the field gives the composer's own one-line shape, because an edit and
+ * a send are the same act at different times.
+ */
+@Composable
+private fun EditLine(
+    initialText: String,
+    onSave: (String) -> Unit,
+    onCancel: () -> Unit,
+) {
+    var draft by remember { mutableStateOf(initialText) }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        OutlinedTextField(
+            value = draft,
+            onValueChange = { draft = it },
+            modifier = Modifier.weight(1f),
+            singleLine = true,
+        )
+        TextButton(
+            onClick = { if (draft.trim().isEmpty() || draft == initialText) onCancel() else onSave(draft) },
+        ) { Text("Save") }
+        TextButton(onClick = onCancel) { Text("Cancel") }
     }
 }
 

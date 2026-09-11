@@ -141,6 +141,7 @@ fun MobileHome(
 
     UserIntentSheet(
         target = intentUser,
+        presence = intentUser?.let { state.presence[it.userId] },
         busy = intentUser?.let { state.friends.busy.contains(it.userId) } == true,
         onDismiss = { intentUser = null },
         onSend = {

@@ -88,6 +88,7 @@ import com.migo.core.protocol.InboxItem
 import com.migo.core.protocol.LedgerEntryWire
 import com.migo.core.protocol.MemberChange
 import com.migo.core.protocol.NotificationEvent
+import com.migo.core.protocol.PresenceEvent
 import com.migo.core.protocol.PresenceState
 import com.migo.core.protocol.ProfileUpdate
 import com.migo.core.protocol.ReceiptKind
@@ -806,6 +807,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 learnNames(live, response.conversations)
                 rememberGroupCounts(response.conversations)
                 val rows = response.conversations.map { row(live, it) }
+                // The direct peers' presence: their rows wear a ring, so their topics are watched
+                // the same frame through -- one subscribe, every peer the list just named.
+                watchPresence(live, rows.mapNotNull { it.peerId })
                 signedIn { it.copy(loading = false, conversations = rows) }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -2202,6 +2206,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     live,
                     entries.map { it.userId } + suggested.map { it.accountId },
                 )
+                // Every friend's topic, watched in one frame: a friend's row wears their presence
+                // ring, and the live stream is the only source the ring trusts.
+                watchPresence(live, entries.map { it.userId })
                 signedIn { it.copy(friends = it.friends.copy(loading = false, entries = entries, suggestions = suggested)) }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -2275,6 +2282,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     listOf(live.client.accountId, peer),
                 )
                 learnNames(live, listOf(summary))
+                // The peer's topic is watched the moment a direct conversation exists: their row
+                // wears the presence ring from now on, whichever list draws it first.
+                watchPresence(live, listOf(peer))
                 val fresh = row(live, summary)
                 signedIn { current ->
                     val absent = current.conversations.none { it.conversationId == fresh.conversationId }
@@ -3882,6 +3892,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         )
         subscriptions.add(opened.client.onMessage { arrived(it) })
         subscriptions.add(opened.client.onDeletion { removed(it) })
+        // Presence is the lists' ambient information: a friend's ring, a direct conversation's
+        // dot. The event lands in the shared map; the lists subscribe the ids they draw so the
+        // first event for each arrives on its own -- this bridge only listens, exactly as the web
+        // client's own presence hook does.
+        subscriptions.add(opened.client.onPresence { appeared(it) })
         subscriptions.add(opened.client.onTyping { typing(it) })
         // A pushed notification is a cue to reconcile every inbox-shaped surface, and a friend
         // event a cue to re-read the graph -- the same reconcile-don't-trust rule each section
@@ -4036,6 +4051,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             at = message.createdAt,
             unsupported = body.placeholder,
             attachment = body.attachment,
+            editedAt = message.editedAt,
         )
         val onScreen = opened(message.conversationId)
         // Filed in the transcript cache whatever the window state: a message that arrives while no
@@ -4063,8 +4079,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         // Back if the reader would rather not be taken there. Echoes of this account's own
         // sends (multi-device sync included) do not open anything: the sending device's screen
         // is the one that matters, and a synchronized echo yanking the reader away from
-        // Friends mid-scroll is a push, not a window.
-        if (!mine && !onScreen) {
+        // Friends mid-scroll is a push, not a window. An edit echo is held to the same rule —
+        // it replaces a line the reader already has, so there is no arrival worth opening for.
+        if (!mine && !onScreen && message.editedAt == null) {
             openFromMessage(message.conversationId)
         }
         if (onScreen && !mine) {
@@ -4093,6 +4110,75 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             chat.copy(messages = chat.messages.filterNot { it.messageId == deletion.messageId })
         }
         evictTranscript(deletion.conversationId, deletion.messageId)
+    }
+
+    /**
+     * Files one presence change in the shared map. Every list that draws a ring reads the map, so
+     * one event moves every dot that names the account -- the friend's row, their direct
+     * conversation's row, wherever the account appears.
+     */
+    private fun appeared(event: PresenceEvent) {
+        signedIn { it.copy(presence = it.presence + (event.userId to event.state)) }
+    }
+
+    /**
+     * Edits one of this account's own text messages in place.
+     *
+     * The replacement text is sealed through the domain's own sender-key chain -- the same chain the
+     * original send advanced -- and the server stores the new envelope under the existing id. The
+     * local copy is updated to the new text and stamped edited on acceptance, because the edit echo
+     * comes back through the stream like any other redelivery; a refusal leaves the original line
+     * exactly as it was, which the catch keeps by doing nothing to the transcript.
+     */
+    fun editMessage(messageId: Id, text: String) {
+        val live = session ?: return
+        val chat = (_state.value as? AppState.SignedIn)?.open ?: return
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            try {
+                live.client.messaging.editMessage(chat.conversationId, messageId, Content.Text(trimmed))
+                inChat(chat.conversationId) { current ->
+                    current.copy(
+                        messages = current.messages.map { line ->
+                            if (line.messageId == messageId && line.attachment == null && !line.unsupported) {
+                                line.copy(text = trimmed, editedAt = System.currentTimeMillis())
+                            } else {
+                                line
+                            }
+                        },
+                    )
+                }
+                restampTranscript(chat.conversationId, messageId, trimmed)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                // A refused edit leaves the original message exactly as it was.
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Withdraws one of this account's own messages from everyone's copy.
+     *
+     * The same fire-and-forget shape the web client keeps: the tombstone arrives through the
+     * conversation's own stream ([removed] drops the line from the window and the cache), so this
+     * path's work is the request alone, and a failure costs nothing to leave unshown -- the line is
+     * still there to press again.
+     */
+    fun deleteMessage(messageId: Id) {
+        val live = session ?: return
+        val chat = (_state.value as? AppState.SignedIn)?.open ?: return
+        viewModelScope.launch {
+            try {
+                live.client.messaging.deleteMessage(chat.conversationId, messageId, forEveryone = true)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // A refused delete keeps the message -- the control stays for a retry.
+            }
+        }
     }
 
     private fun typing(event: TypingEvent) {
@@ -4408,9 +4494,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    /**
+     * The presence the lists draw a ring from, for a set of accounts the session has a reason to
+     * watch: every friend, every direct peer. One SUBSCRIBE frame for the whole set, the wire's
+     * own answer to a list that wants presence for each row it shows; a refusal (a privacy limit,
+     * a capped set) is tolerated because the ring's grey is the honest state when the server would
+     * not say -- the same rule the web client's own watcher keeps. Re-watched freely: a topic
+     * already subscribed is a no-op the server absorbs.
+     */
+    private suspend fun watchPresence(live: MigoSession, ids: List<Id>) {
+        val wanted = ids.filter { it != live.client.accountId }.distinct()
+        if (wanted.isEmpty()) return
+        try {
+            live.client.watchUsers(wanted)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // The rings stay grey; the lists are still correct without them.
+        }
+    }
+
     /** The names behind a set of account ids, batched — the one profiles read behind every name shown. */
-    private suspend fun learnAccountNames(live: MigoSession, ids: List<Id>) {
-        val wanted = LinkedHashSet(ids.filter { !names.containsKey(it) })
+    private suspend fun learnAccountNames(live: MigoSession, ids: List<Id>) {        val wanted = LinkedHashSet(ids.filter { !names.containsKey(it) })
         if (wanted.isEmpty()) return
         try {
             for (profile in live.client.profile.fetch(wanted.toList().take(PROFILE_BATCH))) {
@@ -4567,6 +4672,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun evictTranscript(conversationId: Id, messageId: Id) {
         val cached = transcripts[conversationId] ?: return
         cached.removeAll { it.messageId == messageId }
+    }
+
+    /**
+     * Restamps one row of the transcript cache an edit just replaced. The cache and the window hold
+     * the same row shape, so an edit the window accepted is an edit the cache must carry too -- a
+     * reopened conversation reads the cache, and a reopened line that still said the old text would
+     * be a message that changed back.
+     */
+    private fun restampTranscript(conversationId: Id, messageId: Id, text: String) {
+        val cached = transcripts[conversationId] ?: return
+        val at = cached.indexOfFirst { it.messageId == messageId }
+        if (at < 0) return
+        cached[at] = cached[at].copy(text = text, editedAt = System.currentTimeMillis())
     }
 
     /**

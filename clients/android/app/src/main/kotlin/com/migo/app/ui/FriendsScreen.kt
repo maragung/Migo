@@ -34,6 +34,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.migo.app.model.AppState
+import com.migo.core.protocol.PresenceState
 import com.migo.core.protocol.RelationshipEntry
 import com.migo.core.protocol.RelationshipKind
 import com.migo.core.protocol.SuggestedUser
@@ -148,6 +149,7 @@ fun FriendsScreen(
                             name = name,
                             line = direct?.preview ?: "Tap to chat",
                             unread = direct?.unread ?: 0L,
+                            presence = state.presence[entry.userId],
                             onClick = { onOpenIntent(UserTarget(userId = entry.userId, name = name, friend = true)) },
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
@@ -207,12 +209,17 @@ fun FriendsScreen(
 /**
  * One friend: the presence-ringed avatar, the name, the line beneath, the unread pill, the chevron
  * — tappable along its whole length to open the friend intent sheet.
+ *
+ * [presence] is the live stream's word for the friend -- null when no event has arrived, which the
+ * ring shows as the not-here grey rather than guessing online. The web client's dot carries the
+ * same four states; the ring is this build's shape for the same fact.
  */
 @Composable
 private fun FriendRow(
     name: String,
     line: String,
     unread: Long,
+    presence: com.migo.core.protocol.PresenceState?,
     onClick: () -> Unit,
 ) {
     Row(
@@ -223,7 +230,7 @@ private fun FriendRow(
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        ListRowAvatar(name = name)
+        ListRowAvatar(name = name, online = presence != PresenceState.Offline)
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
             ListRowName(text = name)

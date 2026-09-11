@@ -4,6 +4,7 @@ import com.migo.core.crypto.Content
 import com.migo.core.protocol.Acknowledged
 import com.migo.core.protocol.MessageAccepted
 import com.migo.core.protocol.MessageDelete
+import com.migo.core.protocol.MessageEdit
 import com.migo.core.protocol.MessageEvent
 import com.migo.core.protocol.MessageKind
 import com.migo.core.protocol.MessageReceipt
@@ -468,6 +469,43 @@ class MessagingDomain(
             Op.MESSAGE_DELETE,
             { w -> request.encode(w) },
             { r -> MessageAccepted.decode(r) },
+        )
+    }
+
+    /**
+     * Replaces one of this account's messages in place: a fresh envelope under the same message id,
+     * so every receiver sees the line again with an edited stamp rather than as a new message.
+     *
+     * The caller hands the replacement as a [Content] and this domain seals it, the same
+     * rotate-distribute-seal order [send] and [sendReaction] keep. The web client has to seal its
+     * edits with a separate crypto instance because its SDK takes a raw envelope -- a seam that
+     * rides a chain the sending path has not distributed. This port has the chain right here, so
+     * the edit rides the same chain [send] advances and the distribution pass has already covered,
+     * and the seam does not exist. The server stores the new envelope under the existing id; the
+     * echo reaches this device like any other redelivery of the message, `editedAt` set.
+     */
+    suspend fun editMessage(conversationId: Id, messageId: Id, content: Content) {
+        if (groupCrypto.needsRotation(conversationId)) {
+            groupCrypto.rotate(conversationId)
+        }
+        distribute(conversationId)
+
+        val plaintext = content.encode()
+        val sealed = try {
+            groupCrypto.sealContent(conversationId, plaintext)
+        } finally {
+            plaintext.fill(0)
+        }
+
+        val request = MessageEdit(
+            messageId = messageId,
+            conversationId = conversationId,
+            envelope = sealed.envelope,
+        )
+        rpc.call(
+            Op.MESSAGE_EDIT,
+            { w -> request.encode(w) },
+            { r -> Acknowledged.decode(r) },
         )
     }
 

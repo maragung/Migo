@@ -29,8 +29,22 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.migo.app.model.RoomLiveInfo
+import com.migo.core.protocol.PresenceState
 import com.migo.core.protocol.RoomSummary
 import com.migo.core.wire.Id
+
+/**
+ * A presence state's word, the same labels the me sheet's pills carry: the sheet's friend line
+ * states the state by name, because a colour alone is a fact the colour-blind reader cannot read.
+ */
+private fun presenceWord(presence: PresenceState): String = when (presence) {
+    PresenceState.Online -> "online"
+    PresenceState.Away -> "away"
+    PresenceState.Busy -> "busy"
+    PresenceState.Offline -> "offline"
+    PresenceState.Invisible -> "invisible"
+    PresenceState.Unknown -> "offline"
+}
 
 /** The person a user-intent sheet was opened for: who they are, and whether they are a friend. */
 data class UserTarget(
@@ -204,6 +218,7 @@ fun SheetPrimaryAction(
 @Composable
 fun UserIntentSheet(
     target: UserTarget?,
+    presence: com.migo.core.protocol.PresenceState?,
     busy: Boolean,
     onDismiss: () -> Unit,
     onSend: (UserTarget) -> Unit,
@@ -218,13 +233,20 @@ fun UserIntentSheet(
                 .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            ListRowAvatar(name = target.name, online = target.friend)
+            // The live word the stream has for the person, when it has one: a friend's ring wears
+            // their presence rather than the always-online look the sheet once defaulted to. A
+            // stranger or a not-yet-heard friend keeps the plain ring -- an unwatched account has
+            // no presence to state, and the sheet does not guess.
+            ListRowAvatar(
+                name = target.name,
+                online = presence == null || presence != PresenceState.Offline,
+            )
             Spacer(modifier = Modifier.width(10.dp))
             Column {
                 ListRowName(text = target.name)
                 ListRowLine(
                     text = if (target.friend) {
-                        "Friend"
+                        "Friend" + (presence?.let { " · ${presenceWord(it)}" } ?: "")
                     } else {
                         "Not a friend yet — messages open a direct chat either way"
                     },

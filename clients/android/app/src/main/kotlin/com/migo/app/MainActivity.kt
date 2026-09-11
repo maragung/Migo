@@ -359,6 +359,11 @@ private fun ShellScreen(
                     onStopVoiceNote = model::stopVoiceNote,
                     onCancelVoiceNote = model::cancelVoiceNote,
                     onReact = model::react,
+                    // The sender's own two acts on their line, from the long-press bar: the edit
+                    // seals a replacement through the same chain the send used, and the delete is
+                    // the tombstone every member's copy drops when the server broadcasts it.
+                    onEdit = model::editMessage,
+                    onDelete = model::deleteMessage,
                     onResolveMedia = model::resolveMedia,
                     autoFetchMedia = autoFetchMedia,
                     onSaveDocument = { attachment ->

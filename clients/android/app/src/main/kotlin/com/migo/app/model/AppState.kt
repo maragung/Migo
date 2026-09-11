@@ -15,6 +15,7 @@ import com.migo.core.protocol.GiftListing
 import com.migo.core.protocol.InboxItem
 import com.migo.core.protocol.LedgerEntryWire
 import com.migo.core.protocol.MemberChange
+import com.migo.core.protocol.PresenceState
 import com.migo.core.protocol.ProgressionWire
 import com.migo.core.protocol.RankWire
 import com.migo.core.protocol.RelationshipEntry
@@ -139,6 +140,15 @@ sealed interface AppState {
         val admins: AdminsState = AdminsState(),
         val games: GamesState = GamesState(),
         val settings: SettingsPanelState = SettingsPanelState(),
+        /**
+         * The presence the live stream has reported for other accounts, by account id. Seeded by
+         * nothing -- an account not in the map is an account whose presence this shell has not
+         * heard -- because the lists that show presence subscribe the ids they draw and the first
+         * event for each lands within moments; the profile read's own presence field is the
+         * server's last statement from before this session, and a stale seed under a live value is
+         * the one state worse than none. The web client keeps the same live-only map.
+         */
+        val presence: Map<Id, PresenceState> = emptyMap(),
     ) : AppState
 
     /**
@@ -788,6 +798,12 @@ data class ChatMessage(
      * the placeholder states need nothing from this field.
      */
     val attachment: Attachment? = null,
+    /**
+     * When the message was last edited, when it has been. An edit keeps the message's id, seq and
+     * timestamp -- the stamp is the only thing that distinguishes an edited line from the original
+     * -- and a null here is an unedited line, the ordinary case.
+     */
+    val editedAt: Long? = null,
 )
 
 /**
