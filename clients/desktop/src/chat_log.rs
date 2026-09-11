@@ -25,7 +25,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use migo_core::Timestamp;
 
@@ -295,8 +295,9 @@ pub fn saved_logs(dir: &Path) -> Vec<SavedLog> {
         });
     }
     // Newest first: the list reads the way the conversations do, and the cap's survivor is
-    // the one at the top rather than the one that scrolled.
-    out.sort_by(|a, b| b.modified.as_unix_ms().cmp(&a.modified.as_unix_ms()));
+    // the one at the top rather than the one that scrolled. `Reverse` because `sort_by_key`
+    // is ascending and the intent is the opposite.
+    out.sort_by_key(|log| std::cmp::Reverse(log.modified.as_unix_ms()));
     out
 }
 
@@ -603,8 +604,8 @@ mod tests {
             (Some(settings), Some(logs)) => {
                 assert_eq!(logs.parent(), settings.parent());
                 assert_eq!(
-                    logs.file_name().map(|name| name.to_string_lossy()),
-                    Some("migo-logs".to_owned())
+                    logs.file_name().and_then(|name| name.to_str()),
+                    Some("migo-logs")
                 );
             }
             // A platform with no data directory has neither, and the feature honestly no-ops.
