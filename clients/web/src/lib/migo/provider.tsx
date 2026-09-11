@@ -567,7 +567,9 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
       }
     }
     await teardown();
-    await Promise.all([clearSession(), clearKeyStoreSnapshot()]);
+    // Best-effort for the same reason the resume catch is: a browser whose storage is blocked
+    // must still reach the login screen, not an eternal spinner.
+    await Promise.allSettled([clearSession(), clearKeyStoreSnapshot()]);
     setAccountId(null);
     setDeviceId(null);
     setConnectionState('closed');
@@ -621,7 +623,12 @@ export function MigoProvider({ children }: { children: ReactNode }): ReactNode {
     void restore().catch(async () => {
       // A failed resume (revoked or expired beyond refresh, or a corrupt store) drops back to signed-out.
       await teardown();
-      await Promise.all([clearSession(), clearKeyStoreSnapshot()]);
+      // The drops are best-effort on purpose: the failure that landed us here may be the very
+      // storage these writes go through (IndexedDB blocked, a private-mode browser), and a throw
+      // from inside this catch would leave the status at 'initializing' — an eternal teal spinner
+      // where the login page belongs. The records stay for a browser that can read them; the
+      // visitor still gets a working screen either way.
+      await Promise.allSettled([clearSession(), clearKeyStoreSnapshot()]);
       if (!cancelled) {
         setStatus('anonymous');
       }
