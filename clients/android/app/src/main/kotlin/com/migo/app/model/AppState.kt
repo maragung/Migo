@@ -582,6 +582,18 @@ data class ChatState(
     /** The text in the composer. Held here so a rotation does not lose a half-written message. */
     val draft: String = "",
     /**
+     * Whether the thread's search field is showing. Held here rather than in the screen so it
+     * survives a rotation like the draft does; the toggle that flips it also clears the query,
+     * mirroring the web client's toggle, so a reopened field never resumes a stale filter.
+     */
+    val searchOpen: Boolean = false,
+    /**
+     * The live query text, filtered per keystroke — no submit step, because the web client's
+     * filter runs on every render and the phone answers the same way. Blank (or whitespace-only)
+     * means no filter: the thread draws its full loaded list, not "everything matches".
+     */
+    val searchQuery: String = "",
+    /**
      * The room's live shape, for a room chat's header and for gating its moderation controls. Null
      * for a direct chat, and null for a room until a summary or a state event has named its counts.
      */

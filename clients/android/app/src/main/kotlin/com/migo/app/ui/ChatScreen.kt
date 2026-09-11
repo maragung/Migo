@@ -80,6 +80,7 @@ import com.migo.app.model.gameLabelOf
 import com.migo.app.model.guessFeedbackLine
 import com.migo.app.model.parseGuessBoard
 import com.migo.app.model.playerRangeLabel
+import com.migo.core.domain.filterChatSearch
 import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.GameCatalogueEntry
 import com.migo.core.protocol.GameViewWire
@@ -158,6 +159,13 @@ fun ChatScreen(
      */
     onExportLog: (() -> Unit)? = null,
     /**
+     * Opens or closes the thread's search field. Offered in every conversation kind, exactly as on
+     * the web — a filter over what the thread holds needs no conversation feature to exist.
+     */
+    onToggleSearch: () -> Unit = {},
+    /** Records the live search query; the filter runs on the messages this device already holds. */
+    onSearchQuery: (String) -> Unit = {},
+    /**
      * Opens the file picker for an attachment, whose answer is sent into the conversation. Null in
      * a server-readable room — attachments are an end-to-end feature (a room has no key channel to
      * hand the recipients a sealed object's key), mirroring the web composer's own gating.
@@ -194,15 +202,27 @@ fun ChatScreen(
 ) {
     val listState = rememberLazyListState()
 
+    // The search is a filter over what the thread already holds — the messages this device has
+    // decrypted, never a server query, so nothing leaves the device to answer it. A blank query
+    // hands back the same list untouched (the filter's own contract), so the remember keys below
+    // stay stable until the person actually types. A query matches only text bodies — an
+    // attachment's caption and an unsupported body are not text bodies, the web client's
+    // ContentType.Text rule — case-blind, per keystroke, with no submit step.
+    val shownMessages = filterChatSearch(chat.messages, chat.searchQuery) { message ->
+        if (message.attachment == null && !message.unsupported) message.text else null
+    }
+
     // The drawn order is the messages and the room's own notices — joins, leaves, kicks — woven
     // together by time. A direct chat has no notices, so the weave is the message list untouched;
     // only a room pays the sort, and only over the ~150 lines a chat holds. Messages already sit in
     // sequence order, and a stable sort keeps them there among notices minted at the same instant.
-    val timeline = remember(chat.messages, chat.notices) {
+    // The notices stay woven and unfiltered while a search runs: they are the thread's own
+    // scaffolding, and the web client splices them in unfiltered too.
+    val timeline = remember(shownMessages, chat.notices) {
         if (chat.notices.isEmpty()) {
-            chat.messages.map { TimelineItem.Message(it) }
+            shownMessages.map { TimelineItem.Message(it) }
         } else {
-            (chat.messages.map { TimelineItem.Message(it) } + chat.notices.map { TimelineItem.Notice(it) })
+            (shownMessages.map { TimelineItem.Message(it) } + chat.notices.map { TimelineItem.Notice(it) })
                 .sortedBy { it.at }
         }
     }
@@ -265,6 +285,7 @@ fun ChatScreen(
                 },
                 onStartCall = onStartCall,
                 onExportLog = onExportLog,
+                onToggleSearch = onToggleSearch,
             )
 
             // The change warning (§164) sits between the header and the thread, because it is about
@@ -274,14 +295,35 @@ fun ChatScreen(
                 SafetyWarningBanner(onReview = { safetyOpen.value = true })
             }
 
+            // The search field, under the warning and above the thread — the web client's own
+            // placement. The placeholder names the honest scope: this filters the messages this
+            // device holds, not the server's whole history, and a field that promised more would
+            // be lying in the one place a person reads before typing.
+            if (chat.searchOpen) {
+                OutlinedTextField(
+                    value = chat.searchQuery,
+                    onValueChange = onSearchQuery,
+                    modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 4.dp),
+                    placeholder = { Text("Filter loaded messages") },
+                    singleLine = true,
+                )
+            }
+
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 when {
-                    chat.loading && timeline.isEmpty() -> Box(
+                    // Loading is judged on the messages held, not the filtered view: a query that
+                    // empties the thread mid-load must show the no-match sentence, not a spinner
+                    // that only ends when the history does.
+                    chat.loading && chat.messages.isEmpty() -> Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center,
                     ) {
                         CircularProgressIndicator()
                     }
+
+                    timeline.isEmpty() && chat.searchQuery.isNotBlank() -> Placeholder(
+                        text = "No loaded messages match.",
+                    )
 
                     timeline.isEmpty() -> Placeholder(
                         text = "No messages yet. Anything you send is encrypted on this device first.",
@@ -402,6 +444,7 @@ private fun ChatHeader(
     onOpenSafety: (() -> Unit)? = null,
     onStartCall: ((Id) -> Unit)? = null,
     onExportLog: (() -> Unit)? = null,
+    onToggleSearch: () -> Unit = {},
 ) {
     // Games are offered only where a game has an audience: a room or a group conversation, never a
     // direct chat — the web client's own rule, because a game is the room's shared spectacle.
@@ -452,6 +495,13 @@ private fun ChatHeader(
                 TextButton(onClick = { onStartCall(peer) }) {
                     Text("📞")
                 }
+            }
+            // The thread's own search, before the Log control as on the web. Offered in every
+            // conversation kind — the filter runs on what the thread already holds, so there is no
+            // conversation feature for it to depend on. The label is the toggle's own sentence:
+            // tapping it again closes the field, and the toggle clears the query either way.
+            TextButton(onClick = onToggleSearch) {
+                Text(if (chat.searchOpen) "Close search" else "Search")
             }
             // The conversation's own record: the transcript this device holds, handed to whatever
             // the system shares text with. Offered in every conversation kind — a log is a log

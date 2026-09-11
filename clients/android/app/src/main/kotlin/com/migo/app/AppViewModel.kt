@@ -1026,6 +1026,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Records the live search query. The filter runs on the state the screen already draws. */
+    fun setChatSearchQuery(text: String) {
+        val current = (_state.value as? AppState.SignedIn)?.open ?: return
+        inChat(current.conversationId) { it.copy(searchQuery = text) }
+    }
+
+    /**
+     * Opens or closes the thread's search field.
+     *
+     * Every toggle clears the query, exactly as the web client's toggle does — opening the field
+     * resumes nothing, and closing it lifts the filter immediately rather than leaving the thread
+     * quietly narrowed behind a field that is no longer there to explain why.
+     */
+    fun toggleChatSearch() {
+        val current = (_state.value as? AppState.SignedIn)?.open ?: return
+        inChat(current.conversationId) { it.copy(searchOpen = !it.searchOpen, searchQuery = "") }
+    }
+
     /**
      * Seals and sends the draft.
      *

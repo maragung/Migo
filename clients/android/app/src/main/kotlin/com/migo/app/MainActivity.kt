@@ -313,6 +313,8 @@ private fun ShellScreen(
                     onAcknowledgeSafety = model::acknowledgeSafetyChange,
                     onStartCall = { peerId -> onRequestVoiceCall(open.conversationId, peerId) },
                     onExportLog = { model.shareChatLog(open.conversationId) },
+                    onToggleSearch = model::toggleChatSearch,
+                    onSearchQuery = model::setChatSearchQuery,
                     // Attachments are an end-to-end feature: the control is offered only where the
                     // conversation has a key channel to hand the recipients the object's key --
                     // every direct chat and group, never a server-readable room.
