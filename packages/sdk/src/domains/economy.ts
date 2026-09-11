@@ -7,6 +7,13 @@
  * {@link sendGift}, which moves the caller's own virtual balance to another account, server-ruled
  * and server-recorded.
  *
+ * # Kick Points
+ *
+ * A Kick Point is prepaid kick credit: an outright group kick costs one, falling back to a
+ * 1-coin price when the balance is empty, and refusing when neither is there. The balance is
+ * in-system only — it is bought with coins ({@link EconomyDomain.buyKickPoints}) or granted
+ * through events, never withdrawn or transferred.
+ *
  * # Why every read is authenticated but addressed
  *
  * The wallet ({@link getBalance}) and the ledger ({@link getLedger}) are the caller's own and are
@@ -42,6 +49,8 @@ import {
   decodeLeaderboardResponse,
   encodeStorePurchase,
   decodeStorePurchaseResult,
+  encodeKickPointsBuy,
+  decodeKickPointsBuyResult,
   encodeEntitlementsReq,
   decodeEntitlementsResponse,
 } from '@migo/protocol';
@@ -55,7 +64,8 @@ import type {
   GiftListing,
   GiftSend,
   GiftSendResult,
-  LedgerEntryWire,
+  KickPointsBuy,
+  KickPointsBuyResult,
   LedgerReq,
   LeaderboardReq,
   LeaderboardResponse,
@@ -84,7 +94,7 @@ export class EconomyDomain {
   }
 
   /**
-   * Reads the caller's own wallet: virtual balance and points.
+   * Reads the caller's own wallet: virtual balance, points, and Kick Points.
    *
    * Implied by the session; there is no way to read another account's wallet.
    */
@@ -229,6 +239,28 @@ export class EconomyDomain {
       OP.STORE_PURCHASE,
       encodeStorePurchase,
       decodeStorePurchaseResult,
+      request,
+    );
+  }
+
+  /**
+   * Buys one Kick Point pack, prepaid at a bulk discount.
+   *
+   * A Kick Point covers the price of an outright group kick (a founder's kick spends one KP
+   * before touching the coin balance; a vote is always free). `packKp` is a pack size the node
+   * sells — 1 KP for 1 coin, 10 for 9, 50 for 40 — any other size rejects before anything
+   * moves. Kick Points are an in-system balance only: no chain, no withdrawal, no transfer.
+   *
+   * `clientKey` is the buy intent's idempotency key, exactly as in {@link purchase}: mint one
+   * per intent and send the same key on every retry. A retry with the same key returns the
+   * first buy — `duplicate` true on the result — instead of charging twice.
+   */
+  async buyKickPoints(packKp: number, clientKey: string): Promise<KickPointsBuyResult> {
+    const request: KickPointsBuy = { packKp, clientKey };
+    return this.#rpc.call(
+      OP.KICK_POINTS_BUY,
+      encodeKickPointsBuy,
+      decodeKickPointsBuyResult,
       request,
     );
   }

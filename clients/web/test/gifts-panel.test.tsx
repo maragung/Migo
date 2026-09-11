@@ -27,6 +27,8 @@ import type { Id, LedgerEntryWire, RelationshipEntry, SuggestedUser, UserProfile
 import {
   BalanceCard,
   GiftGrid,
+  KickPointsShelf,
+  KP_PACKS,
   LedgerList,
   ProgressionCard,
   RecipientPicker,
@@ -66,6 +68,45 @@ test('the balance card shows the coin balance and the points balance', () => {
     'the points balance is missing',
   );
   assert.ok(markup.includes('points'), 'the points fact lost its unit');
+});
+
+test('the balance card shows the Kick Points, and an absent balance reads as zero', () => {
+  const held = renderToStaticMarkup(
+    <BalanceCard balance={{ balance: 120, points: 5, kickPoints: 7 }} />,
+  );
+  assert.ok(
+    held.includes('balance-amount">7<') || held.includes('balance-amount">7</span>'),
+    'the Kick Points balance is missing',
+  );
+  assert.ok(held.includes('Kick Points'), 'the Kick Points fact lost its unit');
+  // The field is optional on the wire — a node that predates KP sends nothing, and the card
+  // shows a zero balance, not a hole.
+  const absent = renderToStaticMarkup(<BalanceCard balance={{ balance: 120, points: 5 }} />);
+  assert.ok(
+    absent.includes('balance-amount">0<') || absent.includes('balance-amount">0</span>'),
+    'an absent Kick Points balance must read as zero',
+  );
+  assert.ok(
+    absent.includes('Kick Points'),
+    'the Kick Points fact is hidden when the wire omits it',
+  );
+});
+
+test('the Kick Point shelf states every pack with its price, and the pricing rule it serves', () => {
+  const markup = renderToStaticMarkup(<KickPointsShelf onBuy={() => {}} busy={false} />);
+  // Every pack button states its size and its coin price, so the spend is agreed before the
+  // press — the same rule the gift picker follows.
+  for (const expect of ['1 KP', '10 KP', '50 KP', '$MIG 1', '$MIG 9', '$MIG 40']) {
+    assert.ok(markup.includes(expect), `the shelf lost its "${expect}" line`);
+  }
+  assert.equal((markup.match(/<button/g) ?? []).length, KP_PACKS.length, 'one button per pack');
+  assert.ok(!markup.includes('disabled'), 'an idle shelf must not be disabled');
+  // The rule itself is stated beside the packs: KP first, coin fallback, votes free.
+  assert.ok(markup.includes('Votes are always free'), 'the free-vote rule is missing');
+  assert.ok(markup.includes('$MIG 1'), 'the coin fallback price is missing');
+  // And a busy shelf disables its buttons rather than hiding them.
+  const busy = renderToStaticMarkup(<KickPointsShelf onBuy={() => {}} busy={true} />);
+  assert.ok(busy.includes('disabled'), 'a buy in flight must disable the pack buttons');
 });
 
 test('the gift grid renders every catalogue entry with its price, category, and a send control', () => {
@@ -138,6 +179,9 @@ test('a ledger line signs its amount from the reason, and never guesses for unkn
   // money a client cannot name is not a direction it may draw.
   assert.equal(ledgerAmountLabel(entry('adjustment', 7, 210)), '7');
   assert.equal(ledgerAmountLabel(entry('from_the_future', 9, 219)), '9');
+  // The Kick Point pair: buying a pack debits coin, spending a KP on a kick debits KP.
+  assert.equal(ledgerAmountLabel(entry('kick_points_purchase', 9, 201)), '−9');
+  assert.equal(ledgerAmountLabel(entry('kick_spend', 1, 200)), '−1');
 });
 
 test('the ledger list shows one row per transaction with its reason, amount, and balance after', () => {

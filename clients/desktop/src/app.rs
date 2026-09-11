@@ -686,9 +686,18 @@ impl App {
                     // The push is the cue to re-read whatever inbox-shaped surface is showing.
                     self.commands.push(Command::Notifications);
                 }
-                Event::Balance { coins, points } => {
+                Event::Balance {
+                    coins,
+                    points,
+                    kick_points,
+                } => {
                     self.wallet.coins = Some(coins);
                     self.wallet.points = Some(points);
+                    // Absent is "this node predates the currency", not zero — the surface keeps
+                    // its dash by never learning a number it cannot stand behind.
+                    if let Some(kick_points) = kick_points {
+                        self.wallet.kick_points = Some(kick_points);
+                    }
                 }
                 Event::Ledger(rows) => {
                     self.wallet.ledger = rows;

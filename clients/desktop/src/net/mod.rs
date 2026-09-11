@@ -45,10 +45,10 @@ use std::time::Duration;
 use migo_core::{Id, OsRandom, Random, Timestamp};
 use migo_protocol::{
     features, BadgesReq, ClientInfo, ConversationKind, EncryptionMode, Frame, FriendRespond,
-    FriendTarget, GiftCatalogueReq, GiftSend, InboxReq, LeaderboardReq, LedgerReq, MessageKind,
-    NotificationAck, Opcode, ProgressionReq, RelationshipListReq, RoomCreate, RoomJoinRequest,
-    RoomLeaveRequest, RoomListRequest, SearchReq, SubscribeRequest, SuggestReq, Topic, TopicKind,
-    WalletReq,
+    FriendTarget, GiftCatalogueReq, GiftSend, InboxReq, KickPointsBuy, LeaderboardReq, LedgerReq,
+    MessageKind, NotificationAck, Opcode, ProgressionReq, RelationshipListReq, RoomCreate,
+    RoomJoinRequest, RoomLeaveRequest, RoomListRequest, SearchReq, SubscribeRequest, SuggestReq,
+    Topic, TopicKind, WalletReq,
 };
 use tokio::sync::mpsc;
 
@@ -296,6 +296,11 @@ pub enum Command {
         recipient: Id,
         client_key: Option<String>,
     },
+    /// Buy one Kick Point pack — the currency an outright group kick spends before it falls back
+    /// to 1 $MIG. `client_key` is the buy intent's idempotency key, minted with the click, so a
+    /// lost reply is the first buy again rather than a second charge. The packs and their prices
+    /// are the server's; the buttons state them, and the server is the judge.
+    BuyKickPoints { pack_kp: u32, client_key: String },
     /// Search public profiles by username prefix.
     SearchPeople { query: String },
     /// Ask the social graph for its own suggestions.
@@ -716,8 +721,15 @@ pub enum Event {
     Alerts(Vec<AlertRow>),
     /// A notification was pushed: the cue to re-read whatever inbox-shaped surface is showing.
     AlertPushed,
-    /// The caller's wallet: the MIG coin balance and the points balance.
-    Balance { coins: u64, points: u64 },
+    /// The caller's wallet: the MIG coin balance, the points balance, and the Kick Point balance.
+    ///
+    /// `kick_points` is optional the way the wire's field is: a node that predates the currency
+    /// reads as `None`, and the surface shows the dash rather than a zero it cannot stand behind.
+    Balance {
+        coins: u64,
+        points: u64,
+        kick_points: Option<u64>,
+    },
     /// The wallet's statement, newest first.
     Ledger(Vec<LedgerRow>),
     /// The caller's XP progression.
@@ -1778,6 +1790,12 @@ impl Worker {
                 client_key,
             } => {
                 self.send_gift(sku, recipient, client_key).await;
+            }
+            Command::BuyKickPoints {
+                pack_kp,
+                client_key,
+            } => {
+                self.buy_kick_points(pack_kp, client_key).await;
             }
             Command::SearchPeople { query } => self.search_people(query).await,
             Command::Suggestions => self.request_suggestions().await,
@@ -5339,6 +5357,17 @@ impl Worker {
         self.request(Opcode::GiftSend, &message).await;
     }
 
+    /// Buys one Kick Point pack. On acceptance the wallet re-reads, so the new balance and the
+    /// charge arrive as the server's arithmetic rather than a local guess — the same rule the
+    /// gift buy follows.
+    async fn buy_kick_points(&mut self, pack_kp: u32, client_key: String) {
+        let message = KickPointsBuy {
+            pack_kp,
+            client_key,
+        };
+        self.request(Opcode::KickPointsBuy, &message).await;
+    }
+
     /// Searches public profiles by username prefix.
     async fn search_people(&mut self, query: String) {
         let message = SearchReq {
@@ -5755,6 +5784,7 @@ impl Worker {
         self.sink.send(Event::Balance {
             coins: wallet.balance,
             points: wallet.points,
+            kick_points: wallet.kick_points,
         });
     }
 
@@ -5860,6 +5890,25 @@ impl Worker {
             self.sink
                 .toast("The server refused the gift send", ToastKind::Error);
         }
+    }
+
+    /// A Kick Point pack was bought (or refused): toast the outcome, then re-read the wallet, so
+    /// the balance the surface shows moves to the server's arithmetic. A refusal — most often a
+    /// coin balance that does not cover the pack — arrives as an error frame, which the loop's
+    /// own refusal arm toasts before this handler could; this arm sees only the accepted buys.
+    async fn on_kick_points_bought(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(result) = gateway::decode::<migo_protocol::KickPointsBuyResult>(frame) else {
+            return;
+        };
+        // A duplicate is the first buy returned again: the pack stands, nothing was charged
+        // twice — say the fact rather than the mechanism.
+        if result.duplicate {
+            self.sink
+                .toast("Kick Points already bought", ToastKind::Success);
+        } else {
+            self.sink.toast("Kick Points bought", ToastKind::Success);
+        }
+        self.request_wallet().await;
     }
 
     /// People came back, from search or suggestions: one event for both, because a row cannot tell
@@ -6022,6 +6071,7 @@ impl Worker {
             Opcode::Leaderboard => self.on_leaderboard(&frame),
             Opcode::GiftCatalogue => self.on_gifts(&frame),
             Opcode::GiftSend => self.on_gift_sent(&frame).await,
+            Opcode::KickPointsBuy => self.on_kick_points_bought(&frame).await,
             Opcode::Search | Opcode::Suggestions => self.on_people(&frame),
             // The call plane's own frames. Invite results and TURN answers are replies this
             // device asked for; invite events, SDP/ICE relays, and state events are pushed at

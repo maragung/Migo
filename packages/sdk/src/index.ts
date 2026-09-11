@@ -263,6 +263,7 @@ export type {
   GiftListing,
   GiftSendResult,
   InboxItem,
+  KickPointsBuyResult,
   LedgerEntryWire,
   MediaProgress,
   MediaTicket,

@@ -8,6 +8,8 @@ import com.migo.core.protocol.GiftCatalogueResponse
 import com.migo.core.protocol.GiftListing
 import com.migo.core.protocol.GiftSend
 import com.migo.core.protocol.GiftSendResult
+import com.migo.core.protocol.KickPointsBuy
+import com.migo.core.protocol.KickPointsBuyResult
 import com.migo.core.protocol.LeaderboardReq
 import com.migo.core.protocol.LeaderboardResponse
 import com.migo.core.protocol.LedgerEntryWire
@@ -50,6 +52,21 @@ class EconomyDomain(
     suspend fun getBalance(): WalletView {
         val request = WalletReq()
         return rpc.call(Op.BALANCE_FETCH, { w -> request.encode(w) }, { r -> WalletView.decode(r) })
+    }
+
+    /**
+     * Buys one Kick Point pack: the price of an outright kick, prepaid at a bulk discount.
+     *
+     * `packKp` is one of the server's packs (1, 10, or 50 KP); any other size is refused before
+     * anything moves. A kick spends a KP when the balance holds one and only falls back to a coin
+     * when it does not, so a pack is the one way to make kicks cheap in bulk.
+     *
+     * `clientKey` is this purchase intent's idempotency key, minted per intent exactly like
+     * [sendGift]'s: a retry with the same key returns the first buy instead of charging twice.
+     */
+    suspend fun buyKickPoints(packKp: Long, clientKey: String): KickPointsBuyResult {
+        val request = KickPointsBuy(packKp, clientKey)
+        return rpc.call(Op.KICK_POINTS_BUY, { w -> request.encode(w) }, { r -> KickPointsBuyResult.decode(r) })
     }
 
     /**

@@ -237,6 +237,8 @@ data class SearchState(
 data class WalletState(
     val balance: Long? = null,
     val points: Long? = null,
+    /** Kick Points: prepaid kick credit — a kick spends one before it spends a coin. */
+    val kickPoints: Long? = null,
     val ledger: List<LedgerEntryWire> = emptyList(),
     val progression: ProgressionWire? = null,
     val badges: List<BadgeWire> = emptyList(),

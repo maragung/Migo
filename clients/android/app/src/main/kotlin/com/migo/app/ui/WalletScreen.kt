@@ -65,6 +65,7 @@ import com.migo.core.wire.Id
 fun WalletScreen(
     state: AppState.SignedIn,
     onSendGift: (sku: String, recipient: Id, clientKey: String?) -> Unit,
+    onBuyKickPoints: (packKp: Long, clientKey: String) -> Unit,
     onRefresh: () -> Unit,
     onArchiveWallet: (walletId: String) -> Unit,
     onChainNetwork: (ChainNetworkChoice) -> Unit,
@@ -121,7 +122,40 @@ fun WalletScreen(
                             unit = "points",
                             emphasise = false,
                         )
+                        // Kick Points: the kick's prepaid credit, named for what it buys.
+                        BalanceFact(
+                            amount = state.wallet.kickPoints?.toString() ?: "…",
+                            unit = "KP",
+                            emphasise = false,
+                        )
                     }
+                }
+
+                // Kick Points: a kick spends a KP before it spends a coin, and the packs are the
+                // bulk discount. The prices are stated up front, like the gift shop's.
+                item { SectionLabel(text = "Kick Points") }
+                item {
+                    Text(
+                        text = "A kick costs 1 KP, else 1 \$MIG. Voting to kick is free.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    )
+                }
+                items(KICK_POINT_PACKS, key = { it.first }) { (kp, price) ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("$kp KP", style = MaterialTheme.typography.titleMedium)
+                            OneLine(text = "$price \$MIG")
+                        }
+                        Button(onClick = {
+                            onBuyKickPoints(kp, java.util.UUID.randomUUID().toString())
+                        }) { Text("Buy") }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 }
 
                 // The AVAX side (§184): one named network at a time, balance by explicit refresh.
@@ -418,6 +452,9 @@ private fun LedgerLine(entry: LedgerEntryWire) {
 /** The closed reason-to-direction mapping, identical to the web client's. */
 fun ledgerCredits(reason: String): Boolean =
     reason == "grant" || reason == "gift_reputation" || reason == "refund" || reason == "game_payout"
+
+/** The server's Kick Point packs: (kp, price in coins) — the bulk discount is the point. */
+val KICK_POINT_PACKS: List<Pair<Long, Long>> = listOf(1L to 1L, 10L to 9L, 50L to 40L)
 
 /** The signed amount a statement line shows, from the reason's direction. */
 fun ledgerAmount(entry: LedgerEntryWire): String =

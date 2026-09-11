@@ -748,6 +748,9 @@ pub fn ledger_credit(reason: &str) -> bool {
         reason,
         "grant" | "gift_reputation" | "refund" | "game_payout"
     )
+    // Not listed: the Kick Point legs — "kick_spend" and "kick_points_purchase" both debit, the
+    // buy in coins and the spend in KP, and the unknown-word fallback already draws a spend as
+    // unsigned rather than guessing; keeping them off the credit list is the whole change.
 }
 
 /// A snake_case wire word as readable words (`friend_request` → `Friend request`).

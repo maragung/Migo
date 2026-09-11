@@ -436,6 +436,7 @@ private fun SectionScreen(state: AppState.SignedIn, model: AppViewModel, modifie
         AppState.Section.WALLET -> WalletScreen(
             state = state,
             onSendGift = model::sendGift,
+            onBuyKickPoints = model::buyKickPoints,
             onRefresh = model::loadWallet,
             onArchiveWallet = model::archiveWallet,
             onChainNetwork = model::selectChainNetwork,

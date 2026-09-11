@@ -1,5 +1,5 @@
-//! The Wallet place: the $MIG balance, the gift shop, the statement, progression, badges, and
-//! the leaderboard — the caller's whole economy under one address.
+//! The Wallet place: the $MIG balance, the gift shop, the Kick Point shop, the statement,
+//! progression, badges, and the leaderboard — the caller's whole economy under one address.
 //!
 //! The unit is $MIG, and the money is on-chain: the wallet's chain half reads and moves real
 //! Avalanche value straight from the account root, with no in-app credits in between. The
@@ -21,6 +21,10 @@ use crate::ui::{widgets, Context};
 pub struct WalletState {
     pub coins: Option<u64>,
     pub points: Option<u64>,
+    /// Kick Points held, if the node reports them: the currency an outright group kick spends
+    /// before it falls back to 1 $MIG. `None` until a balance read answers — and forever, on a
+    /// node that predates the currency.
+    pub kick_points: Option<u64>,
     pub ledger: Vec<LedgerRow>,
     pub progression: Option<Progression>,
     pub badges: Vec<String>,
@@ -132,6 +136,17 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut WalletState) {
                         .unwrap_or_else(|| "…".into()),
                     false,
                 );
+                ui.add_space(space::SM);
+                fact_card(
+                    ui,
+                    context.theme,
+                    "KICK POINTS",
+                    &state
+                        .kick_points
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "…".into()),
+                    false,
+                );
             });
 
             // The AVAX side: one network at a time, balance by explicit refresh, and a send that
@@ -214,6 +229,39 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut WalletState) {
                         });
                     });
                 }
+            }
+
+            // The Kick Point shop: the prepaid currency a group kick spends before it falls back
+            // to 1 $MIG. Price stated before the button, per the place's own rule, and the pack
+            // list is the server's — the buttons state it, the server is the judge.
+            ui.add_space(space::LG);
+            widgets::subheader(ui, context.theme, "KICK POINTS");
+            ui.horizontal(|ui| {
+                ui.add_space(space::MD);
+                ui.label(
+                    RichText::new("A group kick spends one; without any, it costs 1 $MIG.")
+                        .font(FontId::proportional(font::SMALL))
+                        .color(colors.text_muted),
+                );
+            });
+            for (pack_kp, price) in KP_PACKS {
+                ui.horizontal(|ui| {
+                    ui.add_space(space::MD);
+                    ui.label(
+                        RichText::new(format!("{} KP · {} $MIG", pack_kp, price))
+                            .font(FontId::proportional(font::BODY))
+                            .color(colors.text),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_space(space::MD);
+                        if ui.button("Buy").clicked() {
+                            context.issue(Command::BuyKickPoints {
+                                pack_kp,
+                                client_key: kick_intent_key(),
+                            });
+                        }
+                    });
+                });
             }
 
             // The statement: one line per transaction, newest first.
@@ -852,6 +900,23 @@ fn prepared_line(ui: &mut Ui, theme: Theme, label: &str, value: &str, monospace:
 fn intent_key() -> String {
     format!(
         "gift-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    )
+}
+
+/// The Kick Point packs and their prices in $MIG, stated as the server prices them: the buy
+/// button says what the wire will charge. Bulk buys discount, and the server is the judge of
+/// both — a wrong pack is refused before anything moves.
+const KP_PACKS: [(u32, u64); 3] = [(1, 1), (10, 9), (50, 40)];
+
+/// A fresh idempotency key for one Kick Point buy, minted with the click for the same reason a
+/// gift pick mints one: a lost reply is the first buy again, not a second charge.
+fn kick_intent_key() -> String {
+    format!(
+        "kp-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())

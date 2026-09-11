@@ -69,6 +69,19 @@ const LEDGER_ROWS = 10;
 const LEADERBOARD_ROWS = 10;
 
 /**
+ * The Kick Point packs the panel offers, as plain facts the buttons state verbatim.
+ *
+ * The sizes and prices are the server's own pack table (a node that sold different packs rejects
+ * an unknown size before anything moves), so the panel states each pack's price beside its size —
+ * the spend is agreed before the button is pressed, exactly like the gift picker.
+ */
+export const KP_PACKS: ReadonlyArray<{ kp: number; price: number }> = [
+  { kp: 1, price: 1 },
+  { kp: 10, price: 9 },
+  { kp: 50, price: 40 },
+];
+
+/**
  * A fresh idempotency key for one gift pick, from the platform CSPRNG.
  *
  * Sent with every retry of that pick so the server can tell a re-sent gift
@@ -92,7 +105,7 @@ export function xpFraction(into: number, total: number): number {
   return Math.min(1, Math.max(0, into / total));
 }
 
-/** The wallet as two plain facts: the $MIG coin balance and the points balance. */
+/** The wallet as plain facts: the $MIG coin balance, the points balance, and the Kick Points. */
 export function BalanceCard({ balance }: { balance: WalletView }): ReactNode {
   return (
     <div className="balance-card">
@@ -105,6 +118,50 @@ export function BalanceCard({ balance }: { balance: WalletView }): ReactNode {
         <span className="balance-amount">{balance.points.toLocaleString()}</span>
         <span className="balance-unit">points</span>
       </span>
+      {/* Kick Points are optional on the wire (a node that predates them sends nothing); an absent
+          balance reads as zero, the same absence the ledger shows for a brand-new account. */}
+      <span className="balance-fact balance-fact-points">
+        <span className="balance-amount">{(balance.kickPoints ?? 0).toLocaleString()}</span>
+        <span className="balance-unit">Kick Points</span>
+      </span>
+    </div>
+  );
+}
+
+/**
+ * The Kick Point shelf: the pack buttons plus the pricing rule they serve.
+ *
+ * A Kick Point is the prepaid price of an outright group kick — a founder's kick spends one KP
+ * before touching the coin balance, a vote is always free — so the shelf states that rule beside
+ * the packs, the same way the gift picker states its price before the recipient is chosen.
+ */
+export function KickPointsShelf({
+  onBuy,
+  busy,
+}: {
+  /** Buys one pack; the panel refreshes the balance and the statement on success. */
+  onBuy: (pack: { kp: number; price: number }) => void;
+  busy: boolean;
+}): ReactNode {
+  return (
+    <div className="kp-shelf" role="group" aria-label="Buy Kick Points">
+      <p className="muted">
+        A founder's kick costs 1 Kick Point, or $MIG 1 when you have none. Votes are always free.
+      </p>
+      <div className="kp-packs">
+        {KP_PACKS.map((pack) => (
+          <button
+            key={pack.kp}
+            type="button"
+            className="btn"
+            disabled={busy}
+            onClick={() => onBuy(pack)}
+            title={`Add ${pack.kp} Kick Point${pack.kp === 1 ? '' : 's'} to this account`}
+          >
+            {pack.kp} KP — $MIG {pack.price}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -230,11 +287,13 @@ export function ledgerAmountLabel(entry: LedgerEntryWire): string {
     entry.reason === 'grant' ||
     entry.reason === 'gift_reputation' ||
     entry.reason === 'refund' ||
-    entry.reason === 'game_payout';
+    entry.reason === 'game_payout' ||
+    entry.reason === 'kick_points_purchase';
   const debit =
     entry.reason === 'gift_purchase' ||
     entry.reason === 'purchase' ||
-    entry.reason === 'game_stake';
+    entry.reason === 'game_stake' ||
+    entry.reason === 'kick_spend';
   if (credit) {
     return `+${entry.amount}`;
   }
@@ -468,6 +527,12 @@ export function WalletPanel(): ReactNode {
   const [notice, setNotice] = useState<string | null>(null);
   const [results, setResults] = useState<SuggestedUser[] | null>(null);
 
+  // The Kick Point buy flow: one pack button in flight at a time, keyed by the pack's size. Its
+  // failure line shares the send flow's channel (a refused buy is a refused spend, not a broken
+  // panel), and its idempotency key is minted per press — a re-press is a new intent, exactly like
+  // a second gift pick, because the button's label already stated the price.
+  const [kpBuying, setKpBuying] = useState<number | null>(null);
+
   const reload = useCallback(async (): Promise<void> => {
     if (!client) {
       return;
@@ -551,6 +616,35 @@ export function WalletPanel(): ReactNode {
     [client, picking, pickingKey, sending, reload],
   );
 
+  /** Buys one Kick Point pack; on success the money-side facts re-read, exactly like a gift. */
+  const buyKpPack = useCallback(
+    (pack: { kp: number; price: number }): void => {
+      if (!client || kpBuying !== null) {
+        return;
+      }
+      setKpBuying(pack.kp);
+      setSendError(null);
+      setNotice(null);
+      client.economy
+        .buyKickPoints(pack.kp, newGiftIntentKey())
+        .then((res) => {
+          setNotice(
+            res.duplicate
+              ? `That ${pack.kp} KP pack was already bought — nothing charged twice.`
+              : `Bought ${pack.kp} Kick Point${pack.kp === 1 ? '' : 's'} for $MIG ${pack.price}.`,
+          );
+          return reload();
+        })
+        .catch((cause: unknown) => {
+          setSendError(friendlyError(cause));
+        })
+        .finally(() => {
+          setKpBuying(null);
+        });
+    },
+    [client, kpBuying, reload],
+  );
+
   const onSearch = useCallback(
     (text: string): void => {
       if (!client || text.length === 0) {
@@ -605,6 +699,11 @@ export function WalletPanel(): ReactNode {
           <section className="panel-section" aria-label="Balance">
             <h2 className="panel-heading">Balance</h2>
             <BalanceCard balance={balance} />
+          </section>
+
+          <section className="panel-section" aria-label="Kick Points">
+            <h2 className="panel-heading">Kick Points</h2>
+            <KickPointsShelf onBuy={buyKpPack} busy={kpBuying !== null} />
           </section>
 
           {/* The chain side of the wallet (§184): a separate conversation with a separate

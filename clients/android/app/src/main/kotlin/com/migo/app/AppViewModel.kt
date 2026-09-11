@@ -2653,6 +2653,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         loading = false,
                         balance = wallet?.balance,
                         points = wallet?.points,
+                        kickPoints = wallet?.kickPoints,
                         ledger = ledger,
                         progression = progression,
                         badges = badges,
@@ -2721,6 +2722,27 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 live.client.economy.sendGift(sku, recipient, null, clientKey)
+                loadWallet()
+                signedIn { it.copy(failure = null) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Buys one Kick Point pack; the wallet re-reads after, for the same reason as [sendGift] —
+     * the server's arithmetic is the only arithmetic worth showing. `clientKey` is the intent's
+     * idempotency key from the pack row, so a retry of the same press is the first buy again
+     * server-side, not a second charge.
+     */
+    fun buyKickPoints(packKp: Long, clientKey: String) {
+        val live = session ?: return
+        viewModelScope.launch {
+            try {
+                live.client.economy.buyKickPoints(packKp, clientKey)
                 loadWallet()
                 signedIn { it.copy(failure = null) }
             } catch (cancelled: CancellationException) {

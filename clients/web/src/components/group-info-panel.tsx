@@ -154,7 +154,7 @@ export function GroupRosterRow({
               className="btn btn-ghost"
               disabled={busy}
               onClick={onVoteKick}
-              title="Call a vote to remove this person. When half the group agrees, they are kicked."
+              title="Call a vote to remove this person. When half the group agrees, they are kicked. A vote costs nothing — only a founder's outright kick is priced."
             >
               Vote kick
             </button>
@@ -190,7 +190,7 @@ export function GroupRosterRow({
               className="btn btn-danger"
               disabled={busy}
               onClick={onKick}
-              title="Remove this person outright, no vote — a founder's call."
+              title="Remove this person outright, no vote — a founder's call. Costs 1 Kick Point, or $MIG 1 if you have none."
             >
               Kick
             </button>
@@ -462,13 +462,20 @@ export function GroupInfoPanel({
     withBusy(targetId, () => active.conversations.mute(conversationId, targetId));
   }
 
-  // A founder's kick removes a person outright, so the member is named before the server acts.
+  // A founder's kick removes a person outright and carries a price, so the member is named and the
+  // cost stated before the server acts: a Kick Point when there is one to spend, otherwise $MIG 1.
+  // The server's answer is the authority — a refusal (no KP and no coin) arrives as its own error
+  // message and is surfaced through the panel's error line, not swallowed.
   function kickPerson(targetId: Id): void {
     const active = client;
     if (!active) {
       return;
     }
-    if (!window.confirm(`Kick ${nameOf(targetId)} from the group? A founder's call, no vote.`)) {
+    if (
+      !window.confirm(
+        `Kick ${nameOf(targetId)} from the group? A founder's call, no vote — it costs 1 Kick Point, or $MIG 1 if you have none.`,
+      )
+    ) {
       return;
     }
     withBusy(targetId, () => active.conversations.kick(conversationId, targetId));

@@ -1782,6 +1782,14 @@ private fun GroupMemberRow(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     ConfirmTextButton(label = "Kick", enabled = !acting, onConfirm = onKick)
                 }
+                // The tariff's price, stated where the spend is agreed: a kick spends a Kick Point
+                // when one is held and a coin when not, and a short wallet refuses rather than
+                // half-charging. The vote is every member's free recourse.
+                Text(
+                    text = "A kick spends 1 KP, else 1 \$MIG. Vote kick is free.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }

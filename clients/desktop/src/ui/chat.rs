@@ -1106,6 +1106,7 @@ fn group_roster_panel(
                                 .fill(egui::Color32::TRANSPARENT)
                                 .stroke(egui::Stroke::NONE),
                             )
+                            .on_hover_text("Costs 1 Kick Point, or 1 $MIG when none are held")
                             .clicked()
                         {
                             kick_send = Some(member.account_id);
@@ -1127,6 +1128,7 @@ fn group_roster_panel(
                                 .fill(egui::Color32::TRANSPARENT)
                                 .stroke(egui::Stroke::NONE),
                             )
+                            .on_hover_text("Free — the vote costs nothing")
                             .clicked()
                     {
                         vote_send = Some(member.account_id);

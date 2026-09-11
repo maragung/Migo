@@ -2505,6 +2505,11 @@ main {
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 8px;
 }
+.kp-shelf .kp-packs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 .gift-card {
   display: flex;
   flex-direction: column;
