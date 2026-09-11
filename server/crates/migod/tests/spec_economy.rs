@@ -14,7 +14,7 @@ use migo_core::{Id, Secret, Timestamp};
 use migo_economy::{Catalogue, EconomyConfig, Gift, Grant, Reason, SendGift};
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 use migo_store::model::{Currency, NewAccount};
-use migo_store::traits::AccountStore;
+use migo_store::traits::{AccountStore, EconomyStore};
 use migo_store::MemoryStore;
 
 const NOW: i64 = 1_700_000_000_000;
