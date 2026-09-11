@@ -636,7 +636,7 @@ impl App {
                 }
                 // A kick vote's tally, for everyone: the newest tally per conversation is
                 // the one that matters, and a closed one retires.
-                Event::GroupVoteEvent {
+                Event::GroupVoteBroadcast {
                     conversation_id,
                     target_id,
                     votes,
