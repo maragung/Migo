@@ -546,6 +546,137 @@ impl App {
                         live.member_count = member_count;
                     }
                 }
+                // A group's roster arrived: the panel's copy, filed for the conversation the
+                // ask named. The roster is also the fact the founder gates read, so the
+                // panel redraws with real authority the frame after this.
+                Event::GroupRoster {
+                    conversation_id,
+                    members,
+                } => {
+                    self.chat.rosters.insert(conversation_id, members);
+                }
+                // A group's membership moved: the notice line lands in the group's thread,
+                // the group twin of the room tail above. The names are resolved at draw time
+                // the way every notice's are, and the conversation row's member list is
+                // patched with the same delta the worker patched its cache with.
+                Event::GroupMember {
+                    conversation_id,
+                    user_id,
+                    change,
+                } => {
+                    let verb = crate::model::group_notice_verb(change);
+                    let tail = self.chat.group_notices.entry(conversation_id).or_default();
+                    let seq = tail.last().map(|n| n.seq + 1).unwrap_or(0);
+                    tail.push(RoomNotice { user_id, verb, seq });
+                    if tail.len() > MAX_ROOM_NOTICES {
+                        let cut = tail.len() - MAX_ROOM_NOTICES;
+                        tail.drain(0..cut);
+                    }
+                    if let Some(conversation) = self
+                        .chat
+                        .conversations
+                        .iter_mut()
+                        .find(|c| c.conversation_id == conversation_id)
+                    {
+                        use migo_protocol::MemberChange;
+                        match change {
+                            MemberChange::Joined => {
+                                if !conversation.members.contains(&user_id) {
+                                    conversation.members.push(user_id);
+                                }
+                            }
+                            MemberChange::Left | MemberChange::Kicked | MemberChange::Banned => {
+                                conversation.members.retain(|id| *id != user_id);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // A group was renamed: the row's title, the same delta the state event
+                // carried. Other members' windows hear the new name the same frame.
+                Event::GroupRenamed {
+                    conversation_id,
+                    title,
+                } => {
+                    if let Some(conversation) = self
+                        .chat
+                        .conversations
+                        .iter_mut()
+                        .find(|c| c.conversation_id == conversation_id)
+                    {
+                        conversation.title = Some(title);
+                    }
+                }
+                // This account's own vote landed: the tally as the caller sees it. Filed as
+                // the conversation's running tally, the same shape the fan-out event files.
+                Event::GroupVoteStatus {
+                    conversation_id,
+                    target_id,
+                    votes,
+                    needed,
+                    member_count,
+                    open,
+                } => {
+                    if open {
+                        self.chat.votes.insert(
+                            conversation_id,
+                            crate::model::VoteTally {
+                                target_id,
+                                votes,
+                                needed,
+                                member_count,
+                                closed: None,
+                            },
+                        );
+                    } else {
+                        // The vote carried. The tally retires, and the member event for the
+                        // removal follows separately.
+                        self.chat.votes.remove(&conversation_id);
+                    }
+                }
+                // A kick vote's tally, for everyone: the newest tally per conversation is
+                // the one that matters, and a closed one retires.
+                Event::GroupVoteEvent {
+                    conversation_id,
+                    target_id,
+                    votes,
+                    needed,
+                    member_count,
+                    closed,
+                } => {
+                    if closed == Some(true) {
+                        self.chat.votes.remove(&conversation_id);
+                    } else {
+                        self.chat.votes.insert(
+                            conversation_id,
+                            crate::model::VoteTally {
+                                target_id,
+                                votes,
+                                needed,
+                                member_count,
+                                closed,
+                            },
+                        );
+                    }
+                }
+                // The leave (or the removal) was accepted: the thread's window closes, its
+                // notices go with it, and the copy of the conversation goes from the list —
+                // the list re-read the worker already fired is what settles the row.
+                Event::GroupLeft { conversation_id } => {
+                    self.chat.group_notices.remove(&conversation_id);
+                    self.chat.rosters.remove(&conversation_id);
+                    self.chat.votes.remove(&conversation_id);
+                    self.chat.roster_open.remove(&conversation_id);
+                    self.chat.messages.remove(&conversation_id);
+                    self.chat
+                        .conversations
+                        .retain(|c| c.conversation_id != conversation_id);
+                    if self.chat.selected == Some(conversation_id) {
+                        self.chat.selected = None;
+                    }
+                    self.desktop.close_chat(conversation_id);
+                    self.toasts.push(Toast::info("Left the group"));
+                }
                 Event::Alerts(rows) => {
                     self.alerts.items = rows;
                     self.alerts.loaded = true;
@@ -1196,7 +1327,9 @@ impl App {
             zoom_choice,
         };
         match place {
-            Place::Friends => crate::ui::friends::show(ui, &mut context, &mut self.friends),
+            Place::Friends => {
+                crate::ui::friends::show(ui, &mut context, &mut self.friends, &mut self.chat)
+            }
             Place::Rooms => {
                 crate::ui::rooms::show(ui, &mut context, &mut self.rooms, &mut self.chat)
             }

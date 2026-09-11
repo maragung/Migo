@@ -195,6 +195,54 @@ pub enum Command {
     StartDirect { username: String },
     /// Start a direct conversation with an account id already held — a search hit, a suggestion.
     StartDirectById { peer: Id },
+    /// Create a group conversation with the friends chosen in the new-group form. The member
+    /// list carries the *other* members, exactly the way a direct create names its one peer:
+    /// the server adds the caller, mints the founder role for them, and drops the caller's own
+    /// id from the list without an error (the same tolerance `start_direct` relies on).
+    CreateGroup {
+        /// The other founding members. One is the minimum — the server refuses an empty list
+        /// with "a conversation needs somebody other than its creator", and the form holds the
+        /// button back until then rather than sending a refusal the person could have been
+        /// spared.
+        members: Vec<Id>,
+        /// The group's title, as typed. Trimmed by the form; the server enforces its own
+        /// length bound and says so in a sentence worth reading.
+        title: String,
+    },
+    /// Add members to a group conversation. Any current member's right, within the group size
+    /// cap the server holds; already-seated names are dropped by the server, not refused.
+    InviteToGroup {
+        conversation_id: Id,
+        members: Vec<Id>,
+    },
+    /// Leave a group conversation. The last founder out promotes the earliest remaining member,
+    /// so the group survives the person who made it.
+    LeaveGroup { conversation_id: Id },
+    /// Read a group conversation's roster: every member with role, join time, mute, and
+    /// departure. The answer is what the roster panel draws and what the founder controls
+    /// gate on — the member cache the send path keeps is an audience, not a roster.
+    GroupRoster { conversation_id: Id },
+    /// A founder mutes one member until `until`, or lifts the mute when `until` is `None`.
+    /// The server refuses a self-mute and a mute aimed at the other founder; the UI mirrors
+    /// both gates so its buttons say what the wire would allow.
+    MuteGroupMember {
+        conversation_id: Id,
+        target_id: Id,
+        until: Option<Timestamp>,
+    },
+    /// A founder removes a member outright, no vote. The other founder is beyond this reach,
+    /// and the server says so; the roster panel keeps the button off founders for the same
+    /// reason the web client does — a refusal the person can see coming is kinder than one
+    /// that arrives.
+    KickGroupMember { conversation_id: Id, target_id: Id },
+    /// Start a kick vote in a group, or add this account's voice to one already running.
+    /// Every member's lever, founders excepted as targets, one voice per account, and a
+    /// strict majority of the members carries it — the same rules the web client states in
+    /// its panel.
+    VoteKickMember { conversation_id: Id, target_id: Id },
+    /// A founder renames a group. The wire is a delta of title alone; the server answers with
+    /// the refreshed summary and the group's members hear the new name through a state event.
+    RenameGroup { conversation_id: Id, title: String },
     /// Report typing state. Best effort; dropped silently when offline.
     Typing { conversation_id: Id, typing: bool },
     /// Mark everything up to `seq` as read.
@@ -518,6 +566,61 @@ pub enum Event {
     /// asked because it wants the thread open, so the id arrives on its own and the shell can
     /// open the tab without guessing which conversation in the refreshed list is the new one.
     ConversationCreated { conversation_id: Id },
+    /// A group's roster arrived: every member with role, join time, mute, and departure, in the
+    /// server's order (active first by join time, then the departed as they left).
+    ///
+    /// The roster is a different fact from the member cache the send path keeps: the cache is an
+    /// encryption audience of ids, the roster is the panel a person reads — roles, mutes and all.
+    /// Both are fed by the same wire answer; this event carries the panel's copy.
+    GroupRoster {
+        conversation_id: Id,
+        members: Vec<crate::model::RosterMember>,
+    },
+    /// A group's membership moved: somebody joined, left, was removed, or was voted out.
+    ///
+    /// The group twin of [`Event::RoomMember`]: the same wire enum, the same notice-line shape,
+    /// keyed by the conversation because a group has no room id to key by. The sender-key
+    /// rotation the movement demands happens in the worker, below this event.
+    GroupMember {
+        conversation_id: Id,
+        user_id: Id,
+        change: migo_protocol::MemberChange,
+    },
+    /// A group's metadata moved as a delta: the title changed, because a founder renamed it.
+    ///
+    /// Only the title exists on this wire today; the event stays a delta (absent means
+    /// unchanged) so a field the server adds later has a shape to arrive in.
+    GroupRenamed { conversation_id: Id, title: String },
+    /// A kick vote's tally, as this account's own voice landed in it.
+    ///
+    /// Sent for the reply the caller sees — "2 of 4, still open" — while the same tally for
+    /// everyone else arrives as [`Event::GroupVoteEvent`]. `open: false` is the moment the vote
+    /// carried and the removal happened (the member event for it follows separately).
+    GroupVoteStatus {
+        conversation_id: Id,
+        target_id: Id,
+        votes: u32,
+        needed: u32,
+        member_count: u32,
+        open: bool,
+    },
+    /// A running kick vote's tally, for everyone the vote concerns.
+    ///
+    /// `closed: Some(true)` is a vote that ended without passing — expired, or its target left;
+    /// the UI stops drawing the tally it was showing. The newest tally per conversation is the
+    /// one that matters, the same coalescing rule the wire states.
+    GroupVoteEvent {
+        conversation_id: Id,
+        target_id: Id,
+        votes: u32,
+        needed: u32,
+        member_count: u32,
+        closed: Option<bool>,
+    },
+    /// A leave was accepted: the group's thread goes with the person, because everything the
+    /// worker held under that conversation — the sender-key chain, the ratchets, the held
+    /// messages — was dropped before this event crossed the channel.
+    GroupLeft { conversation_id: Id },
     /// A page of history, oldest first.
     History {
         conversation_id: Id,
@@ -1385,6 +1488,22 @@ struct Worker {
     /// The voice note playing, if one plays. One at a time, like the recording: a speaker is
     /// a device, and the second note would mix with the first.
     playing: Option<Playing>,
+    /// Group rosters asked for by the panel and not yet answered, keyed by the conversation
+    /// the ask named. More than one may be in flight — the roster panel asks for whichever
+    /// group window is open, and the reply names nothing but the correlation it answers, so
+    /// the conversation the request carried is the only key the answer can be filed under.
+    /// (The send path's own roster ask is the single-slot `pending_roster` above, kept apart
+    /// because it is a different ask with a different consequence: one promotes an audience,
+    /// this one fills a panel.)
+    group_rosters: HashMap<Id, ()>,
+    /// The group leave awaiting its acknowledgement. One at a time: the leave closes the
+    /// window that asked for it, so a second ask cannot be made before the first is answered.
+    /// The ack names nothing, so the ask is remembered the same way a room leave's is.
+    group_leave: Option<Id>,
+    /// The kick vote awaiting its reply, as the (conversation, target) the request named. The
+    /// reply carries only the tally — neither the conversation nor the target — so the ask is
+    /// the only place the answer's subject lives.
+    pending_vote: Option<(Id, Id)>,
 }
 
 impl Worker {
@@ -1414,6 +1533,9 @@ impl Worker {
             media_cache: MediaCache::new(),
             recording: None,
             playing: None,
+            group_rosters: HashMap::new(),
+            group_leave: None,
+            pending_vote: None,
         }
     }
 
@@ -1569,6 +1691,47 @@ impl Worker {
             }
             Command::StartDirect { username } => self.start_direct(username).await,
             Command::StartDirectById { peer } => self.start_direct_by_id(peer).await,
+            Command::CreateGroup { members, title } => {
+                self.create_group(members, title).await;
+            }
+            Command::InviteToGroup {
+                conversation_id,
+                members,
+            } => {
+                self.invite_to_group(conversation_id, members).await;
+            }
+            Command::LeaveGroup { conversation_id } => {
+                self.leave_group(conversation_id).await;
+            }
+            Command::GroupRoster { conversation_id } => {
+                self.request_group_roster(conversation_id).await;
+            }
+            Command::MuteGroupMember {
+                conversation_id,
+                target_id,
+                until,
+            } => {
+                self.mute_group_member(conversation_id, target_id, until)
+                    .await;
+            }
+            Command::KickGroupMember {
+                conversation_id,
+                target_id,
+            } => {
+                self.kick_group_member(conversation_id, target_id).await;
+            }
+            Command::VoteKickMember {
+                conversation_id,
+                target_id,
+            } => {
+                self.vote_kick_member(conversation_id, target_id).await;
+            }
+            Command::RenameGroup {
+                conversation_id,
+                title,
+            } => {
+                self.rename_group(conversation_id, title).await;
+            }
             Command::Typing {
                 conversation_id,
                 typing,
@@ -2397,6 +2560,101 @@ impl Worker {
             title: None,
         };
         self.request(Opcode::ConversationCreate, &create).await;
+    }
+
+    /// Creates a group conversation: the founding members and a title, the way the web
+    /// client's new-group form sends it.
+    ///
+    /// The member list names the *other* members — the server adds the caller and drops the
+    /// caller's own id without complaint, the same tolerance the direct path relies on — and
+    /// the caller lands as the group's first founder. The title is the group's alone on this
+    /// wire; an empty one is sent as `None` so the server's own "a group's title cannot be
+    /// empty" refusal (which fires only for a present-but-empty title) is never asked for.
+    async fn create_group(&mut self, members: Vec<Id>, title: String) {
+        let trimmed = title.trim().to_owned();
+        let create = migo_protocol::ConversationCreateRequest {
+            kind: ConversationKind::Group,
+            members,
+            title: (!trimmed.is_empty()).then_some(trimmed),
+        };
+        self.request(Opcode::ConversationCreate, &create).await;
+    }
+
+    /// Invites members into a group. Any current member's right; the server drops
+    /// already-seated names and refuses the size cap, both in sentences worth reading.
+    async fn invite_to_group(&mut self, conversation_id: Id, members: Vec<Id>) {
+        let invite = migo_protocol::ConversationInviteRequest {
+            conversation_id,
+            members,
+        };
+        self.request(Opcode::ConversationInvite, &invite).await;
+    }
+
+    /// Leaves a group conversation. The ack is remembered because the wire's reply names
+    /// nothing: the conversation the request carried is the only key its answer can be filed
+    /// under, the same trade a room leave makes with `pending_leave`.
+    async fn leave_group(&mut self, conversation_id: Id) {
+        self.group_leave = Some(conversation_id);
+        let leave = migo_protocol::ConversationLeaveRequest { conversation_id };
+        self.request(Opcode::ConversationLeave, &leave).await;
+    }
+
+    /// Reads a group's roster for the panel — a different ask from the send path's roster
+    /// read, filed separately because one promotes an encryption audience while this one
+    /// fills the window a person reads.
+    async fn request_group_roster(&mut self, conversation_id: Id) {
+        self.group_rosters.insert(conversation_id, ());
+        let roster = migo_protocol::ConversationRosterRequest { conversation_id };
+        self.request(Opcode::ConversationRoster, &roster).await;
+    }
+
+    /// A founder mutes one member until `until`, or lifts the mute when `until` is `None`.
+    /// The server is the judge of the role and the immunity; this only carries the intent.
+    async fn mute_group_member(
+        &mut self,
+        conversation_id: Id,
+        target_id: Id,
+        until: Option<Timestamp>,
+    ) {
+        let mute = migo_protocol::ConversationMuteRequest {
+            conversation_id,
+            target_id,
+            until,
+        };
+        self.request(Opcode::ConversationMute, &mute).await;
+    }
+
+    /// A founder removes a member outright. No frame announces it beyond the member event
+    /// everyone in the group hears.
+    async fn kick_group_member(&mut self, conversation_id: Id, target_id: Id) {
+        let kick = migo_protocol::ConversationKickRequest {
+            conversation_id,
+            target_id,
+        };
+        self.request(Opcode::ConversationKick, &kick).await;
+    }
+
+    /// Starts a kick vote, or adds this account's voice to one already running. The reply —
+    /// this voice's own tally — is decoded in `on_group_vote_reply`; the same tally for
+    /// everyone else arrives as a vote event. The (conversation, target) pair is remembered
+    /// because the reply carries neither, only the numbers.
+    async fn vote_kick_member(&mut self, conversation_id: Id, target_id: Id) {
+        self.pending_vote = Some((conversation_id, target_id));
+        let vote = migo_protocol::ConversationVoteKickRequest {
+            conversation_id,
+            target_id,
+        };
+        self.request(Opcode::ConversationVoteKick, &vote).await;
+    }
+
+    /// A founder renames a group. The reply is the refreshed summary (the same shape a create
+    /// answers with), and the group's other members learn the name through a state event.
+    async fn rename_group(&mut self, conversation_id: Id, title: String) {
+        let update = migo_protocol::ConversationUpdateRequest {
+            conversation_id,
+            title: Some(title),
+        };
+        self.request(Opcode::ConversationUpdate, &update).await;
     }
 
     async fn send_typing(&mut self, conversation_id: Id, typing: bool) {
@@ -5239,23 +5497,49 @@ impl Worker {
             return;
         };
         // Which conversation the answer names: the request carried the id, but the reply does
-        // not repeat it. The one in-flight roster ask is the only ask — the send path makes a
-        // second only after this answer stores — so remembering the ask is remembering the
-        // answer's subject.
-        let Some(conversation_id) = self.pending_roster.take() else {
-            return;
-        };
+        // not repeat it. Two askers can be waiting — the send path's single-slot ask
+        // (`pending_roster`) and the roster panel's asks (`group_rosters`) — and both are
+        // answered by this one frame, because both asked the same wire the same question.
+        let send_path_subject = self.pending_roster.take();
+        let panel_subjects: Vec<Id> = self.group_rosters.keys().copied().collect();
+        let subjects = send_path_subject.into_iter().chain(panel_subjects);
         let active: Vec<Id> = response
             .entries
-            .into_iter()
+            .iter()
             .filter(|entry| entry.left_at.is_none())
             .map(|entry| entry.account_id)
             .collect();
-        let Some(signed) = self.signed.as_mut() else {
-            return;
-        };
-        if let Some(cached) = signed.members.get_mut(&conversation_id) {
-            cached.promote(active);
+        let mut panel_event: Option<(Id, Vec<crate::model::RosterMember>)> = None;
+        // The panel's copy, reduced once for whichever asker wants it: every field the roster
+        // panel draws, in the server's own order. Built outside the loop — the loop's subjects
+        // share one answer, and the answer's subject is whichever of them was the panel's.
+        let panel_rows: Vec<crate::model::RosterMember> = response
+            .entries
+            .iter()
+            .map(|entry| crate::model::RosterMember {
+                account_id: entry.account_id,
+                role: entry.role,
+                joined_at: entry.joined_at,
+                muted_until: entry.muted_until,
+                left_at: entry.left_at,
+            })
+            .collect();
+        for conversation_id in subjects {
+            let Some(signed) = self.signed.as_mut() else {
+                return;
+            };
+            if let Some(cached) = signed.members.get_mut(&conversation_id) {
+                cached.promote(active.clone());
+            }
+            if panel_event.is_none() && self.group_rosters.remove(&conversation_id).is_some() {
+                panel_event = Some((conversation_id, panel_rows.clone()));
+            }
+        }
+        if let Some((conversation_id, members)) = panel_event {
+            self.sink.send(Event::GroupRoster {
+                conversation_id,
+                members,
+            });
         }
         // The send that asked for this roster failed on purpose (the audience was not knowable
         // yet); the UI's retry affordance — the same one a missing device list surfaces — sends
@@ -5291,6 +5575,132 @@ impl Worker {
             if let Some(signed) = self.signed.as_mut() {
                 signed.groups.rotate(event.conversation_id);
             }
+            // This account's own departure ends the group for this device the way a leave's
+            // ack does: the keys go, the window's copy of the thread goes, and the member
+            // event stops arriving the moment the subscription dies with the membership.
+            if let Some(signed) = self.signed.as_ref() {
+                if event.user_id == signed.account.account_id {
+                    let conversation_id = event.conversation_id;
+                    self.forget_group(conversation_id);
+                    self.sink.send(Event::GroupLeft { conversation_id });
+                }
+            }
+        }
+        self.sink.send(Event::GroupMember {
+            conversation_id: event.conversation_id,
+            user_id: event.user_id,
+            change: event.change,
+        });
+    }
+
+    /// A group's metadata moved as a delta: the only field on this wire today is the title,
+    /// and a present one is a rename the group's members hear. The conversation list's row is
+    /// patched by the shell, off the event below — the worker holds no rows, it only reduces
+    /// the wire — so the member who renamed is heard by every member whose window is open,
+    /// not only the one whose list re-read happens to land next.
+    fn on_conversation_state(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(event) = gateway::decode::<migo_protocol::ConversationStateEvent>(frame) else {
+            return;
+        };
+        if let Some(title) = event.title {
+            self.sink.send(Event::GroupRenamed {
+                conversation_id: event.conversation_id,
+                title,
+            });
+        }
+    }
+
+    /// This account's own vote landed: the tally as the caller sees it, straight off the
+    /// reply the request was owed. The reply names neither conversation nor target, so both
+    /// are read back out of the remembered ask. `open: false` is the moment the vote carried —
+    /// the member event for the removal follows separately, and the UI's tally line retires
+    /// when it does.
+    fn on_group_vote_reply(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(response) = gateway::decode::<migo_protocol::ConversationVoteKickResponse>(frame)
+        else {
+            return;
+        };
+        let Some((conversation_id, target_id)) = self.pending_vote.take() else {
+            return;
+        };
+        self.sink.send(Event::GroupVoteStatus {
+            conversation_id,
+            target_id,
+            votes: response.votes,
+            needed: response.needed,
+            member_count: response.member_count,
+            open: response.open,
+        });
+    }
+
+    /// A kick vote's tally, for everyone the vote concerns: the same numbers the voter's own
+    /// reply carries, arriving as the event the fan-out publishes. `closed` retires a tally a
+    /// client was still drawing.
+    fn on_group_vote_event(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(event) = gateway::decode::<migo_protocol::ConversationVoteEvent>(frame) else {
+            return;
+        };
+        self.sink.send(Event::GroupVoteEvent {
+            conversation_id: event.conversation_id,
+            target_id: event.target_id,
+            votes: event.votes,
+            needed: event.needed,
+            member_count: event.member_count,
+            closed: event.closed,
+        });
+    }
+
+    /// A rename's reply: the refreshed summary, the same shape a create answers with. The
+    /// list re-read that follows is what carries the new title to the row; other members hear
+    /// it through the state event. A toast says it took, because a rename that failed silently
+    /// would leave the renamer typing it again to find out.
+    async fn on_conversation_update_reply(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(summary) = gateway::decode::<migo_protocol::ConversationSummary>(frame) else {
+            return;
+        };
+        if let Some(title) = &summary.title {
+            self.sink
+                .toast(format!("Group renamed to {title}"), ToastKind::Success);
+        }
+        self.request_conversations().await;
+    }
+
+    /// A group leave's acknowledgement: the bare ack names nothing, so the conversation the
+    /// request carried is read back out of the remembered ask. Everything this device held
+    /// under the conversation — the sender-key chain, the ratchets, the held messages — goes
+    /// before the event crosses the channel, the same order a sign-out follows for the same
+    /// reason: state must not outlive the keys it was sealed with.
+    async fn on_group_left(&mut self, frame: &migo_protocol::Frame) {
+        let Ok(acknowledged) = gateway::decode::<migo_protocol::Acknowledged>(frame) else {
+            return;
+        };
+        if !acknowledged.ok {
+            return;
+        }
+        let Some(conversation_id) = self.group_leave.take() else {
+            return;
+        };
+        self.forget_group(conversation_id);
+        self.sink.send(Event::GroupLeft { conversation_id });
+        self.request_conversations().await;
+    }
+
+    /// Drops every piece of worker state a group conversation owns: the outbound sender-key
+    /// chain, the pairwise ratchets, the messages held awaiting a distribution, the caches,
+    /// and the watch. The group twin of the room leave's teardown — the same contents, keyed
+    /// by the conversation itself because a group has no room id to map through.
+    fn forget_group(&mut self, conversation_id: Id) {
+        self.group_rosters.remove(&conversation_id);
+        if self.group_leave == Some(conversation_id) {
+            self.group_leave = None;
+        }
+        if let Some(signed) = self.signed.as_mut() {
+            signed.groups.forget(conversation_id);
+            signed.sessions.forget(conversation_id, None);
+            signed.pending.retain(|(id, _), _| *id != conversation_id);
+            signed.members.remove(&conversation_id);
+            signed.e2e.remove(&conversation_id);
+            signed.conversations_watched.remove(&conversation_id);
         }
     }
 
@@ -5540,12 +5950,21 @@ impl Worker {
             Opcode::ConversationList => self.on_conversations(&frame).await,
             Opcode::ConversationCreate => self.on_conversation_created(&frame).await,
             // The roster the send path asks for when its cached membership is a list preview:
-            // the whole truth the audience is chosen from.
+            // the whole truth the audience is chosen from. The same answer fills the roster
+            // panel's ask when one is waiting — one wire, two askers, one frame.
             Opcode::ConversationRoster => self.on_roster(&frame),
             // A group's membership moved. Patched onto the cache the next audience is built
             // from, the way `on_room_member` feeds the rooms pane — and the same rotation on
             // a departure, so a key a departed member may still hold stops sealing.
             Opcode::ConversationMemberEvent => self.on_conversation_member(&frame),
+            // The group plane's own replies and pushes: a leave's ack, a rename's delta, and
+            // a kick vote's tally from both sides of it (the voter's own reply, and the
+            // fan-out everyone else hears).
+            Opcode::ConversationLeave => self.on_group_left(&frame).await,
+            Opcode::ConversationUpdate => self.on_conversation_update_reply(&frame).await,
+            Opcode::ConversationStateEvent => self.on_conversation_state(&frame),
+            Opcode::ConversationVoteKick => self.on_group_vote_reply(&frame),
+            Opcode::ConversationVoteEvent => self.on_group_vote_event(&frame),
             Opcode::Sync => self.on_history(&frame),
             Opcode::KeyBundleFetch => self.on_bundles(&frame),
             Opcode::Typing => self.on_typing(&frame),
@@ -5802,6 +6221,7 @@ impl Worker {
                 updated_at: summary.last_message.as_ref().map(|event| event.created_at),
                 unread: u32::try_from(summary.last_seq.saturating_sub(summary.read_seq))
                     .unwrap_or(u32::MAX),
+                kind: summary.kind,
                 // A Room-kind conversation has a room behind it — but the summary names no room
                 // id, so it stays `None` here. The join event (the one wire moment that names
                 // both) fills it; a room joined in an earlier session keeps `None`, and its

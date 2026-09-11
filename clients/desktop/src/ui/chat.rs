@@ -19,6 +19,7 @@ use std::path::PathBuf;
 
 use egui::{Align, Key, Layout, RichText, Ui};
 use migo_core::Id;
+use migo_protocol::ConversationRole;
 
 use crate::model::{self, Body, Conversation, Delivery, Message};
 use crate::net::Command;
@@ -107,6 +108,34 @@ pub struct ChatState {
     /// and the query is kept per conversation the way a draft is, so switching windows and
     /// back does not cost the words already typed.
     pub searches: HashMap<Id, SearchPanel>,
+    /// Group rosters, per conversation: the panel the header's roster button folds out. The
+    /// worker asks the wire for it on demand; `None` means "not asked yet", and the panel's
+    /// first open is the ask.
+    pub rosters: HashMap<Id, Vec<crate::model::RosterMember>>,
+    /// The new-group form, when the friends pane's "+ Group" left it open. One at a time on
+    /// the whole screen — the form is a dialog the friends pane draws, and two forms would be
+    /// one group's members picked into another's.
+    pub new_group: Option<NewGroupForm>,
+    /// The roster panel's open flag, per conversation, kept the way the attach and search
+    /// panels are kept: the header's people button folds the roster out under it, and the
+    /// flag is the conversation's own so switching windows closes nothing.
+    pub roster_open: HashMap<Id, bool>,
+    /// The rename row's state, per conversation: the founder's rename affordance in the roster
+    /// panel folds a typed field out under it, and the draft is kept the way every other
+    /// per-conversation draft is.
+    pub renames: HashMap<Id, RenamePanel>,
+    /// The invite row's state, per conversation: every member's invite affordance, folding a
+    /// typed account-id field out under the roster, one name at a time — the web panel's
+    /// username search is a REST surface the gateway path does not offer, so the desktop's
+    /// invitation is an account id the person already knows.
+    pub invites: HashMap<Id, InvitePanel>,
+    /// A running kick vote's tally, per conversation: the newest tally the wire sent. The
+    /// panel draws it under the roster; a closed tally is dropped rather than kept, because a
+    /// question the server has stopped asking is not a fact to render.
+    pub votes: HashMap<Id, crate::model::VoteTally>,
+    /// Group membership notices, keyed by conversation — the group twin of the room notices,
+    /// the same live tail, the same cap, the same draw at the scroll's end.
+    pub group_notices: HashMap<Id, Vec<RoomNotice>>,
 }
 
 /// The thread search's state for one conversation.
@@ -122,6 +151,37 @@ pub struct SearchPanel {
     /// first frame it is drawn — the web client's field autofocuses, and a search opened
     /// without the cursor in it is a question half-asked.
     pub claim_focus: bool,
+}
+
+/// The new-group form's state, as the friends pane draws it.
+#[derive(Default)]
+pub struct NewGroupForm {
+    /// The group's title, as typed.
+    pub title: String,
+    /// The friends picked as founding members, in pick order.
+    pub picked: Vec<Id>,
+    /// The account id typed into the manual field, for the friend the list does not show.
+    pub manual: String,
+    /// One frame's flag: the form just opened, and the title field asks for focus.
+    pub claim_focus: bool,
+}
+
+/// The rename row's state for one conversation.
+#[derive(Default)]
+pub struct RenamePanel {
+    /// Whether the row is showing in the roster panel.
+    pub open: bool,
+    /// The title as typed, seeded from the conversation's current title when the row opens.
+    pub title: String,
+}
+
+/// The invite row's state for one conversation.
+#[derive(Default)]
+pub struct InvitePanel {
+    /// Whether the row is showing in the roster panel.
+    pub open: bool,
+    /// The account id as typed.
+    pub account_id: String,
 }
 
 /// The transcript panel's state for one conversation.
@@ -465,6 +525,18 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
         search_row(ui, context, state, conversation_id);
     }
 
+    // The roster's fold-out: the group's people, their roles, and the levers a member or a
+    // founder holds. Drawn only for a group and only while the header's people button left
+    // it open; the panel's own first draw is the roster read's ask.
+    let roster_open = state
+        .roster_open
+        .get(&conversation_id)
+        .copied()
+        .unwrap_or(false);
+    if roster_open {
+        group_roster_panel(ui, context, state, conversation_id);
+    }
+
     // The search's needle, taken as an owned value before the scroll area borrows `state`:
     // the thread's loop asks it per row with no borrow of the panel map behind it. `None` is
     // "no question asked" — an empty or whitespace query filters nothing, exactly as the web
@@ -602,6 +674,10 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
             // A live tail, not history — the notices arrived while the room was open, in arrival
             // order, and a reader who wants the durable roster opens the rooms pane.
             room_notices(ui, context, state, conversation_id);
+            // A group's own life, the same tail with the group's own verbs: who joined, who
+            // left, who was removed or voted out. Keyed by the conversation, because a group
+            // has no room id to key by.
+            group_notices_tail(ui, context, state, conversation_id);
             ui.add_space(space::SM);
         });
 }
@@ -839,6 +915,353 @@ fn room_notices(ui: &mut Ui, context: &Context<'_>, state: &ChatState, conversat
     }
 }
 
+/// A group's membership notices, the group twin of the room notices: the same live tail, the
+/// same cap, the same draw at the scroll's end — keyed by the conversation because a group
+/// has no room id to key by, with the group's own verbs ("joined the group", not "joined
+/// the room") filled in by the shell when the event arrived.
+fn group_notices_tail(ui: &mut Ui, context: &Context<'_>, state: &ChatState, conversation_id: Id) {
+    let colors = palette(context.theme);
+    let Some(notices) = state.group_notices.get(&conversation_id) else {
+        return;
+    };
+    for notice in notices {
+        let who = state
+            .names
+            .get(&notice.user_id)
+            .cloned()
+            .unwrap_or_else(|| model::short_id(notice.user_id));
+        ui.horizontal(|ui| {
+            ui.add_space(space::LG);
+            ui.label(
+                RichText::new(format!("{who} {}", notice.verb))
+                    .font(egui::FontId::proportional(font::TINY))
+                    .color(colors.text_muted),
+            );
+        });
+    }
+}
+
+/// The group's roster panel: every member with role and mute, and the levers the signed-in
+/// member holds — invite for everyone, rename/mute/kick for founders, the vote for all.
+///
+/// The panel's facts are the roster the wire answered, not the conversation row's member
+/// preview: roles and mutes live only on the roster, and the founder gates read them, so the
+/// panel opens with an ask (the shell issues it the moment the toggle opens) and draws what
+/// the answer filed. Until the answer lands the panel says so, because a roster that guessed
+/// would be a list of names with wrong authority beside them.
+fn group_roster_panel(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    state: &mut ChatState,
+    conversation_id: Id,
+) {
+    let colors = palette(context.theme);
+    let me = context.account.map(|account| account.account_id);
+    let Some(conversation) = state
+        .conversations
+        .iter()
+        .find(|c| c.conversation_id == conversation_id)
+    else {
+        return;
+    };
+    // Owned facts read before the panel's frame: the frame's closure mutates `state` (the
+    // rename and invite panels are its own), so the conversation and roster borrows have to
+    // end here, as values, not live into it.
+    let listed_members = conversation.members.len();
+    let current_title = conversation.title.clone().unwrap_or_default();
+    // Who the signed-in member is on this roster: a founder holds rename, mute, and kick;
+    // a member holds invite and the vote. Read from the roster, not assumed from the
+    // create — a founder who left passed the role on, and the last founder out promotes
+    // the earliest remaining member.
+    let active_count = state
+        .rosters
+        .get(&conversation_id)
+        .map(|rows| rows.iter().filter(|m| m.left_at.is_none()).count())
+        .unwrap_or(0);
+    let i_am_founder = state
+        .rosters
+        .get(&conversation_id)
+        .and_then(|rows| me.and_then(|me| rows.iter().find(|m| m.account_id == me)))
+        .is_some_and(|m| m.role == ConversationRole::Founder);
+
+    // Deferred commands, past the borrows above: a click is intent, and intent is applied
+    // after the panel has finished drawing.
+    let mut invite_send: Option<Vec<Id>> = None;
+    let mut rename_send: Option<String> = None;
+    let mut mute_send: Option<(Id, bool)> = None;
+    let mut kick_send: Option<Id> = None;
+    let mut vote_send: Option<Id> = None;
+    let mut leave = false;
+
+    ui.add_space(space::SM);
+    egui::Frame::new()
+        .fill(colors.surface_raised)
+        .corner_radius(egui::CornerRadius::same(crate::theme::radius::MD))
+        .inner_margin(egui::Margin::symmetric(space::MD as i8, space::SM as i8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Members")
+                        .text_style(crate::theme::named(crate::theme::text_style::OVERLINE))
+                        .color(colors.text_muted),
+                );
+                widgets::pill(
+                    ui,
+                    &format!("{active_count} of {}", listed_members.max(active_count)),
+                    colors.text_muted,
+                    colors.surface,
+                );
+                // The founder's rename, folded out under the roster: the same patience every
+                // typed field in this file is given.
+                if i_am_founder {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("\u{270F}")
+                                    .font(egui::FontId::proportional(font::BODY))
+                                    .color(colors.text),
+                            )
+                            .fill(egui::Color32::TRANSPARENT)
+                            .stroke(egui::Stroke::NONE),
+                        )
+                        .on_hover_text("Rename group")
+                        .clicked()
+                    {
+                        let panel = state.renames.entry(conversation_id).or_default();
+                        panel.open = !panel.open;
+                        if panel.open {
+                            panel.title = current_title.clone();
+                        }
+                    }
+                }
+            });
+            ui.add_space(space::XS);
+
+            let Some(rows) = state.rosters.get(&conversation_id) else {
+                ui.label(
+                    RichText::new("Reading the group's roster…")
+                        .font(egui::FontId::proportional(font::SMALL))
+                        .color(colors.text_muted),
+                );
+                return;
+            };
+            for member in rows {
+                let name = state
+                    .names
+                    .get(&member.account_id)
+                    .cloned()
+                    .unwrap_or_else(|| model::short_id(member.account_id));
+                let departed = member.left_at.is_some();
+                ui.horizontal(|ui| {
+                    widgets::avatar(ui, context.theme, &name, 22.0);
+                    ui.label(
+                        RichText::new(name)
+                            .font(egui::FontId::proportional(font::SMALL))
+                            .color(if departed {
+                                colors.text_muted
+                            } else {
+                                colors.text
+                            }),
+                    );
+                    if member.role == ConversationRole::Founder {
+                        widgets::pill(ui, "founder", colors.text_muted, colors.surface);
+                    }
+                    if member.muted_until.is_some() && !departed {
+                        widgets::pill(ui, "muted", colors.warning, colors.surface);
+                    }
+                    if departed {
+                        widgets::pill(ui, "left", colors.text_muted, colors.surface);
+                    }
+                    // The founder's levers, on the active members that are not this account:
+                    // the server refuses a self-mute and a self-kick, and the other founder
+                    // is beyond both — the button is withheld rather than sent to fail,
+                    // because a refusal the person can see coming is kinder than one that
+                    // arrives.
+                    let targetable = i_am_founder
+                        && me != Some(member.account_id)
+                        && member.role != ConversationRole::Founder
+                        && !departed;
+                    if targetable {
+                        let muted = member.muted_until.is_some();
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(if muted { "Unmute" } else { "Mute" })
+                                        .font(egui::FontId::proportional(font::TINY))
+                                        .color(colors.text_muted),
+                                )
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::NONE),
+                            )
+                            .clicked()
+                        {
+                            mute_send = Some((member.account_id, !muted));
+                        }
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Remove")
+                                        .font(egui::FontId::proportional(font::TINY))
+                                        .color(colors.text_muted),
+                                )
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::NONE),
+                            )
+                            .clicked()
+                        {
+                            kick_send = Some(member.account_id);
+                        }
+                    }
+                    // The vote, every member's lever, never aimed at this account and never
+                    // at a founder: the same gates the server holds, mirrored so the button
+                    // says what the wire would allow. Departed members are past voting out.
+                    if me != Some(member.account_id)
+                        && member.role != ConversationRole::Founder
+                        && !departed
+                    {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Vote remove")
+                                        .font(egui::FontId::proportional(font::TINY))
+                                        .color(colors.text_muted),
+                                )
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::NONE),
+                            )
+                            .clicked()
+                        {
+                            vote_send = Some(member.account_id);
+                        }
+                    }
+                });
+                ui.add_space(space::XS);
+            }
+
+            // A running vote's tally, if the wire has one open: "2 of 4 needed" reads as a
+            // question the group is still answering, and the newest tally per conversation
+            // is the one that matters.
+            if let Some(tally) = state.votes.get(&conversation_id) {
+                ui.label(
+                    RichText::new(format!(
+                        "Vote to remove {}: {} of {} needed",
+                        state
+                            .names
+                            .get(&tally.target_id)
+                            .cloned()
+                            .unwrap_or_else(|| model::short_id(tally.target_id)),
+                        tally.votes,
+                        tally.needed,
+                    ))
+                    .font(egui::FontId::proportional(font::TINY))
+                    .color(colors.warning),
+                );
+            }
+
+            // The invite row, every member's right: an account id typed by hand. The friends
+            // the panel could offer are the friends pane's rows, not this pane's, and a
+            // one-at-a-time field keeps the wire's "any current member may invite" honest.
+            let invite_open = state
+                .invites
+                .get(&conversation_id)
+                .is_some_and(|panel| panel.open);
+            if invite_open {
+                let panel = state.invites.entry(conversation_id).or_default();
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut panel.account_id)
+                        .hint_text("account id")
+                        .desired_width(ui.available_width() - 96.0),
+                );
+                let submitted =
+                    response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (ui.button("Invite").clicked() || submitted)
+                    && !panel.account_id.trim().is_empty()
+                {
+                    if let Ok(id) = Id::parse(panel.account_id.trim()) {
+                        invite_send = Some(vec![id]);
+                        panel.account_id.clear();
+                    }
+                }
+            } else if ui.button("+ Invite").clicked() {
+                let panel = state.invites.entry(conversation_id).or_default();
+                panel.open = true;
+                panel.account_id.clear();
+            }
+
+            // The founder's rename row, seeded from the current title when it opened.
+            let rename_open = state
+                .renames
+                .get(&conversation_id)
+                .is_some_and(|panel| panel.open);
+            if rename_open && i_am_founder {
+                let panel = state.renames.entry(conversation_id).or_default();
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut panel.title)
+                        .hint_text("group name")
+                        .desired_width(ui.available_width() - 96.0),
+                );
+                let submitted =
+                    response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (ui.button("Rename").clicked() || submitted) && !panel.title.trim().is_empty() {
+                    rename_send = Some(panel.title.trim().to_owned());
+                }
+            }
+
+            // Leaving, the lever every member holds. The window's copy of the thread goes
+            // when the ack arrives, so no confirmation is spent here — the click is the
+            // confirmation, the same as the web client's leave.
+            if ui.button("Leave group").clicked() {
+                leave = true;
+            }
+        });
+    ui.add_space(space::SM);
+
+    if let Some(members) = invite_send {
+        context.issue(Command::InviteToGroup {
+            conversation_id,
+            members,
+        });
+    }
+    if let Some(title) = rename_send {
+        context.issue(Command::RenameGroup {
+            conversation_id,
+            title,
+        });
+        if let Some(panel) = state.renames.get_mut(&conversation_id) {
+            panel.open = false;
+        }
+    }
+    if let Some((target_id, mute)) = mute_send {
+        // A mute runs an hour — the web client's default — and an unmute is the request
+        // with no `until` at all, the wire's own word for "lift it".
+        let until = mute.then(|| {
+            migo_core::Timestamp::from_unix_ms(
+                migo_core::Timestamp::now().as_unix_ms() + 60 * 60 * 1000,
+            )
+        });
+        context.issue(Command::MuteGroupMember {
+            conversation_id,
+            target_id,
+            until,
+        });
+    }
+    if let Some(target_id) = kick_send {
+        context.issue(Command::KickGroupMember {
+            conversation_id,
+            target_id,
+        });
+    }
+    if let Some(target_id) = vote_send {
+        context.issue(Command::VoteKickMember {
+            conversation_id,
+            target_id,
+        });
+    }
+    if leave {
+        context.issue(Command::LeaveGroup { conversation_id });
+    }
+}
+
 /// The compact header over the open conversation: title, encryption state, and the counts that
 /// are true of the whole thread rather than of any one message in it.
 ///
@@ -868,6 +1291,8 @@ fn thread_header(
     let mut want_log_panel = false;
     // The search's toggle, deferred for the same reason — the same patience, twice.
     let mut want_search_panel = false;
+    // The roster's toggle, deferred for the same reason — the same patience, three times.
+    let mut want_roster_panel = false;
 
     ui.add_space(space::MD);
     ui.horizontal(|ui| {
@@ -987,6 +1412,27 @@ fn thread_header(
             {
                 want_search_panel = true;
             }
+            // The people button, on a group only: the roster, the roles, and every lever a
+            // member or a founder holds — invite, rename, mute, kick, the vote, and leaving.
+            // Gated on the server's own kind and not the member count, because a group of
+            // two (one member just left) is still a group with a roster and a rename.
+            if conversation.is_group() {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new("\u{1F465}")
+                                .font(egui::FontId::proportional(font::BODY))
+                                .color(colors.text),
+                        )
+                        .fill(egui::Color32::TRANSPARENT)
+                        .stroke(egui::Stroke::NONE),
+                    )
+                    .on_hover_text("Group members")
+                    .clicked()
+                {
+                    want_roster_panel = true;
+                }
+            }
         });
     });
     if want_log_panel {
@@ -1001,6 +1447,15 @@ fn thread_header(
         // half-asked.
         if panel.open {
             panel.claim_focus = true;
+        }
+    }
+    if want_roster_panel {
+        let open = state.roster_open.entry(conversation_id).or_insert(false);
+        *open = !*open;
+        // Opening is the ask: the roster the panel draws is a wire fact, and the panel's
+        // first frame is the moment it starts waiting for one.
+        if *open {
+            context.issue(Command::GroupRoster { conversation_id });
         }
     }
     ui.add_space(space::MD);

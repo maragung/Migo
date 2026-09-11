@@ -137,7 +137,12 @@ fn matches_query(needle: &str, name: &str, id: Id) -> bool {
 /// The whole pane scrolls rather than only the list: a graph with a hundred edges and three
 /// pending requests is one document about one account, and clipping the bottom of it would hide
 /// the Accept button a request is waiting on.
-pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut FriendsState) {
+pub fn show(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    state: &mut FriendsState,
+    chat: &mut crate::ui::chat::ChatState,
+) {
     let column = 420.0_f32.min(ui.available_width() - space::XL * 2.0);
 
     egui::ScrollArea::vertical()
@@ -158,7 +163,7 @@ pub fn show(ui: &mut Ui, context: &mut Context<'_>, state: &mut FriendsState) {
 
                     add_row(ui, context, state);
                     ui.add_space(space::SM);
-                    search_row(ui, context, state);
+                    search_row(ui, context, state, chat);
                     ui.add_space(space::LG);
 
                     if state.entries.is_empty() {
@@ -233,17 +238,46 @@ fn add_row(ui: &mut Ui, context: &mut Context<'_>, state: &mut FriendsState) {
 /// The reference has no Chats tab: a conversation opens from wherever a person is found, as a
 /// closable tab of its own. This field is the Main pane's door — the same "New chat" the web
 /// client's friends panel offers — and typing a username here opens the thread directly.
-fn search_row(ui: &mut Ui, context: &mut Context<'_>, state: &mut FriendsState) {
+fn search_row(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    state: &mut FriendsState,
+    chat: &mut crate::ui::chat::ChatState,
+) {
     ui.horizontal(|ui| {
         ui.add(
             egui::TextEdit::singleline(&mut state.search)
                 .hint_text("Search")
-                .desired_width(ui.available_width() - 96.0),
+                .desired_width(ui.available_width() - 196.0),
         );
+        // The new-group door, beside the new-chat one: a group conversation is the other
+        // thing a friends list is for, and the web client's friends panel offers both.
+        if ui.button("+ Group").clicked() {
+            let mut form = crate::ui::chat::NewGroupForm::default();
+            form.claim_focus = true;
+            chat.new_group = Some(form);
+        }
         if ui.button("+ Chat").clicked() {
             state.composing_new = !state.composing_new;
         }
     });
+    // The form is taken out of the chat state for the draw, so the form's own submit and
+    // cancel — which write that same Option — never fight the borrow the draw holds. A form
+    // that survives the draw goes back; a submitted or cancelled one never comes back.
+    if let Some(mut form) = chat.new_group.take() {
+        let outcome = new_group_form(ui, context, state, &mut form);
+        chat.new_group = match outcome {
+            GroupFormOutcome::Open => Some(form),
+            GroupFormOutcome::Cancelled => None,
+            GroupFormOutcome::Create => {
+                context.issue(Command::CreateGroup {
+                    members: form.picked.clone(),
+                    title: form.title.trim().to_owned(),
+                });
+                None
+            }
+        };
+    }
     if state.composing_new {
         ui.horizontal(|ui| {
             let response = ui.add(
@@ -260,6 +294,166 @@ fn search_row(ui: &mut Ui, context: &mut Context<'_>, state: &mut FriendsState) 
                 state.composing_new = false;
             }
         });
+    }
+}
+
+/// The new-group form: a title, the friends to pick as founding members, and a manual
+/// account-id field for the person the list does not show. The members picked here are the
+/// group's *other* members — the server adds the caller and names them its founder.
+/// What became of the new-group form in one draw: still open, dismissed, or submitted. The
+/// caller owns the consequence — the form is taken out of the chat state for the draw, so
+/// what happens to it afterwards is one decision in one place.
+enum GroupFormOutcome {
+    Open,
+    Cancelled,
+    Create,
+}
+
+fn new_group_form(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    state: &FriendsState,
+    form: &mut crate::ui::chat::NewGroupForm,
+) -> GroupFormOutcome {
+    let colors = palette(context.theme);
+    // Deferred, past the borrows above: the create is issued after the form has finished
+    // drawing, the same patience every typed field in this client is given.
+    let mut submitted = false;
+    let mut closed = false;
+    egui::Frame::new()
+        .fill(colors.surface_raised)
+        .corner_radius(egui::CornerRadius::same(crate::theme::radius::MD))
+        .inner_margin(egui::Margin::symmetric(space::MD as i8, space::SM as i8))
+        .show(ui, |ui| {
+            let title_response = widgets::field(
+                ui,
+                context.theme,
+                "Group name",
+                &mut form.title,
+                false,
+                "Weekend plans",
+            );
+            if form.claim_focus {
+                title_response.request_focus();
+                form.claim_focus = false;
+            }
+            ui.label(
+                RichText::new("Pick the founding members")
+                    .text_style(crate::theme::named(crate::theme::text_style::OVERLINE))
+                    .color(colors.text_muted),
+            );
+            ui.add_space(space::XS);
+            // The friends who are already picked, as removable chips: a pick is reversible
+            // until the create, the same way every other form here is. The removal is
+            // deferred past the iteration, because a chip cannot unbutton itself out of the
+            // list it is drawn from.
+            if !form.picked.is_empty() {
+                let mut unpick: Option<usize> = None;
+                ui.horizontal_wrapped(|ui| {
+                    for (index, picked) in form.picked.iter().enumerate() {
+                        let name = state
+                            .names
+                            .get(picked)
+                            .cloned()
+                            .unwrap_or_else(|| crate::model::short_id(*picked));
+                        if ui
+                            .add(
+                                egui::Button::new(format!("{name} \u{2715}"))
+                                    .fill(egui::Color32::TRANSPARENT)
+                                    .stroke(egui::Stroke::NONE),
+                            )
+                            .clicked()
+                        {
+                            unpick = Some(index);
+                        }
+                    }
+                });
+                if let Some(index) = unpick {
+                    form.picked.remove(index);
+                }
+                ui.add_space(space::XS);
+            }
+            // The friends list as toggleable rows: a friend already picked is a chip above,
+            // so the row below only offers the ones not yet picked.
+            let friends: Vec<crate::model::Relationship> = state
+                .entries
+                .iter()
+                .filter(|entry| entry.kind == crate::model::RelationshipKind::Friend)
+                .filter(|entry| !form.picked.contains(&entry.user_id))
+                .cloned()
+                .collect();
+            if friends.is_empty() {
+                ui.label(
+                    RichText::new("Every friend is already picked — or there are none yet.")
+                        .font(egui::FontId::proportional(font::SMALL))
+                        .color(colors.text_muted),
+                );
+            }
+            let mut add_pick: Option<migo_core::Id> = None;
+            for friend in &friends {
+                let name = state
+                    .names
+                    .get(&friend.user_id)
+                    .cloned()
+                    .unwrap_or_else(|| crate::model::short_id(friend.user_id));
+                ui.horizontal(|ui| {
+                    widgets::avatar(ui, context.theme, &name, 22.0);
+                    ui.label(
+                        RichText::new(name)
+                            .font(egui::FontId::proportional(font::SMALL))
+                            .color(colors.text),
+                    );
+                    if ui
+                        .add(
+                            egui::Button::new("Add")
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::NONE),
+                        )
+                        .clicked()
+                    {
+                        add_pick = Some(friend.user_id);
+                    }
+                });
+            }
+            if let Some(pick) = add_pick {
+                form.picked.push(pick);
+            }
+            // The manual field, for the account id the friends list cannot name.
+            let manual_response = ui.add(
+                egui::TextEdit::singleline(&mut form.manual)
+                    .hint_text("or paste an account id")
+                    .desired_width(ui.available_width() - 96.0),
+            );
+            let manual_submitted =
+                manual_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.button("Add by id").clicked() || manual_submitted)
+                && !form.manual.trim().is_empty()
+            {
+                if let Ok(id) = migo_core::Id::parse(form.manual.trim()) {
+                    if !form.picked.contains(&id) {
+                        form.picked.push(id);
+                    }
+                    form.manual.clear();
+                }
+            }
+            ui.add_space(space::SM);
+            // The create, held back until the form has somebody in it: the server would only
+            // refuse with "a conversation needs somebody other than its creator", and a
+            // refusal the person can see coming is kinder than one that arrives.
+            let can_create = !form.picked.is_empty() && !form.title.trim().is_empty();
+            if widgets::primary_button(ui, context.theme, "Create group", can_create).clicked() {
+                submitted = true;
+            }
+            if ui.button("Cancel").clicked() {
+                closed = true;
+            }
+        });
+    if submitted {
+        GroupFormOutcome::Create
+    } else if closed {
+        GroupFormOutcome::Cancelled
+    } else {
+        GroupFormOutcome::Open
     }
 }
 

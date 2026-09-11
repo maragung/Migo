@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 
 use migo_core::{Id, Timestamp};
+use migo_protocol::ConversationKind;
 
 /// Where the gateway connection is, as far as the interface needs to know.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +142,12 @@ pub struct Conversation {
     pub updated_at: Option<Timestamp>,
     /// How many messages arrived that the user has not looked at.
     pub unread: u32,
+    /// The conversation's kind, as the server stated it in the summary: a group and a
+    /// two-member direct chat can both carry three ids in `members` mid-flight (a group whose
+    /// peer just left), and the kind — not the count — is the fact the founder controls and
+    /// the roster panel gate on. `Unknown` for a summary this build could not name, which
+    /// draws as "not a group" and harms nobody.
+    pub kind: ConversationKind,
     /// The room behind this conversation, when it is a room — the thread's notice tail and the
     /// rooms pane's live counts are keyed by it. `None` for direct and group conversations.
     pub room_id: Option<Id>,
@@ -170,6 +177,60 @@ impl Conversation {
                 .collect::<Vec<_>>()
                 .join(", "),
         }
+    }
+
+    /// Whether this conversation is a group conversation — the kind the roster panel, the
+    /// founder controls, and the vote-kick lever belong to. Turned on the server's own kind,
+    /// not the member count: a group of two (one member just left) is still a group with a
+    /// roster and a rename, and a direct chat is never one.
+    #[must_use]
+    pub fn is_group(&self) -> bool {
+        self.kind == ConversationKind::Group
+    }
+}
+
+/// One member of a group's roster, as the interface draws it. The wire's own entry reduced by
+/// the worker; a role this build has no name for would have arrived as `Unknown` upstream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RosterMember {
+    pub account_id: Id,
+    /// The member's role: a founder holds rename, mute, and kick; a member holds invite and
+    /// the vote. The immunity rules are the server's, and the UI only mirrors them so its
+    /// buttons match what the wire would allow.
+    pub role: migo_protocol::ConversationRole,
+    pub joined_at: Timestamp,
+    /// While this runs, the member cannot send to this group. `None` when unmuted.
+    pub muted_until: Option<Timestamp>,
+    /// Set when the member is no longer in the group — history stays attributable, so the
+    /// departed stay in the roster's tail rather than vanishing from it.
+    pub left_at: Option<Timestamp>,
+}
+
+/// A running kick vote's tally, as the interface draws it: the votes in, the strict majority
+/// that carries it, and the group the count is a share of. `closed: Some(true)` is a vote
+/// that ended without passing; the UI drops the tally rather than drawing a retired question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoteTally {
+    pub target_id: Id,
+    pub votes: u32,
+    pub needed: u32,
+    pub member_count: u32,
+    pub closed: Option<bool>,
+}
+
+/// The sentence a member event reads as, minus the name — the group twin of the room notice
+/// verb the shell already keeps. "joined the group", not "joined the room": the two read
+/// differently on screen even though the wire enum is shared.
+#[must_use]
+pub fn group_notice_verb(change: migo_protocol::MemberChange) -> &'static str {
+    match change {
+        migo_protocol::MemberChange::Joined => "joined the group",
+        migo_protocol::MemberChange::Left => "left",
+        migo_protocol::MemberChange::Disconnected => "disconnected",
+        migo_protocol::MemberChange::Reconnected => "came back",
+        migo_protocol::MemberChange::Kicked => "was removed",
+        migo_protocol::MemberChange::Banned => "was banned",
+        migo_protocol::MemberChange::Unknown => "left",
     }
 }
 
@@ -892,6 +953,40 @@ pub fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_group_is_a_kind_not_a_count() {
+        // The roster panel gates on the kind, not the member count: a group of two (one
+        // member just left) keeps its roster and its rename, and a direct chat never has
+        // one — even a direct chat whose row briefly lists three ids.
+        let group = Conversation {
+            conversation_id: Id::default(),
+            title: Some("Weekend plans".to_owned()),
+            members: Vec::new(),
+            encrypted: true,
+            last_seq: 0,
+            preview: None,
+            updated_at: None,
+            unread: 0,
+            kind: ConversationKind::Group,
+            room_id: None,
+        };
+        assert!(group.is_group());
+        let mut direct = group.clone();
+        direct.kind = ConversationKind::Direct;
+        assert!(!direct.is_group());
+    }
+
+    #[test]
+    fn group_notice_verbs_read_as_group_sentences() {
+        // The group's own vocabulary: "joined the group", not the room's "joined the
+        // room" — the two read differently on screen even though the wire enum is shared.
+        use migo_protocol::MemberChange;
+        assert_eq!(group_notice_verb(MemberChange::Joined), "joined the group");
+        assert_eq!(group_notice_verb(MemberChange::Kicked), "was removed");
+        assert_eq!(group_notice_verb(MemberChange::Left), "left");
+        assert_eq!(group_notice_verb(MemberChange::Unknown), "left");
+    }
 
     #[test]
     fn relationship_kind_maps_every_wire_value() {
