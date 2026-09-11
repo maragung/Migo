@@ -411,7 +411,11 @@ fn decode_opus(
         if packet.track_id() != track_id {
             continue;
         }
-        let frames = match decoder.decode(packet.data(), &mut pcm, false) {
+        // `buf()` is the accessor for `Packet`'s public `data: Box<[u8]>` field — the source of
+        // symphonia-core 0.5.5 says so, and the compiler's two earlier hints pointed at it from
+        // both sides (`&packet.buf` reached for the field through a method's name; `data()`
+        // reached for the field through a method that does not exist).
+        let frames = match decoder.decode(packet.buf(), &mut pcm, false) {
             Ok(frames) => frames,
             Err(_) => continue,
         };

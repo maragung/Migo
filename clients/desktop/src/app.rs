@@ -703,10 +703,13 @@ impl App {
                     self.chat.recording = Some((conversation_id, std::time::Instant::now()));
                 }
                 Event::RecordingStopped { conversation_id } => {
+                    // `is_some_and` hands the tuple out of the Option by value, so `recording`
+                    // here is already an owned `Id` — no reference, no dereference, a plain
+                    // `Id == Id` compare.
                     if self
                         .chat
                         .recording
-                        .is_some_and(|(recording, _)| recording == &conversation_id)
+                        .is_some_and(|(recording, _)| recording == conversation_id)
                     {
                         self.chat.recording = None;
                     }
