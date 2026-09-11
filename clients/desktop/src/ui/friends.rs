@@ -253,9 +253,10 @@ fn search_row(
         // The new-group door, beside the new-chat one: a group conversation is the other
         // thing a friends list is for, and the web client's friends panel offers both.
         if ui.button("+ Group").clicked() {
-            let mut form = crate::ui::chat::NewGroupForm::default();
-            form.claim_focus = true;
-            chat.new_group = Some(form);
+            chat.new_group = Some(crate::ui::chat::NewGroupForm {
+                claim_focus: true,
+                ..Default::default()
+            });
         }
         if ui.button("+ Chat").clicked() {
             state.composing_new = !state.composing_new;

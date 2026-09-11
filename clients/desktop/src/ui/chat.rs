@@ -1013,8 +1013,8 @@ fn group_roster_panel(
                 );
                 // The founder's rename, folded out under the roster: the same patience every
                 // typed field in this file is given.
-                if i_am_founder {
-                    if ui
+                if i_am_founder
+                    && ui
                         .add(
                             egui::Button::new(
                                 RichText::new("\u{270F}")
@@ -1026,12 +1026,11 @@ fn group_roster_panel(
                         )
                         .on_hover_text("Rename group")
                         .clicked()
-                    {
-                        let panel = state.renames.entry(conversation_id).or_default();
-                        panel.open = !panel.open;
-                        if panel.open {
-                            panel.title = current_title.clone();
-                        }
+                {
+                    let panel = state.renames.entry(conversation_id).or_default();
+                    panel.open = !panel.open;
+                    if panel.open {
+                        panel.title = current_title.clone();
                     }
                 }
             });
@@ -1118,8 +1117,7 @@ fn group_roster_panel(
                     if me != Some(member.account_id)
                         && member.role != ConversationRole::Founder
                         && !departed
-                    {
-                        if ui
+                        && ui
                             .add(
                                 egui::Button::new(
                                     RichText::new("Vote remove")
@@ -1130,9 +1128,8 @@ fn group_roster_panel(
                                 .stroke(egui::Stroke::NONE),
                             )
                             .clicked()
-                        {
-                            vote_send = Some(member.account_id);
-                        }
+                    {
+                        vote_send = Some(member.account_id);
                     }
                 });
                 ui.add_space(space::XS);
@@ -1416,8 +1413,8 @@ fn thread_header(
             // member or a founder holds — invite, rename, mute, kick, the vote, and leaving.
             // Gated on the server's own kind and not the member count, because a group of
             // two (one member just left) is still a group with a roster and a rename.
-            if conversation.is_group() {
-                if ui
+            if conversation.is_group()
+                && ui
                     .add(
                         egui::Button::new(
                             RichText::new("\u{1F465}")
@@ -1429,9 +1426,8 @@ fn thread_header(
                     )
                     .on_hover_text("Group members")
                     .clicked()
-                {
-                    want_roster_panel = true;
-                }
+            {
+                want_roster_panel = true;
             }
         });
     });

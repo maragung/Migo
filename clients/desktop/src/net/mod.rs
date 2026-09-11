@@ -594,7 +594,7 @@ pub enum Event {
     /// A kick vote's tally, as this account's own voice landed in it.
     ///
     /// Sent for the reply the caller sees — "2 of 4, still open" — while the same tally for
-    /// everyone else arrives as [`Event::GroupVoteEvent`]. `open: false` is the moment the vote
+    /// everyone else arrives as [`Event::GroupVoteBroadcast`]. `open: false` is the moment the vote
     /// carried and the removal happened (the member event for it follows separately).
     GroupVoteStatus {
         conversation_id: Id,
@@ -608,8 +608,11 @@ pub enum Event {
     ///
     /// `closed: Some(true)` is a vote that ended without passing — expired, or its target left;
     /// the UI stops drawing the tally it was showing. The newest tally per conversation is the
-    /// one that matters, the same coalescing rule the wire states.
-    GroupVoteEvent {
+    /// one that matters, the same coalescing rule the wire states. Not named `GroupVoteEvent`
+    /// despite mirroring the wire's `ConversationVoteEvent`: clippy's variant-name lint aside,
+    /// the enum already has a `GroupVoteStatus` for the caller's own reply and the two are
+    /// easiest to tell apart when the broadcast spells what it is.
+    GroupVoteBroadcast {
         conversation_id: Id,
         target_id: Id,
         votes: u32,
@@ -5640,7 +5643,7 @@ impl Worker {
         let Ok(event) = gateway::decode::<migo_protocol::ConversationVoteEvent>(frame) else {
             return;
         };
-        self.sink.send(Event::GroupVoteEvent {
+        self.sink.send(Event::GroupVoteBroadcast {
             conversation_id: event.conversation_id,
             target_id: event.target_id,
             votes: event.votes,
