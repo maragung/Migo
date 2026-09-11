@@ -93,6 +93,16 @@ function makeCollector(scope: string): InboundCollector {
 }
 
 async function openOrCreateDirect(alice: MigoClient, bob: MigoClient, bobId: Id): Promise<Id> {
+  // A fresh account is private by default: `who_can_message` starts at Friends, so a
+  // direct conversation between two strangers is refused with PRIVACY_RESTRICTED at the
+  // create door. The two smoke accounts therefore become friends first — alice requests,
+  // bob accepts — which is also the real-world shape every new user has to walk through
+  // before their first message can land.
+  log('alice', `friend request to ${bobId}`);
+  await alice.social.friendRequest(bobId);
+  log('bob', `accepting ${bobId}`);
+  await bob.social.friendRespond(bobId, true);
+
   const existing = await alice.loadConversations(20);
   for (const summary of existing.conversations) {
     if (summary.kind === ConversationKind.Direct && summary.members?.includes(bobId)) {
