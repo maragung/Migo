@@ -321,6 +321,46 @@ function ReadTicks({ read }: { read: boolean }): ReactNode {
   );
 }
 
+/**
+ * The disappearing mark: a clock glyph on a message that carries a sealed lifetime, so the
+ * promise is visible on the row itself rather than learned only when the row vanishes. The
+ * lifetime rides inside the message's own ciphertext (the wire never echoes it), so the row is
+ * the only surface that can say it.
+ */
+function ExpiryMark({ message }: { message: ThreadMessage }): ReactNode {
+  const { content } = message;
+  // Only the three body types carry a sealed lifetime; a reaction or control signal never does,
+  // and the narrowing below is what keeps that a fact the compiler checks rather than assumes.
+  const lifetime =
+    content.type === ContentType.Text ||
+    content.type === ContentType.MediaRef ||
+    content.type === ContentType.VoiceNoteRef
+      ? content.expiresInMs
+      : undefined;
+  if (lifetime === undefined) {
+    return null;
+  }
+  return (
+    <span className="expiry-mark" title={`Disappears ${formatLifetime(lifetime)} after sending`}>
+      <Icon name="clock" size={11} />
+      <span className="visually-hidden">Disappearing message</span>
+    </span>
+  );
+}
+
+/** A lifetime in milliseconds as the words a tooltip reads. */
+export function formatLifetime(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 60) {
+    return `${Math.max(1, minutes)} minute${minutes === 1 ? '' : 's'}`;
+  }
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) {
+    return `${hours} hour${hours === 1 ? '' : 's'}`;
+  }
+  return `${Math.round(hours / 24)} day${Math.round(hours / 24) === 1 ? '' : 's'}`;
+}
+
 export interface MessageListProps {
   /**
    * The transcript to render, read-only: the list maps over it and never mutates it, so a caller
@@ -762,6 +802,7 @@ function BubbleLine({
         {body}
         <span className="meta">
           {formatClock(message.createdAt)}
+          <ExpiryMark message={message} />
           {message.editedAt !== undefined ? <span className="edited-mark">edited</span> : null}
           {mine ? <ReadTicks read={read} /> : null}
         </span>

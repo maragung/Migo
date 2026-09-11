@@ -32,6 +32,8 @@ const MAX_CATCHUP_PAGES = 5;
 const CATCHUP_PAGE = 200;
 /** Clear a peer's typing indicator this long after the last Start, in case a Stop is missed. */
 const TYPING_TIMEOUT_MS = 4000;
+/** How often the thread drops messages whose sealed lifetime has passed. */
+const EXPIRY_SWEEP_MS = 1000;
 
 /**
  * A thread message plus the tombstone mark the deletion stream sets.
@@ -42,6 +44,26 @@ const TYPING_TIMEOUT_MS = 4000;
  */
 export interface ThreadMessage extends IncomingMessage {
   deleted?: boolean;
+}
+
+/**
+ * Whether a message's sealed lifetime has passed. The lifetime travels inside the message's own
+ * ciphertext (the wire's `expires_in_ms` reaches only the server), so the deadline this reads is
+ * the one every receiver holds — and the countdown runs on the receiving clock by design: the
+ * sweep's own doc says a client must not wait for the server to tell it a message is gone.
+ */
+export function messageExpired(message: ThreadMessage, now = Date.now()): boolean {
+  const lifetime = contentLifetime(message.content);
+  return lifetime !== undefined && message.createdAt + lifetime <= now;
+}
+
+/** The sealed disappearing lifetime a content body carries, whatever its type. */
+function contentLifetime(content: ThreadMessage['content']): number | undefined {
+  return content.type === ContentType.Text ||
+    content.type === ContentType.MediaRef ||
+    content.type === ContentType.VoiceNoteRef
+    ? content.expiresInMs
+    : undefined;
 }
 
 export interface ChatThread {
@@ -59,11 +81,18 @@ export interface ChatThread {
   replyTo: ThreadMessage | null;
   /** Marks a message as the reply target (and clears it again when passed null). */
   setReplyTo: (message: ThreadMessage | null) => void;
-  send: (text: string) => Promise<void>;
+  send: (text: string, expiresInMs?: number) => Promise<void>;
   /** Uploads a picked image file and sends the message that references it. */
   sendAttachment: (file: File) => Promise<void>;
   /** Uploads a finished voice note recording and sends the message that references it. */
   sendVoiceNote: (recording: VoiceRecording) => Promise<void>;
+  /**
+   * The disappearing-message lifetime the composer has armed, in milliseconds — the value the
+   * next send seals beside its content. Null when the next message is a normal, kept one.
+   */
+  expiresAfterMs: number | null;
+  /** Arms or clears the disappearing mode the next send carries. */
+  setExpiresAfterMs: (ms: number | null) => void;
   setTyping: (isTyping: boolean) => void;
   /** True while the deletion request for a message is still in flight. */
   deleting: boolean;
@@ -112,6 +141,10 @@ export function useChat(conversationId: Id, options: ChatCryptoOptions = {}): Ch
   const [deleting, setDeleting] = useState(false);
   const [hasEarlier, setHasEarlier] = useState(false);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
+  // The disappearing mode the composer has armed: the lifetime the next send seals beside its
+  // content. It stays armed across sends (the mode is a setting, not a one-shot), the way the
+  // reply target is a one-shot it is not.
+  const [expiresAfterMs, setExpiresAfterMs] = useState<number | null>(null);
 
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastReadSeqRef = useRef(0);
@@ -284,6 +317,34 @@ export function useChat(conversationId: Id, options: ChatCryptoOptions = {}): Ch
   }, [client, conversationId, accountId, resetNonce, upsert, markDeleted]);
 
   /**
+   * The local half of a disappearing message: the drop when a sealed lifetime passes.
+   *
+   * The server sweeps its own store on a one-minute tick, but the deadline is the client's to
+   * honour — the sweeper publishes nothing, so a client that waited for the server would show a
+   * message for a full minute past the moment it promised to vanish. Each message's lifetime is
+   * sealed inside its own ciphertext (the wire never echoes `expires_in_ms` back), so this is the
+   * only place the deadline can be read. The sweep is one `setMessages` per tick that actually
+   * drops something; a quiet thread costs one `some()` scan per second.
+   *
+   * The row is removed outright, not tombstoned: unlike a deletion — which names a message that
+   * may still be unread, so its place in the transcript is kept — an expiry is the message saying
+   * it never wanted to be remembered. The seq numbering gains the same gap a hard purge leaves,
+   * and the sync path's `Truncated` status already treats a gap as honest.
+   */
+  useEffect(() => {
+    if (messages.length === 0) {
+      return;
+    }
+    const timer = setInterval(() => {
+      setMessages((prev) => {
+        const kept = prev.filter((message) => !messageExpired(message));
+        return kept.length === prev.length ? prev : kept;
+      });
+    }, EXPIRY_SWEEP_MS);
+    return () => clearInterval(timer);
+  }, [messages.length]);
+
+  /**
    * Pages unreplayed history into the thread, one page per click.
    *
    * {@link MigoClient.catchUp} fetches forward only, so the backwards page is fetched through the
@@ -332,15 +393,26 @@ export function useChat(conversationId: Id, options: ChatCryptoOptions = {}): Ch
   }, [client, conversationId, loadingEarlier]);
 
   const send = useCallback(
-    async (text: string): Promise<void> => {
+    async (text: string, expiresInMs?: number): Promise<void> => {
       const trimmed = text.trim();
       if (!client || !accountId || trimmed.length === 0) {
         return;
       }
-      const content: TextContent = { type: ContentType.Text, text: trimmed };
+      // The lifetime is sealed inside the content (where every receiver reads it) and stated on
+      // the send (where the server computes its own expiry from its clock). One argument serves
+      // both because they are the same number, chosen once by the sender.
+      const lifetime = expiresInMs ?? expiresAfterMs ?? undefined;
+      const content: TextContent = {
+        type: ContentType.Text,
+        text: trimmed,
+        ...(lifetime !== undefined ? { expiresInMs: lifetime } : {}),
+      };
       // A reply carries the target's id as a threading hint the server stores and replays; the
       // composer's preview state, not the message content, is what makes it a reply in the UI.
-      const sendOptions = replyTo ? { replyTo: replyTo.messageId } : {};
+      const sendOptions = {
+        ...(replyTo ? { replyTo: replyTo.messageId } : {}),
+        ...(lifetime !== undefined ? { expiresInMs: lifetime } : {}),
+      };
       const accepted = await client.messaging.send(conversationId, content, sendOptions);
       // Optimistic local echo: the sender is excluded from the server's fan-out.
       upsert({
@@ -356,7 +428,7 @@ export function useChat(conversationId: Id, options: ChatCryptoOptions = {}): Ch
       setReplyTo(null);
       void client.typing.setTyping(conversationId, TypingState.Stop).catch(() => {});
     },
-    [client, accountId, conversationId, upsert, replyTo],
+    [client, accountId, conversationId, upsert, replyTo, expiresAfterMs],
   );
 
   /**
@@ -377,7 +449,17 @@ export function useChat(conversationId: Id, options: ChatCryptoOptions = {}): Ch
       const content = file.type.startsWith('image/')
         ? await uploadImageAttachment(client, conversationId, file, options)
         : await uploadDocumentAttachment(client, conversationId, file);
-      const sendOptions = replyTo ? { replyTo: replyTo.messageId } : {};
+      // A message the composer armed as disappearing carries its lifetime whatever its body —
+      // text, image, document — because the promise "this vanishes" is about the send, not the
+      // medium. The lifetime rides both the content and the wire field, as in `send`.
+      const lifetime = expiresAfterMs ?? undefined;
+      if (lifetime !== undefined) {
+        content.expiresInMs = lifetime;
+      }
+      const sendOptions = {
+        ...(replyTo ? { replyTo: replyTo.messageId } : {}),
+        ...(lifetime !== undefined ? { expiresInMs: lifetime } : {}),
+      };
       const accepted = await client.messaging.send(conversationId, content, sendOptions);
       upsert({
         messageId: accepted.messageId,
@@ -392,7 +474,7 @@ export function useChat(conversationId: Id, options: ChatCryptoOptions = {}): Ch
       setReplyTo(null);
       void client.typing.setTyping(conversationId, TypingState.Stop).catch(() => {});
     },
-    [client, accountId, conversationId, options, upsert, replyTo],
+    [client, accountId, conversationId, options, upsert, replyTo, expiresAfterMs],
   );
 
   /**
@@ -408,7 +490,15 @@ export function useChat(conversationId: Id, options: ChatCryptoOptions = {}): Ch
         return;
       }
       const content = await uploadVoiceNote(client, conversationId, recording, options);
-      const sendOptions = replyTo ? { replyTo: replyTo.messageId } : {};
+      // The same armed-lifetime rule as an attachment: a disappearing voice note disappears too.
+      const lifetime = expiresAfterMs ?? undefined;
+      if (lifetime !== undefined) {
+        content.expiresInMs = lifetime;
+      }
+      const sendOptions = {
+        ...(replyTo ? { replyTo: replyTo.messageId } : {}),
+        ...(lifetime !== undefined ? { expiresInMs: lifetime } : {}),
+      };
       const accepted = await client.messaging.send(conversationId, content, sendOptions);
       upsert({
         messageId: accepted.messageId,
@@ -423,7 +513,7 @@ export function useChat(conversationId: Id, options: ChatCryptoOptions = {}): Ch
       setReplyTo(null);
       void client.typing.setTyping(conversationId, TypingState.Stop).catch(() => {});
     },
-    [client, accountId, conversationId, options, upsert, replyTo],
+    [client, accountId, conversationId, options, upsert, replyTo, expiresAfterMs],
   );
 
   /**
@@ -518,6 +608,8 @@ export function useChat(conversationId: Id, options: ChatCryptoOptions = {}): Ch
     send,
     sendAttachment,
     sendVoiceNote,
+    expiresAfterMs,
+    setExpiresAfterMs,
     setTyping,
     deleting,
     deleteMessage,

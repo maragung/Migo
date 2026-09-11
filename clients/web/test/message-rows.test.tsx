@@ -27,6 +27,7 @@ import type { Id, UserProfile } from '@migo/sdk';
 
 import { MessageList } from '../src/components/message-list.js';
 import type { InterleavedRow } from '../src/components/message-list.js';
+import { messageExpired } from '../src/lib/migo/use-chat.js';
 import type { ThreadMessage } from '../src/lib/migo/use-chat.js';
 
 const CREATED = Date.parse('2026-08-26T12:00:00Z');
@@ -42,6 +43,7 @@ function msg(fields: {
   deleted?: boolean;
   replyTo?: Id;
   createdAt?: number;
+  expiresInMs?: number;
 }): ThreadMessage {
   seq += 1;
   return {
@@ -50,7 +52,11 @@ function msg(fields: {
     seq,
     senderId: fields.senderId,
     senderDevice: 'dev_1' as Id,
-    content: { type: ContentType.Text, text: fields.text },
+    content: {
+      type: ContentType.Text,
+      text: fields.text,
+      ...(fields.expiresInMs !== undefined ? { expiresInMs: fields.expiresInMs } : {}),
+    },
     createdAt: fields.createdAt ?? CREATED,
     ...(fields.deleted ? { deleted: true } : {}),
     ...(fields.replyTo ? { replyTo: fields.replyTo } : {}),
@@ -278,4 +284,37 @@ test('the load-earlier control appears only when history is missing, and shows i
   );
   assert.ok(busy.includes('Loading…'), 'the busy label is missing');
   assert.ok(busy.includes('disabled'), 'a busy paging control must not be clickable');
+});
+
+// --- the disappearing mark ---
+
+test('a message carrying a sealed lifetime wears the clock mark; a kept one wears none', () => {
+  // The lifetime rides inside the message's own ciphertext, so the row is the only surface that
+  // can say the promise exists. The mark must appear exactly on the rows that carry it.
+  const fleeting = msg({ senderId: 'ada' as Id, text: 'read quickly', expiresInMs: 8 * 3_600_000 });
+  const kept = msg({ senderId: 'ada' as Id, text: 'this one stays' });
+  const markup = render([fleeting, kept]);
+  assert.equal(markup.split('expiry-mark').length - 1, 1, 'exactly one row carries the mark');
+  assert.ok(markup.includes('Disappears'), 'the mark states what it means');
+});
+
+test('the lifetime reads as words a person can check, not raw milliseconds', () => {
+  const markup = render([
+    msg({ senderId: 'ada' as Id, text: 'gone soon', expiresInMs: 8 * 3_600_000 }),
+  ]);
+  assert.ok(markup.includes('8 hours'), 'the tooltip humanises the lifetime');
+  assert.ok(!markup.includes('28800000'), 'raw milliseconds must not reach the reader');
+});
+
+// --- the local sweep ---
+
+test('a sealed lifetime expires the row on the receiver clock, and absence never does', () => {
+  // The sweep is the client's half of a disappearing message: the server drops its row on a
+  // one-minute tick and publishes nothing, so the deadline this reads is the one sealed inside
+  // the message. `messageExpired` is the pure heart of that sweep, pinned here.
+  const sent = msg({ senderId: 'ada' as Id, text: 'brief', createdAt: 1_000, expiresInMs: 60_000 });
+  assert.ok(!messageExpired(sent, 1_000 + 59_999), 'the lifetime has not passed');
+  assert.ok(messageExpired(sent, 1_000 + 60_000), 'the boundary itself expires');
+  const kept = msg({ senderId: 'ada' as Id, text: 'kept', createdAt: 1_000 });
+  assert.ok(!messageExpired(kept, 1_000 + 10 * 365 * 24 * 3_600_000), 'no lifetime, no expiry');
 });

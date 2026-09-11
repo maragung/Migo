@@ -14,6 +14,15 @@ import { VoiceRecorder } from './voice-recorder.js';
 /** Stop signalling "typing" after this idle gap. */
 const TYPING_IDLE_MS = 2500;
 
+/**
+ * The lifetime the composer's disappearing toggle arms: eight hours, the middle of the pack a
+ * messenger usually offers (a minute is a gimmick, a day is a kept message with extra steps). The
+ * value is stated in the control's tooltip, so what vanishes and when is agreed before the send.
+ */
+export const DISAPPEARING_MS = 8 * 60 * 60 * 1_000;
+/** The same lifetime in human words, for the toggle's tooltip and the composer's hint line. */
+const DISAPPEARING_LABEL = '8 hours';
+
 /** What the reply bar quotes: who is being replied to, and the start of their message. */
 export interface ReplyPreview {
   senderName: string;
@@ -51,6 +60,15 @@ interface ComposerProps {
   /** Toggles the inline emoticon/sticker picker (the 😊 beside the attach button). */
   onToggleEmoticon?: () => void;
   /**
+   * The disappearing-message lifetime the composer has armed, or null when the next message is a
+   * kept one. The control reflects the armed state; the send path seals the value beside the
+   * content. Optional: absent renders no control, so a context without disappearing messages
+   * (a room, where history is the point) keeps its composer as it was.
+   */
+  expiresAfterMs?: number | null;
+  /** Arms or clears the disappearing mode the next send carries. */
+  onToggleDisappearing?: () => void;
+  /**
    * The handle the emoticon picker inserts through. The composer owns the textarea, so the only
    * honest way for a sibling component to insert at the caret is a ref the composer fills with a
    * small function it controls — never a reach into the DOM the composer did not sanction.
@@ -70,6 +88,8 @@ export function MessageComposer({
   giftOpen,
   emoticonOpen,
   onToggleEmoticon,
+  expiresAfterMs,
+  onToggleDisappearing,
   insertRef,
 }: ComposerProps): ReactNode {
   const [text, setText] = useState('');
@@ -337,6 +357,27 @@ export function MessageComposer({
               aria-pressed={giftOpen}
             >
               <Icon name="gift" size={20} />
+            </button>
+          ) : null}
+          {onToggleDisappearing !== undefined ? (
+            <button
+              type="button"
+              className={`attach-btn ${expiresAfterMs != null ? 'active' : ''}`}
+              onClick={onToggleDisappearing}
+              disabled={disabled || uploading}
+              aria-label={
+                expiresAfterMs != null
+                  ? 'Stop disappearing messages'
+                  : 'Send a disappearing message'
+              }
+              aria-pressed={expiresAfterMs != null}
+              title={
+                expiresAfterMs != null
+                  ? `Disappearing on — new messages vanish after ${DISAPPEARING_LABEL}`
+                  : `New messages vanish after ${DISAPPEARING_LABEL}`
+              }
+            >
+              <Icon name="clock" size={20} />
             </button>
           ) : null}
           {onVoiceNote !== undefined ? (

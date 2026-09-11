@@ -3428,6 +3428,14 @@ main {
   color: var(--text-faint);
   font-style: italic;
 }
+/* The disappearing mark: a small clock beside the timestamp on a message that carries a sealed
+   lifetime. Same faint register as "edited" — a fact about the row, not an alarm. */
+.expiry-mark {
+  margin-left: 5px;
+  color: var(--text-faint);
+  display: inline-flex;
+  vertical-align: middle;
+}
 .reaction-bar {
   display: inline-flex;
   gap: 2px;

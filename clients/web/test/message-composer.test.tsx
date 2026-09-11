@@ -25,7 +25,7 @@ import test from 'node:test';
 
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { MessageComposer } from '../src/components/message-composer.js';
+import { DISAPPEARING_MS, MessageComposer } from '../src/components/message-composer.js';
 import { friendlyError } from '../src/lib/migo/errors.js';
 
 function render(props: Partial<Parameters<typeof MessageComposer>[0]> = {}): string {
@@ -102,5 +102,26 @@ test('the mic renders independently of the attach button, so rooms keep voice no
   assert.ok(
     noVoice.includes('aria-label="Attach a file"'),
     'the attach button must stay when the mic is hidden',
+  );
+});
+
+// --- the disappearing toggle ---
+
+test('the clock control renders only where disappearing is offered, and states its price', () => {
+  // A room keeps its history (the transcripts are the point of a room), so its composer is handed
+  // no toggle and renders none; a direct or group thread gets the clock, reflecting the armed
+  // state the next send seals.
+  const armed = render({ expiresAfterMs: DISAPPEARING_MS, onToggleDisappearing: () => {} });
+  assert.ok(armed.includes('aria-pressed="true"'), 'the armed control must read as pressed');
+  assert.ok(armed.includes('8 hours'), 'the control states the lifetime it arms');
+
+  const idle = render({ expiresAfterMs: null, onToggleDisappearing: () => {} });
+  assert.ok(idle.includes('aria-pressed="false"'), 'the idle control reads as unpressed');
+  assert.ok(!idle.includes('aria-pressed="true"'), 'only one pressed control may exist');
+
+  const roomComposer = render({ onToggleDisappearing: undefined });
+  assert.ok(
+    !roomComposer.includes('disappearing message'),
+    'no clock control where the context offers none',
   );
 });

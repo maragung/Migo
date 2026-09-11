@@ -55,6 +55,14 @@ export interface TextContent {
   type: ContentType.Text;
   text: string;
   mentions?: Id[];
+  /**
+   * A disappearing-message lifetime in milliseconds, sealed inside the body so every receiver
+   * learns the deadline the sender chose. The wire's `MessageSend.expires_in_ms` reaches only the
+   * server (which never echoes it back); this copy is what a receiver's own countdown reads.
+   * Absent on old clients' messages, and skipped by old clients' decoders — the optional-field
+   * rule makes a newer field invisible, not fatal.
+   */
+  expiresInMs?: number;
 }
 
 /**
@@ -75,6 +83,8 @@ export interface MediaRefContent {
   height?: number;
   blurhash?: string;
   caption?: string;
+  /** A disappearing-message lifetime, sealed for the receivers' own countdown. See TextContent. */
+  expiresInMs?: number;
 }
 
 /** A pointer to an encrypted voice note. `waveform` is a coarse amplitude preview for the UI. */
@@ -87,6 +97,8 @@ export interface VoiceNoteRefContent {
   key: Uint8Array;
   nonce: Uint8Array;
   waveform?: Uint8Array;
+  /** A disappearing-message lifetime, sealed for the receivers' own countdown. See TextContent. */
+  expiresInMs?: number;
 }
 
 /** An emoji reaction to a message. `remove` true retracts a reaction the sender placed earlier. */
@@ -191,6 +203,7 @@ function encodeContentBody(w: Writer, content: MessageContent): void {
       w.str(content.text);
       let present = 0;
       if (content.mentions !== undefined) present++;
+      if (content.expiresInMs !== undefined) present++;
       w.u32(present);
       if (content.mentions !== undefined) {
         const mentions = content.mentions;
@@ -200,6 +213,13 @@ function encodeContentBody(w: Writer, content: MessageContent): void {
             sub.id(id);
           }
         });
+      }
+      // Field 2: the disappearing lifetime, sealed beside the text it bounds. Ids 1 and 3 are
+      // taken by mentions and the marker below; a receiver that predates the field skips it by
+      // the optional-field rule, so the message still reads — it just never disappears there.
+      if (content.expiresInMs !== undefined) {
+        const expiresInMs = content.expiresInMs;
+        w.optional(2, (sub) => sub.u32(expiresInMs));
       }
       w.leave();
       return;
@@ -233,6 +253,10 @@ function encodeContentBody(w: Writer, content: MessageContent): void {
         const caption = content.caption;
         w.optional(4, (sub) => sub.str(caption));
       }
+      if (content.expiresInMs !== undefined) {
+        const expiresInMs = content.expiresInMs;
+        w.optional(5, (sub) => sub.u32(expiresInMs));
+      }
       w.leave();
       return;
     }
@@ -246,10 +270,15 @@ function encodeContentBody(w: Writer, content: MessageContent): void {
       w.bytes(content.nonce);
       let present = 0;
       if (content.waveform !== undefined) present++;
+      if (content.expiresInMs !== undefined) present++;
       w.u32(present);
       if (content.waveform !== undefined) {
         const waveform = content.waveform;
         w.optional(1, (sub) => sub.bytes(waveform));
+      }
+      if (content.expiresInMs !== undefined) {
+        const expiresInMs = content.expiresInMs;
+        w.optional(2, (sub) => sub.u32(expiresInMs));
       }
       w.leave();
       return;
@@ -301,6 +330,8 @@ function decodeContentBody(type: ContentType, r: Reader): MessageContent {
             mentions.push(sub.id());
           }
           content.mentions = mentions;
+        } else if (fieldId === 2) {
+          content.expiresInMs = sub.u32();
         }
       }
       r.leave();
@@ -337,6 +368,9 @@ function decodeContentBody(type: ContentType, r: Reader): MessageContent {
           case 4:
             content.caption = sub.str();
             break;
+          case 5:
+            content.expiresInMs = sub.u32();
+            break;
           default:
             break;
         }
@@ -366,6 +400,8 @@ function decodeContentBody(type: ContentType, r: Reader): MessageContent {
         const [fieldId, sub] = r.optional();
         if (fieldId === 1) {
           content.waveform = sub.bytes();
+        } else if (fieldId === 2) {
+          content.expiresInMs = sub.u32();
         }
       }
       r.leave();

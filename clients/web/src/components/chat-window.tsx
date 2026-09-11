@@ -46,7 +46,7 @@ import { GameEventList } from './game-events.js';
 import { GameLauncher } from './game-launcher.js';
 import { GiftPicker } from './gift-picker.js';
 import { GroupInfoPanel } from './group-info-panel.js';
-import { MessageComposer } from './message-composer.js';
+import { DISAPPEARING_MS, MessageComposer } from './message-composer.js';
 import { MessageList, senderNameOf } from './message-list.js';
 import type { InterleavedRow } from './message-list.js';
 import { RoomInfoPanel } from './room-info-panel.js';
@@ -154,6 +154,8 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
     loadingEarlier,
     loadEarlier,
     sendVoiceNote,
+    expiresAfterMs,
+    setExpiresAfterMs,
   } = useChat(conversationId, { endToEnd });
   const game = useGameEvents(conversationId);
   const { startCall } = useCall();
@@ -746,6 +748,15 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
         }}
         giftOpen={giftOpen}
         emoticonOpen={emoticonOpen}
+        // Disappearing messages are a private-and-group feature: a room's history is its record
+        // (the room's transcripts are the point of a room), so the clock control stays out of a
+        // room's composer entirely — the same rule that hides file send there.
+        expiresAfterMs={isRoom ? null : expiresAfterMs}
+        onToggleDisappearing={
+          isRoom
+            ? undefined
+            : () => setExpiresAfterMs(expiresAfterMs == null ? DISAPPEARING_MS : null)
+        }
         onToggleEmoticon={() => {
           setGiftOpen(false);
           setEmoticonOpen((open) => !open);
