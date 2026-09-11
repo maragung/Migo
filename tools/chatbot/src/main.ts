@@ -92,16 +92,22 @@ function makeCollector(scope: string): InboundCollector {
   };
 }
 
-async function openOrCreateDirect(alice: MigoClient, bob: MigoClient, bobId: Id): Promise<Id> {
+async function openOrCreateDirect(
+  alice: MigoClient,
+  bob: MigoClient,
+  bobId: Id,
+  aliceId: Id,
+): Promise<Id> {
   // A fresh account is private by default: `who_can_message` starts at Friends, so a
   // direct conversation between two strangers is refused with PRIVACY_RESTRICTED at the
   // create door. The two smoke accounts therefore become friends first — alice requests,
   // bob accepts — which is also the real-world shape every new user has to walk through
-  // before their first message can land.
+  // before their first message can land. The respond names the *requester* (alice), not
+  // the responder: it answers the incoming row on bob's side of the graph.
   log('alice', `friend request to ${bobId}`);
   await alice.social.friendRequest(bobId);
-  log('bob', `accepting ${bobId}`);
-  await bob.social.friendRespond(bobId, true);
+  log('bob', `accepting ${aliceId}`);
+  await bob.social.friendRespond(aliceId, true);
 
   const existing = await alice.loadConversations(20);
   for (const summary of existing.conversations) {
@@ -205,7 +211,12 @@ async function main(): Promise<void> {
   });
 
   // Open (or reuse) a 1:1 conversation between the two.
-  const conversationId = await openOrCreateDirect(aliceClient, bobClient, bobClient.accountId);
+  const conversationId = await openOrCreateDirect(
+    aliceClient,
+    bobClient,
+    bobClient.accountId,
+    aliceClient.accountId,
+  );
 
   // Each side needs its own membership cache for the sender-key distribution
   // that `messaging.send` performs. Alice's cache is primed by
