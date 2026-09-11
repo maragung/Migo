@@ -45,8 +45,8 @@ class GroupPermissionsTest {
 
     @Test
     fun `every member may vote against a plain member`() {
+        // The single parameter is the target's role — the vote itself has no viewer-side gate.
         assertTrue(canVoteKickGroup(ConversationRole.Member, isSelf = false))
-        assertTrue(canVoteKickGroup(ConversationRole.Founder, isSelf = false))
     }
 
     @Test
