@@ -102,6 +102,26 @@ pub struct ChatState {
     /// the floppy in the header folds out a typed-path save row under it, and the path is kept
     /// between frames so closing the row on a mistake does not cost the whole path.
     pub log_panels: HashMap<Id, LogPanel>,
+    /// The thread search's own state, per conversation, keyed the way the attach panel and the
+    /// transcript panel are: the magnifier in the header folds a live filter row out under it,
+    /// and the query is kept per conversation the way a draft is, so switching windows and
+    /// back does not cost the words already typed.
+    pub searches: HashMap<Id, SearchPanel>,
+}
+
+/// The thread search's state for one conversation.
+#[derive(Default)]
+pub struct SearchPanel {
+    /// Whether the search row is showing under the header.
+    pub open: bool,
+    /// The query as typed, kept between frames so closing the row on a mistake does not cost
+    /// the words — the same patience the attach panel's path and the transcript row's path
+    /// are given.
+    pub query: String,
+    /// One frame's flag: the magnifier just opened the row, and the field asks for focus the
+    /// first frame it is drawn — the web client's field autofocuses, and a search opened
+    /// without the cursor in it is a question half-asked.
+    pub claim_focus: bool,
 }
 
 /// The transcript panel's state for one conversation.
@@ -436,6 +456,26 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
         transcript_save_row(ui, context, state, conversation_id);
     }
 
+    // The search's fold-out, beside the transcript row it shares the header with.
+    let search_open = state
+        .searches
+        .get(&conversation_id)
+        .is_some_and(|panel| panel.open);
+    if search_open {
+        search_row(ui, context, state, conversation_id);
+    }
+
+    // The search's needle, taken as an owned value before the scroll area borrows `state`:
+    // the thread's loop asks it per row with no borrow of the panel map behind it. `None` is
+    // "no question asked" — an empty or whitespace query filters nothing, exactly as the web
+    // client's field does — while a real needle that answers nothing is a question the
+    // thread below answers with its own honest line.
+    let needle = state
+        .searches
+        .get(&conversation_id)
+        .filter(|panel| panel.open)
+        .and_then(|panel| search_needle(&panel.query));
+
     // Read before the scroll area borrows `state`, and by member count rather than by conversation
     // kind: a group of two reads like a direct chat and should look like one.
     let conversation = state
@@ -484,7 +524,21 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
                 );
             } else {
                 let mut last_day: Option<String> = None;
+                // How many rows the needle let through, for the "nothing matches" line below:
+                // a filter that answers nothing must say so, because the thread's own empty
+                // state ("No messages yet") would be a lie under one — there are messages,
+                // none of them answer.
+                let mut drawn = 0usize;
                 for message in thread {
+                    // The live filter, before the day label: a separator whose every message
+                    // was filtered away is a rule over nothing, and the day a survivor
+                    // belongs to is still drawn by the survivor itself.
+                    if let Some(needle) = &needle {
+                        if !body_matches(needle, &message.body) {
+                            continue;
+                        }
+                    }
+                    drawn += 1;
                     let day = day_label(message.sent_at);
                     if last_day.as_deref() != Some(day.as_str()) {
                         day_separator(ui, context, &day);
@@ -534,6 +588,14 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
                         &mut state.reactions,
                     );
                     ui.add_space(space::SM);
+                }
+                if needle.is_some() && drawn == 0 {
+                    let colors = palette(context.theme);
+                    ui.label(
+                        RichText::new("No loaded message matches.")
+                            .font(egui::FontId::proportional(font::SMALL))
+                            .color(colors.text_muted),
+                    );
                 }
             }
             // The room's own life, as the scroll's final lines: who came, who went, who dropped.
@@ -585,6 +647,70 @@ fn transcript_save_row(
                     // write's outcome arrives as a toast, and a row still open under it would
                     // be the question twice.
                     panel.open = false;
+                }
+            });
+        });
+}
+
+/// A thread-search query as the thread's filter asks it: trimmed and lowercased, or `None`
+/// when nothing was really asked.
+///
+/// `None`, not an empty needle, is the distinction that matters: an empty or whitespace-only
+/// query is "no question" (the thread draws unfiltered), while a real needle that matches
+/// nothing is "a question with no answer" (the thread says so). Collapsing the two would make
+/// the honest empty state impossible to draw — the web client's field makes the same cut,
+/// filtering nothing until the trimmed query has length.
+#[must_use]
+fn search_needle(query: &str) -> Option<String> {
+    let trimmed = query.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_lowercase())
+}
+
+/// Whether one message's body answers a prepared [`search_needle`].
+///
+/// Text matches, case-insensitively; nothing else does. A media caption is a label on an
+/// object, not words someone wrote, and a voice note's words are not in the body at all — the
+/// web client's filter makes the same cut, so the same thread searches the same on every
+/// screen it is read on. The haystack's lowercase is allocated per ask, not cached: a repaint
+/// lays out every row's text from scratch anyway, and one allocation beside that many is
+/// noise — but the needle is prepared once per frame, never per row.
+#[must_use]
+fn body_matches(needle: &str, body: &Body) -> bool {
+    match body {
+        Body::Text(text) => text.to_lowercase().contains(needle),
+        _ => false,
+    }
+}
+
+/// The thread search row, under the header, while the header's magnifier left it open.
+///
+/// A live filter, not a submitted query: every keystroke narrows the thread below, because a
+/// search over messages this session already holds costs no round trip and owes nobody a
+/// submit — the same per-keystroke rule the web client's field follows. The hint says what
+/// the filter honestly covers — the loaded messages, not the server — the web client's own
+/// sentence.
+fn search_row(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conversation_id: Id) {
+    let colors = palette(context.theme);
+    let panel = state.searches.entry(conversation_id).or_default();
+    egui::Frame::new()
+        .fill(colors.surface_raised)
+        .corner_radius(egui::CornerRadius::same(crate::theme::radius::MD))
+        .inner_margin(egui::Margin::same(space::MD as i8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Search this conversation")
+                        .text_style(crate::theme::named(crate::theme::text_style::OVERLINE))
+                        .color(colors.text_muted),
+                );
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut panel.query)
+                        .hint_text("Filter loaded messages")
+                        .desired_width((ui.available_width() - space::XL).max(120.0)),
+                );
+                if panel.claim_focus {
+                    response.request_focus();
+                    panel.claim_focus = false;
                 }
             });
         });
@@ -716,9 +842,9 @@ fn room_notices(ui: &mut Ui, context: &Context<'_>, state: &ChatState, conversat
 /// The compact header over the open conversation: title, encryption state, and the counts that
 /// are true of the whole thread rather than of any one message in it.
 ///
-/// Mutable state, unlike most headers, for one button: the floppy folds the transcript save row
-/// in and out, and that toggle is the conversation's own (kept the way drafts are), so the
-/// header writes it.
+/// Mutable state, unlike most headers, for two buttons: the floppy folds the transcript save
+/// row in and out, and the magnifier folds the thread search row in and out — both toggles
+/// are the conversation's own (kept the way drafts are), so the header writes them.
 fn thread_header(
     ui: &mut Ui,
     context: &mut Context<'_>,
@@ -740,6 +866,8 @@ fn thread_header(
     // Deferred, not written at the click: `conversation` above borrows `state`, and the toggle
     // writes `state.log_panels` — one frame's worth of patience keeps the two borrows apart.
     let mut want_log_panel = false;
+    // The search's toggle, deferred for the same reason — the same patience, twice.
+    let mut want_search_panel = false;
 
     ui.add_space(space::MD);
     ui.horizontal(|ui| {
@@ -840,11 +968,40 @@ fn thread_header(
             {
                 want_log_panel = true;
             }
+            // The magnifier, beside the floppy: this conversation's thread, searched live over
+            // what this session already holds. The honesty rule is the web field's own — a
+            // filter of the loaded messages, not a query the server answers — and the row
+            // under the header says so in the field's own hint.
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("\u{1F50D}")
+                            .font(egui::FontId::proportional(font::BODY))
+                            .color(colors.text),
+                    )
+                    .fill(egui::Color32::TRANSPARENT)
+                    .stroke(egui::Stroke::NONE),
+                )
+                .on_hover_text("Search this conversation")
+                .clicked()
+            {
+                want_search_panel = true;
+            }
         });
     });
     if want_log_panel {
         let panel = state.log_panels.entry(conversation_id).or_default();
         panel.open = !panel.open;
+    }
+    if want_search_panel {
+        let panel = state.searches.entry(conversation_id).or_default();
+        panel.open = !panel.open;
+        // Opening claims the field's focus, the frame the row first draws: a magnifier click
+        // that left the person to find the field themselves would be the question
+        // half-asked.
+        if panel.open {
+            panel.claim_focus = true;
+        }
     }
     ui.add_space(space::MD);
 }
@@ -1601,7 +1758,7 @@ mod tests {
             sender_id: Id::from_bytes([9; 16]),
             outgoing: false,
             body: Body::Text("a message to react to".to_owned()),
-            sent_at: migo_core::Timestamp::from_millis(1_000),
+            sent_at: migo_core::Timestamp::from_unix_ms(1_000),
             delivery: Delivery::Received,
         };
         let reaction = Message {
@@ -1614,7 +1771,7 @@ mod tests {
                 emoji: "\u{1F44D}".to_owned(),
                 target,
             },
-            sent_at: migo_core::Timestamp::from_millis(2_000),
+            sent_at: migo_core::Timestamp::from_unix_ms(2_000),
             delivery: Delivery::Received,
         };
         (target_message, reaction)
@@ -1664,5 +1821,108 @@ mod tests {
         // The target itself arrives afterwards and lands as the one row it is.
         state.absorb(target_message);
         assert_eq!(state.messages.get(&conversation).map(Vec::len), Some(1));
+    }
+
+    /// A message in the shape the store holds, for the search tests: only the parts the
+    /// filter reads vary; the rest is the worker's own delivery.
+    fn search_message(seq: u64, body: Body) -> Message {
+        Message {
+            message_id: Id::from_bytes([seq as u8; 16]),
+            conversation_id: Id::from_bytes([3; 16]),
+            seq,
+            sender_id: Id::from_bytes([9; 16]),
+            outgoing: false,
+            body,
+            sent_at: migo_core::Timestamp::from_unix_ms(1_000),
+            delivery: Delivery::Received,
+        }
+    }
+
+    /// The thread search's own vocabulary, pinned: the needle is the query trimmed and
+    /// lowercased — or absent, when nothing was really asked — and only a text body ever
+    /// answers. A media caption is a label on an object, not words someone wrote, so it does
+    /// not match even when it says the very thing being searched for; the web client's filter
+    /// makes the same cut, so the same thread searches the same on every screen it is read on.
+    #[test]
+    fn the_needle_trims_lowercases_and_only_text_answers() {
+        // Nothing really asked: empty, or only whitespace.
+        assert_eq!(search_needle(""), None);
+        assert_eq!(search_needle("   "), None);
+        assert_eq!(search_needle(" \t "), None);
+        // A real question: trimmed of its edges, lowered for the case-insensitive compare.
+        assert_eq!(search_needle("  Hello  "), Some("hello".to_owned()));
+
+        let text = Body::Text("The Quarterly Report".to_owned());
+        assert!(body_matches("quarterly", &text), "case does not matter");
+        assert!(body_matches("the", &text));
+        assert!(
+            !body_matches("weekly", &text),
+            "a substring that is not there"
+        );
+
+        // Words someone did not write: a caption on an attachment, a voice note, a reaction,
+        // a body a newer peer sent. None of them answer, whatever they carry.
+        let media = Body::Media {
+            media_id: Id::from_bytes([1; 16]),
+            mime_type: "image/png".to_owned(),
+            size_bytes: 1,
+            width: None,
+            height: None,
+            caption: Some("the quarterly report".to_owned()),
+        };
+        assert!(
+            !body_matches("quarterly", &media),
+            "a caption is not a match"
+        );
+        let voice = Body::VoiceNote {
+            media_id: Id::from_bytes([2; 16]),
+            duration_ms: 1_500,
+        };
+        assert!(!body_matches("1", &voice));
+        let reaction = Body::Reaction {
+            emoji: "\u{1F44D}".to_owned(),
+            target: Id::from_bytes([4; 16]),
+        };
+        assert!(!body_matches("\u{1F44D}", &reaction));
+        assert!(!body_matches(
+            "anything",
+            &Body::Unsupported { content_type: 99 }
+        ));
+    }
+
+    /// The filter as the thread composes it: rows the needle does not answer are skipped in
+    /// place, never re-gathered — the store is already sequence-sorted, and a search must be
+    /// a narrower view of that order, not a second opinion about it. An absent needle is the
+    /// loop's own `None` arm: the whole thread, untouched.
+    #[test]
+    fn the_filter_skips_in_place_and_keeps_the_thread_order() {
+        let thread = vec![
+            search_message(1, Body::Text("alpha".to_owned())),
+            search_message(2, Body::Text("Beta report".to_owned())),
+            search_message(
+                3,
+                Body::Media {
+                    media_id: Id::from_bytes([1; 16]),
+                    mime_type: "image/png".to_owned(),
+                    size_bytes: 1,
+                    width: None,
+                    height: None,
+                    caption: None,
+                },
+            ),
+            search_message(4, Body::Text("the report, again".to_owned())),
+        ];
+
+        let needle = search_needle("  REPORT ").expect("a real question");
+        let survivors: Vec<u64> = thread
+            .iter()
+            .filter(|message| body_matches(&needle, &message.body))
+            .map(|message| message.seq)
+            .collect();
+        // The two text rows that answer, in the store's own order — and only those.
+        assert_eq!(survivors, vec![2, 4]);
+
+        // No question asked: nothing is filtered, whatever the panel's field holds.
+        assert!(search_needle("   ").is_none());
     }
 }
