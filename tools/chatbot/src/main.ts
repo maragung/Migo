@@ -29,9 +29,17 @@ import {
   serverEndpointFromUrl,
   type IncomingMessage,
   type Id,
+  type ServerEndpoint,
 } from '@migo/sdk';
 
 const API_URL = process.env.MIGOD_API_URL ?? 'http://localhost:18080';
+// The gateway origin, separate from REST on purpose: the two-node smoke runs node-1 and
+// node-2 side by side, and the endpoint derivation's loopback rule would otherwise point the
+// WebSocket at "REST port + 1" — node-2's port, a different database — while the accounts were
+// registered through node-1's REST. The token verifies (both nodes share the test token key)
+// but the session row lives in node-1's store, so node-2 answers TOKEN_REVOKED. Honoring the
+// documented env keeps both sockets on the node the accounts belong to.
+const GATEWAY_URL = process.env.MIGOD_GATEWAY_URL ?? 'ws://localhost:18080/ws';
 const ROUNDS = Number.parseInt(process.env.BOT_ROUNDS ?? '10', 10);
 const APP_VERSION = '0.1.0';
 const LOCALE = 'en-US';
@@ -110,13 +118,23 @@ async function openOrCreateDirect(alice: MigoClient, bob: MigoClient, bobId: Id)
 async function main(): Promise<void> {
   const alice = envAccount('alice');
   const bob = envAccount('bob');
-  log('boot', `target ${API_URL}, ${ROUNDS} rounds`);
+  log('boot', `target ${API_URL} (gateway ${GATEWAY_URL}), ${ROUNDS} rounds`);
+
+  // The endpoint both clients share: REST as the env names it, with the gateway port
+  // overridden by the gateway origin — the one knob that keeps the realtime socket on the
+  // same node as the accounts (see GATEWAY_URL above).
+  const server: ServerEndpoint = (() => {
+    const base = serverEndpointFromUrl(API_URL);
+    const gateway = new URL(GATEWAY_URL);
+    const gatewayPort = Number.parseInt(gateway.port, 10);
+    return Number.isInteger(gatewayPort) ? { ...base, gatewayPort } : { ...base };
+  })();
 
   // Build the two clients. Each gets its own key material (the SDK mints
   // a fresh keystore on construction), so the sender-key distribution that
   // `messaging.send` performs on first use is a real-world shape.
   const aliceClient = MigoClient.create({
-    server: serverEndpointFromUrl(API_URL),
+    server,
     deviceDisplayName: alice.displayName,
     hello: {
       platform: 4, // Desktop — Platform enum
@@ -126,7 +144,7 @@ async function main(): Promise<void> {
     },
   });
   const bobClient = MigoClient.create({
-    server: serverEndpointFromUrl(API_URL),
+    server,
     deviceDisplayName: bob.displayName,
     hello: {
       platform: 4,
