@@ -34,6 +34,7 @@ import com.migo.app.ui.CallOverlay
 import com.migo.app.ui.ChatScreen
 import com.migo.app.ui.ErrorBanner
 import com.migo.app.ui.GamesScreen
+import com.migo.app.ui.GroupInviteCandidate
 import com.migo.app.ui.MigoTheme
 import com.migo.app.ui.MobileHome
 import com.migo.app.ui.MobileTabStrip
@@ -46,6 +47,7 @@ import com.migo.app.ui.SignInScreen
 import com.migo.app.ui.WalletScreen
 import com.migo.app.ui.panelTitle
 import com.migo.core.protocol.ConversationKind
+import com.migo.core.protocol.RelationshipKind
 import com.migo.core.store.MediaAutoDownload
 import com.migo.core.store.ThemeChoice
 import com.migo.core.wire.Id
@@ -303,6 +305,36 @@ private fun ShellScreen(
                         open.roomId?.let { roomId -> model.sanction(open.conversationId, roomId, target, action) }
                     },
                     onMuteForMe = { userId, on -> model.muteForMe(open.conversationId, userId, on) },
+                    // The group lifecycle rides the same chat surface: the member sheet, the
+                    // rename, the invite quick-pick, and the founder-vs-vote controls all read
+                    // from the conversation id alone, where the room controls above need a room.
+                    onOpenGroupMembers = if (open.roomId == null) {
+                        { model.openGroupMembers(open.conversationId) }
+                    } else {
+                        null
+                    },
+                    onCloseGroupMembers = { model.closeMembers(open.conversationId) },
+                    onInvite = { userId -> model.inviteToGroup(open.conversationId, userId) },
+                    onGroupVoteKick = { target -> model.groupVoteKick(open.conversationId, target) },
+                    onGroupMute = { target, term -> model.groupMute(open.conversationId, target, term) },
+                    onGroupKick = { target -> model.groupKick(open.conversationId, target) },
+                    onRenameGroup = { title -> model.renameGroup(open.conversationId, title) },
+                    onToggleRename = model::toggleGroupRename,
+                    onRenameValue = model::setGroupRename,
+                    onLeaveGroup = if (open.roomId == null) {
+                        { model.leaveGroup(open.conversationId) }
+                    } else {
+                        null
+                    },
+                    // The invite quick-pick lists the friends this shell can name: a row that offers
+                    // to invite someone has to say who it is offering.
+                    groupInvitees = state.friends.entries
+                        .filter { it.kind == RelationshipKind.Friend.wire.toLong() }
+                        .mapNotNull { entry ->
+                            val name = model.nameOf(entry.userId) ?: return@mapNotNull null
+                            GroupInviteCandidate(entry.userId, name)
+                        }
+                        .sortedBy { it.name },
                     gameCatalogue = state.games.catalogue,
                     gamesLoading = state.games.loading,
                     gamesFailure = state.games.failure,

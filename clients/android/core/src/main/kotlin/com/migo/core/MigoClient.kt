@@ -52,7 +52,9 @@ import com.migo.core.protocol.ClientInfo
 import com.migo.core.protocol.ConversationKind
 import com.migo.core.protocol.ConversationListResponse
 import com.migo.core.protocol.ConversationMemberEvent
+import com.migo.core.protocol.ConversationStateEvent
 import com.migo.core.protocol.ConversationSummary
+import com.migo.core.protocol.ConversationVoteEvent
 import com.migo.core.protocol.Feature
 import com.migo.core.protocol.FriendEvent
 import com.migo.core.protocol.GameEvent
@@ -348,6 +350,12 @@ class MigoClient private constructor(
     private val typingListeners = ListenerSet<TypingEvent>(Op.TYPING, options.onEventError)
     private val presenceListeners = ListenerSet<PresenceEvent>(Op.PRESENCE_EVENT, options.onEventError)
     private val friendListeners = ListenerSet<FriendEvent>(Op.FRIEND_EVENT, options.onEventError)
+    private val conversationMemberListeners =
+        ListenerSet<ConversationMemberEvent>(Op.CONVERSATION_MEMBER_EVENT, options.onEventError)
+    private val conversationVoteListeners =
+        ListenerSet<ConversationVoteEvent>(Op.CONVERSATION_VOTE_EVENT, options.onEventError)
+    private val conversationStateListeners =
+        ListenerSet<ConversationStateEvent>(Op.CONVERSATION_STATE_EVENT, options.onEventError)
     private val memberListeners =
         ListenerSet<RoomMemberEvent>(Op.ROOM_MEMBER_EVENT, options.onEventError)
     private val roomStateListeners =
@@ -463,6 +471,24 @@ class MigoClient private constructor(
 
     /** Friendship changes, bridged across reconnects like every application-facing stream. */
     fun onFriendEvent(listener: Listener<FriendEvent>): Subscription = friendListeners.add(listener)
+
+    /**
+     * Group membership movement: joins, departures, and removals, bridged across reconnects.
+     *
+     * Membership churn is a crypto event before it is a UI one -- the membership cache is already
+     * patched by the client itself, and a handler here should rotate the conversation's sender key
+     * so a removed member cannot read what is sealed after their departure.
+     */
+    fun onConversationMember(listener: Listener<ConversationMemberEvent>): Subscription =
+        conversationMemberListeners.add(listener)
+
+    /** A group kick vote's running tally, bridged across reconnects. */
+    fun onConversationVote(listener: Listener<ConversationVoteEvent>): Subscription =
+        conversationVoteListeners.add(listener)
+
+    /** Coalesced group metadata deltas (a rename), bridged across reconnects. */
+    fun onConversationState(listener: Listener<ConversationStateEvent>): Subscription =
+        conversationStateListeners.add(listener)
 
     // --- application-facing streams (survive reconnects) ---
 
@@ -1344,7 +1370,7 @@ class MigoClient private constructor(
                 this,
                 options.onEventError,
             ),
-            conversations = ConversationsDomain(rpc),
+            conversations = ConversationsDomain(rpc, options.onEventError),
             sync = SyncDomain(rpc),
             typing = TypingDomain(rpc, options.onEventError),
             presence = PresenceDomain(rpc, options.onEventError),
@@ -1380,6 +1406,9 @@ class MigoClient private constructor(
         session.notifications.onNotification { notificationListeners.deliver(it) }
         session.games.onEvent { gameListeners.deliver(it) }
         session.social.onFriendEvent { friendListeners.deliver(it) }
+        session.conversations.onMember { conversationMemberListeners.deliver(it) }
+        session.conversations.onVote { conversationVoteListeners.deliver(it) }
+        session.conversations.onState { conversationStateListeners.deliver(it) }
         session.calls.onIncomingCall { incomingCallListeners.deliver(it) }
         session.calls.onCallState { callStateListeners.deliver(it) }
         session.calls.onSdp { callSdpListeners.deliver(it) }
@@ -1602,6 +1631,7 @@ private class Session(
         typing.start()
         presence.start()
         rooms.start()
+        conversations.start()
         notifications.start()
         games.start()
         social.start()
@@ -1614,6 +1644,7 @@ private class Session(
         typing.stop()
         presence.stop()
         rooms.stop()
+        conversations.stop()
         notifications.stop()
         games.stop()
         social.stop()

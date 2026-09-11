@@ -1,6 +1,7 @@
 package com.migo.app.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,6 +19,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -57,6 +59,16 @@ fun FriendsScreen(
     nameOf: (com.migo.core.wire.Id) -> String? = { null },
     /** What tapping a friend opens: the friend intent sheet. */
     onOpenIntent: (UserTarget) -> Unit = {},
+    /** Opens the new-group sheet over the Friends view. */
+    onOpenGroup: () -> Unit = {},
+    /** Closes the new-group sheet, keeping what was typed and picked for a re-open. */
+    onCloseGroup: () -> Unit = {},
+    /** Edits the new group's title text. */
+    onGroupTitle: (String) -> Unit = {},
+    /** Adds or removes one friend from the new group's picked members. */
+    onToggleGroupPick: (com.migo.core.wire.Id) -> Unit = {},
+    /** Creates the group from the picked members and opens its thread. */
+    onCreateGroup: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var field by rememberSaveable { mutableStateOf(state.search.query) }
@@ -80,6 +92,9 @@ fun FriendsScreen(
 
     Column(modifier = modifier.fillMaxSize().imePadding()) {
         ScreenTitle(title = "Friends") {
+            // The new-group entry sits beside Refresh because a group starts from people, and the
+            // Friends view is where the people are.
+            TextButton(onClick = onOpenGroup, enabled = !state.friends.loading) { Text("New group") }
             TextButton(onClick = onRefresh, enabled = !state.friends.loading) { Text("Refresh") }
         }
         OutlinedTextField(
@@ -169,6 +184,22 @@ fun FriendsScreen(
 
                 item { Spacer(modifier = Modifier.height(16.dp)) }
             }
+        }
+
+        // The new-group sheet covers the whole view, the same full-surface treatment the chat's
+        // member sheet gives a roster: picking people is a list that scrolls.
+        if (state.friends.groupOpen) {
+            NewGroupSheet(
+                friends = friends,
+                picked = state.friends.groupPicked,
+                title = state.friends.groupTitle,
+                busy = state.friends.groupBusy,
+                nameOf = nameOf,
+                onClose = onCloseGroup,
+                onTitle = onGroupTitle,
+                onToggle = onToggleGroupPick,
+                onCreate = onCreateGroup,
+            )
         }
     }
 }
@@ -267,3 +298,119 @@ private fun shortName(entry: RelationshipEntry): String = shortId(entry.userId)
 
 /** An id as the short, readable form the rest of this build uses. */
 private fun shortId(id: com.migo.core.wire.Id): String = id.value.take(8)
+
+/**
+ * The new-group sheet: a title, the friends to pick, and the Create that asks the server for the
+ * conversation.
+ *
+ * The pick order is kept, not just the picked set: the first friend named joins the caller as the
+ * group's second founder -- the two of them are the group's memory of who built it -- so the list
+ * reads in the order it will mean something.
+ */
+@Composable
+private fun NewGroupSheet(
+    friends: List<RelationshipEntry>,
+    picked: List<com.migo.core.wire.Id>,
+    title: String,
+    busy: Boolean,
+    nameOf: (com.migo.core.wire.Id) -> String?,
+    onClose: () -> Unit,
+    onTitle: (String) -> Unit,
+    onToggle: (com.migo.core.wire.Id) -> Unit,
+    onCreate: () -> Unit,
+) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(end = 16.dp, top = 8.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        TextButton(onClick = onClose) {
+                            Text(text = "<", style = MaterialTheme.typography.titleMedium)
+                        }
+                        Text(
+                            text = "New group",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f),
+                        )
+                        // A group needs at least one named member besides the caller, so Create
+                        // stays dark until the sheet can build one.
+                        Button(
+                            onClick = onCreate,
+                            enabled = !busy && picked.isNotEmpty(),
+                        ) {
+                            Text("Create")
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = onTitle,
+                    placeholder = { Text("Group title (optional)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+
+                if (friends.isEmpty()) {
+                    Placeholder(
+                        text = "No friends yet. A group needs someone to be built with.",
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                } else {
+                    LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        item { SectionLabel(text = "Pick members") }
+                        items(friends, key = { it.userId.value }) { entry ->
+                            val name = nameOf(entry.userId) ?: shortId(entry.userId)
+                            val isPicked = entry.userId in picked
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(enabled = !busy) { onToggle(entry.userId) }
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Monogram(name = name, size = 32.dp)
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = name,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                    )
+                                    // The first pick is called out because it carries a meaning
+                                    // the rest do not: that person becomes the second founder.
+                                    Text(
+                                        text = if (picked.indexOf(entry.userId) == 0) {
+                                            "First pick · becomes a founder"
+                                        } else if (isPicked) {
+                                            "Picked"
+                                        } else {
+                                            ""
+                                        },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                if (isPicked) {
+                                    TextButton(onClick = { onToggle(entry.userId) }, enabled = !busy) {
+                                        Text("Remove")
+                                    }
+                                }
+                            }
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                        }
+                        item { Spacer(modifier = Modifier.height(16.dp)) }
+                    }
+                }
+            }
+        }
+    }
+}

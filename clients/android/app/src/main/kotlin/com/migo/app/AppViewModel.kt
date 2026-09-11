@@ -31,6 +31,8 @@ import com.migo.app.model.ChatSafety
 import com.migo.app.model.ChatState
 import com.migo.app.model.ConversationRow
 import com.migo.app.model.GAME_STATUS_OPEN
+import com.migo.app.model.GroupLiveInfo
+import com.migo.app.model.GroupMember
 import com.migo.app.model.MediaObject
 import com.migo.app.model.PreparedChainTx
 import com.migo.app.model.RoomLiveInfo
@@ -41,6 +43,7 @@ import com.migo.app.model.VoteTally
 import com.migo.app.model.WindowTab
 import com.migo.app.model.gameEventLine
 import com.migo.app.model.gameLabelOf
+import com.migo.app.model.groupMemberLine
 import com.migo.app.model.parseAvaxAmount
 import com.migo.app.session.MigoSession
 import com.migo.app.session.SessionHooks
@@ -75,7 +78,11 @@ import com.migo.core.net.TrackOptions
 import com.migo.core.net.TrackOutcome
 import com.migo.core.net.TrackResult
 import com.migo.core.protocol.ConversationKind
+import com.migo.core.protocol.ConversationMemberEvent
+import com.migo.core.protocol.ConversationRole
+import com.migo.core.protocol.ConversationStateEvent
 import com.migo.core.protocol.ConversationSummary
+import com.migo.core.protocol.ConversationVoteEvent
 import com.migo.core.protocol.GameEvent
 import com.migo.core.protocol.InboxItem
 import com.migo.core.protocol.LedgerEntryWire
@@ -293,6 +300,25 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * is public directory data.
      */
     private val roomInfo = ConcurrentHashMap<Id, RoomSummary>()
+
+    /**
+     * The member count this shell last saw for a group, by conversation id.
+     *
+     * A group chat's header wants its live count, but a conversation opened cold from the list
+     * carries only the row. Every summary that passes through records the count its member preview
+     * holds (or the whole membership, when a create or an invite answered), and [open] seeds the
+     * chat's [GroupLiveInfo] from it; the group's member-event stream takes over from there.
+     */
+    private val groupCounts = ConcurrentHashMap<Id, Long>()
+
+    /** Records each group summary's member count, so a later [open] can seed the chat's header. */
+    private fun rememberGroupCounts(summaries: List<ConversationSummary>) {
+        for (summary in summaries) {
+            if (summary.kind != ConversationKind.Group) continue
+            val members = summary.members?.size ?: continue
+            if (members > 0) groupCounts[summary.conversationId] = members.toLong()
+        }
+    }
 
     /**
      * A monotonic source of keys for room notices.
@@ -778,6 +804,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val response = live.client.loadConversations(CONVERSATION_PAGE)
                 learnNames(live, response.conversations)
+                rememberGroupCounts(response.conversations)
                 val rows = response.conversations.map { row(live, it) }
                 signedIn { it.copy(loading = false, conversations = rows) }
             } catch (cancelled: CancellationException) {
@@ -821,6 +848,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     roomId = listed?.roomId,
                     peerId = listed?.peerId,
                     room = listed?.roomId?.let { liveInfoFor(it) },
+                    // A group opens with its last-known count, which the member-event stream keeps
+                    // current from here; the role stays a plain member's until the roster read
+                    // names it, because a founder control offered on a guess is one the server can
+                    // only refuse.
+                    group = if (listed?.kind == ConversationKind.Group) {
+                        GroupLiveInfo(groupCounts[conversationId] ?: 0L)
+                    } else {
+                        null
+                    },
                     // Seeded from the transcript cache, so the window opens on what this session
                     // already decrypted rather than on a spinner over an empty list. The tail
                     // fetch below fills whatever is newer; the seed is what makes a reopen not
@@ -2255,6 +2291,347 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // --- the group lifecycle ---
+
+    /**
+     * Opens the new-group sheet over the Friends view. The picks and the title live on
+     * [com.migo.app.model.FriendsState] rather than in the sheet's own state so a rotation keeps
+     * them, exactly as the composer's draft is kept.
+     */
+    fun openGroupSheet() {
+        signedIn { it.copy(friends = it.friends.copy(groupOpen = true, groupBusy = false)) }
+    }
+
+    /** Closes the new-group sheet, discarding the picks and the title. */
+    fun closeGroupSheet() {
+        signedIn {
+            it.copy(friends = it.friends.copy(groupOpen = false, groupTitle = "", groupPicked = emptyList()))
+        }
+    }
+
+    /** Records the new-group sheet's live title text. */
+    fun setGroupTitle(text: String) {
+        signedIn { it.copy(friends = it.friends.copy(groupTitle = text)) }
+    }
+
+    /**
+     * Toggles one friend in the new-group sheet's picks.
+     *
+     * The order is pick order, which is the order the founders are chosen in: the creator is one
+     * founder and the *first* person named is the other, so a reorder here would change who the
+     * group's memory of its builders is.
+     */
+    fun toggleGroupPick(userId: Id) {
+        signedIn { current ->
+            val picked = current.friends.groupPicked
+            val next = if (userId in picked) picked - userId else picked + userId
+            current.copy(friends = current.friends.copy(groupPicked = next))
+        }
+    }
+
+    /**
+     * Creates the group from the sheet's picks and opens it.
+     *
+     * A group needs at least one named member besides the caller -- the two of them are the
+     * founders -- so the call is refused here rather than sent for the server to refuse. The
+     * create answer carries the whole membership, which [MigoClient.startConversation] caches
+     * complete; the title travels when one was typed, and the server names an untitled group from
+     * its members.
+     */
+    fun createGroup() {
+        val live = session ?: return
+        val current = signedInState ?: return
+        if (current.friends.groupBusy) return
+        val picked = current.friends.groupPicked
+        if (picked.isEmpty()) return
+        val title = current.friends.groupTitle.trim().ifEmpty { null }
+        signedIn { it.copy(friends = it.friends.copy(groupBusy = true)) }
+        viewModelScope.launch {
+            try {
+                val summary = live.client.startConversation(ConversationKind.Group, picked, title)
+                learnNames(live, listOf(summary))
+                // The new group's own size, so the thread's subtitle can say it before any event
+                // has had a reason to arrive.
+                rememberGroupCounts(listOf(summary))
+                val fresh = row(live, summary)
+                signedIn { state ->
+                    val absent = state.conversations.none { it.conversationId == fresh.conversationId }
+                    state.copy(
+                        friends = state.friends.copy(groupOpen = false, groupTitle = "", groupPicked = emptyList(), groupBusy = false),
+                        conversations = if (absent) {
+                            listOf(fresh) + state.conversations
+                        } else {
+                            state.conversations
+                        },
+                    )
+                }
+                open(fresh.conversationId, fresh.title)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(friends = it.friends.copy(groupBusy = false), failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Opens the member sheet over a group chat and reads what it shows: the roster, with the
+     * caller's own role folded into the live info the founder controls read.
+     */
+    fun openGroupMembers(conversationId: Id) {
+        inChat(conversationId) { it.copy(membersOpen = true) }
+        loadGroupRoster(conversationId)
+    }
+
+    /**
+     * Reads a group's roster into the open chat.
+     *
+     * The names come first, as the room roster does: a sheet of short ids helps nobody. The
+     * caller's own role is refined from its own roster row -- the roster is the one place the
+     * server states it plainly -- and folded into the live info the founder gates read, so a
+     * cold-opened group learns what the caller may do without waiting for an event that never
+     * carries roles.
+     */
+    private fun loadGroupRoster(conversationId: Id) {
+        val live = session ?: return
+        inChat(conversationId) { it.copy(rosterLoading = true) }
+        viewModelScope.launch {
+            try {
+                val roster = live.client.conversations.getRoster(conversationId)
+                val unknown = roster.map { it.accountId }.filter { !names.containsKey(it) }
+                if (unknown.isNotEmpty()) {
+                    try {
+                        for (profile in live.client.profile.fetch(unknown.take(PROFILE_BATCH))) {
+                            names[profile.userId] = profile.displayName.ifBlank { profile.username }
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        // A short id is a worse label than a name, not a broken sheet.
+                    }
+                }
+                val rows = roster.map { entry ->
+                    GroupMember(
+                        userId = entry.accountId,
+                        name = names[entry.accountId] ?: shortId(entry.accountId),
+                        role = entry.role,
+                        mutedUntil = entry.mutedUntil,
+                        departed = entry.leftAt != null,
+                    )
+                }
+                val self = signedInState?.accountId
+                val myRole = self?.let { id -> rows.find { it.userId == id }?.role }
+                val active = rows.count { !it.departed }
+                inChat(conversationId) { chat ->
+                    chat.copy(
+                        roster = null,
+                        rosterLoading = false,
+                        group = (chat.group ?: GroupLiveInfo(active.toLong())).copy(
+                            memberCount = active.toLong(),
+                            myRole = myRole ?: chat.group?.myRole ?: ConversationRole.Member,
+                        ),
+                        groupRoster = rows,
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                inChat(conversationId) { it.copy(rosterLoading = false) }
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Invites one account into the open group.
+     *
+     * The reply is the group's summary as it now stands, so the member count and the sheet's rows
+     * are corrected from it at once; each person who actually landed is announced on the member
+     * stream, which is the same path a member invited by someone else takes.
+     */
+    fun inviteToGroup(conversationId: Id, userId: Id) {
+        val live = session ?: return
+        if (signedInState?.open?.acting?.contains(userId) == true) return
+        inChat(conversationId) { it.copy(acting = it.acting + userId) }
+        viewModelScope.launch {
+            try {
+                live.client.conversations.invite(conversationId, listOf(userId))
+                learnAccountNames(live, listOf(userId))
+                loadGroupRoster(conversationId)
+                inChat(conversationId) { it.copy(acting = it.acting - userId) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                inChat(conversationId) { it.copy(acting = it.acting - userId) }
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Applies a founder's group mute -- a term from the sheet, or null to lift one early.
+     *
+     * There is no event for a mute; the roster is the record, so the sheet re-reads it and the row
+     * says so until the mute expires or a founder lifts it.
+     */
+    fun groupMute(conversationId: Id, targetId: Id, termMs: Long?) {
+        val live = session ?: return
+        if (signedInState?.open?.acting?.contains(targetId) == true) return
+        inChat(conversationId) { it.copy(acting = it.acting + targetId) }
+        viewModelScope.launch {
+            try {
+                val until = termMs?.let { System.currentTimeMillis() + it }
+                live.client.conversations.mute(conversationId, targetId, until)
+                loadGroupRoster(conversationId)
+                inChat(conversationId) { it.copy(acting = it.acting - targetId) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                inChat(conversationId) { it.copy(acting = it.acting - targetId) }
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Removes a member outright, no vote -- a founder's call.
+     *
+     * The removal is announced to the group on the member stream and the group rotates its sender
+     * key; the SDK's membership cache is patched by that same event, so the next send's audience
+     * is the group as it stands.
+     */
+    fun groupKick(conversationId: Id, targetId: Id) {
+        val live = session ?: return
+        if (signedInState?.open?.acting?.contains(targetId) == true) return
+        inChat(conversationId) { it.copy(acting = it.acting + targetId) }
+        viewModelScope.launch {
+            try {
+                live.client.conversations.kick(conversationId, targetId)
+                inChat(conversationId) { it.copy(acting = it.acting - targetId) }
+                loadGroupRoster(conversationId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                inChat(conversationId) { it.copy(acting = it.acting - targetId) }
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Casts this account's voice in a group kick vote against a member.
+     *
+     * The reply is the tally the instant the voice landed, so it is reflected at once rather than
+     * waiting for the broadcast to echo back: an open vote shows the running tally against the
+     * target, and a vote that just passed clears it -- the kick itself follows as a member event.
+     */
+    fun groupVoteKick(conversationId: Id, targetId: Id) {
+        val live = session ?: return
+        if (signedInState?.open?.acting?.contains(targetId) == true) return
+        inChat(conversationId) { it.copy(acting = it.acting + targetId) }
+        viewModelScope.launch {
+            try {
+                val result = live.client.conversations.voteKick(conversationId, targetId)
+                inChat(conversationId) { chat ->
+                    val votes = if (result.open) {
+                        chat.votes + (targetId to VoteTally(result.votes, result.needed))
+                    } else {
+                        chat.votes - targetId
+                    }
+                    chat.copy(votes = votes, acting = chat.acting - targetId)
+                }
+                if (!result.open) loadGroupRoster(conversationId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                inChat(conversationId) { it.copy(acting = it.acting - targetId) }
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /**
+     * Renames the open group -- a founder's action.
+     *
+     * The reply carries the new title, and the state stream carries it to every member; the local
+     * row, the window tab and the open chat are corrected here so the caller sees their own rename
+     * without waiting for their own echo.
+     */
+    fun renameGroup(conversationId: Id, title: String) {
+        val live = session ?: return
+        val trimmed = title.trim()
+        if (trimmed.isEmpty()) return
+        inChat(conversationId) { it.copy(renameBusy = true, renameValue = "") }
+        viewModelScope.launch {
+            try {
+                live.client.conversations.rename(conversationId, trimmed)
+                signedIn { current ->
+                    current.copy(
+                        conversations = current.conversations.map {
+                            if (it.conversationId == conversationId) it.copy(title = trimmed) else it
+                        },
+                        windows = current.windows.map {
+                            if (it.conversationId == conversationId) it.copy(title = trimmed) else it
+                        },
+                        open = current.open?.let {
+                            if (it.conversationId == conversationId) it.copy(title = trimmed) else it
+                        },
+                    )
+                }
+                inChat(conversationId) { it.copy(renameBusy = false, renameOpen = false) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                inChat(conversationId) { it.copy(renameBusy = false) }
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
+    /** Opens or closes the group's rename field; opening seeds it with the chat's current title. */
+    fun toggleGroupRename() {
+        val chat = (_state.value as? AppState.SignedIn)?.open ?: return
+        inChat(chat.conversationId) {
+            it.copy(renameOpen = !it.renameOpen, renameValue = if (!it.renameOpen) chat.title else "")
+        }
+    }
+
+    /** Records the rename field's live text. */
+    fun setGroupRename(text: String) {
+        val chat = (_state.value as? AppState.SignedIn)?.open ?: return
+        inChat(chat.conversationId) { it.copy(renameValue = text) }
+    }
+
+    /**
+     * Leaves the open group. Nobody's permission is asked -- leaving is a right, not a request.
+     *
+     * The local echo is the same as a room's: the row, the window tab and the chat itself go, so
+     * the group stops offering itself. The crypto state is forgotten through the messaging domain,
+     * exactly as the room's leave does -- the group rotates its sender key on the departure and
+     * the local receiver state is no longer useful.
+     */
+    fun leaveGroup(conversationId: Id) {
+        val live = session ?: return
+        viewModelScope.launch {
+            try {
+                live.client.conversations.leave(conversationId)
+                live.client.messaging.forget(conversationId)
+                live.client.invalidateConversation(conversationId)
+                signedIn { current ->
+                    current.copy(
+                        conversations = current.conversations.filterNot { it.conversationId == conversationId },
+                        windows = current.windows.filterNot { it.conversationId == conversationId },
+                        open = if (current.open?.conversationId == conversationId) null else current.open,
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                signedIn { it.copy(failure = readable(failure)) }
+            }
+        }
+    }
+
     /**
      * The Wallet's combined read: balance, statement, progression, badges, leaders, catalogue, and
      * the account's registered addresses.
@@ -3497,6 +3874,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         subscriptions.add(opened.client.onRoomMember { roomMember(it) })
         subscriptions.add(opened.client.onRoomState { roomState(it) })
         subscriptions.add(opened.client.onRoomVote { roomVote(it) })
+        // The group's three streams, with the room's: a membership move is a timeline notice in the
+        // open group and a crypto rotation everywhere (the SDK already rotates its own cache; the
+        // sender-key rotation the next send performs is the crypto cost of the churn), a state delta
+        // carries a rename onto the row and the tab, and a vote tally lands on the member sheet's
+        // rows. A stream for a group the list does not hold is an invite -- the list re-reads.
+        subscriptions.add(opened.client.onConversationMember { conversationMember(it) })
+        subscriptions.add(opened.client.onConversationState { conversationState(it) })
+        subscriptions.add(opened.client.onConversationVote { conversationVote(it) })
         // The game stream: a published event becomes a line in the open thread and a fresh view of
         // the game it moved. Added with the rest so a reconnect re-bridges it with them.
         subscriptions.add(opened.client.onGameEvent { gameEvent(it) })
@@ -3852,6 +4237,143 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * A group's membership moved: somebody joined, left, or was removed.
+     *
+     * The same two-way fan-out a room member event gets. The open chat, when it is this group's,
+     * gains a timeline notice in the room-notice style and tracks the member count the event
+     * carries; the member sheet's rows are left to the roster re-read, which the sheet's own
+     * reload performs -- the event is the freshest statement that something moved, the roster the
+     * freshest statement of who belongs. A join naming *this* account for a conversation the list
+     * does not hold is an invite arriving on our own user topic: the list re-reads, and the group
+     * appears without a refresh, exactly as the web client's provider treats it.
+     */
+    private fun conversationMember(event: ConversationMemberEvent) {
+        val live = session ?: return
+        val self = (_state.value as? AppState.SignedIn)?.accountId
+        // A removal of *this* account closes the thread: this account can no longer read the
+        // group, and a thread it cannot read must not stay on screen. The leave of our own is the
+        // belt to [leaveGroup]'s braces; a kick or a ban from another member is the real path.
+        val departedSelf = event.userId == self && event.change != MemberChange.Joined &&
+            event.change != MemberChange.Reconnected
+        if (departedSelf) {
+            viewModelScope.launch {
+                try {
+                    live.client.messaging.forget(event.conversationId)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // The conversation is already gone from the screen; the crypto state it held
+                    // is sealed on disk and a failed forget costs nothing the next sign-in will
+                    // not re-derive.
+                }
+            }
+            signedIn { current ->
+                current.copy(
+                    conversations = current.conversations.filterNot { it.conversationId == event.conversationId },
+                    windows = current.windows.filterNot { it.conversationId == event.conversationId },
+                    open = if (current.open?.conversationId == event.conversationId) null else current.open,
+                )
+            }
+            return
+        }
+        val listed = signedInState?.conversations?.any { it.conversationId == event.conversationId } == true
+        if (!listed && event.userId == self && event.change == MemberChange.Joined) {
+            refreshConversations()
+            return
+        }
+        // Membership churn is a crypto event before it is a UI one: the outbound sender-key chain
+        // this device holds must stop being the chain that seals anything, so the next send
+        // re-distributes a fresh one to whoever belongs now -- a removed member cannot read what
+        // is sealed after their departure.
+        live.client.messaging.rotateSenderKey(event.conversationId)
+        // The name is the one this shell has learned, or the short id -- a notice that resolved its
+        // name at draw time would fetch on every scroll frame.
+        val who = names[event.userId] ?: shortId(event.userId)
+        val notice = RoomNotice(
+            key = "notice-" + noticeSeq.incrementAndGet(),
+            text = groupMemberLine(who, event.change),
+            at = System.currentTimeMillis(),
+        )
+        inChat(event.conversationId) { chat ->
+            val count = event.memberCount.takeIf { it > 0L }
+                ?: chat.group?.memberCount ?: 0L
+            chat.copy(
+                group = (chat.group ?: GroupLiveInfo(count)).copy(memberCount = count),
+                notices = (chat.notices + notice).takeLast(NOTICE_CAP),
+            )
+        }
+        // A removal the open group's member sheet should stop offering: the roster re-read the
+        // sheet's own actions perform is the honest path, but a kick the member is watching land
+        // deserves the row going now.
+        val removed = event.change == MemberChange.Kicked ||
+            event.change == MemberChange.Banned ||
+            event.change == MemberChange.Left
+        if (removed) {
+            inChat(event.conversationId) { chat ->
+                chat.copy(
+                    groupRoster = chat.groupRoster?.map { member ->
+                        if (member.userId == event.userId) member.copy(departed = true) else member
+                    },
+                    votes = chat.votes - event.userId,
+                )
+            }
+        }
+    }
+
+    /**
+     * A group's coalesced metadata delta: a rename.
+     *
+     * Every field is a delta -- absent means unchanged -- so each is folded onto what the row, the
+     * tab and the open chat already hold. The rename reply already corrected the caller's own
+     * surfaces; this is the same correction for a rename by the *other* founder, and the equality
+     * check keeps a coalesced echo of our own rename from re-touching three lists.
+     */
+    private fun conversationState(event: ConversationStateEvent) {
+        val title = event.title?.takeIf { it.isNotBlank() } ?: return
+        signedIn { current ->
+            val chat = current.open
+            if (chat?.conversationId == event.conversationId && chat.title == title &&
+                current.conversations.none {
+                    it.conversationId == event.conversationId && it.title != title
+                }
+            ) {
+                return@signedIn current
+            }
+            current.copy(
+                conversations = current.conversations.map {
+                    if (it.conversationId == event.conversationId) it.copy(title = title) else it
+                },
+                windows = current.windows.map {
+                    if (it.conversationId == event.conversationId) it.copy(title = title) else it
+                },
+                open = chat?.let {
+                    if (it.conversationId == event.conversationId) it.copy(title = title) else it
+                },
+            )
+        }
+    }
+
+    /**
+     * A group kick vote's tally moved, or the vote ended.
+     *
+     * Only the open chat cares, and only when it is this group's: while [ConversationVoteEvent.closed]
+     * is null the target's row shows the running tally, and any close -- an expiry, the target
+     * leaving, or the pass whose kick lands separately as a member event -- takes the tally down.
+     */
+    private fun conversationVote(event: ConversationVoteEvent) {
+        signedIn { current ->
+            val chat = current.open
+            if (chat == null || chat.conversationId != event.conversationId) return@signedIn current
+            val votes = if (event.closed == true) {
+                chat.votes - event.targetId
+            } else {
+                chat.votes + (event.targetId to VoteTally(event.votes, event.needed))
+            }
+            current.copy(open = chat.copy(votes = votes))
+        }
+    }
+
     private suspend fun learnNames(live: MigoSession, summaries: List<ConversationSummary>) {
         learnAccountNames(
             live,
@@ -3914,7 +4436,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      *
      * A stored title wins. Failing that a direct conversation is named after the other member, which
      * is what a person expects and what the server cannot do for us: the title would have to be the
-     * same for both sides. Anything else falls back to a short id, which is at least stable.
+     * same for both sides. A group with no title is just "Group" -- the web client's own fallback --
+     * because a comma list of members is a roster, not a name, and a group is renamed the moment a
+     * founder gives it one. Anything else falls back to a short id, which is at least stable.
      */
     private fun title(live: MigoSession, summary: ConversationSummary): String {
         summary.title?.takeIf { it.isNotBlank() }?.let { return it }
@@ -3922,6 +4446,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (summary.kind == ConversationKind.Direct && others.size == 1) {
             return names[others[0]] ?: shortId(others[0])
         }
+        if (summary.kind == ConversationKind.Group) return "Group"
         if (others.isNotEmpty()) {
             return others.joinToString(limit = 3) { names[it] ?: shortId(it) }
         }

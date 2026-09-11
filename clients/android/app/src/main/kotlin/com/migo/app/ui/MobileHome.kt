@@ -94,6 +94,11 @@ fun MobileHome(
                     onRefresh = model::loadFriends,
                     nameOf = model::nameOf,
                     onOpenIntent = { intentUser = it },
+                    onOpenGroup = model::openGroupSheet,
+                    onCloseGroup = model::closeGroupSheet,
+                    onGroupTitle = model::setGroupTitle,
+                    onToggleGroupPick = model::toggleGroupPick,
+                    onCreateGroup = model::createGroup,
                     modifier = Modifier.fillMaxSize(),
                 )
                 AppState.Section.ROOMS -> RoomsScreen(

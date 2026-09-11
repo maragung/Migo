@@ -4043,12 +4043,22 @@ class WalletReq(
 data class WalletView(
     val balance: Long,
     val points: Long,
+    /** Kick Points held; absent on nodes that predate them (reads as zero). */
+    val kickPoints: Long? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
         w.u64(balance)
         w.u64(points)
-        w.u32(0)
+        var present = 0
+        if (kickPoints != null) present++
+        w.u32(present)
+        if (kickPoints != null) {
+            val value = kickPoints
+            w.optional(1) { w ->
+                w.u64(value)
+            }
+        }
         w.leave()
     }
 
@@ -4057,12 +4067,17 @@ data class WalletView(
             r.enter()
             val balance = r.u64()
             val points = r.u64()
+            var kickPoints: Long? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
-                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> kickPoints = sub.u64()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
             }
             r.leave()
-            return WalletView(balance, points)
+            return WalletView(balance, points, kickPoints)
         }
     }
 }
@@ -8170,6 +8185,70 @@ data class StorePurchaseResult(
     }
 }
 
+/** Buys one Kick Point pack: the price of an outright kick, prepaid at a bulk discount. */
+data class KickPointsBuy(
+    /** Pack size, one of the node's packs — 1, 10, or 50 KP. */
+    val packKp: Long,
+    /** Caller's idempotency key; a repeat returns the first purchase. */
+    val clientKey: String,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u32(packKp)
+        w.str(clientKey)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): KickPointsBuy {
+            r.enter()
+            val packKp = r.u32()
+            val clientKey = r.str()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return KickPointsBuy(packKp, clientKey)
+        }
+    }
+}
+
+/** The buy's answer: the new Kick Point balance, what the pack cost, and whether this call was a repeat. */
+data class KickPointsBuyResult(
+    /** The Kick Point balance after the buy. */
+    val kickPoints: Long,
+    /** What the pack cost, in coins. */
+    val price: Long,
+    /** True when a repeated client_key returned the earlier buy rather than charging again. */
+    val duplicate: Boolean,
+) {
+    fun encode(w: Writer) {
+        w.enter()
+        w.u64(kickPoints)
+        w.u64(price)
+        w.bool(duplicate)
+        w.u32(0)
+        w.leave()
+    }
+
+    companion object {
+        fun decode(r: Reader): KickPointsBuyResult {
+            r.enter()
+            val kickPoints = r.u64()
+            val price = r.u64()
+            val duplicate = r.bool()
+            val optionalCount = r.u32()
+            for (i in 0L until optionalCount) {
+                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+            }
+            r.leave()
+            return KickPointsBuyResult(kickPoints, price, duplicate)
+        }
+    }
+}
+
 /** Empty; the caller's own entitlements are the session's. */
 class EntitlementsReq(
 ) {
@@ -8431,6 +8510,7 @@ object Op {
     const val STORE_PURCHASE: Long = 239L
     /** Everything the caller owns, oldest first. */
     const val ENTITLEMENTS: Long = 240L
+    const val KICK_POINTS_BUY: Long = 168L
 }
 
 /** Static metadata for one opcode: its rate-limit cost, delivery class, required auth, and shape. */
@@ -8566,6 +8646,7 @@ val OPCODES: Map<Long, OpcodeMeta> = mapOf(
     52L to OpcodeMeta(52L, "CONVERSATION_STATE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ConversationStateEvent", null, "conversation_id"),
     239L to OpcodeMeta(239L, "STORE_PURCHASE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "StorePurchase", "StorePurchaseResult", null),
     240L to OpcodeMeta(240L, "ENTITLEMENTS", 1, DeliveryClass.Droppable, AuthLevel.User, Direction.ClientToServer, false, "EntitlementsReq", "EntitlementsResponse", null),
+    168L to OpcodeMeta(168L, "KICK_POINTS_BUY", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "KickPointsBuy", "KickPointsBuyResult", null),
 )
 
 /** Human name for an opcode, for logs and errors. Never used on the wire. */

@@ -8,11 +8,13 @@ import com.migo.core.net.DeviceSummary
 import com.migo.core.net.WalletSummary
 import com.migo.core.protocol.BadgeWire
 import com.migo.core.protocol.ConversationKind
+import com.migo.core.protocol.ConversationRole
 import com.migo.core.protocol.GameCatalogueEntry
 import com.migo.core.protocol.GameViewWire
 import com.migo.core.protocol.GiftListing
 import com.migo.core.protocol.InboxItem
 import com.migo.core.protocol.LedgerEntryWire
+import com.migo.core.protocol.MemberChange
 import com.migo.core.protocol.ProgressionWire
 import com.migo.core.protocol.RankWire
 import com.migo.core.protocol.RelationshipEntry
@@ -209,6 +211,14 @@ data class FriendsState(
     val loading: Boolean = false,
     /** Account ids with a social action in flight. */
     val busy: Set<Id> = emptySet(),
+    /** True while the new-group sheet is covering the Friends view. */
+    val groupOpen: Boolean = false,
+    /** The group sheet's live title text. Held here so a rotation does not lose a half-typed name. */
+    val groupTitle: String = "",
+    /** The members picked for the group so far, in pick order. */
+    val groupPicked: List<Id> = emptyList(),
+    /** True while the group is being created; the sheet's Create control is disabled. */
+    val groupBusy: Boolean = false,
 )
 
 /** The Search section: one query's answers across every surface that can honestly answer. */
@@ -599,8 +609,16 @@ data class ChatState(
      */
     val room: RoomLiveInfo? = null,
     /**
+     * The group's live shape, for a group chat's header and for gating its founder controls. Null
+     * for a direct chat and for a room, and null for a group until a roster read or a member event
+     * has named its counts -- the same not-yet-known honesty the room's own info keeps.
+     */
+    val group: GroupLiveInfo? = null,
+    /**
      * The room's non-message timeline — joins, leaves, kicks — oldest first, capped so it cannot
-     * grow without bound while a busy room is left open. Always empty for a direct chat.
+     * grow without bound while a busy room is left open. Always empty for a direct chat. A group's
+     * own member movement lands here too: a join, a leave, or a removal is a timeline fact in a
+     * group exactly as it is in a room, drawn by the same notice line.
      */
     val notices: List<RoomNotice> = emptyList(),
     /** The room's members once the member sheet has read them; null before the first read. */
@@ -613,6 +631,18 @@ data class ChatState(
     val muted: Set<Id> = emptySet(),
     /** Whether the member sheet is covering the thread. */
     val membersOpen: Boolean = false,
+    /**
+     * The group's members once the member sheet has read them; null before the first read. Held
+     * apart from [roster] because the two sheets draw different facts: a room's row carries a
+     * room role, a group's carries the group role and the founder's mute.
+     */
+    val groupRoster: List<GroupMember>? = null,
+    /** Whether the group's rename field is showing, in the member sheet's header. */
+    val renameOpen: Boolean = false,
+    /** The rename field's live text, held here so a rotation does not lose it. */
+    val renameValue: String = "",
+    /** True while a rename is in flight, so the field's Save control cannot double-fire. */
+    val renameBusy: Boolean = false,
     /** Accounts with a moderation or a mute action in flight, so only the pressed row shows it. */
     val acting: Set<Id> = emptySet(),
     /**
@@ -687,6 +717,33 @@ data class RosterMember(
     val userId: Id,
     val name: String,
     val role: RoomRole,
+)
+
+/**
+ * A group's live shape, as the open chat reads it.
+ *
+ * Seeded from the roster read ([com.migo.app.AppViewModel.openGroupMembers]) and kept current by the
+ * group's member-event stream, which carries the running [memberCount]. [myRole] is the field no
+ * event carries, so it is seeded from the caller's own roster row -- the roster is the one place
+ * the server states it plainly -- and it is what gates the founder controls (mute, kick, rename).
+ */
+data class GroupLiveInfo(
+    val memberCount: Long,
+    val myRole: ConversationRole = ConversationRole.Member,
+)
+
+/**
+ * One member as the group's member sheet draws it: a display name, the id behind it, the group
+ * role, and the founder's mute still running against them, when one is.
+ */
+data class GroupMember(
+    val userId: Id,
+    val name: String,
+    val role: ConversationRole,
+    /** Epoch ms the founder's group mute ends, or null when the member is not group-muted. */
+    val mutedUntil: Long? = null,
+    /** True when the member has left; the roster keeps them for history's sake. */
+    val departed: Boolean = false,
 )
 
 /** A running kick vote's tally, as a member row shows it while the vote is open. */
@@ -945,3 +1002,37 @@ fun gameEventLine(event: String, who: String?, label: String?): String {
         else -> "Game update"
     }
 }
+
+// --- the group vocabulary, as plain data ---
+
+/** The label a group role renders as; a role this build cannot name is at least a member. */
+fun groupRoleLabel(role: ConversationRole): String = when (role) {
+    ConversationRole.Founder -> "Founder"
+    else -> "Member"
+}
+
+/**
+ * The sentence a group member movement becomes, as the timeline notice draws it.
+ *
+ * Pure, so a test can pin it. `who` is already the display name — "You" for ourselves — and a
+ * change this build cannot name reads as the plain fact that someone joined rather than a guess.
+ */
+fun groupMemberLine(who: String, change: MemberChange): String {
+    val verb = when (change) {
+        MemberChange.Joined -> "joined"
+        MemberChange.Left -> "left"
+        MemberChange.Kicked -> "was removed"
+        MemberChange.Banned -> "was banned"
+        MemberChange.Disconnected -> "disconnected"
+        MemberChange.Reconnected -> "reconnected"
+        MemberChange.Unknown -> "joined"
+    }
+    return "$who $verb"
+}
+
+/** The mute terms a founder may set, as the member sheet's control labels read them. */
+val GROUP_MUTE_TERMS: List<Pair<String, Long>> = listOf(
+    "1 hour" to 60L * 60L * 1000L,
+    "1 day" to 24L * 60L * 60L * 1000L,
+    "7 days" to 7L * 24L * 60L * 60L * 1000L,
+)

@@ -71,17 +71,23 @@ import com.migo.app.model.ChatSafety
 import com.migo.app.model.ChatState
 import com.migo.app.model.GAME_KIND_GUESS_NUMBER
 import com.migo.app.model.GAME_STATUS_OPEN
+import com.migo.app.model.GROUP_MUTE_TERMS
+import com.migo.app.model.GroupMember
 import com.migo.app.model.MediaObject
 import com.migo.app.model.QUICK_REACTIONS
 import com.migo.app.model.RoomNotice
 import com.migo.app.model.RosterMember
 import com.migo.app.model.VoteTally
 import com.migo.app.model.gameLabelOf
+import com.migo.app.model.groupRoleLabel
 import com.migo.app.model.guessFeedbackLine
 import com.migo.app.model.parseGuessBoard
 import com.migo.app.model.playerRangeLabel
+import com.migo.core.domain.canFounderAct
+import com.migo.core.domain.canVoteKickGroup
 import com.migo.core.domain.filterChatSearch
 import com.migo.core.protocol.ConversationKind
+import com.migo.core.protocol.ConversationRole
 import com.migo.core.protocol.GameCatalogueEntry
 import com.migo.core.protocol.GameViewWire
 import com.migo.core.protocol.RoomRole
@@ -130,6 +136,31 @@ fun ChatScreen(
     onSanction: (Id, SanctionAction) -> Unit = { _, _ -> },
     /** Mutes or unmutes the given account for this device only. */
     onMuteForMe: (Id, Boolean) -> Unit = { _, _ -> },
+    /**
+     * Opens the group's member sheet. Offered only for a group chat; the group's sheet is its own
+     * surface, because the facts it draws (group roles, founder mutes) are not the room's.
+     */
+    onOpenGroupMembers: (() -> Unit)? = null,
+    /** Closes the group's member sheet. */
+    onCloseGroupMembers: () -> Unit = {},
+    /** Invites the given account into this group, from the sheet's invite row. */
+    onInvite: (Id) -> Unit = {},
+    /** Casts this account's voice in a group kick vote against the given member. */
+    onGroupVoteKick: (Id) -> Unit = {},
+    /** Applies a founder's group mute -- a term, or null to lift one early. */
+    onGroupMute: (Id, Long?) -> Unit = { _, _ -> },
+    /** Removes the given member outright, no vote -- a founder's call. */
+    onGroupKick: (Id) -> Unit = {},
+    /** Renames the group to the given title -- a founder's action. */
+    onRenameGroup: (String) -> Unit = {},
+    /** Opens or closes the rename field; the view model seeds the value. */
+    onToggleRename: () -> Unit = {},
+    /** Records the rename field's live text. */
+    onRenameValue: (String) -> Unit = {},
+    /** Leaves the group -- nobody's permission is asked. */
+    onLeaveGroup: (() -> Unit)? = null,
+    /** The friends this shell knows, for the group sheet's invite quick-pick. */
+    groupInvitees: List<GroupInviteCandidate> = emptyList(),
     /** The node's game catalogue, shared with the Games panel; null before the first read. */
     gameCatalogue: List<GameCatalogueEntry>? = null,
     /** True while the shared catalogue read is in flight. */
@@ -286,6 +317,8 @@ fun ChatScreen(
                 onStartCall = onStartCall,
                 onExportLog = onExportLog,
                 onToggleSearch = onToggleSearch,
+                onOpenGroupMembers = onOpenGroupMembers,
+                onLeaveGroup = onLeaveGroup,
             )
 
             // The change warning (§164) sits between the header and the thread, because it is about
@@ -401,6 +434,25 @@ fun ChatScreen(
             )
         }
 
+        // The group's member sheet: the roster with the founder controls, the invite quick-pick,
+        // the rename, and the way out. Back closes it, as the room's does.
+        if (chat.membersOpen && chat.kind == ConversationKind.Group && chat.roomId == null) {
+            BackHandler(onBack = onCloseGroupMembers)
+            GroupMembersSheet(
+                chat = chat,
+                selfId = selfId,
+                invitees = groupInvitees,
+                onClose = onCloseGroupMembers,
+                onInvite = onInvite,
+                onVoteKick = onGroupVoteKick,
+                onMute = onGroupMute,
+                onKick = onGroupKick,
+                onRename = onRenameGroup,
+                onToggleRename = onToggleRename,
+                onRenameValue = onRenameValue,
+            )
+        }
+
         // The game launcher: the node's catalogue as the sheet the header's Games control opens.
         // Only single-player games are startable through this build's wire — GAME_START cannot name
         // opponents, so the server refuses a two-player kind outright — and rather than send a
@@ -445,6 +497,8 @@ private fun ChatHeader(
     onStartCall: ((Id) -> Unit)? = null,
     onExportLog: (() -> Unit)? = null,
     onToggleSearch: () -> Unit = {},
+    onOpenGroupMembers: (() -> Unit)? = null,
+    onLeaveGroup: (() -> Unit)? = null,
 ) {
     // Games are offered only where a game has an audience: a room or a group conversation, never a
     // direct chat — the web client's own rule, because a game is the room's shared spectacle.
@@ -522,6 +576,20 @@ private fun ChatHeader(
                     Text("Leave", color = MaterialTheme.colorScheme.error)
                 }
             }
+            // The group's member sheet door: the same word the room's control uses, because the
+            // question it answers -- who is in here -- is the same question. Gated on the kind
+            // rather than the roster's presence, so a group the sheet has not read yet still
+            // offers the door that reads it.
+            if (chat.kind == ConversationKind.Group && onOpenGroupMembers != null) {
+                TextButton(onClick = onOpenGroupMembers) {
+                    Text("Members")
+                }
+            }
+            if (chat.kind == ConversationKind.Group && onLeaveGroup != null) {
+                TextButton(onClick = onLeaveGroup) {
+                    Text("Leave", color = MaterialTheme.colorScheme.error)
+                }
+            }
         }
     }
 }
@@ -536,6 +604,13 @@ private fun ChatHeader(
  * direct chat says what it is: encrypted end to end, which a room deliberately is not (§178).
  */
 private fun roomSubtitle(chat: ChatState): String {
+    if (chat.kind == ConversationKind.Group) {
+        // A group speaks its size the way a room speaks its occupancy: how many belong. The count
+        // is unknown until a summary or a member event has named it, and the honest word for that
+        // is the group itself, not a confident zero.
+        val count = chat.group?.memberCount ?: 0L
+        return if (count > 0L) "$count members · encrypted end to end" else "Group · encrypted end to end"
+    }
     if (chat.roomId == null) return "Encrypted end to end"
     val room = chat.room ?: return "Room"
     if (room.memberCount <= 0L) return "Room"
@@ -1456,6 +1531,262 @@ private fun SystemNotice(text: String) {
         modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 4.dp),
     )
 }
+
+/** One candidate the group sheet's invite quick-pick offers: a friend, by id and name. */
+data class GroupInviteCandidate(
+    val userId: Id,
+    val name: String,
+)
+
+/**
+ * The group's member sheet: the rename, the invite quick-pick, and the roster with the actions
+ * each viewer may take.
+ *
+ * # Who may do what
+ *
+ * A group is built by two founders -- the creator and the first person they named -- and the roster
+ * is the only statement of who they are, so the sheet reads it before offering anyone a control:
+ *
+ * - **Invite** is every member's right. The quick-pick lists the friends this shell knows who are
+ *   not already seated; a person not in the graph is reached from the Friends screen's search, the
+ *   same path a direct chat starts from.
+ * - **Rename**, **mute**, and a straight **kick** are the founders' controls. A founder cannot
+ *   touch the other founder -- a group built by two cannot be halved by one of them -- and cannot
+ *   mute or kick themselves either.
+ * - **Vote kick** is the members' own recourse, open to everyone, never against yourself and never
+ *   against a founder. Half the group rounded up carries it, and the running tally arrives on the
+ *   broadcast vote stream so every member watches the same count climb.
+ */
+@Composable
+private fun GroupMembersSheet(
+    chat: ChatState,
+    selfId: Id,
+    invitees: List<GroupInviteCandidate>,
+    onClose: () -> Unit,
+    onInvite: (Id) -> Unit,
+    onVoteKick: (Id) -> Unit,
+    onMute: (Id, Long?) -> Unit,
+    onKick: (Id) -> Unit,
+    onRename: (String) -> Unit,
+    onToggleRename: () -> Unit,
+    onRenameValue: (String) -> Unit,
+) {
+    val myRole = chat.group?.myRole ?: ConversationRole.Member
+    val roster = chat.groupRoster
+    // The friends who are not already seated, which is the whole point of a quick-pick: a row that
+    // offers to invite someone who is already in would be a button that can only fail politely.
+    val seated = roster?.filter { !it.departed }?.map { it.userId }?.toSet() ?: emptySet()
+    val candidates = invitees.filter { it.userId !in seated && it.userId != selfId }
+    val now = System.currentTimeMillis()
+
+    Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Surface(color = MaterialTheme.colorScheme.surfaceVariant) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(end = 16.dp, top = 8.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = onClose) {
+                        Text(text = "<", style = MaterialTheme.typography.titleMedium)
+                    }
+                    Text(
+                        text = "Members",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(1f),
+                    )
+                    // The rename control: a founder's action, so the sheet says so when it is not
+                    // this viewer's to take rather than hiding the group's title from the people
+                    // who may read it.
+                    TextButton(onClick = onToggleRename, enabled = myRole == ConversationRole.Founder) {
+                        Text(if (chat.renameOpen) "Cancel" else "Rename")
+                    }
+                }
+            }
+
+            // The rename field, when a founder opened it: the current title as its starting value,
+            // and a Save that cannot double-fire.
+            if (chat.renameOpen) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedTextField(
+                        value = chat.renameValue,
+                        onValueChange = onRenameValue,
+                        placeholder = { Text("Group title") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(
+                        onClick = { onRename(chat.renameValue) },
+                        enabled = !chat.renameBusy && chat.renameValue.trim().isNotEmpty(),
+                    ) {
+                        Text("Save")
+                    }
+                }
+            }
+
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                when {
+                    chat.rosterLoading && roster == null -> Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CircularProgressIndicator()
+                    }
+
+                    else -> LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        if (candidates.isNotEmpty()) {
+                            item(key = "invite-label") { SectionLabel(text = "Invite a friend") }
+                            items(candidates, key = { "invite-" + it.userId.value }) { person ->
+                                GroupInviteRow(
+                                    name = person.name,
+                                    busy = person.userId in chat.acting,
+                                    onInvite = { onInvite(person.userId) },
+                                )
+                            }
+                        }
+
+                        item(key = "roster-label") {
+                            if (candidates.isNotEmpty()) HorizontalDivider()
+                            SectionLabel(text = "In this group")
+                        }
+                        if (roster == null || roster.isEmpty()) {
+                            item(key = "roster-empty") { Placeholder(text = "No members to show.") }
+                        } else {
+                            items(roster, key = { "member-" + it.userId.value }) { member ->
+                                GroupMemberRow(
+                                    member = member,
+                                    isSelf = member.userId == selfId,
+                                    myRole = myRole,
+                                    tally = chat.votes[member.userId],
+                                    now = now,
+                                    acting = member.userId in chat.acting,
+                                    onVoteKick = { onVoteKick(member.userId) },
+                                    onMute = { term -> onMute(member.userId, term) },
+                                    onKick = { onKick(member.userId) },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One invite candidate: the friend and the single act the row exists for. Busy is the row's own,
+ * because an invite is one person's call and no other row should wait for it.
+ */
+@Composable
+private fun GroupInviteRow(name: String, busy: Boolean, onInvite: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Monogram(name = name, size = 32.dp)
+        Spacer(modifier = Modifier.width(12.dp))
+        Text(
+            text = name,
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            modifier = Modifier.weight(1f),
+        )
+        if (busy) {
+            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+        }
+        TextButton(onClick = onInvite, enabled = !busy) {
+            Text("Invite")
+        }
+    }
+}
+
+/**
+ * One group roster row: the member, their role, any running group mute, and the actions this
+ * viewer may take on them -- the vote for everyone, the founder's controls for a founder over a
+ * plain member. A departed member reads as "was here" without actions, because history is not
+ * deletable and neither is a row that explains it.
+ */
+@Composable
+private fun GroupMemberRow(
+    member: GroupMember,
+    isSelf: Boolean,
+    myRole: ConversationRole,
+    tally: VoteTally?,
+    now: Long,
+    acting: Boolean,
+    onVoteKick: () -> Unit,
+    onMute: (Long?) -> Unit,
+    onKick: () -> Unit,
+) {
+    val founder = canFounderAct(myRole, member.role, isSelf)
+    val canVote = canVoteKickGroup(member.role, isSelf)
+    val muted = member.mutedUntil != null && member.mutedUntil > now
+
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Monogram(name = member.name, size = 32.dp)
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (isSelf) member.name + " (you)" else member.name,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = if (member.departed) {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                    maxLines = 1,
+                )
+                val sub = buildString {
+                    append(groupRoleLabel(member.role))
+                    if (member.departed) append(" · left")
+                    if (muted && member.mutedUntil != null) append(" · muted")
+                }
+                Text(
+                    text = sub,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (acting) {
+                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+            }
+        }
+        if (!isSelf && !member.departed) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (canVote) {
+                    TextButton(onClick = onVoteKick, enabled = !acting) {
+                        Text(if (tally != null) "Vote kick ${tally.votes}/${tally.needed}" else "Vote kick")
+                    }
+                }
+                if (founder && muted) {
+                    TextButton(onClick = { onMute(null) }, enabled = !acting) {
+                        Text("Unmute")
+                    }
+                }
+            }
+            if (founder && !muted) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    for ((label, term) in GROUP_MUTE_TERMS) {
+                        TextButton(onClick = { onMute(term) }, enabled = !acting) {
+                            Text("Mute $label")
+                        }
+                    }
+                }
+            }
+            if (founder) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    ConfirmTextButton(label = "Kick", enabled = !acting, onConfirm = onKick)
+                }
+            }
+        }
+    }
+}
+
 
 /**
  * The member sheet: who is in the room, and what this account may do about them.
