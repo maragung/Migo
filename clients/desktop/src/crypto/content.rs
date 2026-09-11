@@ -215,7 +215,10 @@ fn encode_body(w: &mut Writer, content: &Content) -> WireResult<()> {
             // receiver's own countdown reads. An older decoder skips it unknown — the
             // optional-field rule makes a newer field invisible, not fatal.
             if let Some(v) = expires_in_ms {
-                w.optional(2, |sub| sub.write_u32(v))?;
+                w.optional(2, |sub| {
+                    sub.write_u32(*v);
+                    Ok(())
+                })?;
             }
             w.leave();
         }
@@ -264,7 +267,10 @@ fn encode_body(w: &mut Writer, content: &Content) -> WireResult<()> {
             // Field 5: the same disappearing lifetime the text body carries at field 2, after
             // the media's own four fields — the id the web and Android clients seal it under.
             if let Some(v) = expires_in_ms {
-                w.optional(5, |sub| sub.write_u32(v))?;
+                w.optional(5, |sub| {
+                    sub.write_u32(*v);
+                    Ok(())
+                })?;
             }
             w.leave();
         }
@@ -291,7 +297,10 @@ fn encode_body(w: &mut Writer, content: &Content) -> WireResult<()> {
             }
             // Field 2: the disappearing lifetime, after the waveform — same id as the text body.
             if let Some(v) = expires_in_ms {
-                w.optional(2, |sub| sub.write_u32(v))?;
+                w.optional(2, |sub| {
+                    sub.write_u32(*v);
+                    Ok(())
+                })?;
             }
             w.leave();
         }

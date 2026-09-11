@@ -1786,7 +1786,7 @@ fn edit_in_place(
 ) -> bool {
     let field = egui::TextEdit::multiline(&mut draft.text)
         .hint_text("the corrected message")
-        .desired_width((ui.available_width() - space::LG * 2).max(120.0));
+        .desired_width((ui.available_width() - space::LG * 2.0).max(120.0));
     let response = ui.add(field);
     if draft.claim_focus {
         response.request_focus();
