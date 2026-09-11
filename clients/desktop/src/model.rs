@@ -84,6 +84,10 @@ pub enum Body {
     VoiceNote { media_id: Id, duration_ms: u32 },
     /// An emoji reaction to another message.
     Reaction { emoji: String, target: Id },
+    /// A withdrawn message: the row stays so the sequence numbering has no hole, and the
+    /// bubble the thread draws in its place is the fact, not the content. The wire's
+    /// envelope is already empty when this arrives.
+    Tombstone,
     /// A body this build understands the envelope of but not the content type — a newer peer.
     Unsupported { content_type: u8 },
 }
@@ -102,6 +106,7 @@ impl Body {
                 )
             }
             Self::Reaction { emoji, .. } => format!("Reacted {emoji}"),
+            Self::Tombstone => "Message deleted".to_string(),
             Self::Unsupported { .. } => "Unsupported message".to_string(),
         }
     }
@@ -120,6 +125,18 @@ pub struct Message {
     pub body: Body,
     pub sent_at: Timestamp,
     pub delivery: Delivery,
+    /// A tombstone: the sender withdrew the message for everyone, and the row stays only so
+    /// the sequence numbering has no hole a syncing client would read as lost data. The wire
+    /// carries this as the `deleted` flag on the event, with the envelope already cleared.
+    pub deleted: bool,
+    /// The sender replaced the content after sending. The wire stamps `edited_at`; the flag
+    /// is all the surface needs — the new body is the body.
+    pub edited: bool,
+    /// The moment a disappearing message vanishes: `sent_at` plus the lifetime the sender
+    /// sealed inside the content. `None` on a permanent message, and on every message an old
+    /// peer sends — the lifetime travels as an optional field precisely so its absence is an
+    /// answer, not an error. The UI's own sweep reads this deadline; the wire never echoes it.
+    pub expires_at: Option<Timestamp>,
 }
 
 /// One row in the conversation list.
@@ -276,6 +293,10 @@ pub enum RelationshipKind {
     Follow,
     Block,
     Favorite,
+    /// The caller's personal mute: the account's room messages are hidden for the muter
+    /// alone, in every room. Lighter than a block — no teardown, no notification, and the
+    /// wire's own word for clearing it is the same opcode with `on: false`.
+    Mute,
 }
 
 impl RelationshipKind {
@@ -290,6 +311,7 @@ impl RelationshipKind {
             4 => Self::Follow,
             5 => Self::Block,
             6 => Self::Favorite,
+            7 => Self::Mute,
             _ => Self::Unknown,
         }
     }
@@ -1005,6 +1027,7 @@ mod tests {
         assert_eq!(RelationshipKind::from_wire(4), RelationshipKind::Follow);
         assert_eq!(RelationshipKind::from_wire(5), RelationshipKind::Block);
         assert_eq!(RelationshipKind::from_wire(6), RelationshipKind::Favorite);
+        assert_eq!(RelationshipKind::from_wire(7), RelationshipKind::Mute);
         // A kind a newer server knows about collapses, never crashes.
         assert_eq!(RelationshipKind::from_wire(99), RelationshipKind::Unknown);
         assert_eq!(RelationshipKind::from_wire(0), RelationshipKind::Unknown);

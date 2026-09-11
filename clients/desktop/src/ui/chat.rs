@@ -50,6 +50,17 @@ pub struct ChatState {
     /// switching windows must not carry half a sentence from one thread into another, and
     /// closing a window must not cost the words someone was still composing in it.
     pub drafts: HashMap<Id, String>,
+    /// The open inline edit, per message id — at most one is open anywhere, because the map
+    /// holds the message being fixed, but keying by id (rather than holding a bare Option)
+    /// lets a closed editor remove itself without knowing which conversation's thread drew it.
+    pub edits: HashMap<Id, EditDraft>,
+    /// The accounts this caller has personally muted, as the relationship graph last read
+    /// them — the set the muted-provider owns on the web, kept here because a chat window
+    /// filters rooms against it and the friends pane is not always mounted.
+    ///
+    /// Room chatter only, never direct messages: a mute is a volume control for the noise of
+    /// a crowd, and the person muted in a room can still be heard one to one.
+    pub muted: HashSet<Id>,
     /// The last typing state reported, per conversation, so a keystroke does not send one frame
     /// per character. Keyed the same way the drafts are, for the same reason.
     pub typing_sent: HashMap<Id, bool>,
@@ -136,6 +147,13 @@ pub struct ChatState {
     /// Group membership notices, keyed by conversation — the group twin of the room notices,
     /// the same live tail, the same cap, the same draw at the scroll's end.
     pub group_notices: HashMap<Id, Vec<RoomNotice>>,
+    /// The conversations whose composer is armed for disappearing sends — the web's
+    /// `expiresAfterMs` state, held as a set because the desktop offers the one lifetime the
+    /// web's `DISAPPEARING_MS` fixes. Armed is per conversation: the promise is about a
+    /// thread's future, not the screen's, so a window switch does not carry an arm from one
+    /// person's chat into another's. Rooms never hold an arm — a room is server-readable, so
+    /// its transcripts are the server's memory, not a promise a sender can make.
+    pub disappearing: HashSet<Id>,
 }
 
 /// The thread search's state for one conversation.
@@ -319,11 +337,56 @@ impl ChatState {
             if !matches!(message.body, Body::Text(ref t) if t.is_empty()) {
                 existing.body = message.body;
             }
+            // A tombstone or an edit stamp is never withdrawn by a later echo: once the
+            // sender has pulled a message back or fixed it, every later delivery of the
+            // same id still says so.
+            if message.deleted {
+                existing.deleted = true;
+            }
+            if message.edited {
+                existing.edited = true;
+            }
+            // A deadline, once learned, is kept: the optimistic insert stamps it from this
+            // clock, and the edit's echo re-seals the original's lifetime, so a later
+            // delivery agreeing is the ordinary case and a `None` from an un-opened echo
+            // must not un-promise what the row already holds.
+            if message.expires_at.is_some() {
+                existing.expires_at = message.expires_at;
+            }
             return;
         }
         thread.push(message);
         thread.sort_by_key(|m| (m.seq, m.sent_at.as_millis()));
         self.scroll_to_end = true;
+    }
+
+    /// The local half of a disappearing message: the drop when a sealed lifetime passes.
+    ///
+    /// The server sweeps its own store on a one-minute tick, but the deadline is the client's
+    /// to honour — the sweeper publishes nothing, so a client that waited for the server
+    /// would show a message a full minute past the moment it promised to vanish. Each row's
+    /// deadline was computed at decrypt (or at the optimistic insert) from the lifetime the
+    /// sender sealed inside the content, because the wire never echoes it back.
+    ///
+    /// The row is removed outright, not tombstoned: unlike a deletion — which names a message
+    /// that may still be unread, so its place in the transcript is kept — an expiry is the
+    /// message saying it never wanted to be remembered. The seq numbering gains the same gap
+    /// a hard purge leaves, and the sync path's truncation handling already treats a gap as
+    /// honest.
+    ///
+    /// Returns whether anything was dropped, so the caller can repaint on the drop and coast
+    /// between; a quiet thread costs one scan per tick.
+    pub fn sweep_expired(&mut self) -> bool {
+        let now = migo_core::Timestamp::now();
+        let mut dropped = false;
+        for thread in self.messages.values_mut() {
+            let before = thread.len();
+            thread.retain(|message| message.expires_at.is_none_or(|deadline| deadline > now));
+            if thread.len() != before {
+                dropped = true;
+            }
+        }
+        dropped
     }
 
     /// Merges a page of history.
@@ -429,6 +492,14 @@ fn delivery_rank(state: Delivery) -> u8 {
 /// `selected` field is the *last* conversation any door opened, not the one being drawn, and
 /// reading it here would make every window show whichever thread was opened most recently.
 pub fn thread(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conversation_id: Id) {
+    // The disappearing sweep, once per second: the deadline a sealed lifetime set is this
+    // client's to honour, so a repaint cadence is asked for and the drop checked before the
+    // thread borrows its messages. Called from `thread` rather than each window's pane
+    // because the promise spans every conversation at once — a message expiring in a window
+    // nobody has open must still leave the conversation list's preview and the store.
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_secs(1));
+    state.sweep_expired();
     thread_pane(ui, context, state, conversation_id);
 }
 
@@ -555,6 +626,10 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
         .iter()
         .find(|c| c.conversation_id == conversation_id);
     let group = conversation.is_some_and(|c| c.members.len() > 2);
+    // A room, by the server's own word: the one conversation kind a personal mute filters.
+    // Direct and group messages reach the person by name and are never muted out — the
+    // muted set is a volume control for the noise of a crowd, not a door.
+    let is_room = conversation.is_some_and(|c| c.room_id.is_some());
     // The monogram a direct chat's incoming bubbles carry: the peer's title, resolved the same
     // way the header resolves it so the two never disagree about who is who.
     let peer_seed = (!group)
@@ -574,7 +649,7 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
         .frame(egui::Frame::NONE)
         .show(ui, |ui| {
             typing_line(ui, context, state, conversation_id);
-            composer(ui, context, state, conversation_id);
+            composer(ui, context, state, conversation_id, is_room);
         });
 
     // The thread: the growing area, in everything the window has left.
@@ -602,6 +677,13 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
                 // none of them answer.
                 let mut drawn = 0usize;
                 for message in thread {
+                    // The personal mute, before anything else: a muted account's room chatter
+                    // is not drawn, the same rule the web client's muteFilter applies — and
+                    // only in a room, because a direct message is the one place a muted
+                    // person can still be heard.
+                    if is_room && state.muted.contains(&message.sender_id) {
+                        continue;
+                    }
                     // The live filter, before the day label: a separator whose every message
                     // was filtered away is a rule over nothing, and the day a survivor
                     // belongs to is still drawn by the survivor itself.
@@ -658,6 +740,7 @@ fn thread_pane(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, co
                         read,
                         &mut state.media,
                         &mut state.reactions,
+                        &mut state.edits,
                     );
                     ui.add_space(space::SM);
                 }
@@ -1292,6 +1375,12 @@ fn thread_header(
     let mut want_search_panel = false;
     // The roster's toggle, deferred for the same reason — the same patience, three times.
     let mut want_roster_panel = false;
+    // The peer verdicts, deferred for the same reason — the same patience, four times: a
+    // personal mute on the peer of a direct chat, or the block that ends it. Both act on
+    // someone outside the conversation row's own state, so they are only issued after the
+    // header's borrows close.
+    let mut peer_mute_toggle: Option<(Id, bool)> = None;
+    let mut peer_block: Option<Id> = None;
 
     ui.add_space(space::MD);
     ui.horizontal(|ui| {
@@ -1360,6 +1449,53 @@ fn thread_header(
                                 conversation_id,
                                 callee_id: *peer,
                             });
+                        }
+                        ui.add_space(space::XS);
+                    }
+                }
+            }
+            // The peer's own row of verdicts, on a direct chat only: the personal mute the
+            // web profile modal offers, and the block that ends the conversation. The mute
+            // needs the muted set to say which way its switch points; the block is set-only
+            // on the wire, so it states what it does and never offers an undo.
+            if !conversation.is_group() && conversation.room_id.is_none() {
+                if let Some(me) = context.account.map(|account| account.account_id) {
+                    if let Some(peer) = conversation.members.iter().find(|id| **id != me) {
+                        let muted = state.muted.contains(peer);
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(if muted { "Unmute" } else { "Mute for me" })
+                                        .font(egui::FontId::proportional(font::TINY))
+                                        .color(colors.text_muted),
+                                )
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::NONE),
+                            )
+                            .on_hover_text(
+                                "Hides this person's room messages for you. Direct messages are never muted.",
+                            )
+                            .clicked()
+                        {
+                            peer_mute_toggle = Some((*peer, !muted));
+                        }
+                        ui.add_space(space::XS);
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Block")
+                                        .font(egui::FontId::proportional(font::TINY))
+                                        .color(colors.text_muted),
+                                )
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::NONE),
+                            )
+                            .on_hover_text(
+                                "End the friendship and stop contact. There is no unblock.",
+                            )
+                            .clicked()
+                        {
+                            peer_block = Some(*peer);
                         }
                         ui.add_space(space::XS);
                     }
@@ -1437,6 +1573,12 @@ fn thread_header(
         let panel = state.log_panels.entry(conversation_id).or_default();
         panel.open = !panel.open;
     }
+    if let Some((peer, on)) = peer_mute_toggle {
+        context.issue(Command::MuteUser { user_id: peer, on });
+    }
+    if let Some(peer) = peer_block {
+        context.issue(Command::BlockUser { user_id: peer });
+    }
     if want_search_panel {
         let panel = state.searches.entry(conversation_id).or_default();
         panel.open = !panel.open;
@@ -1492,12 +1634,27 @@ fn message_row(
     read: bool,
     media: &mut MediaState,
     reactions: &mut HashMap<Id, Vec<(Id, String)>>,
+    edits: &mut HashMap<Id, EditDraft>,
 ) {
+    // The disappearing mark rides the meta line as a glyph, so the promise is visible on the
+    // row itself rather than learned only when the row vanishes — the web's ExpiryMark, the
+    // same clock the composer's arm shows, on every row the arm produced. The deadline it
+    // names is the receiving clock's, by the same design the web states: a client must not
+    // wait for the server to tell it a message is gone.
     let meta = format!(
-        "{} {}{}",
+        "{} {}{}{}{}",
         model::clock(message.sent_at),
         tick(message.delivery),
-        if read { " \u{2713}\u{2713}" } else { "" }
+        if read { " \u{2713}\u{2713}" } else { "" },
+        // The correction's mark, the same quiet word the web client's bubble carries. It
+        // rides the meta line rather than the bubble because it is a fact about the row,
+        // not part of what was said.
+        if message.edited { " · edited" } else { "" },
+        if message.expires_at.is_some() {
+            " \u{1F552}"
+        } else {
+            ""
+        }
     );
     if let Some(sender) = sender {
         let colors = palette(context.theme);
@@ -1522,6 +1679,22 @@ fn message_row(
             egui::vec2(ui.available_width() - space::LG, 0.0),
             Layout::top_down(Align::Min),
             |ui| {
+                // One of this account's own text messages, open in the inline editor: the
+                // bubble becomes the field and the row's actions wait below it, the same
+                // trade the web client's MessageEditor makes. A finished editor (saved,
+                // cancelled, or emptied) closes itself here, so the row is a bubble again
+                // on this same paint.
+                let mut edit_done = false;
+                if let Some(draft) = edits.get_mut(&message.message_id) {
+                    edit_done = edit_in_place(ui, context, message, draft);
+                    if !edit_done {
+                        reaction_chips(ui, context, message, reactions);
+                        return;
+                    }
+                }
+                if edit_done {
+                    edits.remove(&message.message_id);
+                }
                 match &message.body {
                     Body::Text(text) => {
                         widgets::bubble(ui, context.theme, text, &meta, message.outgoing, BubbleTone::Normal);
@@ -1559,6 +1732,20 @@ fn message_row(
                     // body that somehow arrives here is drawn as nothing rather than as a
                     // message that buries its own target.
                     Body::Reaction { .. } => {}
+                    // A withdrawn message keeps its row — the sequence numbering has no
+                    // hole — but says only the fact. The web client's tombstone text, the
+                    // same words on every surface so a transcript read on two devices
+                    // tells one story.
+                    Body::Tombstone => {
+                        widgets::bubble(
+                            ui,
+                            context.theme,
+                            "Message deleted",
+                            &meta,
+                            message.outgoing,
+                            BubbleTone::Problem,
+                        );
+                    }
                     Body::Unsupported { content_type } => {
                         widgets::bubble(
                             ui,
@@ -1571,8 +1758,126 @@ fn message_row(
                     }
                 }
                 reaction_chips(ui, context, message, reactions);
+                own_message_actions(ui, context, message, edits);
             },
         );
+    });
+}
+
+/// One open edit: the replacement text so far, and whether the field has had its focus
+/// claimed yet. A draft lives in the chat state keyed by message id, so it survives
+/// repaints the way a composer draft does; opening a second edit closes the first by
+/// simply not being that id anymore.
+#[derive(Debug, Default)]
+pub struct EditDraft {
+    pub text: String,
+    pub claim_focus: bool,
+}
+
+/// The inline editor for one of this account's own text messages: the bubble becomes a
+/// field, Enter commits, Escape closes, and an empty field closes rather than sending a
+/// blank replacement the server would only refuse. Returns `true` when the editor is
+/// finished — saved, cancelled, or emptied — and the row should go back to being a bubble.
+fn edit_in_place(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    message: &Message,
+    draft: &mut EditDraft,
+) -> bool {
+    let field = egui::TextEdit::multiline(&mut draft.text)
+        .hint_text("the corrected message")
+        .desired_width((ui.available_width() - space::LG * 2).max(120.0));
+    let response = ui.add(field);
+    if draft.claim_focus {
+        response.request_focus();
+        draft.claim_focus = false;
+    }
+    let submitted = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    let mut done = false;
+    ui.horizontal(|ui| {
+        ui.add_space(space::SM);
+        if widgets::primary_button(ui, context.theme, "Save", !draft.text.trim().is_empty())
+            .clicked()
+            || submitted
+        {
+            let text = draft.text.trim().to_owned();
+            if !text.is_empty() {
+                context.issue(Command::EditMessage {
+                    conversation_id: message.conversation_id,
+                    message_id: message.message_id,
+                    text,
+                });
+            }
+            done = true;
+        }
+        if ui.button("Cancel").clicked() || cancelled {
+            done = true;
+        }
+    });
+    // An emptied field is a closed editor too: there is nothing left to save, and a blank
+    // replacement is a message the server would only refuse.
+    done || draft.text.trim().is_empty()
+}
+
+/// The hover actions on this account's own messages: Edit on a text bubble, Delete on any.
+/// Drawn as quiet text buttons below the bubble, on the sender's own side, so the actions
+/// are reachable but never compete with the reading.
+fn own_message_actions(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    message: &Message,
+    edits: &mut HashMap<Id, EditDraft>,
+) {
+    if !message.outgoing || message.deleted || message.delivery == Delivery::Sending {
+        return;
+    }
+    let colors = palette(context.theme);
+    ui.horizontal(|ui| {
+        ui.add_space(space::SM);
+        // Edit is offered on the one body this client composes: a text message. An
+        // attachment cannot be re-typed, and the web client offers nothing there either.
+        if matches!(message.body, Body::Text(ref text) if !text.is_empty()) {
+            if ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("Edit")
+                            .font(egui::FontId::proportional(font::TINY))
+                            .color(colors.text_muted),
+                    )
+                    .fill(egui::Color32::TRANSPARENT)
+                    .stroke(egui::Stroke::NONE),
+                )
+                .on_hover_text("Fix this message for everyone")
+                .clicked()
+            {
+                let draft = edits.entry(message.message_id).or_default();
+                if draft.text.is_empty() {
+                    if let Body::Text(text) = &message.body {
+                        draft.text = text.clone();
+                    }
+                }
+                draft.claim_focus = true;
+            }
+        }
+        if ui
+            .add(
+                egui::Button::new(
+                    RichText::new("Delete")
+                        .font(egui::FontId::proportional(font::TINY))
+                        .color(colors.text_muted),
+                )
+                .fill(egui::Color32::TRANSPARENT)
+                .stroke(egui::Stroke::NONE),
+            )
+            .on_hover_text("Withdraw this message for everyone")
+            .clicked()
+        {
+            context.issue(Command::DeleteMessage {
+                conversation_id: message.conversation_id,
+                message_id: message.message_id,
+            });
+        }
     });
 }
 
@@ -1940,6 +2245,14 @@ fn typing_line(ui: &mut Ui, context: &Context<'_>, state: &ChatState, conversati
     });
 }
 
+/// The one disappearing lifetime the desktop offers, in milliseconds — the web's
+/// `DISAPPEARING_MS`, the same number, so a thread armed on either client makes the same
+/// promise.
+pub const DISAPPEARING_MS: u32 = 8 * 60 * 60 * 1_000;
+
+/// The lifetime's own words, for the toggle's hover — the web's `DISAPPEARING_LABEL`.
+const DISAPPEARING_LABEL: &str = "8 hours";
+
 /// The composer.
 ///
 /// Enter sends, Shift+Enter inserts a newline. That is the convention every chat client uses, and
@@ -1950,7 +2263,13 @@ fn typing_line(ui: &mut Ui, context: &Context<'_>, state: &ChatState, conversati
 /// the third. While a note is being recorded the composer is replaced by the recording bar,
 /// because a field that still accepts typing invites a message that arrives after — and
 /// interrupts — the note it would replace.
-fn composer(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conversation_id: Id) {
+fn composer(
+    ui: &mut Ui,
+    context: &mut Context<'_>,
+    state: &mut ChatState,
+    conversation_id: Id,
+    is_room: bool,
+) {
     let colors = palette(context.theme);
     let online = context.connection.is_online();
 
@@ -2035,6 +2354,12 @@ fn composer(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conve
                         .drafts
                         .get(&conversation_id)
                         .is_some_and(|draft| !draft.trim().is_empty());
+                // The lifetime an armed composer stamps on this send, read before the send's
+                // own borrows so the arm is one fact read once.
+                let expires_in_ms = state
+                    .disappearing
+                    .contains(&conversation_id)
+                    .then_some(DISAPPEARING_MS);
                 if (send_by_key || send_by_click) && can_send {
                     let text = state
                         .drafts
@@ -2048,6 +2373,7 @@ fn composer(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conve
                     context.issue(Command::SendText {
                         conversation_id,
                         text,
+                        expires_in_ms,
                     });
                     if state
                         .typing_sent
@@ -2089,6 +2415,39 @@ fn composer(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conve
                     state.typing_sent.insert(conversation_id, has_text);
                 }
 
+                // The disappearing arm: a clock the person can set on the thread's future.
+                // Excluded in rooms exactly the way the web excludes it — a room is
+                // server-readable, so a transcript the server keeps is not a promise a sender
+                // can make. The armed state colours the glyph so the promise is visible on the
+                // composer itself, not learned only when a row later vanishes.
+                if !is_room {
+                    let armed = state.disappearing.contains(&conversation_id);
+                    let clock =
+                        RichText::new("\u{1F552}").font(egui::FontId::proportional(font::BODY));
+                    let clock = if armed {
+                        clock.color(colors.accent)
+                    } else {
+                        clock.color(colors.text_muted)
+                    };
+                    if ui
+                        .add(egui::Button::new(clock))
+                        .on_hover_text(if armed {
+                            format!(
+                                "Disappearing on — new messages vanish after {DISAPPEARING_LABEL}"
+                            )
+                        } else {
+                            format!("New messages vanish after {DISAPPEARING_LABEL}")
+                        })
+                        .clicked()
+                    {
+                        if armed {
+                            state.disappearing.remove(&conversation_id);
+                        } else {
+                            state.disappearing.insert(conversation_id);
+                        }
+                    }
+                }
+
                 // The microphone and the paperclip: the two things a message can be besides
                 // text, one press away from the field that types the third.
                 if ui
@@ -2096,7 +2455,13 @@ fn composer(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conve
                     .on_hover_text("Record a voice note")
                     .clicked()
                 {
-                    context.issue(Command::StartRecording { conversation_id });
+                    context.issue(Command::StartRecording {
+                        conversation_id,
+                        expires_in_ms: state
+                            .disappearing
+                            .contains(&conversation_id)
+                            .then_some(DISAPPEARING_MS),
+                    });
                 }
                 if ui
                     .button(RichText::new("\u{1F4CE}").font(egui::FontId::proportional(font::BODY)))
@@ -2125,6 +2490,10 @@ fn composer(ui: &mut Ui, context: &mut Context<'_>, state: &mut ChatState, conve
                             context.issue(Command::SendAttachment {
                                 conversation_id,
                                 path: PathBuf::from(typed),
+                                expires_in_ms: state
+                                    .disappearing
+                                    .contains(&conversation_id)
+                                    .then_some(DISAPPEARING_MS),
                             });
                             panel.open = false;
                             panel.path.clear();
@@ -2213,6 +2582,9 @@ mod tests {
             body: Body::Text("a message to react to".to_owned()),
             sent_at: migo_core::Timestamp::from_unix_ms(1_000),
             delivery: Delivery::Received,
+            deleted: false,
+            edited: false,
+            expires_at: None,
         };
         let reaction = Message {
             message_id: Id::from_bytes([5; 16]),
@@ -2226,6 +2598,9 @@ mod tests {
             },
             sent_at: migo_core::Timestamp::from_unix_ms(2_000),
             delivery: Delivery::Received,
+            deleted: false,
+            edited: false,
+            expires_at: None,
         };
         (target_message, reaction)
     }
@@ -2288,6 +2663,9 @@ mod tests {
             body,
             sent_at: migo_core::Timestamp::from_unix_ms(1_000),
             delivery: Delivery::Received,
+            deleted: false,
+            edited: false,
+            expires_at: None,
         }
     }
 

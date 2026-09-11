@@ -190,7 +190,15 @@ pub enum Command {
     /// arrives after the conversation has started is a surface nobody looks at.
     PeerKeys { user_id: Id },
     /// Encrypt and send text.
-    SendText { conversation_id: Id, text: String },
+    ///
+    /// `expires_in_ms` is the disappearing lifetime the composer armed, when it did — the one
+    /// value, riding both the wire field (the server's sweeper reads it) and the sealed content
+    /// (a receiver's own countdown reads it). `None` is an ordinary, permanent message.
+    SendText {
+        conversation_id: Id,
+        text: String,
+        expires_in_ms: Option<u32>,
+    },
     /// Start a direct conversation with one username.
     StartDirect { username: String },
     /// Start a direct conversation with an account id already held — a search hit, a suggestion.
@@ -477,11 +485,22 @@ pub enum Command {
     /// file is I/O the UI thread must not own — and the whole three-step upload (ticket, PUT,
     /// commit) plus the message that references it is one command, because it is one action
     /// to the person who clicked Attach.
-    SendAttachment { conversation_id: Id, path: PathBuf },
+    SendAttachment {
+        conversation_id: Id,
+        path: PathBuf,
+        /// The disappearing lifetime, as on [`Command::SendText`] — an armed send carries its
+        /// promise whatever the body, because "this vanishes" is about the send, not the medium.
+        expires_in_ms: Option<u32>,
+    },
     /// Begin recording a voice note in a conversation. One recording runs at a time; a second
     /// ask while one runs is ignored (the UI trades its mic button for the recording bar, so
-    /// the ask should not be possible).
-    StartRecording { conversation_id: Id },
+    /// the ask should not be possible). The lifetime is the composer's disappearing arm, when
+    /// one is on — captured here because the arm may be switched off before the recording ends,
+    /// and the promise was made when the recording began.
+    StartRecording {
+        conversation_id: Id,
+        expires_in_ms: Option<u32>,
+    },
     /// End the recording in progress: send it, or throw it away.
     StopRecording { send: bool },
     /// React to one message with one emoji. Add-only, the same shape every Migo client
@@ -492,6 +511,25 @@ pub enum Command {
         target_message_id: Id,
         emoji: String,
     },
+    /// Withdraw one of this account's own messages for everyone. The server keeps the row as a
+    /// tombstone — the sequence numbering has no hole — and fans the tombstone out to every
+    /// participant, this device included (as an echo it recognises by id).
+    DeleteMessage { conversation_id: Id, message_id: Id },
+    /// Replace one of this account's own text messages. The caller passes the replacement
+    /// *text*; the worker re-seals it through the same chain that sealed the original, because
+    /// the envelope the wire wants is the caller's crypto, and the crypto lives in the worker.
+    EditMessage {
+        conversation_id: Id,
+        message_id: Id,
+        text: String,
+    },
+    /// Block an account. One-sided and silent: the server tears down any friendship in both
+    /// directions and tells the blocked party nothing. There is no unblock opcode — the wire
+    /// is set-only — so the control that issues this reads "Block" and then "Blocked".
+    BlockUser { user_id: Id },
+    /// Mute or unmute an account for the caller alone. A volume control, not a verdict: no
+    /// teardown, no notification, and a muted account's room messages are simply not drawn.
+    MuteUser { user_id: Id, on: bool },
     /// Fetch one attachment for the thread. Deduplicated by the worker: a bubble that asks
     /// twice still costs one fetch.
     FetchMedia { media_id: Id },
@@ -1239,6 +1277,10 @@ struct Recording {
     samples: Arc<Mutex<Vec<i16>>>,
     /// The pump's stop flag, so an end is an end even mid-chunk.
     stop: Arc<AtomicBool>,
+    /// The disappearing lifetime the composer was armed with when the recording began, so the
+    /// finished note keeps the promise that was standing when its recording started — an arm
+    /// switched off mid-note does not retroactively un-promise a send that had one.
+    expires_in_ms: Option<u32>,
     /// The five-minute cap, as an instant the select loop can sleep to — a recording that
     /// reaches it is ended and sent, not cut, because five minutes of someone's voice must
     /// not be lost to a timer nobody watched.
@@ -1701,8 +1743,9 @@ impl Worker {
             Command::SendText {
                 conversation_id,
                 text,
+                expires_in_ms,
             } => {
-                self.send_text(conversation_id, text).await;
+                self.send_text(conversation_id, text, expires_in_ms).await;
             }
             Command::StartDirect { username } => self.start_direct(username).await,
             Command::StartDirectById { peer } => self.start_direct_by_id(peer).await,
@@ -1874,11 +1917,16 @@ impl Worker {
             Command::SendAttachment {
                 conversation_id,
                 path,
+                expires_in_ms,
             } => {
-                self.send_attachment(conversation_id, path).await;
+                self.send_attachment(conversation_id, path, expires_in_ms)
+                    .await;
             }
-            Command::StartRecording { conversation_id } => {
-                self.start_recording(conversation_id);
+            Command::StartRecording {
+                conversation_id,
+                expires_in_ms,
+            } => {
+                self.start_recording(conversation_id, expires_in_ms);
             }
             Command::StopRecording { send } => self.stop_recording(send).await,
             Command::SendReaction {
@@ -1889,6 +1937,21 @@ impl Worker {
                 self.send_reaction(conversation_id, target_message_id, emoji)
                     .await;
             }
+            Command::DeleteMessage {
+                conversation_id,
+                message_id,
+            } => {
+                self.delete_message(conversation_id, message_id).await;
+            }
+            Command::EditMessage {
+                conversation_id,
+                message_id,
+                text,
+            } => {
+                self.edit_message(conversation_id, message_id, text).await;
+            }
+            Command::BlockUser { user_id } => self.block_user(user_id).await,
+            Command::MuteUser { user_id, on } => self.mute_user(user_id, on).await,
             Command::FetchMedia { media_id } => {
                 self.want_media(media_id, MediaIntent::Show).await;
             }
@@ -3046,7 +3109,12 @@ impl Worker {
     /// decodes is sent as an image (with its real dimensions, so receivers can lay out
     /// before downloading), anything else is a document. The size caps are checked before
     /// any bytes cross the wire, because a cap the server enforces is cheaper refused here.
-    async fn send_attachment(&mut self, conversation_id: Id, path: PathBuf) {
+    async fn send_attachment(
+        &mut self,
+        conversation_id: Id,
+        path: PathBuf,
+        expires_in_ms: Option<u32>,
+    ) {
         let bytes = match tokio::fs::read(&path).await {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -3093,6 +3161,7 @@ impl Worker {
                     height: Some(height),
                     duration_ms: None,
                     caption: None,
+                    expires_in_ms,
                 };
                 (plan, bytes)
             }
@@ -3114,6 +3183,7 @@ impl Worker {
                     height: None,
                     duration_ms: None,
                     caption: None,
+                    expires_in_ms,
                 };
                 (plan, bytes)
             }
@@ -3301,6 +3371,12 @@ impl Worker {
             body: pending.plan.body(pending.media_id),
             sent_at: Timestamp::now(),
             delivery: Delivery::Sending,
+            deleted: false,
+            edited: false,
+            expires_at: pending
+                .plan
+                .expires_in_ms
+                .map(|lifetime| Timestamp::now().saturating_add_millis(i64::from(lifetime))),
         }));
         let plaintext = match content::encode(&pending.plan.content(pending.media_id), true) {
             Ok(bytes) => bytes,
@@ -3332,7 +3408,10 @@ impl Worker {
             kind,
             envelope,
             reply_to: None,
-            expires_in_ms: None,
+            // The wire copy of the sealed lifetime, so the server's own sweeper agrees with
+            // every receiver's countdown. `plan.content` sealed the same value inside the
+            // envelope one call above.
+            expires_in_ms: pending.plan.expires_in_ms,
             sender_key_id: Some(chain_id),
         };
         self.request(Opcode::MessageSend, &message).await;
@@ -3375,9 +3454,76 @@ impl Worker {
         self.request(Opcode::ReactionSet, &reaction).await;
     }
 
+    /// Withdraws one of this account's own messages for everyone. The wire is delete-for-
+    /// everyone or nothing — the server refuses `for_everyone: false` outright, because it
+    /// keeps no per-member hide table — so the flag is sent `true` and never anything else.
+    ///
+    /// The tombstone comes back as an ordinary message event (a `MessageEvent` with `deleted`
+    /// set and the envelope cleared), which the chat layer already knows how to fold; this
+    /// send needs no echo of its own, the same posture the reaction send takes.
+    async fn delete_message(&mut self, conversation_id: Id, message_id: Id) {
+        let message = migo_protocol::MessageDelete {
+            message_id,
+            conversation_id,
+            for_everyone: true,
+        };
+        self.request(Opcode::MessageDelete, &message).await;
+    }
+
+    /// Replaces one of this account's own text messages. The replacement is sealed through
+    /// the same conversation chain that sealed the original — an edit is a send that happens
+    /// to land on an old sequence — so the audience and the distributions are the same
+    /// `envelope_for` machinery every send path uses.
+    ///
+    /// On acceptance the server fans the edited message out as a `MessageEvent` with an
+    /// `edited_at` stamp, and this device's own echo is suppressed by the decrypt layer's
+    /// `mine` rule. The local row moves when that event arrives, not before: the sender's
+    /// screen says "edited" when the server says so, the same moment everyone else's does.
+    async fn edit_message(&mut self, conversation_id: Id, message_id: Id, text: String) {
+        // The replacement carries no lifetime of its own, exactly like the web's
+        // `sealTextEdit`: an edit is a correction of what was said, not a new send, so the
+        // row keeps the deadline the original sealed. A receiver that re-reads the edit's
+        // content finds no `expiresInMs` and falls back to the row it already holds, whose
+        // deadline the fold never withdraws.
+        let plaintext = match content::encode(&Content::text(text), true) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                self.sink
+                    .toast("The edit could not be sealed", ToastKind::Error);
+                return;
+            }
+        };
+        let Some((envelope, _chain_id)) = self.envelope_for(conversation_id, &plaintext).await
+        else {
+            return;
+        };
+        let edit = migo_protocol::MessageEdit {
+            message_id,
+            conversation_id,
+            envelope,
+        };
+        self.request(Opcode::MessageEdit, &edit).await;
+    }
+
+    /// Blocks an account. The server tears down the friendship and every pending edge in
+    /// both directions, tells the blocked party nothing, and the graph re-read that follows
+    /// the acknowledgement is what moves the friends pane — the block itself answers with
+    /// nothing to show.
+    async fn block_user(&mut self, user_id: Id) {
+        let message = FriendTarget { user_id };
+        self.request(Opcode::BlockSet, &message).await;
+    }
+
+    /// Sets or clears the caller's personal mute on an account. The wire carries the switch;
+    /// the graph re-read after the acknowledgement is what carries it back.
+    async fn mute_user(&mut self, user_id: Id, on: bool) {
+        let message = migo_protocol::MuteSet { user_id, on };
+        self.request(Opcode::MuteSet, &message).await;
+    }
+
     /// Begins a voice-note recording: opens the microphone and hands its chunks to a pump
     /// that appends them at the note's own rate.
-    fn start_recording(&mut self, conversation_id: Id) {
+    fn start_recording(&mut self, conversation_id: Id, expires_in_ms: Option<u32>) {
         if self.recording.is_some() {
             return;
         }
@@ -3404,6 +3550,7 @@ impl Worker {
             microphone,
             samples,
             stop,
+            expires_in_ms,
             deadline: std::time::Instant::now() + Duration::from_millis(media::VOICE_NOTE_MAX_MS),
         });
         self.sink.send(Event::RecordingStarted { conversation_id });
@@ -3415,6 +3562,7 @@ impl Worker {
             return;
         };
         let conversation_id = recording.conversation_id;
+        let recording_expires_in_ms = recording.expires_in_ms;
         recording.stop.store(true, Ordering::Relaxed);
         let samples = recording
             .samples
@@ -3463,6 +3611,9 @@ impl Worker {
             height: None,
             duration_ms: Some(duration_ms),
             caption: None,
+            // The lifetime the composer was armed with when recording began — a disappearing
+            // arm covers the voice note too, the same rule every body follows.
+            expires_in_ms: recording_expires_in_ms,
         };
         self.begin_attachment(conversation_id, plan, wav).await;
     }
@@ -5069,7 +5220,7 @@ impl Worker {
     /// lacks it, one pairwise-sealed `ControlEvent` per device, so the server never holds a chain
     /// key. The audience is every member's devices plus this account's own other devices (a
     /// message must reach the account's phone as surely as the peer's), minus this device.
-    async fn send_text(&mut self, conversation_id: Id, text: String) {
+    async fn send_text(&mut self, conversation_id: Id, text: String, expires_in_ms: Option<u32>) {
         let Some(signed) = self.signed.as_mut() else {
             return;
         };
@@ -5088,9 +5239,24 @@ impl Worker {
             body: Body::Text(text.clone()),
             sent_at: Timestamp::now(),
             delivery: Delivery::Sending,
+            deleted: false,
+            edited: false,
+            // The deadline the arm promised, from this send's own moment. The server's clock
+            // recomputes it at accept time; the difference is the same skew every other
+            // receiver's countdown tolerates.
+            expires_at: expires_in_ms
+                .map(|lifetime| Timestamp::now().saturating_add_millis(i64::from(lifetime))),
         }));
 
-        let plaintext = match content::encode(&Content::text(text), true) {
+        // The lifetime is sealed inside the content as well as carried on the wire: the wire
+        // copy reaches only the server (which never echoes it), while this copy is what each
+        // receiver's own countdown reads. One sender decision, two rides.
+        let content = Content::Text {
+            text,
+            mentions: Vec::new(),
+            expires_in_ms,
+        };
+        let plaintext = match content::encode(&content, true) {
             Ok(bytes) => bytes,
             Err(_) => return self.sink.send(Event::SendFailed { message_id }),
         };
@@ -5104,7 +5270,7 @@ impl Worker {
             kind: MessageKind::Text,
             envelope,
             reply_to: None,
-            expires_in_ms: None,
+            expires_in_ms,
             sender_key_id: Some(chain_id),
         };
         self.request(Opcode::MessageSend, &message).await;
@@ -5996,6 +6162,12 @@ impl Worker {
             Opcode::Ping => self.on_ping(&frame).await,
             Opcode::MessageEvent => self.on_message(&frame),
             Opcode::MessageSend => self.on_accepted(&frame),
+            // A delete's answer carries the tombstone's sequence — the same `MessageAccepted`
+            // shape a send answers with — and an edit's answer is a bare acknowledgement. Both
+            // leave the transcript move to the fan-out every participant hears, which this
+            // device's own copy arrives as; the acks themselves carry nothing left to show.
+            Opcode::MessageDelete => self.on_accepted(&frame),
+            Opcode::MessageEdit => {}
             // Someone's delivery or read watermark moved. The event reaches the conversation's
             // subscribers only — one more reason the SUBSCRIBE-on-list-read path above matters.
             Opcode::MessageReceipt => self.on_receipt(&frame),
@@ -6055,6 +6227,10 @@ impl Worker {
             // The acknowledgement of a FRIEND_REQUEST or FRIEND_RESPOND. Both mean the graph
             // moved and the list in the UI is now stale, so both take the same action: re-read.
             Opcode::FriendRequest | Opcode::FriendRespond => self.on_social_ack(&frame).await,
+            // A BLOCK_SET or MUTE_SET acknowledgement: the graph moved the same way a friend
+            // request moves it, so the same re-read answers both — the muted-set view the UI
+            // renders is a filtered read of the very list this refreshes.
+            Opcode::BlockSet | Opcode::MuteSet => self.on_social_ack(&frame).await,
             Opcode::FriendEvent => self.on_friend_event(&frame),
             Opcode::PresenceEvent => self.on_presence(&frame),
             Opcode::RoomList => self.on_rooms(&frame),
@@ -6614,6 +6790,25 @@ impl Worker {
     /// disappearing: a silently dropped message is indistinguishable from one that was never
     /// sent, and the gap in the sequence numbers would go unexplained.
     fn decrypt(&mut self, event: &migo_protocol::MessageEvent) -> Option<Message> {
+        // A tombstone never needs opening: the server clears the envelope when it writes one,
+        // and the row's whole meaning is carried by the `deleted` flag. Filed as a body-less
+        // message so the chat layer's fold — which matches on id — converts the row it
+        // already holds rather than adding a second one.
+        if event.deleted.unwrap_or(false) {
+            return Some(Message {
+                message_id: event.message_id,
+                conversation_id: event.conversation_id,
+                seq: event.seq,
+                sender_id: event.sender_id,
+                outgoing: event.sender_id == self.signed.as_ref()?.account.account_id,
+                body: Body::Tombstone,
+                sent_at: event.created_at,
+                delivery: Delivery::Received,
+                deleted: true,
+                edited: false,
+                expires_at: None,
+            });
+        }
         let (outgoing, mine) = {
             let signed = self.signed.as_ref()?;
             (
@@ -6622,11 +6817,33 @@ impl Worker {
             )
         };
 
-        let body = if mine {
+        // The deadline a receiver's own sweep reads, computed from the sealed lifetime the
+        // body's projection carries. The mine-branch of a non-edit echo leaves it `None` on
+        // purpose: that echo is suppressed below, so its row keeps the deadline the optimistic
+        // insert already stamped — and an edit's echo re-opens the content, whose sealed
+        // lifetime is the original's, so the edit keeps the promise the send made.
+        let (body, expires_in_ms) = if mine {
             // Our own message, echoed back. The chain that sealed it is this device's, and its
             // keys advance on seal, so there is nothing to open — the UI already has this text
-            // from the optimistic insert.
-            Body::Text(String::new())
+            // from the optimistic insert. An edit's echo is the exception: the replacement was
+            // sealed *after* the original, so the ratchet position the sender-key chain holds
+            // now is the edit's, and this is the one place this device can read its own edit
+            // back. The body it carries is the replacement text, which the fold below applies
+            // to the row the optimistic insert left.
+            if event.edited_at.is_some() {
+                let signed = self.signed.as_mut()?;
+                let opened = signed
+                    .groups
+                    .open(event.conversation_id, event.sender_device, &event.envelope)
+                    .ok()
+                    .and_then(|plaintext| content::decode(&plaintext).ok());
+                match opened {
+                    Some(content) => body_of(content),
+                    None => (Body::Text(String::new()), None),
+                }
+            } else {
+                (Body::Text(String::new()), None)
+            }
         } else {
             let held = {
                 let signed = self.signed.as_mut()?;
@@ -6683,10 +6900,18 @@ impl Worker {
             }
         };
 
-        if mine {
+        if mine && event.edited_at.is_none() {
             // Suppress the echo entirely: ACCEPTED already moved the message from sending to sent.
             return None;
         }
+
+        // The deadline runs from the server's `created_at` on the receiving clock — the same
+        // arithmetic the web client's `messageExpired` makes (`createdAt + lifetime`), and the
+        // same design decision: a client must not wait for the server to tell it a message
+        // is gone. Clock skew between sender and receiver shifts the moment slightly, never
+        // the promise.
+        let expires_at = expires_in_ms
+            .map(|lifetime| event.created_at.saturating_add_millis(i64::from(lifetime)));
 
         Some(Message {
             message_id: event.message_id,
@@ -6697,6 +6922,9 @@ impl Worker {
             body,
             sent_at: event.created_at,
             delivery: Delivery::Received,
+            deleted: false,
+            edited: event.edited_at.is_some(),
+            expires_at,
         })
     }
 
@@ -6862,10 +7090,20 @@ fn peer_fingerprint_changed(
     }
 }
 
-/// Projects decrypted [`Content`] onto the UI's [`Body`].
-fn body_of(content: Content) -> Body {
+/// Projects decrypted [`Content`] onto the UI's [`Body`] — and the sealed disappearing
+/// lifetime, when one is present, onto the deadline the UI's own sweep reads.
+///
+/// The lifetime travels inside the ciphertext (`MessageSend.expires_in_ms` reaches only the
+/// server, which never echoes it), so this projection is the only place a receiver's deadline
+/// can come from. The deadline runs on the receiving clock by the same design the web client
+/// states: a client must not wait for the server to tell it a message is gone.
+fn body_of(content: Content) -> (Body, Option<u32>) {
     match content {
-        Content::Text { text, .. } => Body::Text(text),
+        Content::Text {
+            text,
+            expires_in_ms,
+            ..
+        } => (Body::Text(text), expires_in_ms),
         Content::MediaRef {
             media_id,
             mime_type,
@@ -6873,33 +7111,44 @@ fn body_of(content: Content) -> Body {
             width,
             height,
             caption,
+            expires_in_ms,
             ..
-        } => Body::Media {
-            media_id,
-            mime_type,
-            size_bytes,
-            width,
-            height,
-            caption,
-        },
+        } => (
+            Body::Media {
+                media_id,
+                mime_type,
+                size_bytes,
+                width,
+                height,
+                caption,
+            },
+            expires_in_ms,
+        ),
         Content::VoiceNoteRef {
             media_id,
             duration_ms,
+            expires_in_ms,
             ..
-        } => Body::VoiceNote {
-            media_id,
-            duration_ms,
-        },
+        } => (
+            Body::VoiceNote {
+                media_id,
+                duration_ms,
+            },
+            expires_in_ms,
+        ),
         Content::Reaction {
             emoji,
             target_message_id,
             ..
-        } => Body::Reaction {
-            emoji,
-            target: target_message_id,
-        },
-        Content::ControlEvent { .. } => Body::Unsupported { content_type: 5 },
-        Content::Unsupported { content_type } => Body::Unsupported { content_type },
+        } => (
+            Body::Reaction {
+                emoji,
+                target: target_message_id,
+            },
+            None,
+        ),
+        Content::ControlEvent { .. } => (Body::Unsupported { content_type: 5 }, None),
+        Content::Unsupported { content_type } => (Body::Unsupported { content_type }, None),
     }
 }
 

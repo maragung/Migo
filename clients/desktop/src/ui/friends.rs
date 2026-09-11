@@ -83,7 +83,13 @@ pub struct Sections {
     pub friends: Vec<Relationship>,
     pub incoming: Vec<Relationship>,
     pub outgoing: Vec<Relationship>,
-    /// Edges this pane renders but offers no action for: follows, favourites, blocks, and kinds
+    /// Accounts this caller has blocked. Rendered with no action: the wire is set-only —
+    /// there is no unblock opcode — so a block is the one row the pane is honest about
+    /// being unable to undo from here.
+    pub blocked: Vec<Relationship>,
+    /// Accounts this caller has muted, each with its Unmute.
+    pub muted: Vec<Relationship>,
+    /// Edges this pane renders but offers no action for: follows, favourites, and kinds
     /// a newer server knows about that this build files under [`RelationshipKind::Unknown`].
     pub others: Vec<Relationship>,
 }
@@ -111,10 +117,11 @@ pub fn sections(entries: &[Relationship], query: &str, names: &HashMap<Id, Strin
             RelationshipKind::Friend => out.friends.push(entry.clone()),
             RelationshipKind::PendingIncoming => out.incoming.push(entry.clone()),
             RelationshipKind::PendingOutgoing => out.outgoing.push(entry.clone()),
-            RelationshipKind::Unknown
-            | RelationshipKind::Follow
-            | RelationshipKind::Block
-            | RelationshipKind::Favorite => out.others.push(entry.clone()),
+            RelationshipKind::Block => out.blocked.push(entry.clone()),
+            RelationshipKind::Mute => out.muted.push(entry.clone()),
+            RelationshipKind::Unknown | RelationshipKind::Follow | RelationshipKind::Favorite => {
+                out.others.push(entry.clone())
+            }
         }
     }
     out
@@ -207,6 +214,20 @@ pub fn show(
                         "Friends",
                         &resolved.friends,
                         online_meta.as_deref(),
+                        false,
+                    );
+                    // The two personal verdicts, after the people: a mute is a volume
+                    // control with its own switch back, a block a door the wire will not
+                    // reopen from here. Both sections state what they are; neither draws
+                    // an action it cannot deliver.
+                    section(ui, context, state, "Muted", &resolved.muted, None, false);
+                    section(
+                        ui,
+                        context,
+                        state,
+                        "Blocked",
+                        &resolved.blocked,
+                        None,
                         false,
                     );
                     section(ui, context, state, "Others", &resolved.others, None, false);
@@ -489,6 +510,7 @@ fn section(
 
     let mut actions: Vec<(Id, bool)> = Vec::new();
     let mut message: Option<Id> = None;
+    let mut unmutes: Vec<Id> = Vec::new();
     for entry in entries {
         row(
             ui,
@@ -498,6 +520,7 @@ fn section(
             with_actions,
             &mut actions,
             &mut message,
+            &mut unmutes,
         );
         ui.add_space(space::XS);
     }
@@ -509,10 +532,16 @@ fn section(
     if let Some(peer) = message {
         context.issue(Command::StartDirectById { peer });
     }
+    // An Unmute click clears the personal mute: the wire's own word for it is the same
+    // opcode with the switch off.
+    for user_id in unmutes {
+        context.issue(Command::MuteUser { user_id, on: false });
+    }
     ui.add_space(space::SM);
 }
 
 /// One account row: avatar, name, presence dot, and the action buttons when there are any.
+#[allow(clippy::too_many_arguments)]
 fn row(
     ui: &mut Ui,
     context: &mut Context<'_>,
@@ -521,6 +550,7 @@ fn row(
     with_actions: bool,
     actions: &mut Vec<(Id, bool)>,
     message: &mut Option<Id>,
+    unmutes: &mut Vec<Id>,
 ) {
     let colors = palette(context.theme);
     let name = state
@@ -556,8 +586,19 @@ fn row(
                 if widgets::ghost_button(ui, context.theme, "Message").clicked() {
                     *message = Some(entry.user_id);
                 }
+            } else if entry.kind == RelationshipKind::Mute {
+                // A volume control, so the row carries its own switch back: Unmute is the
+                // same opcode with the flag off, and no confirmation is owed — the choice
+                // never told the other person anything in the first place.
+                if widgets::ghost_button(ui, context.theme, "Unmute").clicked() {
+                    unmutes.push(entry.user_id);
+                }
             } else if entry.kind == RelationshipKind::PendingOutgoing {
                 widgets::pill(ui, "waiting", colors.text_muted, colors.surface_raised);
+            } else if entry.kind == RelationshipKind::Block {
+                // Set-only on the wire: no unblock opcode exists, so the pill states the
+                // fact rather than offering a switch this client cannot deliver.
+                widgets::pill(ui, "blocked", colors.text_muted, colors.surface_raised);
             }
         });
     });
@@ -644,15 +685,27 @@ mod tests {
                 user_id: id(6),
                 kind: RelationshipKind::Unknown,
             },
+            Relationship {
+                user_id: id(7),
+                kind: RelationshipKind::Mute,
+            },
         ];
         let split = sections(&entries, "", &HashMap::new());
         assert_eq!(split.friends.len(), 1);
         assert_eq!(split.incoming.len(), 1);
         assert_eq!(split.outgoing.len(), 1);
-        assert_eq!(split.others.len(), 3);
+        // A block files under its own section, and a mute under its.
+        assert_eq!(split.blocked.len(), 1);
+        assert_eq!(split.muted.len(), 1);
+        assert_eq!(split.others.len(), 2);
         // Every entry lands somewhere, so nothing is silently dropped.
         assert_eq!(
-            split.friends.len() + split.incoming.len() + split.outgoing.len() + split.others.len(),
+            split.friends.len()
+                + split.incoming.len()
+                + split.outgoing.len()
+                + split.blocked.len()
+                + split.muted.len()
+                + split.others.len(),
             entries.len()
         );
     }

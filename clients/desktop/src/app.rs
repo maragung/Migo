@@ -389,7 +389,15 @@ impl App {
                     self.friends.merge_names(names);
                 }
                 Event::Relationships(entries) => {
-                    self.friends.set_relationships(entries);
+                    self.friends.set_relationships(entries.clone());
+                    // The muted set rides the same graph: a chat window filtering rooms
+                    // against it is a view of this very list, so both holders are fed from
+                    // the one read the worker made.
+                    self.chat.muted = entries
+                        .iter()
+                        .filter(|entry| entry.kind == crate::model::RelationshipKind::Mute)
+                        .map(|entry| entry.user_id)
+                        .collect();
                 }
                 Event::FriendChanged { user_id, accepted } => {
                     // The event says the graph moved, not how, so the response is a re-read rather

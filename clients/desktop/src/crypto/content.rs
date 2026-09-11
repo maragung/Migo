@@ -58,7 +58,17 @@ impl ContentType {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Content {
     /// Written text, with the users referenced inline for client-side highlighting.
-    Text { text: String, mentions: Vec<Id> },
+    Text {
+        text: String,
+        mentions: Vec<Id>,
+        /// A disappearing-message lifetime in milliseconds, sealed beside the text it bounds
+        /// so every receiver learns the deadline the sender chose. The wire's
+        /// `MessageSend.expires_in_ms` reaches only the server (which never echoes it);
+        /// this copy is what a receiver's own countdown reads. Absent on old clients'
+        /// messages, and skipped by old clients' decoders — the optional-field rule makes
+        /// a newer field invisible, not fatal.
+        expires_in_ms: Option<u32>,
+    },
     /// A pointer to an encrypted blob in object storage. The server holds the ciphertext and cannot
     /// read it: `key` and `nonce` travel only here, inside this message's own ciphertext.
     MediaRef {
@@ -71,6 +81,9 @@ pub enum Content {
         height: Option<u32>,
         blurhash: Option<String>,
         caption: Option<String>,
+        /// A disappearing-message lifetime, sealed for the receivers' own countdown. See
+        /// [`Content::Text`]'s field of the same name.
+        expires_in_ms: Option<u32>,
     },
     /// A pointer to an encrypted voice note. `waveform` is a coarse amplitude preview for the UI.
     VoiceNoteRef {
@@ -81,6 +94,9 @@ pub enum Content {
         key: Vec<u8>,
         nonce: Vec<u8>,
         waveform: Option<Vec<u8>>,
+        /// A disappearing-message lifetime, sealed for the receivers' own countdown. See
+        /// [`Content::Text`]'s field of the same name.
+        expires_in_ms: Option<u32>,
     },
     /// An emoji reaction. `remove` retracts one the sender placed earlier.
     Reaction {
@@ -99,11 +115,12 @@ pub enum Content {
 }
 
 impl Content {
-    /// Plain text with no mentions — what the composer produces.
+    /// Plain text with no mentions and no lifetime — what the composer produces.
     pub fn text(text: impl Into<String>) -> Self {
         Self::Text {
             text: text.into(),
             mentions: Vec::new(),
+            expires_in_ms: None,
         }
     }
 
@@ -176,10 +193,14 @@ pub fn decode(plaintext: &[u8]) -> WireResult<Content> {
 /// Writes the MSE body for a content struct.
 fn encode_body(w: &mut Writer, content: &Content) -> WireResult<()> {
     match content {
-        Content::Text { text, mentions } => {
+        Content::Text {
+            text,
+            mentions,
+            expires_in_ms,
+        } => {
             w.enter()?;
             w.write_str(text)?;
-            w.write_u32(u32::from(!mentions.is_empty()));
+            w.write_u32(u32::from(!mentions.is_empty()) + u32::from(expires_in_ms.is_some()));
             if !mentions.is_empty() {
                 w.optional(1, |sub| {
                     sub.list_len(mentions.len())?;
@@ -188,6 +209,13 @@ fn encode_body(w: &mut Writer, content: &Content) -> WireResult<()> {
                     }
                     Ok(())
                 })?;
+            }
+            // Field 2: the disappearing lifetime, sealed beside the text it bounds. The wire's
+            // `MessageSend.expires_in_ms` reaches only the server; this copy is what a
+            // receiver's own countdown reads. An older decoder skips it unknown — the
+            // optional-field rule makes a newer field invisible, not fatal.
+            if let Some(v) = expires_in_ms {
+                w.optional(2, |sub| sub.write_u32(v))?;
             }
             w.leave();
         }
@@ -201,6 +229,7 @@ fn encode_body(w: &mut Writer, content: &Content) -> WireResult<()> {
             height,
             blurhash,
             caption,
+            expires_in_ms,
         } => {
             w.enter()?;
             w.write_id(media_id);
@@ -211,7 +240,8 @@ fn encode_body(w: &mut Writer, content: &Content) -> WireResult<()> {
             let present = usize::from(width.is_some())
                 + usize::from(height.is_some())
                 + usize::from(blurhash.is_some())
-                + usize::from(caption.is_some());
+                + usize::from(caption.is_some())
+                + usize::from(expires_in_ms.is_some());
             w.write_u32(present as u32);
             if let Some(v) = width {
                 w.optional(1, |sub| {
@@ -231,6 +261,11 @@ fn encode_body(w: &mut Writer, content: &Content) -> WireResult<()> {
             if let Some(v) = caption {
                 w.optional(4, |sub| sub.write_str(v))?;
             }
+            // Field 5: the same disappearing lifetime the text body carries at field 2, after
+            // the media's own four fields — the id the web and Android clients seal it under.
+            if let Some(v) = expires_in_ms {
+                w.optional(5, |sub| sub.write_u32(v))?;
+            }
             w.leave();
         }
         Content::VoiceNoteRef {
@@ -241,6 +276,7 @@ fn encode_body(w: &mut Writer, content: &Content) -> WireResult<()> {
             key,
             nonce,
             waveform,
+            expires_in_ms,
         } => {
             w.enter()?;
             w.write_id(media_id);
@@ -249,9 +285,13 @@ fn encode_body(w: &mut Writer, content: &Content) -> WireResult<()> {
             w.write_u32(*duration_ms);
             w.write_bytes(key)?;
             w.write_bytes(nonce)?;
-            w.write_u32(u32::from(waveform.is_some()));
+            w.write_u32(u32::from(waveform.is_some()) + u32::from(expires_in_ms.is_some()));
             if let Some(v) = waveform {
                 w.optional(1, |sub| sub.write_bytes(v))?;
+            }
+            // Field 2: the disappearing lifetime, after the waveform — same id as the text body.
+            if let Some(v) = expires_in_ms {
+                w.optional(2, |sub| sub.write_u32(v))?;
             }
             w.leave();
         }
@@ -296,18 +336,27 @@ fn decode_body(content_type: ContentType, r: &mut Reader) -> WireResult<Content>
             r.enter()?;
             let text = r.read_string()?;
             let mut mentions = Vec::new();
+            let mut expires_in_ms = None;
             for _ in 0..r.read_u32()? {
                 let (field_id, mut sub) = r.read_optional()?;
-                if field_id == 1 {
-                    let count = sub.read_list_len()?;
-                    mentions.reserve(count);
-                    for _ in 0..count {
-                        mentions.push(sub.read_id()?);
+                match field_id {
+                    1 => {
+                        let count = sub.read_list_len()?;
+                        mentions.reserve(count);
+                        for _ in 0..count {
+                            mentions.push(sub.read_id()?);
+                        }
                     }
+                    2 => expires_in_ms = Some(sub.read_u32()?),
+                    _ => {}
                 }
             }
             r.leave();
-            Ok(Content::Text { text, mentions })
+            Ok(Content::Text {
+                text,
+                mentions,
+                expires_in_ms,
+            })
         }
         ContentType::MediaRef => {
             r.enter()?;
@@ -320,6 +369,7 @@ fn decode_body(content_type: ContentType, r: &mut Reader) -> WireResult<Content>
             let mut height = None;
             let mut blurhash = None;
             let mut caption = None;
+            let mut expires_in_ms = None;
             for _ in 0..r.read_u32()? {
                 let (field_id, mut sub) = r.read_optional()?;
                 match field_id {
@@ -327,6 +377,7 @@ fn decode_body(content_type: ContentType, r: &mut Reader) -> WireResult<Content>
                     2 => height = Some(sub.read_u32()?),
                     3 => blurhash = Some(sub.read_string()?),
                     4 => caption = Some(sub.read_string()?),
+                    5 => expires_in_ms = Some(sub.read_u32()?),
                     _ => {}
                 }
             }
@@ -341,6 +392,7 @@ fn decode_body(content_type: ContentType, r: &mut Reader) -> WireResult<Content>
                 height,
                 blurhash,
                 caption,
+                expires_in_ms,
             })
         }
         ContentType::VoiceNoteRef => {
@@ -352,10 +404,13 @@ fn decode_body(content_type: ContentType, r: &mut Reader) -> WireResult<Content>
             let key = r.read_bytes()?;
             let nonce = r.read_bytes()?;
             let mut waveform = None;
+            let mut expires_in_ms = None;
             for _ in 0..r.read_u32()? {
                 let (field_id, mut sub) = r.read_optional()?;
-                if field_id == 1 {
-                    waveform = Some(sub.read_bytes()?);
+                match field_id {
+                    1 => waveform = Some(sub.read_bytes()?),
+                    2 => expires_in_ms = Some(sub.read_u32()?),
+                    _ => {}
                 }
             }
             r.leave();
@@ -367,6 +422,7 @@ fn decode_body(content_type: ContentType, r: &mut Reader) -> WireResult<Content>
                 key,
                 nonce,
                 waveform,
+                expires_in_ms,
             })
         }
         ContentType::Reaction => {

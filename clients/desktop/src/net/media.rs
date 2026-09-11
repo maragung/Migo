@@ -169,6 +169,10 @@ pub(crate) struct OutgoingMedia {
     pub duration_ms: Option<u64>,
     /// A sender-typed caption, for an image.
     pub caption: Option<String>,
+    /// The disappearing lifetime the send was armed with, sealed into the content beside the
+    /// object it references — the same ride a text message's lifetime takes, because the
+    /// promise "this vanishes" is about the send, not the medium.
+    pub expires_in_ms: Option<u32>,
 }
 
 impl OutgoingMedia {
@@ -193,6 +197,7 @@ impl OutgoingMedia {
                 key: self.key.clone(),
                 nonce: self.nonce.clone(),
                 waveform: None,
+                expires_in_ms: self.expires_in_ms,
             },
             _ => Content::MediaRef {
                 media_id,
@@ -204,6 +209,7 @@ impl OutgoingMedia {
                 height: self.height,
                 blurhash: None,
                 caption: self.caption.clone(),
+                expires_in_ms: self.expires_in_ms,
             },
         }
     }
