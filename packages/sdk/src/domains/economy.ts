@@ -66,6 +66,7 @@ import type {
   GiftSendResult,
   KickPointsBuy,
   KickPointsBuyResult,
+  LedgerEntryWire,
   LedgerReq,
   LeaderboardReq,
   LeaderboardResponse,
