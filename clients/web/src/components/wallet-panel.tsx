@@ -287,13 +287,15 @@ export function ledgerAmountLabel(entry: LedgerEntryWire): string {
     entry.reason === 'grant' ||
     entry.reason === 'gift_reputation' ||
     entry.reason === 'refund' ||
-    entry.reason === 'game_payout' ||
-    entry.reason === 'kick_points_purchase';
+    entry.reason === 'game_payout';
   const debit =
     entry.reason === 'gift_purchase' ||
     entry.reason === 'purchase' ||
     entry.reason === 'game_stake' ||
-    entry.reason === 'kick_spend';
+    entry.reason === 'kick_spend' ||
+    // The pack's coin leg is the one the caller's statement shows: coins out to
+    // the fee account. The points arrive as a separate mint leg, not this line.
+    entry.reason === 'kick_points_purchase';
   if (credit) {
     return `+${entry.amount}`;
   }
