@@ -765,6 +765,9 @@ fn day_separator(ui: &mut Ui, context: &Context<'_>, day: &str) {
 /// touching it does. The media and reactions state is passed in mutable: the row that draws
 /// an unfetched image is the row that asks for it, and the row that can be reacted to is the
 /// row that carries the picker.
+// Every fact the row draws is a fact it needs, and in immediate mode they arrive as
+// parameters, not as a struct the caller would build only to hand it here.
+#[allow(clippy::too_many_arguments)]
 fn message_row(
     ui: &mut Ui,
     context: &mut Context<'_>,
@@ -866,6 +869,9 @@ fn message_row(
 /// lands. A document is a row: what it claims to be, how big it is, and where to save it.
 /// egui offers no save dialog, so the destination is typed — the same trade the attach
 /// panel and the avatar picker make.
+// The arm count is the message's own shape: what a media body carries is what the row
+// draws, and splitting it into structs would split one bubble across two types.
+#[allow(clippy::too_many_arguments)]
 fn attachment_bubble(
     ui: &mut Ui,
     context: &mut Context<'_>,
@@ -928,6 +934,8 @@ fn attachment_bubble(
 }
 
 /// One image attachment: the picture when it has arrived, a named placeholder until then.
+// As above: each parameter is one fact of the image, drawn.
+#[allow(clippy::too_many_arguments)]
 fn image_bubble(
     ui: &mut Ui,
     context: &mut Context<'_>,
@@ -1543,7 +1551,7 @@ mod tests {
             state.reactions.get(&target),
             Some(&vec![(sender, "\u{1F44D}".to_owned())])
         );
-        assert!(state.messages.get(&conversation).is_none());
+        assert!(!state.messages.contains_key(&conversation));
 
         // The same reaction again — an echo, or a re-fetch. One chip, not two.
         state.absorb(reaction.clone());

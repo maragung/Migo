@@ -236,12 +236,14 @@ impl OutgoingMedia {
 /// playback never copies a note's whole audio.
 #[derive(Clone)]
 pub(crate) enum CachedMedia {
-    /// An opened image: the sender's original bytes and the MIME type they claimed.
-    Image { bytes: Vec<u8>, mime_type: String },
+    /// An opened image: the sender's original bytes, so a save writes the file that was
+    /// sent and the pixels are decoded per serve. The claimed MIME type is not kept — the
+    /// row already shows it from the message, and a save's extension is the typed path's.
+    Image { bytes: Vec<u8> },
     /// A decoded voice note: mono samples at the rate the container stated.
     Audio { samples: Arc<Vec<i16>>, rate: u32 },
-    /// Anything else: the bytes and the claimed type.
-    Document { bytes: Vec<u8>, mime_type: String },
+    /// Anything else: the bytes, for a save.
+    Document { bytes: Vec<u8> },
 }
 
 impl CachedMedia {
@@ -327,13 +329,9 @@ pub(crate) fn decode_audio(bytes: &[u8]) -> Result<DecodedAudio, String> {
         .codec_params
         .sample_rate
         .unwrap_or(VOICE_NOTE_SAMPLE_RATE);
-    loop {
-        let packet = match format.next_packet() {
-            Ok(packet) => packet,
-            // The container is over — the normal ending, signalled the same way an I/O
-            // error is. Whatever decoded so far is the whole note.
-            Err(_) => break,
-        };
+    // `while let` stops at the container's end — an Err is the normal ending, signalled
+    // the same way an I/O error is — keeping whatever decoded so far as the whole note.
+    while let Ok(packet) = format.next_packet() {
         if packet.track_id() != track_id {
             continue;
         }
@@ -401,13 +399,9 @@ fn decode_opus(
     let channel_count = channels.count();
     let mut pcm = vec![0i16; 5_760 * channel_count];
     let mut samples: Vec<i16> = Vec::new();
-    loop {
-        let packet = match format.next_packet() {
-            Ok(packet) => packet,
-            // The container is over — the normal ending. Whatever decoded so far is the
-            // whole note.
-            Err(_) => break,
-        };
+    // `while let` stops at the container's end — an Err is the normal ending — keeping
+    // whatever decoded so far as the whole note.
+    while let Ok(packet) = format.next_packet() {
         if packet.track_id() != track_id {
             continue;
         }

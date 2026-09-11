@@ -1112,7 +1112,8 @@ struct Recording {
     /// The conversation the note will land in.
     conversation_id: Id,
     /// The device handle, held so capture continues; dropped to stop. The chunk receiver is
-    /// not here — the capture pump owns it now.
+    /// not here — the capture pump owns it now. Never read: the handle exists to be held.
+    #[allow(dead_code)]
     microphone: call_audio::Microphone,
     /// Where the capture pump appends, shared with the pump thread. A mutex over one vector
     /// because the pump produces and the stop consumes; a channel would only move the same
@@ -1131,7 +1132,9 @@ struct Playing {
     /// The note's media id, so a late "ended" report from a stopped pump can be told from
     /// this one's.
     media_id: Id,
-    /// The device handle, held so playback continues; dropped to stop.
+    /// The device handle, held so playback continues; dropped to stop. Never read: the
+    /// handle exists to be held.
+    #[allow(dead_code)]
     speaker: call_audio::Speaker,
     /// The pump's stop flag.
     stop: Arc<AtomicBool>,
@@ -3377,15 +3380,9 @@ impl Worker {
         } else if keying.mime_type.starts_with("image/") {
             // Cached as the sender's original bytes; the pixels are decoded per serve, so a
             // save writes the file that was sent.
-            media::CachedMedia::Image {
-                bytes: opened,
-                mime_type: keying.mime_type.clone(),
-            }
+            media::CachedMedia::Image { bytes: opened }
         } else {
-            media::CachedMedia::Document {
-                bytes: opened,
-                mime_type: keying.mime_type.clone(),
-            }
+            media::CachedMedia::Document { bytes: opened }
         };
         self.media_cache.insert(media_id, cached);
         self.media_fetching.remove(&media_id);
@@ -4850,9 +4847,7 @@ impl Worker {
         conversation_id: Id,
         plaintext: &[u8],
     ) -> Option<(Vec<u8>, u32)> {
-        let Some(signed) = self.signed.as_ref() else {
-            return None;
-        };
+        let signed = self.signed.as_ref()?;
         let Some(cached) = signed.members.get(&conversation_id) else {
             // Never primed: the send path is only reached from a conversation the list or a
             // create seeded, but a defensive refusal beats sealing for no one.
@@ -4872,9 +4867,9 @@ impl Worker {
         // The audience the SDK's `recipientDevices` computes: members ∪ this account (the account's
         // other devices must receive this message for sync), devices of each, minus this sending
         // device.
-        let Some(signed) = self.signed.as_ref() else {
-            return None;
-        };
+        // The `?` re-borrow is not redundant with the one at the top: the roster request
+        // and the toasts between them took `&mut self`, so this arm needs its own take.
+        let signed = self.signed.as_ref()?;
         let members: Vec<Id> = signed
             .members
             .get(&conversation_id)
@@ -4911,14 +4906,10 @@ impl Worker {
         // so it must be taken before the content seal — handing it out after the first message
         // would gate that message out of the receiver's chain, which is the late-joiner property
         // applied to everyone.
-        let Some(signed) = self.signed.as_mut() else {
-            return None;
-        };
+        let signed = self.signed.as_mut()?;
         let distribution = signed.groups.distribution(conversation_id);
         for device in &targets {
-            let Some(signed) = self.signed.as_mut() else {
-                return None;
-            };
+            let signed = self.signed.as_mut()?;
             if !signed.groups.needs_distribution(conversation_id, *device) {
                 continue;
             }
@@ -4965,9 +4956,7 @@ impl Worker {
         // One seal for the whole conversation, fanned out by the server to every device the
         // distribution reached. This is the entire point of the sender-key design — the
         // pairwise cost is paid per device once, not per message.
-        let Some(signed) = self.signed.as_mut() else {
-            return None;
-        };
+        let signed = self.signed.as_mut()?;
         match signed.groups.seal(conversation_id, plaintext) {
             Ok(sealed) => Some((sealed.envelope, sealed.chain_id)),
             Err(_) => None,
@@ -6461,30 +6450,26 @@ fn spawn_recording_pump(
             let mut resampler = (source_rate != media::VOICE_NOTE_SAMPLE_RATE)
                 .then(|| call_audio::Resampler::new(source_rate, media::VOICE_NOTE_SAMPLE_RATE));
             let mut resampled: Vec<i16> = Vec::new();
-            loop {
-                match frames.recv() {
-                    Ok(chunk) => {
-                        if stop.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        match resampler.as_mut() {
-                            Some(resampler) => {
-                                resampled.clear();
-                                resampler.process(&chunk, &mut resampled);
-                                if let Ok(mut buffer) = samples.lock() {
-                                    buffer.extend_from_slice(&resampled);
-                                }
-                            }
-                            None => {
-                                if let Ok(mut buffer) = samples.lock() {
-                                    buffer.extend_from_slice(&chunk);
-                                }
-                            }
+            // `while let` stops when the channel closes — the microphone was dropped, so the
+            // recording is over whatever the flag says, and everything appended so far is
+            // the note.
+            while let Ok(chunk) = frames.recv() {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                match resampler.as_mut() {
+                    Some(resampler) => {
+                        resampled.clear();
+                        resampler.process(&chunk, &mut resampled);
+                        if let Ok(mut buffer) = samples.lock() {
+                            buffer.extend_from_slice(&resampled);
                         }
                     }
-                    // The microphone was dropped: the recording is over, whatever the flag
-                    // says. Everything appended so far is the note.
-                    Err(_) => break,
+                    None => {
+                        if let Ok(mut buffer) = samples.lock() {
+                            buffer.extend_from_slice(&chunk);
+                        }
+                    }
                 }
             }
         })
