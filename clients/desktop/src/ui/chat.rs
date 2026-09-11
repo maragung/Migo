@@ -1896,7 +1896,8 @@ mod tests {
     /// loop's own `None` arm: the whole thread, untouched.
     #[test]
     fn the_filter_skips_in_place_and_keeps_the_thread_order() {
-        let thread = vec![
+        // An array, not a `vec!`: four fixed rows, and the filter borrows them, never grows.
+        let thread = [
             search_message(1, Body::Text("alpha".to_owned())),
             search_message(2, Body::Text("Beta report".to_owned())),
             search_message(
