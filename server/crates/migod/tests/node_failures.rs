@@ -121,8 +121,8 @@ async fn admit(mesh: &SharedMesh, peer: Id, peer_key: &[u8], base_url: String, r
     .expect("a fresh allow-list admits the peer");
 }
 
-/// A node's transport, with no gateway behind it: these tests assert on the link and
-/// the outbox, which the ingest window already exposes.
+/// A node's transport, with no gateway and no room relay behind it: these tests assert on
+/// the link and the outbox, which the ingest window already exposes.
 fn transport(mesh: &SharedMesh) -> Arc<MeshTransport> {
     Arc::new(MeshTransport::new(
         mesh.clone(),
