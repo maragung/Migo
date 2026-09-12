@@ -8186,20 +8186,27 @@ impl Decode for GiftCatalogueResponse {
     }
 }
 
-/// Reads the caller's statement.
+/// Reads one keyset page of the caller's statement; the cursor is the position of the last entry a previous page returned.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LedgerReq {
     pub limit: Option<u32>,
+    pub cursor: Option<String>,
 }
 
 impl Encode for LedgerReq {
     fn encode(&self, w: &mut Writer) -> Result<()> {
         w.enter()?;
-        let present = usize::from(self.limit.is_some());
+        let present = usize::from(self.limit.is_some()) + usize::from(self.cursor.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.limit {
             w.optional(1, |w| {
                 w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.cursor {
+            w.optional(2, |w| {
+                w.write_str(v)?;
                 Ok(())
             })?;
         }
@@ -8218,6 +8225,7 @@ impl Decode for LedgerReq {
             let sub = &mut owned;
             match field_id {
                 1 => out.limit = Some(sub.read_u32()?),
+                2 => out.cursor = Some(sub.read_string()?),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }
@@ -8282,10 +8290,11 @@ impl Decode for LedgerEntryWire {
     }
 }
 
-/// A page of the caller's statement.
+/// A page of the caller's statement, with the cursor of the next page whenever this one was full.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LedgerResponse {
     pub entries: Vec<LedgerEntryWire>,
+    pub next_cursor: Option<String>,
 }
 
 impl Encode for LedgerResponse {
@@ -8297,7 +8306,14 @@ impl Encode for LedgerResponse {
                 item.encode(w)?;
             }
         }
-        w.write_u32(0);
+        let present = usize::from(self.next_cursor.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.next_cursor {
+            w.optional(1, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -8317,9 +8333,12 @@ impl Decode for LedgerResponse {
         };
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
-            // No optional fields are defined for this struct in this
-            // protocol build; a newer peer's fields are skipped by length.
-            let _ = r.read_optional()?;
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.next_cursor = Some(sub.read_string()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
         }
         r.leave();
         Ok(out)
@@ -10268,14 +10287,30 @@ impl Decode for KickPointsBuyResult {
     }
 }
 
-/// Empty; the caller's own entitlements are the session's.
+/// Reads one keyset page of the caller's own entitlements; the cursor is the position of the last row a previous page returned.
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct EntitlementsReq {}
+pub struct EntitlementsReq {
+    pub limit: Option<u32>,
+    pub cursor: Option<String>,
+}
 
 impl Encode for EntitlementsReq {
     fn encode(&self, w: &mut Writer) -> Result<()> {
         w.enter()?;
-        w.write_u32(0);
+        let present = usize::from(self.limit.is_some()) + usize::from(self.cursor.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.limit {
+            w.optional(1, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.cursor {
+            w.optional(2, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -10284,12 +10319,16 @@ impl Encode for EntitlementsReq {
 impl Decode for EntitlementsReq {
     fn decode(r: &mut Reader) -> Result<Self> {
         r.enter()?;
-        let out = Self::default();
+        let mut out = Self::default();
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
-            // No optional fields are defined for this struct in this
-            // protocol build; a newer peer's fields are skipped by length.
-            let _ = r.read_optional()?;
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.limit = Some(sub.read_u32()?),
+                2 => out.cursor = Some(sub.read_string()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
         }
         r.leave();
         Ok(out)
@@ -10331,10 +10370,11 @@ impl Decode for Entitlement {
     }
 }
 
-/// Everything the caller owns, oldest first.
+/// One page of what the caller owns, oldest first, with the cursor of the next page whenever this one was full.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EntitlementsResponse {
     pub items: Vec<Entitlement>,
+    pub next_cursor: Option<String>,
 }
 
 impl Encode for EntitlementsResponse {
@@ -10346,7 +10386,14 @@ impl Encode for EntitlementsResponse {
                 item.encode(w)?;
             }
         }
-        w.write_u32(0);
+        let present = usize::from(self.next_cursor.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.next_cursor {
+            w.optional(1, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -10366,9 +10413,12 @@ impl Decode for EntitlementsResponse {
         };
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
-            // No optional fields are defined for this struct in this
-            // protocol build; a newer peer's fields are skipped by length.
-            let _ = r.read_optional()?;
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.next_cursor = Some(sub.read_string()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
         }
         r.leave();
         Ok(out)

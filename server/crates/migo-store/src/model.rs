@@ -1001,6 +1001,62 @@ pub struct Room {
     pub archived_at: Option<Timestamp>,
 }
 
+impl Room {
+    /// The keyset position of this row, for asking the next browse page to
+    /// continue after it.
+    #[must_use]
+    pub fn position(&self) -> RoomPosition {
+        RoomPosition {
+            member_count: self.member_count,
+            created_at: self.created_at,
+            room_id: self.room_id,
+        }
+    }
+}
+
+/// A position in the room browse, used to continue paging after it.
+///
+/// The browse is busiest first, then oldest, then by id — a ranked directory, and
+/// the rank (member count) moves as people join and leave. A keyset does not freeze
+/// the ranking; it names the last row the client holds, so a room whose rank rose
+/// past the position between two pages can appear again, and one that fell can be
+/// skipped — which is the honest behaviour for a directory that re-ranks live, and
+/// exactly why the third field is the primary key: without it, two rooms that
+/// share a count and a creation time would be one ambiguous position and paging
+/// would decide between them by accident.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RoomPosition {
+    /// Cached member count of the room at the position, the primary sort key
+    /// (descending).
+    pub member_count: i32,
+    /// Creation time of the room at the position (ascending).
+    pub created_at: Timestamp,
+    /// Primary key of the room at the position (ascending).
+    pub room_id: Id,
+}
+
+impl RoomPosition {
+    /// True when `candidate` sorts strictly after this position in the browse's
+    /// order: member count descending, then creation time ascending, then id
+    /// ascending.
+    ///
+    /// One definition shared by both store implementations, so a page boundary
+    /// that disagreed with the sort would be a compile-time stranger here rather
+    /// than a missing row in production.
+    #[must_use]
+    pub fn precedes(&self, candidate: &Room) -> bool {
+        match candidate.member_count.cmp(&self.member_count) {
+            Ordering::Less => true,
+            Ordering::Greater => false,
+            Ordering::Equal => match candidate.created_at.cmp(&self.created_at) {
+                Ordering::Greater => true,
+                Ordering::Less => false,
+                Ordering::Equal => candidate.room_id > self.room_id,
+            },
+        }
+    }
+}
+
 /// Everything needed to create a room.
 #[derive(Clone, Debug)]
 pub struct NewRoom {
@@ -1247,6 +1303,47 @@ pub struct LedgerTransaction {
     pub legs: Vec<LedgerLeg>,
 }
 
+impl LedgerTransaction {
+    /// The keyset position of this row, for asking the next statement page to
+    /// continue after it.
+    #[must_use]
+    pub fn position(&self) -> LedgerPosition {
+        LedgerPosition {
+            created_at: self.created_at,
+            tx_id: self.tx_id,
+        }
+    }
+}
+
+/// A position in a statement, used to continue paging after it.
+///
+/// A statement is newest first and only ever grows at the top, so the same keyset
+/// discipline as the conversation list applies verbatim: an offset describes a
+/// different row as soon as the account spends again, while a position keeps
+/// naming the last row the client actually holds. The posting time and the primary
+/// key together make the order total.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LedgerPosition {
+    /// Posting time of the transaction at the position.
+    pub created_at: Timestamp,
+    /// Primary key of the transaction at the position, which breaks the tie
+    /// when two postings share a millisecond.
+    pub tx_id: Id,
+}
+
+impl LedgerPosition {
+    /// True when `candidate` sorts strictly after this position in a
+    /// statement's order: posting time descending, then id descending.
+    #[must_use]
+    pub fn precedes(&self, candidate: &LedgerTransaction) -> bool {
+        match candidate.created_at.cmp(&self.created_at) {
+            Ordering::Less => true,
+            Ordering::Greater => false,
+            Ordering::Equal => candidate.tx_id < self.tx_id,
+        }
+    }
+}
+
 /// Outcome of posting a transaction.
 #[derive(Clone, Debug)]
 pub enum Posted {
@@ -1381,6 +1478,45 @@ pub struct Entitlement {
     pub acquired_at: Timestamp,
     /// The purchase, absent when the system granted it.
     pub tx_id: Option<Id>,
+}
+
+impl Entitlement {
+    /// The keyset position of this row, for asking the next page to continue
+    /// after it.
+    #[must_use]
+    pub fn position(&self) -> EntitlementPosition {
+        EntitlementPosition {
+            acquired_at: self.acquired_at,
+            sku: self.sku.clone(),
+        }
+    }
+}
+
+/// A position in an entitlements listing, used to continue paging after it.
+///
+/// Oldest first, per the opcode's contract, and the catalogue code is the primary
+/// key's second half so the pair is a total order. Acquisitions only append, so a
+/// position is stable for as long as the rows it names exist.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EntitlementPosition {
+    /// Acquisition time of the entitlement at the position (ascending).
+    pub acquired_at: Timestamp,
+    /// Catalogue code of the entitlement at the position (ascending), which is
+    /// unique within one account's shelf.
+    pub sku: String,
+}
+
+impl EntitlementPosition {
+    /// True when `candidate` sorts strictly after this position in the
+    /// entitlements' order: acquisition time ascending, then code ascending.
+    #[must_use]
+    pub fn precedes(&self, candidate: &Entitlement) -> bool {
+        match candidate.acquired_at.cmp(&self.acquired_at) {
+            Ordering::Greater => true,
+            Ordering::Less => false,
+            Ordering::Equal => candidate.sku > self.sku,
+        }
+    }
 }
 
 /// An account's XP and level.
@@ -1962,6 +2098,51 @@ pub mod notification_kind {
     #[must_use]
     pub fn is_storable(kind: i16) -> bool {
         STORABLE.contains(&kind)
+    }
+}
+
+impl Notification {
+    /// The keyset position of this row, for asking the next inbox page to
+    /// continue after it.
+    #[must_use]
+    pub fn position(&self) -> NotificationPosition {
+        NotificationPosition {
+            created_at: self.created_at,
+            notification_id: self.notification_id,
+        }
+    }
+}
+
+/// A position in an inbox, used to continue paging after it.
+///
+/// The same keyset discipline as [`ConversationPosition`]: the inbox is newest
+/// first, and newest-first lists move at the top, so an offset names a different
+/// row on every request while a position keeps naming the last row the client
+/// actually holds. The two fields are exactly the two the inbox is ordered by,
+/// and the second is a primary key, so the order is total.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct NotificationPosition {
+    /// Creation time of the notification at the position.
+    pub created_at: Timestamp,
+    /// Primary key of the notification at the position, which breaks the tie
+    /// when two notifications share a millisecond.
+    pub notification_id: Id,
+}
+
+impl NotificationPosition {
+    /// True when `candidate` sorts strictly after this position in the inbox's
+    /// order: creation time descending, then id descending.
+    ///
+    /// Both store implementations derive their paging from this one definition
+    /// rather than restating it, so the page boundary and the sort can never
+    /// disagree about which row comes next.
+    #[must_use]
+    pub fn precedes(&self, candidate: &Notification) -> bool {
+        match candidate.created_at.cmp(&self.created_at) {
+            Ordering::Less => true,
+            Ordering::Greater => false,
+            Ordering::Equal => candidate.notification_id < self.notification_id,
+        }
     }
 }
 

@@ -40,7 +40,8 @@ use migo_core::{Id, Random, Result, Secret, SeededRandom, Timestamp};
 use migo_protocol::{codes, NotificationKind, Platform};
 use migo_ratelimit::{CacheRateLimiter, Policies, TrustTier};
 use migo_store::model::{
-    notification_kind, DeviceStatus, NewAccount, NewDevice, Notification, PushProvider,
+    notification_kind, DeviceStatus, NewAccount, NewDevice, Notification, NotificationPosition,
+    PushProvider,
 };
 use migo_store::traits::{AccountStore, DeviceStore, NotifyStore};
 use migo_store::MemoryStore;
@@ -408,7 +409,7 @@ async fn inbox_refuses_a_caller_with_no_account() {
     let harness = Harness::new();
     let nobody = Caller::new(Id::NIL, Id::NIL, TrustTier::Established, ts(NOW));
     expect_code(
-        harness.notify.inbox(&nobody, 20).await,
+        harness.notify.inbox(&nobody, 20, None).await,
         codes::UNAUTHENTICATED,
     );
 }
@@ -457,7 +458,7 @@ async fn a_read_refuses_a_caller_with_an_account_but_no_device() {
     harness.account(ALICE, "alice").await;
     let headless = Caller::new(id(ALICE), Id::NIL, TrustTier::Established, ts(NOW));
     expect_code(
-        harness.notify.inbox(&headless, 20).await,
+        harness.notify.inbox(&headless, 20, None).await,
         codes::UNAUTHENTICATED,
     );
     expect_code(
@@ -486,7 +487,7 @@ async fn registration_refuses_a_caller_with_an_account_but_no_device() {
 async fn an_unauthenticated_read_is_refused_before_any_rate_limit_charge() {
     let harness = Harness::new();
     let nobody = Caller::new(Id::NIL, Id::NIL, TrustTier::Established, ts(NOW));
-    let _ = harness.notify.inbox(&nobody, 20).await;
+    let _ = harness.notify.inbox(&nobody, 20, None).await;
     let _ = harness.notify.badge(&nobody).await;
     let _ = harness.notify.acknowledge(&nobody, ts(NOW)).await;
     assert_eq!(
@@ -1378,7 +1379,7 @@ async fn an_account_with_no_registered_device_is_still_an_event() {
     assert_eq!(harness.stored_count("gift"), 1);
     let inbox = harness
         .notify
-        .inbox(&caller(ALICE, ALICE_PHONE), 10)
+        .inbox(&caller(ALICE, ALICE_PHONE), 10, None)
         .await
         .expect("the inbox reads");
     assert_eq!(inbox.items.len(), 1);
@@ -1422,7 +1423,7 @@ async fn a_storable_kind_becomes_a_row_and_a_conversational_one_does_not() {
 
     let inbox = harness
         .notify
-        .inbox(&caller(ALICE, ALICE_PHONE), 10)
+        .inbox(&caller(ALICE, ALICE_PHONE), 10, None)
         .await
         .expect("the inbox reads");
     assert_eq!(inbox.items.len(), 1);
@@ -1442,7 +1443,7 @@ async fn an_inbox_row_carries_the_ids_needed_to_fetch_the_thing_itself() {
 
     let inbox = harness
         .notify
-        .inbox(&caller(ALICE, ALICE_PHONE), 10)
+        .inbox(&caller(ALICE, ALICE_PHONE), 10, None)
         .await
         .expect("the inbox reads");
     let item = &inbox.items[0];
@@ -1494,7 +1495,7 @@ async fn the_badge_counts_unread_rows_and_acknowledging_clears_it() {
 
     let inbox = harness
         .notify
-        .inbox(&who, 10)
+        .inbox(&who, 10, None)
         .await
         .expect("the inbox reads");
     assert_eq!(inbox.unread, 1);
@@ -1559,7 +1560,7 @@ async fn an_inbox_never_shows_somebody_elses_rows() {
     // arguing, because a future overload taking an account id would break it silently.
     let alice = harness
         .notify
-        .inbox(&caller(ALICE, ALICE_PHONE), 50)
+        .inbox(&caller(ALICE, ALICE_PHONE), 50, None)
         .await
         .expect("alice's inbox");
     assert_eq!(alice.items.len(), 1);
@@ -1598,7 +1599,7 @@ async fn an_inbox_page_is_capped_however_much_is_asked_for() {
     // answer has to fit in one response.
     let inbox = harness
         .notify
-        .inbox(&caller(ALICE, ALICE_PHONE), u16::MAX)
+        .inbox(&caller(ALICE, ALICE_PHONE), u16::MAX, None)
         .await
         .expect("the inbox reads");
     assert_eq!(inbox.items.len(), MAX_INBOX_PAGE as usize);
@@ -1621,7 +1622,7 @@ async fn the_newest_rows_come_first() {
 
     let inbox = harness
         .notify
-        .inbox(&caller(ALICE, ALICE_PHONE), 3)
+        .inbox(&caller(ALICE, ALICE_PHONE), 3, None)
         .await
         .expect("the inbox reads");
     assert_eq!(inbox.items.len(), 3);
@@ -1629,6 +1630,62 @@ async fn the_newest_rows_come_first() {
     // client gets after a wake-up contains the thing it was woken for.
     assert_eq!(inbox.items[0].at, ts(NOW + 4 * MINUTE));
     assert_eq!(inbox.items[2].at, ts(NOW + 2 * MINUTE));
+}
+
+/// The inbox pages by position, not by offset: page two starts after page one's
+/// last row, and walking a five-row inbox in pages of two returns each row once
+/// — newest to oldest, none repeated, none skipped. This is the discipline the
+/// NOTIFICATION_LIST cursor rides on, tested here where the rows can be seeded
+/// exactly.
+#[tokio::test]
+async fn an_inbox_pages_by_position_without_repeating_or_dropping() {
+    let harness = Harness::new();
+    harness.account(ALICE, "alice").await;
+    harness.device(ALICE, ALICE_PHONE, Platform::Android).await;
+    for n in 0..5 {
+        let event = Event::new(id(ALICE), NotificationKind::Gift, ts(NOW + n * MINUTE))
+            .by(id(BOB))
+            .about(id(SUBJECT));
+        harness.notify.notify(event).await.expect("a gift");
+    }
+
+    let mut seen: Vec<Timestamp> = Vec::new();
+    let mut after: Option<NotificationPosition> = None;
+    for _ in 0..5 {
+        let page = harness
+            .notify
+            .inbox(&caller(ALICE, ALICE_PHONE), 2, after)
+            .await
+            .expect("the inbox reads");
+        if page.items.is_empty() {
+            break;
+        }
+        seen.extend(page.items.iter().map(|item| item.at));
+        let last = page.items.last().expect("a non-empty page has a last row");
+        after = Some(NotificationPosition {
+            created_at: last.at,
+            notification_id: last.notification_id,
+        });
+    }
+    assert_eq!(
+        seen,
+        [
+            ts(NOW + 4 * MINUTE),
+            ts(NOW + 3 * MINUTE),
+            ts(NOW + 2 * MINUTE),
+            ts(NOW + MINUTE),
+            ts(NOW),
+        ],
+        "five rows, newest first, each exactly once"
+    );
+    // The unread count is a property of the whole inbox, not of any page: it is
+    // the same number before the walk as after it.
+    let first = harness
+        .notify
+        .inbox(&caller(ALICE, ALICE_PHONE), 2, None)
+        .await
+        .expect("the inbox reads");
+    assert_eq!(first.unread, 5);
 }
 
 // ---------------------------------------------------------------------------
@@ -1796,7 +1853,7 @@ async fn the_sweep_deletes_read_rows_and_leaves_unread_ones() {
     assert_eq!(gone, 3);
     let inbox = harness
         .notify
-        .inbox(&who, 50)
+        .inbox(&who, 50, None)
         .await
         .expect("the inbox reads");
     assert_eq!(inbox.items.len(), 3);
@@ -1861,7 +1918,7 @@ async fn reading_an_inbox_is_charged() {
     let before = harness.rl_checks();
     harness
         .notify
-        .inbox(&caller(ALICE, ALICE_PHONE), 10)
+        .inbox(&caller(ALICE, ALICE_PHONE), 10, None)
         .await
         .expect("the inbox reads");
     harness
@@ -1953,7 +2010,7 @@ async fn every_series_is_labelled_by_shape_and_never_by_identity() {
     let who = caller(ALICE, ALICE_PHONE);
     harness
         .notify
-        .inbox(&who, 10)
+        .inbox(&who, 10, None)
         .await
         .expect("the inbox reads");
     harness.notify.badge(&who).await.expect("the badge reads");
@@ -2092,7 +2149,7 @@ async fn a_stored_notification_is_ids_and_timestamps_and_nothing_else() {
 
     let rows: Vec<Notification> = harness
         .store
-        .notifications(id(ALICE), 10)
+        .notifications(id(ALICE), None, 10)
         .await
         .expect("the inbox can be read");
     assert_eq!(rows.len(), 1);
@@ -2134,7 +2191,7 @@ async fn an_inbox_item_carries_the_pointer_the_row_carries() {
 
     let inbox: Inbox = harness
         .notify
-        .inbox(&caller(ALICE, ALICE_PHONE), 10)
+        .inbox(&caller(ALICE, ALICE_PHONE), 10, None)
         .await
         .expect("an account may read its own inbox");
     assert_eq!(inbox.unread, 1);
@@ -2145,7 +2202,7 @@ async fn an_inbox_item_carries_the_pointer_the_row_carries() {
     // prose, because there is none to hand back.
     let rows = harness
         .store
-        .notifications(id(ALICE), 10)
+        .notifications(id(ALICE), None, 10)
         .await
         .expect("the inbox can be read");
     assert_eq!(item.notification_id, rows[0].notification_id);

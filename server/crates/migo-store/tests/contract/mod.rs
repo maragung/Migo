@@ -2392,16 +2392,16 @@ pub async fn archiving_a_room_closes_it_without_deleting_it(store: &SharedStore)
         .await
         .unwrap();
 
-    let browse = store.browse_rooms(None, 10).await.unwrap();
+    let browse = store.browse_rooms(None, None, 10).await.unwrap();
     let ids: Vec<Id> = browse.iter().map(|r| r.room_id).collect();
     assert_eq!(ids, vec![id(100), id(101)], "busiest first");
     let public = store
-        .browse_rooms(Some(RoomKindFilter::Public), 10)
+        .browse_rooms(Some(RoomKindFilter::Public), None, 10)
         .await
         .unwrap();
     assert_eq!(public.len(), 1);
     let managed = store
-        .browse_rooms(Some(RoomKindFilter::Managed), 10)
+        .browse_rooms(Some(RoomKindFilter::Managed), None, 10)
         .await
         .unwrap();
     assert_eq!(managed[0].room_id, id(101));
@@ -2429,7 +2429,7 @@ pub async fn archiving_a_room_closes_it_without_deleting_it(store: &SharedStore)
             .archived_at,
         Some(ts(9_000))
     );
-    let browse = store.browse_rooms(None, 10).await.unwrap();
+    let browse = store.browse_rooms(None, None, 10).await.unwrap();
     assert_eq!(browse.len(), 1, "an archived room is not on the shelf");
     expect_code(
         store.join_room(member_row(id(100), id(3), 9_200)).await,
@@ -2948,7 +2948,7 @@ pub async fn a_transfer_moves_value_without_creating_any(store: &SharedStore) {
     );
     assert_eq!(store.currency_sum(Currency::Gems).await.unwrap(), 0);
 
-    let statement = store.ledger_history(alice_wallet, 10).await.unwrap();
+    let statement = store.ledger_history(alice_wallet, None, 10).await.unwrap();
     assert_eq!(statement.len(), 2);
     assert_eq!(
         statement[0].1, -30,
@@ -2956,7 +2956,11 @@ pub async fn a_transfer_moves_value_without_creating_any(store: &SharedStore) {
     );
     assert_eq!(statement[0].0.tx_id, id(401));
     assert_eq!(statement[1].1, 100);
-    assert!(store.ledger_history(id(998), 10).await.unwrap().is_empty());
+    assert!(store
+        .ledger_history(id(998), None, 10)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 pub async fn a_retried_payment_charges_once(store: &SharedStore) {
@@ -2991,7 +2995,11 @@ pub async fn a_retried_payment_charges_once(store: &SharedStore) {
         "charged once, not twice"
     );
     assert_eq!(
-        store.ledger_history(alice_wallet, 10).await.unwrap().len(),
+        store
+            .ledger_history(alice_wallet, None, 10)
+            .await
+            .unwrap()
+            .len(),
         1,
         "the retry left no second entry to reconcile against"
     );
@@ -3041,7 +3049,11 @@ pub async fn a_reused_key_with_a_different_payload_is_refused(store: &SharedStor
         "a refused replay moves no money"
     );
     assert_eq!(
-        store.ledger_history(alice_wallet, 10).await.unwrap().len(),
+        store
+            .ledger_history(alice_wallet, None, 10)
+            .await
+            .unwrap()
+            .len(),
         1,
         "the refused replay left no entry behind"
     );

@@ -29,12 +29,12 @@ use migo_protocol::{fault, MlDsaPurpose, RelationshipKind};
 use crate::model::{
     Account, AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, CappedXpAward, Conversation,
     ConversationMember, ConversationPosition, ConversationSummary, Cursor, Device, Entitlement,
-    GameSession, GiftSent, GlobalAdmin, KeyBundle, LedgerAccount, LedgerAccountKind,
-    LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice, NewGame, NewMessage,
-    NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward, Notification,
-    OutboxRecord, PeerRecord, Posted, Profile, ProfilePatch, Progression, PublishedKeys,
-    PushRegistration, PushTarget, Relationship, Report, Room, RoomMember, Scope, Session, Standing,
-    StoredMessage, XpCaps, XpChange,
+    EntitlementPosition, GameSession, GiftSent, GlobalAdmin, KeyBundle, LedgerAccount,
+    LedgerAccountKind, LedgerPosition, LedgerTransaction, MediaObject, NewAccount, NewBot,
+    NewDevice, NewGame, NewMessage, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction,
+    NewXpAward, Notification, NotificationPosition, OutboxRecord, PeerRecord, Posted, Profile,
+    ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Relationship, Report,
+    Room, RoomMember, RoomPosition, Scope, Session, Standing, StoredMessage, XpCaps, XpChange,
 };
 
 /// Largest page any read will return, whatever the caller asks for.
@@ -487,8 +487,17 @@ pub trait RoomStore: Send + Sync {
     /// Archives a room. Not a delete: links and history keep resolving.
     async fn archive_room(&self, room_id: Id, at: Timestamp) -> Result<()>;
 
-    /// Browse listing, most populated first.
-    async fn browse_rooms(&self, kind: Option<RoomKindFilter>, limit: u16) -> Result<Vec<Room>>;
+    /// Browse listing, most populated first, as one keyset page.
+    ///
+    /// `after` is the position of the last row a previous page returned; `None`
+    /// starts from the top. Both backends derive the boundary from
+    /// [`crate::model::RoomPosition::precedes`].
+    async fn browse_rooms(
+        &self,
+        kind: Option<RoomKindFilter>,
+        after: Option<RoomPosition>,
+        limit: u16,
+    ) -> Result<Vec<Room>>;
 
     /// Joins a room, or rejoins after leaving. Returns the membership.
     async fn join_room(&self, member: RoomMember) -> Result<RoomMember>;
@@ -773,10 +782,15 @@ pub trait EconomyStore: Send + Sync {
     /// Balance as the sum of entries, using the latest snapshot as a base.
     async fn balance(&self, ledger_account_id: Id) -> Result<i64>;
 
-    /// Recent entries for an account statement.
+    /// One keyset page of an account statement, newest first.
+    ///
+    /// `after` is the position of the last posting a previous page returned;
+    /// `None` starts from the top. Both backends derive the boundary from
+    /// [`crate::model::LedgerPosition::precedes`].
     async fn ledger_history(
         &self,
         ledger_account_id: Id,
+        after: Option<LedgerPosition>,
         limit: u16,
     ) -> Result<Vec<(LedgerTransaction, i64)>>;
 
@@ -803,8 +817,17 @@ pub trait EconomyStore: Send + Sync {
     /// descending, then by code, so the same shelf renders the same way twice.
     async fn gift_tally(&self, account_id: Id) -> Result<Vec<(String, u32)>>;
 
-    /// Everything an account owns, oldest first.
-    async fn entitlements(&self, account_id: Id) -> Result<Vec<Entitlement>>;
+    /// One keyset page of what an account owns, oldest first.
+    ///
+    /// `after` is the position of the last row a previous page returned; `None`
+    /// starts from the beginning. Both backends derive the boundary from
+    /// [`crate::model::EntitlementPosition::precedes`].
+    async fn entitlements(
+        &self,
+        account_id: Id,
+        after: Option<EntitlementPosition>,
+        limit: u16,
+    ) -> Result<Vec<Entitlement>>;
 
     /// Whether an account already owns one thing.
     ///
@@ -1026,8 +1049,18 @@ pub trait NotifyStore: Send + Sync {
     /// becomes a count that disagrees with `conversation_cursor`.
     async fn create_notification(&self, notification: Notification) -> Result<Notification>;
 
-    /// An account's inbox, newest first.
-    async fn notifications(&self, account_id: Id, limit: u16) -> Result<Vec<Notification>>;
+    /// An account's inbox, newest first, as one keyset page.
+    ///
+    /// `after` is the position of the last row a previous page returned; `None`
+    /// starts from the top. Both backends derive the boundary from
+    /// [`crate::model::NotificationPosition::precedes`], so the sort and the page
+    /// can never disagree about which row comes next.
+    async fn notifications(
+        &self,
+        account_id: Id,
+        after: Option<NotificationPosition>,
+        limit: u16,
+    ) -> Result<Vec<Notification>>;
 
     /// How many are unread.
     ///
