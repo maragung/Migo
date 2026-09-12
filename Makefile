@@ -417,6 +417,28 @@ test-load: ## One-node load run: build migod (release), run tools/load/run.sh
 	$(CARGO) build $(MANIFEST) --release --bin migod
 	tools/load/run.sh
 
+# ---------------------------------------------------------------- end-to-end
+
+.PHONY: test-e2e
+test-e2e: build-ts ## End-to-end suite: one real migod, real PostgreSQL and Redis, the real SDK client (CI gate)
+	# The one target that runs the product rather than its parts. tests/e2e starts
+	# a single migod the way tools/2node does — per-run TOML config, its own HTTP
+	# port, a fresh PostgreSQL database, health wait, teardown on exit — and drives
+	# it with MigoClient from @migo/sdk, the same code the browser runs, asserting
+	# on what actually crossed the wire and what actually landed in storage. Unlike
+	# the load run it wants the real backends, because the suite's claims are about
+	# durability and the contract surfaces, and unlike smoke-2node it is a gate.
+	# It needs MIGO_TEST_DATABASE_URL and MIGO_TEST_REDIS_URL (CI's service
+	# containers provide them; locally, `make infra-up` plus the exports in
+	# tools/2node/README.md), and it fails rather than skips when they are
+	# missing, because a gate that can skip itself is a gate that can go quiet.
+	#
+	# The suite's package script is deliberately named `e2e` and not `test`, so
+	# `pnpm -r --if-present test` — the web job, which has no databases — can
+	# never pick it up by accident. This target is the only door in.
+	$(CARGO) build $(MANIFEST) --bin migod
+	$(PNPM) --filter @migo/e2e run e2e
+
 # ---------------------------------------------------------------- smoke
 
 .PHONY: smoke-2node
@@ -442,7 +464,7 @@ audit: ## Dependency vulnerability + licence audit
 	$(PNPM) audit --audit-level high || true
 
 .PHONY: ci
-ci: protocol-check entity-check brief-check vector-check kotlin-check infra-check pydeps-check secret-check fmt-check build-ts lint doc-check test test-vectors budget-check test-fuzz test-stress test-security ## Everything CI runs
+ci: protocol-check entity-check brief-check vector-check kotlin-check infra-check pydeps-check secret-check fmt-check build-ts lint doc-check test test-vectors budget-check test-fuzz test-stress test-security test-e2e ## Everything CI runs
 
 # ---------------------------------------------------------------- misc
 
