@@ -370,7 +370,9 @@ pub struct App {
 }
 
 impl App {
-    /// Builds the whole system from a validated [`Config`].
+    /// Builds the whole system from a validated [`Config`], opening the store itself; a
+    /// caller that already owns a store — the one-database, multi-node shape of section 170
+    /// — hands it to [`App::build_with_store`] instead.
     ///
     /// Runs bottom-up: the registry and shutdown signal, the platform layer (the data store is
     /// opened asynchronously; the cache and rate limiter are not), the fourteen domain services with
@@ -385,6 +387,34 @@ impl App {
     /// or if any platform or fallible domain service cannot be opened (for example, the database is
     /// unreachable or the cache connection fails).
     pub async fn build(config: &Config) -> anyhow::Result<Self> {
+        let store = migo_store::open(&config.store)
+            .await
+            .context("cannot open the data store")?;
+        Self::build_with_store(config, store).await
+    }
+
+    /// Builds the whole system over a store the caller already opened — the one seam
+    /// production never takes and a multi-node deployment does.
+    ///
+    /// Section 170 records the two honest shapes a node fleet can have: every node pointing
+    /// at one database, or a store per node. Everything that makes a *client* survivable
+    /// across a failover — the session row authentication reads, the conversation
+    /// membership a re-subscribe is authorized against, the messages a section 158 sync
+    /// recovers — is a store fact, not a gateway fact, so the cross-node resume scenario
+    /// can only be exercised honestly when two nodes really do share their rows. This
+    /// constructor is that seam: `App::build` opens its own store and hands it here, while
+    /// a test (or any deployment tooling that wants several nodes over one database) opens
+    /// the store once and builds every node over it. Migration runs here, as it does for
+    /// every entry point: it is idempotent, so the second node over a shared store applies
+    /// nothing the first one already did.
+    ///
+    /// Everything below the store is per-node state by design — the session registry, the
+    /// resume ring buffers, the hub — which is exactly why a session that lands on a
+    /// different node is a fresh session there (section 150) and not a resumed one.
+    pub async fn build_with_store(
+        config: &Config,
+        store: migo_store::SharedStore,
+    ) -> anyhow::Result<Self> {
         config.validate().context("configuration is not valid")?;
 
         let registry = Registry::new();
@@ -394,16 +424,15 @@ impl App {
         let node_secret = resolve_node_secret(config)?;
 
         // --- Layer 2: platform ---
-        let store = migo_store::open(&config.store)
-            .await
-            .context("cannot open the data store")?;
-        // Apply pending schema migrations before any domain service is built on the store. The
-        // pool `open` returned is lazy and has touched nothing yet, so this is also the first
-        // call that reaches the database — it doubles as the startup connectivity check the
-        // store documents. A no-op for the memory backend (its schema is the Rust types); for
-        // postgres it runs the whole migration set under an advisory lock in one transaction,
-        // idempotent on every boot. Under an orchestrator this runs once the database's own
-        // health check has passed, so a still-starting database delays the query, not fails it.
+        // Apply pending schema migrations before any domain service is built on the store —
+        // the store `open` handed back is lazy and has touched nothing yet, so this is also
+        // the first call that reaches the database; it doubles as the startup connectivity
+        // check the store documents. A no-op for the memory backend (its schema is the Rust
+        // types); for postgres it runs the whole migration set under an advisory lock in one
+        // transaction, idempotent on every boot — which is what lets a second node be built
+        // over the same store. Under an orchestrator this runs once the database's own
+        // health check has passed, so a still-starting database delays the query, not fails
+        // it.
         store
             .migrate()
             .await
