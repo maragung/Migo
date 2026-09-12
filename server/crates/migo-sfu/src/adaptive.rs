@@ -73,7 +73,7 @@ pub fn target_step(stats: &LinkStats, thresholds: &AdaptiveThresholds) -> Qualit
 
 /// Moves a subscription from its current rung toward the target.
 ///
-/// The derived order on [`QualityStep`](crate::model::QualityStep) puts the
+/// The derived order on [`QualityStep`] puts the
 /// best rung lowest, so "down the ladder" is the direction where the target
 /// compares *greater* than the current rung. Down is immediate: a saturated
 /// link helps nobody, and the ladder's order is the order of what is given
