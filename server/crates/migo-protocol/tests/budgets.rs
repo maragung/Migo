@@ -212,11 +212,13 @@ fn per_event_frames_fit_their_budgets() {
     let f = Fixture::new(1);
 
     // PING/Pong: 6-byte budget in the brief assumed a bare header; a Migo
-    // timestamp is a 6-byte varint, so the brief now budgets 16 and 24.
+    // timestamp is a 6-byte varint, so the brief now budgets 16 and 24. A PONG
+    // travels on the PING opcode as its correlated reply — there is no separate
+    // PONG opcode — so the two frames differ only in what they carry.
     let ping = frame_size(Opcode::Ping, 1, &Ping { client_time: NOW });
     assert!(ping <= 16, "PING is {ping} bytes, budget 16 (section 56)");
     let pong = frame_size(
-        Opcode::Pong,
+        Opcode::Ping,
         1,
         &Pong {
             client_time: NOW,
@@ -516,7 +518,7 @@ fn cold_start_and_idle_hour_fit_their_session_budgets() {
     // Both directions are the session's bytes to pay for.
     let ping = frame_size(Opcode::Ping, 1, &Ping { client_time: NOW });
     let pong = frame_size(
-        Opcode::Pong,
+        Opcode::Ping,
         1,
         &Pong {
             client_time: NOW,
