@@ -236,7 +236,7 @@ impl HandshakeBudget {
         // An interval's first tick completes immediately; consume it so only real
         // cadence ticks carry the deadline check.
         ticker.tick().await;
-        let read = pin!(read_frame(io));
+        let mut read = pin!(read_frame(io));
         loop {
             tokio::select! {
                 frame = &mut read => return frame,
