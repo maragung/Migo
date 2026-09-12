@@ -4625,7 +4625,7 @@ Penyelesaian ketegangan antara aturan di atas dan section 158: pada SYNC, histor
 
 158. OFFLINE-FIRST SYNCHRONIZATION
 
-STATUS: BUILT untuk sisi server di migo-messaging, yaitu SYNC maju dan mundur, to_seq untuk mengambil tepat satu gap, status Ok dan Truncated, penanda more, dan read cursor yang bergerak maju saja dengan delivered yang selalu minimal sebesar read. STATUS: SPEC untuk sisi client, yaitu urutan reconnect, outbox, dan penghentian sync ketika aplikasi masuk background.
+STATUS: BUILT untuk sisi server di migo-messaging, yaitu SYNC maju dan mundur, to_seq untuk mengambil tepat satu gap, status Ok dan Truncated, penanda more, dan read cursor yang bergerak maju saja dengan delivered yang selalu minimal sebesar read. STATUS: BUILT juga untuk sisi client di @migo/sdk dan client web: domain messaging memelihara watermark seq kontigu per conversation (tombstone menempati seq seperti pesan, redelivery tidak menggesernya, dan gap menahan watermark sampai halaman yang hilang tiba), reconnect yang resume tidak melakukan sync apa pun, session baru men-subscribe ulang topik user lebih dulu lalu menguras outbox dengan kunci idempotensi yang sama per entri, catch-up setelah reset memulai dari watermark sehingga yang diambil hanya gap dan bukan full resync, serta sync yang berhalaman berhenti rapi lewat sync gate ketika aplikasi masuk background; client web memakai keduanya dengan mempertahankan transkrip lintas reset dan meneruskan paging dari watermark.
 
 Urutan sinkronisasi setelah reconnect:
 
