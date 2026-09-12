@@ -601,34 +601,64 @@ pub struct ClientPeer {
     pub public_url: String,
 }
 
+/// One peer node the operator names for the mesh, completely enough to admit it.
+///
+/// Admission is a trust decision, so the entry carries everything the allow-list
+/// demands: the peer's node id, the Ed25519 public key its handshake proofs are
+/// checked against, where its mesh listener is reached, and its region label.
+/// migod applies the list at startup (section 170) — idempotently, so a restart
+/// converges on the same allow-list instead of failing on the row a previous
+/// boot wrote. A malformed entry (an id that is not a node id, a key that does
+/// not decode to 32 bytes, an address that is not `https`/`wss`) is a startup
+/// failure in every environment rather than a warning, and a node id or public
+/// key that appears twice is refused, because the second entry would otherwise
+/// quietly claim the first one's identity.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MeshPeer {
+    /// The peer's node id, canonical 26-character text form — the same form the
+    /// allow-list and `FedPeerView` name a node by.
+    pub node_id: String,
+    /// The peer's Ed25519 public key: base64 (or hex) of its 32 raw bytes.
+    pub public_key: String,
+    /// Where the peer's mesh listener is reached, e.g. `wss://node-b:18090`.
+    /// `https://` and `wss://` name the same TCP endpoint the transport dials;
+    /// the scheme gate exists so a typo cannot send mesh traffic in the clear.
+    pub base_url: String,
+    /// The peer's region label, carried straight from its own identity. This is
+    /// how a room's home node is found — the `home_region` a room row names is
+    /// matched against it (section 170).
+    pub region: String,
+}
+
 /// Server-to-server mesh.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct FederationConfig {
     /// Whether to accept and originate mesh connections.
     pub enabled: bool,
-    /// Explicit allow-list of peer node ids. Empty means accept none.
-    #[serde(deserialize_with = "comma_separated_strings")]
-    pub allowed_peers: Vec<String>,
+    /// The peers this node admits to the mesh allow-list at startup (section
+    /// 170). Each [`MeshPeer`] entry names a node completely enough to
+    /// federate with it, and migod applies the list idempotently at every boot:
+    /// a peer absent from the allow-list is admitted, a peer already admitted
+    /// with the same key is left alone, and a changed key or address is brought
+    /// to what the configuration says. Empty — the single-node posture — means
+    /// the node federates with nobody, which validation refuses outside
+    /// development while `enabled` is true (ADR-0005).
+    pub peers: Vec<MeshPeer>,
     /// Peer nodes the config document offers to clients, so a client can
     /// measure latency per node and fail over between them (section 170).
     /// Empty — the single-node posture — means the document lists this node
     /// alone and clients have nowhere else to go.
     pub client_peers: Vec<ClientPeer>,
-    /// Rejection threshold for handshake clock skew.
-    pub max_clock_skew_seconds: u64,
-    /// Per-peer outbound queue depth.
-    pub peer_queue_capacity: usize,
 }
 
 impl Default for FederationConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            allowed_peers: Vec::new(),
+            peers: Vec::new(),
             client_peers: Vec::new(),
-            max_clock_skew_seconds: 60,
-            peer_queue_capacity: 4096,
         }
     }
 }
@@ -1054,9 +1084,67 @@ impl Config {
             problems
                 .push("node.roles includes federation but federation.enabled is false".to_string());
         }
-        if self.federation.enabled && self.federation.max_clock_skew_seconds > 300 {
+        // A configured mesh peer is a trust decision, so every entry is checked in
+        // every environment — not only the hardened ones — and a malformed or
+        // duplicated entry fails the boot rather than warning. The alternative is
+        // an allow-list that admits a peer the operator did not quite name.
+        let mut peer_ids: Vec<&str> = Vec::new();
+        let mut peer_keys: Vec<&str> = Vec::new();
+        for peer in &self.federation.peers {
+            if Id::parse(peer.node_id.trim()).is_err() {
+                problems.push(format!(
+                    "federation.peers entry {:?} node_id is not a node id (the canonical \
+                     26-character text form)",
+                    peer.node_id
+                ));
+            }
+            let key = peer.public_key.trim();
+            if decode_key_material(key).len() != 32 {
+                problems.push(format!(
+                    "federation.peers entry {:?} public_key must decode to exactly 32 bytes of \
+                     Ed25519 public key",
+                    peer.node_id
+                ));
+            }
+            let base_url = peer.base_url.trim();
+            if base_url.is_empty() {
+                problems.push(format!(
+                    "federation.peers entry {:?} has an empty base_url",
+                    peer.node_id
+                ));
+            } else if !(base_url.starts_with("https://") || base_url.starts_with("wss://")) {
+                problems.push(format!(
+                    "federation.peers entry {:?} base_url must be an https:// or wss:// URL",
+                    peer.node_id
+                ));
+            }
+            if peer.region.trim().is_empty() {
+                problems.push(format!(
+                    "federation.peers entry {:?} has an empty region",
+                    peer.node_id
+                ));
+            }
+            if peer_ids.contains(&peer.node_id.trim()) {
+                problems.push(format!(
+                    "federation.peers names node {:?} twice: one row per node, or the allow-list \
+                     cannot tell which entry speaks for it",
+                    peer.node_id
+                ));
+            }
+            if peer_keys.contains(&key) {
+                problems.push(format!(
+                    "federation.peers entries {:?} and another share one public_key: the key, not \
+                     the id, is what a handshake is checked against",
+                    peer.node_id
+                ));
+            }
+            peer_ids.push(peer.node_id.trim());
+            peer_keys.push(key);
+        }
+        if !self.federation.peers.is_empty() && !self.federation.enabled {
             problems.push(
-                "federation.max_clock_skew_seconds above 300 makes replay protection meaningless"
+                "federation.peers names a node but federation.enabled is false: enable \
+                 federation or remove the entries, a disabled mesh admits nothing"
                     .to_string(),
             );
         }
@@ -1166,9 +1254,9 @@ impl Config {
                 // Not an error, but worth saying out loud once at boot.
                 tracing::warn!("open registration is enabled in production");
             }
-            if self.federation.enabled && self.federation.allowed_peers.is_empty() {
+            if self.federation.enabled && self.federation.peers.is_empty() {
                 problems.push(
-                    "federation.enabled is true but federation.allowed_peers is empty: the mesh \
+                    "federation.enabled is true but federation.peers is empty: the mesh \
                      allow-list is mandatory (ADR-0005)"
                         .to_string(),
                 );
@@ -1803,6 +1891,83 @@ mod tests {
                 .contains(r#"client_peers entry "relative" public_url must be an absolute URL"#),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn mesh_peers_round_trip_and_a_well_formed_entry_passes() {
+        use base64::Engine as _;
+        let node_id = Id::from_bytes([7; 16]).to_text();
+        let key = base64::engine::general_purpose::STANDARD.encode([2u8; 32]);
+        let config = Config::from_toml_str(
+            &format!(
+                "[federation]\nenabled = true\n\
+                 [[federation.peers]]\nnode_id = \"{node_id}\"\npublic_key = \"{key}\"\n\
+                 base_url = \"wss://node-b:18090\"\nregion = \"region-b\"\n"
+            ),
+            &[],
+        )
+        .expect("builds");
+        config
+            .validate()
+            .expect("a well-formed mesh peer list is valid");
+        let peer = &config.federation.peers[0];
+        assert_eq!(peer.node_id, node_id);
+        assert_eq!(peer.base_url, "wss://node-b:18090");
+        assert_eq!(peer.region, "region-b");
+    }
+
+    #[test]
+    fn malformed_or_duplicated_mesh_peers_are_refused() {
+        use base64::Engine as _;
+        let node_id = Id::from_bytes([7; 16]).to_text();
+        let other = Id::from_bytes([9; 16]).to_text();
+        let key = base64::engine::general_purpose::STANDARD.encode([2u8; 32]);
+        let config = Config::from_toml_str(
+            &format!(
+                "[[federation.peers]]\nnode_id = \"not-a-node-id\"\npublic_key = \"{key}\"\n\
+                 base_url = \"wss://node-b:18090\"\nregion = \"region-b\"\n\
+                 [[federation.peers]]\nnode_id = \"{node_id}\"\npublic_key = \"c2hvcnQ=\"\n\
+                 base_url = \"wss://node-b:18090\"\nregion = \"region-b\"\n\
+                 [[federation.peers]]\nnode_id = \"{other}\"\npublic_key = \"{key}\"\n\
+                 base_url = \"http://node-c:18090\"\nregion = \"region-c\"\n\
+                 [[federation.peers]]\nnode_id = \"{node_id}\"\npublic_key = \"{key}\"\n\
+                 base_url = \"wss://node-b:18090\"\nregion = \"region-b\"\n"
+            ),
+            &[],
+        )
+        .expect("builds");
+        let rendered = config.validate().expect_err("must refuse").to_string();
+        assert!(
+            rendered.contains(r#"entry "not-a-node-id" node_id is not a node id"#),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("public_key must decode to exactly 32 bytes"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("base_url must be an https:// or wss:// URL"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("names node"), "{rendered}");
+        assert!(rendered.contains("share one public_key"), "{rendered}");
+    }
+
+    #[test]
+    fn an_empty_mesh_peer_list_is_refused_outside_development() {
+        let key = "0123456789abcdef0123456789abcdef";
+        let config = Config::from_sources(
+            &[],
+            &env(&[
+                ("MIGO_NODE__ENVIRONMENT", "production"),
+                ("MIGO_NODE__SIGNING_KEY", key),
+                ("MIGO_FEDERATION__ENABLED", "true"),
+                ("MIGO_AUTH__TOKEN_KEY", &format!("{}{}", key, key)),
+            ]),
+        )
+        .expect("builds");
+        let rendered = config.validate().expect_err("must refuse").to_string();
+        assert!(rendered.contains("federation.peers is empty"), "{rendered}");
     }
 
     #[test]

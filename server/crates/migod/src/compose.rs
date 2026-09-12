@@ -42,14 +42,14 @@ use migo_auth::{captcha::CaptchaGate, ConcreteAuth, SharedAuth};
 use migo_bots::SharedBots;
 use migo_calls::{CallsConfig, MemoryCallStore, SharedCallkeeper};
 use migo_captcha::{CaptchaService, InMemoryStore as CaptchaInMemoryStore};
-use migo_core::config::Environment;
+use migo_core::config::{decode_key_material, Environment, MeshPeer};
 use migo_core::metrics::Registry;
-use migo_core::{Clock, Config, Id, OsRandom, Random, Shutdown, SystemClock};
+use migo_core::{Clock, Config, Id, OsRandom, Random, Shutdown, SystemClock, Timestamp};
 use migo_crypto::NodeSecret;
 use migo_economy::{
     Attributes, Catalogue, Category, Listing, Price, SharedAnnouncer, SharedTreasurer, Sku,
 };
-use migo_federation::{MeshConfig, SharedMesh};
+use migo_federation::{MeshConfig, NewPeerSpec, SharedMesh};
 use migo_games::{SharedReferee, SharedRewards};
 use migo_gateway::{Dispatcher, Gateway, GatewayServices};
 use migo_keys::SharedKeyring;
@@ -650,6 +650,20 @@ impl App {
         )
         .context("cannot open the federation mesh")?;
 
+        // The allow-list the operator wrote is the mesh's admission truth (section 170):
+        // every `federation.peers` entry is reconciled into the mesh the moment it opens,
+        // so two nodes named to each other link as soon as their listeners and runners
+        // start — configuration alone, no programmatic call. The application is
+        // idempotent, so a restart converges on what the previous boot already stored.
+        apply_mesh_peers(
+            &federation,
+            Id::from_bytes(fed_node_id),
+            &config.federation.peers,
+            clock.now(),
+        )
+        .await
+        .context("cannot apply the configured mesh peers")?;
+
         // Tiered room fanout (section 170): the relay the dispatcher's publish paths
         // forward through and the mesh transport's ingest path registers watchers into —
         // one table, two halves, both held by the composition root because neither the
@@ -854,6 +868,70 @@ impl App {
             calls,
         })
     }
+}
+
+/// Applies the operator's `federation.peers` into the open mesh's allow-list.
+///
+/// The configuration-driven counterpart to a programmatic [`add_peer`](migo_federation::Mesh::add_peer)
+/// call, and the one admission path an operator actually has: every entry names a node
+/// completely — its id, its listener's address, its Ed25519 public key, its region — and
+/// each is handed to [`apply_peer`](migo_federation::Mesh::apply_peer), which admits a
+/// peer that is not yet allowed, leaves an unchanged one untouched, and brings a rotated
+/// key, address, or region to what the configuration says. That is what makes a restart
+/// converge instead of failing with `ALREADY_EXISTS`.
+///
+/// Validation has already run by the time this is reached (`App::build` validates the
+/// configuration first), but nothing here trusts it: an id that does not parse or a key
+/// that is not 32 bytes still fails the boot, because the alternative is an allow-list
+/// entry that names a peer the operator did not quite name. An entry naming this node
+/// itself is refused for the same reason a mesh does not dial its own address — it is
+/// always a configuration mistake, never an intent.
+///
+/// # Errors
+///
+/// Any entry that cannot be parsed or admitted, naming the entry; the caller fails the
+/// boot rather than serving with a partially applied allow-list.
+pub async fn apply_mesh_peers(
+    mesh: &SharedMesh,
+    own_node_id: Id,
+    peers: &[MeshPeer],
+    now: Timestamp,
+) -> anyhow::Result<()> {
+    for peer in peers {
+        let node_id = Id::parse(peer.node_id.trim()).with_context(|| {
+            format!(
+                "federation.peers entry {:?} is not a node id (the canonical 26-character \
+                 text form)",
+                peer.node_id
+            )
+        })?;
+        if node_id == own_node_id {
+            bail!(
+                "federation.peers names this node itself ({peer.node_id}): a node does not \
+                 federate with itself, point the entry at another node"
+            );
+        }
+        let public_key = decode_key_material(peer.public_key.trim());
+        let view = mesh
+            .apply_peer(
+                NewPeerSpec {
+                    node_id,
+                    public_key,
+                    base_url: peer.base_url.trim().to_string(),
+                    region: peer.region.trim().to_string(),
+                },
+                now,
+            )
+            .await
+            .with_context(|| format!("cannot admit the configured mesh peer {}", peer.node_id))?;
+        tracing::info!(
+            node = %view.node_id,
+            region = %view.region,
+            base_url = %view.base_url,
+            "mesh peer applied from configuration"
+        );
+    }
+    Ok(())
 }
 
 /// Reads this node's identity out of the configuration into the transport-facing [`NodeInfo`].

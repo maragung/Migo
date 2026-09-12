@@ -5884,6 +5884,40 @@ impl FederationStore for PostgresStore {
             .map(peer_of))
     }
 
+    async fn update_peer(
+        &self,
+        node_id: &str,
+        public_key: Vec<u8>,
+        base_url: String,
+        region: String,
+    ) -> Result<Option<PeerRecord>> {
+        // The update touches identity and addressing only; status, added_at, and
+        // last_seen_at keep their values, so the configuration cannot quietly
+        // reverse an operator's runtime decision about a peer. `node_peer_key_key`
+        // is named in the conflict mapping for the same reason `add_peer` names
+        // it: a key belongs to at most one row.
+        let result = entity::node_peer::Entity::update_many()
+            .filter(entity::node_peer::Column::NodeId.eq(node_id))
+            .set(entity::node_peer::ActiveModel {
+                public_key: Set(public_key),
+                base_url: Set(base_url),
+                region: Set(region),
+                ..Default::default()
+            })
+            .exec(&self.db)
+            .await
+            .map_err(|error| {
+                on_conflict(error, "node peer", |name| match name {
+                    "node_peer_key_key" => Some(fault::already_exists("node key")),
+                    _ => None,
+                })
+            })?;
+        if result.rows_affected == 0 {
+            return Ok(None);
+        }
+        self.peer(node_id).await
+    }
+
     async fn peers(&self, limit: u16) -> Result<Vec<PeerRecord>> {
         let rows = entity::node_peer::Entity::find()
             .order_by_desc(entity::node_peer::Column::AddedAt)

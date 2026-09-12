@@ -3,8 +3,9 @@
 //! # Three audiences, one trait
 //!
 //! [`Mesh`] serves three callers. An **operator** administers the allow-list —
-//! [`add_peer`](Mesh::add_peer), [`set_peer_status`](Mesh::set_peer_status),
-//! [`peers`](Mesh::peers), [`peer`](Mesh::peer) — the deliberate, approved joins section 170
+//! [`add_peer`](Mesh::add_peer), [`apply_peer`](Mesh::apply_peer),
+//! [`set_peer_status`](Mesh::set_peer_status), [`peers`](Mesh::peers),
+//! [`peer`](Mesh::peer) — the deliberate, approved joins section 170
 //! requires. The **transport layer** drives a link: it builds a [`hello`](Mesh::hello),
 //! signs a [`prove`](Mesh::prove), [`authenticate`](Mesh::authenticate)s the peer's proof,
 //! and runs every subsequent packet through [`check_sequence`](Mesh::check_sequence). And a
@@ -48,6 +49,23 @@ pub trait Mesh: Send + Sync {
     /// quietly replace. `now` stamps when the peer was admitted. Authorising that the caller
     /// may manage peers at all is the gateway's, done before this is reached.
     async fn add_peer(&self, spec: NewPeerSpec, now: Timestamp) -> Result<PeerView>;
+
+    /// Reconciles one configured peer into the allow-list, idempotently.
+    ///
+    /// The configuration-driven counterpart to [`add_peer`](Mesh::add_peer): the
+    /// composition root calls this once per `federation.peers` entry at startup,
+    /// so the operator's config document is the source of truth for the
+    /// allow-list. A peer absent from the allow-list is admitted exactly as
+    /// `add_peer` would admit it; a peer already admitted with the same key,
+    /// address, and region is left untouched, so a restart converges instead of
+    /// failing with `ALREADY_EXISTS`; and a changed key, address, or region is
+    /// brought to what the configuration says, which is the rotation path
+    /// section 170 leaves to operator tooling. A key change is logged, because
+    /// swapping the key a handshake is checked against is a trust decision that
+    /// belongs in the log even when the operator made it. A peer's allow-list
+    /// *status* is never touched here: pausing and blocking are runtime
+    /// decisions that survive a restart by design.
+    async fn apply_peer(&self, spec: NewPeerSpec, now: Timestamp) -> Result<PeerView>;
 
     /// Sets a peer's allow-list status, returning the updated view.
     ///

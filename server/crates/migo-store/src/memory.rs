@@ -3289,6 +3289,44 @@ impl FederationStore for MemoryStore {
         Ok(peer)
     }
 
+    async fn update_peer(
+        &self,
+        node_id: &str,
+        public_key: Vec<u8>,
+        base_url: String,
+        region: String,
+    ) -> Result<Option<PeerRecord>> {
+        let mut s = self.state.write();
+        // The old key is read first so every later step is a plain write: the
+        // guard does not allow a row borrow and an index borrow at once.
+        let Some(old_key) = s.peers.get(node_id).map(|peer| peer.public_key.clone()) else {
+            return Ok(None);
+        };
+        // The key's unique index is checked before anything is written — the same
+        // guard `add_peer` keeps, for the same reason: the key is what a handshake
+        // is checked against, so it belongs to at most one row.
+        if let Some(owner) = s.peer_by_key.get(&public_key) {
+            if owner != node_id {
+                return Err(fault::already_exists("node key"));
+            }
+        }
+        if old_key != public_key {
+            s.peer_by_key.remove(&old_key);
+            s.peer_by_key
+                .insert(public_key.clone(), node_id.to_string());
+        }
+        let Some(peer) = s.peers.get_mut(node_id) else {
+            return Ok(None);
+        };
+        peer.public_key = public_key;
+        peer.base_url = base_url;
+        peer.region = region;
+        // Status, added_at, and last_seen_at are deliberately untouched: the
+        // configuration sets identity and addressing, not an operator's runtime
+        // decision about whether this peer may federate right now.
+        Ok(Some(peer.clone()))
+    }
+
     async fn peer(&self, node_id: &str) -> Result<Option<PeerRecord>> {
         Ok(self.state.read().peers.get(node_id).cloned())
     }
