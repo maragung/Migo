@@ -97,12 +97,19 @@ const clients: MigoClient[] = [];
 
 let userSerial = 0;
 
-/** A unique account spec. Usernames stay in the server's alphabet: lowercase, digits, `_`. */
+/**
+ * A unique account spec. Usernames stay in the server's alphabet — lowercase, digits, `_` —
+ * and inside its 32-byte cap, which is why the label is truncated to a budget rather than
+ * trusted: the label is the one part whose length this file does not control (a scenario
+ * name grows past the cap without any test noticing, and the failure lands at registration
+ * as FIELD_TOO_LONG on a whole scenario). The suffix, not the label, carries uniqueness.
+ */
 function account(label: string): { username: string; passphrase: string } {
   userSerial += 1;
-  const suffix = `${Date.now().toString(36)}_${userSerial}_${randomBytes(2).toString('hex')}`;
+  const suffix = `${Date.now().toString(36)}${userSerial.toString(36)}${randomBytes(2).toString('hex')}`;
+  const budget = 32 - 'e2e_'.length - '_'.length - suffix.length;
   return {
-    username: `e2e_${label}_${suffix}`,
+    username: `e2e_${label.slice(0, budget)}_${suffix}`,
     passphrase: `correct-horse-battery-staple-${randomBytes(4).toString('hex')}`,
   };
 }
@@ -229,8 +236,18 @@ async function metric(name: string): Promise<number | undefined> {
   const response = await fetch(`${harness.apiUrl}/metrics`);
   assert.ok(response.ok, `/metrics answered ${response.status}`);
   const text = await response.text();
-  const line = text.split('\n').find((candidate) => candidate.startsWith(`${name} `));
-  return line === undefined ? undefined : Number.parseInt(line.slice(name.length + 1), 10);
+  // A series renders either bare (`name 0`) or labelled (`name{outcome="ok"} 0`).
+  // Most of the gateway's counters are by-reason series and therefore labelled, so
+  // matching only the bare form made a series that is registered and zero look
+  // absent — the exact failure the first CI run of the contract scenario hit.
+  const line = text
+    .split('\n')
+    .find((candidate) => candidate.startsWith(`${name} `) || candidate.startsWith(`${name}{`));
+  if (line === undefined) {
+    return undefined;
+  }
+  const value = line.slice(line.lastIndexOf(' ') + 1);
+  return Number.parseInt(value, 10);
 }
 
 /**
@@ -361,13 +378,21 @@ test('two accounts register, befriend, and chat over the real gateway', async ()
     assert.equal(atAlice.seq, bobAck.seq, 'the seq alice saw is the seq the server acknowledged');
   }
 
-  // The gapless sequencer: every acknowledgement the conversation handed out, across
-  // both senders, is 1..2*rounds with no hole and no reuse (brief section 92's promise
-  // that a sequence number is never reused is exactly this assertion).
-  const seqs = acks.map((ack) => ack.seq).sort((a, b) => a - b);
+  // The sequencer's own promises, not a guess at its starting point. A conversation's
+  // sequence space is shared by every event in it: the sender-key distributions that
+  // ride ahead of a member's first message are KeyExchange events on the same
+  // sequencer (the SDK's watermark counts them as events, exactly like tombstones),
+  // so the first text from each member does not land on seq 1 and the sequence of
+  // *messages* alone is not gapless. What section 92 actually promises — a sequence
+  // number is never reused and never handed out out of order — is asserted here
+  // against the acknowledgements themselves, which the per-round checks above already
+  // tied one-to-one to what the far side received.
+  const seqs = acks.map((ack) => ack.seq);
+  assert.equal(new Set(seqs).size, seqs.length, 'no sequence number is ever reused');
   assert.deepEqual(
     seqs,
-    Array.from({ length: rounds * 2 }, (_, i) => i + 1),
+    [...seqs].sort((a, b) => a - b),
+    'acknowledged sequence numbers never go backwards',
   );
 });
 
