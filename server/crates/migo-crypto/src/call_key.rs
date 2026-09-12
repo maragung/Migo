@@ -142,7 +142,7 @@ impl CallKeyState {
         call_id: Id,
         sealed: &[u8],
     ) -> Result<Self> {
-        let plaintext = aead::open(
+        let mut plaintext = aead::open(
             &join_wrapping_key(session_secret, call_id),
             call_id.as_bytes(),
             sealed,
@@ -553,10 +553,13 @@ mod tests {
         let sealed = caller
             .sealed_join_distribution(JOINER_SESSION, &mut random)
             .expect("seals");
-        assert_eq!(
+        // `CallKeyState` deliberately has neither `PartialEq` nor an all-seeing
+        // `Debug` — it holds key material — so the assertion matches the error
+        // instead of comparing whole states.
+        assert!(matches!(
             CallKeyState::from_join_distribution(SESSION, call_id(), &sealed),
             Err(CryptoError::DecryptionFailed)
-        );
+        ));
     }
 
     #[test]
@@ -571,7 +574,7 @@ mod tests {
             Id::from_bytes([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]),
             &sealed,
         );
-        assert_eq!(other, Err(CryptoError::DecryptionFailed));
+        assert!(matches!(other, Err(CryptoError::DecryptionFailed)));
     }
 
     #[test]
@@ -583,10 +586,10 @@ mod tests {
             .expect("seals");
         let last = sealed.len() - 1;
         sealed[last] ^= 1;
-        assert_eq!(
+        assert!(matches!(
             CallKeyState::from_join_distribution(JOINER_SESSION, call_id(), &sealed),
             Err(CryptoError::DecryptionFailed)
-        );
+        ));
     }
 
     #[test]
@@ -633,9 +636,9 @@ mod tests {
             &mut random,
         )
         .expect("seals");
-        assert_eq!(
+        assert!(matches!(
             CallKeyState::from_join_distribution(JOINER_SESSION, call_id(), &forged),
             Err(CryptoError::DecryptionFailed)
-        );
+        ));
     }
 }
