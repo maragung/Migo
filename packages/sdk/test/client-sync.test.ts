@@ -15,6 +15,11 @@
  * * **Background stop** — a hidden page parks the drain between entries without dropping
  *   anything, and the moment the page is visible the queue continues. Nothing fails, nothing
  *   duplicates.
+ * * **Gap-only resync** — the messaging domain keeps the highest contiguous sequence per
+ *   conversation (tombstones count, redeliveries do not regress, a gap holds the watermark
+ *   until filled), and a reconnect's catch-up starts from that watermark, so the fetch after
+ *   a reset asks for exactly what the outage cost — never the full resync section 158 forbids.
+ *   The sync gate behind the outbox parking is the same one any paging sync work awaits.
  *
  * They drive the real `MigoClient` over a scripted socket — the same harness shape the
  * membership-cache tests use — because the point under test is the client's own wiring, not
@@ -37,20 +42,32 @@ import {
   TopicKind,
   FLAG,
   MessageKind,
+  SyncStatus,
   decodeKeyBundleRequest,
   decodeMessageSend,
   decodeSubscribeRequest,
+  decodeSyncRequest,
   encodeAcknowledged,
   encodeConversationRosterResponse,
   encodeError,
   encodeKeyBundleResponse,
   encodeKeyPublishResult,
   encodeMessageAccepted,
+  encodeMessageEvent,
   encodePong,
   encodeSubscribeResponse,
+  encodeSyncResponse,
   encodeWelcome,
 } from '@migo/protocol';
-import type { ConversationRosterEntry, KeyBundle, MessageSend, Welcome } from '@migo/protocol';
+import type {
+  ConversationRosterEntry,
+  KeyBundle,
+  MessageEvent,
+  MessageSend,
+  SyncRequest,
+  SyncResponse,
+  Welcome,
+} from '@migo/protocol';
 import { KeyStore } from '../src/index.js';
 import { decodeFrame, encodeFrame, frameHeader, idFromBytes } from '@migo/wire';
 import type { Id } from '@migo/wire';
@@ -164,6 +181,10 @@ class ScriptedServer {
   readonly asked: number[] = [];
   /** When false, a MESSAGE_SEND is answered with a generic INTERNAL_ERROR refusal. */
   refuseSends = false;
+  /** Every decoded SyncRequest, in arrival order — what the gap-only assertions read. */
+  readonly syncs: SyncRequest[] = [];
+  /** Answers a SYNC from the test; when null, every sync is answered "nothing missing". */
+  syncScript: ((request: SyncRequest) => SyncResponse) | null = null;
   /** A custom refusal to answer MESSAGE_SEND with, as (code, symbol). */
   refusal: { code: number; symbol: string; retryAfterMs?: number } | null = null;
   /** The next seq the server hands a stored message. */
@@ -252,6 +273,29 @@ class ScriptedServer {
     }
     if (opcode === OP.UNSUBSCRIBE) {
       reply(encodeBody(encodeAcknowledged, { ok: true }));
+      return;
+    }
+    if (opcode === OP.SYNC) {
+      // The catch-up path's server: record what was asked and answer from a script the test
+      // installs. A null script answers "nothing missing" — the reply a caught-up conversation
+      // earns, which is what the gap-only tests assert against.
+      const request = decodeBody(decodeSyncRequest, frame.payload);
+      this.syncs.push(request);
+      const scripted = this.syncScript;
+      if (scripted === null) {
+        reply(
+          encodeBody(encodeSyncResponse, {
+            conversationId: request.conversationId,
+            status: SyncStatus.Ok,
+            fromSeq: request.haveSeq,
+            toSeq: request.haveSeq,
+            more: false,
+            messages: [],
+          }),
+        );
+        return;
+      }
+      reply(encodeBody(encodeSyncResponse, scripted(request)));
       return;
     }
     if (opcode === OP.CONVERSATION_ROSTER) {
@@ -550,6 +594,149 @@ test('after a session reset, the topics are re-subscribed user-first', async () 
       userIndex < roomIndex && roomIndex < firstConversation,
       `the reset subscribes User before Room before Conversation (saw ${kinds.join(',')})`,
     );
+  } finally {
+    await client.disconnect();
+  }
+});
+
+/**
+ * A synthetic message event, as the watermark tests feed the live path.
+ *
+ * The envelope is filler on purpose: the watermark advances before dispatch, so what these
+ * tests pin is the *accounting* of held sequences — including undecryptable ones, which is
+ * exactly what a gap detection must not be fooled by — and the pending buffer the filler
+ * lands in is bounded and torn down with the client.
+ */
+function eventOf(conversationId: Id, seq: number, deleted = false): MessageEvent {
+  const event: MessageEvent = {
+    messageId: idOf(0x10_00 + seq),
+    conversationId,
+    seq,
+    senderId: idOf(20),
+    senderDevice: idOf(0x9001),
+    kind: MessageKind.Text,
+    envelope: new Uint8Array([seq]),
+    createdAt: 1_700_000_000_000,
+  };
+  if (deleted) {
+    event.deleted = true;
+  }
+  return event;
+}
+
+/** Delivers a pushed MESSAGE_EVENT on the live socket, as the server's fan-out would. */
+function deliverEvent(socket: ControlledSocket, event: MessageEvent): void {
+  socket.deliver(
+    encodeFrame({
+      header: frameHeader(OP.MESSAGE_EVENT, 0),
+      payload: encodeBody(encodeMessageEvent, event),
+    }),
+  );
+}
+
+test('the watermark tracks the contiguous prefix: live events advance it, a gap holds it', async () => {
+  const { client, socket } = await connectedClient();
+  try {
+    const conversation = idOf(0x5eed);
+    deliverEvent(socket, eventOf(conversation, 1));
+    deliverEvent(socket, eventOf(conversation, 2));
+    deliverEvent(socket, eventOf(conversation, 3));
+    await tick();
+    assert.equal(client.messaging.watermark(conversation), 3, 'contiguous delivery advances');
+
+    // A tombstone occupies a sequence number like any message; the prefix is of events.
+    deliverEvent(socket, eventOf(conversation, 4, true));
+    await tick();
+    assert.equal(client.messaging.watermark(conversation), 4, 'a deletion extends the prefix');
+
+    // A redelivery is not a regression, and a gap is not an advance.
+    deliverEvent(socket, eventOf(conversation, 2));
+    deliverEvent(socket, eventOf(conversation, 7));
+    await tick();
+    assert.equal(client.messaging.watermark(conversation), 4, 'a gap holds the watermark still');
+
+    // The gap closes from below: 5, 6 advance, and then 7 is exactly one past the watermark.
+    deliverEvent(socket, eventOf(conversation, 5));
+    deliverEvent(socket, eventOf(conversation, 6));
+    await tick();
+    assert.equal(client.messaging.watermark(conversation), 6, 'filling the gap advances');
+
+    // An untouched conversation has no watermark to resume from — the caller picks its floor.
+    assert.equal(client.messaging.watermark(idOf(0xbee2)), undefined);
+  } finally {
+    await client.disconnect();
+  }
+});
+
+test('after a reset, the watermark names the gap the reconnect must sync', async () => {
+  const { client, server, socket } = await connectedClient();
+  try {
+    const conversation = idOf(0x5eed);
+    await client.watchConversation(conversation);
+    // The thread's held history, built the way the app builds it: a full replay from zero.
+    server.syncScript = (request) => ({
+      conversationId: request.conversationId,
+      status: SyncStatus.Ok,
+      fromSeq: 1,
+      toSeq: 3,
+      more: false,
+      messages: [eventOf(conversation, 1), eventOf(conversation, 2), eventOf(conversation, 3)],
+    });
+    const first = await client.catchUp(conversation, 0, 200);
+    assert.equal(first.toSeq, 3);
+    assert.equal(client.messaging.watermark(conversation), 3);
+    assert.equal(server.syncs.length, 1);
+    const firstSync = server.syncs[0];
+    assert.ok(firstSync !== undefined);
+    assert.equal(firstSync.haveSeq, 0, 'a fresh thread replays from the beginning');
+
+    // The session resets (fresh WELCOME, not a resume); the transcript and the watermark stay.
+    socket.readyState = ControlledSocket.CLOSED;
+    socket.close(1006, 'link dropped');
+    await tick();
+    socket.readyState = ControlledSocket.OPEN;
+    socket.fireOpen();
+    await tick();
+    socket.deliver(welcomeFrame(idOf(2), false));
+    await tick();
+    await tick();
+    await tick();
+
+    // The reconnect's catch-up starts from the watermark, so the only fetch is the gap —
+    // section 158's "never a full resync when only a few messages are missing".
+    const resumed = client.catchUp(
+      conversation,
+      client.messaging.watermark(conversation) ?? 0,
+      200,
+    );
+    await tick();
+    const gapSync = server.syncs[server.syncs.length - 1];
+    assert.ok(gapSync !== undefined, 'the reconnect sent a SYNC');
+    assert.equal(gapSync.conversationId, conversation);
+    assert.equal(gapSync.haveSeq, 3, 'the reconnect syncs from the held watermark, not zero');
+    await resumed;
+  } finally {
+    await client.disconnect();
+  }
+});
+
+test('a hidden page parks the sync gate; a visible one admits work again', async () => {
+  const { client } = await connectedClient();
+  try {
+    // Visible by default: work proceeds without waiting.
+    await client.whenVisible();
+
+    client.setPageVisible(false);
+    let admitted = false;
+    const parked = client.whenVisible().then(() => {
+      admitted = true;
+    });
+    await tick();
+    assert.ok(!admitted, 'a hidden page holds the gate shut');
+
+    client.setPageVisible(true);
+    await parked;
+    assert.ok(admitted, 'visibility admits the parked work again');
   } finally {
     await client.disconnect();
   }
