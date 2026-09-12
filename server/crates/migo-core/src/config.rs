@@ -632,7 +632,7 @@ pub struct MeshPeer {
 }
 
 /// Server-to-server mesh.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct FederationConfig {
     /// Whether to accept and originate mesh connections.
@@ -651,16 +651,6 @@ pub struct FederationConfig {
     /// Empty — the single-node posture — means the document lists this node
     /// alone and clients have nowhere else to go.
     pub client_peers: Vec<ClientPeer>,
-}
-
-impl Default for FederationConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            peers: Vec::new(),
-            client_peers: Vec::new(),
-        }
-    }
 }
 
 /// Cost-based abuse control (ADR-0006). Per-opcode costs live in the protocol
