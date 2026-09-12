@@ -4774,7 +4774,7 @@ Code yang tidak dikenal client diperlakukan menurut class-nya berdasarkan range.
 
 STATUS: BUILT untuk primitive di migo-crypto dan untuk penolakan frame cacat di migo-wire. STATUS: BUILT juga untuk model ancaman penuh beserta pengujiannya: modelnya ada di docs/03-security-threat-model.md section 12, setiap klaimnya dipasang pada penguji yang diberi nama di sana, penguji komposisi barunya ada di server/crates/migo-crypto/tests/threat_model.rs, dan klaim yang belum punya penguji ditandai eksplisit sebagai unverified bersama temuannya di section 12.5 dokumen itu.
 
-Yang dilindungi transport, yaitu TLS 1.3 atau QUIC:
+Yang dilindungi transport, yaitu TLS 1.3 — diterminasi di dalam proses pada listener QUIC, atau diterminasi di depan listener WebSocket oleh deployment yang menjalankannya:
 
 Metadata di kabel
 Isi pesan Public Room dan Managed Room
@@ -4808,8 +4808,9 @@ Urutan ini disengaja. Decode payload adalah bagian termahal, dan pekerjaan mahal
 
 Aturan keamanan protocol lainnya:
 
-Frame dengan auth level Server yang datang dari socket client WAJIB ditolak dan dicatat sebagai insiden
-Tidak ada transport plaintext, termasuk di development
+Frame dengan auth level Server yang datang dari socket client WAJIB ditolak dan dicatat sebagai insiden. Rekaman insidennya terstruktur dan tahan lama di log node, memuat session, akun dan device bila sudah diautentikasi, kelas jaringan remote, opcode pelanggar, dan alasannya — dan tidak memuat payload, token, atau key material apa pun
+Transport plaintext hanya diizinkan di loopback. TLS diterminasi di dalam proses pada listener QUIC; listener WebSocket adalah TCP polos, sehingga deployment yang membuat listener itu dijangkau dari luar loopback WAJIB menempatkan terminasi TLS — reverse proxy atau load balancer — di depannya. Ini syarat operasional node, bukan saran
+Karena itu aturan lama "tidak ada transport plaintext, termasuk di development" tidak dapat dipenuhi tanpa berbohong: tumpukan development yang dikirim di repositori ini memang plaintext, termasuk ws://localhost:8080/ws di infra/compose/docker-compose.yml dan Environment::Staging yang dibolehkan tanpa TLS, sehingga klaim itu tidak berlaku untuk satu pun deployment WebSocket di repositori ini. Sisa ini diakui terbuka di section 12.5 model ancaman, bukan disembunyikan
 Token bersifat opaque HMAC-SHA256, bukan JWT, sehingga tidak ada permukaan algoritma yang dapat dibingungkan
 Refresh token bersifat rotating. Pemakaian ulang refresh token yang sudah ditukar dianggap pencurian dan seluruh family session dicabut, dijawab REFRESH_REUSE_DETECTED
 Push token dan bot token disimpan dalam bentuk hash dan TIDAK BOLEH ditulis ke log

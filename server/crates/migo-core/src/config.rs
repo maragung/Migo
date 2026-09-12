@@ -108,7 +108,9 @@ pub enum Environment {
     /// A laptop. Insecure defaults are permitted and logged.
     #[default]
     Development,
-    /// A shared pre-production deployment. Production checks apply, minus TLS.
+    /// A shared pre-production deployment. Production checks apply, minus in-process TLS:
+    /// the WebSocket listener is plain TCP by design, so a staging node reachable off
+    /// loopback still requires TLS termination in front of it (brief section 162).
     Staging,
     /// Real users. Every check applies.
     Production,
