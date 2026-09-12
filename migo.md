@@ -5165,7 +5165,7 @@ Packet dari node yang tidak dikenal ditolak sebelum decode payload
 
 170. FEDERATION ROUTING, DISCOVERY, FAILOVER, SHARDING
 
-STATUS: BUILT untuk FED_DIRECTORY, join eksplisit dengan allow-list, dan home node tunggal per room di migo-federation. STATUS: SPEC untuk pengarahan client ke node terdekat berdasarkan latensi terukur dan untuk failover antar node. Keduanya tidak lagi membutuhkan topology multi-region nyata karena beberapa node berdampingan mengikuti pola tools/2node cukup untuk mengujinya, dan keduanya tetap SPEC karena kodenya belum ditulis.
+STATUS: BUILT untuk FED_DIRECTORY, join eksplisit dengan allow-list, home node tunggal per room di migo-federation, dan fan-out bertingkat lintas node di migod melalui room_relay: node yang anggotanya mendapat topik room lewat SUBSCRIBE mengirim FED_ROOM_SUBSCRIBE sekali per room ke home node (node yang dijawab oleh label home_region pada baris room), home node mencatat peer yang berlangganan per room, lalu setiap publish room, baik dari jalur request maupun dari room-presence, mengantre satu salinan FED_ROOM_EVENT per node yang berlangganan dan node penerima menyebarkannya ke hub lokalnya. IDL yang dibekukan belum memiliki opcode unsubscribe, jadi daftar watcher hanya bertumbuh dan salinan yang tiba tanpa pelanggan lokal adalah no-op murah. STATUS: SPEC untuk pengarahan client ke node terdekat berdasarkan latensi terukur dan untuk failover antar node. Keduanya tidak lagi membutuhkan topology multi-region nyata karena beberapa node berdampingan mengikuti pola tools/2node cukup untuk mengujinya, dan keduanya tetap SPEC karena kodenya belum ditulis.
 
 Discovery:
 
