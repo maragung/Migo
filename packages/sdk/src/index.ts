@@ -125,6 +125,11 @@ export type { CreateConversationOptions } from './domains/conversations.js';
 export { SyncDomain } from './domains/sync.js';
 export type { SyncOptions } from './domains/sync.js';
 
+// --- the offline-first client half: the queue and the gate ---
+export { Outbox } from './outbox.js';
+export type { OutboxEntry, OutboxOptions, OutboxState } from './outbox.js';
+export { SyncGate } from './sync-gate.js';
+
 export { TypingDomain } from './domains/typing.js';
 export { PresenceDomain } from './domains/presence.js';
 export type { PresenceOptions } from './domains/presence.js';

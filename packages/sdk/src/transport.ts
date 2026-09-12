@@ -197,6 +197,8 @@ export class GatewayTransport {
   #shouldReconnect = true;
   /** True while a reconnect (as opposed to a first connect) is in flight. */
   #isReconnect = false;
+  /** A reset noticed in the WELCOME that has not reached its handler yet (see #onReady). */
+  #resetPending = false;
 
   /** The in-flight handshake's settlers, or null when not handshaking. */
   #handshake: { resolve: () => void; reject: (error: Error) => void } | null = null;
@@ -514,12 +516,15 @@ export class GatewayTransport {
     // A resumed session keeps its seq space and its in-flight requests: the server replays the
     // Critical frames past our watermark, and those replies resolve the pending promises. A fresh
     // session on a reconnect means the old requests will never be answered — reject them and tell
-    // the app to resync — and the seq space restarts at zero.
+    // the app to resync — and the seq space restarts at zero. The reset is *delivered* once the
+    // session reaches Ready (below), not here: a handler that re-subscribes or re-syncs the moment
+    // it hears about the reset would be sending into a transport that is still `reconnecting`,
+    // which the request guard refuses.
     if (this.#isReconnect && !resumed) {
       this.#rejectAllPending(new TransportError('session could not be resumed'));
       this.#lastServerSeq = 0;
       this.#lastAckedSeq = 0;
-      this.#options.onReset?.();
+      this.#resetPending = true;
     }
 
     if (resumed || welcome.authenticatedUser !== undefined) {
@@ -574,6 +579,12 @@ export class GatewayTransport {
     const settle = this.#handshake;
     this.#handshake = null;
     settle?.resolve();
+    // The reset notice rides Ready, not the WELCOME that caused it, so a handler reading this
+    // transport finds a session it can immediately send on (see #onWelcome).
+    if (this.#resetPending) {
+      this.#resetPending = false;
+      this.#options.onReset?.();
+    }
   }
 
   /** Fails the in-flight handshake and closes the socket. */
