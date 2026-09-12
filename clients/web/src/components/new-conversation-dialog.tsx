@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 
 import { ConversationKind, RelationshipKind } from '@migo/sdk';
 import type { Id, RelationshipEntry, SuggestedUser } from '@migo/sdk';
@@ -208,7 +209,10 @@ export function NewConversationDialog({ onClose }: { onClose: () => void }): Rea
     }
   }
 
-  return (
+  // Portaled to the body: a modal opened from inside a window must be the topmost surface —
+  // the desk stacks windows by an unbounded counter, so a dialog rendered in place could stay
+  // below another window.
+  return createPortal(
     <div
       className="modal-backdrop"
       role="dialog"
@@ -349,6 +353,7 @@ export function NewConversationDialog({ onClose }: { onClose: () => void }): Rea
           </button>
         </form>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

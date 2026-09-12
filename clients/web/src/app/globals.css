@@ -240,6 +240,9 @@
   --z-overlay: 300;
   --z-modal: 400;
   --z-toast: 500;
+  /* The desk's own ceiling — below every overlay, so the windows it stacks (whose z counters
+     grow without bound) can never paint above a sheet or a dialog. */
+  --z-desk: 50;
 
   /* layout: content never stretches edge-to-edge on a monitor */
   --content-max: 1280px;
@@ -4617,6 +4620,11 @@ button.activity-row-btn:focus-visible {
   position: fixed;
   inset: 0;
   overflow: hidden;
+  /* The ceiling for every window the desk stacks: the focus counter inside grows without
+     bound, so the desk itself must be the fence that keeps it below the overlays (the sheets
+     at 2100, the confirm dialog at 3000). One z-index here is a stacking context — the
+     windows' own z values compete only with each other. */
+  z-index: var(--z-desk);
   font-size: var(--fs-body);
 }
 .desk-boot {

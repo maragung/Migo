@@ -431,7 +431,9 @@ export function AppShell(): ReactNode {
         return existing.conversationId;
       }
       try {
-        const summary = await client.conversations.create(ConversationKind.Direct, [userId]);
+        // startConversation, not a bare create: the first send needs the membership cached
+        // (recipientDevices) and the topic subscribed (replies arrive) — create does neither.
+        const summary = await client.startConversation(ConversationKind.Direct, [userId]);
         noteConversation(summary);
         return summary.conversationId;
       } catch {
@@ -613,6 +615,13 @@ export function AppShell(): ReactNode {
 
   return (
     <SectionNavProvider navigate={navigate}>
+      {/* The desk is one stacking context (its z-index is `var(--z-desk)`, far below every
+          overlay): the windows inside it carry unbounded z counters — every focus click
+          increments — and without this fence a long session lets a window's z overtake the
+          sheets (2100) and the confirm dialog (3000), burying them under a window they were
+          meant to sit above. Overlays that portal to document.body (sheets, dialogs) and this
+          element are siblings, so the desk's own z-index is the ceiling for everything inside
+          it — the newest overlay always wins, whichever window was focused last. */}
       <div className="desk-bg desk-root">
         {/* ===== the phone's home ===== */}
         {isMobile && visibleNavs.length > 0 ? (

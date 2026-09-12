@@ -72,6 +72,9 @@ export function useJoinRoom(onOpenConversation: (conversationId: Id) => void): J
       setJoining((prev) => new Set(prev).add(room.roomId));
       try {
         const joined = await client.rooms.join(room.roomId);
+        // The join answers with a handle, not a membership: prime the roster and watch both
+        // topics before the thread opens, so the first send has an audience and replies arrive.
+        await client.startRoomConversation(joined.conversationId, joined.room.roomId);
         noteConversation(joinedRoomSummary(joined));
         noteRoom(roomInfoOf(joined));
         onOpenConversation(joined.conversationId);

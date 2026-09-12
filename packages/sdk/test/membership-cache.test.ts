@@ -33,6 +33,7 @@ import {
   EncryptionMode,
   MemberChange,
   decodeKeyBundleRequest,
+  decodeRosterReq,
   decodeSubscribeRequest,
   encodeConversationListResponse,
   encodeConversationMemberEvent,
@@ -40,6 +41,8 @@ import {
   encodeKeyBundleResponse,
   encodeKeyPublishResult,
   encodePong,
+  encodeRoomMemberEvent,
+  encodeRosterResponse,
   encodeSubscribeResponse,
   encodeWelcome,
 } from '@migo/protocol';
@@ -47,6 +50,7 @@ import type {
   ConversationRosterEntry,
   ConversationSummary,
   KeyBundle,
+  RosterEntry,
   Welcome,
 } from '@migo/protocol';
 import { decodeFrame, encodeFrame, frameHeader, idFromBytes } from '@migo/wire';
@@ -162,6 +166,8 @@ class ScriptedServer {
   readonly asked: number[] = [];
   /** The accounts the roster names, as the numbers the ids were minted from. */
   roster: number[] = [];
+  /** The room roster's accounts, for the room-side tests. */
+  roomRoster: number[] = [];
 
   constructor(socket: ControlledSocket) {
     this.socket = socket;
@@ -177,6 +183,20 @@ class ScriptedServer {
           userId: idOf(userId),
           change,
           memberCount: 2,
+        }),
+      }),
+    );
+  }
+
+  /** Delivers a *room* member event, as the rooms fan-out would — naming the room, not the conversation. */
+  roomMemberEvent(userId: number, joined: boolean): void {
+    this.socket.deliver(
+      encodeFrame({
+        header: frameHeader(OP.ROOM_MEMBER_EVENT, 0),
+        payload: encodeBody(encodeRoomMemberEvent, {
+          roomId: idOf(0x100d),
+          userId: idOf(userId),
+          joined,
         }),
       }),
     );
@@ -231,6 +251,19 @@ class ScriptedServer {
         joinedAt: 1_700_000_000_000,
       }));
       reply(encodeBody(encodeConversationRosterResponse, { entries }));
+      return;
+    }
+    if (opcode === OP.ROOM_ROSTER) {
+      const request = decodeBody(decodeRosterReq, frame.payload);
+      const limit = request.limit ?? this.roomRoster.length;
+      const start =
+        request.after === undefined
+          ? 0
+          : this.roomRoster.findIndex((n) => idOf(n) === request.after) + 1;
+      const members: RosterEntry[] = this.roomRoster
+        .slice(start, start + limit)
+        .map((n) => ({ accountId: idOf(n), role: 0, joinedAt: 1_700_000_000_000 }));
+      reply(encodeBody(encodeRosterResponse, { members }));
       return;
     }
     if (opcode === OP.KEY_BUNDLE_FETCH) {
@@ -396,6 +429,66 @@ test('an incomplete cache is not patched into a wrong answer', async () => {
     assert.ok(
       !tags.has(idOf(30)),
       'the event arrives before the roster the promotion reads, and the roster is the answer',
+    );
+  } finally {
+    await client.disconnect();
+  }
+});
+
+test('a joined room is primed: the roster pages in, and both topics are watched', async () => {
+  const { client, server } = await connectedClient();
+  try {
+    // A room of five, paged two at a time: the page cap forces the loop to walk three pages.
+    server.roomRoster = [40, 41, 42, 43, 44];
+    await client.startRoomConversation(idOf(0x5eed), idOf(0x100d), 2);
+
+    const audience = await client.recipientDevices(idOf(0x5eed));
+    const tags = new Set(audience.map((device) => device.userId));
+    for (const n of [40, 41, 42, 43, 44]) {
+      assert.ok(tags.has(idOf(n)), `room member ${n} is in the audience with no roster re-read`);
+    }
+    // Three pages asked (2+2+1), and then the audience answered from the cache: the fourth
+    // CONVERSATION_ROSTER the list row's preview might have caused never happens, because the
+    // room's own roster already primed the membership complete.
+    assert.equal(
+      server.asked.filter((opcode) => opcode === OP.ROOM_ROSTER).length,
+      3,
+      'the roster paged until a short page',
+    );
+    assert.equal(
+      server.asked.filter((opcode) => opcode === OP.CONVERSATION_ROSTER).length,
+      0,
+      'a membership primed from the room roster needs no conversation roster read',
+    );
+  } finally {
+    await client.disconnect();
+  }
+});
+
+test('a room member event folds the joiner into the audience, so old members seal for them', async () => {
+  const { client, server } = await connectedClient();
+  try {
+    server.roomRoster = [40, 41];
+    await client.startRoomConversation(idOf(0x5eed), idOf(0x100d), 50);
+
+    // A new member joins the room: the event names the room, and the cache it must reach is
+    // the conversation's. Without the bridge the next audience would omit the joiner — the
+    // exact "new user sends, old members never receive" shape, in miniature.
+    server.roomMemberEvent(42, true);
+    await tick();
+    const audience = await client.recipientDevices(idOf(0x5eed));
+    assert.ok(
+      audience.some((device) => device.userId === idOf(42)),
+      'the room joiner is in the next audience',
+    );
+
+    // And a departure drops them again, with no roster re-read either way.
+    server.roomMemberEvent(42, false);
+    await tick();
+    const after = await client.recipientDevices(idOf(0x5eed));
+    assert.ok(
+      !after.some((device) => device.userId === idOf(42)),
+      'the room leaver is out of the next audience',
     );
   } finally {
     await client.disconnect();

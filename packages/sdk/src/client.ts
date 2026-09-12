@@ -50,6 +50,7 @@ import {
   encodePing,
   decodePong,
   decodeConversationMemberEvent,
+  decodeRoomMemberEvent,
   MemberChange,
 } from '@migo/protocol';
 import type {
@@ -57,6 +58,7 @@ import type {
   ConversationMemberEvent,
   ConversationSummary,
   ConversationListResponse,
+  RoomMemberEvent,
   SubscribeResponse,
   SyncResponse,
   Topic,
@@ -221,6 +223,13 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   readonly #peerIdentitiesCache = new Map<Id, PeerIdentity[]>();
   /** Every topic we have an active subscription to, re-sent after a session reset. */
   readonly #subscribedTopics = new Map<string, Topic>();
+  /**
+   * Room id to its conversation id, so a room's member events can patch the conversation they
+   * belong to. Rooms publish membership movement on the room's own topic naming the room, while
+   * the membership cache is keyed by conversation — this is the bridge {@link #applyRoomMemberEvent}
+   * reads. Filled by {@link startRoomConversation}, which is the one moment both halves are known.
+   */
+  readonly #roomConversations = new Map<Id, Id>();
   /**
    * Unsubscribers for the client-internal event listeners ({@link #applyMemberEvent}'s wiring),
    * torn down on disconnect so a reconnect does not stack a second copy of each.
@@ -584,6 +593,42 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   }
 
   /**
+   * Primes a joined room for sending and receiving: pages its roster into the membership cache and
+   * subscribes both of its topics.
+   *
+   * `rooms.join` answers with a handle, not a membership, and subscribes nothing — a joiner who
+   * went straight to the thread could neither choose an encryption audience (the first send throws
+   * "membership is unknown") nor hear a reply (the conversation topic is unwatched). This helper
+   * is the join's other half: the roster is paged until a short page (a room can dwarf the page),
+   * cached complete, and both the conversation topic (messages) and the room topic (membership
+   * and state) are subscribed. Callers that resume an already-joined room may call it again
+   * freely — the pages re-read, the subscriptions are idempotent server-side.
+   */
+  async startRoomConversation(conversationId: Id, roomId: Id, rosterPageSize = 500): Promise<void> {
+    const ctx = this.#requireConnected();
+    const ids: Id[] = [];
+    let after: Id | undefined;
+    // Page until a short page: the roster is the audience the next send seals for, and a preview
+    // here would mean a member who can never decrypt.
+    for (;;) {
+      const page = await ctx.rooms.getRoster(roomId, rosterPageSize, after);
+      ids.push(...page.map((entry) => entry.accountId));
+      if (page.length < rosterPageSize) {
+        break;
+      }
+      const cursor = page[page.length - 1]?.accountId;
+      if (cursor === undefined) {
+        break;
+      }
+      after = cursor;
+    }
+    this.rememberMembers(conversationId, ids);
+    this.#roomConversations.set(roomId, conversationId);
+    await this.watchConversation(conversationId);
+    await this.watchRoom(roomId);
+  }
+
+  /**
    * Lists conversations, priming each one's membership and subscribing to it.
    *
    * After this returns, every listed conversation can be sent to and will deliver inbound events.
@@ -696,6 +741,46 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
       });
     } else if (departed && held) {
       this.#members.set(event.conversationId, {
+        ids: cached.ids.filter((id) => id !== event.userId),
+        complete: cached.complete,
+      });
+    }
+  }
+
+  /**
+   * Applies a room's membership movement onto the conversation the room is carried by.
+   *
+   * Rooms publish joins and departures as {@link RoomMemberEvent}s on the room's own topic —
+   * naming the room, not the conversation — so without this bridge a room's existing members
+   * would never fold a new joiner into the membership cache, and the next send would seal for
+   * the group as it stood before the join: the joiner can never decrypt. `joined` is the wire's
+   * own word for it (the event predates `change`); when `change` is present it wins, the same
+   * way {@link #applyMemberEvent} reads it.
+   */
+  #applyRoomMemberEvent(event: RoomMemberEvent): void {
+    const conversationId = this.#roomConversations.get(event.roomId);
+    if (conversationId === undefined) {
+      return;
+    }
+    const joined = event.change !== undefined ? event.change === MemberChange.Joined : event.joined;
+    const departed =
+      event.change !== undefined
+        ? event.change === MemberChange.Left ||
+          event.change === MemberChange.Kicked ||
+          event.change === MemberChange.Banned
+        : !event.joined;
+    const cached = this.#members.get(conversationId);
+    if (cached === undefined) {
+      return;
+    }
+    const held = cached.ids.includes(event.userId);
+    if (joined && !held) {
+      this.#members.set(conversationId, {
+        ids: [...cached.ids, event.userId],
+        complete: cached.complete,
+      });
+    } else if (departed && held) {
+      this.#members.set(conversationId, {
         ids: cached.ids.filter((id) => id !== event.userId),
         complete: cached.complete,
       });
@@ -1185,6 +1270,14 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     this.#unsubscribes.push(
       rpc.on(OP.CONVERSATION_MEMBER_EVENT, decodeConversationMemberEvent, (event) => {
         this.#applyMemberEvent(event);
+      }),
+    );
+    // The same duty for rooms, which publish their membership movement on their own topic:
+    // without this listener a room's joiners would be missing from every existing member's
+    // audience for the next send.
+    this.#unsubscribes.push(
+      rpc.on(OP.ROOM_MEMBER_EVENT, decodeRoomMemberEvent, (event) => {
+        this.#applyRoomMemberEvent(event);
       }),
     );
 

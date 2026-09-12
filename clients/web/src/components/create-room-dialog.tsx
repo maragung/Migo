@@ -14,6 +14,7 @@
 
 import { useEffect, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 
 import { RoomKind } from '@migo/sdk';
 import type { Id } from '@migo/sdk';
@@ -121,7 +122,10 @@ export function CreateRoomDialog({
 
   const isPublic = kind === RoomKind.Public;
 
-  return (
+  // Portaled to the body: a modal opened from inside a window must be the topmost surface —
+  // the desk stacks windows by an unbounded counter, so a dialog rendered in place could stay
+  // below another window.
+  return createPortal(
     <div
       className="modal-backdrop"
       role="dialog"
@@ -210,6 +214,7 @@ export function CreateRoomDialog({
           </button>
         </form>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

@@ -10,6 +10,7 @@
 
 import { useEffect } from 'react';
 import type { ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 
 export function ConfirmDialog({
   open,
@@ -47,7 +48,10 @@ export function ConfirmDialog({
     return null;
   }
 
-  return (
+  // Portaled to the body so the confirmation sits above every window the desk stacks — the
+  // desk is its own stacking context, so a dialog rendered inside it could never be the
+  // topmost surface when another window holds the higher z.
+  return createPortal(
     <div
       className="confirm-backdrop"
       role="dialog"
@@ -73,6 +77,7 @@ export function ConfirmDialog({
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

@@ -1779,6 +1779,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val joined: RoomJoinResponse = live.client.rooms.join(room.roomId)
+                // The join answers with a handle, not a membership: prime the roster and watch
+                // both topics before the thread opens, so the first send has an audience and
+                // replies arrive.
+                live.client.startRoomConversation(joined.conversationId, joined.room.roomId)
                 noteRoom(joined)
                 signedIn { current ->
                     current.copy(
@@ -1829,6 +1833,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val joined: RoomJoinResponse = live.client.rooms.create(slug, name, kind, topic)
+                // Creation is entry: the reply is a join handle, so it needs the join's other
+                // half — roster primed, both topics watched — before the thread opens.
+                live.client.startRoomConversation(joined.conversationId, joined.room.roomId)
                 noteRoom(joined)
                 open(joined.conversationId, joined.room.name)
             } catch (cancelled: CancellationException) {

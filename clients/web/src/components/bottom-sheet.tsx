@@ -16,6 +16,7 @@
 
 import { useEffect, useRef } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 
 import { Icon } from './icons.js';
 
@@ -53,7 +54,10 @@ export function BottomSheet({
     };
   }, [onClose]);
 
-  return (
+  // Portaled to the body so the sheet sits above every window no matter where it was opened:
+  // rendered in place, a sheet inside one window would stay below another window the desk
+  // stacks above it — the newest surface must always be the top one.
+  return createPortal(
     <div
       className={`sheet-backdrop${variant === 'auth' ? ' sheet-backdrop-auth' : ''}`}
       onClick={onClose}
@@ -86,6 +90,7 @@ export function BottomSheet({
         </header>
         <div className="sheet-body">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

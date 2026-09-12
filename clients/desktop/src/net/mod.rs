@@ -1019,16 +1019,23 @@ impl MemberCache {
     /// set alone. `complete` is never touched: a preview that already truncates cannot be made
     /// whole by patching it — only the roster read promotes.
     fn apply(&mut self, event: &migo_protocol::ConversationMemberEvent) {
-        match event.change {
+        self.apply_change(event.user_id, event.change);
+    }
+
+    /// The same movement, factored so a *room* member event can apply it too: the room stream
+    /// reports the same joins and departures the conversation stream does, it just names the
+    /// room — the caller bridges room→conversation and hands the account and the change here.
+    fn apply_change(&mut self, user_id: Id, change: migo_protocol::MemberChange) {
+        match change {
             migo_protocol::MemberChange::Joined => {
-                if !self.ids.contains(&event.user_id) {
-                    self.ids.push(event.user_id);
+                if !self.ids.contains(&user_id) {
+                    self.ids.push(user_id);
                 }
             }
             migo_protocol::MemberChange::Left
             | migo_protocol::MemberChange::Kicked
             | migo_protocol::MemberChange::Banned => {
-                self.ids.retain(|id| *id != event.user_id);
+                self.ids.retain(|id| *id != user_id);
             }
             _ => {}
         }
@@ -5671,6 +5678,18 @@ impl Worker {
             if let Some(signed) = self.signed.as_mut() {
                 if let Some(conversation) = signed.room_conversations.get(&event.room_id) {
                     signed.groups.rotate(*conversation);
+                }
+            }
+        }
+        // The event is also the conversation's membership moving: without this fold, a member
+        // who joins a room after this client did never lands in its audience, and the next
+        // send's sender key is sealed for a membership the room has already outgrown — the
+        // desktop twin of the bug the SDK and Android fixed. The bridge map names the
+        // conversation; the cache patch is the same one a `CONVERSATION_MEMBER_EVENT` applies.
+        if let Some(signed) = self.signed.as_mut() {
+            if let Some(conversation) = signed.room_conversations.get(&event.room_id) {
+                if let Some(cached) = signed.members.get_mut(conversation) {
+                    cached.apply_change(event.user_id, change);
                 }
             }
         }

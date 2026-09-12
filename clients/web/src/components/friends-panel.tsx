@@ -124,7 +124,9 @@ export function FriendsPanel({
         return;
       }
       try {
-        const summary = await client.conversations.create(ConversationKind.Direct, [userId]);
+        // startConversation, not a bare create: it caches the membership the first send needs
+        // and subscribes the topic so the peer's replies arrive.
+        const summary = await client.startConversation(ConversationKind.Direct, [userId]);
         noteConversation(summary);
         onOpenConversation(summary.conversationId);
       } catch (cause) {

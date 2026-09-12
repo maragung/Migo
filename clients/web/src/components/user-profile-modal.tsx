@@ -21,6 +21,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 
 import type { BadgeWire, Id, ProgressionWire } from '@migo/sdk';
 
@@ -271,7 +272,10 @@ export function UserProfileModal({
     [muting, setMuted],
   );
 
-  return (
+  // Portaled to the body: a modal opened from inside a window must be the topmost surface —
+  // the desk stacks windows by an unbounded counter, so a dialog rendered in place could stay
+  // below another window.
+  return createPortal(
     <div
       className="modal-backdrop"
       role="dialog"
@@ -309,6 +313,7 @@ export function UserProfileModal({
           ) : null}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

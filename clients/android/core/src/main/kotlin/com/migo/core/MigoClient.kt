@@ -374,6 +374,13 @@ class MigoClient private constructor(
     /** Conversation id to its member account ids and whether that set is known whole; backs [recipientDevices]. */
     private val members = HashMap<Id, MemberCache>()
 
+    /**
+     * Room id to its conversation id, so a room's member events can patch the conversation
+     * they belong to (rooms publish movement naming the room; the cache is keyed by
+     * conversation). Filled by [startRoomConversation], the one moment both halves are known.
+     */
+    private val roomConversations = HashMap<Id, Id>()
+
     /** Account id to its device ids, cached so the steady-state send path makes no round trip. */
     private val userDevices = HashMap<Id, List<Id>>()
 
@@ -1030,6 +1037,36 @@ class MigoClient private constructor(
     }
 
     /**
+     * Primes a joined room for sending and receiving: pages its roster into the membership
+     * cache, remembers the room-to-conversation bridge, and subscribes both of its topics.
+     *
+     * `RoomsDomain.join` answers with a handle, not a membership, and subscribes nothing — a
+     * joiner who went straight to the thread could neither choose an encryption audience (the
+     * first send fails on an unknown membership) nor hear a reply (the conversation topic is
+     * unwatched). This is the join's other half. The room-to-conversation map is what lets
+     * [applyRoomMemberEvent] fold a room's joins into the conversation's membership cache, so
+     * existing members seal for the joiner on their next send.
+     */
+    suspend fun startRoomConversation(conversationId: Id, roomId: Id, rosterPageSize: Int = 500) {
+        val session = requireConnected()
+        val ids = ArrayList<Id>()
+        var after: Id? = null
+        // Page until a short page: the roster is the audience the next send seals for, and a
+        // preview here would mean a member who can never decrypt.
+        while (true) {
+            val page = session.rooms.getRoster(roomId, rosterPageSize, after).members
+            ids.addAll(page.map { it.accountId })
+            if (page.size < rosterPageSize) break
+            val cursor = page.lastOrNull()?.accountId ?: break
+            after = cursor
+        }
+        rememberMembers(conversationId, ids)
+        cacheLock.withLock { roomConversations[roomId] = conversationId }
+        watchConversation(conversationId)
+        watchRoom(roomId)
+    }
+
+    /**
      * Lists conversations, priming each one's membership and subscribing to all of them.
      *
      * One SUBSCRIBE for the whole page rather than one per conversation: the topics are known together,
@@ -1437,6 +1474,12 @@ class MigoClient private constructor(
         session.rpc.on(Op.CONVERSATION_MEMBER_EVENT, { r -> ConversationMemberEvent.decode(r) }) { event, _ ->
             scope.launch { applyMemberEvent(event) }
         }
+        // The same duty for rooms, which publish their membership movement on their own topic
+        // naming the room: without this bridge a room's joiners would be missing from every
+        // existing member's audience for the next send.
+        session.rpc.on(Op.ROOM_MEMBER_EVENT, { r -> RoomMemberEvent.decode(r) }) { event, _ ->
+            scope.launch { applyRoomMemberEvent(event) }
+        }
     }
 
     /**
@@ -1463,6 +1506,34 @@ class MigoClient private constructor(
                 joined && !held -> members[event.conversationId] =
                     MemberCache(cached.ids + event.userId, cached.complete)
                 departed && held -> members[event.conversationId] =
+                    MemberCache(cached.ids - event.userId, cached.complete)
+            }
+        }
+    }
+
+    /**
+     * Applies a room's membership movement onto the conversation the room is carried by.
+     *
+     * Rooms publish joins and departures as [RoomMemberEvent]s on the room's own topic —
+     * naming the room, not the conversation — so without this bridge a room's existing
+     * members would never fold a new joiner into the membership cache, and the next send
+     * would seal for the group as it stood before the join: the joiner can never decrypt.
+     * `joined` is the wire's own word for it (the event predates `change`); when `change`
+     * is present it wins, the same way [applyMemberEvent] reads it.
+     */
+    private suspend fun applyRoomMemberEvent(event: RoomMemberEvent) {
+        cacheLock.withLock {
+            val conversationId = roomConversations[event.roomId] ?: return
+            val cached = members[conversationId] ?: return
+            val joined = event.change?.let { it == MemberChange.Joined } ?: event.joined
+            val departed = event.change?.let {
+                it == MemberChange.Left || it == MemberChange.Kicked || it == MemberChange.Banned
+            } ?: !event.joined
+            val held = event.userId in cached.ids
+            when {
+                joined && !held -> members[conversationId] =
+                    MemberCache(cached.ids + event.userId, cached.complete)
+                departed && held -> members[conversationId] =
                     MemberCache(cached.ids - event.userId, cached.complete)
             }
         }
