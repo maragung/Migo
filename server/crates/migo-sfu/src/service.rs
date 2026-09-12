@@ -520,7 +520,7 @@ impl Sfu {
             return Err(fault::not_found("seat"));
         };
         let mode = plane.seats[seat_index].mode;
-        let sub = plane.seats[seat_index]
+        let Some(sub) = plane.seats[seat_index]
             .subs
             .iter_mut()
             .find(|s| s.publisher == publisher && s.stream_id == stream_id)

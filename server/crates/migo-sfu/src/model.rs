@@ -182,13 +182,17 @@ impl QualityStep {
         }
     }
 
-    /// Position on the ladder, [`QualityStep::Full`] at zero.
-    const fn index(self) -> usize {
+    /// Position on the ladder, [`QualityStep::Full`] at zero. Crate-private:
+    /// the number is the ladder-walk's arithmetic, not a fact about quality a
+    /// caller should reason with.
+    pub(crate) const fn index(self) -> usize {
         self as usize
     }
 
-    /// The rung at a position, clamped to the ladder's ends.
-    const fn at(index: usize) -> Self {
+    /// The rung at a position, clamped to the ladder's ends. Crate-private
+    /// for the same reason [`QualityStep::index`](Self::index) is: only the
+    /// one-rung-at-a-time walk in [`crate::adaptive`] may name a position.
+    pub(crate) const fn at(index: usize) -> Self {
         if index >= Self::LADDER.len() {
             Self::VideoOff
         } else {
