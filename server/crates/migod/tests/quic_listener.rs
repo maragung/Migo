@@ -434,6 +434,16 @@ async fn the_datagram_binding_round_trips_and_oversized_frames_stay_on_the_strea
         .expect("the stream opens");
     let _ = &mut client_send;
 
+    // quinn does not announce a stream to its peer until the stream carries data or a FIN, so
+    // the client writes one byte to make the server's accept_bi fire. The byte is a partial
+    // frame on purpose: the transport must bank it in its stream buffer and keep waiting,
+    // which is exactly the discipline under test -- datagram frames come back whole, never
+    // folded into the stream buffer, and banked stream bytes never leak into a datagram.
+    client_send
+        .write_all(&[0u8])
+        .await
+        .expect("the stream byte is written");
+
     // One bare frame as one datagram from the client -- no length prefix anywhere.
     let ping = migo_protocol::Ping {
         client_time: migo_core::Timestamp::now(),
