@@ -26,11 +26,17 @@
 //!
 //! *The distribution* (what the pairwise channel carries):
 //! ```text
+//! varint  epoch                         the membership generation the chain belongs to
 //! varint  chain_id
 //! varint  message_number                the chain key's position, not the message's
 //! bytes   chain_key                     32
 //! bytes   sender_identity               64
 //! ```
+//!
+//! The epoch in the distribution is what the receiving side's refusal turns
+//! on: a distribution that does not advance the generation the receiver already
+//! holds is dropped rather than installed, so a re-sent old distribution cannot
+//! strand this device on a chain nothing further is sealed under.
 //!
 //! # What the chain key's position means
 //!
@@ -173,17 +179,28 @@ impl GroupStore {
         entry.distributed.clear();
     }
 
-    /// Accepts a distribution from a remote device, so its future messages can open. A later
-    /// distribution for the same sender replaces the earlier one — that is how a rotation is
-    /// adopted on the receiving side. Unparseable bytes are swallowed: the pairwise channel
-    /// already authenticated the sender, so a bad payload is a version skew, not an attack to
-    /// surface.
+    /// Accepts a distribution from a remote device, so its future messages can open. The first
+    /// distribution is the baseline; every later one must advance the epoch the receiver holds,
+    /// and one that does not is dropped with the current chain kept — a stale re-send must not
+    /// displace a live chain, and the receiver still re-syncs forward by adopting a newer one.
+    /// Unparseable bytes are swallowed: the pairwise channel already authenticated the sender,
+    /// so a bad payload is a version skew, not an attack to surface.
     pub fn accept(&mut self, conversation: Id, sender_device: Id, bytes: &[u8]) {
-        if let Some(distribution) = decode_distribution(bytes) {
-            self.receiving.insert(
-                (conversation, sender_device),
-                ReceiverKeyState::accept(&distribution),
-            );
+        let Some(distribution) = decode_distribution(bytes) else {
+            return;
+        };
+        match self.receiving.get_mut(&(conversation, sender_device)) {
+            Some(receiver) => {
+                // A refused adoption leaves the receiver untouched, so a stale
+                // distribution costs nothing but the bytes it arrived in.
+                let _ = receiver.adopt(&distribution);
+            }
+            None => {
+                self.receiving.insert(
+                    (conversation, sender_device),
+                    ReceiverKeyState::accept(&distribution),
+                );
+            }
         }
     }
 
@@ -294,13 +311,15 @@ fn decode_envelope(bytes: &[u8]) -> Option<SenderKeyMessage> {
     })
 }
 
-/// Serialises a distribution: chain id, message number, the chain key, the sender's identity.
+/// Serialises a distribution: the epoch, chain id, message number, the chain key, the sender's
+/// identity.
 ///
 /// The chain key is secret material in the clear here, by design — these bytes exist to be
 /// sealed into the pairwise channel immediately, and the caller is expected to. The copy this
 /// function returns is the only one; `SenderKeyDistribution` zeroes itself on drop.
 fn encode_distribution(distribution: &SenderKeyDistribution) -> Vec<u8> {
-    let mut out = Vec::with_capacity(16 + CHAIN_KEY_LEN + IDENTITY_PUBLIC_LEN);
+    let mut out = Vec::with_capacity(21 + CHAIN_KEY_LEN + IDENTITY_PUBLIC_LEN);
+    varint(u64::from(distribution.group_key_epoch), &mut out);
     varint(u64::from(distribution.chain_id), &mut out);
     varint(u64::from(distribution.message_number), &mut out);
     out.extend_from_slice(&distribution.chain_key);
@@ -311,12 +330,14 @@ fn encode_distribution(distribution: &SenderKeyDistribution) -> Vec<u8> {
 /// Parses a distribution written by [`encode_distribution`].
 fn decode_distribution(bytes: &[u8]) -> Option<SenderKeyDistribution> {
     let mut cursor = Cursor::new(bytes);
+    let group_key_epoch = cursor.varint_u32()?;
     let chain_id = cursor.varint_u32()?;
     let message_number = cursor.varint_u32()?;
     let mut chain_key = [0u8; CHAIN_KEY_LEN];
     chain_key.copy_from_slice(cursor.take(CHAIN_KEY_LEN)?);
     let identity = migo_crypto::IdentityPublic::parse(cursor.take(IDENTITY_PUBLIC_LEN)?).ok()?;
     Some(SenderKeyDistribution {
+        group_key_epoch,
         chain_id,
         message_number,
         chain_key,
@@ -493,6 +514,40 @@ mod tests {
         assert!(receiver
             .open(conversation, sender_device, &tampered)
             .is_err());
+    }
+
+    #[test]
+    fn a_stale_distribution_does_not_displace_the_current_chain() {
+        // A member re-sends a distribution from before a rotation this receiver
+        // has already adopted. The old bytes must be dropped, not installed:
+        // installed, they would strand this device on a chain that no longer
+        // seals anything, and nothing but a newer distribution would fix it.
+        let mut sender = GroupStore::new(device_identity());
+        let mut receiver = GroupStore::new(device_identity());
+        let conversation = fresh_id();
+        let sender_device = fresh_id();
+
+        let stale = sender.distribution(conversation);
+        receiver.accept(conversation, sender_device, &stale);
+
+        sender.rotate(conversation);
+        receiver.accept(
+            conversation,
+            sender_device,
+            &sender.distribution(conversation),
+        );
+
+        // The re-send, and then a message on the rotated chain.
+        receiver.accept(conversation, sender_device, &stale);
+        let sealed = sender
+            .seal(conversation, b"after the re-send")
+            .expect("seals");
+        assert_eq!(
+            receiver
+                .open(conversation, sender_device, &sealed.envelope)
+                .expect("the current chain still opens"),
+            b"after the re-send"
+        );
     }
 
     #[test]

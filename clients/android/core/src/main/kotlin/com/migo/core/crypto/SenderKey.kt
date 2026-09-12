@@ -29,6 +29,12 @@ import com.migo.core.wire.Varint
  * * After [SenderKeyState.MAX_MESSAGES_PER_CHAIN] messages, so a compromise has a bounded window
  *   even in a group where nobody ever leaves.
  *
+ * Every rotation is labeled by a `groupKeyEpoch` that rises monotonically with it, and the number
+ * travels in the distribution. The receiver's half of "the epoch never regresses" is
+ * [ReceiverKeyState.adopt]: a distribution that does not advance the generation the receiver
+ * already holds is refused rather than installed, so a member who re-sends an old distribution
+ * cannot strand a peer on a dead chain.
+ *
  * Rotation on removal is a correctness requirement, not a policy knob. A group implementation that
  * skips it has a member who left in March still reading messages in August.
  *
@@ -57,6 +63,12 @@ private val GROUP_DOMAIN = "migo-sender-key-v1".toByteArray(Charsets.UTF_8)
  * [exposeChainKey]; everything else in this type is not secret.
  */
 class SenderKeyDistribution(
+    /**
+     * The membership generation this chain belongs to. Rises on every rotation, never repeats,
+     * never regresses — and travels *in* the distribution, because the receiver's whole defence
+     * against a stale one is comparing this number against the generation it already holds.
+     */
+    val groupKeyEpoch: Long,
     /** Which chain this is, so a rotation can be distinguished from a resend. */
     val chainId: Long,
     /**
@@ -72,6 +84,7 @@ class SenderKeyDistribution(
     val identity: IdentityPublic,
 ) {
     init {
+        requireU32(groupKeyEpoch, "group key epoch")
         requireU32(chainId, "chain id")
         requireU32(messageNumber, "message number")
         if (chainKey.size != CHAIN_KEY_LEN) {
@@ -82,8 +95,9 @@ class SenderKeyDistribution(
     /**
      * Borrows the chain key. The greppable audit point for this secret leaving the type.
      *
-     * Returns the live buffer, as [SymmetricKey.expose] does; the only caller,
-     * [ReceiverKeyState.accept], copies it into its own state immediately.
+     * Returns the live buffer, as [SymmetricKey.expose] does; the only callers,
+     * [ReceiverKeyState.accept] and [ReceiverKeyState.adopt], copy it into their own state
+     * immediately.
      */
     fun exposeChainKey(): ByteArray = chainKey
 
@@ -94,7 +108,8 @@ class SenderKeyDistribution(
 
     /** Never the key. */
     override fun toString(): String =
-        "SenderKeyDistribution(chain_id: $chainId, message_number: $messageNumber, chain_key: ***)"
+        "SenderKeyDistribution(group_key_epoch: $groupKeyEpoch, chain_id: $chainId, " +
+            "message_number: $messageNumber, chain_key: ***)"
 }
 
 /** The header on a group message. */
@@ -209,9 +224,14 @@ class SenderKeyState private constructor(
      *
      * The chain key is copied into the distribution, not shared: this state's key advances with every
      * message, and a distribution that aliased it would silently change under the recipient.
+     *
+     * The epoch is passed in rather than held: this class tracks one chain, while the membership
+     * generation belongs to the conversation around it (GroupCrypto owns the numbering, as the
+     * Rust sender state owns its own). The distribution names the generation so the receiver can
+     * refuse a stale one before any key material moves — see [ReceiverKeyState.adopt].
      */
-    fun distribution(identity: IdentitySecret): SenderKeyDistribution =
-        SenderKeyDistribution(chainId, messageNumber, chainKey.copyOf(), identity.public())
+    fun distribution(groupKeyEpoch: Long, identity: IdentitySecret): SenderKeyDistribution =
+        SenderKeyDistribution(groupKeyEpoch, chainId, messageNumber, chainKey.copyOf(), identity.public())
 
     /** Encrypts and signs a group message. */
     fun encrypt(
@@ -279,10 +299,15 @@ class SenderKeyState private constructor(
 
 /** The receiving half: one per (group, sender) pair. */
 class ReceiverKeyState private constructor(
-    private val chainId: Long,
-    private val chainKey: ByteArray,
+    /**
+     * The membership generation this state's chain belongs to. The baseline every later
+     * distribution from this sender is measured against; only [adopt] moves it, and only forward.
+     */
+    private var groupKeyEpoch: Long,
+    private var chainId: Long,
+    private var chainKey: ByteArray,
     private var nextMessageNumber: Long,
-    private val identity: IdentityPublic,
+    private var identity: IdentityPublic,
 ) {
     /**
      * Keys derived for messages that have not arrived yet, oldest first.
@@ -296,9 +321,18 @@ class ReceiverKeyState private constructor(
         /** How far ahead of the receiver a message may claim to be. */
         const val MAX_CHAIN_GAP = 1_000L
 
-        /** Accepts a distribution message and starts tracking the sender's chain. */
+        /**
+         * Accepts the *first* distribution a receiver sees from this sender.
+         *
+         * The first distribution is the baseline: there is no earlier generation to compare
+         * against, so any epoch is accepted here and every later one is measured from it.
+         * Freshness of the baseline is vouched for by the pairwise channel it arrived through.
+         * Once state exists, use [adopt] — this constructor never refuses anything and must not
+         * be used to replace held state.
+         */
         fun accept(distribution: SenderKeyDistribution): ReceiverKeyState =
             ReceiverKeyState(
+                distribution.groupKeyEpoch,
                 distribution.chainId,
                 distribution.exposeChainKey().copyOf(),
                 distribution.messageNumber,
@@ -329,24 +363,84 @@ class ReceiverKeyState private constructor(
                 // is a damaged file, and the caller's move is the same either way.
                 throw CryptoError.malformedHeader()
             }
-            val state = ReceiverKeyState(chainId, chainKey, nextMessageNumber, identity)
 
             val stashedCount = cursor.varintU32()
             // Restores the class invariant rather than trusting the file: decrypt trims the map to
             // MAX_CHAIN_GAP, so a snapshot claiming more was not written by this code.
             if (stashedCount > MAX_CHAIN_GAP) throw CryptoError.malformedHeader()
+            val stashed = LinkedHashMap<Long, GroupStashedKey>()
             repeat(stashedCount.toInt()) {
                 val number = cursor.varintU32()
-                state.skipped[number] = GroupStashedKey(
+                stashed[number] = GroupStashedKey(
                     cursor.take(AEAD_KEY_LEN),
                     cursor.take(AEAD_NONCE_LEN),
                 )
             }
 
-            if (cursor.rest().isNotEmpty()) throw CryptoError.malformedHeader()
+            // The trailing epoch is optional: snapshots written before the field existed end at
+            // the skipped keys. Such a receiver restores with a baseline of 0 and re-baselines
+            // from the next distribution it adopts, which never names an epoch lower than the
+            // chain it belongs to. Anything further after the varint is refused, as before.
+            val trailing = cursor.rest()
+            val groupKeyEpoch = if (trailing.isEmpty()) {
+                0L
+            } else {
+                val epochCursor = Cursor(trailing)
+                val epoch = epochCursor.varintU32()
+                if (epochCursor.rest().isNotEmpty()) throw CryptoError.malformedHeader()
+                epoch
+            }
+
+            val state = ReceiverKeyState(groupKeyEpoch, chainId, chainKey, nextMessageNumber, identity)
+            state.skipped.putAll(stashed)
             return state
         }
     }
+
+    /**
+     * Adopts a distribution into state that already tracks this sender.
+     *
+     * This is the receiver's half of "the epoch never regresses". Four cases, in the order they
+     * are decided:
+     *
+     * * **Older epoch** — refused with [CryptoError.keyAlreadyUsed]. This is the
+     *   stale-distribution attack: a member re-sends a distribution from before the last
+     *   membership change, and if it were installed the receiver would sit on a chain nothing
+     *   further is sealed under. The held state is untouched, so the receiver keeps reading on
+     *   the current chain and can still re-sync forward.
+     * * **Same epoch, same chain** — a re-send of the distribution the receiver already holds.
+     *   Not a regression, and not a reason to re-install either: re-installing would rewind the
+     *   receiver's position inside the live chain. Succeeds as a no-op.
+     * * **Same epoch, different chain** — refused. A rotation always raises the epoch, so a
+     *   second chain at one generation is a swap, not a rotation.
+     * * **Newer epoch** — installed. The old chain key and every skipped key are zeroed before
+     *   the new state lands, and the skipped window is emptied because message numbers restart
+     *   with the chain.
+     *
+     * The boundary of this guarantee: refusing a stale distribution protects liveness and
+     * correctness of the receiver's chain, not confidentiality — the harm refused is a stranded
+     * receiver, which is a denial of message delivery until re-sync, not a disclosure.
+     */
+    fun adopt(distribution: SenderKeyDistribution) {
+        if (distribution.groupKeyEpoch < groupKeyEpoch) {
+            throw CryptoError.keyAlreadyUsed()
+        }
+        if (distribution.groupKeyEpoch == groupKeyEpoch) {
+            if (distribution.chainId == chainId) {
+                return
+            }
+            throw CryptoError.keyAlreadyUsed()
+        }
+        destroy()
+        groupKeyEpoch = distribution.groupKeyEpoch
+        chainId = distribution.chainId
+        chainKey = distribution.exposeChainKey().copyOf()
+        nextMessageNumber = distribution.messageNumber
+        identity = distribution.identity
+    }
+
+    /** The membership generation this state holds. */
+    fun groupKeyEpoch(): Long = groupKeyEpoch
 
     /** Which chain this state tracks. */
     fun chainId(): Long = chainId
@@ -446,6 +540,7 @@ class ReceiverKeyState private constructor(
      *   varint  message_number
      *   32      message_key
      *   24      nonce
+     * varint  group_key_epoch      appended last; absent in files written before the field existed
      * ```
      *
      * Chain key and retained message keys are secrets in the clear, so the same contract as
@@ -456,11 +551,15 @@ class ReceiverKeyState private constructor(
      * The skipped keys are kept for the reason given on [RatchetSession.snapshot]: dropping them
      * would make a group message still in flight permanently undecryptable, and the file is sealed
      * and rewritten on every save, so a key that gets used leaves the file at the next save.
+     *
+     * The epoch is appended rather than the version bumped because STATE_SNAPSHOT_VERSION is shared
+     * with the pairwise ratchet: bumping it would invalidate every ratchet snapshot on every device,
+     * while an optional trailing field leaves old receiver snapshots readable at a baseline of 0.
      */
     fun snapshot(): ByteArray {
         val out = ByteAccumulator(
             1 + 5 + CHAIN_KEY_LEN + 5 + IDENTITY_PUBLIC_LEN + 5 +
-                skipped.size * (5 + AEAD_KEY_LEN + AEAD_NONCE_LEN),
+                skipped.size * (5 + AEAD_KEY_LEN + AEAD_NONCE_LEN) + 5,
         )
         out.push(STATE_SNAPSHOT_VERSION)
         Varint.encodeU64(chainId, out)
@@ -474,6 +573,7 @@ class ReceiverKeyState private constructor(
             out.append(stashed.key)
             out.append(stashed.nonce)
         }
+        Varint.encodeU64(groupKeyEpoch, out)
         return out.toByteArray()
     }
 

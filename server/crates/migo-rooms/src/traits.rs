@@ -49,16 +49,14 @@
 //! admitted, because admitting somebody a policy meant to hold back is the failure
 //! that cannot be undone by shipping the table later.
 
+use crate::fanout::Fanout;
+use crate::model::{Authorized, Caller, NewRoomRequest, Sanction, Settings};
 use async_trait::async_trait;
 use migo_core::{Id, Result, Timestamp};
 use migo_protocol::{
     RoomJoinRequest, RoomJoinResponse, RoomLeaveRequest, RoomListRequest, RoomListResponse,
     RoomRole, RoomSummary, RoomVoteKickResponse,
 };
-use migo_store::model::RoomMember;
-
-use crate::fanout::Fanout;
-use crate::model::{Authorized, Caller, NewRoomRequest, Sanction, Settings};
 
 /// Everything rooms do.
 #[async_trait]
@@ -159,7 +157,8 @@ pub trait Roomkeeper: Send + Sync {
     /// Rooms this account is currently in.
     async fn mine(&self, caller: &Caller) -> Result<Vec<RoomSummary>>;
 
-    /// A page of the roster, highest role first.
+    /// A page of the roster, highest role first, with the room's state revision
+    /// the page was read at (brief section 156).
     ///
     /// Members only, and only to members. A roster is the membership list of a
     /// community, and handing it to anyone who knows the room id would make every
@@ -170,7 +169,7 @@ pub trait Roomkeeper: Send + Sync {
         room_id: Id,
         limit: u16,
         after: Option<Id>,
-    ) -> Result<Vec<RoomMember>>;
+    ) -> Result<crate::model::Roster>;
 
     /// Changes name, topic, slow mode, or join policy.
     ///

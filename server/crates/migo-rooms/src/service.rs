@@ -700,12 +700,17 @@ fn sanction_reason(sanction: &Sanction) -> Option<String> {
 }
 
 /// A membership event about `subject`, for the room's topic.
+///
+/// `revision` is the room's state revision this change advanced it to (brief
+/// section 156), read back from the store write that made the change, so a
+/// client that missed this frame can tell from the next one it does see.
 fn member_event(
     room_id: Id,
     subject: Id,
     joined: bool,
     role: Option<RoomRole>,
     member_count: Option<u32>,
+    revision: u64,
 ) -> RoomMemberEvent {
     RoomMemberEvent {
         room_id,
@@ -716,6 +721,7 @@ fn member_event(
         // Callers that only have the boolean say it with the boolean; the events that
         // know why the membership changed set `change` and leave this `None`.
         change: None,
+        revision: Some(revision),
     }
 }
 
@@ -965,6 +971,10 @@ where
                     true,
                     Some(stored.role),
                     Some(view::count(room.member_count)),
+                    // The re-read above already happened after the store's
+                    // write, so the revision it carries is the one the join
+                    // advanced the room to.
+                    view::revision(room.revision),
                 ),
             )
         });
@@ -1000,7 +1010,8 @@ where
                 "the owner must transfer the room or archive it before leaving",
             ));
         }
-        self.store
+        let revision = self
+            .store
             .leave_room(room.room_id, caller.account_id, caller.now)
             .await?;
         self.meters.leave(ChangeOutcome::Applied);
@@ -1013,6 +1024,7 @@ where
                 false,
                 None,
                 Some(self.current_count(room.room_id).await?),
+                view::revision(revision),
             ),
         )))
     }
@@ -1047,7 +1059,7 @@ where
             self.meters.timeout(TimeoutOutcome::Owner);
             return Ok(None);
         }
-        self.store.leave_room(room_id, account_id, now).await?;
+        let revision = self.store.leave_room(room_id, account_id, now).await?;
         self.meters.timeout(TimeoutOutcome::Removed);
         let mut event = member_event(
             room_id,
@@ -1055,6 +1067,7 @@ where
             false,
             None,
             Some(self.current_count(room_id).await?),
+            view::revision(revision),
         );
         // Said with `Left`, not just `joined: false`: a client that saw only the boolean could
         // not tell a grace timeout from a kick, and a roster colours the two differently — one
@@ -1217,7 +1230,7 @@ where
         room_id: Id,
         limit: u16,
         after: Option<Id>,
-    ) -> Result<Vec<RoomMember>> {
+    ) -> Result<crate::model::Roster> {
         Self::require_identity(caller)?;
         self.charge_flat(caller, READ_COST).await?;
         let room = self.load_room(room_id).await?;
@@ -1226,9 +1239,20 @@ where
         // room a directory of the people in it, and there is no permission bit for
         // "may see who is here" because every member may.
         self.require(caller, &room, 0).await?;
-        self.store
+        let members = self
+            .store
             .room_members(room_id, limit.clamp(1, MAX_ROSTER_PAGE), after)
-            .await
+            .await?;
+        // Read after the member rows, not before: a change that landed between
+        // the two reads leaves the revision ahead of the page, which a client
+        // reads as "a delta was missed, re-read" — the safe mistake. The other
+        // order would leave the revision behind the page, which reads as fresh
+        // while a member row is already gone.
+        let revision = self.store.room_revision(room_id).await?;
+        Ok(crate::model::Roster {
+            members,
+            revision: crate::view::revision(revision),
+        })
     }
 
     async fn update(
@@ -1312,7 +1336,7 @@ where
                 caller.now,
             )
             .await?;
-        let mut event = view::delta(room_id);
+        let mut event = view::delta(room_id, view::revision(updated.revision));
         match &topic {
             Patch::Set(topic) => event.topic = Some(topic.clone()),
             // An empty string, because `None` on this field already means "unchanged".
@@ -1407,7 +1431,8 @@ where
             self.meters.role(ChangeOutcome::Unchanged);
             return Ok(None);
         }
-        self.store
+        let revision = self
+            .store
             .set_room_role(room_id, subject_id, role, caller.now)
             .await?;
         self.meters.role(ChangeOutcome::Applied);
@@ -1418,7 +1443,14 @@ where
         Ok(Some(Fanout::member(
             room_id,
             caller.device_id,
-            member_event(room_id, subject_id, true, Some(role), None),
+            member_event(
+                room_id,
+                subject_id,
+                true,
+                Some(role),
+                None,
+                view::revision(revision),
+            ),
         )))
     }
 
@@ -1567,7 +1599,8 @@ where
                     // kicking an empty seat.
                     return Ok(fanouts);
                 }
-                self.store
+                let revision = self
+                    .store
                     .leave_room(room_id, subject_id, caller.now)
                     .await?;
                 let mut event = member_event(
@@ -1576,6 +1609,7 @@ where
                     false,
                     None,
                     Some(self.current_count(room_id).await?),
+                    view::revision(revision),
                 );
                 // Said with `Kicked` and not just `joined: false`: a client that
                 // saw only the boolean could not tell a removal from a departure,
@@ -1596,7 +1630,8 @@ where
                         .saturating_add(ms)
                         .min(PERMANENT_BAN_MS)
                 }));
-                self.store
+                let revision = self
+                    .store
                     .set_room_sanction(
                         room_id,
                         subject_id,
@@ -1612,6 +1647,7 @@ where
                     false,
                     None,
                     Some(self.current_count(room_id).await?),
+                    view::revision(revision),
                 );
                 // The room hears that somebody left, not why. The reason is for the
                 // banned account and the moderation log; broadcasting it would put
@@ -1698,7 +1734,8 @@ where
                     if !member.is_active() {
                         continue;
                     }
-                    self.store
+                    let revision = self
+                        .store
                         .leave_room(other.room_id, subject_id, caller.now)
                         .await?;
                     let mut event = member_event(
@@ -1707,6 +1744,7 @@ where
                         false,
                         None,
                         Some(self.current_count(other.room_id).await?),
+                        view::revision(revision),
                     );
                     event.change = Some(MemberChange::Banned);
                     // Unattributed: the admin's socket is not in these rooms'
@@ -1902,7 +1940,8 @@ where
         if passed {
             // Outside the lock: this is a store write, and holding a mutex across
             // an await would put the registry on the scheduler's critical path.
-            self.store
+            let revision = self
+                .store
                 .leave_room(room_id, target_id, caller.now)
                 .await?;
             self.meters.vote(VoteOutcome::Passed);
@@ -1912,6 +1951,7 @@ where
                 false,
                 None,
                 Some(self.current_count(room_id).await?),
+                view::revision(revision),
             );
             event.change = Some(MemberChange::Kicked);
             // The member event is the tally's closing: a `RoomVoteEvent` with
@@ -1957,7 +1997,8 @@ where
             // keeps the counter honest about how many transfers happened.
             return Ok(None);
         }
-        self.store
+        let revision = self
+            .store
             .transfer_room_ownership(room_id, caller.account_id, to, caller.now)
             .await?;
         self.meters.transfer();
@@ -1968,7 +2009,14 @@ where
         Ok(Some(Fanout::member(
             room_id,
             caller.device_id,
-            member_event(room_id, to, true, Some(RoomRole::Owner), None),
+            member_event(
+                room_id,
+                to,
+                true,
+                Some(RoomRole::Owner),
+                None,
+                view::revision(revision),
+            ),
         )))
     }
 

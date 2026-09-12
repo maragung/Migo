@@ -62,6 +62,14 @@ pub fn summary(room: &Room, my_role: Option<RoomRole>) -> RoomSummary {
         // The ceiling the join path refuses at, so a client can draw "2/33" instead of
         // learning the room is full only by being refused.
         max_members: Some(count(room.max_members)),
+        // The room's state revision this snapshot was read at (brief section 156).
+        // A member or state event that arrives carrying a revision beyond it means
+        // a delta was missed and the snapshot should be re-read; comparing the two
+        // numbers is how a client tells a stale cache from a fresh one without
+        // re-fetching on every doubt. `max(0)` before the cast for the same reason
+        // as `count`: the column is signed and a client should never see a negative
+        // arrive as something enormous.
+        revision: Some(revision(room.revision)),
     }
 }
 
@@ -87,6 +95,23 @@ pub fn count(members: i32) -> u32 {
     members.max(0) as u32
 }
 
+/// A state revision as the wire wants it.
+///
+/// Saturating for the same reason as [`count`]: the store's column is signed, and
+/// a negative arriving as `u64` would hand the client a revision no room will
+/// reach, which reads as "stale forever".
+#[must_use]
+pub const fn revision(of: i64) -> u64 {
+    // Not `of.max(0)`: `Ord::max` is not const-callable on the declared MSRV,
+    // and a const fn that only compiles on newer toolchains is a gate that
+    // flatters the machine that wrote it.
+    if of < 0 {
+        0
+    } else {
+        of as u64
+    }
+}
+
 /// A state event carrying only the fields that moved.
 ///
 /// Brief section 156 asks for deltas, and the `RoomStateEvent` doc line says so too:
@@ -101,7 +126,7 @@ pub fn count(members: i32) -> u32 {
 /// nullable-nullable on the wire is a shape that gets decoded wrongly once per
 /// client.
 #[must_use]
-pub fn delta(room_id: Id) -> RoomStateEvent {
+pub fn delta(room_id: Id, revision: u64) -> RoomStateEvent {
     RoomStateEvent {
         room_id,
         online_count: None,
@@ -109,6 +134,9 @@ pub fn delta(room_id: Id) -> RoomStateEvent {
         topic: None,
         slow_mode_ms: None,
         max_members: None,
+        // The number this change advanced the room to, so a client that missed
+        // the frame can tell from the next one it does see (brief section 156).
+        revision: Some(revision),
     }
 }
 
@@ -116,6 +144,15 @@ pub fn delta(room_id: Id) -> RoomStateEvent {
 ///
 /// Called before a fanout is built rather than after, so that a settings request
 /// which changed nothing produces no frame at all instead of an empty one.
+///
+/// The revision does not count toward emptiness, on purpose. A rename or a join
+/// policy change advances the revision without producing a state event — the
+/// frame carries no field for either — so a delta holding nothing but a revision
+/// is exactly the rename case, and publishing it would be a frame whose only
+/// content is "re-read the summary", sent to a room that the settings screen
+/// already answered. The revision a rename advances is not wasted: it is the
+/// number the next summary read returns, and a client comparing revisions learns
+/// its held name is stale the moment it looks.
 #[must_use]
 pub fn is_empty(event: &RoomStateEvent) -> bool {
     event.online_count.is_none()

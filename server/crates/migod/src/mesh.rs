@@ -1702,6 +1702,7 @@ mod tests {
             role: None,
             member_count: Some(3),
             change: None,
+            revision: None,
         };
         let vote = migo_protocol::RoomVoteEvent {
             room_id,

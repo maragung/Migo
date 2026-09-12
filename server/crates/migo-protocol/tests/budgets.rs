@@ -317,6 +317,7 @@ fn per_event_frames_fit_their_budgets() {
             topic: None,
             slow_mode_ms: None,
             max_members: None,
+            revision: None,
         },
     );
     assert!(

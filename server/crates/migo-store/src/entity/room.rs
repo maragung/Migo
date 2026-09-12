@@ -47,6 +47,8 @@ pub struct Model {
     pub updated_at: TimeDateTimeWithTimeZone,
     /// The `archived_at` column.
     pub archived_at: Option<TimeDateTimeWithTimeZone>,
+    /// The `revision` column.
+    pub revision: i64,
 }
 
 /// Foreign keys leaving `room`.
