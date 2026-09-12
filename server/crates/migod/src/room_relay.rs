@@ -630,8 +630,8 @@ fn encode_envelope<T: Encode>(opcode: Opcode, value: &T) -> Result<Vec<u8>> {
 /// receive, published to this node's own hub for the members whose sockets are
 /// here.
 ///
-/// A port rather than the gateway itself, for the same reason
-/// [`RoomPublisher`](crate::room_presence::RoomPublisher) is one: the move's
+/// A port rather than the gateway itself, for the same reason the room
+/// publisher port in `room_presence` is one: the move's
 /// logic — who is told, in which order, with what endpoint — is exercised by
 /// handing it a recorder and reading the frame back, with no hub and no
 /// runtime behind it. The frame is the whole interface, raw bytes and nothing
