@@ -31,8 +31,13 @@
 //!   from a future protocol version crosses the link and is ingested, because the
 //!   reader scopes unknown fields by length and skips them.
 //! * **9 (a routing epoch bump, the rebalance primitive)** — a sender working from a
-//!   stale routing view is refused, its event survives in the outbox, and once its view
-//!   is refreshed the delivery goes through without loss.
+//!   stale routing view is refused, and the refusal names the epoch the peer's view is
+//!   current at: the sender's transport adopts that epoch and redelivers in the same
+//!   drain, with nothing lost and no operator's `bump_epoch` by hand. The other half of
+//!   the rebalance follows it: when a room moves to another node, every member is handed
+//!   a `RECONNECT_HINT` naming the new home's endpoint — one publish on the home node's
+//!   own hub, one federated copy per watching node, then the rehomed row and the raised
+//!   epoch, the drain order section 170 names.
 //! * **10 (a mass backlog after recovery)** — three hundred queued events drain in
 //!   sessions bounded by the drain batch, arriving once each in queue order, so a
 //!   mass sync cannot exceed a session's capacity no matter how long the outage was.
@@ -41,9 +46,8 @@
 //! storage-unavailable and outbox idempotency in `migo-federation`'s suite, cache loss
 //! in `migo-cache`'s contracts, media unavailability in `migo-media`'s. The gaps this
 //! file cannot close — the unused `ROOM_READ_ONLY_PARTITION` code, the missing
-//! degraded-peer marking, the absent handshake timeout, no automatic directory refetch
-//! on a stale epoch, and no `RECONNECT_HINT` to members of a rebalanced room — are
-//! recorded in the brief rather than papered over here.
+//! degraded-peer marking, and the absent handshake timeout — are recorded in the brief
+//! rather than papered over here.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,7 +63,8 @@ use migo_federation::{
     FederatedEvent, MeshConfig, MeshService, NewPeerSpec, PeerStatus, SharedMesh,
 };
 use migo_protocol::{
-    from_frame, to_frame, FedAck, FedAuth, FedHello, FedPresenceDigest, Frame, Opcode,
+    from_frame, to_frame, CloseReason, EncryptionMode, FedAck, FedAuth, FedHello,
+    FedPresenceDigest, FedRouting, Frame, Opcode, ReconnectHint, RoomKind,
 };
 use migo_store::MemoryStore;
 use migo_wire::Writer;
@@ -849,11 +854,12 @@ async fn a_frame_carrying_a_future_optional_field_crosses_the_link_unrefused() {
 /// Section 173, scenario 9: the routing epoch is how a rebalance refuses a sender
 /// working from a stale view. Node A bumps its epoch — the shard map changed — and
 /// node B's next delivery is refused at the handshake, before any payload moves. The
-/// event survives in the outbox, and once B's view is refreshed the delivery goes
-/// through with nothing lost. What the brief asks of the members' `RECONNECT_HINT`
-/// is client-facing and not yet built; this test pins the half the link owns.
+/// refusal is not a bare close: it names the epoch A's view is current at, so B's
+/// transport refreshes its own view and redials the same batch inside the same drain —
+/// the refetch the brief asks the link to perform on its own, not one an operator's
+/// `bump_epoch` performs by hand.
 #[tokio::test]
-async fn a_stale_routing_view_is_refused_and_the_event_survives_until_the_view_refreshes() {
+async fn a_stale_view_is_refused_the_transport_refreshes_and_the_event_arrives() {
     let (mesh_a, _) = node(1, "region-a").await;
     let (mesh_b, _) = node(2, "region-b").await;
     admit(
@@ -896,41 +902,20 @@ async fn a_stale_routing_view_is_refused_and_the_event_survives_until_the_view_r
     let bumped = mesh_a.bump_epoch();
     assert_eq!(bumped, 1, "the epoch advances from zero by one bump");
 
-    // Node B, still working from the old view, is refused — and the refusal is a
-    // settled failure: the event is owed, not lost, and ingested nothing.
+    // Node B, still working from the old view, is refused — and the refusal names the
+    // epoch, so the drain refreshes B's view and retries the batch itself. No operator
+    // and no `bump_epoch` touched B: one drain, one refused session, one redial.
     let after = Timestamp::now();
     queue(&mesh_b, node_id(1), 2, after).await;
     transport_b
         .drain_once(after)
         .await
-        .expect("a refused handshake is a settled failure, not a drain error");
+        .expect("the drain refreshes its own view and completes");
     assert_eq!(
-        transport_a.ingested().len(),
-        1,
-        "nothing moved while the view was stale"
+        mesh_b.epoch(),
+        bumped,
+        "the transport adopted the epoch the refusal named, not a bump of its own"
     );
-    assert!(
-        mesh_b
-            .due(after.saturating_add_millis(999))
-            .await
-            .expect("the outbox reads")
-            .is_empty(),
-        "the retry is at least one backoff base away"
-    );
-    let owed: Vec<_> = mesh_b
-        .due(after.saturating_add_millis(1_000))
-        .await
-        .expect("the outbox reads");
-    assert_eq!(owed.len(), 1, "the event survived the refusal");
-
-    // B's view refreshes — the directory refetch an operator's tooling, or a future
-    // transport, would perform — and the delivery goes through.
-    let refreshed = mesh_b.bump_epoch();
-    assert!(refreshed >= bumped, "the refreshed view is not older");
-    transport_b
-        .drain_once(after.saturating_add_millis(1_000))
-        .await
-        .expect("the drain completes against the refreshed view");
 
     let seen = transport_a.ingested();
     assert_eq!(seen.len(), 2, "both events arrived: {seen:?}");
@@ -942,6 +927,184 @@ async fn a_stale_routing_view_is_refused_and_the_event_survives_until_the_view_r
     assert!(
         everything_owed(&mesh_b).await.is_empty(),
         "the queue settled: nothing was lost to the stale view"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 9's other half — the members of a rebalanced room
+// ---------------------------------------------------------------------------
+
+/// The local half of a move, recorded: what the room's own sessions would have
+/// received had a hub been behind the test.
+struct RecordedHints(Mutex<Vec<(Id, Bytes)>>);
+
+impl migod::room_relay::HintPublisher for RecordedHints {
+    fn publish_hint(&self, room_id: Id, frame: &Bytes, _now: Timestamp) {
+        self.0
+            .lock()
+            .expect("the recorder locks")
+            .push((room_id, frame.clone()));
+    }
+}
+
+/// Section 173's missing half: a room that moves nodes must not strand its members
+/// on the old one. Node A homes a room whose members sit on node B; B subscribes as
+/// the tier's watch half asks; and when A moves the room to B's region, every member
+/// is told before anything else moves — a `RECONNECT_HINT` naming B's endpoint,
+/// published on A's own hub and carried to B as the room event the tier already
+/// carries, then the rehomed row, then the raised epoch.
+#[tokio::test]
+async fn a_moved_room_hands_its_members_a_reconnect_hint_naming_the_new_node() {
+    let (mesh_a, _) = node(1, "region-a").await;
+    let (mesh_b, _) = node(2, "region-b").await;
+
+    // Node A homes the room, so its store holds the row that says so.
+    let room_id = Id::from(0x7777);
+    let store_a: migo_store::SharedStore = Arc::new(MemoryStore::new());
+    store_a
+        .create_room(migo_store::model::NewRoom {
+            room_id,
+            conversation_id: Id::from(0x2222),
+            slug: format!("room-{room_id:x}"),
+            name: "a room".to_string(),
+            topic: None,
+            kind: RoomKind::Public,
+            owner_id: Id::from(0x3333),
+            home_region: "region-a".to_string(),
+            max_members: 100,
+            encryption: EncryptionMode::Transport,
+            created_at: Timestamp::now(),
+        })
+        .await
+        .expect("a fresh store creates the room");
+    let hints = Arc::new(RecordedHints(Mutex::new(Vec::new())));
+    let relay_a = Arc::new(migod::room_relay::RoomRelay::new(
+        mesh_a.clone(),
+        store_a.clone(),
+        Some(hints.clone() as Arc<dyn migod::room_relay::HintPublisher>),
+    ));
+
+    // Both nodes listen, and each names the other in its allow-list by the address
+    // the hint will carry — B's endpoint is what the members are told to reconnect to.
+    let transport_b = transport(&mesh_b);
+    let bound_b = transport_b
+        .spawn_listener("127.0.0.1:0")
+        .await
+        .expect("B's listener binds");
+    admit(
+        &mesh_a,
+        node_id(2),
+        &key_bytes(2),
+        format!("wss://{bound_b}"),
+        "region-b",
+    )
+    .await;
+    let transport_a = Arc::new(MeshTransport::new(
+        mesh_a.clone(),
+        None,
+        Some(Arc::clone(&relay_a)),
+        &Registry::new(),
+        Arc::new(SystemClock) as Arc<dyn Clock>,
+    ));
+    let bound_a = transport_a
+        .spawn_listener("127.0.0.1:0")
+        .await
+        .expect("A's listener binds");
+    admit(
+        &mesh_b,
+        node_id(1),
+        &key_bytes(1),
+        format!("wss://{bound_a}"),
+        "region-a",
+    )
+    .await;
+
+    // B subscribes to the room, as the tier's watch half asks: one
+    // `FED_ROOM_SUBSCRIBE` over the real wire, delivered by a drain the test drives.
+    let now = Timestamp::now();
+    mesh_b
+        .enqueue(
+            FederatedEvent {
+                target_node: node_id(1),
+                opcode: Opcode::FedRoomSubscribe.to_wire() as i32,
+                payload: to_frame(
+                    Opcode::FedRoomSubscribe.to_wire(),
+                    0,
+                    &FedRouting {
+                        epoch: mesh_b.epoch(),
+                        home_region: "region-a".to_string(),
+                        room_id,
+                    },
+                )
+                .expect("the subscribe encodes")
+                .encode()
+                .expect("the frame encodes")
+                .to_vec(),
+            },
+            now,
+        )
+        .await
+        .expect("the subscribe enqueues");
+    transport_b
+        .drain_once(now)
+        .await
+        .expect("the subscribe is delivered");
+    assert_eq!(
+        relay_a.watchers_of(room_id),
+        vec![node_id(2)],
+        "A holds B as the room's one watching node"
+    );
+
+    // The move, by the operator's placement primitive: A tells the members, moves
+    // the row, and raises the epoch — in that order.
+    let moved_at = Timestamp::now();
+    let moved = relay_a
+        .move_room(room_id, "region-b", moved_at)
+        .await
+        .expect("the room moves to B's region");
+    assert_eq!(
+        moved.home_region, "region-b",
+        "the row names the new home node"
+    );
+    assert_eq!(
+        mesh_a.epoch(),
+        1,
+        "the routing epoch rose with the move, so a stale view is refused"
+    );
+
+    // The local half: the room's own sessions — the ones already on A — were handed
+    // the same frame the far node's members receive.
+    let recorded = hints.0.lock().expect("the recorder locks").clone();
+    assert_eq!(recorded.len(), 1, "one hint on the room's own topic");
+    let frame = Frame::decode(recorded[0].1.clone()).expect("the hint is an encoded frame");
+    assert_eq!(
+        Opcode::from_wire(frame.header.opcode),
+        Some(Opcode::ReconnectHint)
+    );
+    let hint: ReconnectHint = from_frame(&frame).expect("the hint decodes");
+    assert_eq!(hint.reason, CloseReason::Rebalance);
+    assert_eq!(hint.after_ms, 0, "the instruction is to reconnect now");
+    assert_eq!(
+        hint.endpoint.as_deref(),
+        Some(format!("wss://{bound_b}").as_str()),
+        "the hint names the new home node, by the address the allow-list holds"
+    );
+
+    // The federated half: one `FED_ROOM_EVENT` for the watching node, carrying the
+    // same hint inside the envelope, delivered over the real wire.
+    transport_a
+        .drain_once(moved_at)
+        .await
+        .expect("the hint is delivered to the watching node");
+    let seen = transport_b.ingested();
+    assert!(
+        seen.iter()
+            .any(|(opcode, _)| *opcode == Opcode::ReconnectHint.to_wire()),
+        "B ingested the reconnect hint as a room event: {seen:?}"
+    );
+    assert!(
+        everything_owed(&mesh_a).await.is_empty(),
+        "the move's whole obligation — one hint per watching node — was delivered"
     );
 }
 
@@ -1055,11 +1218,11 @@ async fn a_mass_backlog_drains_in_bounded_batches_without_loss_or_duplication() 
 }
 
 // ---------------------------------------------------------------------------
-// The doc's rule that every scenario be automatable, proven for these six
+// The doc's rule that every scenario be automatable, proven for these seven
 // ---------------------------------------------------------------------------
 
 /// Section 173 closes with the rule that every scenario be runnable as an automated
-/// test with injected time and randomness. The six scenarios above each build their
+/// test with injected time and randomness. The seven scenarios above each build their
 /// nodes with seeded keys and seeded randomness (`node(name)` derives both from one
 /// byte), drive every delivery through `drain_once` at timestamps the test names, and
 /// pin the one clock that matters (the skew window) with a `ManualClock` — so this

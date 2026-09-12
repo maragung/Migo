@@ -952,6 +952,43 @@ async fn an_epoch_at_or_ahead_of_the_current_one_is_fresh() {
     assert!(h.mesh.check_epoch(2).is_ok());
 }
 
+#[tokio::test]
+async fn a_refresh_adopts_the_epoch_a_refusal_names() {
+    // The transport's answer to ROUTING_EPOCH_STALE: adopt the epoch the refusing peer is
+    // current at, so the retry the same drain performs carries a fresh view. One adoption,
+    // however many bumps the peer made — a view three generations behind catches up in one
+    // hop rather than three refusals.
+    let h = Harness::new();
+    h.mesh.bump_epoch();
+    h.mesh.bump_epoch();
+    h.mesh.bump_epoch();
+    let view = h.mesh.refresh_routing(3);
+    assert_eq!(view, 3, "the view is exactly the peer's");
+    assert_eq!(h.mesh.epoch(), 3, "and it is the one the mesh now holds");
+    assert!(
+        h.mesh.check_epoch(3).is_ok(),
+        "a request on the adopted view is no longer stale"
+    );
+}
+
+#[tokio::test]
+async fn a_refresh_never_lowers_or_duplicates_the_view() {
+    // Monotonic in both directions: a peer naming an older epoch (a crafted refusal, or a
+    // view that moved again mid-flight) cannot drag the view back, and refreshing to the
+    // epoch already held is a no-op rather than a bump — bump_epoch stays the only way to
+    // move the view forward on purpose.
+    let h = Harness::new();
+    h.mesh.bump_epoch();
+    assert_eq!(h.mesh.refresh_routing(0), 1, "an older epoch is ignored");
+    assert_eq!(h.mesh.epoch(), 1);
+    assert_eq!(
+        h.mesh.refresh_routing(1),
+        1,
+        "adopting the current epoch changes nothing"
+    );
+    assert_eq!(h.mesh.epoch(), 1, "and did not count as a bump");
+}
+
 // ===========================================================================
 // Invariant 6 (batch cap): a peer listing cannot be an unbounded read.
 // ===========================================================================

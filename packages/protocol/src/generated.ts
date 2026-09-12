@@ -4262,6 +4262,7 @@ export interface FedError {
   nodeId: string;
   code: number;
   message: string;
+  epoch?: number;
 }
 
 export function encodeFedError(w: Writer, v: FedError): void {
@@ -4269,7 +4270,10 @@ export function encodeFedError(w: Writer, v: FedError): void {
   w.str(v.nodeId);
   w.u32(v.code);
   w.str(v.message);
-  w.u32(0);
+  let present = 0;
+  if (v.epoch !== undefined) present++;
+  w.u32(present);
+  if (v.epoch !== undefined) { const value = v.epoch; w.optional(1, (w) => { w.u64(value); }); }
   w.leave();
 }
 
@@ -4280,9 +4284,13 @@ export function decodeFedError(r: Reader): FedError {
   const message = r.str();
   const out: FedError = { nodeId, code, message } as FedError;
   const optionalCount = r.u32();
-  // No optional fields in this version of the struct. Each entry is length-delimited,
-  // so reading it is skipping it, and a newer peer may well have sent one.
-  for (let i = 0; i < optionalCount; i++) r.optional();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.epoch = sub.u64(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
   r.leave();
   return out;
 }

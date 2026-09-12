@@ -2362,6 +2362,12 @@
         {
           "name": "message",
           "type": "string"
+        },
+        {
+          "name": "epoch",
+          "type": "u64",
+          "optional": true,
+          "id": 1
         }
       ]
     },

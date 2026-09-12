@@ -886,6 +886,7 @@ async fn dispatcher() -> DispatcherHarness {
         std::sync::Arc::new(migod::room_relay::RoomRelay::new(
             app.federation.clone(),
             app_store.clone(),
+            None,
         )),
     );
     DispatcherHarness { app, dispatcher }

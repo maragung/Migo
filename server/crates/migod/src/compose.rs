@@ -654,9 +654,19 @@ impl App {
         // forward through and the mesh transport's ingest path registers watchers into —
         // one table, two halves, both held by the composition root because neither the
         // dispatcher nor the transport may own the other.
+        //
+        // It also publishes a moved room's reconnect hints locally, which needs the
+        // gateway's hub — a gateway that does not exist yet, because the gateway is handed
+        // the dispatcher and so must be built after it. The handle below is the same
+        // one-slot cell the dispatcher holds for the same reason: the relay binds it now,
+        // empty, and the composition root fills it the moment the gateway is open.
+        let gateway_handle = Arc::new(GatewayHandle::new());
         let room_relay = Arc::new(crate::room_relay::RoomRelay::new(
             federation.clone(),
             store.clone(),
+            Some(Arc::new(crate::room_relay::GatewayHintPublisher::new(
+                Arc::clone(&gateway_handle),
+            ))),
         ));
 
         // --- Layer 4: transports ---
@@ -666,10 +676,9 @@ impl App {
         //
         // It also needs to publish *out of band* — presence and room lifecycle on the connection
         // edges the gateway reports — but it is built and moved into the gateway before the gateway
-        // exists. The handle below is the one-slot cell that resolves the cycle: the dispatcher holds
-        // it now, empty, and the composition root fills it the moment the gateway is open, exactly as
-        // it hands the same gateway to the mesh a few lines down.
-        let gateway_handle = Arc::new(GatewayHandle::new());
+        // exists. The handle above is the one-slot cell that resolves the cycle: the dispatcher and
+        // the room relay both hold it now, empty, and the composition root fills it the moment the
+        // gateway is open, exactly as it hands the same gateway to the mesh a few lines down.
         let dispatcher: Arc<dyn Dispatcher> = Arc::new(AppDispatcher::new(
             store.clone(),
             messaging.clone(),
@@ -727,9 +736,10 @@ impl App {
             },
         ));
 
-        // The gateway now exists: fill the dispatcher's late-bound handle so its out-of-band
-        // publishes (presence and room lifecycle on connection edges) reach the hub. Before this
-        // point they were no-ops, which is correct — no session can have connected yet.
+        // The gateway now exists: fill the late-bound handle so the out-of-band publishes
+        // riding it — the dispatcher's presence and room lifecycle on connection edges, the
+        // room relay's reconnect hints for a moved room — reach the hub. Before this point
+        // they were no-ops, which is correct — no session can have connected yet.
         gateway_handle.set(Arc::clone(&gateway));
 
         // The native clients' default transport: raw TCP, bound only when the operator gave it

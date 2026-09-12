@@ -3187,6 +3187,31 @@ impl RoomStore for PostgresStore {
             .ok_or_else(|| fault::not_found("room"))
     }
 
+    async fn rehome_room(&self, room_id: Id, home_region: &str, at: Timestamp) -> Result<Room> {
+        // One statement, for the same reason `update_room` is one: the home region, the
+        // updated stamp, and the revision advance belong to a single observable move, and
+        // a rehomed room whose revision did not move would leave every client holding a
+        // summary that still names the old node as the fan-out authority.
+        entity::room::Entity::update_many()
+            .filter(entity::room::Column::RoomId.eq(uuid_of(room_id)))
+            .col_expr(
+                entity::room::Column::Revision,
+                Expr::col(entity::room::Column::Revision).add(1),
+            )
+            .set(entity::room::ActiveModel {
+                home_region: Set(home_region.to_string()),
+                updated_at: Set(stamp_of(at)),
+                ..Default::default()
+            })
+            .exec_with_returning(&self.db)
+            .await
+            .context("rehome_room")?
+            .into_iter()
+            .next()
+            .map(Into::into)
+            .ok_or_else(|| fault::not_found("room"))
+    }
+
     async fn archive_room(&self, room_id: Id, at: Timestamp) -> Result<()> {
         // Not a delete: links and history keep resolving. The conversation is
         // archived in the same transaction, because a live conversation behind an

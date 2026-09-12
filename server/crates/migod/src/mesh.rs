@@ -9,7 +9,12 @@
 //!   accepts connections and drives the server side of the handshake;
 //! - a **runner**, always spawned, drains the outbox (`Mesh::due`) and delivers each
 //!   pending event to its target node as `FED_FORWARD`, marking it delivered on the peer's
-//!   cumulative `FED_ACK` watermark and failed — with backoff — otherwise.
+//!   cumulative `FED_ACK` watermark and failed — with backoff — otherwise. The one failure
+//!   the runner heals itself is a stale routing view: a peer answers it with a `FED_ERROR`
+//!   naming the epoch its view is current at, the runner adopts that epoch
+//!   ([`Mesh::refresh_routing`](migo_federation::Mesh::refresh_routing)) and dials the same
+//!   batch again in the same drain, so a rebalance on the far side costs one refused
+//!   session rather than an operator's manual bump.
 //!
 //! # The wire
 //!
@@ -164,6 +169,101 @@ fn framed<T: Encode>(opcode: Opcode, correlation: u32, value: &T) -> Result<Fram
     to_frame(opcode.to_wire(), correlation, value).map_err(fault::from_wire)
 }
 
+/// Why a delivery session failed, when the failure is one the transport can act on.
+///
+/// The ordinary arm is every failure the runner already knew: an unreachable peer, a torn
+/// link, an unacknowledged batch. The stale-view arm is the refusal a rebalance produces —
+/// the peer's routing epoch moved on, and the refusal names the epoch its view is current
+/// at, so the sender can refresh and retry in the same drain rather than waiting for an
+/// operator's tooling to bump its view by hand.
+#[derive(Debug)]
+enum SessionFailure {
+    /// An ordinary failure: the batch is rescheduled on its backoff.
+    Failed(Error),
+    /// The peer refused the session because this node's routing view is stale, naming the
+    /// epoch its own view is current at.
+    StaleView { peer_epoch: u64 },
+}
+
+impl From<Error> for SessionFailure {
+    fn from(error: Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl std::fmt::Display for SessionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(error) => write!(f, "{error}"),
+            Self::StaleView { peer_epoch } => {
+                write!(
+                    f,
+                    "the peer's routing view is current at epoch {peer_epoch}"
+                )
+            }
+        }
+    }
+}
+
+/// Reads a peer's `FED_ERROR` answer as a stale-view refusal, if that is what it is.
+///
+/// Returns the epoch the peer's view is current at when the refusal is a
+/// `ROUTING_EPOCH_STALE` that names one; `None` for every other frame or error, including
+/// a stale refusal that names no epoch — a peer too old to name one cannot be refreshed
+/// against, so its answer is an ordinary failure.
+fn stale_view_of(frame: &Frame) -> Result<Option<u64>> {
+    if frame.header.opcode != Opcode::FedError.to_wire() {
+        return Ok(None);
+    }
+    let error: migo_protocol::FedError = from_frame(frame).map_err(fault::from_wire)?;
+    if error.code == migo_protocol::codes::ROUTING_EPOCH_STALE {
+        return Ok(error.epoch);
+    }
+    Ok(None)
+}
+
+/// Turns a peer's `FED_ERROR` answer into the session failure it names.
+fn refusal_failure(frame: &Frame) -> Result<SessionFailure> {
+    let error: migo_protocol::FedError = from_frame(frame).map_err(fault::from_wire)?;
+    if error.code == migo_protocol::codes::ROUTING_EPOCH_STALE {
+        if let Some(peer_epoch) = error.epoch {
+            return Ok(SessionFailure::StaleView { peer_epoch });
+        }
+    }
+    Ok(SessionFailure::Failed(fault::internal(format!(
+        "the peer refused the session: {}",
+        error.message
+    ))))
+}
+
+/// Answers a stale routing epoch with the one refusal a sender can act on: a `FED_ERROR`
+/// carrying `ROUTING_EPOCH_STALE` and the epoch this node's view is current at.
+///
+/// Written before the link closes — at the handshake gate, where the check runs before the
+/// peer has proven anything, and after an ingest that refused a stale embedded epoch — so the
+/// peer's transport can [`refresh its view`](migo_federation::Mesh::refresh_routing) and
+/// retry, instead of reading a bare close as one more dead link. The frame names no secret:
+/// a region label this node publishes in every hello and a generation number, on a listener
+/// the operator placed on the mesh's own segment.
+async fn refuse_stale_epoch<S: AsyncWrite + Unpin + Send>(
+    io: &mut S,
+    mesh: &SharedMesh,
+    error: &Error,
+) {
+    let refusal = migo_protocol::FedError {
+        node_id: mesh.region().to_string(),
+        code: error.code(),
+        message: "the routing epoch carried is stale; refresh the view and retry".to_string(),
+        epoch: Some(mesh.epoch()),
+    };
+    if let Err(write_error) = write_frame(io, &framed(Opcode::FedError, 0, &refusal)).await {
+        tracing::debug!(
+            %write_error,
+            "cannot hand a stale-epoch refusal to the peer before the link closes"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Handshake
 // ---------------------------------------------------------------------------
@@ -241,12 +341,17 @@ fn proof_from_wire(wire: &migo_protocol::FedAuth) -> Result<NodeProof> {
 ///
 /// Both hellos, both proofs, each side verified through the mesh — after this returns the
 /// link is a proven session with `peer`, numbered from sequence one.
+///
+/// A peer whose routing view has moved on answers the hello with a `FED_ERROR` naming the
+/// epoch it is current at, and the session ends there as a [`SessionFailure::StaleView`]
+/// rather than an auth failure: the caller refreshes its view and dials again, which is the
+/// one-hop refetch section 170 asks a stale view to perform.
 async fn handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
     io: &mut S,
     mesh: &SharedMesh,
     region: &str,
     now: Timestamp,
-) -> Result<Handshook> {
+) -> std::result::Result<Handshook, SessionFailure> {
     let local = mesh.hello();
     write_frame(
         io,
@@ -259,12 +364,13 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
     .await?;
 
     let Some(reply) = read_frame(io).await? else {
-        return Err(fault::mesh_auth_failed(
-            "the peer closed during the handshake",
-        ));
+        return Err(fault::mesh_auth_failed("the peer closed during the handshake").into());
     };
+    if reply.header.opcode == Opcode::FedError.to_wire() {
+        return Err(refusal_failure(&reply)?);
+    }
     if reply.header.opcode != Opcode::FedHello.to_wire() {
-        return Err(fault::mesh_auth_failed("unexpected mesh handshake frame"));
+        return Err(fault::mesh_auth_failed("unexpected mesh handshake frame").into());
     }
     let remote_hello = from_frame::<migo_protocol::FedHello>(&reply).map_err(fault::from_wire)?;
     let remote = hello_from_wire(&remote_hello)?;
@@ -284,12 +390,13 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
     .await?;
 
     let Some(counter_reply) = read_frame(io).await? else {
-        return Err(fault::mesh_auth_failed(
-            "the peer closed during the handshake",
-        ));
+        return Err(fault::mesh_auth_failed("the peer closed during the handshake").into());
     };
+    if counter_reply.header.opcode == Opcode::FedError.to_wire() {
+        return Err(refusal_failure(&counter_reply)?);
+    }
     if counter_reply.header.opcode != Opcode::FedAuth.to_wire() {
-        return Err(fault::mesh_auth_failed("unexpected mesh handshake frame"));
+        return Err(fault::mesh_auth_failed("unexpected mesh handshake frame").into());
     }
     let counter_proof =
         from_frame::<migo_protocol::FedAuth>(&counter_reply).map_err(fault::from_wire)?;
@@ -321,8 +428,16 @@ async fn handshake_server<S: AsyncRead + AsyncWrite + Unpin + Send>(
     }
     let remote_hello = from_frame::<migo_protocol::FedHello>(&opening).map_err(fault::from_wire)?;
     // A peer working from a stale routing view must refetch and retry; the epoch check is
-    // what tells it so, before the handshake is allowed to proceed (section 169).
-    mesh.check_epoch(remote_hello.epoch)?;
+    // what tells it so, before the handshake is allowed to proceed (section 169). The
+    // refusal is written rather than left implicit: a `FED_ERROR` naming this node's
+    // current epoch lets the peer's transport refresh its view and dial again on its own,
+    // which is the refetch the check exists to ask for.
+    if let Err(error) = mesh.check_epoch(remote_hello.epoch) {
+        if error.code() == migo_protocol::codes::ROUTING_EPOCH_STALE {
+            refuse_stale_epoch(io, mesh, &error).await;
+        }
+        return Err(error);
+    }
     let remote = hello_from_wire(&remote_hello)?;
 
     let local = mesh.hello();
@@ -532,6 +647,10 @@ impl IngestRouter {
     ///
     /// - a room *lifecycle* event — a member change, a title, a poll — belongs on the
     ///   room topic, which is the topic the room's own members subscribe to;
+    /// - a *rebalance hint* — the room moved to another node, and every member is told
+    ///   where to reconnect — belongs on the room topic too, the room being the only
+    ///   thing that names its audience: the hint frame itself carries no room id, so the
+    ///   envelope's is the one that places it;
     /// - a *messaging* event, which is how a room's text arrives, belongs on the
     ///   conversation the room's row names. It is a messaging event because a room's
     ///   chat is a conversation, and every messaging event carries its own
@@ -639,6 +758,15 @@ fn placement_of(opcode: Opcode, inner: &Frame, room_id: Id) -> Result<Placement>
     match opcode {
         // Room lifecycle: the room topic is the one the room's own members subscribe to.
         Opcode::RoomMemberEvent => Ok(Placement {
+            topic: room,
+            coalesce: None,
+            also: None,
+        }),
+        // A rebalance's instruction rides the room envelope like any other room event,
+        // because the members it addresses are the room's subscribers; the hint names no
+        // conversation and must never be coalesced — two moves collapsed into one would
+        // leave the survivor's members reconnecting to a node that no longer homes them.
+        Opcode::ReconnectHint => Ok(Placement {
             topic: room,
             coalesce: None,
             also: None,
@@ -830,7 +958,16 @@ async fn serve_reads<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 }
                 let inner =
                     Frame::decode(Bytes::from(forward.payload)).map_err(fault::from_wire)?;
-                router.ingest(peer, inner).await?;
+                if let Err(error) = router.ingest(peer, inner).await {
+                    // A stale routing epoch inside an ingested frame is the same refusal the
+                    // handshake gate raises, and gets the same answer: the `FED_ERROR` names
+                    // this node's current epoch so the sender refreshes its view and retries,
+                    // rather than reading the torn link as one more dead peer.
+                    if error.code() == migo_protocol::codes::ROUTING_EPOCH_STALE {
+                        refuse_stale_epoch(io, mesh, &error).await;
+                    }
+                    return Err(error);
+                }
                 *watermark = (*watermark).max(sequence);
                 write_frame(
                     io,
@@ -899,7 +1036,9 @@ fn peer_to_wire(peer: PeerView) -> migo_protocol::FedPeerView {
 /// The whole session is one unit of work: handshake, send every event numbered from one,
 /// hold the link open until the peer's cumulative watermark covers the batch, and report
 /// exactly which events the watermark covered. Anything short of full coverage is a
-/// partial failure — the caller marks what arrived and reschedules the rest.
+/// partial failure — the caller marks what arrived and reschedules the rest. A
+/// [`SessionFailure::StaleView`] is the one failure the caller can act on itself: the peer
+/// named the epoch its view is current at, so the caller refreshes and dials again.
 async fn deliver_batch<S: AsyncRead + AsyncWrite + Unpin + Send>(
     mut io: S,
     mesh: &SharedMesh,
@@ -907,7 +1046,7 @@ async fn deliver_batch<S: AsyncRead + AsyncWrite + Unpin + Send>(
     peer_view: &PeerView,
     events: &[PendingEvent],
     now: Timestamp,
-) -> Result<Vec<Id>> {
+) -> std::result::Result<Vec<Id>, SessionFailure> {
     let handshook = handshake(&mut io, mesh, mesh.region(), now).await?;
     let _ = handshook;
 
@@ -932,7 +1071,8 @@ async fn deliver_batch<S: AsyncRead + AsyncWrite + Unpin + Send>(
             let Some(frame) = read_frame(&mut io).await? else {
                 return Err(fault::internal(
                     "the peer closed the link before acknowledging the batch",
-                ));
+                )
+                .into());
             };
             match Opcode::from_wire(frame.header.opcode)
                 .ok_or_else(|| fault::validation("opcode", "not a known mesh opcode"))?
@@ -941,8 +1081,17 @@ async fn deliver_batch<S: AsyncRead + AsyncWrite + Unpin + Send>(
                     let ack: migo_protocol::FedAck =
                         from_frame(&frame).map_err(fault::from_wire)?;
                     if ack.seq >= highest {
-                        return Ok::<(), Error>(());
+                        return Ok::<(), SessionFailure>(());
                     }
+                }
+                Opcode::FedError => {
+                    // A refusal can arrive here too — an ingested frame carrying a stale
+                    // epoch tears the link after the handshake passed — and it gets the
+                    // same refresh-and-retry answer the handshake gate's refusal does.
+                    return match stale_view_of(&frame)? {
+                        Some(peer_epoch) => Err(SessionFailure::StaleView { peer_epoch }),
+                        None => Err(refusal_failure(&frame)?),
+                    };
                 }
                 Opcode::Ping => {
                     let ping: migo_protocol::FedPing =
@@ -961,7 +1110,8 @@ async fn deliver_batch<S: AsyncRead + AsyncWrite + Unpin + Send>(
                     return Err(fault::validation(
                         "opcode",
                         "unexpected mesh frame while awaiting acks",
-                    ))
+                    )
+                    .into())
                 }
             }
         }
@@ -1164,25 +1314,67 @@ impl MeshTransport {
                     continue;
                 }
             };
-            let stream = match tokio::net::TcpStream::connect(&endpoint).await {
-                Ok(stream) => stream,
-                Err(error) => {
-                    self.settle_failure(&events, now, &format!("cannot reach the peer: {error}"))
-                        .await;
-                    continue;
-                }
-            };
-            match deliver_batch(stream, &self.mesh, &self.router, &peer, &events, now).await {
+            match self.deliver_to(&endpoint, &peer, &events, now).await {
                 Ok(delivered) => {
                     self.meters.delivered(delivered.len() as u64);
                     for event_id in delivered {
                         self.mesh.mark_delivered(event_id, now).await?;
                     }
                 }
-                Err(error) => self.settle_failure(&events, now, &error.to_string()).await,
+                Err(SessionFailure::StaleView { peer_epoch }) => {
+                    // The refusal named the epoch the peer's view is current at, so the
+                    // refresh is one hop rather than an operator's `bump_epoch`: adopt it
+                    // and dial again, still inside this drain. The retry happens exactly
+                    // once — a peer that refuses a fresh view twice is refusing for a
+                    // reason this node cannot fix, and the events go back on their backoff
+                    // like any other failure.
+                    let view = self.mesh.refresh_routing(peer_epoch);
+                    tracing::info!(
+                        peer = %target.to_text(),
+                        peer_epoch,
+                        view,
+                        "the peer refused a stale routing view; refreshed and retrying"
+                    );
+                    match self.deliver_to(&endpoint, &peer, &events, now).await {
+                        Ok(delivered) => {
+                            self.meters.delivered(delivered.len() as u64);
+                            for event_id in delivered {
+                                self.mesh.mark_delivered(event_id, now).await?;
+                            }
+                        }
+                        Err(failure) => {
+                            self.settle_failure(&events, now, &failure.to_string())
+                                .await;
+                        }
+                    }
+                }
+                Err(SessionFailure::Failed(error)) => {
+                    self.settle_failure(&events, now, &error.to_string()).await;
+                }
             }
         }
         Ok(())
+    }
+
+    /// Dials one peer and hands it the batch, returning the events its watermark covered.
+    ///
+    /// The dial and the session are one helper because they fail as one: a peer that cannot
+    /// be reached and a peer that refuses the session both leave the batch undelivered, and
+    /// the one failure a refresh turns into a success — the stale-view refusal — is caught
+    /// by the caller rather than absorbed here.
+    async fn deliver_to(
+        &self,
+        endpoint: &str,
+        peer: &PeerView,
+        events: &[PendingEvent],
+        now: Timestamp,
+    ) -> std::result::Result<Vec<Id>, SessionFailure> {
+        let stream = tokio::net::TcpStream::connect(endpoint)
+            .await
+            .map_err(|error| {
+                SessionFailure::Failed(fault::internal(format!("cannot reach the peer: {error}")))
+            })?;
+        deliver_batch(stream, &self.mesh, &self.router, peer, events, now).await
     }
 
     /// Reschedules a batch that did not arrive, with the failure the next backoff grows from.
@@ -1585,6 +1777,7 @@ mod tests {
         let relay_b = Arc::new(crate::room_relay::RoomRelay::new(
             mesh_b.clone(),
             Arc::new(MemoryStore::new()),
+            None,
         ));
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
@@ -1668,6 +1861,7 @@ mod tests {
         let relay_b = Arc::new(crate::room_relay::RoomRelay::new(
             mesh_b.clone(),
             store_with_room(room_id, Id::from(0x2222), "region-2").await,
+            None,
         ));
         let transport_a = Arc::new(MeshTransport::new(
             mesh_a.clone(),
@@ -1818,8 +2012,13 @@ mod tests {
         let relay_a = Arc::new(crate::room_relay::RoomRelay::new(
             mesh_a.clone(),
             store_a.clone(),
+            None,
         ));
-        let relay_b = Arc::new(crate::room_relay::RoomRelay::new(mesh_b.clone(), store_b));
+        let relay_b = Arc::new(crate::room_relay::RoomRelay::new(
+            mesh_b.clone(),
+            store_b,
+            None,
+        ));
         // B ingests on `later`, so the onward copy it enqueues is due at `later` — the
         // ingest clock has to be the test's, or the copy lands in the real present and no
         // assertion about this batch could see it.
@@ -1920,6 +2119,111 @@ mod tests {
         assert_eq!(
             onward[0].target_node, third,
             "the other watching node, and only it"
+        );
+    }
+
+    /// A stale routing view is refused with the epoch named on the wire, and the named
+    /// epoch is what the sender adopts: one refusal, one refresh, one redial — no
+    /// operator's `bump_epoch` anywhere in the sequence.
+    #[tokio::test]
+    async fn a_stale_view_refusal_names_the_epoch_and_the_redial_succeeds() {
+        let (mesh_a, mesh_b, _a_id, b_id) = pair().await;
+        let now = Timestamp::from_millis(NOW);
+        let registry = registry();
+        let transport_b = Arc::new(MeshTransport::new(
+            mesh_b.clone(),
+            None,
+            None,
+            &registry,
+            Arc::new(SystemClock),
+        ));
+
+        // B's view moves on — three rebalances' worth — while A still holds epoch zero.
+        mesh_b.bump_epoch();
+        mesh_b.bump_epoch();
+        assert_eq!(
+            mesh_b.bump_epoch(),
+            3,
+            "the test's premise: B is at epoch three"
+        );
+
+        let event = FederatedEvent {
+            target_node: b_id,
+            opcode: Opcode::FedPresenceDigest.to_wire() as i32,
+            payload: digest_frame("refused, then delivered").to_vec(),
+        };
+        mesh_a
+            .enqueue(event, now)
+            .await
+            .expect("a federation-band event enqueues");
+        let due = mesh_a.due(now).await.expect("the queue reads");
+        assert_eq!(due.len(), 1, "the event waits to be delivered");
+
+        // First dial: B refuses the stale view, and the refusal is a frame the client can
+        // read before the link closes — not a bare close it would file as a dead peer.
+        let (client_io, server_io) = duplex(64 * 1024);
+        let peer_view = mesh_a.peer(b_id).await.expect("the peer resolves");
+        let server_mesh = mesh_b.clone();
+        let server_router = transport_b.router_ref().clone();
+        let server =
+            tokio::spawn(
+                async move { serve_session(server_io, server_mesh, server_router, now).await },
+            );
+        let refusal = deliver_batch(
+            client_io,
+            &mesh_a,
+            transport_b.router_ref(),
+            &peer_view,
+            &due,
+            now,
+        )
+        .await
+        .expect_err("a stale view is refused");
+        server
+            .await
+            .expect("the refused session ends")
+            .expect_err("the refusal ends the server session");
+        match refusal {
+            SessionFailure::StaleView { peer_epoch } => assert_eq!(
+                peer_epoch, 3,
+                "the refusal names the epoch B's view is current at"
+            ),
+            other => panic!("the refusal is a stale view, not {other:?}"),
+        }
+        assert_eq!(mesh_a.epoch(), 0, "the refusal alone moved nothing on A");
+
+        // The transport's answer: adopt the named epoch and dial the same batch again.
+        assert_eq!(
+            mesh_a.refresh_routing(3),
+            3,
+            "the named epoch becomes A's view"
+        );
+        let (client_io, server_io) = duplex(64 * 1024);
+        let server_mesh = mesh_b;
+        let server_router = transport_b.router_ref().clone();
+        let server =
+            tokio::spawn(
+                async move { serve_session(server_io, server_mesh, server_router, now).await },
+            );
+        let delivered = deliver_batch(
+            client_io,
+            &mesh_a,
+            transport_b.router_ref(),
+            &peer_view,
+            &due,
+            now,
+        )
+        .await
+        .expect("the refreshed view is admitted");
+        server
+            .await
+            .expect("the server session completes")
+            .expect("the server side of the session is clean");
+        assert_eq!(delivered.len(), 1, "the retry delivered the event");
+        assert_eq!(
+            transport_b.ingested().len(),
+            1,
+            "B ingested the event the retry carried"
         );
     }
 }

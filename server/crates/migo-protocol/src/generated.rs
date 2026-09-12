@@ -6814,6 +6814,7 @@ pub struct FedError {
     pub node_id: String,
     pub code: u32,
     pub message: String,
+    pub epoch: Option<u64>,
 }
 
 impl Encode for FedError {
@@ -6822,7 +6823,14 @@ impl Encode for FedError {
         w.write_str(&self.node_id)?;
         w.write_u32(self.code);
         w.write_str(&self.message)?;
-        w.write_u32(0);
+        let present = usize::from(self.epoch.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.epoch {
+            w.optional(1, |w| {
+                w.write_u64(*v);
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -6837,9 +6845,12 @@ impl Decode for FedError {
         out.message = r.read_string()?;
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
-            // No optional fields are defined for this struct in this
-            // protocol build; a newer peer's fields are skipped by length.
-            let _ = r.read_optional()?;
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.epoch = Some(sub.read_u64()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
         }
         r.leave();
         Ok(out)

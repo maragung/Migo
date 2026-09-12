@@ -491,6 +491,17 @@ pub trait RoomStore: Send + Sync {
         at: Timestamp,
     ) -> Result<Room>;
 
+    /// Moves a room to a new home node, returning the rehomed row.
+    ///
+    /// The placement half of a node move (brief section 173): the row's `home_region` is
+    /// the fact every publish path reads to decide who tiers the room's fanout, so moving
+    /// the room is moving that fact. The revision advances with it, because a client
+    /// holding a summary built on the old placement is as stale as one holding an old
+    /// name. Fails as [`not_found`](migo_protocol::fault::not_found) if the room does not
+    /// exist; the caller owns the rest of the move — telling the members, raising the
+    /// routing epoch — because those are mesh facts, not storage ones.
+    async fn rehome_room(&self, room_id: Id, home_region: &str, at: Timestamp) -> Result<Room>;
+
     /// Archives a room. Not a delete: links and history keep resolving.
     async fn archive_room(&self, room_id: Id, at: Timestamp) -> Result<()>;
 
