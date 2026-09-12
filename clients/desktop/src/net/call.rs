@@ -912,7 +912,11 @@ impl Worker {
         // its drop at call end is the signal the whole capture chain unwinds on.
         let mic_frames = microphone.take_frames();
         spawn_capture_pump(mic_frames, microphone.rate, muted.clone(), sample_tx);
-        Ok((pc, microphone, speaker, muted, video_slot))
+        // The slot crosses into the on_track handler above (a move closure owns what it
+        // captures) and back out here as the caller's share of the same slot — one clone for
+        // two holders of one Arc, so the overlay and the pump read and write the same frame
+        // store the call through.
+        Ok((pc, microphone, speaker, muted, video_slot.clone()))
     }
 
     /// The placement's second half, on the TURN answer or its timeout: media, offer, invite.
