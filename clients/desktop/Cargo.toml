@@ -61,10 +61,20 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls", "log"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # The call engine's media plane: WebRTC for the peer connection, SDP, and ICE, with the media
-# engine carrying PCMU only (8 kHz µ-law, the one codec every Migo client speaks). The crate's
-# own default features are kept — the deny_once SRTP protection and the ICE mDNS candidate
+# engine carrying PCMU for audio and VP8 for the video this build receives. The crate's own
+# default features are kept — the deny_once SRTP protection and the ICE mDNS candidate
 # support are both wanted on a desktop that may sit behind a hairpinning router.
 webrtc = "0.14"
+# The video half of a call, built on the same three crates the audio half already rides.
+#
+# VP8 decoding is oxideav — pure Rust, no C toolchain in the build, same reasoning as
+# `oporus` below. `default-features = false` is load-bearing: the default `registry`
+# feature pulls oxideav-core, which this client has no other use for; without it the crate
+# has no dependencies at all. Only the stateful decoder is used (`Vp8DecoderState`), because
+# a call is inter-frames all the way down and a stateless decode would show one keyframe and
+# stop. The depacketizer and the PLI keyframe request come from `webrtc`'s own re-exports
+# (`webrtc::rtp`, `webrtc::rtcp`) — the same crates, the same versions, no second copy.
+oxideav-vp8 = { version = "0.2.7", default-features = false }
 anyhow = "1"
 futures-util = "0.3"
 

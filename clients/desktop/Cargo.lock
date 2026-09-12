@@ -2897,6 +2897,7 @@ dependencies = [
  "migo-protocol",
  "migo-wire",
  "oporus",
+ "oxideav-vp8",
  "quinn",
  "reqwest",
  "rustls",
@@ -3569,6 +3570,12 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
 ]
+
+[[package]]
+name = "oxideav-vp8"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "506f2495a728488c2fee1ee54bc7f819ca934dc3246369b4100c83848f057852"
 
 [[package]]
 name = "p256"

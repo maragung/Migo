@@ -340,8 +340,9 @@ impl CallDeclineReason {
 /// What kind of media a call carries, as the wire numbers it.
 ///
 /// Video is a future this build does not place, but a video invite from a newer
-/// client still rings and answers — degraded to audio by `from_wire`, never
-/// refused, because the call as audio beats no call at all.
+/// client still rings and answers — the incoming video is rendered by the
+/// answerer's video stage, while this build's own camera stays dark, so the
+/// call as audio-and-their-picture beats no call at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallMediaKind {
     Audio,
