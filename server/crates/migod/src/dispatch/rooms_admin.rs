@@ -33,6 +33,13 @@
 //! sent (section 156). The publishing itself is
 //! [`publish_rooms`](super::publish_rooms) — the same helper the inline room handlers
 //! use, so a member event, a state event, and a vote tally keep their one encoder.
+//!
+//! Every handler that mutates an *existing* room passes the read-only gate of section
+//! 173's scenario 2 first: a room whose home node is partitioned away is refused with
+//! `ROOM_READ_ONLY_PARTITION`, because the write would need a second sequencer that
+//! must not exist (section 170). `ROOM_CREATE` is not gated — a new room is homed on
+//! the node that creates it, so its sequencer is born here — and `ROOM_ROSTER` is a
+//! read, which a partition never refuses.
 
 use migo_core::Error;
 use migo_gateway::ClientContext;
@@ -173,6 +180,7 @@ pub(crate) async fn handle_role_set(
         ctx.now(),
     );
     let request: RoomRoleSet = from_frame(frame).map_err(fault::from_wire)?;
+    dispatcher.ensure_room_writable(request.room_id).await?;
     let fanout = svc
         .set_role(
             &caller,
@@ -214,6 +222,7 @@ pub(crate) async fn handle_room_update(
         ctx.now(),
     );
     let request: RoomUpdate = from_frame(frame).map_err(fault::from_wire)?;
+    dispatcher.ensure_room_writable(request.room_id).await?;
     let settings = Settings {
         name: request.name,
         topic: request.topic.map_or(TopicChange::Keep, TopicChange::Set),
@@ -240,6 +249,7 @@ pub(crate) async fn handle_room_archive(
     ctx: &ClientContext<'_>,
     frame: &Frame,
     svc: &SharedRooms,
+    dispatcher: &super::AppDispatcher,
 ) -> Result<(), Error> {
     let caller = RoomCaller::new(
         ctx.identity().account_id(),
@@ -248,6 +258,9 @@ pub(crate) async fn handle_room_archive(
         ctx.now(),
     );
     let request: RoomArchive = from_frame(frame).map_err(fault::from_wire)?;
+    // Archiving is room state like any other: the home node's sequencer owns
+    // the order it lands in, so a partitioned room is read-only to it too.
+    dispatcher.ensure_room_writable(request.room_id).await?;
     svc.archive(&caller, request.room_id).await?;
     ctx.reply(&Acknowledged { ok: true })
 }
@@ -286,6 +299,7 @@ pub(crate) async fn handle_sanction(
         ctx.now(),
     );
     let request: RoomSanction = from_frame(frame).map_err(fault::from_wire)?;
+    dispatcher.ensure_room_writable(request.room_id).await?;
     let sanction = match request.action {
         SanctionAction::Mute => Sanction::Mute {
             duration_ms: MAX_MUTE_MS,
@@ -339,6 +353,7 @@ pub(crate) async fn handle_vote_kick(
         ctx.now(),
     );
     let request: RoomVoteKick = from_frame(frame).map_err(fault::from_wire)?;
+    dispatcher.ensure_room_writable(request.room_id).await?;
     let (response, fanouts) = svc
         .vote_kick(&caller, request.room_id, request.target_id)
         .await?;
