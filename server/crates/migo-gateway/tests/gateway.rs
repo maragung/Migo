@@ -1213,9 +1213,15 @@ async fn an_allocated_opcode_at_the_reserved_head_is_not_caught_by_the_range_gat
         codes::UNEXPECTED_OPCODE,
         "240 reaches the phase gate and is answered for its phase, not its range"
     );
-    assert_eq!(
+    // The proof that the range gate let 240 through is what the refusal does *not* carry:
+    // disclosure is opt-in (`Error::public`, and `fault::error` leaves the detail unset), so
+    // the phase gate's internal "the session is not authenticated" never reaches the wire —
+    // the one refusal on this path that says anything is the range gate's, and its hint is
+    // the literal "reserved opcode" under UNKNOWN_OPCODE, as the test above pins. A hint
+    // here would mean the range gate had intercepted an allocated opcode.
+    assert_ne!(
         error.message.as_deref(),
-        Some("the session is not authenticated"),
+        Some("reserved opcode"),
         "the refusal is the phase gate's — proof the range gate let 240 through"
     );
     assert_eq!(
