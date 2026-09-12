@@ -30,7 +30,7 @@ pub mod tcp;
 mod transport;
 mod webhook;
 
-pub use compose::App;
+pub use compose::{apply_mesh_peers, App};
 pub use serve::GATEWAY_PATH;
 
 use anyhow::Context;

@@ -63,3 +63,17 @@ log_level = "info"                 # RUST_LOG-style directives; RUST_LOG itself 
 log_format = "pretty"              # pretty | json
 # Metrics are scraped at GET /metrics on the HTTP router — there is no
 # separate bind, and no OTLP/tracing exporter in this build.
+
+# Federation: the server-to-server mesh. Every entry in peers is applied to the
+# allow-list at startup, idempotently — a restart converges on what is already
+# stored instead of failing. Two nodes that name each other link from this
+# configuration alone; node.mesh_bind on each side opens the listener. A
+# malformed or duplicated entry, an entry while enabled is false, or an entry
+# naming this node itself refuses to start rather than warning.
+# [federation]
+# enabled = true
+# [[federation.peers]]
+# node_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"  # the peer's node id, canonical text form
+# public_key = "base64-of-32-raw-ed25519-public-key-bytes"
+# base_url = "wss://other-node.example:18090"
+# region = "local"                        # the label the peer itself runs under

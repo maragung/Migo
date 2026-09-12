@@ -3674,7 +3674,6 @@ async fn admitted_peer(store: &SharedStore, node: u128) {
         .await
         .expect("a fresh allow-list admits the peer");
 }
-
 /// A status transition lands only from the status it names, and never overwrites
 /// the one an operator set in between.
 pub async fn a_status_transition_lands_only_from_the_status_it_names(store: &SharedStore) {
@@ -3784,6 +3783,151 @@ pub async fn pending_depth_counts_what_one_peer_is_owed(store: &SharedStore) {
     );
 }
 
+// The allow-list is the mesh's boundary, so its contract is about identity: one
+// row per node, one key per row, and an update that converges exactly what the
+// operator re-declared while leaving what only the runtime decided alone.
+
+pub async fn a_peer_is_admitted_once_and_read_back_as_written(store: &SharedStore) {
+    store
+        .add_peer(NewPeer {
+            node_id: id(7_001).to_string(),
+            public_key: vec![1; 32],
+            base_url: "wss://node-b.example:18090".to_string(),
+            region: "region-b".to_string(),
+            status: 0,
+            added_at: ts(1_000),
+        })
+        .await
+        .unwrap();
+    // The same node id presenting a different key is a second identity claim on
+    // one row: refused, and the original is not overwritten.
+    expect_code(
+        store
+            .add_peer(NewPeer {
+                node_id: id(7_001).to_string(),
+                public_key: vec![2; 32],
+                base_url: "wss://elsewhere.example:1".to_string(),
+                region: "elsewhere".to_string(),
+                status: 0,
+                added_at: ts(2_000),
+            })
+            .await,
+        codes::ALREADY_EXISTS,
+    );
+    // The key, not the id, is what a handshake is checked against, so a second
+    // node cannot claim an admitted key either.
+    expect_code(
+        store
+            .add_peer(NewPeer {
+                node_id: id(7_002).to_string(),
+                public_key: vec![1; 32],
+                base_url: "wss://twin.example:1".to_string(),
+                region: "twin".to_string(),
+                status: 0,
+                added_at: ts(3_000),
+            })
+            .await,
+        codes::ALREADY_EXISTS,
+    );
+    let unchanged = store.peer(&id(7_001).to_string()).await.unwrap().unwrap();
+    assert_eq!(unchanged.public_key, vec![1; 32]);
+    assert_eq!(unchanged.base_url, "wss://node-b.example:18090");
+    assert_eq!(unchanged.region, "region-b");
+}
+
+pub async fn update_peer_converges_what_was_redeclared_and_nothing_else(store: &SharedStore) {
+    store
+        .add_peer(NewPeer {
+            node_id: id(7_010).to_string(),
+            public_key: vec![3; 32],
+            base_url: "wss://old.example:1".to_string(),
+            region: "region-old".to_string(),
+            status: 0,
+            added_at: ts(1_000),
+        })
+        .await
+        .unwrap();
+    // A runtime decision the next boot's configuration must not undo.
+    store
+        .set_peer_status(&id(7_010).to_string(), 1)
+        .await
+        .unwrap()
+        .unwrap();
+    let updated = store
+        .update_peer(
+            &id(7_010).to_string(),
+            vec![4; 32],
+            "wss://new.example:2".to_string(),
+            "region-new".to_string(),
+        )
+        .await
+        .unwrap()
+        .expect("the peer exists, so the update lands");
+    assert_eq!(updated.public_key, vec![4; 32]);
+    assert_eq!(updated.base_url, "wss://new.example:2");
+    assert_eq!(updated.region, "region-new");
+    assert_eq!(
+        updated.status, 1,
+        "a runtime status survives re-declaration"
+    );
+    assert_eq!(
+        updated.added_at,
+        ts(1_000),
+        "admission time is history, not configuration"
+    );
+}
+
+pub async fn update_peer_on_an_unknown_node_is_none_and_a_released_key_is_claimable(
+    store: &SharedStore,
+) {
+    assert!(
+        store
+            .update_peer(
+                &id(7_020).to_string(),
+                vec![5; 32],
+                "wss://ghost.example:1".to_string(),
+                "ghost".to_string(),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "an update for a node that was never admitted lands on nothing"
+    );
+    // A rotated key releases the old one: the next node may claim it.
+    store
+        .add_peer(NewPeer {
+            node_id: id(7_021).to_string(),
+            public_key: vec![6; 32],
+            base_url: "wss://rotating.example:1".to_string(),
+            region: "rotating".to_string(),
+            status: 0,
+            added_at: ts(1_000),
+        })
+        .await
+        .unwrap();
+    store
+        .update_peer(
+            &id(7_021).to_string(),
+            vec![7; 32],
+            "wss://rotating.example:1".to_string(),
+            "rotating".to_string(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .add_peer(NewPeer {
+            node_id: id(7_022).to_string(),
+            public_key: vec![6; 32],
+            base_url: "wss://claimant.example:1".to_string(),
+            region: "claimant".to_string(),
+            status: 0,
+            added_at: ts(4_000),
+        })
+        .await
+        .expect("the released key is claimable again");
+}
+
 /// Names every case in the suite, so a backend file lists none of them.
 ///
 /// A test that exists but is only wired into one backend is worse than no test:
@@ -3849,6 +3993,9 @@ macro_rules! for_each_contract_case {
         $case!(the_moderation_queue_is_oldest_first_and_resolves_once);
         $case!(the_audit_log_is_newest_first_and_scoped_to_one_target);
         $case!(a_game_token_moves_even_within_one_millisecond);
+        $case!(a_peer_is_admitted_once_and_read_back_as_written);
+        $case!(update_peer_converges_what_was_redeclared_and_nothing_else);
+        $case!(update_peer_on_an_unknown_node_is_none_and_a_released_key_is_claimable);
         $case!(a_status_transition_lands_only_from_the_status_it_names);
         $case!(pending_depth_counts_what_one_peer_is_owed);
     };

@@ -241,6 +241,53 @@ where
         view_of(record)
     }
 
+    async fn apply_peer(&self, spec: NewPeerSpec, now: Timestamp) -> Result<PeerView> {
+        // The same validation add_peer performs, so the configuration path may not
+        // admit a peer the programmatic path would refuse: a key that is not a
+        // 32-byte Ed25519 point or an address that is not a mesh scheme is a
+        // startup failure, not a warning.
+        NodePublic::parse(&spec.public_key)
+            .map_err(|_| fault::validation("public_key", "must be a 32-byte Ed25519 public key"))?;
+        validate_base_url(&spec.base_url)?;
+        let region = spec.region.trim();
+        if region.is_empty() {
+            return Err(fault::field_required("region"));
+        }
+        match self.store.peer(&spec.node_id.to_string()).await? {
+            Some(existing) => {
+                if existing.public_key == spec.public_key
+                    && existing.base_url == spec.base_url.trim()
+                    && existing.region == region
+                {
+                    // Nothing changed: the row a previous boot wrote is exactly what
+                    // the configuration names, so a restart writes nothing.
+                    return view_of(existing);
+                }
+                if existing.public_key != spec.public_key {
+                    // A key swap is the one update that changes who a handshake
+                    // proves, so it is said out loud even though the operator
+                    // caused it — the log is where a rotation is audited.
+                    tracing::warn!(
+                        node = %spec.node_id,
+                        "the configured public key replaces the stored one for this peer"
+                    );
+                }
+                let record = self
+                    .store
+                    .update_peer(
+                        &spec.node_id.to_string(),
+                        spec.public_key,
+                        spec.base_url.trim().to_string(),
+                        region.to_string(),
+                    )
+                    .await?
+                    .ok_or_else(|| fault::not_found("peer"))?;
+                view_of(record)
+            }
+            None => self.add_peer(spec, now).await,
+        }
+    }
+
     async fn set_peer_status(&self, node_id: Id, status: PeerStatus) -> Result<PeerView> {
         let record = self
             .store
