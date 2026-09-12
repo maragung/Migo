@@ -949,6 +949,56 @@ impl<T: Transport> Connection<'_, T> {
         FrameOutcome::Close(Closed::ProtocolViolation)
     }
 
+    /// Refuses a Server-auth-level frame that arrived on a client socket, and files the
+    /// section 162 incident record alongside the refusal.
+    ///
+    /// The record is identification only — the session, the account and device when the
+    /// session has authenticated, the remote network class (never a whole address; the
+    /// same section truncates IP data to the network class), the offending opcode, and
+    /// the reason — and it quotes nothing from the frame itself: no payload, no token,
+    /// no key material.
+    fn refuse_server_auth_frame(
+        &self,
+        established: &Established,
+        outbound: &Outbound,
+        opcode: Opcode,
+        opcode_raw: u32,
+        correlation: u32,
+        now: Timestamp,
+    ) -> FrameOutcome {
+        let account_id = established
+            .identity
+            .as_ref()
+            .map(|identity| identity.account_id().to_string());
+        let device_id = established
+            .identity
+            .as_ref()
+            .map(|identity| identity.device_id().to_string());
+        tracing::warn!(
+            incident = "server_auth_frame_from_client",
+            session_id = %established.session_id,
+            account_id = account_id.as_deref(),
+            device_id = device_id.as_deref(),
+            remote_network = self.base.ip_class(),
+            opcode = opcode_raw,
+            opcode_name = %opcode.name(),
+            reason = "protocol_violation",
+            "a Server-auth-level frame was refused on a client socket"
+        );
+        let error =
+            fault::unexpected_opcode(opcode_raw, "this opcode is not accepted from a client");
+        push_error(
+            outbound,
+            &self.gateway.meters,
+            opcode_raw,
+            correlation,
+            &error,
+            now,
+            self.compression,
+        );
+        FrameOutcome::Close(Closed::ProtocolViolation)
+    }
+
     /// Applies the section 149 phase gate to one decoded frame, then either answers a lifecycle
     /// opcode directly or delegates an application opcode to its handler.
     async fn dispatch_frame(
@@ -985,20 +1035,18 @@ impl<T: Transport> Connection<'_, T> {
             return FrameOutcome::Continue;
         };
 
-        // A server-only or server-to-client opcode arriving from a client is a violation.
+        // A server-only or server-to-client opcode arriving from a client is a violation,
+        // and section 162 requires the refusal to be filed as a durable incident record —
+        // `refuse_server_auth_frame` does both.
         if !opcode.accepts_from_client() {
-            let error =
-                fault::unexpected_opcode(opcode_raw, "this opcode is not accepted from a client");
-            push_error(
+            return self.refuse_server_auth_frame(
+                established,
                 outbound,
-                meters,
+                opcode,
                 opcode_raw,
                 correlation,
-                &error,
                 now,
-                self.compression,
             );
-            return FrameOutcome::Close(Closed::ProtocolViolation);
         }
 
         // A second HELLO after the handshake is complete is a violation.
