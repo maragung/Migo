@@ -76,6 +76,7 @@ impl MigratorTrait for Migrator {
             Box::new(PublicRoomCapacity),
             Box::new(PassphraseRename),
             Box::new(ProfileCustomStatus),
+            Box::new(RoomRevision),
         ]
     }
 }
@@ -436,6 +437,36 @@ impl MigrationTrait for ProfileCustomStatus {
         Err(DbErr::Migration(
             "0011_profile_custom_status cannot be rolled back: create a new database instead"
                 .to_owned(),
+        ))
+    }
+}
+
+/// `0012_room_revision` -- the per-room state counter section 156 asks deltas
+/// to carry, so a client that already holds a room can tell it missed a frame
+/// and re-read the snapshot rather than re-fetching on every doubt. See
+/// `server/migrations/0012_room_revision.sql`.
+struct RoomRevision;
+
+impl MigrationName for RoomRevision {
+    fn name(&self) -> &str {
+        "0012_room_revision"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for RoomRevision {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(include_str!("../../../migrations/0012_room_revision.sql"))
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Same posture as every migration before it.
+        Err(DbErr::Migration(
+            "0012_room_revision cannot be rolled back: create a new database instead".to_owned(),
         ))
     }
 }

@@ -2745,6 +2745,8 @@ data class RoomSummary(
     val slowModeMs: Long? = null,
     /** The room's capacity ceiling; join is refused once member_count reaches it. */
     val maxMembers: Long? = null,
+    /** The room's state revision this summary was read at (section 156). A summary is a snapshot; comparing its revision with the one a held roster or state cache was built at says whether the cache is stale without re-reading the room. */
+    val revision: Long? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -2765,6 +2767,7 @@ data class RoomSummary(
         if (myRole != null) present++
         if (slowModeMs != null) present++
         if (maxMembers != null) present++
+        if (revision != null) present++
         w.u32(present)
         if (topic != null) {
             val value = topic
@@ -2826,6 +2829,12 @@ data class RoomSummary(
                 w.u32(value)
             }
         }
+        if (revision != null) {
+            val value = revision
+            w.optional(11) { w ->
+                w.u64(value)
+            }
+        }
         w.leave()
     }
 
@@ -2848,6 +2857,7 @@ data class RoomSummary(
             var myRole: RoomRole? = null
             var slowModeMs: Long? = null
             var maxMembers: Long? = null
+            var revision: Long? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
@@ -2862,11 +2872,12 @@ data class RoomSummary(
                     8L -> myRole = RoomRole.fromWire(sub.u32())
                     9L -> slowModeMs = sub.u32()
                     10L -> maxMembers = sub.u32()
+                    11L -> revision = sub.u64()
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return RoomSummary(roomId, publicId, kind, name, memberCount, onlineCount, topic, description, avatarUrl, category, language, country, verified, myRole, slowModeMs, maxMembers)
+            return RoomSummary(roomId, publicId, kind, name, memberCount, onlineCount, topic, description, avatarUrl, category, language, country, verified, myRole, slowModeMs, maxMembers, revision)
         }
     }
 }
@@ -3091,6 +3102,8 @@ data class RoomMemberEvent(
     val memberCount: Long? = null,
     /** Why the membership changed. Absent on legacy join/leave, where `joined` says it. */
     val change: MemberChange? = null,
+    /** The room's state revision this change advanced it to (section 156). Absent on the presence edges (Connected/Disconnected/Reconnected), which move no state a roster can observe. */
+    val revision: Long? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -3101,6 +3114,7 @@ data class RoomMemberEvent(
         if (role != null) present++
         if (memberCount != null) present++
         if (change != null) present++
+        if (revision != null) present++
         w.u32(present)
         if (role != null) {
             val value = role
@@ -3120,6 +3134,12 @@ data class RoomMemberEvent(
                 w.u32(value.toWire())
             }
         }
+        if (revision != null) {
+            val value = revision
+            w.optional(4) { w ->
+                w.u64(value)
+            }
+        }
         w.leave()
     }
 
@@ -3132,6 +3152,7 @@ data class RoomMemberEvent(
             var role: RoomRole? = null
             var memberCount: Long? = null
             var change: MemberChange? = null
+            var revision: Long? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
@@ -3139,11 +3160,12 @@ data class RoomMemberEvent(
                     1L -> role = RoomRole.fromWire(sub.u32())
                     2L -> memberCount = sub.u32()
                     3L -> change = MemberChange.fromWire(sub.u32())
+                    4L -> revision = sub.u64()
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return RoomMemberEvent(roomId, userId, joined, role, memberCount, change)
+            return RoomMemberEvent(roomId, userId, joined, role, memberCount, change, revision)
         }
     }
 }
@@ -3157,6 +3179,8 @@ data class RoomStateEvent(
     val slowModeMs: Long? = null,
     /** The room's capacity ceiling, sent when it changes. */
     val maxMembers: Long? = null,
+    /** The room's state revision this change advanced it to (section 156). Absent on the online-count frames the gateway's own tally publishes, which move no stored state. */
+    val revision: Long? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -3167,6 +3191,7 @@ data class RoomStateEvent(
         if (topic != null) present++
         if (slowModeMs != null) present++
         if (maxMembers != null) present++
+        if (revision != null) present++
         w.u32(present)
         if (onlineCount != null) {
             val value = onlineCount
@@ -3198,6 +3223,12 @@ data class RoomStateEvent(
                 w.u32(value)
             }
         }
+        if (revision != null) {
+            val value = revision
+            w.optional(6) { w ->
+                w.u64(value)
+            }
+        }
         w.leave()
     }
 
@@ -3210,6 +3241,7 @@ data class RoomStateEvent(
             var topic: String? = null
             var slowModeMs: Long? = null
             var maxMembers: Long? = null
+            var revision: Long? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
@@ -3219,11 +3251,12 @@ data class RoomStateEvent(
                     3L -> topic = sub.str()
                     4L -> slowModeMs = sub.u32()
                     5L -> maxMembers = sub.u32()
+                    6L -> revision = sub.u64()
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return RoomStateEvent(roomId, onlineCount, memberCount, topic, slowModeMs, maxMembers)
+            return RoomStateEvent(roomId, onlineCount, memberCount, topic, slowModeMs, maxMembers, revision)
         }
     }
 }
@@ -3982,6 +4015,8 @@ data class InboxItem(
 data class InboxResponse(
     val items: List<InboxItem>,
     val nextCursor: String? = null,
+    /** The unread count across the whole inbox, not just this page (section 156's counter): fresh with every page, so a badge never counts the rows it happens to hold. */
+    val unread: Long? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -3989,11 +4024,18 @@ data class InboxResponse(
         for (item in items) { item.encode(w) }
         var present = 0
         if (nextCursor != null) present++
+        if (unread != null) present++
         w.u32(present)
         if (nextCursor != null) {
             val value = nextCursor
             w.optional(1) { w ->
                 w.str(value)
+            }
+        }
+        if (unread != null) {
+            val value = unread
+            w.optional(2) { w ->
+                w.u32(value)
             }
         }
         w.leave()
@@ -4004,16 +4046,18 @@ data class InboxResponse(
             r.enter()
             val items = run { val n = r.listLen(); val acc = ArrayList<InboxItem>(n); for (i in 0 until n) acc.add(InboxItem.decode(r)); acc }
             var nextCursor: String? = null
+            var unread: Long? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
                 when (fieldId) {
                     1L -> nextCursor = sub.str()
+                    2L -> unread = sub.u32()
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return InboxResponse(items, nextCursor)
+            return InboxResponse(items, nextCursor, unread)
         }
     }
 }
@@ -6080,12 +6124,22 @@ data class RosterReq(
 /** A page of a room's roster. */
 data class RosterResponse(
     val members: List<RosterEntry>,
+    /** The room's state revision this page was read at (section 156). A member or state event that arrives carrying a revision beyond it means a delta was missed and the roster should be re-read. */
+    val revision: Long? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
         w.listLen(members.size)
         for (item in members) { item.encode(w) }
-        w.u32(0)
+        var present = 0
+        if (revision != null) present++
+        w.u32(present)
+        if (revision != null) {
+            val value = revision
+            w.optional(1) { w ->
+                w.u64(value)
+            }
+        }
         w.leave()
     }
 
@@ -6093,12 +6147,17 @@ data class RosterResponse(
         fun decode(r: Reader): RosterResponse {
             r.enter()
             val members = run { val n = r.listLen(); val acc = ArrayList<RosterEntry>(n); for (i in 0 until n) acc.add(RosterEntry.decode(r)); acc }
+            var revision: Long? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
-                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> revision = sub.u64()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
             }
             r.leave()
-            return RosterResponse(members)
+            return RosterResponse(members, revision)
         }
     }
 }

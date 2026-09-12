@@ -4,6 +4,7 @@ use migo_core::config::NodeConfig;
 use migo_core::{Id, Timestamp};
 use migo_protocol::{RoomKind, RoomRole};
 use migo_ratelimit::TrustTier;
+use migo_store::model::RoomMember;
 
 /// Shortest a slug may be.
 ///
@@ -362,6 +363,22 @@ pub struct Authorized {
     /// message time per author, which is messaging and not this crate. Enforcing it
     /// here would mean reading a conversation's tail on every permission check.
     pub slow_mode_seconds: i32,
+}
+
+/// One page of a roster, with the room's state revision it was read at.
+///
+/// The revision is brief section 156 made usable: a member or state event that
+/// arrives carrying a revision beyond this one means a delta was missed between
+/// the page and now, and the roster should be re-read rather than patched from
+/// a frame the client no longer trusts. It is read *after* the member rows, so
+/// a change that raced the page is counted as missed rather than silently
+/// absent from both numbers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Roster {
+    /// The members, highest role first.
+    pub members: Vec<RoomMember>,
+    /// The room's state revision the page was read at.
+    pub revision: u64,
 }
 
 /// Whether a slug is a name and not an injection.

@@ -132,9 +132,10 @@ pub(crate) async fn handle_roster(
     let limit = request.limit.map_or(MAX_ROSTER_PAGE, |limit| {
         limit.clamp(1, u32::from(MAX_ROSTER_PAGE)) as u16
     });
-    let members = svc
+    let roster = svc
         .roster(&caller, request.room_id, limit, request.after)
         .await?;
+    let members = roster.members;
     ctx.reply(&RosterResponse {
         members: members
             .into_iter()
@@ -144,6 +145,10 @@ pub(crate) async fn handle_roster(
                 joined_at: member.joined_at,
             })
             .collect(),
+        // The page's anchor (brief section 156): a member or state event that
+        // arrives carrying a revision beyond it means a delta was missed and
+        // the roster should be re-read.
+        revision: Some(roster.revision),
     })
 }
 
