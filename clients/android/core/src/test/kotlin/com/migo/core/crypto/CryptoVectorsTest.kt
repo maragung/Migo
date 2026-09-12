@@ -48,12 +48,23 @@ class CryptoVectorsTest {
             Sodium.overrideForTesting(LazySodiumJava(SodiumJava()))
         }
 
-        /** The crypto vector directory, found by walking up from the module to the repo root. */
-        private val vectorDir: File by lazy {
+        /**
+         * The crypto vector directory, found by walking up from the module to the repo root.
+         *
+         * The search is a named function rather than an inline `lazy` body because a lambda's
+         * result type is the common supertype of everything that can leave it — both its `return`
+         * points and its last expression. Inline, the successful return is a [File] and the
+         * trailing `while` is `Unit`, so the supertype is `Any` and `lazy` would hand back a
+         * `Lazy<Any>`. Declaring `: File` here says what the search means and lets the compiler
+         * check the loop instead of widening it.
+         */
+        private val vectorDir: File by lazy { findVectorDir() }
+
+        private fun findVectorDir(): File {
             var dir = File(System.getProperty("user.dir")).absoluteFile
             while (true) {
                 val candidate = File(dir, "shared/protocol/vectors/crypto")
-                if (candidate.isDirectory) return@lazy candidate
+                if (candidate.isDirectory) return candidate
                 dir = dir.parentFile ?: fail(
                     "the conformance vectors are not above ${System.getProperty("user.dir")}",
                 )
