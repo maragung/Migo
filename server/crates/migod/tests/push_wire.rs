@@ -24,7 +24,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use migo_auth::{DeviceClaim, Grant, Registration, RequestContext};
 use migo_core::{Config, Id, Secret, Timestamp};
-use migo_notify::{Event, Notifier, MAX_TOKEN_LEN};
+use migo_notify::{Event, MAX_TOKEN_LEN};
 use migo_protocol::{
     codes, from_frame, to_frame, Acknowledged, Encode, Frame, Hello, InboxReq, InboxResponse,
     NotificationKind, Opcode, Platform, PushRegister, PushUnregister, Welcome, PROTOCOL_VERSION,

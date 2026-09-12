@@ -39,6 +39,10 @@ export type {
   WalletSummary,
 } from './rest.js';
 
+// --- client node routing (§170): measure the node list, pick the fastest, fail over ---
+export { candidatesFromConfig, rankNodesByLatency, routingPlanFromConfig } from './node-router.js';
+export type { NodeCandidate, RankedNode, RankOptions, RoutingPlan } from './node-router.js';
+
 // --- the user-configured server endpoint (host, port, scheme, transport) ---
 export {
   assertValidServerEndpoint,

@@ -142,6 +142,14 @@ export interface MigoClientOptions {
    * pair of endpoints with no way to disagree about which deployment is meant.
    */
   server: ServerEndpoint;
+  /**
+   * Other nodes the transport may fail over to when `server` cannot be reached (§170). Built by
+   * {@link routingPlanFromConfig} from the config document's node list; omitted (or empty) is
+   * the single-node posture, where the transport behaves exactly as before the field existed.
+   * A failover to another node starts a fresh session there and fires the reset path
+   * (re-subscribe + resync), because session state is node-local.
+   */
+  failoverServers?: ServerEndpoint[];
   /** The handshake parameters; the access token and device id are supplied from the grant. */
   hello: ClientHello;
   /** The human-readable device name recorded on the account's device list. */
@@ -1516,6 +1524,9 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     }
     if (this.#options.maxReconnectDelayMs !== undefined) {
       options.maxReconnectDelayMs = this.#options.maxReconnectDelayMs;
+    }
+    if (this.#options.failoverServers !== undefined) {
+      options.failoverServers = this.#options.failoverServers;
     }
     return options;
   }

@@ -93,7 +93,7 @@ use std::sync::Arc;
 use axum::Router;
 
 use migo_auth::SharedAuth;
-use migo_core::config::Config;
+use migo_core::config::{ClientPeer, Config};
 use migo_core::metrics::Registry;
 use migo_core::{Clock, Timestamp};
 use migo_protocol::NodeInfo;
@@ -154,6 +154,10 @@ struct Inner {
     node: NodeInfo,
     features: u64,
     policy: Policy,
+    /// The peer nodes `/v1/config` may offer clients as routing alternatives (section 170).
+    /// Copied from `federation.client_peers` once, like the policy values, so a handler
+    /// never borrows the whole configuration tree.
+    client_peers: Vec<ClientPeer>,
     /// Peer addresses whose forwarded headers name the caller. Empty means
     /// every request is answered with its own socket address.
     trusted_proxies: Vec<std::net::IpAddr>,
@@ -223,6 +227,7 @@ impl ApiState {
                 node: services.node,
                 features: services.features,
                 policy,
+                client_peers: config.federation.client_peers.clone(),
                 trusted_proxies,
                 media_files: services.media_files,
                 recovery_delivery: services.recovery_delivery,
@@ -275,6 +280,13 @@ impl ApiState {
     /// The configuration-derived policy, for `/v1/config`.
     pub(crate) fn policy(&self) -> &Policy {
         &self.inner.policy
+    }
+
+    /// The peer nodes `/v1/config` may offer clients as routing alternatives, for the
+    /// `nodes` list. Empty is the single-node posture: the list still carries this
+    /// node, because a client reads the list to learn where it may connect at all.
+    pub(crate) fn client_peers(&self) -> &[ClientPeer] {
+        &self.inner.client_peers
     }
 
     /// The server's notion of now, sampled from the node clock.
