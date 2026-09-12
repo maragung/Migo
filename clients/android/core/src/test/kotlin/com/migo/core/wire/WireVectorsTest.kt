@@ -12,7 +12,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Assert.fail
 import org.junit.Test
 
 /**
@@ -426,3 +425,15 @@ class WireVectorsTest {
         assertTrue("only $total wire vector cases, expected at least 60", total >= 60)
     }
 }
+
+/**
+ * Fails the case with [message].
+ *
+ * JUnit 4's `Assert.fail` returns `void`, which Kotlin types as `Unit` and not as `Nothing`. That
+ * matters everywhere this suite uses the elvis form to reject a missing field: `file[name] ?:
+ * fail(...)` would infer the common supertype `Any` instead of keeping the field's own type, and
+ * every access downstream of it — `.jsonArray`, `.jsonPrimitive`, `.jsonObject` — collapses into a
+ * receiver-type mismatch. Declaring `Nothing` is what makes the elvis form say what it means: the
+ * right-hand side never returns, so the expression is the left-hand side's type.
+ */
+private fun fail(message: String): Nothing = throw AssertionError(message)
