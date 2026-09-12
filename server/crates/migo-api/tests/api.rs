@@ -55,7 +55,7 @@ use tower::ServiceExt;
 use migo_api::{router, ApiServices, Page, PageParams, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE};
 use migo_auth::{Auth, SharedAuth};
 use migo_cache::MemoryCache;
-use migo_core::config::Config;
+use migo_core::config::{ClientPeer, Config};
 use migo_core::metrics::Registry;
 use migo_core::{Clock, ManualClock, Secret, SeededRandom, Timestamp};
 use migo_protocol::{codes, NodeInfo};
@@ -447,6 +447,53 @@ async fn config_is_unauthenticated() {
     let h = Harness::new();
     let resp = h.send(get("/v1/config")).await;
     assert_eq!(resp.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn config_lists_this_node_first_then_peers() {
+    // Section 170: the document names every node a client may connect to, this one
+    // first so a client that measures the list always has a well-defined winner.
+    let h = Harness::with(|config| {
+        config.federation.client_peers = vec![
+            ClientPeer {
+                node_id: "node-b".to_string(),
+                region: "test-region-b".to_string(),
+                country: "DE".to_string(),
+                public_url: "https://node-b.example".to_string(),
+            },
+            ClientPeer {
+                node_id: "node-c".to_string(),
+                region: "test-region-c".to_string(),
+                country: "SG".to_string(),
+                public_url: "https://node-c.example".to_string(),
+            },
+        ];
+    });
+    let resp = h.send(get("/v1/config")).await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let nodes = resp.json()["nodes"].as_array().expect("nodes is a list");
+    assert_eq!(nodes.len(), 3, "this node plus both peers");
+    assert_eq!(nodes[0]["id"], NODE_ID);
+    assert_eq!(nodes[0]["public_url"], "http://localhost:8080");
+    assert_eq!(nodes[1]["id"], "node-b");
+    assert_eq!(nodes[1]["region"], "test-region-b");
+    assert_eq!(nodes[1]["country"], "DE");
+    assert_eq!(nodes[1]["public_url"], "https://node-b.example");
+    assert_eq!(nodes[2]["id"], "node-c");
+    assert_eq!(nodes[2]["public_url"], "https://node-c.example");
+}
+
+#[tokio::test]
+async fn config_still_lists_this_node_when_alone() {
+    // The single-node posture: no peers configured, and the list is never empty —
+    // a client reading the list does not need a special case for one node.
+    let h = Harness::new();
+    let resp = h.send(get("/v1/config")).await;
+    let nodes = resp.json()["nodes"].as_array().expect("nodes is a list");
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0]["id"], NODE_ID);
+    assert_eq!(nodes[0]["region"], NODE_REGION);
+    assert_eq!(nodes[0]["country"], NODE_COUNTRY);
 }
 
 // --- registration happy path --------------------------------------------------------------
