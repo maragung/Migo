@@ -386,7 +386,6 @@ export class AccountFile {
  * `OpenFailed` if Argon2id could not run at any memory cost this device can allocate.
  */
 export async function sealContainer(credential: string, file: AccountFile): Promise<Uint8Array> {
-  let failure: AccountError = AccountError.openFailed();
   for (const memoryKib of SEAL_MEMORY_LADDER_KIB) {
     const salt = randomBytes(SALT_LEN);
     const nonce = randomBytes(NONCE_LEN);
@@ -405,7 +404,6 @@ export async function sealContainer(credential: string, file: AccountFile): Prom
       if (!(cause instanceof AccountError) || cause.kind !== 'OpenFailed') {
         throw cause;
       }
-      failure = cause;
     }
   }
   throw new AccountError(
