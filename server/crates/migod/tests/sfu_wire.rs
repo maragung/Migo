@@ -289,13 +289,17 @@ async fn a_joiner_receives_the_roster_on_their_own_topic() {
 
     let mut founder_session = LiveSession::connect(addr, &founder).await;
 
+    // A group conversation the founder shares with a second registered
+    // account — a group conversation needs somebody other than its creator,
+    // and a group call's roster is exactly that conversation's members.
+    let peer = registered_grant(&app, "sfujoinpeer").await;
     let summary: migo_protocol::ConversationSummary = founder_session
         .ask(
             Opcode::ConversationCreate,
             11,
             &ConversationCreateRequest {
                 kind: ConversationKind::Group,
-                members: Vec::new(),
+                members: vec![peer.account_id],
                 title: Some("The SFU Group".to_string()),
             },
         )
@@ -396,15 +400,18 @@ async fn a_stranger_s_join_is_refused_not_disabled() {
     let mut founder_session = LiveSession::connect(addr, &founder).await;
     let mut stranger_session = LiveSession::connect(addr, &stranger).await;
 
-    // A direct conversation between founder and nobody: the stranger is not
-    // a member of it, which is the gate under test.
+    // A group conversation between the founder and a second registered
+    // account: the stranger is not a member of it, which is the gate under
+    // test. A group conversation needs somebody other than its creator, so
+    // the founder brings a member the stranger is not.
+    let insider = registered_grant(&app, "sfuclosedinsider").await;
     let summary: migo_protocol::ConversationSummary = founder_session
         .ask(
             Opcode::ConversationCreate,
             11,
             &ConversationCreateRequest {
                 kind: ConversationKind::Group,
-                members: Vec::new(),
+                members: vec![insider.account_id],
                 title: Some("The Closed Group".to_string()),
             },
         )
