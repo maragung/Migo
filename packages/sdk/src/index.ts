@@ -136,7 +136,6 @@ export { SyncGate } from './sync-gate.js';
 
 export { TypingDomain } from './domains/typing.js';
 export { PresenceDomain } from './domains/presence.js';
-export type { PresenceOptions } from './domains/presence.js';
 export { RoomsDomain } from './domains/rooms.js';
 export type { RoomListFilter } from './domains/rooms.js';
 export {

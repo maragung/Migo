@@ -5,9 +5,15 @@
  *
  * Presence is a publish, not a store: the me bar (the desktop's contacts window and the phone's
  * home card are the two that carry it) holds the current state locally, seeds it once from the
- * profile the cache already resolved, and performs the wire call on change — never optimistically
- * keeping a presence the server refused. Both surfaces need exactly this, so it lives here rather
- * than twice.
+ * profile the cache already resolved, and performs the wire call on change. Both surfaces need
+ * exactly this, so it lives here rather than twice.
+ *
+ * The two halves travel on two wires, because the server keeps them in two places. The presence
+ * state is a presence entry, which evaporates with the cache; the free-text status is a profile
+ * column that outlives the session — and presence refuses that field outright, so the profile patch
+ * is the only way to write one. {@link publish} therefore writes each half to its own home, and a
+ * refused write is dropped rather than retried: the bars publish again on the next change, and the
+ * status is re-seeded from the profile the cache holds the next time this hook mounts.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -25,7 +31,7 @@ export interface MeState {
   avatarUrl: string | undefined;
   presence: PresenceStateValue;
   status: string;
-  /** Publishes the presence and the status together — the wire carries them as one call. */
+  /** Publishes the presence state and the status, each to the wire that stores it. */
   publish: (state: PresenceStateValue, status: string) => void;
 }
 
@@ -53,16 +59,21 @@ export function useMePresence(): MeState {
 
   const publish = useCallback(
     (state: PresenceStateValue, next: string): void => {
+      const trimmed = next.trim();
+      // The away toggle publishes the status it already has, so the two halves move independently
+      // here: the state always goes out, the status only when the box actually moved.
+      const statusMoved = trimmed !== status;
       setPresence(state);
-      setStatus(next);
+      setStatus(trimmed);
       if (!client) {
         return;
       }
-      void client.presence
-        .setPresence(state, next.trim().length > 0 ? { customStatus: next } : {})
-        .catch(() => {});
+      void client.presence.setPresence(state).catch(() => {});
+      if (statusMoved) {
+        void client.profile.updateProfile({ customStatus: trimmed }).catch(() => {});
+      }
     },
-    [client],
+    [client, status],
   );
 
   return {

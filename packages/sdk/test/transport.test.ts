@@ -20,12 +20,13 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { GatewayTransport, encodeBody, decodeBody } from '../src/index.js';
+import { GatewayTransport, DEFAULT_CLIENT_FEATURES, encodeBody, decodeBody } from '../src/index.js';
 import type { ServerEndpoint } from '../src/index.js';
 import { decodeFrame, encodeFrame, frameHeader } from '@migo/wire';
 import {
   BandwidthMode,
   CODE,
+  FEATURE,
   OP,
   Platform,
   decodeAuthenticate,
@@ -177,6 +178,20 @@ async function connectReady(): Promise<{ transport: GatewayTransport; socket: Fa
   await ready;
   return { transport, socket };
 }
+
+test('the stock feature set offers the bits this SDK can actually honour', () => {
+  // A client that offers a bit it cannot honour is worse than one that stays silent, because the
+  // server takes the offer at face value. The bit this suite exists to pin is RICH_PRESENCE: the
+  // server gates the `custom_status` *field* on it, so a stock connection that did not offer the
+  // bit would have every status write answered FEATURE_NOT_NEGOTIATED — and the SDK does carry
+  // that field (see the ProfileDomain tests). Pinned here so a rebuild that quietly dropped it
+  // from the defaults fails in the SDK rather than in a browser against a live node.
+  assert.equal(
+    (DEFAULT_CLIENT_FEATURES & FEATURE.RICH_PRESENCE) === FEATURE.RICH_PRESENCE,
+    true,
+    'RICH_PRESENCE is offered by default',
+  );
+});
 
 test('the transport puts its socket into binary mode before the handshake', async () => {
   const { transport, socket } = await connectReady();

@@ -389,6 +389,49 @@ test('profile: updateProfile sends only the fields the patch carries', async () 
   assert.deepEqual(request, { displayName: 'Ada Lovelace', showLastSeen: 0 });
 });
 
+test('profile: the custom status is the field the RICH_PRESENCE bit gates, and it rides the patch', async () => {
+  // The server answers a session without RICH_PRESENCE with FEATURE_NOT_NEGOTIATED for this
+  // field, so the SDK has to both offer the bit (see DEFAULT_CLIENT_FEATURES) and actually put
+  // `custom_status` on the wire. Either half alone is a dead end: a bit with no writer is a
+  // capability nothing can use, and a writer with no bit is a request the server refuses.
+  const withStatus: UserProfile = {
+    userId: USER,
+    publicId: 'MGO-TEST',
+    username: 'ada',
+    displayName: 'Ada Lovelace',
+    customStatus: 'sedang di jalan',
+  };
+  const { transport, profile } = rig(
+    new Map([[OP.PROFILE_UPDATE, () => encodeBody(encodeUserProfile, withStatus)]]),
+  );
+  const reply = await profile.updateProfile({ customStatus: 'sedang di jalan' });
+  assert.equal(
+    reply.customStatus,
+    'sedang di jalan',
+    'the reply carries the status back to render',
+  );
+  const request = decodeBody(decodeProfileUpdate, sentAt(transport, 0).body);
+  // Field 9 by the codec's own numbering, and absent fields still stay absent.
+  assert.deepEqual(request, { customStatus: 'sedang di jalan' });
+});
+
+test('profile: clearing the status sends the empty string rather than dropping the field', async () => {
+  // An absent field means "keep" on this wire, so a caller that erases its status must send the
+  // empty string; dropping it would leave the old status in place and look like a no-op save.
+  const cleared: UserProfile = {
+    userId: USER,
+    publicId: 'MGO-TEST',
+    username: 'ada',
+    displayName: 'Ada Lovelace',
+  };
+  const { transport, profile } = rig(
+    new Map([[OP.PROFILE_UPDATE, () => encodeBody(encodeUserProfile, cleared)]]),
+  );
+  await profile.updateProfile({ customStatus: '' });
+  const request = decodeBody(decodeProfileUpdate, sentAt(transport, 0).body);
+  assert.deepEqual(request, { customStatus: '' });
+});
+
 test('profile: fetch still batch-fetches after the extension', async () => {
   const { profile } = rig(
     new Map([[OP.PROFILE_FETCH, () => encodeBody(encodeProfileResponse, { profiles: [] })]]),

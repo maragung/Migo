@@ -9,6 +9,14 @@
  *
  * An inbound {@link PresenceEvent} may carry a `lastSeen` timestamp for an account that is now offline,
  * which is how a UI shows "last seen 5 minutes ago" without polling.
+ *
+ * # The custom status is not here
+ *
+ * `PresenceUpdate` has a `customStatus` field and this domain deliberately offers no way to set it:
+ * the server refuses it with `FEATURE_DISABLED` (a presence entry evaporates with the cache, and a
+ * status is expected to outlive a disconnect), and its durable home is the profile column that
+ * `FEATURE.RICH_PRESENCE` gates. Writing one is `ProfileDomain.updateProfile`'s job — see
+ * {@link PresenceEvent} for the read side of the same field on the wire.
  */
 
 import {
@@ -23,12 +31,6 @@ import type { PresenceUpdate, PresenceEvent, Acknowledged } from '@migo/protocol
 import { ListenerSet } from './listeners.js';
 import type { Listener } from './listeners.js';
 import type { EventErrorHandler, Rpc } from './rpc.js';
-
-/** Optional detail attached to a presence update. */
-export interface PresenceOptions {
-  /** A free-text status line shown alongside the presence state, e.g. "in a meeting". */
-  customStatus?: string;
-}
 
 /**
  * Publish and observe presence.
@@ -72,12 +74,12 @@ export class PresenceDomain {
    *
    * Resolves once the server has accepted the update. Use {@link PresenceState.Invisible} to stay
    * connected while appearing offline to others.
+   *
+   * The state is all this carries — the free-text status is not a presence fact (see the class
+   * doc) and goes through the profile domain instead.
    */
-  async setPresence(state: PresenceState, options: PresenceOptions = {}): Promise<Acknowledged> {
+  async setPresence(state: PresenceState): Promise<Acknowledged> {
     const update: PresenceUpdate = { state };
-    if (options.customStatus !== undefined) {
-      update.customStatus = options.customStatus;
-    }
     return this.#rpc.call(OP.PRESENCE_SET, encodePresenceUpdate, decodeAcknowledged, update);
   }
 }
