@@ -22,18 +22,18 @@ A feature is done when **all** of these hold:
 
 ## 2. Test pyramid, and what each layer is for
 
-| Layer           | Location                         | Speed      | Catches                                                            |
-| --------------- | -------------------------------- | ---------- | ------------------------------------------------------------------ |
-| Unit            | in-crate `#[cfg(test)]`          | ms         | Logic, boundaries, error paths                                     |
-| Property        | `proptest`                       | ms–s       | Codec round-trips, permission algebra, ledger invariants           |
-| Contract        | `server/crates/*/tests/contract` | ms–s       | **Two backends disagreeing** about one trait                       |
-| Vector / golden | `shared/protocol/vectors`        | ms         | **Cross-language drift** — the highest-value tests in the repo     |
-| Fuzz            | `cargo-fuzz` targets             | continuous | Decoder crashes, OOM, panics on hostile input                      |
-| Integration     | `server/tests`                   | s          | Real DB, real WebSocket, real auth                                 |
-| Simulation      | `server/tests/sim`               | s          | Reconnects, partitions, reordering, clock skew — deterministically |
-| E2E             | `tests/e2e` (Playwright)         | s–min      | Web client against a real server                                   |
-| Load            | `tools/loadgen`                  | min        | Throughput, fanout cost, bytes/user, memory growth                 |
-| Security        | `tests/` + CI audit              | min        | Authz bypass, IDOR, replay, limits, dependency CVEs                |
+| Layer           | Location                                | Speed | Catches                                                              |
+| --------------- | --------------------------------------- | ----- | -------------------------------------------------------------------- |
+| Unit            | in-crate `#[cfg(test)]`                 | ms    | Logic, boundaries, error paths                                       |
+| Property        | `proptest`                              | ms–s  | Codec round-trips, permission algebra, ledger invariants             |
+| Contract        | `server/crates/*/tests/contract`        | ms–s  | **Two backends disagreeing** about one trait                         |
+| Vector / golden | `shared/protocol/vectors`               | ms    | **Cross-language drift** — the highest-value tests in the repo       |
+| Fuzz            | `tests/fuzz.rs` (bounded, seeded)       | s     | Decoder crashes, OOM, panics on hostile input                        |
+| Integration     | `server/tests`                          | s     | Real DB, real WebSocket, real auth                                   |
+| Simulation      | `server/tests/sim`                      | s     | Reconnects, partitions, reordering, clock skew — deterministically   |
+| E2E             | `tests/e2e` (Playwright)                | s–min | Web client against a real server                                     |
+| Load            | `tools/loadgen` via `tools/load/run.sh` | min   | Concurrent sessions against one node (CI job), error budget asserted |
+| Security        | `tests/` + CI audit                     | min   | Authz bypass, IDOR, replay, limits, dependency CVEs                  |
 
 ## 3. Contract tests: one suite, two backends
 
@@ -306,6 +306,13 @@ exactly. Flaky reconnect bugs are otherwise found by users, in production, at sc
 **One room must never be able to kill the cluster.** That is the acceptance criterion,
 not a nice-to-have.
 
+CI runs the bounded half of this table: `tools/load/run.sh` (`make test-load`, its own
+job) starts one migod on in-memory backends, drives loadgen's connect scenario with a
+fixed virtual-user count and duration, and gates on loadgen's exit code plus a `/health`
+check afterwards. Percentiles are printed and never asserted — a slow runner is not a
+broken server. The full-scale scenarios in the table stay nightly-or-manual territory,
+because ten thousand sessions is not a deterministic test.
+
 ## 7. Multi-region failure tests (brief §96)
 
 Region down, network partition, 30 % packet loss, 400 ms added latency, DB failover,
@@ -321,6 +328,14 @@ IDOR on every id parameter, replayed frame, oversized payload, malformed payload
 rate-limit bypass attempts, token from a revoked session, and upload of a mislabelled
 file type.
 
+The wire-level half of this list is pinned by `make test-security`
+(`server/crates/migod/tests/security_wire.rs`), which drives a real TCP listener on a
+node assembled the way a deployment assembles it: the whole reserved opcode span
+terminal, the allocated 240 refused by the phase gate with no disclosure, unknown
+opcodes answered without closing the session, forged inline tokens and pre-auth user
+opcodes refused opaquely, replayed HELLOs, garbage frames, and length prefixes past the
+frame ceiling — then asserts the listener still serves the next client.
+
 ## 9. CI gates
 
 ```
@@ -329,7 +344,9 @@ protocol-check → entity-check → brief-check → fmt → clippy -D warnings �
   → contract: store (memory + Postgres) and cache (memory + Redis)
   → vectors (Rust & TS) → integration (Postgres service) → web build + e2e
   → msrv (cargo check on 1.94) → audit (reports, does not gate)
-  → [nightly] fuzz + load
+  → hardening: fuzz (bounded, seeded) + stress + security, its own job
+  → load: tools/loadgen against one node, its own job
+  → [nightly] the same two jobs re-run on the committed tree
 ```
 
 This lives in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), and `make ci`

@@ -265,6 +265,64 @@ jobs:
           make build-web
           make build-store
 
+  # The hardening and load jobs mirror ci.yml's, per the duplication contract
+  # above — nightly re-proves them on the same committed tree.
+
+  hardening:
+    name: Fuzz, stress and security (bounded, brief section 172)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: gates
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          key: server-hardening
+
+      - name: Bounded fuzz suites — wire codec and generated decoders
+        run: make test-fuzz
+
+      - name: Gateway stress suite — throttle and session-slot contracts
+        run: make test-stress
+
+      - name: Security — negative wire tests against the real TCP listener
+        run: make test-security
+
+  load:
+    name: Load — concurrent sessions against one node
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: gates
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          key: server-load
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build TypeScript
+        run: make build-ts
+
+      - name: Load run — migod (release) under tools/load/run.sh
+        run: make test-load
+
   audit:
     name: Dependency advisories (reports, does not gate)
     runs-on: ubuntu-latest

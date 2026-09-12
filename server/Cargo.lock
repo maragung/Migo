@@ -2235,6 +2235,7 @@ dependencies = [
 name = "migo-protocol"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "migo-core",
  "migo-crypto",
  "migo-wire",
@@ -2266,6 +2267,15 @@ dependencies = [
  "parking_lot",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "migo-sfu"
+version = "0.1.0"
+dependencies = [
+ "migo-core",
+ "migo-protocol",
+ "parking_lot",
 ]
 
 [[package]]

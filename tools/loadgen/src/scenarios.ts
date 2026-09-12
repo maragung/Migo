@@ -13,7 +13,7 @@ import type { Id } from '@migo/sdk';
 
 import { runPool } from './pool.js';
 import type { RunContext } from './run-context.js';
-import { classifyError } from './stats.js';
+import { classifyError, describeError } from './stats.js';
 import type { VirtualUser } from './virtual-user.js';
 
 /** A per-VU loop that runs, self-paced, until the run's deadline. */
@@ -111,7 +111,7 @@ const messaging: Scenario = {
         sender.partner = receiver;
         await receiver.client.watchConversation(summary.conversationId);
       } catch (error) {
-        ctx.metrics.recordError('setup', classifyError(error));
+        ctx.metrics.recordError('setup', classifyError(error), describeError(error));
         ctx.log.debug(`pair ${sender.index}/${receiver.index} setup failed`);
       }
     });

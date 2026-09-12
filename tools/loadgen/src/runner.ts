@@ -16,7 +16,7 @@ import type { RunOutcome } from './report.js';
 import { RunContext, sleep } from './run-context.js';
 import { getScenario } from './scenarios.js';
 import type { Workload } from './scenarios.js';
-import { classifyError, Metrics } from './stats.js';
+import { classifyError, describeError, Metrics } from './stats.js';
 import { VirtualUser } from './virtual-user.js';
 
 /** How often the steady-state hold wakes to notice the deadline or an interrupt. */
@@ -45,7 +45,8 @@ export async function run(config: Config, log: Logger): Promise<RunOutcome> {
   const metrics = new Metrics();
   const passphrase = buildPassphrase(config, server.passphraseMinLength);
   const runTag = makeRunTag();
-  const onEventError = (error: unknown): void => metrics.recordError('event', classifyError(error));
+  const onEventError = (error: unknown): void =>
+    metrics.recordError('event', classifyError(error), describeError(error));
 
   log.info(`building ${config.vus} virtual users for scenario "${scenario.name}"`);
   const vus = Array.from(
@@ -68,7 +69,7 @@ export async function run(config: Config, log: Logger): Promise<RunOutcome> {
         metrics.recordOk('connect');
         log.debug(`VU ${vu.index} connected`);
       } catch (error) {
-        metrics.recordError('connect', classifyError(error));
+        metrics.recordError('connect', classifyError(error), describeError(error));
         log.debug(`VU ${vu.index} failed to connect: ${describe(error)}`);
       }
     });
@@ -135,7 +136,7 @@ async function preflight(config: Config, log: Logger): Promise<ServerConfig> {
 /** Run one workload to completion, folding any escape into a tallied 'workload' error. */
 function driveSafely(workload: Workload, ctx: RunContext): Promise<void> {
   return workload(ctx).catch((error: unknown) => {
-    ctx.metrics.recordError('workload', classifyError(error));
+    ctx.metrics.recordError('workload', classifyError(error), describeError(error));
   });
 }
 

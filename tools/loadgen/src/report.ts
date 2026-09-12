@@ -76,6 +76,11 @@ export function renderText(outcome: RunOutcome): string {
     if (op.errorsByClass.length > 0) {
       lines.push(`      errors: ${op.errorsByClass.map(([cls, n]) => `${cls} ${n}`).join(', ')}`);
     }
+    // The diagnosis the counts cannot carry: one real message per class, so a
+    // wall of identical refusals arrives with the field the server blamed.
+    for (const [cls, sample] of op.errorSamples) {
+      lines.push(`      e.g. ${cls}: ${sample}`);
+    }
   }
 
   const errorRate = computeErrorRate(outcome);
@@ -98,6 +103,7 @@ export function renderJson(outcome: RunOutcome): string {
       ok: op.ok,
       errors: op.errors,
       errorsByClass: Object.fromEntries(op.errorsByClass),
+      errorSamples: Object.fromEntries(op.errorSamples),
       throughputPerSec: PHASE_LABELS.has(label) || durationSec === 0 ? null : op.ok / durationSec,
       latency: op.latency,
     };

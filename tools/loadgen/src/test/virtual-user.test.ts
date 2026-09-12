@@ -61,10 +61,27 @@ function buildWithStubbedClient(
   }
 }
 
-test('the throwaway username is prefix-runTag-index', () => {
-  assert.equal(buildWithStubbedClient(3, CONFIG).vu.username, 'loadgen-tag42-3');
+test('the throwaway username is prefix_runTag_index and server-legal', () => {
+  assert.equal(buildWithStubbedClient(3, CONFIG).vu.username, 'loadgen_tag42_3');
   const custom: Config = { ...CONFIG, usernamePrefix: 'stress' };
-  assert.equal(buildWithStubbedClient(7, custom).vu.username, 'stress-tag42-7');
+  assert.equal(buildWithStubbedClient(7, custom).vu.username, 'stress_tag42_7');
+  // The whole rule the server's credential validator enforces (migo-auth's
+  // credential.rs), not just "the hyphens are gone" — so no future runTag or
+  // prefix edge case can reintroduce a name the server refuses with
+  // VALIDATION_FAILED on every VU before a single session opens:
+  //   * length 3..=32 (USERNAME_MIN_CHARS / USERNAME_MAX_CHARS),
+  //   * the first character is an ASCII lowercase letter,
+  //   * the last character is not a separator (no trailing `.` or `_`),
+  //   * only letters, digits, dots and underscores, and never two
+  //     separators in a row.
+  for (const { vu } of [buildWithStubbedClient(3, CONFIG), buildWithStubbedClient(7, custom)]) {
+    const name = vu.username;
+    assert.ok(name.length >= 3 && name.length <= 32, `${name} must be 3-32 characters`);
+    assert.match(name, /^[a-z]/, 'the first character must be a lowercase letter');
+    assert.match(name, /[a-z0-9]$/, 'the name must not end with a separator');
+    assert.doesNotMatch(name, /[^a-z0-9_.]/, 'only letters, digits, dots and underscores');
+    assert.doesNotMatch(name, /[_.][_.]/, 'never two separators in a row');
+  }
 });
 
 test('a fresh VU is not yet connected and has no partner or conversation', () => {
