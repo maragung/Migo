@@ -535,42 +535,38 @@ Envelope pertama, wire envelope. Ini adalah MWP/1 frame yang dibaca server. Spes
 
 Envelope kedua, cryptographic envelope. Ini adalah byte hasil enkripsi client yang diletakkan di field envelope pada MessageSend dan MessageEvent. Server hanya melihatnya sebagai byte dengan panjang tertentu.
 
-Layout cryptographic envelope untuk chat 1-on-1. STATUS: SPEC.
+Layout cryptographic envelope. STATUS: BUILT untuk layout pada ketiga client, yang dikodekan di packages/sdk/src/session-crypto.ts untuk web, clients/desktop/src/crypto/envelope.rs untuk desktop, dan clients/android/core/src/main/kotlin/com/migo/core/crypto/Envelope.kt untuk Android; ketiganya menyalin satu layout yang sama field demi field sehingga pesan yang disegel salah satunya terbuka di kedua lainnya. STATUS: SPEC untuk perluasan associated data yang dibicarakan setelah daftar field.
 
-Semua field ditulis biner tanpa nama field. Urutan tetap, tidak ada JSON, tidak ada nama field di kabel:
+Semua field ditulis biner tanpa nama field. Urutan tetap, tidak ada JSON, tidak ada nama field di kabel. Nilai scheme konkret: 1 untuk pesan Double Ratchet 1-on-1 yang sudah mapan, 2 untuk pesan pertama 1-on-1 yang membawa preamble X3DH, dan 3 untuk pesan group dengan Sender Key:
 
-envelope_version, u8
-scheme, u8, nilainya menyatakan Double Ratchet 1-on-1 atau Sender Key untuk group
-sender_key_id, varint
-ratchet_public_key, 32 byte, hanya ada bila scheme memerlukan
+envelope_version, u8, saat ini selalu 1
+scheme, u8, bernilai 1, 2, atau 3 sesuai daftar di atas
+sender_key_id, varint, 0 untuk 1-on-1, id chain sender untuk group
+preamble X3DH, hanya ada pada scheme 2, berisi initiator_identity 64 byte, ephemeral_key 32 byte, signed_prekey_id varint, has_one_time_prekey u8, lalu one_time_prekey_id varint hanya bila byte itu bernilai 1
+ratchet_public_key, 32 byte, hanya ada bila scheme memerlukan, yaitu scheme 1 dan 2
 message_counter, varint
-previous_chain_length, varint
-ciphertext, byte sampai akhir minus 16 byte
-authentication_tag, 16 byte
+previous_chain_length, varint, hanya untuk scheme 1 dan 2
+ciphertext, byte sampai akhir, yang 16 byte terakhirnya adalah authentication_tag
+authentication_tag, 16 byte, menempel di akhir ciphertext tanpa penanda panjang sendiri
 
-Associated data untuk AEAD WAJIB mengikat metadata yang tidak dienkripsi, minimal:
+Associated data untuk AEAD mengikat metadata yang tidak dienkripsi sejauh kemampuan scheme masing-masing. Pada scheme 1 dan 2, tag mengikat kedua identity key kedua ujung melalui associated data X3DH dan encoding kanonik header ratchet, sehingga server tidak dapat mengganti identitas pengirim atau memutar balik header tanpa merusak verifikasi. Pada scheme 3, tag mengikat conversation_id dan header chain, lalu tanda tangan Ed25519 64 byte dari identity key pengirim menutup associated data dan ciphertext sekaligus, sehingga anggota yang memegang chain key simetris tidak dapat memalsukan pesan anggota lain.
 
-envelope_version
-scheme
-message_id
-conversation_id
-sender_id
-sender_device
-sender_key_id
+Pengikatan yang lebih luas, yaitu message_id, conversation_id pada jalur 1-on-1, sender_device, envelope_version, dan scheme ke dalam associated data, adalah STATUS: SPEC dan bermigrasi lewat nilai envelope_version berikutnya, bukan diubah diam-diam. Mengubah associated data hari ini membuat setiap client yang sudah terpasang gagal membuka setiap pesan baru, karena tag yang dihitung kedua ujung tidak akan pernah cocok lagi, dan tidak ada kanal negosiasi versi di dalam envelope; karena itu perubahan ini menunggu ketiga client berpindah versi secara terkoordinasi, dan sampai itu terjadi E2E pada jalur 1-on-1 melindungi isi dan identitas tetapi belum mengikat konteks percakapan pada tag. Mengikat metadata pada tag berarti server tidak dapat memindahkan ciphertext ke conversation lain atau mengganti identitas pengirim tanpa merusak verifikasi. Tanpa pengikatan ini, E2E melindungi isi tetapi tidak melindungi konteks.
 
-Mengikat metadata pada tag berarti server tidak dapat memindahkan ciphertext ke conversation lain atau mengganti identitas pengirim tanpa merusak verifikasi. Tanpa pengikatan ini, E2E melindungi isi tetapi tidak melindungi konteks.
-
-Plaintext di dalam ciphertext juga binary dan compact. Layout plaintext:
+Plaintext di dalam ciphertext juga binary dan compact. Layout plaintext sudah BUILT dengan implementasi yang sama pada ketiga client. Layout plaintext:
 
 content_type, u8, misalnya Text, MediaRef, VoiceNoteRef, Reaction, atau ControlEvent
 body, byte, berisi struct MSE sesuai content_type
-Padding OPSIONAL, dengan bucket panjang tetap, untuk mengurangi kebocoran panjang pesan
+Padding OPSIONAL, dengan bucket panjang tetap, untuk mengurangi kebocoran panjang pesan, yang membulatkan plaintext ke bucket 64, 256, 1024, 4096, atau 16384 byte, dan di atas bucket terakhir ke kelipatannya
 
 JSON TIDAK BOLEH dipakai di dalam cryptographic envelope. Menggunakan JSON di dalam ciphertext membuang byte pada setiap pesan dan tetap membocorkan struktur melalui panjang.
 
-Group message memakai layout yang sama dengan scheme Sender Key, ditambah:
+Group message memakai layout yang sama melalui scheme 3, dengan sender_key_id menjadi id chain sender, ditambah:
 
-group_key_epoch, varint, naik setiap kali keanggotaan berubah sehingga member yang keluar tidak dapat membaca pesan berikutnya
+group_key_epoch, varint, naik setiap kali keanggotaan berubah atau chain dirotasi sehingga member yang keluar tidak dapat membaca pesan berikutnya
+tanda tangan Ed25519, 64 byte, dari identity key pengirim atas associated data dan ciphertext
+
+Pada scheme 3, ratchet_public_key dan previous_chain_length tidak hadir karena chain simetris tidak memilikinya, dan urutan fieldnya adalah envelope_version, scheme, sender_key_id, group_key_epoch, message_counter, tanda tangan, lalu ciphertext.
 
 
 12. BANDWIDTH OPTIMIZATION
