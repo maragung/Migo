@@ -520,13 +520,18 @@ async fn the_datagram_binding_round_trips_and_oversized_frames_stay_on_the_strea
         .await
         .expect("the oversized frame sends");
 
-    /// Reads one length-prefixed record off the client's receive half of the stream.
-    async fn read_stream_record(client_recv: &mut quinn::RecvStream) -> bytes::Bytes {
-        let mut seen = Vec::new();
+    /// Reads one length-prefixed record off the client's receive half of the stream, banking
+    /// anything past the record's end in `seen` — the two records were written back to back,
+    /// so one read can (and does) deliver bytes of the second inside the first's chunk.
+    async fn read_stream_record(
+        client_recv: &mut quinn::RecvStream,
+        seen: &mut Vec<u8>,
+    ) -> bytes::Bytes {
         loop {
-            if let Ok(Some((frame, _consumed))) =
-                migo_wire::Frame::decode_length_prefixed(&bytes::Bytes::copy_from_slice(&seen))
+            if let Ok(Some((frame, consumed))) =
+                migo_wire::Frame::decode_length_prefixed(&bytes::Bytes::copy_from_slice(seen))
             {
+                seen.drain(..consumed);
                 return frame.encode().expect("the frame re-encodes");
             }
             let mut buf = [0u8; 16 * 1024];
@@ -541,16 +546,19 @@ async fn the_datagram_binding_round_trips_and_oversized_frames_stay_on_the_strea
 
     // Both stream-bound records arrive in order behind the u32 prefix: the Critical PONG and
     // then the oversized-but-eligible TYPING.
-    let framed_pong = tokio::time::timeout(STEP, read_stream_record(&mut client_recv))
-        .await
-        .expect("the critical reply arrives within the step budget");
+    let mut leftover = Vec::new();
+    let framed_pong =
+        tokio::time::timeout(STEP, read_stream_record(&mut client_recv, &mut leftover))
+            .await
+            .expect("the critical reply arrives within the step budget");
     assert_eq!(
         framed_pong, pong,
         "a Critical frame rides the length-prefixed stream, not a datagram"
     );
-    let framed_big = tokio::time::timeout(STEP, read_stream_record(&mut client_recv))
-        .await
-        .expect("the oversized frame arrives within the step budget");
+    let framed_big =
+        tokio::time::timeout(STEP, read_stream_record(&mut client_recv, &mut leftover))
+            .await
+            .expect("the oversized frame arrives within the step budget");
     assert_eq!(
         framed_big, big,
         "a frame too large for a datagram rides the length-prefixed stream"
