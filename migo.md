@@ -4687,7 +4687,7 @@ bandwidth_mode dikirim pada HELLO supaya server berhenti mengirim yang tidak aka
 
 160. FLOW CONTROL AND BACKPRESSURE
 
-STATUS: BUILT untuk gateway satu node: outbound queue terbatas per session dengan kebijakan tiga kelas di atas kapasitas, deadline lagging dijalankan pada drain writer (drain yang tidak selesai atau selesai melewati LAGGING_DEADLINE_MS menutup session sebagai SessionLagging, resume buffer dipertahankan, dan pada drain yang selesai di batas record bersih client menerima RECONNECT_HINT sebelum FIN), admission refusal menjawab OVERLOADED saat session ceiling tercapai, dan rate limit dijawab RATE_LIMITED beserta retry_after_ms. Keputusan desain ada di ADR-0008. Sisa SPEC: pengalihan RECONNECT_HINT ke node lain saat satu node kelebihan beban, yang menunggu topologi multi-region.
+STATUS: BUILT untuk gateway satu node: outbound queue terbatas per session dengan kebijakan tiga kelas di atas kapasitas, deadline lagging dijalankan pada drain writer (drain yang tidak selesai atau selesai melewati LAGGING_DEADLINE_MS menutup session sebagai SessionLagging, resume buffer dipertahankan, dan pada drain yang selesai di batas record bersih client menerima RECONNECT_HINT sebelum FIN), admission refusal menjawab OVERLOADED saat session ceiling tercapai, dan rate limit dijawab RATE_LIMITED beserta retry_after_ms. Keputusan desain ada di ADR-0008. Sisa SPEC: pengalihan RECONNECT_HINT ke node lain saat satu node kelebihan beban, yang menunggu topologi multi-node.
 
 Setiap session memiliki outbound queue dengan kapasitas SESSION_QUEUE_CAPACITY yaitu 256 frame.
 
