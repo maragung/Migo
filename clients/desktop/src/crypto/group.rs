@@ -63,12 +63,10 @@ const ENVELOPE_VERSION: u8 = 1;
 /// The chain key and the identity public key are the two fixed-width blocks in a distribution.
 const CHAIN_KEY_LEN: usize = 32;
 
-/// One conversation's outbound chain: the state, its epoch, and who already holds it.
+/// One conversation's outbound chain: the state — whose epoch labels the membership generation the
+/// chain belongs to — and who already holds it.
 struct Outbound {
     state: SenderKeyState,
-    /// The epoch this chain belongs to; travels in every message it seals. Bumped on rotation so
-    /// a receiver can tell a re-sent old chain from a deliberately fresh one.
-    epoch: u32,
     /// Devices that already hold the current chain's distribution. Cleared on rotation: keeping
     /// it would leave members holding a chain that no longer seals anything, with no message to
     /// tell them so.
@@ -122,7 +120,7 @@ impl GroupStore {
         let entry = outbound(sending, conversation);
         let context = conversation.as_bytes();
         let message = entry.state.encrypt(identity, context, plaintext)?;
-        let epoch = entry.epoch;
+        let epoch = entry.state.group_key_epoch();
         Ok(Sealed {
             chain_id: message.header.chain_id,
             envelope: encode_envelope(epoch, &message),
@@ -160,19 +158,18 @@ impl GroupStore {
     }
 
     /// Starts a fresh outbound chain and bumps the epoch, for a membership change (someone left,
-    /// so the old chain must die) or a chain that hit its message bound.
+    /// so the old chain must die) or a chain that hit its message bound. The placeholder epoch 0
+    /// is bumped by the rotate itself, so a first chain lands on 1 exactly like every later one
+    /// lands on its predecessor plus one.
     pub fn rotate(&mut self, conversation: Id) {
-        let previous = self.sending.get(&conversation).map(|entry| entry.epoch);
         let entry = self
             .sending
             .entry(conversation)
             .or_insert_with(|| Outbound {
-                state: SenderKeyState::create(random_chain_id(), &mut OsRandom),
-                epoch: 0,
+                state: SenderKeyState::create(0, random_chain_id(), &mut OsRandom),
                 distributed: HashSet::new(),
             });
-        entry.state = SenderKeyState::create(random_chain_id(), &mut OsRandom);
-        entry.epoch = previous.unwrap_or_default().wrapping_add(1).max(1);
+        entry.state.rotate(random_chain_id(), &mut OsRandom);
         entry.distributed.clear();
     }
 
@@ -237,14 +234,13 @@ fn outbound(sending: &mut HashMap<Id, Outbound>, conversation: Id) -> &mut Outbo
         .get(&conversation)
         .is_some_and(|entry| entry.state.needs_rotation());
     if fresh || spent {
-        let previous = sending.get(&conversation).map(|entry| entry.epoch);
         let entry = sending.entry(conversation).or_insert_with(|| Outbound {
-            state: SenderKeyState::create(random_chain_id(), &mut OsRandom),
-            epoch: 0,
+            state: SenderKeyState::create(0, random_chain_id(), &mut OsRandom),
             distributed: HashSet::new(),
         });
-        entry.state = SenderKeyState::create(random_chain_id(), &mut OsRandom);
-        entry.epoch = previous.unwrap_or_default().wrapping_add(1).max(1);
+        // Same shape as `GroupStore::rotate`: the placeholder epoch 0 becomes 1
+        // on a first chain and previous-plus-one on a spent one.
+        entry.state.rotate(random_chain_id(), &mut OsRandom);
         entry.distributed.clear();
     }
     sending.get_mut(&conversation).expect("inserted above")
