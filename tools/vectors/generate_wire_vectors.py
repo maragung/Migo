@@ -1231,6 +1231,13 @@ def compress_file() -> dict:
     run_plain = b"\x00" * 1000
     run_stream = deflate_runs(run_plain)
     inflate_check("run_of_a_thousand_zeros", run_stream, run_plain)
+    # One 8 KiB decoder chunk plus 529 bytes: the shape the gateway suite found
+    # in CI when a decoder promised its whole output fit a single read. A
+    # decoder that inflates through a fixed-size buffer must loop, and this size
+    # is chosen so the loop cannot be skipped by luck.
+    long_plain = b"\x61" * (8 * 1024 + 529)
+    long_stream = deflate_runs(long_plain)
+    inflate_check("run_past_the_decoder_chunk", long_stream, long_plain)
 
     cases = [
         {"name": "empty_stream", "plain_hex": "", "compressed_hex": empty_stream.hex()},
@@ -1239,6 +1246,7 @@ def compress_file() -> dict:
         {"name": "fixed_block_with_a_match", "plain_hex": match_plain.hex(), "compressed_hex": match_stream.hex()},
         {"name": "stored_then_fixed_blocks", "plain_hex": two_block_plain.hex(), "compressed_hex": two_block_stream.hex()},
         {"name": "run_of_a_thousand_zeros", "plain_hex": run_plain.hex(), "compressed_hex": run_stream.hex()},
+        {"name": "run_past_the_decoder_chunk", "plain_hex": long_plain.hex(), "compressed_hex": long_stream.hex()},
     ]
 
     # --- whole frames with the COMPRESSED flag -------------------------------
