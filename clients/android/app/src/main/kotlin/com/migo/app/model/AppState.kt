@@ -166,9 +166,20 @@ sealed interface AppState {
     }
 }
 
+/**
+ * A finished recording the composer is holding: what the preview row and the recovered-draft chip
+ * show while Send and Delete are the question. The bytes stay in the draft store; this is the
+ * display half — the duration, and the waveform folded from the samples the recording took.
+ */
+data class VoiceNotePreview(
+    /** The recording's length, excluding paused spans — the preview row's `M:SS` label. */
+    val durationMs: Long,
+    /** The fixed-width waveform bars, or null when none were sampled. */
+    val waveform: ByteArray? = null,
+)
+
 /** One open conversation window, as the strip's tab holds it. */
-data class WindowTab(
-    val conversationId: Id,
+data class WindowTab(    val conversationId: Id,
     val title: String,
     /** The room behind a room-kind window, so a reopened tab can restore its live info. */
     val roomId: Id? = null,
@@ -599,6 +610,31 @@ data class ChatState(
      * composer is the recording bar — no text can be typed into a moment that is being recorded.
      */
     val recording: Boolean = false,
+    /**
+     * True while the recording is paused — by the speaker's own Pause or by an interruption (a
+     * call, a lock, the app going to background), which brief 179 answers with a pause, never a
+     * cancellation. The timer and the cap both stand still while it holds.
+     */
+    val recordingPaused: Boolean = false,
+    /** The recording's own clock, excluding paused spans, for the recording bar's timer. */
+    val recordingElapsedMs: Long = 0,
+    /**
+     * The amplitudes sampled so far, as 0–255 bars — the tail the live waveform draws. Kept in the
+     * state so a pause or an interruption does not blank a picture the speaker was reading.
+     */
+    val recordingAmplitudes: List<Int> = emptyList(),
+    /**
+     * A finished recording waiting on the composer's word: the two-step mode's preview (Stop was
+     * pressed, Send or Delete is the question), an undone cancel, or a draft recovered after the
+     * app died mid-recording. Null whenever no note is waiting.
+     */
+    val notePreview: VoiceNotePreview? = null,
+    /**
+     * True for the few seconds a cancelled or deleted note stays recoverable: brief 179's rule
+     * that a slide-cancel nobody meant must be undoable rather than final. The window closes by
+     * itself and the note is deleted with it.
+     */
+    val noteDiscardUndo: Boolean = false,
     /** Ids of accounts currently typing, other than this one. */
     val typing: Set<Id> = emptySet(),
     /** The text in the composer. Held here so a rotation does not lose a half-written message. */

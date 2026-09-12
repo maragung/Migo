@@ -25,6 +25,15 @@
 //! * After [`MAX_MESSAGES_PER_CHAIN`] messages, so a compromise has a bounded
 //!   window even in a group where nobody ever leaves.
 //!
+//! Each rotation is labeled by a
+//! [`group_key_epoch`](SenderKeyState::group_key_epoch) that rises
+//! monotonically with it, so a receiver can tell a deliberate re-key from a
+//! resent old chain even before it holds the new distribution. Section 163 makes
+//! the two one requirement: every membership change raises the epoch *and*
+//! distributes a new sender key, because the member who left must not read what
+//! follows — the fresh chain key is what enforces that, and the epoch is the
+//! number the envelope carries so the change itself is visible on the wire.
+//!
 //! Rotation on removal is a correctness requirement, not a policy knob. A group
 //! implementation that skips it has a member who left in March still reading
 //! messages in August.
@@ -137,6 +146,9 @@ pub struct SenderKeyMessage {
 
 /// The sending half: one per group, held by the sender.
 pub struct SenderKeyState {
+    /// The membership generation this chain belongs to. Rises on every
+    /// [`rotate`](SenderKeyState::rotate), never repeats, never regresses.
+    group_key_epoch: u32,
     chain_id: u32,
     chain_key: [u8; 32],
     message_number: u32,
@@ -149,15 +161,48 @@ impl Drop for SenderKeyState {
 }
 
 impl SenderKeyState {
-    /// Starts a fresh chain.
-    pub fn create(chain_id: u32, random: &mut dyn Random) -> Self {
+    /// Starts a fresh chain under `group_key_epoch`.
+    ///
+    /// The caller owns the numbering: the epoch counts the group's membership
+    /// generations, so it starts at 1 on the first chain and rises by one per
+    /// membership change. The value travels in the caller's envelope, not in the
+    /// chain's own bytes.
+    pub fn create(group_key_epoch: u32, chain_id: u32, random: &mut dyn Random) -> Self {
         let mut chain_key = [0u8; 32];
         random.fill_bytes(&mut chain_key);
         Self {
+            group_key_epoch,
             chain_id,
             chain_key,
             message_number: 0,
         }
+    }
+
+    /// The membership generation this chain belongs to.
+    #[must_use]
+    pub fn group_key_epoch(&self) -> u32 {
+        self.group_key_epoch
+    }
+
+    /// Rotates: a fresh chain key under the next epoch, for a membership change
+    /// (section 163) or a chain that reached its message bound.
+    ///
+    /// The new chain starts at message 0 under `chain_id`, which the caller
+    /// mints fresh so a receiver still holding the old chain can tell the two
+    /// apart. The epoch rises by one and saturates rather than wrapping — an
+    /// epoch that rolled over to a smaller number would make an old chain look
+    /// current again, which is precisely the confusion the number exists to
+    /// prevent. After rotating, the caller distributes the new chain with
+    /// [`distribution`](Self::distribution).
+    pub fn rotate(&mut self, chain_id: u32, random: &mut dyn Random) -> u32 {
+        let mut chain_key = [0u8; 32];
+        random.fill_bytes(&mut chain_key);
+        self.chain_key.zeroize();
+        self.chain_key = chain_key;
+        self.chain_id = chain_id;
+        self.message_number = 0;
+        self.group_key_epoch = self.group_key_epoch.saturating_add(1).max(1);
+        self.group_key_epoch
     }
 
     /// Which chain this state represents.
@@ -365,7 +410,7 @@ mod tests {
     fn group(seed: u64) -> Group {
         let mut random = SeededRandom::new(seed);
         let sender_identity = IdentitySecret::generate(&mut random);
-        let sender = SenderKeyState::create(1, &mut random);
+        let sender = SenderKeyState::create(1, 1, &mut random);
         let receiver = ReceiverKeyState::accept(&sender.distribution(&sender_identity));
         Group {
             sender_identity,
@@ -518,7 +563,7 @@ mod tests {
     #[test]
     fn a_rotated_chain_is_reported_rather_than_mis_decrypted() {
         let mut g = group(10);
-        let rotated = SenderKeyState::create(2, &mut g.random);
+        let rotated = SenderKeyState::create(2, 2, &mut g.random);
         let mut rotated = rotated;
         let message = rotated
             .encrypt(&g.sender_identity, GROUP, b"new chain")
@@ -640,5 +685,55 @@ mod tests {
         let g = group(15);
         let rendered = format!("{:?}", g.sender.distribution(&g.sender_identity));
         assert!(rendered.contains("***"), "{rendered}");
+    }
+
+    #[test]
+    fn rotation_raises_the_epoch_and_mints_a_fresh_chain() {
+        let mut g = group(16);
+        assert_eq!(g.sender.group_key_epoch(), 1);
+        let new_epoch = g.sender.rotate(2, &mut g.random);
+        assert_eq!(new_epoch, 2);
+        assert_eq!(g.sender.chain_id(), 2);
+        // A member who joins the new chain receives its distribution at the
+        // position it starts from, which is before the first message is sealed.
+        // Once that distribution lands, the messages flow again.
+        let mut caught_up = ReceiverKeyState::accept(&g.sender.distribution(&g.sender_identity));
+        let message = g
+            .sender
+            .encrypt(&g.sender_identity, GROUP, b"after the change")
+            .expect("encrypts");
+        assert_eq!(
+            g.receiver.decrypt(GROUP, &message),
+            Err(CryptoError::NoSession)
+        );
+        assert_eq!(
+            caught_up.decrypt(GROUP, &message).expect("decrypts"),
+            b"after the change"
+        );
+    }
+
+    #[test]
+    fn a_member_who_left_cannot_read_after_the_rekey() {
+        // Section 163's own property: a departed member holds the old chain and
+        // never receives the new distribution, so nothing sealed after the
+        // membership change opens for them.
+        let mut g = group(17);
+        let mut departed = ReceiverKeyState::accept(&g.sender.distribution(&g.sender_identity));
+        g.sender.rotate(9, &mut g.random);
+        let after = g
+            .sender
+            .encrypt(&g.sender_identity, GROUP, b"without them")
+            .expect("encrypts");
+        assert_eq!(departed.decrypt(GROUP, &after), Err(CryptoError::NoSession));
+    }
+
+    #[test]
+    fn the_epoch_saturates_instead_of_rolling_over() {
+        let mut random = SeededRandom::new(18);
+        let mut sender = SenderKeyState::create(u32::MAX, 1, &mut random);
+        let epoch = sender.rotate(2, &mut random);
+        // Saturated, not wrapped: an epoch that rolled over to a smaller number
+        // would make an old chain look current again.
+        assert_eq!(epoch, u32::MAX);
     }
 }

@@ -74,4 +74,9 @@ dependencies {
     implementation(libs.androidx.compose.material3)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
+
+    // The JVM half of the app's own tests: the pieces a phone is not needed to prove -- the
+    // waveform fold, the draft store's round trip. Anything that touches a microphone or a
+    // composition stays untested here, as it always has; CI runs testDebugUnitTest on this module.
+    testImplementation("junit:junit:4.13.2")
 }
