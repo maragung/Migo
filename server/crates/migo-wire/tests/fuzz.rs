@@ -325,7 +325,13 @@ fn vectors_dir() -> PathBuf {
 /// input are how a decoder's error paths are explored.
 fn every_vector_payload() -> Vec<Vec<u8>> {
     let mut payloads = Vec::new();
-    for file in ["varint.json", "frames.json", "mse.json"] {
+    for file in [
+        "varint.json",
+        "frames.json",
+        "mse.json",
+        "batch.json",
+        "compress.json",
+    ] {
         let path = vectors_dir().join(file);
         let text =
             std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {path:?}: {error}"));

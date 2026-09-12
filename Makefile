@@ -315,7 +315,12 @@ test: test-server test-web ## Run all tests
 
 .PHONY: test-server
 test-server: ## Run the Rust test suite
-	$(CARGO) test $(MANIFEST) --workspace
+	# --no-fail-fast: cargo runs crates in name order, and migo-gateway sorts
+	# before migo-wire, so a gateway red used to abort the whole job before the
+	# wire crate's own tests ever ran — the codec a gateway failure points at
+	# was the one suite a gateway failure silenced. Every crate's tests run and
+	# every failure is named, so one red crate cannot mask another's verdict.
+	$(CARGO) test $(MANIFEST) --workspace --no-fail-fast
 
 .PHONY: test-contract
 test-contract: ## Contract suites against real backends (needs MIGO_TEST_DATABASE_URL, MIGO_TEST_REDIS_URL)
