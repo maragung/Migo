@@ -1272,6 +1272,52 @@ impl Posted {
     }
 }
 
+impl NewTransaction {
+    /// Whether this attempt is the transaction its idempotency key already named.
+    ///
+    /// Judged by everything a retry keeps and nothing it re-mints: the reason, the
+    /// poster, the legs, and the delivery. A genuine retry mints a fresh `tx_id`, a
+    /// fresh `ref_id` (the gift id it just drew from its own random source), and a
+    /// fresh `created_at` — the client that never saw its answer has none of the
+    /// originals — so none of those can be part of the comparison. Section 153: the
+    /// same key and a different payload is `IDEMPOTENCY_MISMATCH`, because a key
+    /// that answers two payloads was never a key.
+    #[must_use]
+    pub fn replays(&self, stored: &LedgerTransaction, delivery: Option<&Receipt>) -> bool {
+        let same_legs = self
+            .legs
+            .iter()
+            .map(|leg| (leg.ledger_account_id, leg.amount))
+            .eq(stored
+                .legs
+                .iter()
+                .map(|leg| (leg.ledger_account_id, leg.amount)));
+        self.reason == stored.reason
+            && self.created_by == stored.created_by
+            && same_legs
+            && same_delivery(self.receipt.as_ref(), delivery)
+    }
+}
+
+/// Whether a retry's delivery is the delivery the original wrote.
+///
+/// The gift ids are excluded for the same reason the transaction's `ref_id` is: a
+/// retry mints a fresh one before it can learn the original's. What identifies a
+/// gift to the people it was between is who, what, and where — not the row id.
+fn same_delivery(attempted: Option<&Receipt>, stored: Option<&Receipt>) -> bool {
+    match (attempted, stored) {
+        (Some(Receipt::Gift(a)), Some(Receipt::Gift(b))) => {
+            a.sender_id == b.sender_id
+                && a.recipient_id == b.recipient_id
+                && a.gift_code == b.gift_code
+                && a.conversation_id == b.conversation_id
+        }
+        (Some(Receipt::Entitlement { sku: a }), Some(Receipt::Entitlement { sku: b })) => a == b,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 /// What a transaction delivered, written in the same statement sequence as its legs.
 ///
 /// A gift that charged the sender and delivered nothing, or a purchase that took the

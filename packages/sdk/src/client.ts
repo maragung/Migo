@@ -109,6 +109,7 @@ import { TypingDomain } from './domains/typing.js';
 import { PresenceDomain } from './domains/presence.js';
 import { RoomsDomain } from './domains/rooms.js';
 import { CallsDomain } from './domains/calls.js';
+import { GroupCallDomain } from './domains/group-calls.js';
 import { ProfileDomain } from './domains/profile.js';
 import { MediaDomain } from './domains/media.js';
 import { NotificationsDomain } from './domains/notifications.js';
@@ -204,6 +205,7 @@ interface Connected {
   presence: PresenceDomain;
   rooms: RoomsDomain;
   calls: CallsDomain;
+  groupCalls: GroupCallDomain;
   profile: ProfileDomain;
   media: MediaDomain;
   notifications: NotificationsDomain;
@@ -352,6 +354,19 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   }
 
   /**
+   * Resolves when the page is visible, immediately if it already is.
+   *
+   * Section 158 asks that sync still running when the application goes to the background be
+   * stopped *neatly*, not killed: an in-flight page finishes, and the next one does not start
+   * until the page returns. The outbox drain parks on its own; this is the same parking spot
+   * for every other piece of client sync work that pages — a catch-up loop, a history walk —
+   * which awaits it between pages, costing a hidden page no timer and no request.
+   */
+  whenVisible(): Promise<void> {
+    return this.#syncGate.wait();
+  }
+
+  /**
    * The offline outbox, when one is running.
    *
    * Null when the client was built with {@link MigoClientOptions.outboxEnabled} false or while
@@ -403,6 +418,11 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   /** Place, answer, and observe 1:1 voice and video calls. */
   get calls(): CallsDomain {
     return this.#requireConnected().calls;
+  }
+
+  /** Join, leave, and observe SFU group calls. */
+  get groupCalls(): GroupCallDomain {
+    return this.#requireConnected().groupCalls;
   }
 
   /** Look up public account profiles. */
@@ -536,6 +556,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     ctx.rooms.stop();
     ctx.conversations.stop();
     ctx.calls.stop();
+    ctx.groupCalls.stop();
     ctx.notifications.stop();
     ctx.social.stop();
     ctx.games.stop();
@@ -1334,6 +1355,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
       presence: new PresenceDomain(rpc, this.#options.onEventError),
       rooms: new RoomsDomain(rpc, this.#options.onEventError),
       calls: new CallsDomain(rpc, grant.deviceId, this.#options.onEventError),
+      groupCalls: new GroupCallDomain(rpc, grant.deviceId, this.#options.onEventError),
       profile: new ProfileDomain(rpc),
       media: new MediaDomain(rpc, this.#options.fetch),
       notifications: new NotificationsDomain(rpc, this.#options.onEventError),
@@ -1350,6 +1372,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     ctx.rooms.start();
     ctx.conversations.start();
     ctx.calls.start();
+    ctx.groupCalls.start();
     ctx.notifications.start();
     ctx.social.start();
     ctx.games.start();
