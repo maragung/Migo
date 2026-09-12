@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ChangeEvent, ReactNode } from 'react';
 
-import { PresenceState } from '@migo/sdk';
 import type { BadgeWire, ProfileUpdate, ProgressionWire, UserProfile } from '@migo/sdk';
 
 import { friendlyError } from '@/lib/migo/errors.js';
@@ -76,9 +75,12 @@ const PRIVACY_FIELDS: ReadonlyArray<PrivacyField> = [
  * The same posture covers the searchable switch — the wire's profile carries no current value for
  * it, so the switch joins the patch only once flipped. The birth year used to share that posture;
  * since the wire grew `birthYear` it seeds from the profile and joins the patch exactly like the
- * text fields, when its draft differs from what the server holds. The custom status is a different
- * wire: it is presence, not profile ({@link PresenceDomain.setPresence} carries it), so it is
- * published on its own after the save.
+ * text fields, when its draft differs from what the server holds. The custom status follows the
+ * same rule for the same reason: it is a profile column (`custom_status`, the field the
+ * RICH_PRESENCE bit gates), the profile the panel loads carries its current value, and the reply
+ * echoes it back — so the status joins the patch only when the box moved, and saving a name does
+ * not re-state a status. It is *not* published over the presence wire: presence refuses that field
+ * with `FEATURE_DISABLED` by design, which is the mismatch this panel used to hit.
  *
  * Standing — level, XP, badges — arrives from the economy domain and is view-only here; the Gifts
  * tab owns the interactive side of the same facts.
@@ -165,10 +167,10 @@ export function ProfilePanel({ onOpenSettings }: { onOpenSettings?: () => void }
     }
     const patch = buildProfilePatch(profile, { displayName, bio }, privacy, {
       birthYear,
+      customStatus,
       ...(searchableTouched ? { searchable } : {}),
     });
-    const statusChanged = customStatus !== (profile.customStatus ?? '');
-    if (Object.keys(patch).length === 0 && !statusChanged) {
+    if (Object.keys(patch).length === 0) {
       return;
     }
 
@@ -176,32 +178,24 @@ export function ProfilePanel({ onOpenSettings }: { onOpenSettings?: () => void }
     setError(null);
     setSaved(false);
     try {
-      if (Object.keys(patch).length > 0) {
-        const updated = await client.profile.updateProfile(patch);
-        // The reply is the authoritative profile; adopt it through the shared cache so the avatar
-        // URL is resolved and every other surface (the sidebar) moves with this save, not after a
-        // refetch it has no reason to make.
-        const resolved = await cacheProfile(client, updated);
-        setProfile(resolved);
-        setDisplayName(resolved.displayName);
-        setBio(resolved.bio ?? '');
-        setPrivacy({
-          showLastSeen: UNCHANGED,
-          whoCanMessage: UNCHANGED,
-          whoCanAdd: UNCHANGED,
-        });
-        setBirthYear(resolved.birthYear === undefined ? '' : String(resolved.birthYear));
-        setSearchableTouched(false);
-      }
-      if (statusChanged) {
-        // The custom status rides the presence wire, not the profile patch: publish it beside
-        // the current presence state so saving it does not silently flip the user online.
-        const trimmed = customStatus.trim();
-        await client.presence.setPresence(
-          profile.presence ?? PresenceState.Online,
-          trimmed.length > 0 ? { customStatus: trimmed } : {},
-        );
-      }
+      const updated = await client.profile.updateProfile(patch);
+      // The reply is the authoritative profile; adopt it through the shared cache so the avatar
+      // URL is resolved and every other surface (the sidebar) moves with this save, not after a
+      // refetch it has no reason to make.
+      const resolved = await cacheProfile(client, updated);
+      setProfile(resolved);
+      setDisplayName(resolved.displayName);
+      setBio(resolved.bio ?? '');
+      // The status is read back from the reply like every other field — the server is what decides
+      // what a status trims to, and an empty box that saved as empty must show as empty.
+      setCustomStatus(resolved.customStatus ?? '');
+      setPrivacy({
+        showLastSeen: UNCHANGED,
+        whoCanMessage: UNCHANGED,
+        whoCanAdd: UNCHANGED,
+      });
+      setBirthYear(resolved.birthYear === undefined ? '' : String(resolved.birthYear));
+      setSearchableTouched(false);
       setSaved(true);
     } catch (cause) {
       setError(friendlyError(cause));
@@ -269,7 +263,10 @@ export function ProfilePanel({ onOpenSettings }: { onOpenSettings?: () => void }
     profile !== null &&
     (displayName.trim() !== profile.displayName ||
       bio !== (profile.bio ?? '') ||
-      customStatus !== (profile.customStatus ?? '') ||
+      // Trimmed, like the patch itself: an edit that the server would store as the value it
+      // already holds is not a change, and a Save button that stayed lit for one would be a click
+      // that does nothing.
+      customStatus.trim() !== (profile.customStatus ?? '') ||
       birthYear !== (profile.birthYear === undefined ? '' : String(profile.birthYear)) ||
       searchableTouched ||
       privacy.showLastSeen !== UNCHANGED ||
@@ -489,15 +486,18 @@ export function validBirthYear(raw: string): number | undefined {
  *
  * The extra fields follow the same rule with their own leave-as-is shapes: the birth year joins only
  * when its draft differs from the year the profile carries (the wire echoes it back, so "same year"
- * is knowable and "empty against disclosed" is a change to send, not a guess), and the searchable
+ * is knowable and "empty against disclosed" is a change to send, not a guess), the searchable
  * switch only when it was flipped at all — its untouched state is "do not touch" precisely because
- * the wire's profile carries no current value to pre-select.
+ * the wire's profile carries no current value to pre-select — and the custom status only when its
+ * draft differs from the one the profile carries, trimmed the way the server stores it. Clearing
+ * the box is a real edit: it sends the empty string, which sets an empty status rather than
+ * leaving the old one in place.
  */
 export function buildProfilePatch(
   current: UserProfile,
   draft: { displayName: string; bio: string },
   privacy: Record<PrivacyField['key'], string>,
-  extra?: { birthYear?: string; searchable?: boolean },
+  extra?: { birthYear?: string; searchable?: boolean; customStatus?: string },
 ): Partial<ProfileUpdate> {
   const patch: Partial<ProfileUpdate> = {};
   if (draft.displayName.trim() !== current.displayName) {
@@ -528,6 +528,12 @@ export function buildProfilePatch(
     }
     if (extra.searchable !== undefined) {
       patch.searchable = extra.searchable;
+    }
+    if (extra.customStatus !== undefined) {
+      const status = extra.customStatus.trim();
+      if (status !== (current.customStatus ?? '')) {
+        patch.customStatus = status;
+      }
     }
   }
   return patch;

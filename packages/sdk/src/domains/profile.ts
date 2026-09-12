@@ -76,6 +76,12 @@ export class ProfileDomain {
    * so a caller saving a new display name does not also have to know (and re-send) its privacy
    * settings. Resolves with the full updated profile, the same shape {@link fetch} returns, so the
    * caller can refresh its cached copy from the reply instead of re-reading.
+   *
+   * `customStatus` is the one field here the server gates on a feature bit: it belongs to
+   * `FEATURE.RICH_PRESENCE`, which a stock connection offers (see `DEFAULT_CLIENT_FEATURES`), and a
+   * session without that bit is answered `FEATURE_NOT_NEGOTIATED` for the field. An empty string is
+   * sent, not dropped: the wire reads an absent field as "keep", so the empty string is how a
+   * caller erases a status.
    */
   async updateProfile(patch: Partial<ProfileUpdate>): Promise<UserProfile> {
     // Copy the set fields into a fresh struct: the caller's object stays untouched, and an explicitly
@@ -104,6 +110,9 @@ export class ProfileDomain {
     }
     if (patch.searchable !== undefined) {
       request.searchable = patch.searchable;
+    }
+    if (patch.customStatus !== undefined) {
+      request.customStatus = patch.customStatus;
     }
     return this.#rpc.call(OP.PROFILE_UPDATE, encodeProfileUpdate, decodeUserProfile, request);
   }

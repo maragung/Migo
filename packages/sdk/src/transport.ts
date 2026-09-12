@@ -82,6 +82,15 @@ import type { ServerEndpoint } from './server-endpoint.js';
 /**
  * The feature bits a stock client offers; the server intersects this with its own.
  *
+ * `FEATURE.RICH_PRESENCE` is offered because this SDK carries the field the bit gates in both
+ * directions: `ProfileDomain.updateProfile` forwards `customStatus`, and the `UserProfile` that
+ * comes back — from the update itself or from a fetch — carries the same value for the caller to
+ * render. A client that offers a bit it cannot honour is worse than one that stays silent, and the
+ * server gates the *field*: a session without the bit is answered `FEATURE_NOT_NEGOTIATED` for
+ * every `custom_status` it sends, so offering it is what makes the status usable at all. It costs
+ * an application that never sets a status nothing: the SDK writes the field only when a caller
+ * passes one.
+ *
  * `FEATURE.GROUP_CALL` is deliberately absent: the SFU group-call opcodes are opt-in by the
  * application (a client that offers the bit should be one that has a group-call UI), and the
  * server does not gate `CALL_SFU_JOIN`/`CALL_SFU_EVENT` on the bit — a client wanting in offers
@@ -96,7 +105,8 @@ export const DEFAULT_CLIENT_FEATURES =
   FEATURE.TYPING |
   FEATURE.ROOMS |
   FEATURE.RESUME |
-  FEATURE.VOICE_MESSAGE;
+  FEATURE.VOICE_MESSAGE |
+  FEATURE.RICH_PRESENCE;
 
 /** How a caller wants to introduce itself in the handshake. */
 export interface HelloParams {

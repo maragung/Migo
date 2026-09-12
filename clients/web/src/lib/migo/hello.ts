@@ -9,6 +9,12 @@
  * — a client that offers it should be one that has a group-call UI, and this client now does (the
  * roster screen). The server does not gate the SFU opcodes on the bit, so offering it is a
  * statement about this client, not a request the server must grant.
+ *
+ * `RICH_PRESENCE` arrives with the stock set rather than being added here, and this client is the
+ * reason it is in that set: it writes the status the bit gates (the profile panel's save and the me
+ * bar's publish both carry `customStatus`) and renders what comes back (the profile panel, the
+ * friends list, and both me bars). A session that offered the bit without those two halves would
+ * be a promise it could not keep.
  */
 
 import { BandwidthMode, DEFAULT_CLIENT_FEATURES, Platform, protocol } from '@migo/sdk';
