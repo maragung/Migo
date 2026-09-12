@@ -254,7 +254,7 @@ fn draw_video_stage(ui: &mut egui::Ui, theme: Theme, frame: &VideoFrame) {
     // The stage: the overlay's width minus its margins, capped at 4:3-ish height so a tall
     // frame cannot push the actions off the screen. The frame is fitted inside at its own
     // aspect — the letterbox is the stage's fill, not the picture's stretch.
-    let stage_width = 340.0 - 2.0 * space::MD as f32;
+    let stage_width = 340.0 - 2.0 * space::MD;
     let stage_height = (stage_width * 3.0 / 4.0).min(300.0);
     // The frame's own pixels, as floats for the fit below. `as` rather than `From` because
     // the standard library deliberately refuses a lossless `From<u32> for f32`.

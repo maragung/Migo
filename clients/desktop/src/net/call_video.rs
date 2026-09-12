@@ -77,7 +77,7 @@ const MAX_PIXELS_PER_FRAME: u64 = 4096 * 4096;
 fn i420_to_rgba(frame: &oxideav_vp8::Vp8DecodedFrame) -> VideoFrame {
     let width = frame.width as usize;
     let height = frame.height as usize;
-    let chroma_width = (width + 1) / 2;
+    let chroma_width = width.div_ceil(2);
     let y_plane = frame.y.as_slice();
     let u_plane = frame.u.as_slice();
     let v_plane = frame.v.as_slice();
@@ -243,7 +243,12 @@ mod tests {
         assert_eq!(converted.height, 4);
         assert_eq!(converted.rgba.len(), 4 * 4 * 4);
         assert!(
-            converted.rgba.chunks_exact(4).all(|px| px[3] == 255),
+            converted
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|px| px[3] == 255),
             "every pixel is opaque"
         );
     }
