@@ -69,6 +69,10 @@ test('redact masks a bearer token even under an Authorization label', () => {
   const out = redact('Authorization: Bearer eyJhbGciOi.JIUzI1NiIs.InR5cCI6');
   assert.ok(!out.includes('eyJhbGciOi.JIUzI1NiIs.InR5cCI6'));
   assert.ok(out.includes('[redacted]'));
+  // Exactly one marker: the Bearer rule owns the token, and the assignment rule
+  // ("authorization" is a secret key) must not then mask the scheme word too —
+  // two markers for one secret reads as two secrets.
+  assert.equal(out, 'Authorization: Bearer [redacted]');
 });
 
 test('redact leaves benign diagnostics untouched, including near-miss words', () => {

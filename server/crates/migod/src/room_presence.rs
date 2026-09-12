@@ -511,6 +511,10 @@ impl Shared {
 /// `member_count` is the room's total and not the online count: a disconnect and a reconnect do
 /// not change who is a member, so the number a `RoomMemberEvent` carries is unchanged across
 /// both. The online count travels on its own [`state_delta`].
+///
+/// No revision, because these edges — Connected, Disconnected, Reconnected — move no stored
+/// state a roster can observe (brief section 156): a client that reacts to one by re-reading
+/// the room would fetch a page identical to the one it holds.
 fn member_event(
     room_id: Id,
     account_id: Id,
@@ -525,13 +529,16 @@ fn member_event(
         role: None,
         member_count: Some(member_count),
         change: Some(change),
+        revision: None,
     }
 }
 
 /// A room state event carrying only a new online count.
 ///
 /// Every other field absent — a delta (section 156): this frame says the online count moved and
-/// says nothing else, so it cannot be misread as clearing a topic or resetting a cap.
+/// says nothing else, so it cannot be misread as clearing a topic or resetting a cap. No
+/// revision either: the online count is this node's own tally of live sessions, not stored
+/// room state, so there is no revision for it to have advanced.
 fn state_delta(room_id: Id, online_count: u32) -> RoomStateEvent {
     RoomStateEvent {
         room_id,
@@ -540,6 +547,7 @@ fn state_delta(room_id: Id, online_count: u32) -> RoomStateEvent {
         topic: None,
         slow_mode_ms: None,
         max_members: None,
+        revision: None,
     }
 }
 

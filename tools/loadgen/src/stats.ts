@@ -12,8 +12,13 @@
 
 import { RemoteError, TimeoutError, TransportError, SdkError } from '@migo/sdk';
 
+import { redact } from './redact.js';
+
 /** Cap on retained latency samples per label. Percentiles are estimated from this reservoir. */
 const RESERVOIR_CAP = 100_000;
+
+/** Cap on a retained error sample's length, so one runaway message cannot bloat the report. */
+const SAMPLE_CAP = 200;
 
 export interface DigestSnapshot {
   readonly count: number;
@@ -31,6 +36,13 @@ export interface OperationSnapshot {
   readonly errors: number;
   /** Error counts by class, most frequent first. */
   readonly errorsByClass: ReadonlyArray<readonly [string, number]>;
+  /**
+   * One retained error sample per class — the first the run saw — as `describeError` shaped it.
+   * The class label says how many failed and in what way; the sample says why, which for a server
+   * refusal is the field the server blamed. Without it a wall of `remote:VALIDATION_FAILED` is a
+   * count with no diagnosis, and the only copy of the answer sits in a log nobody reads.
+   */
+  readonly errorSamples: ReadonlyArray<readonly [string, string]>;
   readonly latency: DigestSnapshot;
 }
 
@@ -88,6 +100,7 @@ export class Metrics {
   readonly #latency = new Map<string, LatencyDigest>();
   readonly #ok = new Map<string, number>();
   readonly #errors = new Map<string, Map<string, number>>();
+  readonly #samples = new Map<string, Map<string, string>>();
 
   /** The latency digest for `label`, created on first use. */
   latency(label: string): LatencyDigest {
@@ -103,13 +116,23 @@ export class Metrics {
     this.#ok.set(label, (this.#ok.get(label) ?? 0) + 1);
   }
 
-  recordError(label: string, errorClass: string): void {
+  recordError(label: string, errorClass: string, sample?: string): void {
     let byClass = this.#errors.get(label);
     if (byClass === undefined) {
       byClass = new Map();
       this.#errors.set(label, byClass);
     }
     byClass.set(errorClass, (byClass.get(errorClass) ?? 0) + 1);
+    // The first sample per class is the one kept: one is enough to diagnose, and
+    // the first is the one that most plausibly names the systematic cause.
+    if (sample !== undefined && sample !== '') {
+      let bySample = this.#samples.get(label);
+      if (bySample === undefined) {
+        bySample = new Map();
+        this.#samples.set(label, bySample);
+      }
+      if (!bySample.has(errorClass)) bySample.set(errorClass, sample);
+    }
   }
 
   /** Every label that saw a latency sample, a success, or an error. */
@@ -121,11 +144,14 @@ export class Metrics {
     const byClass = this.#errors.get(label);
     const errorsByClass = byClass ? [...byClass.entries()].sort((a, b) => b[1] - a[1]) : [];
     const errors = errorsByClass.reduce((sum, [, count]) => sum + count, 0);
+    const bySample = this.#samples.get(label);
+    const errorSamples = bySample ? [...bySample.entries()] : [];
     return {
       label,
       ok: this.#ok.get(label) ?? 0,
       errors,
       errorsByClass,
+      errorSamples,
       latency: this.latency(label).snapshot(),
     };
   }
@@ -146,4 +172,25 @@ export function classifyError(error: unknown): string {
   if (error instanceof SdkError) return 'sdk';
   if (error instanceof Error) return `local:${error.name}`;
   return 'unknown';
+}
+
+/**
+ * A short, redacted, single-line rendering of an error for the report's per-class sample.
+ *
+ * For a server refusal the offending field leads — `fault::validation(field, …)` names the field,
+ * and the field name is the whole diagnosis for a wall of identical `remote:VALIDATION_FAILED` —
+ * with the server's public message (already symbol-prefixed by the SDK) after it. Everything else
+ * contributes its message when it has one. Capped and scrubbed, because the report gets pasted
+ * where credentials must not travel.
+ */
+export function describeError(error: unknown): string | undefined {
+  let detail: string | undefined;
+  if (error instanceof RemoteError) {
+    detail = error.field === undefined ? error.message : `${error.field}: ${error.message}`;
+  } else if (error instanceof Error) {
+    detail = error.message;
+  }
+  if (detail === undefined || detail === '') return undefined;
+  const capped = detail.length > SAMPLE_CAP ? `${detail.slice(0, SAMPLE_CAP)}…` : detail;
+  return redact(capped);
 }

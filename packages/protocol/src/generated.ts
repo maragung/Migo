@@ -1962,6 +1962,8 @@ export interface RoomSummary {
   slowModeMs?: number;
   /** The room's capacity ceiling; join is refused once member_count reaches it. */
   maxMembers?: number;
+  /** The room's state revision this summary was read at (section 156). A summary is a snapshot; comparing its revision with the one a held roster or state cache was built at says whether the cache is stale without re-reading the room. */
+  revision?: number;
 }
 
 export function encodeRoomSummary(w: Writer, v: RoomSummary): void {
@@ -1983,6 +1985,7 @@ export function encodeRoomSummary(w: Writer, v: RoomSummary): void {
   if (v.myRole !== undefined) present++;
   if (v.slowModeMs !== undefined) present++;
   if (v.maxMembers !== undefined) present++;
+  if (v.revision !== undefined) present++;
   w.u32(present);
   if (v.topic !== undefined) { const value = v.topic; w.optional(1, (w) => { w.str(value); }); }
   if (v.description !== undefined) { const value = v.description; w.optional(2, (w) => { w.str(value); }); }
@@ -1994,6 +1997,7 @@ export function encodeRoomSummary(w: Writer, v: RoomSummary): void {
   if (v.myRole !== undefined) { const value = v.myRole; w.optional(8, (w) => { w.u32(value); }); }
   if (v.slowModeMs !== undefined) { const value = v.slowModeMs; w.optional(9, (w) => { w.u32(value); }); }
   if (v.maxMembers !== undefined) { const value = v.maxMembers; w.optional(10, (w) => { w.u32(value); }); }
+  if (v.revision !== undefined) { const value = v.revision; w.optional(11, (w) => { w.u64(value); }); }
   w.leave();
 }
 
@@ -2020,6 +2024,7 @@ export function decodeRoomSummary(r: Reader): RoomSummary {
       case 8: out.myRole = sub.u32() as RoomRole; break;
       case 9: out.slowModeMs = sub.u32(); break;
       case 10: out.maxMembers = sub.u32(); break;
+      case 11: out.revision = sub.u64(); break;
       default: break; // unknown optional field: skipped by length
     }
   }
@@ -2199,6 +2204,8 @@ export interface RoomMemberEvent {
   memberCount?: number;
   /** Why the membership changed. Absent on legacy join/leave, where `joined` says it. */
   change?: MemberChange;
+  /** The room's state revision this change advanced it to (section 156). Absent on the presence edges (Connected/Disconnected/Reconnected), which move no state a roster can observe. */
+  revision?: number;
 }
 
 export function encodeRoomMemberEvent(w: Writer, v: RoomMemberEvent): void {
@@ -2210,10 +2217,12 @@ export function encodeRoomMemberEvent(w: Writer, v: RoomMemberEvent): void {
   if (v.role !== undefined) present++;
   if (v.memberCount !== undefined) present++;
   if (v.change !== undefined) present++;
+  if (v.revision !== undefined) present++;
   w.u32(present);
   if (v.role !== undefined) { const value = v.role; w.optional(1, (w) => { w.u32(value); }); }
   if (v.memberCount !== undefined) { const value = v.memberCount; w.optional(2, (w) => { w.u32(value); }); }
   if (v.change !== undefined) { const value = v.change; w.optional(3, (w) => { w.u32(value); }); }
+  if (v.revision !== undefined) { const value = v.revision; w.optional(4, (w) => { w.u64(value); }); }
   w.leave();
 }
 
@@ -2230,6 +2239,7 @@ export function decodeRoomMemberEvent(r: Reader): RoomMemberEvent {
       case 1: out.role = sub.u32() as RoomRole; break;
       case 2: out.memberCount = sub.u32(); break;
       case 3: out.change = sub.u32() as MemberChange; break;
+      case 4: out.revision = sub.u64(); break;
       default: break; // unknown optional field: skipped by length
     }
   }
@@ -2246,6 +2256,8 @@ export interface RoomStateEvent {
   slowModeMs?: number;
   /** The room's capacity ceiling, sent when it changes. */
   maxMembers?: number;
+  /** The room's state revision this change advanced it to (section 156). Absent on the online-count frames the gateway's own tally publishes, which move no stored state. */
+  revision?: number;
 }
 
 export function encodeRoomStateEvent(w: Writer, v: RoomStateEvent): void {
@@ -2257,12 +2269,14 @@ export function encodeRoomStateEvent(w: Writer, v: RoomStateEvent): void {
   if (v.topic !== undefined) present++;
   if (v.slowModeMs !== undefined) present++;
   if (v.maxMembers !== undefined) present++;
+  if (v.revision !== undefined) present++;
   w.u32(present);
   if (v.onlineCount !== undefined) { const value = v.onlineCount; w.optional(1, (w) => { w.u32(value); }); }
   if (v.memberCount !== undefined) { const value = v.memberCount; w.optional(2, (w) => { w.u32(value); }); }
   if (v.topic !== undefined) { const value = v.topic; w.optional(3, (w) => { w.str(value); }); }
   if (v.slowModeMs !== undefined) { const value = v.slowModeMs; w.optional(4, (w) => { w.u32(value); }); }
   if (v.maxMembers !== undefined) { const value = v.maxMembers; w.optional(5, (w) => { w.u32(value); }); }
+  if (v.revision !== undefined) { const value = v.revision; w.optional(6, (w) => { w.u64(value); }); }
   w.leave();
 }
 
@@ -2279,6 +2293,7 @@ export function decodeRoomStateEvent(r: Reader): RoomStateEvent {
       case 3: out.topic = sub.str(); break;
       case 4: out.slowModeMs = sub.u32(); break;
       case 5: out.maxMembers = sub.u32(); break;
+      case 6: out.revision = sub.u64(); break;
       default: break; // unknown optional field: skipped by length
     }
   }
@@ -2898,6 +2913,8 @@ export function decodeInboxItem(r: Reader): InboxItem {
 export interface InboxResponse {
   items: InboxItem[];
   nextCursor?: string;
+  /** The unread count across the whole inbox, not just this page (section 156's counter): fresh with every page, so a badge never counts the rows it happens to hold. */
+  unread?: number;
 }
 
 export function encodeInboxResponse(w: Writer, v: InboxResponse): void {
@@ -2905,8 +2922,10 @@ export function encodeInboxResponse(w: Writer, v: InboxResponse): void {
   { w.listLen(v.items.length); for (const item of v.items) { encodeInboxItem(w, item); } }
   let present = 0;
   if (v.nextCursor !== undefined) present++;
+  if (v.unread !== undefined) present++;
   w.u32(present);
   if (v.nextCursor !== undefined) { const value = v.nextCursor; w.optional(1, (w) => { w.str(value); }); }
+  if (v.unread !== undefined) { const value = v.unread; w.optional(2, (w) => { w.u32(value); }); }
   w.leave();
 }
 
@@ -2919,6 +2938,7 @@ export function decodeInboxResponse(r: Reader): InboxResponse {
     const [fieldId, sub] = r.optional();
     switch (fieldId) {
       case 1: out.nextCursor = sub.str(); break;
+      case 2: out.unread = sub.u32(); break;
       default: break; // unknown optional field: skipped by length
     }
   }
@@ -4750,12 +4770,17 @@ export function decodeRosterReq(r: Reader): RosterReq {
 /** A page of a room's roster. */
 export interface RosterResponse {
   members: RosterEntry[];
+  /** The room's state revision this page was read at (section 156). A member or state event that arrives carrying a revision beyond it means a delta was missed and the roster should be re-read. */
+  revision?: number;
 }
 
 export function encodeRosterResponse(w: Writer, v: RosterResponse): void {
   w.enter();
   { w.listLen(v.members.length); for (const item of v.members) { encodeRosterEntry(w, item); } }
-  w.u32(0);
+  let present = 0;
+  if (v.revision !== undefined) present++;
+  w.u32(present);
+  if (v.revision !== undefined) { const value = v.revision; w.optional(1, (w) => { w.u64(value); }); }
   w.leave();
 }
 
@@ -4764,9 +4789,13 @@ export function decodeRosterResponse(r: Reader): RosterResponse {
   const members = ((): RosterEntry[] => { const n = r.listLen(); const v: RosterEntry[] = []; for (let i = 0; i < n; i++) v.push(decodeRosterEntry(r)); return v; })();
   const out: RosterResponse = { members } as RosterResponse;
   const optionalCount = r.u32();
-  // No optional fields in this version of the struct. Each entry is length-delimited,
-  // so reading it is skipping it, and a newer peer may well have sent one.
-  for (let i = 0; i < optionalCount; i++) r.optional();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.revision = sub.u64(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
   r.leave();
   return out;
 }

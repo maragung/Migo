@@ -1015,6 +1015,21 @@ async fn joining_an_open_room_admits_the_caller_and_tells_the_room() {
     assert!(event.joined);
     assert_eq!(event.role, Some(RoomRole::Member));
     assert_eq!(event.member_count, Some(2));
+    assert_eq!(
+        event.revision,
+        Some(1),
+        "the join advanced the room from its birth revision to 1, and the event says so (section 156)"
+    );
+    assert_eq!(
+        response.room.revision,
+        Some(1),
+        "the summary the joiner holds and the event the room hears name the same revision"
+    );
+    assert_eq!(
+        event.revision,
+        Some(harness.room_row(room).await.revision as u64),
+        "the number on the frame is the number in the row, not the one from before the write"
+    );
     assert_eq!(harness.joins("accepted"), 1);
 }
 
@@ -1341,6 +1356,11 @@ async fn leaving_removes_the_member_and_tells_the_room() {
     assert!(!event.joined);
     assert_eq!(event.role, None, "a departure carries no role");
     assert_eq!(event.member_count, Some(2));
+    assert_eq!(
+        event.revision,
+        Some(harness.room_row(room).await.revision as u64),
+        "a departure names the revision it advanced the room to (section 156)"
+    );
     assert_eq!(harness.leaves("applied"), 1);
 
     let member = harness.member_row(room, BOB).await;
@@ -2042,12 +2062,13 @@ async fn a_roster_is_ranked_and_members_only() {
     let harness = Harness::new();
     let room = harness.founded().await;
     harness.promote(room, BOB, RoomRole::Moderator, LATER).await;
-    let members = harness
+    let roster = harness
         .rooms
         .roster(&caller(CAROL, CAROL_PHONE, LATER), room, 10, None)
         .await
         .expect("every member may see who is here");
-    let order: Vec<(Id, RoomRole)> = members
+    let order: Vec<(Id, RoomRole)> = roster
+        .members
         .iter()
         .map(|member| (member.account_id, member.role))
         .collect();
@@ -2085,12 +2106,16 @@ async fn a_roster_hides_the_people_who_left() {
         )
         .await
         .expect("a member may walk out");
-    let members = harness
+    let roster = harness
         .rooms
         .roster(&caller(CAROL, CAROL_PHONE, LATER), room, 10, None)
         .await
         .expect("a member may read the roster");
-    let ids: Vec<Id> = members.iter().map(|member| member.account_id).collect();
+    let ids: Vec<Id> = roster
+        .members
+        .iter()
+        .map(|member| member.account_id)
+        .collect();
     assert_eq!(ids, vec![id(ALICE), id(CAROL)]);
 }
 
@@ -2104,13 +2129,52 @@ async fn a_roster_clamps_its_page_size_upward_and_downward() {
         .roster(&carol, room, 0, None)
         .await
         .expect("zero is clamped to one, not to an empty page");
-    assert_eq!(zero.len(), 1);
+    assert_eq!(zero.members.len(), 1);
     let huge = harness
         .rooms
         .roster(&carol, room, MAX_ROSTER_PAGE + 1, None)
         .await
         .expect("an absurd page size is clamped");
-    assert_eq!(huge.len(), 3);
+    assert_eq!(huge.members.len(), 3);
+}
+
+#[tokio::test]
+async fn a_roster_page_carries_the_revision_it_was_read_at() {
+    let harness = Harness::new();
+    let room = harness.founded().await;
+    let roster = harness
+        .rooms
+        .roster(&caller(CAROL, CAROL_PHONE, LATER), room, 10, None)
+        .await
+        .expect("a member may read the roster");
+    assert_eq!(
+        roster.revision, 2,
+        "creation sat at 0 and the two joins that filled the room advanced it twice"
+    );
+    assert_eq!(
+        roster.revision, harness.room_row(room).await.revision as u64,
+        "the page names the revision the row holds, which is what a later member or state event is compared against"
+    );
+
+    // A change after the page leaves the next event's revision beyond the
+    // page's, which is exactly the signal a client needs to re-read.
+    harness.promote(room, BOB, RoomRole::Moderator, LATER).await;
+    let (_, event) = expect_member(
+        harness
+            .rooms
+            .set_role(
+                &caller(ALICE, ALICE_PHONE, LATER + SECOND),
+                room,
+                id(CAROL),
+                RoomRole::Helper,
+            )
+            .await
+            .expect("the owner outranks everybody"),
+    );
+    assert!(
+        event.revision.unwrap_or(0) > roster.revision,
+        "the event carries a revision beyond the page's, so a client holding the page knows it missed a delta (section 156)"
+    );
 }
 
 #[tokio::test]
@@ -2164,6 +2228,15 @@ async fn a_rename_applies_without_a_frame() {
     assert!(fanout.is_none());
     assert_eq!(harness.settings_changes("applied"), 1);
     assert_eq!(harness.room_row(room).await.name, "Ruang Jakarta");
+    // No frame, but the revision still advanced: the number is the record that
+    // a held summary is stale, so the next read — not the next broadcast — is
+    // where a rename is learned (section 156).
+    assert_eq!(
+        summary.revision,
+        Some(3),
+        "two joins after creation brought the room to 2, and the rename advanced it to 3"
+    );
+    assert_eq!(harness.room_row(room).await.revision, 3);
 }
 
 #[tokio::test]
@@ -2193,6 +2266,11 @@ async fn a_topic_change_is_broadcast_and_a_removal_is_an_empty_string() {
     assert_eq!(event.slow_mode_ms, None, "nothing else moved");
     assert_eq!(event.member_count, None);
     assert_eq!(event.online_count, None);
+    assert_eq!(
+        event.revision,
+        Some(3),
+        "the write advanced the room from 2 to 3 and the delta names the number (section 156)"
+    );
 
     let (summary, fanout) = harness
         .rooms
@@ -2312,6 +2390,7 @@ async fn a_settings_screen_that_changed_nothing_writes_nothing() {
         .await
         .expect("the first submit applies");
     let before = harness.room_row(room).await.updated_at;
+    let revision = harness.room_row(room).await.revision;
 
     // Every input resubmitted with the value it already holds.
     let (summary, fanout) = harness
@@ -2335,6 +2414,11 @@ async fn a_settings_screen_that_changed_nothing_writes_nothing() {
         harness.room_row(room).await.updated_at,
         before,
         "and does not appear in an audit trail as a change"
+    );
+    assert_eq!(
+        harness.room_row(room).await.revision,
+        revision,
+        "and does not advance the revision either, so no client re-reads a room it already holds"
     );
 }
 

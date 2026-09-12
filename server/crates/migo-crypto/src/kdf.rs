@@ -39,6 +39,14 @@ pub const LABEL_RECOVERY: &[u8] = b"migo-recovery-v1";
 /// section 163 forbids one key for two purposes, and the label is how the
 /// prohibition is enforced rather than remembered.
 pub const LABEL_CALL_KEY: &[u8] = b"migo-call-key-v1";
+/// Label for the key that wraps a call's current key for a member joining
+/// mid-call, derived from the pairwise session secret with that member.
+///
+/// The third purpose the pairwise secret serves in one conversation (after the
+/// ratchet and the call key itself), so it must be its own label: reusing the
+/// call-key label would make the wrapping key derivable from the call key,
+/// and section 163 forbids one key for two purposes.
+pub const LABEL_CALL_JOIN: &[u8] = b"migo-call-join-v1";
 
 /// Derives `N` bytes from `secret` under `label`.
 ///
@@ -128,6 +136,7 @@ mod tests {
             LABEL_BACKUP,
             LABEL_RECOVERY,
             LABEL_CALL_KEY,
+            LABEL_CALL_JOIN,
         ];
         let mut sorted = labels.to_vec();
         sorted.sort_unstable();

@@ -538,6 +538,7 @@ impl From<entity::room::Model> for Room {
             created_at: instant_of(row.created_at),
             updated_at: instant_of(row.updated_at),
             archived_at: row.archived_at.map(instant_of),
+            revision: row.revision,
         }
     }
 }
@@ -3045,6 +3046,11 @@ impl RoomStore for PostgresStore {
             created_at: Set(created_at),
             updated_at: Set(created_at),
             archived_at: Set(None),
+            // Zero, the revision of the birth state. The owner's seat is the
+            // room's first fact and nothing is ever published for it, so the
+            // first number a client can see on a delta is the first change
+            // after creation.
+            revision: Set(0),
         })
         .exec_with_returning(&transaction)
         .await
@@ -3110,6 +3116,13 @@ impl RoomStore for PostgresStore {
             .map(Into::into))
     }
 
+    async fn room_revision(&self, room_id: Id) -> Result<i64> {
+        // One column, read straight off the primary key, so the roster page
+        // that stamps it does not pay for the rest of the room (brief
+        // section 156).
+        room_revision_in(&self.db, uuid_of(room_id)).await
+    }
+
     async fn update_room(
         &self,
         room_id: Id,
@@ -3131,8 +3144,19 @@ impl RoomStore for PostgresStore {
         // the same reason as [`AccountStore::update_profile`]: a read-modify-write
         // would need the row's lock to be correct and would still clobber a
         // concurrent change to a field this call does not mention.
+        //
+        // The revision advances in the same statement: every caller of this method
+        // has already dropped a request that changed nothing, so reaching this
+        // write means the room's observable state moved and every client holding
+        // an older revision is behind — including for the changes the state event
+        // cannot carry (a rename, a join policy), where the revision advancing is
+        // the only signal a summary re-read is due.
         let mut update = entity::room::Entity::update_many()
             .filter(entity::room::Column::RoomId.eq(uuid_of(room_id)))
+            .col_expr(
+                entity::room::Column::Revision,
+                Expr::col(entity::room::Column::Revision).add(1),
+            )
             .set(entity::room::ActiveModel {
                 updated_at: Set(stamp_of(at)),
                 ..Default::default()
@@ -3170,11 +3194,17 @@ impl RoomStore for PostgresStore {
         //
         // `archived_at is null` in the filter makes this idempotent and keeps the
         // first archival time: a second call matches no row, so it neither moves
-        // the timestamp nor repeats the conversation write.
+        // the timestamp nor repeats the conversation write — and, because the
+        // revision rides the same filtered statement, a second call does not
+        // advance it either.
         let transaction = self.begin("archive_room").await?;
         let archived = entity::room::Entity::update_many()
             .filter(entity::room::Column::RoomId.eq(uuid_of(room_id)))
             .filter(entity::room::Column::ArchivedAt.is_null())
+            .col_expr(
+                entity::room::Column::Revision,
+                Expr::col(entity::room::Column::Revision).add(1),
+            )
             .set(entity::room::ActiveModel {
                 archived_at: Set(Some(stamp_of(at))),
                 updated_at: Set(stamp_of(at)),
@@ -3327,6 +3357,8 @@ impl RoomStore for PostgresStore {
 
         if !already_active {
             recount_room_in(&transaction, room_id).await?;
+            // The seat appeared, so the roster every client holds is one behind.
+            bump_room_revision_in(&transaction, room_id).await?;
             entity::conversation_member::Entity::insert(entity::conversation_member::ActiveModel {
                 conversation_id: Set(uuid_of(room.conversation_id)),
                 account_id: Set(account_id),
@@ -3354,7 +3386,7 @@ impl RoomStore for PostgresStore {
         Ok(stored)
     }
 
-    async fn leave_room(&self, room_id: Id, account_id: Id, at: Timestamp) -> Result<()> {
+    async fn leave_room(&self, room_id: Id, account_id: Id, at: Timestamp) -> Result<i64> {
         let transaction = self.begin("leave_room").await?;
         let room = uuid_of(room_id);
         let account = uuid_of(account_id);
@@ -3369,8 +3401,9 @@ impl RoomStore for PostgresStore {
             .context("leave_room: lock room")?
         else {
             // Leaving a room that does not exist is already the state the caller
-            // wanted. Nothing to report.
-            return Ok(());
+            // wanted. Nothing to report — and nothing to version, so the answer
+            // is the zero a room that never existed never advanced past.
+            return Ok(0);
         };
 
         let departed = entity::room_member::Entity::update_many()
@@ -3385,8 +3418,12 @@ impl RoomStore for PostgresStore {
             .await
             .context("leave_room: mark departure")?;
 
-        if departed.rows_affected > 0 {
+        let revision = if departed.rows_affected > 0 {
             recount_room_in(&transaction, room).await?;
+            // The seat emptied. A departure nobody can see on a roster page is a
+            // departure the revision still has to answer for, because the member
+            // events that announce it are the frames a client might have missed.
+            let revision = bump_room_revision_in(&transaction, room).await?;
             entity::conversation_member::Entity::update_many()
                 .filter(entity::conversation_member::Column::ConversationId.eq(conversation_id))
                 .filter(entity::conversation_member::Column::AccountId.eq(account))
@@ -3398,10 +3435,15 @@ impl RoomStore for PostgresStore {
                 .exec(&transaction)
                 .await
                 .context("leave_room: leave conversation")?;
-        }
+            revision
+        } else {
+            // No seat to empty, so nothing moved and the revision the room
+            // already had is the honest answer.
+            room_revision_in(&transaction, room).await?
+        };
 
         transaction.commit().await.context("leave_room: commit")?;
-        Ok(())
+        Ok(revision)
     }
 
     async fn room_member(&self, room_id: Id, account_id: Id) -> Result<Option<RoomMember>> {
@@ -3504,21 +3546,34 @@ impl RoomStore for PostgresStore {
         account_id: Id,
         role: RoomRole,
         _at: Timestamp,
-    ) -> Result<()> {
+    ) -> Result<i64> {
+        // One transaction, because the role write and the revision it versions
+        // are one fact: a client that saw the new role land with the old
+        // revision would conclude the roster it already holds is fresh.
+        let transaction = self.begin("set_room_role").await?;
+        let room = uuid_of(room_id);
         let result = entity::room_member::Entity::update_many()
-            .filter(entity::room_member::Column::RoomId.eq(uuid_of(room_id)))
+            .filter(entity::room_member::Column::RoomId.eq(room))
             .filter(entity::room_member::Column::AccountId.eq(uuid_of(account_id)))
             .set(entity::room_member::ActiveModel {
                 role: Set(wire_i16(role.to_wire())),
                 ..Default::default()
             })
-            .exec(&self.db)
+            .exec(&transaction)
             .await
             .context("set_room_role")?;
         if result.rows_affected == 0 {
             return Err(fault::not_found("room member"));
         }
-        Ok(())
+        // The role is on the roster, so a change is a change a snapshot can
+        // observe. The service refuses to set a role the member already holds,
+        // so reaching this write means it really moved.
+        let revision = bump_room_revision_in(&transaction, room).await?;
+        transaction
+            .commit()
+            .await
+            .context("set_room_role: commit")?;
+        Ok(revision)
     }
 
     async fn transfer_room_ownership(
@@ -3527,7 +3582,7 @@ impl RoomStore for PostgresStore {
         from: Id,
         to: Id,
         at: Timestamp,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let transaction = self.begin("transfer_room_ownership").await?;
         let room = uuid_of(room_id);
         let outgoing = uuid_of(from);
@@ -3546,7 +3601,7 @@ impl RoomStore for PostgresStore {
             return Err(fault::conflict("not the owner of the room"));
         }
         if outgoing == incoming {
-            return Ok(());
+            return Ok(locked.revision);
         }
 
         let successor: Option<entity::room_member::Model> = entity::room_member::Entity::find()
@@ -3573,14 +3628,22 @@ impl RoomStore for PostgresStore {
                 .context("transfer_room_ownership: role")?;
         }
 
-        entity::room::Entity::update_many()
+        // The owner is on the summary and both roles are on the roster, so the
+        // revision advances with the same statement that names the new owner —
+        // `exec_with_returning`, because the number it leaves behind is the
+        // answer this method owes the event that announces the transfer.
+        let handed_over = entity::room::Entity::update_many()
             .filter(entity::room::Column::RoomId.eq(room))
+            .col_expr(
+                entity::room::Column::Revision,
+                Expr::col(entity::room::Column::Revision).add(1),
+            )
             .set(entity::room::ActiveModel {
                 owner_id: Set(incoming),
                 updated_at: Set(stamp_of(at)),
                 ..Default::default()
             })
-            .exec(&transaction)
+            .exec_with_returning(&transaction)
             .await
             .context("transfer_room_ownership: owner")?;
 
@@ -3588,7 +3651,10 @@ impl RoomStore for PostgresStore {
             .commit()
             .await
             .context("transfer_room_ownership: commit")?;
-        Ok(())
+        handed_over
+            .first()
+            .map(|room| room.revision)
+            .ok_or_else(|| fault::not_found("room"))
     }
 
     async fn set_room_permissions(
@@ -3624,7 +3690,7 @@ impl RoomStore for PostgresStore {
         banned_until: Option<Timestamp>,
         reason: Option<String>,
         at: Timestamp,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let transaction = self.begin("set_room_sanction").await?;
         let room = uuid_of(room_id);
         let account = uuid_of(account_id);
@@ -3670,8 +3736,18 @@ impl RoomStore for PostgresStore {
             return Err(fault::not_found("room member"));
         }
 
-        if banned {
+        let revision = if banned {
             recount_room_in(&transaction, room).await?;
+            // The ban stamps the departure, so the roster moved even though the
+            // write names a sanction column. A mute or an unban reaches neither
+            // this arm nor the revision: neither is on any wire surface a client
+            // can hold, so advancing for them would have clients re-reading a
+            // roster that did not change.
+            bump_room_revision_in(&transaction, room).await?
+        } else {
+            room_revision_in(&transaction, room).await?
+        };
+        if banned {
             entity::conversation_member::Entity::update_many()
                 .filter(entity::conversation_member::Column::ConversationId.eq(conversation_id))
                 .filter(entity::conversation_member::Column::AccountId.eq(account))
@@ -3688,24 +3764,32 @@ impl RoomStore for PostgresStore {
             .commit()
             .await
             .context("set_room_sanction: commit")?;
-        Ok(())
+        Ok(revision)
     }
 
     async fn recount_room(&self, room_id: Id) -> Result<i32> {
         let transaction = self.begin("recount_room").await?;
         let room = uuid_of(room_id);
+        // The cached count, read under the same lock the rewrite takes, so the
+        // revision below only advances when the recount actually corrected
+        // something — a recount that confirmed the cached number changed nothing
+        // a snapshot can observe, and advancing anyway would have every client
+        // re-read a roster identical to the one it holds.
         let known = entity::room::Entity::find_by_id(room)
             .select_only()
-            .column(entity::room::Column::RoomId)
+            .column(entity::room::Column::MemberCount)
             .lock(LockType::Update)
-            .into_tuple::<Uuid>()
+            .into_tuple::<(i32,)>()
             .one(&transaction)
             .await
             .context("recount_room: lock room")?;
-        if known.is_none() {
+        let Some((cached,)) = known else {
             return Err(fault::not_found("room"));
-        }
+        };
         let count = recount_room_in(&transaction, room).await?;
+        if count != cached {
+            bump_room_revision_in(&transaction, room).await?;
+        }
         transaction.commit().await.context("recount_room: commit")?;
         Ok(count)
     }
@@ -3854,6 +3938,47 @@ async fn recount_room_in<C: ConnectionTrait>(connection: &C, room_id: Uuid) -> R
     updated
         .first()
         .map(|room| room.member_count)
+        .ok_or_else(|| fault::not_found("room"))
+}
+
+/// Advances a room's state revision by one, inside the transaction that has
+/// already written the change it versions (brief section 156), and answers with
+/// the number the room now sits at so the caller can stamp it onto the event it
+/// publishes about the change.
+///
+/// Called by the membership writes — a join, a departure, a ban that stamps one —
+/// so that every frame the rooms service publishes about the change can name the
+/// number, and a client that missed the frame can tell from the next one it does
+/// see. `exec_with_returning` rather than `exec`: the returning row is one
+/// round trip cheaper than a follow-up read, and it is the same row either way.
+async fn bump_room_revision_in<C: ConnectionTrait>(connection: &C, room_id: Uuid) -> Result<i64> {
+    let bumped = entity::room::Entity::update_many()
+        .filter(entity::room::Column::RoomId.eq(room_id))
+        .col_expr(
+            entity::room::Column::Revision,
+            Expr::col(entity::room::Column::Revision).add(1),
+        )
+        .exec_with_returning(connection)
+        .await
+        .context("bump_room_revision")?;
+    bumped
+        .first()
+        .map(|room| room.revision)
+        .ok_or_else(|| fault::not_found("room"))
+}
+
+/// Reads a room's state revision inside a transaction, for the writes that end
+/// without advancing it — a mute, an unban, a departure that found no seat — and
+/// still have to answer with the number the room sits at (brief section 156).
+async fn room_revision_in<C: ConnectionTrait>(connection: &C, room_id: Uuid) -> Result<i64> {
+    entity::room::Entity::find_by_id(room_id)
+        .select_only()
+        .column(entity::room::Column::Revision)
+        .into_tuple::<(i64,)>()
+        .one(connection)
+        .await
+        .context("room_revision")?
+        .map(|(revision,)| revision)
         .ok_or_else(|| fault::not_found("room"))
 }
 

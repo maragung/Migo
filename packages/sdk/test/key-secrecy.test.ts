@@ -93,10 +93,10 @@ test('a sealed group envelope hides the chain key that its distribution delibera
   const distribution = group.distributionFor(CONV);
 
   // Positive control: the distribution is meant to hand a member the raw chain key, so the chain
-  // key's bytes ARE inside it. The distribution serialises as varint(chainId) varint(messageNumber)
-  // then the 32-byte chain key then the 64-byte identity, so the chain key is the 32 bytes ending 64
-  // from the end. Without a case where the scan finds something, a green suite could mean the scan
-  // is broken rather than that nothing leaked.
+  // key's bytes ARE inside it. The distribution serialises as varint(groupKeyEpoch)
+  // varint(chainId) varint(messageNumber) then the 32-byte chain key then the 64-byte identity, so
+  // the chain key is the 32 bytes ending 64 from the end. Without a case where the scan finds
+  // something, a green suite could mean the scan is broken rather than that nothing leaked.
   const chainKey = distribution.subarray(distribution.length - 96, distribution.length - 64);
   assert.equal(chainKey.length, 32);
   assert.ok(

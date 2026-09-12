@@ -3521,6 +3521,8 @@ pub struct RoomSummary {
     pub slow_mode_ms: Option<u32>,
     /// The room's capacity ceiling; join is refused once member_count reaches it.
     pub max_members: Option<u32>,
+    /// The room's state revision this summary was read at (section 156). A summary is a snapshot; comparing its revision with the one a held roster or state cache was built at says whether the cache is stale without re-reading the room.
+    pub revision: Option<u64>,
 }
 
 impl Encode for RoomSummary {
@@ -3541,7 +3543,8 @@ impl Encode for RoomSummary {
             + usize::from(self.verified.is_some())
             + usize::from(self.my_role.is_some())
             + usize::from(self.slow_mode_ms.is_some())
-            + usize::from(self.max_members.is_some());
+            + usize::from(self.max_members.is_some())
+            + usize::from(self.revision.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.topic {
             w.optional(1, |w| {
@@ -3603,6 +3606,12 @@ impl Encode for RoomSummary {
                 Ok(())
             })?;
         }
+        if let Some(v) = &self.revision {
+            w.optional(11, |w| {
+                w.write_u64(*v);
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -3633,6 +3642,7 @@ impl Decode for RoomSummary {
                 8 => out.my_role = Some(RoomRole::from_wire(sub.read_u32()?)),
                 9 => out.slow_mode_ms = Some(sub.read_u32()?),
                 10 => out.max_members = Some(sub.read_u32()?),
+                11 => out.revision = Some(sub.read_u64()?),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }
@@ -3895,6 +3905,8 @@ pub struct RoomMemberEvent {
     pub member_count: Option<u32>,
     /// Why the membership changed. Absent on legacy join/leave, where `joined` says it.
     pub change: Option<MemberChange>,
+    /// The room's state revision this change advanced it to (section 156). Absent on the presence edges (Connected/Disconnected/Reconnected), which move no state a roster can observe.
+    pub revision: Option<u64>,
 }
 
 impl Encode for RoomMemberEvent {
@@ -3905,7 +3917,8 @@ impl Encode for RoomMemberEvent {
         w.write_bool(self.joined);
         let present = usize::from(self.role.is_some())
             + usize::from(self.member_count.is_some())
-            + usize::from(self.change.is_some());
+            + usize::from(self.change.is_some())
+            + usize::from(self.revision.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.role {
             w.optional(1, |w| {
@@ -3922,6 +3935,12 @@ impl Encode for RoomMemberEvent {
         if let Some(v) = &self.change {
             w.optional(3, |w| {
                 w.write_u32(v.to_wire());
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.revision {
+            w.optional(4, |w| {
+                w.write_u64(*v);
                 Ok(())
             })?;
         }
@@ -3945,6 +3964,7 @@ impl Decode for RoomMemberEvent {
                 1 => out.role = Some(RoomRole::from_wire(sub.read_u32()?)),
                 2 => out.member_count = Some(sub.read_u32()?),
                 3 => out.change = Some(MemberChange::from_wire(sub.read_u32()?)),
+                4 => out.revision = Some(sub.read_u64()?),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }
@@ -3963,6 +3983,8 @@ pub struct RoomStateEvent {
     pub slow_mode_ms: Option<u32>,
     /// The room's capacity ceiling, sent when it changes.
     pub max_members: Option<u32>,
+    /// The room's state revision this change advanced it to (section 156). Absent on the online-count frames the gateway's own tally publishes, which move no stored state.
+    pub revision: Option<u64>,
 }
 
 impl Encode for RoomStateEvent {
@@ -3973,7 +3995,8 @@ impl Encode for RoomStateEvent {
             + usize::from(self.member_count.is_some())
             + usize::from(self.topic.is_some())
             + usize::from(self.slow_mode_ms.is_some())
-            + usize::from(self.max_members.is_some());
+            + usize::from(self.max_members.is_some())
+            + usize::from(self.revision.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.online_count {
             w.optional(1, |w| {
@@ -4005,6 +4028,12 @@ impl Encode for RoomStateEvent {
                 Ok(())
             })?;
         }
+        if let Some(v) = &self.revision {
+            w.optional(6, |w| {
+                w.write_u64(*v);
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -4025,6 +4054,7 @@ impl Decode for RoomStateEvent {
                 3 => out.topic = Some(sub.read_string()?),
                 4 => out.slow_mode_ms = Some(sub.read_u32()?),
                 5 => out.max_members = Some(sub.read_u32()?),
+                6 => out.revision = Some(sub.read_u64()?),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }
@@ -4921,6 +4951,8 @@ impl Decode for InboxItem {
 pub struct InboxResponse {
     pub items: Vec<InboxItem>,
     pub next_cursor: Option<String>,
+    /// The unread count across the whole inbox, not just this page (section 156's counter): fresh with every page, so a badge never counts the rows it happens to hold.
+    pub unread: Option<u32>,
 }
 
 impl Encode for InboxResponse {
@@ -4932,11 +4964,17 @@ impl Encode for InboxResponse {
                 item.encode(w)?;
             }
         }
-        let present = usize::from(self.next_cursor.is_some());
+        let present = usize::from(self.next_cursor.is_some()) + usize::from(self.unread.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.next_cursor {
             w.optional(1, |w| {
                 w.write_str(v)?;
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.unread {
+            w.optional(2, |w| {
+                w.write_u32(*v);
                 Ok(())
             })?;
         }
@@ -4963,6 +5001,7 @@ impl Decode for InboxResponse {
             let sub = &mut owned;
             match field_id {
                 1 => out.next_cursor = Some(sub.read_string()?),
+                2 => out.unread = Some(sub.read_u32()?),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }
@@ -7493,6 +7532,8 @@ impl Decode for RosterReq {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RosterResponse {
     pub members: Vec<RosterEntry>,
+    /// The room's state revision this page was read at (section 156). A member or state event that arrives carrying a revision beyond it means a delta was missed and the roster should be re-read.
+    pub revision: Option<u64>,
 }
 
 impl Encode for RosterResponse {
@@ -7504,7 +7545,14 @@ impl Encode for RosterResponse {
                 item.encode(w)?;
             }
         }
-        w.write_u32(0);
+        let present = usize::from(self.revision.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.revision {
+            w.optional(1, |w| {
+                w.write_u64(*v);
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -7524,9 +7572,12 @@ impl Decode for RosterResponse {
         };
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
-            // No optional fields are defined for this struct in this
-            // protocol build; a newer peer's fields are skipped by length.
-            let _ = r.read_optional()?;
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.revision = Some(sub.read_u64()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
         }
         r.leave();
         Ok(out)
