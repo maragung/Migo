@@ -59,16 +59,16 @@ Minimum header: **4 bytes** (`version`, `flags`, 1-byte opcode, 1-byte correlati
 
 ### Flags
 
-| Bit    | Name           | Meaning                                                                                  |
-| ------ | -------------- | ---------------------------------------------------------------------------------------- |
-| `0x01` | `COMPRESSED`   | Payload is `deflate-raw`. Only set when it actually shrinks (§6)                         |
-| `0x02` | `TRACED`       | 16-byte trace id + 8-byte span id precede the payload                                    |
-| `0x04` | `BATCH`        | Payload is `varint count` then `count × (varint len, sub-frame)` (§7)                    |
-| `0x08` | `ERROR`        | Payload is `Error` instead of the opcode's normal response type                          |
-| `0x10` | `ACK_REQUIRED` | Receiver must acknowledge by watermark (§8)                                              |
-| `0x20` | `FRAGMENT`     | Followed by `varint index`, `varint total`; payload is a slice of a larger logical frame |
+| Bit    | Name           | Meaning                                                                                                  |
+| ------ | -------------- | -------------------------------------------------------------------------------------------------------- |
+| `0x01` | `COMPRESSED`   | Payload is `deflate-raw`. Only set when it actually shrinks (§6)                                         |
+| `0x02` | `TRACED`       | 16-byte trace id + 8-byte span id precede the payload                                                    |
+| `0x04` | `BATCH`        | Payload is `varint count` then `count × (varint len, sub-frame)` (§7)                                    |
+| `0x08` | `ERROR`        | Payload is `Error` instead of the opcode's normal response type                                          |
+| `0x10` | `ACK_REQUIRED` | Receiver must acknowledge by watermark (§8)                                                              |
+| `0x20` | `FRAGMENT`     | Followed by `varint index`, `varint total`; payload is a slice of a larger logical frame                 |
 | `0x40` | `METADATA`     | Followed by `varint frame_seq`, `varint sent_at_delta`, `varint payload_len` (zero = not stated); see §8 |
-| `0x80` | `FLAGS_EXT`    | A second flags byte follows (reserved for MWP/2)                                         |
+| `0x80` | `FLAGS_EXT`    | A second flags byte follows (reserved for MWP/2)                                                         |
 
 Rejecting unknown flag bits is intentional: silently ignoring them is how you ship a
 protocol you can never extend safely.
