@@ -458,7 +458,10 @@ ${opcodesDoc.opcodes.map((o) => `            Self::${pascal(o.name.toLowerCase()
     #[must_use]
     pub const fn feature(self) -> Option<u64> {
         match self {
-${opcodesDoc.opcodes.filter((o) => o.feature).map((o) => `            Self::${pascal(o.name.toLowerCase())} => Some(features::${o.feature}),`).join('\n')}
+${opcodesDoc.opcodes
+  .filter((o) => o.feature)
+  .map((o) => `            Self::${pascal(o.name.toLowerCase())} => Some(features::${o.feature}),`)
+  .join('\n')}
             _ => None,
         }
     }
