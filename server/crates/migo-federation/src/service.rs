@@ -33,7 +33,7 @@ use migo_protocol::fault;
 use migo_store::model::{NewOutboxEvent, NewPeer, OutboxRecord, PeerRecord};
 use migo_store::{SharedStore, Store};
 
-use crate::link::LinkSequences;
+use crate::link::{LinkHealth, LinkSequences};
 use crate::metrics::{HandshakeReject, Meters, ReplayReason};
 use crate::model::{
     FederatedEvent, MeshConfig, NewPeerSpec, PeerIdentity, PeerStatus, PeerView, PendingEvent,
@@ -60,6 +60,7 @@ pub struct MeshService<S: ?Sized = dyn Store> {
     random: Mutex<Box<dyn Random>>,
     nonces: NonceWindow,
     links: LinkSequences,
+    health: LinkHealth,
     epoch: AtomicU64,
     meters: Meters,
 }
@@ -119,6 +120,7 @@ where
             random: Mutex::new(random),
             nonces,
             links: LinkSequences::new(),
+            health: LinkHealth::new(),
             epoch: AtomicU64::new(0),
             meters: Meters::new(registry),
         })
@@ -431,6 +433,21 @@ where
             .await?;
         self.meters.outbox_failed();
         Ok(())
+    }
+
+    fn note_link_down(&self, node: Id) {
+        // The mark is the whole action: the outbox failure that reported it was already
+        // settled on its own backoff, and the rooms whose home node sits behind this
+        // link read the mark on their next write attempt (section 170).
+        self.health.mark_down(node);
+    }
+
+    fn note_link_up(&self, node: Id) {
+        self.health.mark_up(node);
+    }
+
+    fn link_reachable(&self, node: Id) -> bool {
+        self.health.is_reachable(node)
     }
 }
 

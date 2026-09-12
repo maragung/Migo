@@ -19,17 +19,25 @@ import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 
 import {
+  MAX_FRAME_BYTES,
   MAX_NESTING_DEPTH,
   Reader,
   WireError,
   Writer,
   decodeFrame,
   decodeFrameLengthPrefixed,
+  deflateRaw,
+  encodeBatch,
   encodeFrame,
   encodeFrameLengthPrefixed,
+  flags,
   fromWire,
   idFromBytes,
+  inflateRaw,
+  isCompressionAvailable,
+  maybeDeflate,
   toWire,
+  unpackFrame,
   varint,
   type Frame,
   type FrameHeader,
@@ -147,6 +155,34 @@ function expectError(item: Case, run: () => unknown, context: string): void {
   }
   assert.fail(
     `${context} case \`${caseName(item)}\` was accepted (${String(outcome)}), vector says it must fail with ${expected}`,
+  );
+}
+
+/**
+ * The async half of [expectError], for the paths whose decoding is asynchronous on this
+ * platform: inflation goes through the Web Streams API, so `unpackFrame` returns a promise.
+ */
+async function expectErrorAsync(
+  item: Case,
+  run: () => Promise<unknown>,
+  context: string,
+): Promise<void> {
+  const expected = text(item, 'error');
+  const why = typeof item.why === 'string' ? item.why : '';
+  let outcome: unknown;
+  try {
+    outcome = await run();
+  } catch (error) {
+    const actual = kindOf(error);
+    assert.equal(
+      actual,
+      expected,
+      `${context} case \`${caseName(item)}\` failed with ${actual}, vector says ${expected} (${why})`,
+    );
+    return;
+  }
+  assert.fail(
+    `${context} case \`${caseName(item)}\` was accepted (${String(outcome)}), vector says it must fail with ${expected} (${why})`,
   );
 }
 
@@ -501,6 +537,165 @@ test('malformed MSE is rejected', () => {
   }
 });
 
+// --- batch --------------------------------------------------------------------
+
+/** Builds the elements of a batch case, one frame per spec. */
+function elementsOf(item: Case): Frame[] {
+  const list = item.elements;
+  assert.ok(Array.isArray(list), `case \`${caseName(item)}\` has elements`);
+  return (list as Case[]).map((spec) => ({
+    header: headerFromCase(spec),
+    payload: bytesOf(spec, 'payload'),
+  }));
+}
+
+/** Compares unpacked elements one by one: headers and payloads, in order. */
+function expectFrames(label: string, got: readonly Frame[], expected: readonly Frame[]): void {
+  assert.equal(got.length, expected.length, `element count for \`${label}\``);
+  expected.forEach((frame, i) => {
+    const unpacked = got[i];
+    assert.ok(unpacked !== undefined, `element ${i} for \`${label}\` is present`);
+    assert.deepEqual(unpacked.header, frame.header, `element ${i} header for \`${label}\``);
+    assert.equal(
+      hex(unpacked.payload),
+      hex(frame.payload),
+      `element ${i} payload for \`${label}\``,
+    );
+  });
+}
+
+test('batches encode and decode as the vectors say', async () => {
+  const file = load('batch.json');
+  for (const item of section(file, 'cases', 'batch.json')) {
+    const elements = elementsOf(item);
+    const expected = bytesOf(item, 'hex');
+    const label = caseName(item);
+
+    const packed = encodeBatch(elements);
+    assert.equal(hex(encodeFrame(packed)), hex(expected), `packing case \`${label}\``);
+
+    const decoded = decodeFrame(expected);
+    assert.ok(typeof item.frame === 'object' && item.frame !== null, `\`${label}\` has a frame`);
+    assert.deepEqual(
+      decoded.header,
+      headerFromCase(item.frame as Case),
+      `envelope header for case \`${label}\``,
+    );
+    const unpacked = await unpackFrame(decoded);
+    expectFrames(label, unpacked, elements);
+  }
+});
+
+test('compressed batches unpack as the vectors say', async () => {
+  // Decode-only by design: the payload is raw DEFLATE, whose exact bytes are not pinned
+  // across implementations (see compress.json). What is pinned is that the envelope
+  // carries both flags, and that it unpacks to exactly these elements.
+  const file = load('batch.json');
+  for (const item of section(file, 'compressed_cases', 'batch.json')) {
+    const elements = elementsOf(item);
+    const expected = bytesOf(item, 'hex');
+    const label = caseName(item);
+
+    const decoded = decodeFrame(expected);
+    assert.equal(
+      decoded.header.flags & (flags.BATCH | flags.COMPRESSED),
+      flags.BATCH | flags.COMPRESSED,
+      `case \`${label}\` must carry both flags`,
+    );
+    const unpacked = await unpackFrame(decoded);
+    expectFrames(label, unpacked, elements);
+  }
+});
+
+test('malformed batches are rejected', async () => {
+  const file = load('batch.json');
+  for (const item of section(file, 'invalid', 'batch.json')) {
+    // The headers of these frames are well-formed; it is the payload that is hostile,
+    // so the frame decodes and the envelope does not.
+    const frame = decodeFrame(bytesOf(item, 'hex'));
+    await expectErrorAsync(item, () => unpackFrame(frame), 'batch');
+  }
+});
+
+// --- compress -----------------------------------------------------------------
+
+test('deflate streams inflate as the vectors say', async () => {
+  const file = load('compress.json');
+  for (const item of section(file, 'cases', 'compress.json')) {
+    const compressed = bytesOf(item, 'compressed_hex');
+    const plain = bytesOf(item, 'plain_hex');
+    const label = caseName(item);
+
+    const inflated = await inflateRaw(compressed, MAX_FRAME_BYTES);
+    assert.equal(hex(inflated), hex(plain), `inflating case \`${label}\``);
+
+    // The encode direction is not byte-pinned — two conforming DEFLATE encoders may
+    // differ — but this implementation's own output must still inflate back to the
+    // same plain bytes, or its compressor and decompressor disagree.
+    const own = await deflateRaw(plain);
+    const restored = await inflateRaw(own, MAX_FRAME_BYTES);
+    assert.equal(hex(restored), hex(plain), `own round trip for case \`${label}\``);
+  }
+});
+
+test('compressed frames inflate to their payloads', async () => {
+  const file = load('compress.json');
+  for (const item of section(file, 'frames', 'compress.json')) {
+    const expected = bytesOf(item, 'hex');
+    const plain = bytesOf(item, 'plain_hex');
+    const label = caseName(item);
+
+    const decoded = decodeFrame(expected);
+    assert.equal(
+      decoded.header.flags & flags.COMPRESSED,
+      flags.COMPRESSED,
+      `case \`${label}\` must carry the COMPRESSED flag`,
+    );
+    assert.ok(typeof item.frame === 'object' && item.frame !== null, `\`${label}\` has a frame`);
+    assert.deepEqual(
+      decoded.header,
+      headerFromCase(item.frame as Case),
+      `header for case \`${label}\``,
+    );
+    const inflated = await inflateRaw(decoded.payload, MAX_FRAME_BYTES);
+    assert.equal(hex(inflated), hex(plain), `inflated payload for case \`${label}\``);
+  }
+});
+
+test('the compression policy decides as the vectors say', async () => {
+  // A runtime without CompressionStream cannot run these cases, and pretending it
+  // could would turn every decision into "does not compress" — a green test that
+  // checks nothing. Node gained deflate-raw in 21.2 and CI runs 22.
+  assert.ok(isCompressionAvailable(), 'this runner needs CompressionStream (deflate-raw)');
+
+  const file = load('compress.json');
+  for (const item of section(file, 'policy', 'compress.json')) {
+    const plain = bytesOf(item, 'plain_hex');
+    const label = caseName(item);
+    assert.equal(
+      typeof item.compresses,
+      'boolean',
+      `case \`${label}\` must say whether it compresses`,
+    );
+    const expected = item.compresses as boolean;
+
+    const decision = await maybeDeflate(plain);
+    assert.equal(decision !== null, expected, `policy decision for case \`${label}\``);
+    if (decision !== null) {
+      const restored = await inflateRaw(decision, MAX_FRAME_BYTES);
+      assert.equal(hex(restored), hex(plain), `compressed round trip for case \`${label}\``);
+    }
+  }
+});
+
+test('malformed deflate is rejected', async () => {
+  const file = load('compress.json');
+  for (const item of section(file, 'invalid', 'compress.json')) {
+    const input = bytesOf(item, 'hex');
+    await expectErrorAsync(item, () => inflateRaw(input, MAX_FRAME_BYTES), 'compress');
+  }
+});
+
 // --- the suite is present at all --------------------------------------------
 
 test('every vector file is present and populated', () => {
@@ -512,6 +707,8 @@ test('every vector file is present and populated', () => {
     ['varint.json', ['cases', 'zigzag', 'invalid']],
     ['frames.json', ['cases', 'length_prefixed', 'invalid']],
     ['mse.json', ['cases', 'invalid']],
+    ['batch.json', ['cases', 'compressed_cases', 'invalid']],
+    ['compress.json', ['cases', 'frames', 'policy', 'invalid']],
   ];
   let total = 0;
   for (const [file, sections] of expected) {

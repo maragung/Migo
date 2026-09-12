@@ -21,7 +21,7 @@
 //!   hundred bytes of crafted DEFLATE can otherwise expand to gigabytes, which
 //!   makes an unbounded decompressor a remote kill switch.
 
-use std::io::{Read, Write};
+use std::io::Write;
 
 use bytes::Bytes;
 use flate2::write::DeflateEncoder;
@@ -67,17 +67,103 @@ pub fn maybe_deflate(payload: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Decompresses raw DEFLATE, refusing to produce more than `max` bytes.
+///
+/// Three properties that a naive decoder shape cannot give, two of them found by
+/// the `compress.json` conformance vectors and one by the gateway suite in CI:
+///
+/// * **Truncation is refusal, not short output.** `read_to_end` returns `Ok`
+///   when the *reader* is exhausted, and a DEFLATE reader cut mid-block reports
+///   `Ok(0)` — indistinguishable from a clean end — so a truncated stream came
+///   back as the partial bytes and the caller never learned the message was cut.
+///   The web and Android ports already refuse that input (the platform's
+///   `DecompressionStream` errors on it; the Kotlin loop exits only on
+///   `finished()`), which made this crate the odd one out in a 3-vs-1. The fix
+///   is to demand proof the stream ended: [`flate2::Status::StreamEnd`].
+/// * **A bomb costs one chunk, not its full expansion.** Output is produced into
+///   an 8 KiB scratch buffer and the limit is checked after every chunk, so the
+///   `Vec` never holds more than `limit + CHUNK` bytes and a stream that expands
+///   past the limit is detected on its first overflowing chunk.
+/// * **`Finish` is a promise, not a request.** flate2 documents that a *first*
+///   call with `FlushDecompress::Finish` asserts the output buffer holds the
+///   entire stream, and miniz_oxide takes the assertion literally: its one-shot
+///   fast path writes straight into the caller's buffer and, on overflow, marks
+///   the decompressor `Failed`, after which every later call errors. Passing
+///   `Finish` on every call therefore refuses every payload over one chunk.
+///   See the loop below for the flush discipline that replaces it.
+/// * **The decoder must be the encoder's mirror.** Raw DEFLATE on the way out
+///   means `Decompress::new(false)` on the way in: the flag is not "produce raw
+///   output" but "expect a zlib header", and a `true` under raw DEFLATE fails
+///   the first call on every payload. Found by the gateway suite in CI — its
+///   513-topic SUBSCRIBE was the only input there to trip the compression
+///   policy, and it failed before the chunk boundary was ever reached.
+///
+/// When a stream is both over the limit and truncated, the size error wins: it
+/// is the more specific fault, and it is checked first so the decision is
+/// visible in the code rather than implied by ordering elsewhere.
 pub fn inflate_raw(compressed: &[u8], max: usize) -> Result<Bytes> {
     let limit = max.min(MAX_FRAME_BYTES);
+    const CHUNK: usize = 8 * 1024;
+    let mut scratch = vec![0u8; CHUNK];
     let mut out = Vec::with_capacity(compressed.len().saturating_mul(4).min(limit));
-    // Read one byte past the limit so an oversized payload is detected rather
-    // than silently truncated.
-    let mut decoder = flate2::read::DeflateDecoder::new(compressed).take(limit as u64 + 1);
-    decoder
-        .read_to_end(&mut out)
-        .map_err(|_| WireError::DecompressFailed)?;
-    if out.len() > limit {
-        return Err(WireError::DecompressedTooLarge { max: limit });
+    // Raw DEFLATE: no zlib header, no Adler-32 trailer. `false` is what makes
+    // flate2 agree — `Decompress::new(zlib_header)` takes "is a zlib header
+    // *expected*", and passing `true` here made miniz_oxide try to read a
+    // two-byte header the encoder never wrote, so the very first call failed
+    // and every compressed payload came back DecompressFailed. The gateway
+    // suite caught it: its 513-topic SUBSCRIBE was the only input in CI to
+    // trip the compression policy, and it never reached the chunk logic at
+    // all. (The encoder below is `write::DeflateEncoder`, the raw one; the
+    // decode side must be its mirror.)
+    let mut inflater = flate2::Decompress::new(false);
+
+    // Driving flate2 has one rule with teeth, and it is documented on
+    // `Decompress::decompress`: a *first* call with `FlushDecompress::Finish`
+    // promises the output buffer holds the whole stream. miniz_oxide takes that
+    // promise literally — its first-call fast path decompresses straight into
+    // the caller's buffer and, when the buffer is too small, marks the
+    // decompressor `Failed`, so every later call errors no matter what flush it
+    // passes. Feeding `Finish` on every call therefore works only for payloads
+    // that fit in one chunk and refuses everything larger. So: `None` while
+    // input remains, which streams through miniz_oxide's dictionary in any
+    // buffer size, and `Finish` only once the input is gone, to make the core
+    // prove the stream ended rather than merely run out.
+    loop {
+        let before_in = inflater.total_in() as usize;
+        let before_out = inflater.total_out() as usize;
+        let remaining = &compressed[before_in..];
+        let flush = if remaining.is_empty() {
+            flate2::FlushDecompress::Finish
+        } else {
+            flate2::FlushDecompress::None
+        };
+        let status = inflater
+            .decompress(remaining, &mut scratch, flush)
+            .map_err(|_| WireError::DecompressFailed)?;
+        let consumed = inflater.total_in() as usize - before_in;
+        let produced = inflater.total_out() as usize - before_out;
+        out.extend_from_slice(&scratch[..produced]);
+        if out.len() > limit {
+            return Err(WireError::DecompressedTooLarge { max: limit });
+        }
+        if status == flate2::Status::StreamEnd {
+            // Bytes after the final block are ignored rather than refused.
+            // That is a deliberate three-way agreement, not an oversight:
+            // the web port decompresses through `DecompressionStream`,
+            // whose API reports no consumed-count, so it cannot see them,
+            // and one port accepting what another refuses is the divergence
+            // this crate's own vectors exist to catch.
+            break;
+        }
+        if consumed == 0 && produced == 0 {
+            // With the input gone and the stream not ended, no progress in
+            // either direction means the stream was cut before its final
+            // block. The reader running out is not the stream ending, and
+            // returning the partial bytes would pass a truncated message off
+            // as a whole one. (While input remains this arm is unreachable:
+            // a call that consumes nothing and produces nothing does not
+            // come back `Ok`.)
+            return Err(WireError::DecompressFailed);
+        }
     }
     Ok(Bytes::from(out))
 }
@@ -93,6 +179,33 @@ mod tests {
         assert!(compressed.len() < payload.len());
         let restored = inflate_raw(&compressed, MAX_FRAME_BYTES).expect("inflates");
         assert_eq!(restored, payload);
+    }
+
+    #[test]
+    fn round_trips_straddle_the_decoder_chunk_boundary() {
+        // inflate_raw reads through an 8 KiB scratch buffer, and flate2's
+        // `Finish`-on-a-first-call is a promise the buffer cannot keep: miniz_oxide's
+        // one-shot fast path writes straight into the caller's buffer and poisons the
+        // decompressor the moment the plain size exceeds it, so every payload over
+        // 8192 bytes would come back DecompressFailed. These sizes walk the boundary
+        // from both sides and through both multiples, with structured content —
+        // sequential u128 ids, like a SUBSCRIBE that names its topics — rather than
+        // one repeated byte, so an off-by-one in the loop cannot hide behind a
+        // trivial stream.
+        const CHUNK: usize = 8 * 1024;
+        for len in [CHUNK - 1, CHUNK, CHUNK + 1, CHUNK * 2, CHUNK * 2 + 1] {
+            let mut payload = Vec::with_capacity(len);
+            let mut id: u128 = 0;
+            while payload.len() < len {
+                payload.extend_from_slice(&id.to_le_bytes());
+                id += 1;
+            }
+            payload.truncate(len);
+            let compressed = deflate_raw(&payload);
+            let restored = inflate_raw(&compressed, MAX_FRAME_BYTES)
+                .unwrap_or_else(|error| panic!("{len} bytes did not round trip: {error}"));
+            assert_eq!(restored, payload, "{len} bytes came back wrong");
+        }
     }
 
     #[test]
@@ -150,6 +263,25 @@ mod tests {
                 "accepted a {gain}% gain"
             );
         }
+    }
+
+    #[test]
+    fn a_truncated_stream_is_refused() {
+        // A stream cut before its final block must not come back as the partial
+        // bytes: the reader running out is not the stream ending. The web and
+        // Android ports already refuse this input, and the `truncated_fixed_block`
+        // case in compress.json pins all three to the same answer.
+        let payload = "ab".repeat(24).into_bytes();
+        let whole = deflate_raw(&payload);
+        assert_eq!(
+            inflate_raw(&whole, MAX_FRAME_BYTES).expect("whole inflates"),
+            payload
+        );
+        let cut = &whole[..whole.len() - 1];
+        assert_eq!(
+            inflate_raw(cut, MAX_FRAME_BYTES),
+            Err(WireError::DecompressFailed)
+        );
     }
 
     #[test]

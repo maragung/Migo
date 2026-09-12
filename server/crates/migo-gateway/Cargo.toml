@@ -26,6 +26,11 @@ dashmap.workspace = true
 migo-cache.workspace = true
 migo-store.workspace = true
 migo-captcha.workspace = true
+# Dev-only, for the instrumented replay of inflate_raw's driving loop in the
+# gateway suite: when the real decoder refuses a compressed frame, the replay
+# prints the exact call sequence (flush, status, consumed, produced) that led
+# to the refusal, so CI names the failing call and not just the variant.
+flate2 = { workspace = true }
 tokio = { workspace = true, features = [
     "rt",
     "macros",

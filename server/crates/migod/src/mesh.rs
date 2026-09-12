@@ -785,6 +785,10 @@ pub(crate) async fn serve_session<S: AsyncRead + AsyncWrite + Unpin + Send>(
 ) -> Result<()> {
     let handshook = handshake_server(&mut io, &mesh, now).await?;
     let peer = handshook.peer;
+    // A completed inbound handshake is proof of life from the other direction: whatever a
+    // previous drain's failed connect believed, the peer is there now, so the rooms it
+    // homes may be written to again (section 173, scenario 2's recovery half).
+    mesh.note_link_up(peer);
     let mut watermark: u64 = 0;
     let result = serve_reads(&mut io, &mesh, &router, peer, &mut watermark).await;
     // The link is over, whatever the reason: the next session with this peer must start
@@ -1167,6 +1171,11 @@ impl MeshTransport {
             let stream = match tokio::net::TcpStream::connect(&endpoint).await {
                 Ok(stream) => stream,
                 Err(error) => {
+                    // The one place a partition is discovered: the peer's address does not
+                    // answer. The mark is what the read-only rule of section 170 runs on —
+                    // a room homed on this peer is refused further writes from this node
+                    // until a delivery or an inbound handshake contradicts the mark.
+                    self.mesh.note_link_down(peer.node_id);
                     self.settle_failure(&events, now, &format!("cannot reach the peer: {error}"))
                         .await;
                     continue;
@@ -1174,6 +1183,9 @@ impl MeshTransport {
             };
             match deliver_batch(stream, &self.mesh, &self.router, &peer, &events, now).await {
                 Ok(delivered) => {
+                    // A delivered batch is proof the link is up, whichever direction last
+                    // said otherwise: the rooms this peer homes are writable again.
+                    self.mesh.note_link_up(peer.node_id);
                     self.meters.delivered(delivered.len() as u64);
                     for event_id in delivered {
                         self.mesh.mark_delivered(event_id, now).await?;
