@@ -115,7 +115,9 @@ function rowJson<T>(db: string, sql: string): T | null {
   return out === '' ? null : (JSON.parse(out) as T);
 }
 
-/** Reads every row of `inner` as one JSON array. */
+/** Reads every row of `inner` as one JSON array. `inner` selects plain rows —
+ * the aggregation wraps each row itself, so an inner `row_to_json` would nest
+ * each element one level too deep (`{"row_to_json": {...}}`). */
 function rowsJson<T>(db: string, inner: string): T[] {
   const out = psql(db, `select coalesce(json_agg(t), '[]'::json) from (${inner}) t`);
   return (JSON.parse(out) as T[]) ?? [];
@@ -275,7 +277,7 @@ async function main(): Promise<void> {
     for (const table of ['device', 'identity_key', 'signed_prekey', 'one_time_prekey']) {
       const rows = rowsJson<Record<string, unknown>>(
         from,
-        `select row_to_json(t) from ${table} t where account_id = '${uuid}'`,
+        `select * from ${table} t where account_id = '${uuid}'`,
       );
       for (const row of rows) {
         insertJson(to, table, row);
@@ -289,19 +291,20 @@ async function main(): Promise<void> {
 
   // The room and its conversation, verbatim: node 2 must know the room exists
   // (its client joins there) and that the conversation is a room conversation
-  // whose home is elsewhere. `home_region` rides along unchanged.
-  const roomRow = mustRow<Record<string, unknown>>(
-    PG.db1,
-    `select row_to_json(t) from room t where room_id = '${roomUuid}'`,
-    'the room row',
-  );
-  insertJson(PG.db2, 'room', roomRow);
+  // whose home is elsewhere. `home_region` rides along unchanged. The
+  // conversation goes first: `room.conversation_id` references it.
   const conversationRow = mustRow<Record<string, unknown>>(
     PG.db1,
     `select row_to_json(t) from conversation t where conversation_id = '${conversationUuid}'`,
     'the room conversation row',
   );
   insertJson(PG.db2, 'conversation', conversationRow);
+  const roomRow = mustRow<Record<string, unknown>>(
+    PG.db1,
+    `select row_to_json(t) from room t where room_id = '${roomUuid}'`,
+    'the room row',
+  );
+  insertJson(PG.db2, 'room', roomRow);
   log(
     'fixture',
     `room ${roomId} (home_region=${String(roomRow.home_region)}) and its conversation copied to node 2`,

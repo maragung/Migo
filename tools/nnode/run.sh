@@ -7,7 +7,10 @@
 # admission anywhere, exactly what a deployment gets. On top of the running
 # stack it runs the TypeScript sync check (src/sync-check.ts), which proves
 # which cross-node paths the link carries and reports the ones it does not.
-# Everything is torn down on exit.
+# Everything is torn down on exit. The mesh is lazy by design — a node only
+# dials a peer when its outbox holds an event for that peer — so the link is
+# verified after the sync check, which is what generates the first cross-node
+# traffic, not before it.
 #
 # Environment variables (all optional):
 #   NODES        how many nodes to run, 2-4 (default: 2)
@@ -312,46 +315,77 @@ for i in $(seq 1 "$NODES"); do
 done
 
 # --- prove the link formed -------------------------------------------------------------
-
-echo "==> Waiting for the mesh: each node should have shaken hands at least once"
-LINK_OK=1
-for _ in $(seq 1 100); do
-  LINK_OK=1
-  for i in $(seq 1 "$NODES"); do
-    port="$(node_http_port "$i")"
-    if [ "$(metric_of "$port" migo_federation_handshakes_total)" -lt 1 ]; then
-      LINK_OK=0
-    fi
-  done
-  [ "$LINK_OK" -eq 1 ] && break
-  sleep 0.5
-done
-if [ "$LINK_OK" -ne 1 ]; then
-  echo "the mesh did not form: at least one node never completed a handshake" >&2
-  for i in $(seq 1 "$NODES"); do
-    echo "--- node $i log (last 20 lines) ---" >&2
-    tail -n 20 "$RUN_DIR/node-$i/migod.log" >&2
-  done
-  exit 1
-fi
+#
+# A mesh link is lazy by design: the runner only dials a peer when the outbox
+# holds an event for it, so a freshly started mesh with no traffic has completed
+# zero handshakes and always will. Waiting for a handshake before any traffic
+# exists would therefore wait forever. The sync check is what generates the
+# first cross-node event (a room subscription becomes FED_ROOM_SUBSCRIBE on the
+# home node), so the handshake counts are verified after it, when traffic has
+# actually flowed; here the runner only confirms that each node admitted its
+# peers from configuration and is serving its metrics.
 
 for i in $(seq 1 "$NODES"); do
   port="$(node_http_port "$i")"
   added="$(metric_of "$port" migo_federation_peers_added_total)"
-  handshakes="$(metric_of "$port" migo_federation_handshakes_total)"
-  note=""
-  if [ "$added" -ne $((NODES - 1)) ]; then
+  if [ "$added" -lt 1 ] && [ "$NODES" -gt 1 ]; then
     # Admission is idempotent: a reused database already holds the peer rows,
-    # and the counter only ticks for fresh admissions.
-    note=" (database reused from an earlier run — admission is idempotent, the link below is the proof)"
+    # and the counter only ticks for fresh admissions, so zero here is only a
+    # problem on a database that has never seen these peers.
+    if PGPASSWORD="$PG_PASSWORD" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$(node_db "$i")" -tAc \
+      "SELECT count(*) FROM node_peer" 2>/dev/null | grep -qv '^0$'; then
+      echo "==> Node $i: peers admitted in an earlier run (admission is idempotent)"
+    else
+      echo "node $i admitted no peers from its federation.peers configuration" >&2
+      tail -n 20 "$RUN_DIR/node-$i/migod.log" >&2
+      exit 1
+    fi
   fi
-  echo "==> Node $i: peers_added_total=$added$note, handshakes_total=$handshakes"
 done
+
+verify_link() {
+  # After the sync check, the nodes it exercised — 1 and 2 — must have completed
+  # at least one mesh handshake. The other nodes (3, 4) carry no traffic in the
+  # check, and an idle mesh never dials, so zero handshakes there is correct
+  # behavior and not a failure.
+  local port
+  for _ in $(seq 1 100); do
+    local ready=1
+    for i in 1 2; do
+      port="$(node_http_port "$i")"
+      [ "$(metric_of "$port" migo_federation_handshakes_total)" -lt 1 ] && ready=0
+    done
+    [ "$ready" -eq 1 ] && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+report_link() {
+  local i port added handshakes note
+  for i in $(seq 1 "$NODES"); do
+    port="$(node_http_port "$i")"
+    added="$(metric_of "$port" migo_federation_peers_added_total)"
+    handshakes="$(metric_of "$port" migo_federation_handshakes_total)"
+    note=""
+    if [ "$added" -ne $((NODES - 1)) ]; then
+      note=" (peers already admitted in an earlier run — admission is idempotent)"
+    fi
+    if [ "$handshakes" -eq 0 ] && [ "$i" -gt 2 ]; then
+      # The sync check exercises nodes 1 and 2; an idle mesh never dials, so a
+      # node it did not touch has no handshakes to show. Not a failure.
+      note="$note (idle: the sync check drives nodes 1 and 2 only, and a mesh link only forms when the outbox has traffic)"
+    fi
+    echo "==> Node $i: peers_added_total=$added$note, handshakes_total=$handshakes"
+  done
+}
 
 # --- the sync check ---------------------------------------------------------------------
 
 if [ "$SKIP_SYNC" = "1" ]; then
-  echo "==> SKIP_SYNC=1: nodes are up and linked; sync check skipped"
+  echo "==> SKIP_SYNC=1: nodes are up; sync check skipped"
+  echo "==> An idle mesh never dials: handshakes appear only once the outbox has"
+  echo "==> traffic, so with the sync check skipped the handshake counters stay at zero."
   echo "==> Nodes are up; logs under $RUN_DIR/node-*/migod.log; press Ctrl-C to tear down"
   wait
   exit 0
@@ -381,5 +415,17 @@ NODE2_HTTP="http://127.0.0.1:$(node_http_port 2)" \
 PGHOST="$PG_HOST" PGPORT="$PG_PORT" PGUSER="$PG_USER" PGPASSWORD="$PG_PASSWORD" \
 DB1="$(node_db 1)" DB2="$(node_db 2)" \
   node "$SYNC_CHECK"
+
+# --- the link, proven by the traffic the sync check just generated ---------------------
+
+if ! verify_link; then
+  echo "the mesh did not form: after cross-node traffic, node 1 or node 2 still has zero handshakes" >&2
+  for i in $(seq 1 "$NODES"); do
+    echo "--- node $i log (last 20 lines) ---" >&2
+    tail -n 20 "$RUN_DIR/node-$i/migod.log" >&2
+  done
+  exit 1
+fi
+report_link
 
 echo "==> Done. Node logs: $RUN_DIR/node-*/migod.log; run directory kept: $RUN_DIR"
