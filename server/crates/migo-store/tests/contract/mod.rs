@@ -3652,6 +3652,282 @@ pub async fn a_game_token_moves_even_within_one_millisecond(store: &SharedStore)
     );
 }
 
+// --- federation -----------------------------------------------------------
+//
+// The allow-list is the mesh's boundary, and the two contracts here pin the
+// pieces the runtime drives itself: a status transition that carries its own
+// precondition, so an operator's decision cannot be overwritten by a stale one,
+// and a per-peer backlog count that treats a backoff wait and a fresh queue
+// entry exactly the same — both are owed.
+
+/// One allow-list row the federation cases share, admitted allowed.
+async fn admitted_peer(store: &SharedStore, node: u128) {
+    store
+        .add_peer(NewPeer {
+            node_id: id(node).to_string(),
+            public_key: vec![u8::try_from(node % 0x80).expect("in range"); 32],
+            base_url: format!("wss://node-{node}.example:19090"),
+            region: format!("region-{node}"),
+            status: 0,
+            added_at: ts(1_000),
+        })
+        .await
+        .expect("a fresh allow-list admits the peer");
+}
+/// A status transition lands only from the status it names, and never overwrites
+/// the one an operator set in between.
+pub async fn a_status_transition_lands_only_from_the_status_it_names(store: &SharedStore) {
+    admitted_peer(store, 7_100).await;
+    // The transition the runtime would make: allowed (0) to degraded (3).
+    let moved = store
+        .transition_peer_status(&id(7_100).to_string(), 0, 3)
+        .await
+        .expect("the store answers")
+        .expect("the peer exists");
+    assert_eq!(
+        moved.status, 3,
+        "the matching precondition lets the write land"
+    );
+    // The precondition that no longer holds: the row is degraded now, so a
+    // second allowed-to-degraded move is a no-op, not a resurrected flag.
+    let unchanged = store
+        .transition_peer_status(&id(7_100).to_string(), 0, 3)
+        .await
+        .expect("the store answers")
+        .expect("the peer still exists");
+    assert_eq!(unchanged.status, 3, "a stale precondition writes nothing");
+    // The race the compare-and-set exists for: an operator paused the peer (1)
+    // after the runtime read it as degraded, so the runtime's
+    // degraded-to-allowed clear must leave the pause standing.
+    store
+        .set_peer_status(&id(7_100).to_string(), 1)
+        .await
+        .expect("the operator pauses the peer");
+    let paused = store
+        .transition_peer_status(&id(7_100).to_string(), 3, 0)
+        .await
+        .expect("the store answers")
+        .expect("the peer still exists");
+    assert_eq!(
+        paused.status, 1,
+        "an operator's decision is never overwritten"
+    );
+    // An unknown peer is None, exactly as every other peer write reports it.
+    assert!(
+        store
+            .transition_peer_status(&id(7_199).to_string(), 0, 3)
+            .await
+            .expect("the store answers")
+            .is_none(),
+        "a peer the allow-list never held has no status to move"
+    );
+}
+
+/// The depth a peer is owed counts undelivered events alone, whatever their
+/// retry schedule, and no other peer's events.
+pub async fn pending_depth_counts_what_one_peer_is_owed(store: &SharedStore) {
+    admitted_peer(store, 7_101).await;
+    admitted_peer(store, 7_102).await;
+    // Four events: three owed to one peer, one to the other.
+    for (event, peer) in [
+        (8_000u128, 7_101u128),
+        (8_001, 7_101),
+        (8_002, 7_101),
+        (8_003, 7_102),
+    ] {
+        store
+            .enqueue_event(NewOutboxEvent {
+                event_id: id(event),
+                target_node: id(peer).to_string(),
+                opcode: 208,
+                payload: vec![event as u8; 8],
+                created_at: ts(1_000),
+                next_attempt_at: ts(1_000),
+            })
+            .await
+            .expect("an outbox event enqueues");
+    }
+    // A failed attempt reschedules the event; it is still owed.
+    store
+        .mark_failed(id(8_000), ts(10_000), "a link that would not ack")
+        .await
+        .expect("the failure is recorded");
+    assert_eq!(
+        store
+            .pending_depth(&id(7_101).to_string())
+            .await
+            .expect("the store answers"),
+        3,
+        "three undelivered events are owed, backoff or not"
+    );
+    assert_eq!(
+        store
+            .pending_depth(&id(7_102).to_string())
+            .await
+            .expect("the store answers"),
+        1,
+        "each peer's depth counts only its own events"
+    );
+    // Delivery is the only thing that shrinks what a peer is owed.
+    store
+        .mark_delivered(id(8_001), ts(20_000))
+        .await
+        .expect("the delivery is recorded");
+    assert_eq!(
+        store
+            .pending_depth(&id(7_101).to_string())
+            .await
+            .expect("the store answers"),
+        2,
+        "a delivered event leaves the count for good"
+    );
+}
+
+// The allow-list is the mesh's boundary, so its contract is about identity: one
+// row per node, one key per row, and an update that converges exactly what the
+// operator re-declared while leaving what only the runtime decided alone.
+
+pub async fn a_peer_is_admitted_once_and_read_back_as_written(store: &SharedStore) {
+    store
+        .add_peer(NewPeer {
+            node_id: id(7_001).to_string(),
+            public_key: vec![1; 32],
+            base_url: "wss://node-b.example:18090".to_string(),
+            region: "region-b".to_string(),
+            status: 0,
+            added_at: ts(1_000),
+        })
+        .await
+        .unwrap();
+    // The same node id presenting a different key is a second identity claim on
+    // one row: refused, and the original is not overwritten.
+    expect_code(
+        store
+            .add_peer(NewPeer {
+                node_id: id(7_001).to_string(),
+                public_key: vec![2; 32],
+                base_url: "wss://elsewhere.example:1".to_string(),
+                region: "elsewhere".to_string(),
+                status: 0,
+                added_at: ts(2_000),
+            })
+            .await,
+        codes::ALREADY_EXISTS,
+    );
+    // The key, not the id, is what a handshake is checked against, so a second
+    // node cannot claim an admitted key either.
+    expect_code(
+        store
+            .add_peer(NewPeer {
+                node_id: id(7_002).to_string(),
+                public_key: vec![1; 32],
+                base_url: "wss://twin.example:1".to_string(),
+                region: "twin".to_string(),
+                status: 0,
+                added_at: ts(3_000),
+            })
+            .await,
+        codes::ALREADY_EXISTS,
+    );
+    let unchanged = store.peer(&id(7_001).to_string()).await.unwrap().unwrap();
+    assert_eq!(unchanged.public_key, vec![1; 32]);
+    assert_eq!(unchanged.base_url, "wss://node-b.example:18090");
+    assert_eq!(unchanged.region, "region-b");
+}
+
+pub async fn update_peer_converges_what_was_redeclared_and_nothing_else(store: &SharedStore) {
+    store
+        .add_peer(NewPeer {
+            node_id: id(7_010).to_string(),
+            public_key: vec![3; 32],
+            base_url: "wss://old.example:1".to_string(),
+            region: "region-old".to_string(),
+            status: 0,
+            added_at: ts(1_000),
+        })
+        .await
+        .unwrap();
+    // A runtime decision the next boot's configuration must not undo.
+    store
+        .set_peer_status(&id(7_010).to_string(), 1)
+        .await
+        .unwrap()
+        .unwrap();
+    let updated = store
+        .update_peer(
+            &id(7_010).to_string(),
+            vec![4; 32],
+            "wss://new.example:2".to_string(),
+            "region-new".to_string(),
+        )
+        .await
+        .unwrap()
+        .expect("the peer exists, so the update lands");
+    assert_eq!(updated.public_key, vec![4; 32]);
+    assert_eq!(updated.base_url, "wss://new.example:2");
+    assert_eq!(updated.region, "region-new");
+    assert_eq!(
+        updated.status, 1,
+        "a runtime status survives re-declaration"
+    );
+    assert_eq!(
+        updated.added_at,
+        ts(1_000),
+        "admission time is history, not configuration"
+    );
+}
+
+pub async fn update_peer_on_an_unknown_node_is_none_and_a_released_key_is_claimable(
+    store: &SharedStore,
+) {
+    assert!(
+        store
+            .update_peer(
+                &id(7_020).to_string(),
+                vec![5; 32],
+                "wss://ghost.example:1".to_string(),
+                "ghost".to_string(),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "an update for a node that was never admitted lands on nothing"
+    );
+    // A rotated key releases the old one: the next node may claim it.
+    store
+        .add_peer(NewPeer {
+            node_id: id(7_021).to_string(),
+            public_key: vec![6; 32],
+            base_url: "wss://rotating.example:1".to_string(),
+            region: "rotating".to_string(),
+            status: 0,
+            added_at: ts(1_000),
+        })
+        .await
+        .unwrap();
+    store
+        .update_peer(
+            &id(7_021).to_string(),
+            vec![7; 32],
+            "wss://rotating.example:1".to_string(),
+            "rotating".to_string(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .add_peer(NewPeer {
+            node_id: id(7_022).to_string(),
+            public_key: vec![6; 32],
+            base_url: "wss://claimant.example:1".to_string(),
+            region: "claimant".to_string(),
+            status: 0,
+            added_at: ts(4_000),
+        })
+        .await
+        .expect("the released key is claimable again");
+}
+
 /// Names every case in the suite, so a backend file lists none of them.
 ///
 /// A test that exists but is only wired into one backend is worse than no test:
@@ -3717,5 +3993,10 @@ macro_rules! for_each_contract_case {
         $case!(the_moderation_queue_is_oldest_first_and_resolves_once);
         $case!(the_audit_log_is_newest_first_and_scoped_to_one_target);
         $case!(a_game_token_moves_even_within_one_millisecond);
+        $case!(a_peer_is_admitted_once_and_read_back_as_written);
+        $case!(update_peer_converges_what_was_redeclared_and_nothing_else);
+        $case!(update_peer_on_an_unknown_node_is_none_and_a_released_key_is_claimable);
+        $case!(a_status_transition_lands_only_from_the_status_it_names);
+        $case!(pending_depth_counts_what_one_peer_is_owed);
     };
 }

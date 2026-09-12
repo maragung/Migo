@@ -54,7 +54,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use migo_core::{Id, Result, Timestamp};
-use migo_federation::model::{FederatedEvent, PeerStatus};
+use migo_federation::model::FederatedEvent;
 use migo_federation::SharedMesh;
 use migo_messaging::{Broadcast as MessageBroadcast, Fanout as MessageFanout};
 use migo_protocol::{
@@ -477,14 +477,18 @@ impl RoomRelay {
             .map(|_queued| ())
     }
 
-    /// The allowed peer that homes a region, if the allow-list names one.
+    /// The federating peer that homes a region, if the allow-list names one.
+    ///
+    /// A degraded peer still counts: degraded is a signal about the link's health, not a
+    /// suspension, so a room's events keep flowing to a slow home node exactly as to a
+    /// fast one (section 153). Only the operator's paused and blocked are excluded.
     async fn home_node(&self, home_region: &str) -> Result<Option<Id>> {
         Ok(self
             .mesh
             .peers(PEER_SCAN_LIMIT)
             .await?
             .into_iter()
-            .find(|peer| peer.region == home_region && peer.status == PeerStatus::Allowed)
+            .find(|peer| peer.region == home_region && peer.status.is_allowed())
             .map(|peer| peer.node_id))
     }
 }

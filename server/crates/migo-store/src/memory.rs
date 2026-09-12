@@ -3370,6 +3370,44 @@ impl FederationStore for MemoryStore {
         Ok(peer)
     }
 
+    async fn update_peer(
+        &self,
+        node_id: &str,
+        public_key: Vec<u8>,
+        base_url: String,
+        region: String,
+    ) -> Result<Option<PeerRecord>> {
+        let mut s = self.state.write();
+        // The old key is read first so every later step is a plain write: the
+        // guard does not allow a row borrow and an index borrow at once.
+        let Some(old_key) = s.peers.get(node_id).map(|peer| peer.public_key.clone()) else {
+            return Ok(None);
+        };
+        // The key's unique index is checked before anything is written — the same
+        // guard `add_peer` keeps, for the same reason: the key is what a handshake
+        // is checked against, so it belongs to at most one row.
+        if let Some(owner) = s.peer_by_key.get(&public_key) {
+            if owner != node_id {
+                return Err(fault::already_exists("node key"));
+            }
+        }
+        if old_key != public_key {
+            s.peer_by_key.remove(&old_key);
+            s.peer_by_key
+                .insert(public_key.clone(), node_id.to_string());
+        }
+        let Some(peer) = s.peers.get_mut(node_id) else {
+            return Ok(None);
+        };
+        peer.public_key = public_key;
+        peer.base_url = base_url;
+        peer.region = region;
+        // Status, added_at, and last_seen_at are deliberately untouched: the
+        // configuration sets identity and addressing, not an operator's runtime
+        // decision about whether this peer may federate right now.
+        Ok(Some(peer.clone()))
+    }
+
     async fn peer(&self, node_id: &str) -> Result<Option<PeerRecord>> {
         Ok(self.state.read().peers.get(node_id).cloned())
     }
@@ -3398,6 +3436,35 @@ impl FederationStore for MemoryStore {
         };
         peer.status = status;
         Ok(Some(peer.clone()))
+    }
+
+    async fn transition_peer_status(
+        &self,
+        node_id: &str,
+        from: i16,
+        to: i16,
+    ) -> Result<Option<PeerRecord>> {
+        let mut s = self.state.write();
+        let Some(peer) = s.peers.get_mut(node_id) else {
+            return Ok(None);
+        };
+        // The precondition rides the write: a status that changed underneath the
+        // caller leaves the row exactly as the changer wrote it.
+        if peer.status == from {
+            peer.status = to;
+        }
+        Ok(Some(peer.clone()))
+    }
+
+    async fn pending_depth(&self, target_node: &str) -> Result<u64> {
+        let s = self.state.read();
+        let owed = s
+            .outbox_order
+            .iter()
+            .filter_map(|id| s.outbox.get(id))
+            .filter(|event| event.delivered_at.is_none() && event.target_node == target_node)
+            .count();
+        Ok(owed as u64)
     }
 
     async fn touch_peer(&self, node_id: &str, seen_at: Timestamp) -> Result<Option<PeerRecord>> {

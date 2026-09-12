@@ -1314,6 +1314,25 @@ pub trait FederationStore: Send + Sync {
     /// is not something a second `add_peer` may quietly replace.
     async fn add_peer(&self, new: NewPeer) -> Result<PeerRecord>;
 
+    /// Updates a peer's public key, base URL, and region, returning the updated
+    /// row, or `Ok(None)` if the peer is not in the allow-list.
+    ///
+    /// The reconciliation half of configuration-driven admission: identity and
+    /// addressing are the configuration's to set, so a changed entry lands here
+    /// rather than failing the boot on the row a previous boot wrote. Status,
+    /// `added_at`, and `last_seen_at` are untouched — a paused or blocked peer is
+    /// an operator's runtime decision an address change must not quietly reverse.
+    /// A public key another peer already claims fails with
+    /// [`fault::already_exists`], exactly as `add_peer` would, because the key —
+    /// not the id — is what a handshake is checked against.
+    async fn update_peer(
+        &self,
+        node_id: &str,
+        public_key: Vec<u8>,
+        base_url: String,
+        region: String,
+    ) -> Result<Option<PeerRecord>>;
+
     /// Reads one peer by node id, or `None` if it is not in the allow-list.
     ///
     /// The lookup a handshake makes before anything else. A `None` here is a node the
@@ -1330,6 +1349,30 @@ pub trait FederationStore: Send + Sync {
     /// without forgetting its key — a blocked peer's row survives so it can be
     /// re-allowed without a fresh key exchange.
     async fn set_peer_status(&self, node_id: &str, status: i16) -> Result<Option<PeerRecord>>;
+
+    /// Moves a peer's status from `from` to `to`, but only if it still is `from`.
+    ///
+    /// The compare-and-set half of [`set_peer_status`](Self::set_peer_status): the
+    /// runtime's automatic transitions (an allowed peer marked degraded by its
+    /// growing backlog, a degraded peer allowed again once it caught up) must never
+    /// overwrite a status an operator set in between, so the write carries its own
+    /// precondition instead of trusting a read the caller made earlier. Returns the
+    /// row as it stands after the attempt — transitioned or not — or `Ok(None)` if
+    /// the peer is not in the allow-list.
+    async fn transition_peer_status(
+        &self,
+        node_id: &str,
+        from: i16,
+        to: i16,
+    ) -> Result<Option<PeerRecord>>;
+
+    /// Counts the events still owed to one peer: undelivered, whatever their retry
+    /// schedule.
+    ///
+    /// The depth a sender reads to tell a slow peer from a dead one. Delivered
+    /// events do not count; events waiting out a backoff do, because the peer owes
+    /// them just the same.
+    async fn pending_depth(&self, target_node: &str) -> Result<u64>;
 
     /// Stamps a peer's last-seen time after a successful handshake, returning the
     /// updated row.

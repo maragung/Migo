@@ -80,8 +80,8 @@ where
     /// If `config` is unusable: a nonce window shorter than twice
     /// [`MAX_CLOCK_SKEW_MS`] (which would let a replay slip through the gap between the clock
     /// check and the nonce memory), a non-positive backoff base, a cap below the base, a zero
-    /// drain batch, or an empty region. These are deployment misconfigurations, caught here
-    /// rather than per request.
+    /// drain batch, a zero degradation watermark, or an empty region. These are deployment
+    /// misconfigurations, caught here rather than per request.
     pub fn new(
         store: Arc<S>,
         config: MeshConfig,
@@ -109,6 +109,11 @@ where
         }
         if config.due_batch == 0 {
             return Err(fault::internal("mesh drain batch must be positive"));
+        }
+        if config.degraded_outbox_watermark == 0 {
+            return Err(fault::internal(
+                "mesh degradation watermark must be positive",
+            ));
         }
         let nonces = NonceWindow::new(config.nonce_window_ms);
         Ok(Self {
@@ -236,12 +241,111 @@ where
         view_of(record)
     }
 
+    async fn apply_peer(&self, spec: NewPeerSpec, now: Timestamp) -> Result<PeerView> {
+        // The same validation add_peer performs, so the configuration path may not
+        // admit a peer the programmatic path would refuse: a key that is not a
+        // 32-byte Ed25519 point or an address that is not a mesh scheme is a
+        // startup failure, not a warning.
+        NodePublic::parse(&spec.public_key)
+            .map_err(|_| fault::validation("public_key", "must be a 32-byte Ed25519 public key"))?;
+        validate_base_url(&spec.base_url)?;
+        let region = spec.region.trim();
+        if region.is_empty() {
+            return Err(fault::field_required("region"));
+        }
+        match self.store.peer(&spec.node_id.to_string()).await? {
+            Some(existing) => {
+                if existing.public_key == spec.public_key
+                    && existing.base_url == spec.base_url.trim()
+                    && existing.region == region
+                {
+                    // Nothing changed: the row a previous boot wrote is exactly what
+                    // the configuration names, so a restart writes nothing.
+                    return view_of(existing);
+                }
+                if existing.public_key != spec.public_key {
+                    // A key swap is the one update that changes who a handshake
+                    // proves, so it is said out loud even though the operator
+                    // caused it — the log is where a rotation is audited.
+                    tracing::warn!(
+                        node = %spec.node_id,
+                        "the configured public key replaces the stored one for this peer"
+                    );
+                }
+                let record = self
+                    .store
+                    .update_peer(
+                        &spec.node_id.to_string(),
+                        spec.public_key,
+                        spec.base_url.trim().to_string(),
+                        region.to_string(),
+                    )
+                    .await?
+                    .ok_or_else(|| fault::not_found("peer"))?;
+                view_of(record)
+            }
+            None => self.add_peer(spec, now).await,
+        }
+    }
+
     async fn set_peer_status(&self, node_id: Id, status: PeerStatus) -> Result<PeerView> {
         let record = self
             .store
             .set_peer_status(&node_id.to_string(), status.to_i16())
             .await?
             .ok_or_else(|| fault::not_found("peer"))?;
+        view_of(record)
+    }
+
+    async fn observe_peer_lag(&self, node_id: Id) -> Result<PeerView> {
+        // What the sender still owes this peer, whatever the retry schedule — the honest
+        // measure of how far behind the link has fallen.
+        let depth = self.store.pending_depth(&node_id.to_string()).await?;
+        let record = self
+            .store
+            .peer(&node_id.to_string())
+            .await?
+            .ok_or_else(|| fault::not_found("peer"))?;
+        let status = PeerStatus::from_i16(record.status);
+        // The two automatic transitions of the peer state machine, and the only two: an
+        // allowed peer whose backlog has crossed the watermark is marked degraded, and a
+        // degraded peer that has caught up to half the watermark is allowed again. Half,
+        // not the watermark itself, so a depth oscillating around the threshold cannot
+        // flap the status drain by drain. Paused and blocked are the operator's and are
+        // never touched here — the transition below carries its precondition in the write,
+        // so an operator pausing a degraded peer between these lines is never overwritten.
+        let watermark = u64::from(self.config.degraded_outbox_watermark);
+        let caught_up = watermark / 2;
+        let transition = match status {
+            PeerStatus::Allowed if depth > watermark => {
+                tracing::warn!(
+                    node = %node_id,
+                    depth,
+                    watermark,
+                    "peer's undelivered backlog crossed the degradation watermark (section 173)"
+                );
+                Some((status, PeerStatus::Degraded))
+            }
+            PeerStatus::Degraded if depth <= caught_up => {
+                tracing::info!(
+                    node = %node_id,
+                    depth,
+                    "a degraded peer caught up; the marking clears"
+                );
+                Some((status, PeerStatus::Allowed))
+            }
+            _ => None,
+        };
+        let record = match transition {
+            // Compare-and-set: the write lands only if the status is still what this read
+            // saw, so a decision an operator made in between stands.
+            Some((from, to)) => self
+                .store
+                .transition_peer_status(&node_id.to_string(), from.to_i16(), to.to_i16())
+                .await?
+                .unwrap_or(record),
+            None => record,
+        };
         view_of(record)
     }
 
@@ -291,9 +395,11 @@ where
             return Err(fault::mesh_auth_failed("unknown node in handshake"));
         };
         // A paused or blocked peer is turned away before the proof too — the row and key are
-        // kept so the state is reversible, but no handshake succeeds while it stands.
+        // kept so the state is reversible, but no handshake succeeds while it stands. A
+        // degraded peer is not: degraded is a signal about the link's health, not a
+        // suspension, so the handshake proceeds exactly as an allowed peer's (section 153).
         match PeerStatus::from_i16(record.status) {
-            PeerStatus::Allowed => {}
+            PeerStatus::Allowed | PeerStatus::Degraded => {}
             PeerStatus::Blocked => {
                 self.meters.handshake_rejected(HandshakeReject::Blocked);
                 tracing::warn!(node = %remote.node_id, "mesh handshake from a blocked peer");

@@ -5,9 +5,9 @@
 //! # Status is an enum here, a raw integer in the store
 //!
 //! The `node_peer` row keeps `status` as a raw `i16`, opaque to the storage layer exactly as
-//! a bot's `scopes` are. What 0, 1 and 2 *mean* — allowed, paused, blocked — is a domain
-//! fact, and domain facts live in this crate. [`PeerStatus`] is that mapping, with the
-//! conversion to and from the stored integer beside it, and with one deliberate asymmetry:
+//! a bot's `scopes` are. What 0, 1, 2 and 3 *mean* — allowed, paused, blocked, degraded — is
+//! a domain fact, and domain facts live in this crate. [`PeerStatus`] is that mapping, with
+//! the conversion to and from the stored integer beside it, and with one deliberate asymmetry:
 //! an unrecognised stored value decodes to [`PeerStatus::Blocked`], the safe direction, so a
 //! corrupt or hostile row closes a link rather than opening one.
 
@@ -45,22 +45,45 @@ pub const DEFAULT_MAX_ATTEMPTS: i32 = 12;
 /// How many due events a single drain pass reads at once.
 pub const DEFAULT_DUE_BATCH: u16 = 128;
 
+/// The undelivered outbox depth at which a peer stops being merely busy and starts being
+/// degraded, section 173's slow-link marking.
+///
+/// The number is a judgement the document leaves to the implementation, and this is the
+/// reasoning: it sits above the largest mass backlog the brief itself tests — three hundred
+/// events in section 173's scenario 10, a mass sync after an outage, which is traffic and
+/// not a fault — so a recovery burst never cries degraded, and it sits far below anything
+/// that threatens a node's memory, which is the exhaustion the marking exists to precede.
+/// Tunable per deployment through [`MeshConfig::degraded_outbox_watermark`].
+pub const DEFAULT_DEGRADED_OUTBOX_WATERMARK: u32 = 512;
+
 /// A peer's place in the allow-list.
 ///
-/// The one gate every handshake passes through: only [`Allowed`](Self::Allowed) federates.
-/// [`Paused`](Self::Paused) and [`Blocked`](Self::Blocked) both refuse the handshake, and
-/// they differ only in intent an operator reads — a paused peer is expected back, a blocked
-/// one is not — because a blocked peer's row survives so it can be re-allowed without a fresh
-/// key exchange. The peer cannot tell which state it is in: both answer the same opaque
-/// error (section 48).
+/// The one gate every handshake passes through: only [`Allowed`](Self::Allowed) federates
+/// out of the states an operator sets. [`Paused`](Self::Paused) and
+/// [`Blocked`](Self::Blocked) both refuse the handshake, and they differ only in intent an
+/// operator reads — a paused peer is expected back, a blocked one is not — because a blocked
+/// peer's row survives so it can be re-allowed without a fresh key exchange. The peer
+/// cannot tell which state it is in: both answer the same opaque error (section 48).
+///
+/// [`Degraded`](Self::Degraded) is the fourth state, and it is not an operator's: the
+/// runtime sets it when the undelivered outbox aimed at the peer crosses
+/// [`DEFAULT_DEGRADED_OUTBOX_WATERMARK`] and clears it when the peer catches up, so an
+/// operator and the routing layer see slowness building before it exhausts anything
+/// (section 173). It is a signal and nothing more: a degraded peer still federates — its
+/// handshakes succeed and its events still go out — because section 153's at-least-once
+/// promise is not a promise the marking is allowed to bend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PeerStatus {
-    /// Federation is permitted. The only state in which a handshake can succeed.
+    /// Federation is permitted. The only state an operator admits a peer in.
     Allowed,
     /// Temporarily suspended by an operator; the row and key are kept for a later resume.
     Paused,
     /// Refused by an operator; the row is kept so the peer can be re-allowed deliberately.
     Blocked,
+    /// Lagging, not by an operator's decision but by measurement: the undelivered outbox
+    /// aimed at this peer is deeper than the degradation watermark. Signalling only — a
+    /// degraded peer still receives everything owed to it.
+    Degraded,
 }
 
 impl PeerStatus {
@@ -68,10 +91,11 @@ impl PeerStatus {
     ///
     /// Never reworded once shipped: like an error symbol, an export and an operator's script
     /// both depend on the exact string.
-    pub const NAMED: [(Self, &'static str); 3] = [
+    pub const NAMED: [(Self, &'static str); 4] = [
         (Self::Allowed, "allowed"),
         (Self::Paused, "paused"),
         (Self::Blocked, "blocked"),
+        (Self::Degraded, "degraded"),
     ];
 
     /// The raw `i16` the store column holds.
@@ -81,6 +105,7 @@ impl PeerStatus {
             Self::Allowed => 0,
             Self::Paused => 1,
             Self::Blocked => 2,
+            Self::Degraded => 3,
         }
     }
 
@@ -94,28 +119,35 @@ impl PeerStatus {
         match value {
             0 => Self::Allowed,
             1 => Self::Paused,
+            3 => Self::Degraded,
             _ => Self::Blocked,
         }
     }
 
-    /// Whether a handshake from a peer in this state may proceed. True only for
-    /// [`Allowed`](Self::Allowed).
+    /// Whether a peer in this state still federates: handshakes proceed and events flow.
+    ///
+    /// True for [`Allowed`](Self::Allowed) and for [`Degraded`](Self::Degraded) — the
+    /// degraded marking is a signal about the link's health, not a suspension of it, so
+    /// delivery semantics are exactly the allowed peer's while it stands (section 153).
+    /// False only for the two operator refusals, [`Paused`](Self::Paused) and
+    /// [`Blocked`](Self::Blocked).
     #[must_use]
     pub const fn is_allowed(self) -> bool {
-        matches!(self, Self::Allowed)
+        matches!(self, Self::Allowed | Self::Degraded)
     }
 
     /// The stable slug for this status.
     #[must_use]
-    pub fn slug(self) -> &'static str {
+    pub const fn slug(self) -> &'static str {
         match self {
             Self::Allowed => "allowed",
             Self::Paused => "paused",
             Self::Blocked => "blocked",
+            Self::Degraded => "degraded",
         }
     }
 
-    /// The status a slug names, or `None` if it is not one of the three.
+    /// The status a slug names, or `None` if it is not one of the four.
     #[must_use]
     pub fn from_slug(slug: &str) -> Option<Self> {
         Self::NAMED
@@ -257,6 +289,12 @@ pub struct MeshConfig {
     pub max_attempts: i32,
     /// How many due events a single drain pass reads.
     pub due_batch: u16,
+    /// The undelivered outbox depth at which a peer is marked
+    /// [`Degraded`](PeerStatus::Degraded). The marking clears once the peer has caught up
+    /// to half the watermark, so a depth oscillating around the threshold cannot flap the
+    /// status. See [`DEFAULT_DEGRADED_OUTBOX_WATERMARK`] for the reasoning behind the
+    /// default.
+    pub degraded_outbox_watermark: u32,
 }
 
 impl Default for MeshConfig {
@@ -267,6 +305,7 @@ impl Default for MeshConfig {
             backoff_cap_ms: DEFAULT_BACKOFF_CAP_MS,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             due_batch: DEFAULT_DUE_BATCH,
+            degraded_outbox_watermark: DEFAULT_DEGRADED_OUTBOX_WATERMARK,
         }
     }
 }

@@ -6009,6 +6009,40 @@ impl FederationStore for PostgresStore {
             .map(peer_of))
     }
 
+    async fn update_peer(
+        &self,
+        node_id: &str,
+        public_key: Vec<u8>,
+        base_url: String,
+        region: String,
+    ) -> Result<Option<PeerRecord>> {
+        // The update touches identity and addressing only; status, added_at, and
+        // last_seen_at keep their values, so the configuration cannot quietly
+        // reverse an operator's runtime decision about a peer. `node_peer_key_key`
+        // is named in the conflict mapping for the same reason `add_peer` names
+        // it: a key belongs to at most one row.
+        let result = entity::node_peer::Entity::update_many()
+            .filter(entity::node_peer::Column::NodeId.eq(node_id))
+            .set(entity::node_peer::ActiveModel {
+                public_key: Set(public_key),
+                base_url: Set(base_url),
+                region: Set(region),
+                ..Default::default()
+            })
+            .exec(&self.db)
+            .await
+            .map_err(|error| {
+                on_conflict(error, "node peer", |name| match name {
+                    "node_peer_key_key" => Some(fault::already_exists("node key")),
+                    _ => None,
+                })
+            })?;
+        if result.rows_affected == 0 {
+            return Ok(None);
+        }
+        self.peer(node_id).await
+    }
+
     async fn peers(&self, limit: u16) -> Result<Vec<PeerRecord>> {
         let rows = entity::node_peer::Entity::find()
             .order_by_desc(entity::node_peer::Column::AddedAt)
@@ -6033,6 +6067,39 @@ impl FederationStore for PostgresStore {
             return Ok(None);
         }
         self.peer(node_id).await
+    }
+
+    async fn transition_peer_status(
+        &self,
+        node_id: &str,
+        from: i16,
+        to: i16,
+    ) -> Result<Option<PeerRecord>> {
+        // The status precondition is part of the UPDATE's predicate, so a status
+        // that changed between the caller's read and this write cannot be
+        // overwritten: the update simply matches no row and the read below hands
+        // back the row as the other writer left it.
+        entity::node_peer::Entity::update_many()
+            .filter(entity::node_peer::Column::NodeId.eq(node_id))
+            .filter(entity::node_peer::Column::Status.eq(from))
+            .set(entity::node_peer::ActiveModel {
+                status: Set(to),
+                ..Default::default()
+            })
+            .exec(&self.db)
+            .await
+            .context("transition_peer_status")?;
+        self.peer(node_id).await
+    }
+
+    async fn pending_depth(&self, target_node: &str) -> Result<u64> {
+        let owed = entity::federation_outbox::Entity::find()
+            .filter(entity::federation_outbox::Column::TargetNode.eq(target_node))
+            .filter(entity::federation_outbox::Column::DeliveredAt.is_null())
+            .count(&self.db)
+            .await
+            .context("pending_depth")?;
+        Ok(owed)
     }
 
     async fn touch_peer(&self, node_id: &str, seen_at: Timestamp) -> Result<Option<PeerRecord>> {

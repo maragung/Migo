@@ -10,6 +10,7 @@
     { "path": "./packages/sdk" },
     { "path": "./tools/loadgen" },
     { "path": "./tools/chatbot" },
+    { "path": "./tools/nnode" },
     { "path": "./tests/e2e" }
   ]
 }
