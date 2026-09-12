@@ -72,7 +72,6 @@ struct PublishedStream {
 /// subscriptions.
 struct Seat {
     member: Member,
-    joined_at: Timestamp,
     mode: BandwidthMode,
     streams: Vec<PublishedStream>,
     subs: Vec<Subscription>,
@@ -187,7 +186,6 @@ impl Sfu {
         }
         plane.seats.push(Seat {
             member,
-            joined_at: now,
             mode,
             streams: Vec::new(),
             subs: Vec::new(),
@@ -485,7 +483,9 @@ impl Sfu {
                 self.meters.dropped(DropReason::Layer);
                 continue;
             }
-            if shape.frame_stride > 1 && frame.sequence % u64::from(shape.frame_stride) != 0 {
+            if shape.frame_stride > 1
+                && !frame.sequence.is_multiple_of(u64::from(shape.frame_stride))
+            {
                 self.meters.dropped(DropReason::Stride);
                 continue;
             }
