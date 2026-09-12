@@ -23,7 +23,7 @@ use migo_protocol::ConversationRole;
 
 use crate::model::{self, Body, Conversation, Delivery, Message};
 use crate::net::Command;
-use crate::theme::{font, palette, space};
+use crate::theme::{font, palette, radius, space};
 use crate::ui::widgets::{self, BubbleTone};
 use crate::ui::{ChatLogAction, Context};
 
@@ -102,10 +102,31 @@ pub struct ChatState {
     /// never rows of their own — a reaction is a fact about another message, and drawing it
     /// as one would bury the thing it answers.
     pub reactions: HashMap<Id, Vec<(Id, String)>>,
-    /// The conversation being recorded into, and when the recording began. `None` when no
-    /// recording runs. The conversation id rides along so a bar left behind by a window
-    /// switch clears when its own conversation's recording ends, not whichever one is open.
-    pub recording: Option<(Id, std::time::Instant)>,
+    /// The live voice-note recording, `None` when none runs. The conversation id rides
+    /// along so a bar left behind by a window switch clears when its own conversation's
+    /// recording ends, not whichever one is open; the elapsed and bars are the worker's own
+    /// tick, so the clock stands still through a pause exactly as the capture does.
+    pub recording: Option<RecordingView>,
+    /// A finished note waiting on the composer's word — the preview, an undo window's
+    /// restore, or a draft recovered after an app death. One at a time, like the recording.
+    pub note_preview: Option<NotePreview>,
+    /// The conversation whose discarded note the undo window still holds, if one stands.
+    /// The window's deadline is the worker's — it owns the bytes — so the chip is withdrawn
+    /// by the event that says the window closed, not by a clock the UI keeps.
+    pub note_discard_undo: Option<Id>,
+    /// Whether the microphone button is under a press — the hold mode's own state, kept here
+    /// because the gesture belongs to the surface that started it. The press started the
+    /// recording already; what the release decides is the hold's whole vocabulary.
+    pub mic_held: bool,
+    /// Where the held press began, in screen points. The slides are measured against the
+    /// press's own origin rather than the button's frame, so a layout shift mid-press — the
+    /// composer trading its field for the held row — cannot move the goal.
+    pub mic_press_origin: Option<egui::Pos2>,
+    /// When the held press began, for the quick-tap judgement the release makes.
+    pub mic_hold_started: Option<std::time::Instant>,
+    /// Whether the held press has slid into its cancel zone: the release then cancels
+    /// rather than sends, and the hint says so in the release's own colour.
+    pub mic_cancel_slide: bool,
     /// The attach panel's own state, per conversation: whether it is open and the path typed
     /// into it. egui offers no file dialog, so the path is typed — the same trade the avatar
     /// picker makes — and it is kept per conversation the way drafts are.
@@ -230,6 +251,36 @@ pub struct AttachPanel {
     /// The path typed into it, kept between frames so closing the panel on a mistake does
     /// not cost the whole path.
     pub path: String,
+}
+
+/// The live recording as the composer draws it: which conversation, how far it has run,
+/// whether the speaker paused it, and the waveform's sampled bars so far. Every fact is the
+/// worker's own tick restated here — the UI never measures a recording itself, so a clock
+/// that stands still through a pause on the capture's side stands still on the screen too,
+/// and the timer can never disagree with the cap that ends the note.
+pub struct RecordingView {
+    /// The conversation the microphone is speaking into.
+    pub conversation_id: Id,
+    /// How long the recording has run, pauses included as nothing — the worker's own count.
+    pub elapsed_ms: u64,
+    /// Whether the speaker paused the capture.
+    pub paused: bool,
+    /// The amplitude bars sampled so far, 0–255, one per tenth of a second of speech.
+    pub amplitudes: Vec<u8>,
+}
+
+/// A finished note held for the composer's word: the two-step mode's Stop, an undo window's
+/// restore, or a draft recovered after an app death — one face for all three, because all
+/// three are the same question: send it or throw it away. The duration and waveform are the
+/// sender's own measurements restated, so the bar lays out before a single audio byte is
+/// read back.
+pub struct NotePreview {
+    /// The conversation the note was recorded into.
+    pub conversation_id: Id,
+    /// The note's playing time as the recorder counted it.
+    pub duration_ms: u32,
+    /// The fixed-width waveform the message will carry, already folded.
+    pub waveform: Vec<u8>,
 }
 
 /// The attachments' state between frames.
@@ -560,6 +611,13 @@ pub fn open(context: &mut Context<'_>, state: &mut ChatState, conversation_id: I
             }
         }
     }
+
+    // A voice-note draft the last session left behind — §179's app-death rule — is offered on
+    // every open, the same door the worker checks: recovered, it becomes the preview the
+    // composer would show a note it had just stopped, and the worker ignores the ask when a
+    // note is already live or held. Asked unconditionally because the worker is the only one
+    // who knows whether the last session died mid-recording.
+    context.issue(Command::RecoverVoiceDraft { conversation_id });
 }
 
 /// The open conversation: header, messages, composer — with the composer pinned.
@@ -1724,8 +1782,20 @@ fn message_row(
                     Body::VoiceNote {
                         media_id,
                         duration_ms,
+                        waveform,
                     } => {
-                        voice_bubble(ui, context, message.outgoing, *media_id, *duration_ms, &meta, media);
+                        voice_bubble(
+                            ui,
+                            context,
+                            message.outgoing,
+                            &VoiceNoteView {
+                                media_id: *media_id,
+                                duration_ms: *duration_ms,
+                                waveform: waveform.clone(),
+                            },
+                            &meta,
+                            media,
+                        );
                     }
                     // A reaction never reaches a row: absorb files it as a chip on its
                     // target. The arm stays because the match must be exhaustive, and a
@@ -2040,22 +2110,37 @@ fn image_bubble(
     );
 }
 
-/// One voice note: a play/stop button, the note's length, and the delivery state.
+/// One voice note's own facts, as a row receives them from the message body: the media id
+/// the fetch flow needs, the playing time the sender measured, and the sender's sampled
+/// waveform. A struct because the row was an eight-argument call by the time the waveform
+/// landed, and eight arguments is a call site nobody can check.
+pub struct VoiceNoteView {
+    /// The media the note's bytes live behind.
+    pub media_id: Id,
+    /// The playing time the sender measured.
+    pub duration_ms: u32,
+    /// The folded waveform the sender sampled, when one came on the wire.
+    pub waveform: Option<Vec<u8>>,
+}
+
+/// One voice note: a play/stop button, the note's own shape — the bars the sender's
+/// microphone sampled, folded to the fixed width the message carries — and the delivery
+/// state.
 ///
-/// The button is the bubble — the whole point of a voice note is that it is pressed, and a
-/// row whose only control sits outside its shape is a row that has to explain itself.
+/// The button is the bubble's neighbour rather than the bubble itself: the bubble carries the
+/// waveform, whose whole point is to be *seen* — a row that shows the shape of what was said
+/// answers "is this the part I missed?" before it is pressed.
 fn voice_bubble(
     ui: &mut Ui,
     context: &mut Context<'_>,
     outgoing: bool,
-    media_id: Id,
-    duration_ms: u32,
+    note: &VoiceNoteView,
     meta: &str,
     media: &mut MediaState,
 ) {
     let colors = palette(context.theme);
-    let playing = media.playing == Some(media_id);
-    if let Some(reason) = media.failures.get(&media_id) {
+    let playing = media.playing == Some(note.media_id);
+    if let Some(reason) = media.failures.get(&note.media_id) {
         widgets::bubble(
             ui,
             context.theme,
@@ -2065,8 +2150,8 @@ fn voice_bubble(
             BubbleTone::Problem,
         );
         if ui.button("Try again").clicked() {
-            media.requested.remove(&media_id);
-            media.failures.remove(&media_id);
+            media.requested.remove(&note.media_id);
+            media.failures.remove(&note.media_id);
         }
         return;
     }
@@ -2091,21 +2176,63 @@ fn voice_bubble(
             if playing {
                 context.issue(Command::StopVoiceNote);
             } else {
-                context.issue(Command::PlayVoiceNote { media_id });
+                context.issue(Command::PlayVoiceNote {
+                    media_id: note.media_id,
+                });
             }
         }
         ui.add_space(space::XS);
-        widgets::bubble(
-            ui,
-            context.theme,
-            &format!(
-                "\u{1F3A4} Voice note \u{00B7} {}",
-                human_duration(duration_ms)
-            ),
-            meta,
-            outgoing,
-            BubbleTone::Normal,
-        );
+        // The bubble itself, in the same two tones a text bubble takes — and carrying the
+        // note's own shape when the message brought one. A note with no waveform (an older
+        // client's send, or a wire that never described it) still says what it is and how
+        // long, the same words the row has always used.
+        let (fill, foreground, stroke) = if outgoing {
+            (colors.accent, colors.text_on_accent, egui::Stroke::NONE)
+        } else {
+            (
+                colors.surface_raised,
+                colors.text,
+                egui::Stroke::new(1.0, colors.border),
+            )
+        };
+        egui::Frame::new()
+            .fill(fill)
+            .stroke(stroke)
+            .corner_radius(egui::CornerRadius::same(radius::MD))
+            .inner_margin(egui::Margin::symmetric(space::MD as i8, space::SM as i8))
+            .show(ui, |ui| {
+                ui.set_max_width((ui.available_width() * 0.68).max(140.0));
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        let bars = note.waveform.as_deref().unwrap_or(&[]);
+                        if !bars.is_empty() {
+                            waveform_bars(ui, bars, foreground, 160.0);
+                            ui.add_space(space::SM);
+                        }
+                        ui.label(
+                            RichText::new(human_duration(note.duration_ms))
+                                .font(egui::FontId::proportional(font::BODY))
+                                .color(foreground),
+                        );
+                    });
+                    ui.add_space(space::XS * 0.5);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
+                        // A dimmer foreground, derived rather than taken from the palette
+                        // because the fill differs by direction — the same derivation a text
+                        // bubble's timestamp makes.
+                        ui.label(
+                            RichText::new(meta)
+                                .font(egui::FontId::proportional(font::TINY))
+                                .color(egui::Color32::from_rgba_unmultiplied(
+                                    foreground.r(),
+                                    foreground.g(),
+                                    foreground.b(),
+                                    170,
+                                )),
+                        );
+                    });
+                });
+            });
     });
 }
 
@@ -2252,6 +2379,23 @@ pub const DISAPPEARING_MS: u32 = 8 * 60 * 60 * 1_000;
 /// The lifetime's own words, for the toggle's hover — the web's `DISAPPEARING_LABEL`.
 const DISAPPEARING_LABEL: &str = "8 hours";
 
+/// The phone's own hold vocabulary, in the phone's own numbers (§179): a press shorter than
+/// this many milliseconds is a tap and becomes the two-step mode's recording, a slide left
+/// past this many points has the release throw the note out, and a slide up past this many
+/// points locks the recording into the two-step bar without waiting for the finger. The same
+/// thresholds the Android client's mic button carries, so the gesture feels the same in the
+/// hand wherever it was learned.
+const MIC_QUICK_TAP_MS: u64 = 400;
+const MIC_CANCEL_SLIDE: f32 = 96.0;
+const MIC_LOCK_SLIDE: f32 = 72.0;
+
+/// The waveform's own geometry: bars three points wide with two between, on an
+/// eighteen-point strip — wide enough to read at a glance, narrow enough that a full note's
+/// fifty bars fit in a composer's row.
+const WAVE_BAR_WIDTH: f32 = 3.0;
+const WAVE_BAR_GAP: f32 = 2.0;
+const WAVE_STRIP_HEIGHT: f32 = 18.0;
+
 /// The composer.
 ///
 /// Enter sends, Shift+Enter inserts a newline. That is the convention every chat client uses, and
@@ -2259,9 +2403,12 @@ const DISAPPEARING_LABEL: &str = "8 hours";
 ///
 /// A message can be three things — text, a voice note, a file — and all three start here: the
 /// field types the first, the microphone records the second, the paperclip folds out a panel for
-/// the third. While a note is being recorded the composer is replaced by the recording bar,
-/// because a field that still accepts typing invites a message that arrives after — and
-/// interrupts — the note it would replace.
+/// the third. While a note is being recorded the composer is replaced by the recording's own
+/// face — the hold's row under a finger, the two-step bar without one — because a field that
+/// still accepts typing invites a message that arrives after — and interrupts — the note it
+/// would replace. A finished note waits in the preview's face, and a discarded one leaves its
+/// undo chip standing above whichever face comes next, §179's rule that an accidental cancel
+/// is a recoverable mistake.
 fn composer(
     ui: &mut Ui,
     context: &mut Context<'_>,
@@ -2272,38 +2419,220 @@ fn composer(
     let colors = palette(context.theme);
     let online = context.connection.is_online();
 
-    // The recording bar: this conversation's live note, a ticking length, and the only two
-    // honest actions — keep it or throw it away.
-    if let Some((recording_conversation, started)) = state.recording {
-        if recording_conversation == conversation_id {
+    // The held press's own frame, before any face is chosen: the release and the slides are
+    // the pointer's facts, not the composer's, so a hold begun in one conversation window
+    // must end honestly in whichever window the pointer lets go over. The slide zones are
+    // recomputed every frame — a drift out of the cancel zone and back is the truth on
+    // screen, not a latch the release would then contradict.
+    if state.mic_held {
+        let (released, position) =
+            ui.input(|i| (i.pointer.primary_released(), i.pointer.latest_pos()));
+        if let Some(position) = position {
+            if let Some(origin) = state.mic_press_origin {
+                let slide = position - origin;
+                state.mic_cancel_slide = slide.x < -MIC_CANCEL_SLIDE;
+                // A slide up past the lock threshold is the lock itself: the hold ends and
+                // the recording runs on into the two-step bar, whose Stop carries the rest
+                // of the vocabulary the finger no longer needs to hold.
+                if slide.y < -MIC_LOCK_SLIDE {
+                    mic_hold_end(state);
+                }
+            }
+        }
+        if state.mic_held && released {
+            let held_ms = state
+                .mic_hold_started
+                .map(|started| started.elapsed().as_millis())
+                .unwrap_or(0);
+            match hold_release(held_ms, state.mic_cancel_slide) {
+                ReleaseDecision::Send => context.issue(Command::SendVoiceNote),
+                ReleaseDecision::Cancel => context.issue(Command::CancelVoiceNote),
+                // A quick tap is the two-step mode's own start: the recording already runs,
+                // so the release hands it to the bar below rather than ending it.
+                ReleaseDecision::TwoStep => {}
+            }
+            mic_hold_end(state);
+        }
+    }
+
+    // The undo chip, above whichever face the composer wears: a discard's window is a fact
+    // about the note rather than about the face that discarded it, so the chip stands even
+    // while the next recording is already running — the seconds of mistake the window buys
+    // are not lost to someone changing their mind about a second take.
+    if state.note_discard_undo == Some(conversation_id) {
+        egui::Frame::new()
+            .fill(colors.surface)
+            .inner_margin(egui::Margin::symmetric(space::LG as i8, space::SM as i8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Recording discarded")
+                            .font(egui::FontId::proportional(font::SMALL))
+                            .color(colors.text_muted),
+                    );
+                    if ui.button("Undo").clicked() {
+                        context.issue(Command::UndoVoiceNoteDiscard);
+                    }
+                });
+            });
+    }
+
+    // Face one: the hold's own row. The press started the recording already, and while the
+    // finger stays down the row is the whole interface — the release sends, a quick tap
+    // hands the note to the two-step bar, and the slides are told by the hint rather than by
+    // buttons, because a button under a held press is a second gesture fighting the first.
+    if state.mic_held
+        && state
+            .recording
+            .as_ref()
+            .is_none_or(|view| view.conversation_id == conversation_id)
+    {
+        // The worker's own tick, restated for the row — and on the frame the press was made
+        // on, before the worker has said the recording began, the hold's own zero: a timer
+        // at 0:00 and a silent strip, for the frame it takes the event to arrive.
+        let (elapsed_ms, amplitudes) = match &state.recording {
+            Some(view) => (view.elapsed_ms, view.amplitudes.clone()),
+            None => (0, Vec::new()),
+        };
+        egui::Frame::new()
+            .fill(colors.surface)
+            .inner_margin(egui::Margin::symmetric(space::LG as i8, space::MD as i8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("\u{25CF} Recording")
+                            .font(egui::FontId::proportional(font::BODY))
+                            .color(colors.danger),
+                    );
+                    ui.label(
+                        RichText::new(human_duration(elapsed_ms as u32))
+                            .font(egui::FontId::proportional(font::BODY))
+                            .color(colors.text_muted),
+                    );
+                    let width = (ui.available_width() - space::LG).max(60.0);
+                    waveform_bars(ui, &amplitudes, colors.accent, width);
+                    // The timer is a clock: ask for frames on a cadence so it ticks instead
+                    // of freezing between interactions.
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(250));
+                });
+                ui.add_space(space::XS * 0.5);
+                ui.label(
+                    RichText::new(if state.mic_cancel_slide {
+                        "Release to cancel"
+                    } else {
+                        "Release to send \u{00B7} slide left to cancel \u{00B7} slide up to keep recording"
+                    })
+                    .font(egui::FontId::proportional(font::SMALL))
+                    .color(if state.mic_cancel_slide {
+                        colors.danger
+                    } else {
+                        colors.text_muted
+                    }),
+                );
+            });
+        return;
+    }
+
+    // Face two: the two-step mode's bar. The recording runs without a finger on it — started
+    // by a quick tap, a lock, an interruption's pause, or a recovery — so its vocabulary is
+    // buttons: the speaker's own pause, a stop into the preview, a cancel under the undo
+    // window.
+    if let Some(view) = state.recording.as_ref() {
+        if view.conversation_id == conversation_id {
+            egui::Frame::new()
+                .fill(colors.surface)
+                .inner_margin(egui::Margin::symmetric(space::LG as i8, space::MD as i8))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let (word, ink) = if view.paused {
+                            ("Paused", colors.text_muted)
+                        } else {
+                            ("Recording", colors.danger)
+                        };
+                        ui.label(
+                            RichText::new(format!("\u{25CF} {word}"))
+                                .font(egui::FontId::proportional(font::BODY))
+                                .color(ink),
+                        );
+                        ui.label(
+                            RichText::new(human_duration(view.elapsed_ms as u32))
+                                .font(egui::FontId::proportional(font::BODY))
+                                .color(colors.text_muted),
+                        );
+                        let width = (ui.available_width() - 240.0).max(60.0);
+                        waveform_bars(ui, &view.amplitudes, colors.accent, width);
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(250));
+                        let pause = if view.paused { "Resume" } else { "Pause" };
+                        if ui.button(pause).clicked() {
+                            // The pause and the resume are the same button's two words: the
+                            // bar's state is the worker's own, restated here, so the word
+                            // shown is always the one the press performs.
+                            context.issue(if view.paused {
+                                Command::ResumeRecording
+                            } else {
+                                Command::PauseRecording
+                            });
+                        }
+                        if ui.button("Cancel").clicked() {
+                            context.issue(Command::CancelVoiceNote);
+                        }
+                        if ui.button("Stop").clicked() {
+                            context.issue(Command::StopRecording);
+                        }
+                    });
+                });
+            return;
+        }
+    }
+
+    // Face three: the preview. The note is finished and held; the composer's word is the only
+    // thing it waits on. Delete hands it to the undo window rather than destroying it
+    // outright, and Send reads the bytes back from the store and seals them into the
+    // conversation — the same door every attachment leaves through.
+    if let Some(preview) = state.note_preview.as_ref() {
+        if preview.conversation_id == conversation_id {
+            // The buttons only speak; the composer decides after the frame is drawn, so the
+            // bar's own borrow of the preview ends before its word is acted on.
+            let mut delete = false;
+            let mut send = false;
             egui::Frame::new()
                 .fill(colors.surface)
                 .inner_margin(egui::Margin::symmetric(space::LG as i8, space::MD as i8))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("\u{25CF} Recording")
+                            RichText::new("\u{1F3A4} Voice note")
                                 .font(egui::FontId::proportional(font::BODY))
-                                .color(colors.danger),
+                                .color(colors.text),
                         );
-                        let elapsed = started.elapsed().as_millis() as u32;
                         ui.label(
-                            RichText::new(human_duration(elapsed))
+                            RichText::new(human_duration(preview.duration_ms))
                                 .font(egui::FontId::proportional(font::BODY))
                                 .color(colors.text_muted),
                         );
-                        // The length is a clock: ask for frames on a cadence so it ticks
-                        // instead of freezing between interactions.
-                        ui.ctx()
-                            .request_repaint_after(std::time::Duration::from_millis(500));
-                        if ui.button("Cancel").clicked() {
-                            context.issue(Command::StopRecording { send: false });
+                        let width = (ui.available_width() - 200.0).max(60.0);
+                        waveform_bars(ui, &preview.waveform, colors.accent, width);
+                        if ui.button("Delete").clicked() {
+                            delete = true;
                         }
                         if ui.button("Send").clicked() {
-                            context.issue(Command::StopRecording { send: true });
+                            send = true;
                         }
                     });
                 });
+            if delete {
+                context.issue(Command::CancelVoiceNote);
+            }
+            if send {
+                // The optimistic hand-off, the same trade a text send makes: the bar steps
+                // aside on the word, and a failure on the way brings it back — the worker
+                // restores the draft's preview on every failure path, so the note is only
+                // really gone when the send says it went.
+                state.note_preview = None;
+                context.issue(Command::SendVoiceNote);
+            }
             return;
         }
     }
@@ -2448,12 +2777,28 @@ fn composer(
                 }
 
                 // The microphone and the paperclip: the two things a message can be besides
-                // text, one press away from the field that types the third.
-                if ui
-                    .button(RichText::new("\u{1F3A4}").font(egui::FontId::proportional(font::BODY)))
-                    .on_hover_text("Record a voice note")
-                    .clicked()
-                {
+                // text, one press away from the field that types the third. The microphone
+                // begins on the press itself, not the click — the hold is the mode, §179's
+                // first interaction: the press starts the capture and the release decides
+                // among send, cancel, and the two-step handover, so a click that only began
+                // on release would have already thrown away the hold's own meaning.
+                let mic = ui
+                    .add_enabled(
+                        online,
+                        egui::Button::new(
+                            RichText::new("\u{1F3A4}").font(egui::FontId::proportional(font::BODY)),
+                        ),
+                    )
+                    .on_hover_text("Hold to record a voice note");
+                if mic.is_pointer_button_down_on() && !state.mic_held && state.recording.is_none() {
+                    state.mic_held = true;
+                    // The slides are measured from the press's own origin rather than the
+                    // button's frame, so the composer trading its field for the hold's row
+                    // mid-press — a layout shift under the very finger making it — cannot
+                    // move the goal.
+                    state.mic_press_origin = ui.input(|i| i.pointer.latest_pos());
+                    state.mic_hold_started = Some(std::time::Instant::now());
+                    state.mic_cancel_slide = false;
                     context.issue(Command::StartRecording {
                         conversation_id,
                         expires_in_ms: state
@@ -2528,6 +2873,73 @@ fn day_label(at: migo_core::Timestamp) -> String {
 fn human_duration(ms: u32) -> String {
     let total = ms / 1000;
     format!("{}:{:02}", total / 60, total % 60)
+}
+
+/// The three ways a held microphone press can end. Drawn nowhere; it is the vocabulary
+/// [`hold_release`] speaks, so the release and the hint under it can never disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReleaseDecision {
+    /// The finger's own send: the note is finalised and sealed on the spot.
+    Send,
+    /// The slide away: the note is handed to the undo window rather than destroyed.
+    Cancel,
+    /// The quick tap: the recording runs on into the two-step bar.
+    TwoStep,
+}
+
+/// What a held microphone's release does, from the hold's own two facts: how long the press
+/// was held, and whether it had slid into its cancel zone. The phone's whole hold vocabulary
+/// in one place — slide away to throw the note out, a quick tap to hand the note to the
+/// two-step bar, anything longer to send — with the same thresholds the Android client's mic
+/// button carries, so the same gesture means the same thing wherever it was learned.
+fn hold_release(held_ms: u128, cancelled: bool) -> ReleaseDecision {
+    if cancelled {
+        ReleaseDecision::Cancel
+    } else if held_ms < u128::from(MIC_QUICK_TAP_MS) {
+        ReleaseDecision::TwoStep
+    } else {
+        ReleaseDecision::Send
+    }
+}
+
+/// Ends the hold, wherever it ended: the press's own facts come off the state together, since
+/// a hold that is half-remembered — a timer without an origin, a cancel zone without a
+/// press — is a gesture the next press would inherit rather than start clean.
+fn mic_hold_end(state: &mut ChatState) {
+    state.mic_held = false;
+    state.mic_press_origin = None;
+    state.mic_hold_started = None;
+    state.mic_cancel_slide = false;
+}
+
+/// The waveform's own drawing: a strip of bars, one per sampled amplitude, mirrored around
+/// the strip's midline the way every client draws them, newest at the right — the recording's
+/// own direction, so what is being said now is always at the right edge, and a strip with
+/// more bars than it has room for drops its oldest, never its newest. Each bar has a small
+/// floor so a held silence still shows a pulse to read.
+fn waveform_bars(ui: &mut Ui, bars: &[u8], color: egui::Color32, width: f32) {
+    let pitch = WAVE_BAR_WIDTH + WAVE_BAR_GAP;
+    let capacity = ((width / pitch).floor() as usize).max(1);
+    let shown = if bars.len() > capacity {
+        &bars[bars.len() - capacity..]
+    } else {
+        bars
+    };
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(width, WAVE_STRIP_HEIGHT), egui::Sense::hover());
+    let mid = rect.center().y;
+    let right = rect.right() - WAVE_BAR_GAP;
+    // Newest first from the right edge, so the strip right-aligns what is being said.
+    for (index, bar) in shown.iter().rev().enumerate() {
+        let magnitude = (*bar as f32 / 255.0).max(0.15);
+        let height = (magnitude * WAVE_STRIP_HEIGHT).min(WAVE_STRIP_HEIGHT);
+        let bar_rect = egui::Rect::from_center_size(
+            egui::pos2(right - index as f32 * pitch - WAVE_BAR_WIDTH / 2.0, mid),
+            egui::vec2(WAVE_BAR_WIDTH, height),
+        );
+        ui.painter()
+            .rect_filled(bar_rect, egui::CornerRadius::same(1), color);
+    }
 }
 
 #[cfg(test)]
@@ -2707,6 +3119,7 @@ mod tests {
         let voice = Body::VoiceNote {
             media_id: Id::from_bytes([2; 16]),
             duration_ms: 1_500,
+            waveform: None,
         };
         assert!(!body_matches("1", &voice));
         let reaction = Body::Reaction {
@@ -2755,5 +3168,39 @@ mod tests {
 
         // No question asked: nothing is filtered, whatever the panel's field holds.
         assert!(search_needle("   ").is_none());
+    }
+
+    /// The hold's whole vocabulary in one place, the same thresholds the phone carries: a
+    /// slide into the cancel zone throws the note out whatever the clock says, a quick tap
+    /// hands the recording to the two-step bar, and anything longer sends. The boundary is
+    /// honest in the tap's favour — held exactly the quick-tap window, a press is already a
+    /// hold — because a tap that almost made it is a note the sender meant to keep talking to.
+    #[test]
+    fn a_held_release_speaks_the_phones_vocabulary() {
+        assert_eq!(
+            hold_release(150, false),
+            ReleaseDecision::TwoStep,
+            "a quick tap keeps recording"
+        );
+        assert_eq!(
+            hold_release(u128::from(MIC_QUICK_TAP_MS), false),
+            ReleaseDecision::Send,
+            "held exactly the quick-tap window is already a hold"
+        );
+        assert_eq!(
+            hold_release(2_000, false),
+            ReleaseDecision::Send,
+            "a long hold sends"
+        );
+        assert_eq!(
+            hold_release(150, true),
+            ReleaseDecision::Cancel,
+            "the cancel zone wins over the clock"
+        );
+        assert_eq!(
+            hold_release(2_000, true),
+            ReleaseDecision::Cancel,
+            "the cancel zone wins over a long hold"
+        );
     }
 }
