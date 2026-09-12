@@ -148,7 +148,8 @@ pub fn group_join_event(
 
 /// Builds the departure event the roster hears: `Ended` naming the leaver and
 /// the size after the change — `Ended` because the wire's vocabulary has no
-/// "left" state, and the reason slot carries [`EndReason::ByCaller`]'s number
+/// "left" state, and the reason slot carries
+/// [`EndReason::ByCaller`](crate::model::EndReason::ByCaller)'s number
 /// so a client rendering the optional reason still renders something honest
 /// (the participant withdrew themselves).
 #[must_use]
