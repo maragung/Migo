@@ -67,9 +67,13 @@ not render. Client-side filtering saves rendering; server-side filtering saves b
   `server/crates/migo-protocol/tests/budgets.rs`, which encodes typical frames
   with the real encoder and the real AEAD and asserts each budget above. A
   struct that grows a field fails the build naming the budget it broke.
-- The gateway exports `migo_frames_total`, `migo_frame_bytes_bucket` and
-  `migo_dropped_frames_total`, all labelled by opcode and class. Regressions show up as a
-  bytes-per-message shift.
+- The gateway exports `migo_gateway_frames_in_total` and
+  `migo_gateway_frames_out_total` (unlabelled) plus
+  `migo_gateway_frames_dropped_total` labelled by delivery class, so a regression
+  shows up as a shift in the frames-in to frames-out ratio. There is no
+  bytes-per-opcode histogram on purpose: ciphertext length is a side channel, so
+  per-message byte measurement is done by the per-opcode frame size tests, not by
+  a metric series.
 - `tools/loadgen` reports bytes/user/minute per scenario; CI fails the perf job if a
   scenario exceeds its budget by more than 10 %.
 - The web client logs a per-session byte counter in development so a feature's cost is
