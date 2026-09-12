@@ -309,9 +309,9 @@ impl RoomRelay {
     /// would either drop it or duplicate it.
     async fn to_owner(&self, room: &Room, inner: Frame, now: Timestamp) -> Result<()> {
         if room.home_region == self.mesh.region() {
-            return self.fan_out(room.id, inner, None, now).await;
+            return self.fan_out(room.room_id, inner, None, now).await;
         }
-        self.send_to_home(room.id, room.home_region.as_str(), inner, now)
+        self.send_to_home(room.room_id, room.home_region.as_str(), inner, now)
             .await
     }
 
@@ -383,6 +383,8 @@ impl RoomRelay {
             payload: inner.encode().map_err(fault::from_wire)?.to_vec(),
         };
         let payload = encode_envelope(Opcode::FedRoomEvent, &envelope)?;
+        // The pending handle is the outbox's business, not this tier's: what
+        // the caller needs to know is whether the copy is queued.
         self.mesh
             .enqueue(
                 FederatedEvent {
@@ -393,6 +395,7 @@ impl RoomRelay {
                 now,
             )
             .await
+            .map(|_queued| ())
     }
 
     /// The allowed peer that homes a region, if the allow-list names one.

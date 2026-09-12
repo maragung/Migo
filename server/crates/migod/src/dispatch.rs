@@ -341,7 +341,7 @@ impl AppDispatcher {
                 {
                     tracing::warn!(
                         %error,
-                        room = %room.id.to_text(),
+                        room = %room.room_id.to_text(),
                         "cannot enqueue the federated half of a room message"
                     );
                 }
