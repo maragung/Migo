@@ -820,6 +820,14 @@ where
             return Err(error);
         }
 
+        // The call the id names, if it names one. Read before the gate so
+        // the gate can be asked about the conversation the call actually
+        // lives in — a retried id that names the wrong conversation is a
+        // client bug the mismatch below must answer, not something a
+        // membership question about a conversation the call was never
+        // minted for should shadow.
+        let existing = self.groups.get(call_id).await?;
+
         // The gate, asked the membership question only: a group call's roster
         // is the conversation's members, so the pairwise questions the 1:1
         // gate asks have no group counterpart to ask — the caller is seated
@@ -827,27 +835,26 @@ where
         // the conversation's own existence as a call-able thing rides the
         // same membership row. Fail closed, and answer NOT_FOUND so a
         // stranger learns nothing about which conversations hold calls.
+        let gated_conversation = existing
+            .as_ref()
+            .map_or(conversation_id, |call| call.conversation_id);
         if !self
             .gate
-            .may_invite(conversation_id, caller.account_id)
+            .may_invite(gated_conversation, caller.account_id)
             .await
         {
             self.meters.group_join(GroupJoinKind::Blocked);
             return Err(fault::not_found("conversation"));
         }
 
-        let existing = self.groups.get(call_id).await?;
-        let mut call = match existing {
-            Some(call) => call,
-            None => GroupCall {
-                call_id,
-                conversation_id,
-                founder_id: caller.account_id,
-                participants: Vec::new(),
-                started_at: caller.now,
-                ended_at: None,
-            },
-        };
+        let mut call = existing.unwrap_or_else(|| GroupCall {
+            call_id,
+            conversation_id,
+            founder_id: caller.account_id,
+            participants: Vec::new(),
+            started_at: caller.now,
+            ended_at: None,
+        });
         if call.conversation_id != conversation_id {
             // The id is spent on a different conversation's call: the same
             // IDEMPOTENCY_MISMATCH the invite path answers, for the same
