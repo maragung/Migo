@@ -2169,8 +2169,7 @@ async fn a_roster_page_carries_the_revision_it_was_read_at() {
                 RoomRole::Helper,
             )
             .await
-            .expect("the owner outranks everybody")
-            .expect("a role that moved is announced"),
+            .expect("the owner outranks everybody"),
     );
     assert!(
         event.revision.unwrap_or(0) > roster.revision,
