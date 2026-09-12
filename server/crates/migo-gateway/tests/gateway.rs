@@ -1242,8 +1242,16 @@ async fn an_allocated_opcode_at_the_reserved_head_is_not_caught_by_the_range_gat
     let pipe = Pipe::new();
     pipe.client(Opcode::Hello, 1, &hello());
     // An Entitlements request out of session state: the phase gate answers it, which is
-    // exactly the proof that the range gate did not intercept it first.
-    pipe.client(Opcode::Entitlements, 2, &migo_protocol::EntitlementsReq {});
+    // exactly the proof that the range gate did not intercept it first. The page
+    // arguments are empty because the request never reaches the listing handler.
+    pipe.client(
+        Opcode::Entitlements,
+        2,
+        &migo_protocol::EntitlementsReq {
+            limit: None,
+            cursor: None,
+        },
+    );
 
     h.serve(&pipe).await;
 
