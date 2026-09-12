@@ -25,6 +25,12 @@
  * * After {@link MAX_MESSAGES_PER_CHAIN} messages, so a compromise has a bounded window even in a
  *   group where nobody ever leaves.
  *
+ * Every rotation is labeled by a `groupKeyEpoch` that rises monotonically with it, and the number
+ * travels in the distribution. The receiver's half of "the epoch never regresses" is
+ * {@link ReceiverKeyState.adopt}: a distribution that does not advance the generation the receiver
+ * already holds is refused rather than installed, so a member who re-sends an old distribution
+ * cannot strand a peer on a dead chain.
+ *
  * Rotation on removal is a correctness requirement, not a policy knob. A group implementation that
  * skips it has a member who left in March still reading messages in August.
  *
@@ -66,6 +72,12 @@ const GROUP_DOMAIN = new TextEncoder().encode('migo-sender-key-v1');
  * {@link exposeChainKey}; everything else in this type is not secret.
  */
 export class SenderKeyDistribution {
+  /**
+   * The membership generation this chain belongs to. Rises on every rotation, never repeats, never
+   * regresses — and travels *in* the distribution, because the receiver's whole defence against a
+   * stale one is comparing this number against the generation it already holds.
+   */
+  readonly groupKeyEpoch: number;
   /** Which chain this is, so a rotation can be distinguished from a resend. */
   readonly chainId: number;
   /**
@@ -81,11 +93,13 @@ export class SenderKeyDistribution {
   readonly identity: IdentityPublic;
 
   constructor(
+    groupKeyEpoch: number,
     chainId: number,
     messageNumber: number,
     chainKey: Uint8Array,
     identity: IdentityPublic,
   ) {
+    this.groupKeyEpoch = groupKeyEpoch;
     this.chainId = chainId;
     this.messageNumber = messageNumber;
     this.#chainKey = chainKey;
@@ -95,16 +109,17 @@ export class SenderKeyDistribution {
   /**
    * Borrows the chain key. The greppable audit point for this secret leaving the type.
    *
-   * Returns the live buffer, as {@link SymmetricKey.expose} does; the only caller,
-   * {@link ReceiverKeyState.accept}, copies it into its own state immediately.
+   * Returns the live buffer, as {@link SymmetricKey.expose} does; the only callers,
+   * {@link ReceiverKeyState.accept} and {@link ReceiverKeyState.adopt}, copy it into their own
+   * state immediately.
    */
   exposeChainKey(): Uint8Array {
     return this.#chainKey;
   }
 
-  /** `SenderKeyDistribution(chain_id: N, message_number: M, chain_key: ***)`. Never the key. */
+  /** `SenderKeyDistribution(group_key_epoch: E, chain_id: N, message_number: M, chain_key: ***)`. Never the key. */
   toString(): string {
-    return `SenderKeyDistribution(chain_id: ${this.chainId}, message_number: ${this.messageNumber}, chain_key: ***)`;
+    return `SenderKeyDistribution(group_key_epoch: ${this.groupKeyEpoch}, chain_id: ${this.chainId}, message_number: ${this.messageNumber}, chain_key: ***)`;
   }
 
   /** `console.log` and `util.inspect` in Node. */
@@ -199,9 +214,16 @@ export class SenderKeyState {
    *
    * The chain key is copied into the distribution, not shared: this state's key advances with every
    * message, and a distribution that aliased it would silently change under the recipient.
+   *
+   * The epoch is passed in rather than held: this class tracks one chain, while the membership
+   * generation belongs to the conversation around it (the SDK layer's `GroupCrypto` owns the
+   * numbering, as the Rust sender state owns its own). The distribution names the generation so
+   * the receiver can refuse a stale one before any key material moves — see
+   * {@link ReceiverKeyState.adopt}.
    */
-  distribution(identity: IdentitySecret): SenderKeyDistribution {
+  distribution(groupKeyEpoch: number, identity: IdentitySecret): SenderKeyDistribution {
     return new SenderKeyDistribution(
+      groupKeyEpoch,
       this.#chainId,
       this.#messageNumber,
       this.#chainKey.slice(),
@@ -237,33 +259,101 @@ export class SenderKeyState {
 
 /** The receiving half: one per (group, sender) pair. */
 export class ReceiverKeyState {
-  readonly #chainId: number;
+  /**
+   * The membership generation this state's chain belongs to. The baseline every later distribution
+   * from this sender is measured against; only {@link ReceiverKeyState.adopt} moves it, and only
+   * forward.
+   */
+  #groupKeyEpoch: number;
+  #chainId: number;
   #chainKey: Uint8Array;
   #nextMessageNumber: number;
-  readonly #identity: IdentityPublic;
+  #identity: IdentityPublic;
   /** Keys derived for messages that have not arrived yet, oldest first. */
   readonly #skipped: Array<{ number: number; key: Uint8Array; nonce: Uint8Array }> = [];
 
   private constructor(
+    groupKeyEpoch: number,
     chainId: number,
     chainKey: Uint8Array,
     nextMessageNumber: number,
     identity: IdentityPublic,
   ) {
+    this.#groupKeyEpoch = groupKeyEpoch;
     this.#chainId = chainId;
     this.#chainKey = chainKey;
     this.#nextMessageNumber = nextMessageNumber;
     this.#identity = identity;
   }
 
-  /** Accepts a distribution message and starts tracking the sender's chain. */
+  /**
+   * Accepts the *first* distribution a receiver sees from this sender.
+   *
+   * The first distribution is the baseline: there is no earlier generation to compare against, so
+   * any epoch is accepted here and every later one is measured from it. Freshness of the baseline
+   * is vouched for by the pairwise channel it arrived through. Once state exists, use
+   * {@link ReceiverKeyState.adopt} — this constructor never refuses anything and must not be used
+   * to replace held state.
+   */
   static accept(distribution: SenderKeyDistribution): ReceiverKeyState {
     return new ReceiverKeyState(
+      distribution.groupKeyEpoch,
       distribution.chainId,
       distribution.exposeChainKey().slice(),
       distribution.messageNumber,
       distribution.identity,
     );
+  }
+
+  /**
+   * Adopts a distribution into state that already tracks this sender.
+   *
+   * This is the receiver's half of "the epoch never regresses". Four cases, in the order they are
+   * decided:
+   *
+   * * **Older epoch** — refused with `keyAlreadyUsed`. This is the stale-distribution attack: a
+   *   member re-sends a distribution from before the last membership change, and if it were
+   *   installed the receiver would sit on a chain nothing further is sealed under. The held state
+   *   is untouched, so the receiver keeps reading on the current chain and can still re-sync
+   *   forward.
+   * * **Same epoch, same chain** — a re-send of the distribution the receiver already holds. Not a
+   *   regression, and not a reason to re-install either: re-installing would rewind the receiver's
+   *   position inside the live chain. Succeeds as a no-op.
+   * * **Same epoch, different chain** — refused. A rotation always raises the epoch, so a second
+   *   chain at one generation is a swap, not a rotation.
+   * * **Newer epoch** — installed. The old chain key and every skipped key are zeroed before the
+   *   new state lands, and the skipped window is emptied because message numbers restart with the
+   *   chain.
+   *
+   * The boundary of this guarantee: refusing a stale distribution protects liveness and
+   * correctness of the receiver's chain, not confidentiality — the harm refused is a stranded
+   * receiver, which is a denial of message delivery until re-sync, not a disclosure.
+   */
+  adopt(distribution: SenderKeyDistribution): void {
+    if (distribution.groupKeyEpoch < this.#groupKeyEpoch) {
+      throw CryptoError.keyAlreadyUsed();
+    }
+    if (distribution.groupKeyEpoch === this.#groupKeyEpoch) {
+      if (distribution.chainId === this.#chainId) {
+        return;
+      }
+      throw CryptoError.keyAlreadyUsed();
+    }
+    this.#chainKey.fill(0);
+    for (const entry of this.#skipped) {
+      entry.key.fill(0);
+    }
+    this.#skipped.length = 0;
+    this.#groupKeyEpoch = distribution.groupKeyEpoch;
+    this.#chainId = distribution.chainId;
+    this.#chainKey = distribution.exposeChainKey().slice();
+    this.#nextMessageNumber = distribution.messageNumber;
+    this.#identity = distribution.identity;
+  }
+
+  /** The membership generation this state holds. */
+  groupKeyEpoch(): number {
+    return this.#groupKeyEpoch;
   }
 
   /** Which chain this state tracks. */

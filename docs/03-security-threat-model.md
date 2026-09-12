@@ -265,7 +265,7 @@ mechanism is §12.3 C1–C25); node private keys exist only inside boundary 3.
 | C12 | A member who joins mid-conversation cannot read history                                                                                                                    | `sender_key.rs::a_new_member_cannot_read_history`                                                                                                                                                                                                 |
 | C13 | A member who left cannot read after the rekey                                                                                                                              | `sender_key.rs::a_member_who_left_cannot_read_after_the_rekey`, `tests/threat_model.rs::a_stolen_group_chain_key_reads_forward_only_until_the_rotation`                                                                                           |
 | C14 | The group epoch rises monotonically and saturates instead of rolling over                                                                                                  | `sender_key.rs::the_epoch_saturates_instead_of_rolling_over`, `rotation_raises_the_epoch_and_mints_a_fresh_chain`                                                                                                                                 |
-| C15 | A receiver refuses a sender-key distribution whose epoch does not advance                                                                                                  | **Unverified — finding F2 below.** `ReceiverKeyState::accept` carries no epoch at all; the refusal belongs to the runtime distribution wiring that brief section 163 still marks SPEC                                                             |
+| C15 | A receiver refuses a sender-key distribution whose epoch does not advance. The first distribution is the baseline at whatever epoch it names; a re-send of the held distribution is a no-op, a second chain at the same epoch is refused, and a newer one re-syncs the receiver forward | `sender_key.rs::a_stale_distribution_does_not_displace_a_current_one`, `an_adopted_distribution_re_syncs_the_receiver_forward`, `a_resent_distribution_is_not_a_regression`, `a_second_chain_at_the_same_epoch_is_refused`, `the_first_distribution_is_the_baseline_whatever_epoch_it_names`; the accept paths above the crypto layer enforce the same rule (desktop pinned by `group.rs::a_stale_distribution_does_not_displace_the_current_chain`, the SDK's and Android's `GroupCrypto` route through `adopt`) |
 | C16 | Sender keys have forward secrecy but **no** post-compromise security within a chain; the window is bounded by rotation (2000 messages) and closed by any membership change | `tests/threat_model.rs::a_stolen_group_chain_key_reads_forward_only_until_the_rotation` (pins both halves, including the thief reading forward); `sender_key.rs::a_chain_refuses_to_run_past_its_rotation_bound`                                  |
 | C17 | A call's media key is derived from the session secret, bound to its call id, and never equals a message key                                                                | `call_key.rs::both_sides_derive_the_same_key_from_one_session`, `a_call_key_is_bound_to_its_call`, `a_call_key_is_not_a_message_key`, plus the independent RFC 5869 pin `the_derivation_is_pinned_to_an_independent_vector`                       |
 | C18 | A call-key update must open under the current key and advance the epoch; replays and rollbacks are refused and leave the working key intact                                | `call_key.rs::an_update_that_does_not_advance_the_epoch_is_refused`, `a_tampered_update_is_refused`, `an_update_bound_to_a_different_epoch_is_refused`                                                                                            |
@@ -276,6 +276,7 @@ mechanism is §12.3 C1–C25); node private keys exist only inside boundary 3.
 | C23 | Signatures never transfer between the mesh, prekey, and group-message domains, even when one key serves all three                                                          | `tests/threat_model.rs::signatures_never_transfer_between_the_mesh_prekey_and_group_domains`                                                                                                                                                      |
 | C24 | The mesh handshake refuses reflection, cross-peer replay, stale and future timestamps, and version mismatch                                                                | `node.rs` tests (all of them), `migo-federation/tests/federation.rs::a_replayed_nonce_is_refused_even_within_the_clock_window`, `a_proof_whose_timestamp_is_outside_the_skew_window_is_refused`                                                   |
 | C25 | The server's complete record of a conversation — both bundles, the initial message, every frame — decrypts nothing, even replayed against an attacker's own private keys   | `tests/threat_model.rs::everything_the_server_records_of_a_conversation_decrypts_nothing`                                                                                                                                                         |
+| C26 | A participant joining a group call mid-progress receives the current epoch's key sealed under their own pairwise session with the distributor: it opens only for them, is bound to its call, opens current media, refuses pre-join media (when the distributor rotates on join — an unrotated call hands the epoch-0 key and pre-join media opens under it, pinned as the boundary, not hidden), and the joiner rides later rotations like every other seat | `call_key.rs::a_mid_call_joiner_receives_the_current_key_sealed_for_them`, `a_call_that_never_rotated_hands_the_joiner_the_epoch_zero_key`, `a_joiner_rides_the_rotations_after_their_first_key`, `a_join_distribution_needs_the_joiners_session`, `a_join_distribution_cannot_be_replayed_onto_another_call`, `a_tampered_join_distribution_is_refused`, `a_truncated_join_distribution_is_refused`, `the_join_wrapping_key_is_not_the_call_key`; the same flow over real sockets in `migod/tests/sfu_wire.rs::a_mid_call_joiner_receives_the_current_key_sealed_for_them` |
 
 Key publication is the server-side half of the same boundary:
 `migo-keys` refuses an unverified prekey signature and an already-expired
@@ -379,6 +380,13 @@ over, and should each close as either a code change or a brief amendment:
   loss (the old chain cannot read the new one). The brief already marks the
   runtime distribution wiring SPEC, so this is an unbuilt requirement, not a
   quiet divergence; C15 stays unverified until it lands.
+  **Closed:** the distribution now carries `group_key_epoch` and
+  `ReceiverKeyState::adopt` enforces the receiver half — an older epoch is
+  refused with the held state untouched, a re-send of the held chain is a
+  no-op that does not rewind the receiver's position, a second chain at the
+  same epoch is refused, and a newer epoch installs after zeroizing the old
+  material — mirrored across `migo-crypto`, the desktop, the TypeScript SDK,
+  and Android. C15 is now pinned above.
 - **F3 — "recorded as an incident" is a counter, not a record.** Brief section 162
   says a Server-auth-level frame from a client socket "WAJIB ditolak dan
   dicatat sebagai insiden" (must be refused and recorded as an incident). The
@@ -390,6 +398,17 @@ over, and should each close as either a code change or a brief amendment:
   convention documented in `call_key.rs`, not code: `migo-crypto` provides the
   sealed-rotation mechanism (C18) but nothing distributes the epoch-0 key to a
   joiner. Same status as F2 — SPEC, and marked unverified here.
+  **Closed at the mechanism level (see C26):**
+  `CallKeyState::sealed_join_distribution` seals the current epoch and key
+  under a wrapping key derived from the *joiner's* pairwise session (HKDF
+  under `kdf::LABEL_CALL_JOIN`, the call id as salt and associated data), and
+  `from_join_distribution` opens it into the joiner's first state. The
+  addressed roster relay a `CallSdp` already provides carries the sealed blob
+  device to device — no server-side change and no second sealing scheme, and
+  the server sees only the sealed bytes (pinned over real sockets in
+  `migod/tests/sfu_wire.rs`). What remains SPEC is the client-side trigger:
+  the joining client asking its seated peer for the distribution and applying
+  it on arrival, which is UI wiring above the crypto layer.
 
 ### 12.6 Verification index
 
@@ -398,13 +417,13 @@ Pinned claims live in five places, all run by CI:
 | Suite                          | File                                                                                 | Holds                                               |
 | ------------------------------ | ------------------------------------------------------------------------------------ | --------------------------------------------------- |
 | Threat-model composition tests | `server/crates/migo-crypto/tests/threat_model.rs`                                    | C3, C13, C16, C21, C23, C25 (new with this section) |
-| Crypto unit tests              | `server/crates/migo-crypto/src/*.rs`, `#[cfg(test)]`                                 | C1, C2, C4–C14, C17–C20, C22, C24                   |
+| Crypto unit tests              | `server/crates/migo-crypto/src/*.rs`, `#[cfg(test)]`                                 | C1, C2, C4–C15, C17–C20, C22, C24, C26              |
 | Cross-language vectors         | `server/crates/migo-crypto/tests/vectors.rs`, `packages/crypto/test/vectors.test.ts` | L2, and the byte-level construction of KDF/AEAD/MAC |
 | Gateway integration tests      | `server/crates/migo-gateway/tests/gateway.rs`                                        | G1–G6, W1                                           |
 | Federation integration tests   | `server/crates/migo-federation/tests/federation.rs`                                  | C24 (runtime half), M1–M5                           |
+| Group-call wire tests          | `server/crates/migod/tests/sfu_wire.rs`                                              | C26 (the sealed first key over real sockets)        |
 
-Currently unverified: C15 (receiver epoch), G7 (check ordering), G8 (WS TLS,
-contradicted by F1), L4 (platform key storage). Everything else in this
-section names its test.
+Currently unverified: G7 (check ordering), G8 (WS TLS, contradicted by F1), L4
+(platform key storage). Everything else in this section names its test.
 
 Report a vulnerability: see [`../SECURITY.md`](../SECURITY.md).

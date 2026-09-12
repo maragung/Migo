@@ -46,8 +46,8 @@
 //! | [`identity`] | Long-term identity, ephemeral key pairs, signed prekeys |
 //! | [`x3dh`] | Asynchronous session establishment against a published bundle |
 //! | [`ratchet`] | Double Ratchet for 1:1 conversations |
-//! | [`sender_key`] | Sender-key ratchet for groups: encrypt once, fan out |
-//! | [`call_key`] | Call media keys: derived from the session, rotated under seal |
+//! | [`sender_key`] | Sender-key ratchet for groups: encrypt once, fan out; the receiver refuses a stale distribution |
+//! | [`call_key`] | Call media keys: derived from the session, rotated under seal, sealed for a mid-call joiner |
 //! | [`passphrase`] | Argon2id hashing and verification |
 //! | [`mac`] | HMAC-SHA256 for session tokens, cursors, and signed URLs |
 //! | [`node`] | Server node identity and the mesh handshake |

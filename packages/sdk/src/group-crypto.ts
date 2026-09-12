@@ -43,6 +43,7 @@
 
 import type { Id } from '@migo/wire';
 import {
+  CryptoError,
   IdentityPublic,
   IDENTITY_PUBLIC_LEN,
   ReceiverKeyState,
@@ -134,7 +135,7 @@ export class GroupCrypto {
    */
   distributionFor(conversationId: Id): Uint8Array {
     const entry = this.#ensureSending(conversationId);
-    return serializeDistribution(entry.state.distribution(this.#keys.identity()));
+    return serializeDistribution(entry.state.distribution(entry.epoch, this.#keys.identity()));
   }
 
   /** Whether a member device still needs the current chain's distribution. */
@@ -173,15 +174,30 @@ export class GroupCrypto {
   /**
    * Accepts a sender-key distribution from a remote device, so its future messages can be opened.
    *
-   * A later distribution for the same sender replaces the earlier one: that is how a rotation is
-   * adopted — the sender rotates, re-distributes, and this overwrites the stale receiver state.
+   * The first distribution from a sender is the baseline this device measures every later one
+   * against. A later distribution must advance the epoch the receiver holds: one that does not is
+   * dropped with the current chain kept, so a member re-sending an old distribution cannot strand
+   * this device on a chain that no longer seals anything — and a genuine rotation is still
+   * adopted, because its epoch is higher.
    */
   acceptDistribution(conversationId: Id, senderDeviceId: Id, distributionBytes: Uint8Array): void {
     const distribution = parseDistribution(distributionBytes);
-    this.#receiving.set(
-      receiverKey(conversationId, senderDeviceId),
-      ReceiverKeyState.accept(distribution),
-    );
+    const key = receiverKey(conversationId, senderDeviceId);
+    const existing = this.#receiving.get(key);
+    if (existing === undefined) {
+      this.#receiving.set(key, ReceiverKeyState.accept(distribution));
+      return;
+    }
+    try {
+      existing.adopt(distribution);
+    } catch (error) {
+      // A distribution that does not advance the held epoch is refused by the crypto layer; the
+      // refusal is the mechanism, not a failure to surface. The receiver keeps its current chain
+      // and re-syncs forward when a genuinely newer distribution arrives.
+      if (!(error instanceof CryptoError && error.kind === 'KeyAlreadyUsed')) {
+        throw error;
+      }
+    }
   }
 
   /** Whether a distribution has been accepted for a remote sender device. */
@@ -264,9 +280,16 @@ function randomChainId(): number {
   return out[0] as number;
 }
 
-/** Serialises a distribution: chain id, message number, the 32-byte chain key, the 64-byte identity. */
+/**
+ * Serialises a distribution: the epoch, chain id, message number, the 32-byte chain key, the
+ * 64-byte identity.
+ *
+ * The epoch leads, so a receiver can refuse a stale distribution before any key material moves.
+ * The layout matches the desktop's `group.rs` and Android's `GroupCrypto.kt` byte-for-byte.
+ */
 function serializeDistribution(distribution: SenderKeyDistribution): Uint8Array {
   const writer = new EnvelopeWriter();
+  writer.varint(distribution.groupKeyEpoch);
   writer.varint(distribution.chainId);
   writer.varint(distribution.messageNumber);
   writer.bytes(distribution.exposeChainKey());
@@ -277,11 +300,12 @@ function serializeDistribution(distribution: SenderKeyDistribution): Uint8Array 
 /** Parses a distribution written by {@link serializeDistribution}. */
 function parseDistribution(bytes: Uint8Array): SenderKeyDistribution {
   const reader = new EnvelopeReader(bytes);
+  const groupKeyEpoch = reader.varint();
   const chainId = reader.varint();
   const messageNumber = reader.varint();
   const chainKey = reader.take(CHAIN_KEY_LEN);
   const identity = IdentityPublic.parse(reader.take(IDENTITY_PUBLIC_LEN));
-  return new SenderKeyDistribution(chainId, messageNumber, chainKey, identity);
+  return new SenderKeyDistribution(groupKeyEpoch, chainId, messageNumber, chainKey, identity);
 }
 
 /** Assembles the section 11 group envelope from a sealed sender-key message. */

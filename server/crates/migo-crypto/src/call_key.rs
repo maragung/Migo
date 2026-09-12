@@ -19,10 +19,16 @@
 //! accepts such an update and refuses any epoch that does not advance, which is
 //! the same replay-and-rollback refusal the message ratchets live by.
 //!
-//! A participant who joins mid-call receives the current key by their own path —
-//! sealed for them at join, the way a sender-key distribution is — and then
-//! rides the same rotations as everyone else. Handing them that first key is the
-//! caller's distribution wiring, not this state's.
+//! A participant who joins mid-call receives the current key by their own path:
+//! [`CallKeyState::sealed_join_distribution`] seals the current epoch and key
+//! under a wrapping key derived from the *joiner's* pairwise session secret
+//! (HKDF under [`kdf::LABEL_CALL_JOIN`], the call id as salt), and the joiner
+//! opens it with [`CallKeyState::from_join_distribution`]. No server relay
+//! ever sees more than the sealed blob, and the caller is expected to rotate
+//! on the join so what the joiner receives is a key that did not exist while
+//! they were outside the call — pre-join media stays sealed because the
+//! frames before the rotation are bound to an older epoch. After that first
+//! key, the joiner rides the same rotations as everyone else.
 //!
 //! # What this module is not
 //!
@@ -87,6 +93,76 @@ impl CallKeyState {
             epoch: 0,
             key,
         }
+    }
+
+    /// Length of a join distribution's plaintext: the epoch, then the key.
+    pub const JOIN_DISTRIBUTION_LEN: usize = 8 + CALL_KEY_LEN;
+
+    /// Seals the current epoch and key for a participant joining mid-call.
+    ///
+    /// The wrapping key is derived from `session_secret` — the pairwise session
+    /// this device shares *with the joiner*, not the one the call started from
+    /// — under its own label (see [`kdf::LABEL_CALL_JOIN`]), so the call's own
+    /// key and the key that wraps it for the joiner are never the same
+    /// material. The call id is both the HKDF salt and the AEAD associated
+    /// data, so the blob cannot be opened for another call. The joiner reads
+    /// the epoch out of the sealed body itself, which means a blob that
+    /// lied about its epoch does not parse.
+    ///
+    /// The caller should rotate *before* distributing: a joiner handed the key
+    /// that was current while they were outside the call can open the media
+    /// that key sealed. Rotation on join is what makes "sealed for them at
+    /// join" also mean "sealed *against* them until join".
+    pub fn sealed_join_distribution(
+        &self,
+        session_secret: &[u8],
+        random: &mut dyn Random,
+    ) -> Result<Vec<u8>> {
+        let mut plaintext = Vec::with_capacity(Self::JOIN_DISTRIBUTION_LEN);
+        plaintext.extend_from_slice(&self.epoch.to_be_bytes());
+        plaintext.extend_from_slice(&self.key);
+        aead::seal(
+            &join_wrapping_key(session_secret, self.call_id),
+            self.call_id.as_bytes(),
+            &plaintext,
+            random,
+        )
+    }
+
+    /// Opens a join distribution into the state it carries: the joiner's first
+    /// key of a call already in progress.
+    ///
+    /// This is a constructor, not an [`adopt`](Self::adopt): the joiner holds
+    /// no earlier epoch to compare against, so the first distribution is the
+    /// baseline, exactly as the first sender-key distribution is. The blob must
+    /// open under the session secret this device shares with the sender of the
+    /// distribution and be bound to `call_id`.
+    pub fn from_join_distribution(
+        session_secret: &[u8],
+        call_id: Id,
+        sealed: &[u8],
+    ) -> Result<Self> {
+        let plaintext = aead::open(
+            &join_wrapping_key(session_secret, call_id),
+            call_id.as_bytes(),
+            sealed,
+        )?;
+        // Parse and clear: the Vec held the key material in the clear, on both
+        // the success and the length-refusal path. The length is read before
+        // zeroizing because a cleared Vec no longer knows it.
+        let actual = plaintext.len();
+        let parsed: Result<[u8; Self::JOIN_DISTRIBUTION_LEN], _> = plaintext.as_slice().try_into();
+        plaintext.zeroize();
+        let bytes = parsed.map_err(|_| CryptoError::BadLength {
+            what: "call join distribution",
+            expected: Self::JOIN_DISTRIBUTION_LEN,
+            actual,
+        })?;
+        Ok(Self {
+            call_id,
+            epoch: u64::from_be_bytes(bytes[..8].try_into().expect("eight bytes")),
+            key: bytes[8..].try_into().expect("thirty-two bytes"),
+        })
     }
 
     /// The epoch this state's key belongs to. Zero until the first rotation.
@@ -184,6 +260,19 @@ impl CallKeyState {
     }
 }
 
+/// The key that wraps a join distribution for one joiner.
+///
+/// Derived from the pairwise session secret the distributor shares with that
+/// joiner, under its own label — the third purpose that secret serves, so it
+/// must not share a label with the ratchet or the call key itself.
+fn join_wrapping_key(session_secret: &[u8], call_id: Id) -> SymmetricKey {
+    SymmetricKey::from_bytes(kdf::derive::<CALL_KEY_LEN>(
+        session_secret,
+        Some(call_id.as_bytes()),
+        kdf::LABEL_CALL_JOIN,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +280,11 @@ mod tests {
 
     /// A session secret both call participants hold and no server ever saw.
     const SESSION: &[u8] = &[0x0a; 32];
+
+    /// The pairwise secret the caller shares with a *third* device joining
+    /// mid-call — different from the call's own session, because it belongs to
+    /// a different pair of devices.
+    const JOINER_SESSION: &[u8] = &[0x0b; 32];
 
     fn call_id() -> Id {
         Id::from_bytes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
@@ -366,5 +460,182 @@ mod tests {
         let state = CallKeyState::from_session(SESSION, call_id());
         let rendered = format!("{state:?}");
         assert!(rendered.contains("***"), "{rendered}");
+    }
+
+    #[test]
+    fn a_mid_call_joiner_receives_the_current_key_sealed_for_them() {
+        // Finding F4: the joiner's first key travels sealed under their own
+        // pairwise session with the caller, through whatever relay already
+        // moves sealed blobs between devices. The rotation on join is what
+        // keeps pre-join media sealed from them.
+        let mut random = SeededRandom::new(13);
+        let mut caller = CallKeyState::from_session(SESSION, call_id());
+        caller.rotate(&mut random).expect("rotates");
+        let pre_join = caller
+            .seal_frame(b"while the joiner was outside", &mut random)
+            .expect("seals");
+
+        caller.rotate(&mut random).expect("rotates");
+        let sealed = caller
+            .sealed_join_distribution(JOINER_SESSION, &mut random)
+            .expect("seals");
+        let joiner = CallKeyState::from_join_distribution(JOINER_SESSION, call_id(), &sealed)
+            .expect("opens");
+        assert_eq!(joiner.epoch(), 2);
+
+        let frame = caller
+            .seal_frame(b"welcome in", &mut random)
+            .expect("seals");
+        assert_eq!(joiner.open_frame(&frame).expect("opens"), b"welcome in");
+        assert_eq!(
+            joiner.open_frame(&pre_join),
+            Err(CryptoError::DecryptionFailed),
+            "the joiner read media from before they joined"
+        );
+    }
+
+    #[test]
+    fn a_call_that_never_rotated_hands_the_joiner_the_epoch_zero_key() {
+        // The honest boundary of the mechanism: without a rotation there is no
+        // older epoch for pre-join media to be stranded on, so the epoch-0 key
+        // the joiner receives opens it. Pre-join secrecy comes from rotating
+        // on join, not from the distribution itself — a test that pretended
+        // otherwise would be pretending it in the model.
+        let mut random = SeededRandom::new(14);
+        let caller = CallKeyState::from_session(SESSION, call_id());
+        let earlier = caller
+            .seal_frame(b"before anyone else arrived", &mut random)
+            .expect("seals");
+        let sealed = caller
+            .sealed_join_distribution(JOINER_SESSION, &mut random)
+            .expect("seals");
+        let joiner = CallKeyState::from_join_distribution(JOINER_SESSION, call_id(), &sealed)
+            .expect("opens");
+        assert_eq!(joiner.epoch(), 0);
+        assert_eq!(
+            joiner.open_frame(&earlier).expect("opens"),
+            b"before anyone else arrived",
+            "epoch-0 media opens under the epoch-0 key; this is why callers rotate on join"
+        );
+    }
+
+    #[test]
+    fn a_joiner_rides_the_rotations_after_their_first_key() {
+        // The first key is a baseline, not a leash: the joiner applies the same
+        // sealed updates as everyone else from the epoch they entered on.
+        let mut random = SeededRandom::new(15);
+        let mut caller = CallKeyState::from_session(SESSION, call_id());
+        caller.rotate(&mut random).expect("rotates");
+        caller.rotate(&mut random).expect("rotates");
+        let sealed = caller
+            .sealed_join_distribution(JOINER_SESSION, &mut random)
+            .expect("seals");
+        let mut joiner = CallKeyState::from_join_distribution(JOINER_SESSION, call_id(), &sealed)
+            .expect("opens");
+        assert_eq!(joiner.epoch(), 2);
+
+        let update = caller.rotate(&mut random).expect("rotates");
+        joiner.adopt(3, &update).expect("adopts");
+        assert_eq!(joiner.epoch(), 3);
+        let frame = caller
+            .seal_frame(b"third epoch", &mut random)
+            .expect("seals");
+        assert_eq!(joiner.open_frame(&frame).expect("opens"), b"third epoch");
+    }
+
+    #[test]
+    fn a_join_distribution_needs_the_joiners_session() {
+        // The blob is sealed to one pairwise session. The call's own other
+        // seat — or the server, which holds none of these secrets — cannot
+        // open the joiner's copy.
+        let mut random = SeededRandom::new(16);
+        let caller = CallKeyState::from_session(SESSION, call_id());
+        let sealed = caller
+            .sealed_join_distribution(JOINER_SESSION, &mut random)
+            .expect("seals");
+        assert_eq!(
+            CallKeyState::from_join_distribution(SESSION, call_id(), &sealed),
+            Err(CryptoError::DecryptionFailed)
+        );
+    }
+
+    #[test]
+    fn a_join_distribution_cannot_be_replayed_onto_another_call() {
+        let mut random = SeededRandom::new(17);
+        let caller = CallKeyState::from_session(SESSION, call_id());
+        let sealed = caller
+            .sealed_join_distribution(JOINER_SESSION, &mut random)
+            .expect("seals");
+        let other = CallKeyState::from_join_distribution(
+            JOINER_SESSION,
+            Id::from_bytes([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]),
+            &sealed,
+        );
+        assert_eq!(other, Err(CryptoError::DecryptionFailed));
+    }
+
+    #[test]
+    fn a_tampered_join_distribution_is_refused() {
+        let mut random = SeededRandom::new(18);
+        let caller = CallKeyState::from_session(SESSION, call_id());
+        let mut sealed = caller
+            .sealed_join_distribution(JOINER_SESSION, &mut random)
+            .expect("seals");
+        let last = sealed.len() - 1;
+        sealed[last] ^= 1;
+        assert_eq!(
+            CallKeyState::from_join_distribution(JOINER_SESSION, call_id(), &sealed),
+            Err(CryptoError::DecryptionFailed)
+        );
+    }
+
+    #[test]
+    fn a_truncated_join_distribution_is_refused() {
+        let mut random = SeededRandom::new(19);
+        let caller = CallKeyState::from_session(SESSION, call_id());
+        let sealed = caller
+            .sealed_join_distribution(JOINER_SESSION, &mut random)
+            .expect("seals");
+        assert!(CallKeyState::from_join_distribution(
+            JOINER_SESSION,
+            call_id(),
+            &sealed[..sealed.len() - 1]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn the_join_wrapping_key_is_not_the_call_key() {
+        // Section 163: no key for two purposes. The wrapping key comes from
+        // the same secret and the same salt but its own label; if the two
+        // derivations ever agreed, the call key would be the wrapping key and
+        // the separation would be gone. Checked at behaviour level: a genuine
+        // blob opens, one wrapped under the call-key label does not.
+        let mut random = SeededRandom::new(20);
+        let caller = CallKeyState::from_session(SESSION, call_id());
+        let genuine = caller
+            .sealed_join_distribution(JOINER_SESSION, &mut random)
+            .expect("seals");
+        assert!(CallKeyState::from_join_distribution(JOINER_SESSION, call_id(), &genuine).is_ok());
+
+        let mut body = Vec::with_capacity(CallKeyState::JOIN_DISTRIBUTION_LEN);
+        body.extend_from_slice(&caller.epoch.to_be_bytes());
+        body.extend_from_slice(&caller.key);
+        let wrong = kdf::derive::<CALL_KEY_LEN>(
+            JOINER_SESSION,
+            Some(call_id().as_bytes()),
+            kdf::LABEL_CALL_KEY,
+        );
+        let forged = aead::seal(
+            &SymmetricKey::from_bytes(wrong),
+            call_id().as_bytes(),
+            &body,
+            &mut random,
+        )
+        .expect("seals");
+        assert_eq!(
+            CallKeyState::from_join_distribution(JOINER_SESSION, call_id(), &forged),
+            Err(CryptoError::DecryptionFailed)
+        );
     }
 }

@@ -33,6 +33,11 @@
 //! distributes a new sender key, because the member who left must not read what
 //! follows — the fresh chain key is what enforces that, and the epoch is the
 //! number the envelope carries so the change itself is visible on the wire.
+//! The number travels in the distribution too, and the receiver's half of
+//! "the epoch never regresses" is [`ReceiverKeyState::adopt`]: a distribution
+//! that does not advance the generation the receiver already holds is refused
+//! rather than installed, so a member who re-sends an old distribution cannot
+//! strand a peer on a dead chain.
 //!
 //! Rotation on removal is a correctness requirement, not a policy knob. A group
 //! implementation that skips it has a member who left in March still reading
@@ -69,6 +74,11 @@ const GROUP_DOMAIN: &[u8] = b"migo-sender-key-v1";
 /// a code path that could log it. `chain_key` is secret material; everything else
 /// in this struct is not.
 pub struct SenderKeyDistribution {
+    /// The membership generation this chain belongs to. Rises on every
+    /// rotation, never repeats, never regresses — and travels *in* the
+    /// distribution, because the receiver's whole defence against a stale one
+    /// is comparing this number against the generation it already holds.
+    pub group_key_epoch: u32,
     /// Which chain this is, so a rotation can be distinguished from a resend.
     pub chain_id: u32,
     /// The message number the chain key corresponds to.
@@ -92,6 +102,7 @@ impl Drop for SenderKeyDistribution {
 impl core::fmt::Debug for SenderKeyDistribution {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("SenderKeyDistribution")
+            .field("group_key_epoch", &self.group_key_epoch)
             .field("chain_id", &self.chain_id)
             .field("message_number", &self.message_number)
             .field("chain_key", &"***")
@@ -227,9 +238,14 @@ impl SenderKeyState {
     }
 
     /// Builds the distribution message for the chain's current position.
+    ///
+    /// The distribution names the generation the chain belongs to, so the
+    /// receiver can refuse a stale one before any key material moves — see
+    /// [`ReceiverKeyState::adopt`].
     #[must_use]
     pub fn distribution(&self, identity: &IdentitySecret) -> SenderKeyDistribution {
         SenderKeyDistribution {
+            group_key_epoch: self.group_key_epoch,
             chain_id: self.chain_id,
             message_number: self.message_number,
             chain_key: self.chain_key,
@@ -276,6 +292,10 @@ impl SenderKeyState {
 
 /// The receiving half: one per (group, sender) pair.
 pub struct ReceiverKeyState {
+    /// The membership generation this state's chain belongs to. The baseline
+    /// every later distribution from this sender is measured against; only
+    /// [`adopt`](Self::adopt) moves it, and only forward.
+    group_key_epoch: u32,
     chain_id: u32,
     chain_key: [u8; 32],
     next_message_number: u32,
@@ -294,16 +314,87 @@ impl Drop for ReceiverKeyState {
 }
 
 impl ReceiverKeyState {
-    /// Accepts a distribution message and starts tracking the sender's chain.
+    /// Accepts the *first* distribution a receiver sees from this sender.
+    ///
+    /// The first distribution is the baseline: there is no earlier generation
+    /// to compare against, so any epoch is accepted here and every later one
+    /// is measured from it. Freshness of the baseline is vouched for by the
+    /// pairwise channel it arrived through, which is the same channel that
+    /// carries every later distribution. Once state exists, use
+    /// [`adopt`](Self::adopt) — this constructor never refuses anything and
+    /// must not be used to replace held state.
     #[must_use]
     pub fn accept(distribution: &SenderKeyDistribution) -> Self {
         Self {
+            group_key_epoch: distribution.group_key_epoch,
             chain_id: distribution.chain_id,
             chain_key: distribution.chain_key,
             next_message_number: distribution.message_number,
             identity: distribution.identity,
             skipped: Vec::new(),
         }
+    }
+
+    /// Adopts a distribution into state that already tracks this sender.
+    ///
+    /// This is the receiver's half of "the epoch never regresses" (section
+    /// 163). Four cases, in the order they are decided:
+    ///
+    /// * **Older epoch** — refused with [`CryptoError::KeyAlreadyUsed`]. This
+    ///   is the finding-F2 attack itself: a member re-sends a distribution
+    ///   from before the last membership change, and if it were installed the
+    ///   receiver would sit on a chain nothing further is sealed under. The
+    ///   held state is untouched, so the receiver keeps reading on the
+    ///   current chain and can still re-sync forward.
+    /// * **Same epoch, same chain** — a re-send of the distribution the
+    ///   receiver already holds. Not a regression, and not a reason to
+    ///   re-install either: re-installing would rewind the receiver's
+    ///   position inside the live chain. Succeeds as a no-op.
+    /// * **Same epoch, different chain** — refused. A rotation always raises
+    ///   the epoch, so a second chain at one generation is a swap, not a
+    ///   rotation, and installing it would be exactly the displacement the
+    ///   epoch comparison exists to prevent.
+    /// * **Newer epoch** — installed. The old chain key and every skipped key
+    ///   are zeroized before the new state lands, and the skipped window is
+    ///   emptied because message numbers restart with the chain.
+    ///
+    /// The boundary of this guarantee: refusing a stale distribution protects
+    /// *liveness and correctness* of the receiver's chain, not
+    /// confidentiality. A stale distribution contains only key material the
+    /// holder was legitimately given at some point; the harm being refused is
+    /// the stranded receiver, which is a denial of message delivery until
+    /// re-sync — not a disclosure.
+    pub fn adopt(&mut self, distribution: &SenderKeyDistribution) -> Result<()> {
+        if distribution.group_key_epoch < self.group_key_epoch {
+            return Err(CryptoError::KeyAlreadyUsed);
+        }
+        if distribution.group_key_epoch == self.group_key_epoch {
+            if distribution.chain_id == self.chain_id {
+                return Ok(());
+            }
+            return Err(CryptoError::KeyAlreadyUsed);
+        }
+        self.chain_key.zeroize();
+        for entry in &mut self.skipped {
+            entry.1.zeroize();
+        }
+        self.skipped.clear();
+        self.group_key_epoch = distribution.group_key_epoch;
+        self.chain_id = distribution.chain_id;
+        self.chain_key = distribution.chain_key;
+        self.next_message_number = distribution.message_number;
+        self.identity = distribution.identity;
+        Ok(())
+    }
+
+    /// The membership generation this state holds.
+    ///
+    /// The number a later distribution is compared against. Not secret, but
+    /// not currently on the wire either — the comparison happens at adoption
+    /// time, inside the receiver.
+    #[must_use]
+    pub fn group_key_epoch(&self) -> u32 {
+        self.group_key_epoch
     }
 
     /// Which chain this state tracks.
@@ -735,5 +826,166 @@ mod tests {
         // Saturated, not wrapped: an epoch that rolled over to a smaller number
         // would make an old chain look current again.
         assert_eq!(epoch, u32::MAX);
+    }
+
+    #[test]
+    fn a_stale_distribution_does_not_displace_a_current_one() {
+        // Finding F2: a member re-sends a distribution from before the last
+        // membership change. The receiver must refuse it, keep the chain it
+        // holds, and keep reading on it — the refusal protects delivery, not
+        // secrecy, and the test must not pretend otherwise.
+        let mut random = SeededRandom::new(19);
+        let identity = IdentitySecret::generate(&mut random);
+        let mut sender = SenderKeyState::create(1, 1, &mut random);
+        let stale = sender.distribution(&identity);
+        let mut receiver = ReceiverKeyState::accept(&stale);
+
+        sender.rotate(2, &mut random);
+        receiver
+            .adopt(&sender.distribution(&identity))
+            .expect("the current distribution is adopted");
+        let current_epoch = receiver.group_key_epoch();
+
+        assert_eq!(
+            receiver.adopt(&stale),
+            Err(CryptoError::KeyAlreadyUsed),
+            "a stale distribution was installed over a current one"
+        );
+        assert_eq!(
+            receiver.group_key_epoch(),
+            current_epoch,
+            "a refused distribution must not move the epoch either"
+        );
+        let message = sender
+            .encrypt(&identity, GROUP, b"still readable")
+            .expect("encrypts");
+        assert_eq!(
+            receiver.decrypt(GROUP, &message).expect("decrypts"),
+            b"still readable",
+            "the receiver was stranded on the dead chain"
+        );
+    }
+
+    #[test]
+    fn an_adopted_distribution_re_syncs_the_receiver_forward() {
+        // The other half of the guarantee: refusal must not become a trap. A
+        // receiver who missed a rotation re-syncs by adopting the new
+        // distribution, and the epoch only ever moves forward.
+        let mut random = SeededRandom::new(20);
+        let identity = IdentitySecret::generate(&mut random);
+        let mut sender = SenderKeyState::create(1, 1, &mut random);
+        let mut receiver = ReceiverKeyState::accept(&sender.distribution(&identity));
+        assert_eq!(receiver.group_key_epoch(), 1);
+
+        sender.rotate(2, &mut random);
+        let undelivered = sender
+            .encrypt(&identity, GROUP, b"missed rotation")
+            .expect("encrypts");
+        assert_eq!(
+            receiver.decrypt(GROUP, &undelivered),
+            Err(CryptoError::NoSession),
+            "a message from the new chain must not mis-decrypt on the old one"
+        );
+
+        receiver
+            .adopt(&sender.distribution(&identity))
+            .expect("a newer distribution is adopted");
+        assert_eq!(receiver.group_key_epoch(), 2);
+        assert_eq!(
+            receiver.decrypt(GROUP, &undelivered).expect("decrypts"),
+            b"missed rotation"
+        );
+    }
+
+    #[test]
+    fn a_resent_distribution_is_not_a_regression() {
+        // Same epoch, same chain: a re-send of what the receiver already
+        // holds succeeds as a no-op, and the no-op must not rewind the
+        // receiver's position inside the live chain. The re-send carries the
+        // position the chain started at, so an implementation that
+        // re-installed instead of no-opping would set the receiver back to
+        // message 0 and un-refuse the replay below.
+        let mut random = SeededRandom::new(21);
+        let identity = IdentitySecret::generate(&mut random);
+        let mut sender = SenderKeyState::create(3, 1, &mut random);
+        let resent = sender.distribution(&identity);
+        let mut receiver = ReceiverKeyState::accept(&sender.distribution(&identity));
+
+        let delivered = sender
+            .encrypt(&identity, GROUP, b"the one message")
+            .expect("encrypts");
+        receiver.decrypt(GROUP, &delivered).expect("decrypts");
+
+        receiver
+            .adopt(&resent)
+            .expect("a re-send of the current distribution is not a regression");
+
+        assert_eq!(
+            receiver.decrypt(GROUP, &delivered),
+            Err(CryptoError::KeyAlreadyUsed),
+            "the no-op re-adoption rewound the chain position and un-refused a replay"
+        );
+        let fresh = sender
+            .encrypt(&identity, GROUP, b"still flowing")
+            .expect("encrypts");
+        assert_eq!(
+            receiver.decrypt(GROUP, &fresh).expect("decrypts"),
+            b"still flowing"
+        );
+    }
+
+    #[test]
+    fn a_second_chain_at_the_same_epoch_is_refused() {
+        // A rotation always raises the epoch, so two chains at one generation
+        // cannot both be legitimate. The second one is a swap wearing a
+        // distribution's clothes, and must be refused.
+        let mut random = SeededRandom::new(22);
+        let identity = IdentitySecret::generate(&mut random);
+        let mut sender = SenderKeyState::create(1, 1, &mut random);
+        let mut receiver = ReceiverKeyState::accept(&sender.distribution(&identity));
+
+        let mut impostor = SenderKeyState::create(1, 2, &mut random);
+        assert_eq!(
+            receiver.adopt(&impostor.distribution(&identity)),
+            Err(CryptoError::KeyAlreadyUsed),
+            "a second chain at the same epoch displaced the current one"
+        );
+        let message = sender
+            .encrypt(&identity, GROUP, b"the real chain")
+            .expect("encrypts");
+        assert_eq!(
+            receiver.decrypt(GROUP, &message).expect("decrypts"),
+            b"the real chain"
+        );
+    }
+
+    #[test]
+    fn the_first_distribution_is_the_baseline_whatever_epoch_it_names() {
+        // A receiver who joins a group mid-life first hears from a sender at
+        // whatever generation the group is on. That first distribution is the
+        // baseline — accepted without comparison — and everything after it is
+        // measured from there, including refusals.
+        let mut random = SeededRandom::new(23);
+        let identity = IdentitySecret::generate(&mut random);
+        let mut sender = SenderKeyState::create(5, 7, &mut random);
+        let mut latecomer = ReceiverKeyState::accept(&sender.distribution(&identity));
+        assert_eq!(latecomer.group_key_epoch(), 5);
+
+        let message = sender
+            .encrypt(&identity, GROUP, b"joined mid-life")
+            .expect("encrypts");
+        assert_eq!(
+            latecomer.decrypt(GROUP, &message).expect("decrypts"),
+            b"joined mid-life"
+        );
+
+        // And measured from that baseline: an epoch-4 distribution, which a
+        // founding member would rightly refuse, is refused here too.
+        let mut older = SenderKeyState::create(4, 6, &mut random);
+        assert_eq!(
+            latecomer.adopt(&older.distribution(&identity)),
+            Err(CryptoError::KeyAlreadyUsed)
+        );
+        assert_eq!(latecomer.group_key_epoch(), 5);
     }
 }
