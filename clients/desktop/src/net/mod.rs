@@ -2937,6 +2937,9 @@ impl Worker {
             who_can_message: patch.who_can_message,
             who_can_add: patch.who_can_add,
             searchable: patch.searchable,
+            // The profile form carries no status control, so this patch never touches the
+            // column: an absent field is "leave it alone", which is exactly the intent.
+            custom_status: None,
         };
         self.request(Opcode::ProfileUpdate, &message).await;
     }
@@ -3099,6 +3102,9 @@ impl Worker {
             who_can_message: None,
             who_can_add: None,
             searchable: None,
+            // Pointing the profile at the new avatar is all this patch means to say; the
+            // status column is somebody else's business.
+            custom_status: None,
         };
         self.request(Opcode::ProfileUpdate, &message).await;
     }

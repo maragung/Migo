@@ -517,6 +517,10 @@ pub struct Profile {
     pub who_can_add: Visibility,
     /// Whether the account appears in search.
     pub searchable: bool,
+    /// Free-text status the owner set, the RICH_PRESENCE bit's own field. `None` is
+    /// "no status set" — a different statement from any string, and the only one a
+    /// client built before the bit can honestly make.
+    pub custom_status: Option<String>,
     /// Last modification.
     pub updated_at: Timestamp,
 }
@@ -540,6 +544,8 @@ pub struct ProfilePatch {
     pub who_can_add: Option<Visibility>,
     /// New search visibility.
     pub searchable: Option<bool>,
+    /// New custom status, or cleared.
+    pub custom_status: Patch<String>,
 }
 
 /// A registered device.
