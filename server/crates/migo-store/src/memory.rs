@@ -1726,6 +1726,22 @@ impl RoomStore for MemoryStore {
         Ok(room.clone())
     }
 
+    async fn rehome_room(&self, room_id: Id, home_region: &str, at: Timestamp) -> Result<Room> {
+        let mut s = self.state.write();
+        let room = s
+            .rooms
+            .get_mut(&room_id)
+            .ok_or_else(|| fault::not_found("room"))?;
+        room.home_region = home_region.to_string();
+        room.updated_at = at;
+        // Advanced unconditionally, mirroring the Postgres statement: a room's home node
+        // is part of its observable placement, so every client holding a summary built on
+        // the old one is behind — and the rehome carries no state event, which makes the
+        // revision the only record that it moved (brief section 156).
+        room.revision += 1;
+        Ok(room.clone())
+    }
+
     async fn archive_room(&self, room_id: Id, at: Timestamp) -> Result<()> {
         let mut s = self.state.write();
         let conversation_id = match s.rooms.get_mut(&room_id) {

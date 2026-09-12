@@ -5503,13 +5503,22 @@ data class FedError(
     val nodeId: String,
     val code: Long,
     val message: String,
+    val epoch: Long? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
         w.str(nodeId)
         w.u32(code)
         w.str(message)
-        w.u32(0)
+        var present = 0
+        if (epoch != null) present++
+        w.u32(present)
+        if (epoch != null) {
+            val value = epoch
+            w.optional(1) { w ->
+                w.u64(value)
+            }
+        }
         w.leave()
     }
 
@@ -5519,12 +5528,17 @@ data class FedError(
             val nodeId = r.str()
             val code = r.u32()
             val message = r.str()
+            var epoch: Long? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
-                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> epoch = sub.u64()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
             }
             r.leave()
-            return FedError(nodeId, code, message)
+            return FedError(nodeId, code, message, epoch)
         }
     }
 }

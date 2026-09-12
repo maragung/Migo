@@ -24,6 +24,11 @@
 //!   path (`mesh::route_room_event`) publishes it into its own hub, which is
 //!   the fan-out the tier asks for, and passes it on in turn if the watch
 //!   table is there.
+//! - the **move half**: a room whose home node changes is moved by
+//!   [`move_room`](RoomRelay::move_room), and its members are told before
+//!   anything else is — one `RECONNECT_HINT` naming the new home's endpoint,
+//!   published locally for the sessions already here and carried to the other
+//!   nodes through the same tier every room event rides.
 //!
 //! Only the home node holds a watch table, so a publish on any other node is
 //! not a fan-out at all: it is one copy addressed to the home node, which does
@@ -54,12 +59,12 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use migo_core::{Id, Result, Timestamp};
-use migo_federation::model::FederatedEvent;
+use migo_federation::model::{FederatedEvent, PeerView};
 use migo_federation::SharedMesh;
 use migo_messaging::{Broadcast as MessageBroadcast, Fanout as MessageFanout};
 use migo_protocol::{
-    fault, to_frame, Encode, FedRoomEvent, FedRouting, Frame, Opcode, RoomMemberEvent,
-    RoomStateEvent, RoomVoteEvent,
+    fault, to_frame, CloseReason, Encode, FedRoomEvent, FedRouting, Frame, Opcode, ReconnectHint,
+    RoomMemberEvent, RoomStateEvent, RoomVoteEvent, Topic, TopicKind,
 };
 use migo_rooms::{Broadcast as RoomBroadcast, Fanout as RoomFanout};
 use migo_store::model::Room;
@@ -77,6 +82,9 @@ const PEER_SCAN_LIMIT: u16 = 256;
 pub struct RoomRelay {
     mesh: SharedMesh,
     store: SharedStore,
+    /// The local half of a rebalance hint: the gateway's hub, once the gateway
+    /// exists. `None` in a test that asserts on the federated half alone.
+    hints: Option<Arc<dyn HintPublisher>>,
     /// The watch table, home-node side: room → the peer nodes watching it.
     watchers: parking_lot::Mutex<HashMap<Id, HashSet<Id>>>,
     /// The rooms this process has already asked a home node to watch. One
@@ -87,12 +95,17 @@ pub struct RoomRelay {
 }
 
 impl RoomRelay {
-    /// Wraps the mesh and the store the two halves read.
+    /// Wraps the mesh, the store, and the local hint surface the two halves read.
     #[must_use]
-    pub fn new(mesh: SharedMesh, store: SharedStore) -> Self {
+    pub fn new(
+        mesh: SharedMesh,
+        store: SharedStore,
+        hints: Option<Arc<dyn HintPublisher>>,
+    ) -> Self {
         Self {
             mesh,
             store,
+            hints,
             watchers: parking_lot::Mutex::new(HashMap::new()),
             subscribed: parking_lot::Mutex::new(HashSet::new()),
         }
@@ -394,6 +407,103 @@ impl RoomRelay {
             .await
     }
 
+    /// Moves a room to another node, telling every member where to reconnect.
+    ///
+    /// The placement primitive the missing half of section 173 needed: a room
+    /// whose home node changes must not strand its members on the old one. The
+    /// order is the drain order section 170 names — tell the members
+    /// first, then move the row, then raise the epoch — and each step is the
+    /// one that makes the next safe:
+    ///
+    /// 1. every member is handed a `RECONNECT_HINT` naming the new home's
+    ///    endpoint, `Rebalance` the reason and `after_ms` zero, because the
+    ///    instruction is "reconnect now, there" — the local half on this
+    ///    node's hub for the sessions already here, the federated half as one
+    ///    `FED_ROOM_EVENT` per watching node, riding the same tier every room
+    ///    event rides;
+    /// 2. the store row is rehomed, which is the fact every publish path reads
+    ///    to decide who tiers the room — after this, this node's own `homes()`
+    ///    answers false and the new node's answers true;
+    /// 3. the routing epoch is bumped, so a peer still routing on the old view
+    ///    is refused — and, because the transport now refreshes on that
+    ///    refusal, converges on the new view rather than waiting for an
+    ///    operator's `bump_epoch`.
+    ///
+    /// The hint is emitted before the row moves, so a failure partway through
+    /// costs a premature hint — a member reconnects to the node that is about
+    /// to own the room — rather than the alternative, a moved room whose
+    /// members were never told. The watch table keeps its entries: they are
+    /// read only through `homes()`, which the moved row has already answered
+    /// false, so a stale entry is inert until the room's subscribers
+    /// re-subscribe and the new home node builds its own table.
+    ///
+    /// # Errors
+    ///
+    /// [`not_found`](migo_protocol::fault::not_found) if the room does not
+    /// exist; [`conflict`](migo_protocol::fault::conflict) if this node is not
+    /// the room's home — only the node holding the watch table knows who must
+    /// be told, so only it may move the room;
+    /// [`validation`](migo_protocol::fault::validation) if no allowed mesh peer
+    /// answers the target region, because a hint with no endpoint in it would
+    /// strand the members it means to rescue.
+    pub async fn move_room(
+        &self,
+        room_id: Id,
+        new_home_region: &str,
+        now: Timestamp,
+    ) -> Result<Room> {
+        let Some(room) = self.store.room(room_id).await? else {
+            return Err(fault::not_found("room"));
+        };
+        if room.home_region != self.mesh.region() {
+            return Err(fault::conflict("only the room's home node may move it"));
+        }
+        if room.home_region == new_home_region {
+            // Already homed there: no hint, no write, no epoch. A move that
+            // changes nothing is not a move, and bumping the epoch for it
+            // would tell every peer its view is stale when nothing moved.
+            return Ok(room);
+        }
+        let Some(home) = self.home_peer(new_home_region).await? else {
+            return Err(fault::validation(
+                "home_region",
+                "no allowed mesh peer homes the target region",
+            ));
+        };
+
+        // 1. The hint, one frame for both halves: the local hub gets the same
+        //    bytes the far nodes' members receive, sealed as a session would.
+        let hint = ReconnectHint {
+            reason: CloseReason::Rebalance,
+            after_ms: 0,
+            endpoint: Some(home.base_url.clone()),
+        };
+        let inner =
+            to_frame(Opcode::ReconnectHint.to_wire(), 0, &hint).map_err(fault::from_wire)?;
+        let bytes = inner.encode().map_err(fault::from_wire)?;
+        if let Some(hints) = &self.hints {
+            hints.publish_hint(room_id, &bytes, now);
+        }
+        self.fan_out(room_id, inner, None, now).await?;
+
+        // 2. The row moves, and with it the fan-out authority.
+        let moved = self
+            .store
+            .rehome_room(room_id, new_home_region, now)
+            .await?;
+        // 3. The epoch rises, and every peer holding the old view is told so.
+        let epoch = self.mesh.bump_epoch();
+        tracing::info!(
+            room = %room_id.to_text(),
+            from = %room.home_region,
+            to = %new_home_region,
+            endpoint = %home.base_url,
+            epoch,
+            "a room moved to another node; its members were told to reconnect there"
+        );
+        Ok(moved)
+    }
+
     /// The fan-out itself: encode once, enqueue one copy per watching node.
     ///
     /// A room with no watchers is a plain no-op, which is the common case on
@@ -483,13 +593,23 @@ impl RoomRelay {
     /// suspension, so a room's events keep flowing to a slow home node exactly as to a
     /// fast one (section 153). Only the operator's paused and blocked are excluded.
     async fn home_node(&self, home_region: &str) -> Result<Option<Id>> {
+        Ok(self.home_peer(home_region).await?.map(|peer| peer.node_id))
+    }
+
+    /// The allowed peer that homes a region, with the endpoint its allow-list
+    /// entry names.
+    ///
+    /// The move path needs the whole view — a reconnect hint without the new
+    /// home's address is an instruction with no destination — while the
+    /// subscribe and forward paths need only the id, so both read this one
+    /// scan and take what they need.
+    async fn home_peer(&self, home_region: &str) -> Result<Option<PeerView>> {
         Ok(self
             .mesh
             .peers(PEER_SCAN_LIMIT)
             .await?
             .into_iter()
-            .find(|peer| peer.region == home_region && peer.status.is_allowed())
-            .map(|peer| peer.node_id))
+            .find(|peer| peer.region == home_region && peer.status.is_allowed()))
     }
 }
 
@@ -504,6 +624,60 @@ fn encode_envelope<T: Encode>(opcode: Opcode, value: &T) -> Result<Vec<u8>> {
         .encode()
         .map_err(fault::from_wire)
         .map(|bytes| bytes.to_vec())
+}
+
+/// The local half of a rebalance hint: the same frame the far nodes' members
+/// receive, published to this node's own hub for the members whose sockets are
+/// here.
+///
+/// A port rather than the gateway itself, for the same reason the room
+/// publisher port in `room_presence` is one: the move's
+/// logic — who is told, in which order, with what endpoint — is exercised by
+/// handing it a recorder and reading the frame back, with no hub and no
+/// runtime behind it. The frame is the whole interface, raw bytes and nothing
+/// decoded, because the far nodes' sessions receive exactly these bytes and
+/// the local half must not be a re-encoding that could drift from them.
+pub trait HintPublisher: Send + Sync {
+    /// Publishes one reconnect hint frame to a room's topic.
+    fn publish_hint(&self, room_id: Id, frame: &Bytes, now: Timestamp);
+}
+
+/// The production [`HintPublisher`]: the gateway's hub, once the gateway exists.
+pub struct GatewayHintPublisher {
+    gateway: Arc<crate::room_presence::GatewayHandle>,
+}
+
+impl GatewayHintPublisher {
+    /// Wraps the late-bound gateway handle — the same one the dispatcher's
+    /// out-of-band publishes ride, filled the moment the gateway opens.
+    pub fn new(gateway: Arc<crate::room_presence::GatewayHandle>) -> Self {
+        Self { gateway }
+    }
+
+    /// The topic every room event fans out to.
+    fn room_topic(room_id: Id) -> Topic {
+        Topic {
+            kind: TopicKind::Room,
+            id: room_id,
+        }
+    }
+}
+
+impl HintPublisher for GatewayHintPublisher {
+    fn publish_hint(&self, room_id: Id, frame: &Bytes, now: Timestamp) {
+        if let Some(gateway) = self.gateway.get() {
+            // Never coalesced: a hint is an instruction, and the survivor of two
+            // collapsed instructions would send its members to whichever node
+            // the second move named — which may be the one they just left.
+            gateway.broadcast_frame_to_topic(
+                &Self::room_topic(room_id),
+                Opcode::ReconnectHint,
+                frame,
+                None,
+                now,
+            );
+        }
+    }
 }
 
 /// The out-of-band room publisher with the federated half attached.
@@ -646,7 +820,7 @@ mod tests {
         let mesh = mesh_in("region-1", Id::from(0x4444), "region-2").await;
         let room_id = Id::from(0x1111);
         let store = store_with_room(room_id, "region-1").await;
-        let relay = RoomRelay::new(Arc::clone(&mesh), store);
+        let relay = RoomRelay::new(Arc::clone(&mesh), store, None);
 
         relay
             .subscribe_to(room_id, Timestamp::from_millis(NOW))
@@ -669,7 +843,7 @@ mod tests {
         let mesh = mesh_in("region-1", peer, "region-2").await;
         let room_id = Id::from(0x1111);
         let store = store_with_room(room_id, "region-2").await;
-        let relay = RoomRelay::new(Arc::clone(&mesh), store);
+        let relay = RoomRelay::new(Arc::clone(&mesh), store, None);
 
         for _ in 0..2 {
             relay
@@ -692,7 +866,7 @@ mod tests {
         let mesh = mesh_in("region-1", Id::from(0x4444), "region-2").await;
         let room_id = Id::from(0x1111);
         let store = store_with_room(room_id, "region-3").await;
-        let relay = RoomRelay::new(Arc::clone(&mesh), store);
+        let relay = RoomRelay::new(Arc::clone(&mesh), store, None);
 
         relay
             .subscribe_to(room_id, Timestamp::from_millis(NOW))
@@ -713,7 +887,7 @@ mod tests {
     async fn a_watch_is_idempotent_and_a_stale_epoch_is_refused() {
         let mesh = mesh_in("region-1", Id::from(0x4444), "region-2").await;
         let store = Arc::new(MemoryStore::new()) as SharedStore;
-        let relay = RoomRelay::new(Arc::clone(&mesh), store);
+        let relay = RoomRelay::new(Arc::clone(&mesh), store, None);
         let room_id = Id::from(0x1111);
         let peer = Id::from(0x5555);
         let routing = FedRouting {
@@ -755,7 +929,7 @@ mod tests {
         let mesh = mesh_in("region-1", peer, "region-2").await;
         let room_id = Id::from(0x1111);
         let store = store_with_room(room_id, "region-2").await;
-        let relay = RoomRelay::new(Arc::clone(&mesh), store);
+        let relay = RoomRelay::new(Arc::clone(&mesh), store, None);
 
         let member = RoomMemberEvent {
             room_id,
@@ -804,5 +978,215 @@ mod tests {
             Some(Opcode::RoomMemberEvent),
             "carrying the member event itself, sealed as a local subscriber would have seen it"
         );
+    }
+
+    /// A hint recorder: what the local half of a move would have published, held
+    /// for the test to decode — the same shape of stand-in `Recorder` is for
+    /// [`RoomPublisher`](crate::room_presence::RoomPublisher).
+    struct RecordedHints(parking_lot::Mutex<Vec<(Id, Bytes)>>);
+
+    impl HintPublisher for RecordedHints {
+        fn publish_hint(&self, room_id: Id, frame: &Bytes, _now: Timestamp) {
+            self.0.lock().push((room_id, frame.clone()));
+        }
+    }
+
+    /// A moved room tells every member where to reconnect, before anything else
+    /// moves: one hint locally, one `FED_ROOM_EVENT` per watching node, then the
+    /// rehomed row and the raised epoch — the drain order section 170 names.
+    #[tokio::test]
+    async fn a_moved_room_hints_its_members_where_to_reconnect() {
+        let peer = Id::from(0x4444);
+        // `mesh_in` admits the peer at region-2 with base_url wss://peer.test:9999,
+        // which is the endpoint the hint must name.
+        let mesh = mesh_in("region-1", peer, "region-2").await;
+        let room_id = Id::from(0x1111);
+        let store = store_with_room(room_id, "region-1").await;
+        let hints = Arc::new(RecordedHints(parking_lot::Mutex::new(Vec::new())));
+        let relay = RoomRelay::new(
+            Arc::clone(&mesh),
+            store.clone(),
+            Some(hints.clone() as Arc<dyn HintPublisher>),
+        );
+        let before = mesh.epoch();
+        let routing = FedRouting {
+            epoch: before,
+            home_region: "region-1".to_string(),
+            room_id,
+        };
+        relay
+            .register_watcher(peer, &routing)
+            .expect("a current epoch admits the watch");
+
+        let moved = relay
+            .move_room(room_id, "region-2", Timestamp::from_millis(NOW))
+            .await
+            .expect("the room moves to the peer's region");
+        assert_eq!(
+            moved.home_region, "region-2",
+            "the row names the new home node"
+        );
+
+        // The local half: one hint on the room's topic, the frame a session would
+        // have received.
+        let recorded = hints.0.lock().clone();
+        assert_eq!(recorded.len(), 1, "one hint for the room's own sessions");
+        assert_eq!(recorded[0].0, room_id);
+        let frame = Frame::decode(recorded[0].1.clone()).expect("the hint is an encoded frame");
+        assert_eq!(
+            Opcode::from_wire(frame.header.opcode),
+            Some(Opcode::ReconnectHint),
+            "the frame is a reconnect hint"
+        );
+        let hint: ReconnectHint = migo_protocol::from_frame(&frame).expect("the hint decodes");
+        assert_eq!(hint.reason, CloseReason::Rebalance);
+        assert_eq!(hint.after_ms, 0, "the instruction is to reconnect now");
+        assert_eq!(
+            hint.endpoint.as_deref(),
+            Some("wss://peer.test:9999"),
+            "the hint names the new home node's endpoint, read off the allow-list"
+        );
+
+        // The federated half: one FED_ROOM_EVENT for the watching node, carrying
+        // the same hint sealed inside the envelope.
+        let due = mesh
+            .due(Timestamp::from_millis(NOW + 60_000))
+            .await
+            .expect("the queue reads");
+        assert_eq!(
+            due.len(),
+            1,
+            "one federated copy, for the node that holds the other members"
+        );
+        assert_eq!(due[0].target_node, peer);
+        let outer = Frame::decode(Bytes::from(due[0].payload.clone()))
+            .expect("an outbox payload is an encoded frame");
+        let envelope: FedRoomEvent =
+            migo_protocol::from_frame(&outer).expect("the envelope decodes");
+        let inner = Frame::decode(Bytes::from(envelope.payload)).expect("the inner frame decodes");
+        assert_eq!(
+            Opcode::from_wire(inner.header.opcode),
+            Some(Opcode::ReconnectHint),
+            "the watching node's members receive the hint as a room event"
+        );
+
+        // And the two facts that make the move real: the row moved, the epoch rose.
+        let row = store.room(room_id).await.expect("the store reads").unwrap();
+        assert_eq!(row.home_region, "region-2");
+        assert_eq!(
+            mesh.epoch(),
+            before + 1,
+            "the routing epoch rose with the move, so stale views are refused"
+        );
+
+        // The move is real for the routing too: a post-move publish goes to the new
+        // home node — the row says so — never to the watch table this node no longer
+        // owns.
+        relay
+            .forward(
+                &RoomFanout {
+                    room_id,
+                    exclude_device: None,
+                    event: RoomBroadcast::Member(RoomMemberEvent {
+                        room_id,
+                        user_id: Id::from(0x8888),
+                        joined: true,
+                        role: None,
+                        member_count: Some(2),
+                        change: None,
+                        revision: None,
+                    }),
+                },
+                Timestamp::from_millis(NOW),
+            )
+            .await
+            .expect("the post-move publish forwards");
+        let owed = mesh
+            .due(Timestamp::from_millis(NOW + 120_000))
+            .await
+            .expect("the queue reads");
+        assert_eq!(
+            owed.len(),
+            2,
+            "the hint and the post-move member event, and nothing else"
+        );
+        assert!(
+            owed.iter().all(|event| event.target_node == peer),
+            "everything the moved room owes routes to the new home node"
+        );
+    }
+
+    /// Only the home node may move a room — it holds the watch table, so it is
+    /// the only node that knows who must be told — and a room that does not
+    /// exist is the store's own refusal, not the mesh's.
+    #[tokio::test]
+    async fn a_room_is_moved_only_by_its_home_node() {
+        let peer = Id::from(0x4444);
+        let mesh = mesh_in("region-1", peer, "region-2").await;
+        let room_id = Id::from(0x1111);
+        // Homed at region-2, so this region-1 node is a watcher, not the home.
+        let store = store_with_room(room_id, "region-2").await;
+        let relay = RoomRelay::new(Arc::clone(&mesh), store, None);
+
+        let error = relay
+            .move_room(room_id, "region-1", Timestamp::from_millis(NOW))
+            .await
+            .expect_err("a node that does not home the room cannot move it");
+        assert_eq!(
+            error.code(),
+            migo_protocol::codes::CONFLICT,
+            "the refusal is a conflict, not a fault of this node"
+        );
+        let missing = relay
+            .move_room(Id::from(0x9999), "region-1", Timestamp::from_millis(NOW))
+            .await
+            .expect_err("a room that does not exist cannot be moved");
+        assert_eq!(missing.code(), migo_protocol::codes::NOT_FOUND);
+    }
+
+    /// A move that changes nothing is not a move, and a move to a region no
+    /// allowed peer answers is refused before any hint or write happens — a
+    /// hint with no endpoint in it would strand the members it means to rescue.
+    #[tokio::test]
+    async fn a_move_nowhere_changes_nothing() {
+        let peer = Id::from(0x4444);
+        let mesh = mesh_in("region-1", peer, "region-2").await;
+        let room_id = Id::from(0x1111);
+        let store = store_with_room(room_id, "region-1").await;
+        let hints = Arc::new(RecordedHints(parking_lot::Mutex::new(Vec::new())));
+        let relay = RoomRelay::new(
+            Arc::clone(&mesh),
+            store.clone(),
+            Some(hints.clone() as Arc<dyn HintPublisher>),
+        );
+        let before = mesh.epoch();
+
+        let same = relay
+            .move_room(room_id, "region-1", Timestamp::from_millis(NOW))
+            .await
+            .expect("a move to the room's own home is a no-op, not an error");
+        assert_eq!(same.home_region, "region-1");
+        assert_eq!(
+            mesh.epoch(),
+            before,
+            "an unchanged placement tells no peer its view is stale"
+        );
+        assert!(hints.0.lock().is_empty(), "nobody is told anything");
+
+        let error = relay
+            .move_room(room_id, "region-3", Timestamp::from_millis(NOW))
+            .await
+            .expect_err("no allowed peer answers region-3");
+        assert_eq!(error.code(), migo_protocol::codes::VALIDATION_FAILED);
+        assert!(
+            hints.0.lock().is_empty(),
+            "no hint was published for a move that could not happen"
+        );
+        let row = store.room(room_id).await.expect("the store reads").unwrap();
+        assert_eq!(
+            row.home_region, "region-1",
+            "the refused move left the row exactly where it was"
+        );
+        assert_eq!(mesh.epoch(), before, "and the epoch unmoved");
     }
 }

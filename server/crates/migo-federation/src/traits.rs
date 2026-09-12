@@ -172,8 +172,20 @@ pub trait Mesh: Send + Sync {
     /// Advances the routing epoch and returns the new value.
     ///
     /// The composition root calls this when the routing table it holds changes, so a request
-    /// carrying the old epoch can be told it is stale.
+    /// carrying the old epoch can be told it is stale. Also the operator's manual lever, which
+    /// is why it stays on the trait: tooling may move a shard by hand and bump the epoch with
+    /// it.
     fn bump_epoch(&self) -> u64;
+
+    /// Adopts a peer's current routing epoch after a stale-view refusal, and returns the
+    /// view this node now holds.
+    ///
+    /// The transport calls this when a peer answers [`check_epoch`](Mesh::check_epoch)'s
+    /// refusal with the epoch its view is current at, so the refetch section 170 asks for is
+    /// one hop rather than an operator's intervention. Monotonic in both directions: a node
+    /// already holding a newer view keeps it, and a node told an older epoch is left alone —
+    /// `bump_epoch` remains the only way to move the view *forward on purpose*.
+    fn refresh_routing(&self, peer_epoch: u64) -> u64;
 
     /// Enqueues an event for delivery to another node, returning the queued view.
     ///

@@ -485,6 +485,28 @@ where
         self.epoch.fetch_add(1, Ordering::Relaxed) + 1
     }
 
+    fn refresh_routing(&self, peer_epoch: u64) -> u64 {
+        // A stale-view refusal names the epoch the peer is current at, so adopting it is one
+        // compare-and-swap rather than a bump per refusal. The loop only retries when a
+        // concurrent refresh or bump moved the counter underneath this call, and the
+        // `current < peer_epoch` guard is what keeps the move monotonic: a peer naming an
+        // older epoch — the refusal was crafted, or the view moved again mid-flight — never
+        // drags this node's view backwards.
+        let mut current = self.epoch.load(Ordering::Relaxed);
+        while current < peer_epoch {
+            match self.epoch.compare_exchange_weak(
+                current,
+                peer_epoch,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return peer_epoch,
+                Err(observed) => current = observed,
+            }
+        }
+        current
+    }
+
     async fn enqueue(&self, event: FederatedEvent, now: Timestamp) -> Result<PendingEvent> {
         if !(FEDERATION_OPCODE_MIN..=FEDERATION_OPCODE_MAX).contains(&event.opcode) {
             return Err(fault::validation(

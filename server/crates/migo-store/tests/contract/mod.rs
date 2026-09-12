@@ -2538,6 +2538,44 @@ pub async fn updating_a_room_can_clear_a_topic_without_clearing_a_name(store: &S
     );
 }
 
+pub async fn rehoming_a_room_moves_its_home_and_advances_the_revision(store: &SharedStore) {
+    let alice = seed_account(store, 1, "alice").await;
+    store
+        .create_room(room_row(id(100), id(200), "lounge", alice, 50))
+        .await
+        .unwrap();
+    let before = store.room(id(100)).await.unwrap().unwrap();
+    assert_eq!(before.home_region, "ap-southeast-1");
+
+    let moved = store
+        .rehome_room(id(100), "eu-central-1", ts(6_000))
+        .await
+        .unwrap();
+    assert_eq!(
+        moved.home_region, "eu-central-1",
+        "the row names the node that now homes the room"
+    );
+    assert_eq!(moved.updated_at, ts(6_000));
+    assert!(
+        moved.revision > before.revision,
+        "a moved room is an observed change, so the revision advances with it"
+    );
+
+    // The move is durable and idempotent in the storage sense: rehoming to the same node
+    // is another observable write, not an error, exactly like every other room update.
+    let again = store
+        .rehome_room(id(100), "eu-central-1", ts(6_100))
+        .await
+        .unwrap();
+    assert_eq!(again.home_region, "eu-central-1");
+    assert!(again.revision > moved.revision);
+
+    expect_code(
+        store.rehome_room(id(999), "eu-central-1", ts(6_200)).await,
+        codes::NOT_FOUND,
+    );
+}
+
 pub async fn the_room_revision_advances_only_on_writes_a_snapshot_can_observe(store: &SharedStore) {
     let alice = seed_account(store, 1, "alice").await;
     let bob = seed_account(store, 2, "bob").await;
@@ -3978,6 +4016,7 @@ macro_rules! for_each_contract_case {
         $case!(a_network_ban_is_one_row_upserted_or_deleted);
         $case!(archiving_a_room_closes_it_without_deleting_it);
         $case!(updating_a_room_can_clear_a_topic_without_clearing_a_name);
+        $case!(rehoming_a_room_moves_its_home_and_advances_the_revision);
         $case!(the_room_revision_advances_only_on_writes_a_snapshot_can_observe);
         $case!(a_block_stops_contact_in_both_directions);
         $case!(accepting_a_friend_request_writes_both_sides);
