@@ -737,19 +737,17 @@ scenario('a node restart keeps history and lets the same device resume', async (
   bobHeard.install(bob.client);
 
   // Five messages, alternating senders, every acknowledgement kept: the ids and seqs
-  // are the ground truth the replay after restart must reproduce, and the sender is
-  // kept with each, because the two halves of this conversation replay differently
-  // (see the catch-up below).
-  const acks: { ack: MessageAccepted; fromBob: boolean }[] = [];
+  // are the ground truth the history after the restart must still hold, every one of
+  // them, whoever sent it.
+  const acks: MessageAccepted[] = [];
   for (let round = 1; round <= 5; round += 1) {
-    const fromBob = round % 2 === 0;
-    const sender = fromBob ? bob : alice;
+    const sender = round % 2 === 0 ? bob : alice;
     const text = `restart round ${round}`;
     const ack = await sender.client.messaging.send(conversationId, {
       type: ContentType.Text,
       text,
     });
-    acks.push({ ack, fromBob });
+    acks.push(ack);
     await until(
       `the peer receives round ${round}`,
       () => bobHeard.received.length >= Math.ceil(round / 2),
@@ -764,7 +762,7 @@ scenario('a node restart keeps history and lets the same device resume', async (
     conversationId,
     kind: ConversationKind.Direct as const,
     encryption: EncryptionMode.EndToEnd,
-    lastSeq: acks[acks.length - 1]?.ack.seq ?? 0,
+    lastSeq: acks[acks.length - 1]?.seq ?? 0,
     readSeq: 0,
     members: [alice.client.accountId, bob.client.accountId],
   };
@@ -781,40 +779,54 @@ scenario('a node restart keeps history and lets the same device resume', async (
   // history it is entitled to is still there.
   const aliceBack = client('restart_alice', KeyStore.restore(aliceKeys));
   await aliceBack.resume(alice.grant);
-  // Listeners only after the gate opens — the domain getters throw before the client is
-  // connected, and the replay below is delivered through the same listener path live
-  // delivery uses.
-  const replayed: IncomingMessage[] = [];
+  // Listeners before the gate opens any further — the live message below is delivered
+  // through the same listener path every live delivery uses.
+  const received: IncomingMessage[] = [];
   aliceBack.messaging.onMessage((message) => {
-    replayed.push(message);
+    received.push(message);
   });
   await aliceBack.watchConversation(conversationId);
 
-  // History from zero, for the messages this device receives through sync. The SDK's
-  // model splits the five: bob's messages arrived live before the restart and must
-  // arrive again after it, while alice's own sends are not redelivered to the sending
-  // device — a device cannot open its own sender-key envelopes, and its own words are
-  // its own transcript's business, not sync's. The test asserts the split rather than
-  // papering over it: every message bob sent replays with its original sequence, and
-  // nothing replays twice — the ratchet's replay protection and the sync domain's
-  // de-duplication are both load-bearing here.
-  await aliceBack.catchUp(conversationId, 0);
-  for (const { ack, fromBob } of acks) {
-    if (!fromBob) {
-      continue;
-    }
-    const message = replayed.find((candidate) => candidate.messageId === ack.messageId);
+  // History from zero, asserted on the raw sync response: the server's half of
+  // durability, checked without decrypting a byte. Every acknowledged message — both
+  // senders' — is still in the log after the restart, at its original sequence, with
+  // the log ordered and free of duplication. Decryption from history is deliberately
+  // not claimed here, because the product does not grant it: the pairwise sessions
+  // that carried the sender-key distributions are in-memory ratchets a key-store
+  // snapshot never contained (and this device was live for every message anyway, so
+  // the ratchet's replay protection would refuse the re-read); and the sender-key
+  // design itself refuses a device the history sealed before its distribution. What
+  // a restored device can still prove — from the snapshot's seeds alone, on the wire
+  // — is the live half below.
+  const history = await aliceBack.catchUp(conversationId, 0);
+  for (const ack of acks) {
+    const event = history.messages.find((candidate) => candidate.messageId === ack.messageId);
     assert.ok(
-      message !== undefined,
-      `bob's message ${ack.messageId} (seq ${ack.seq}) replayed after restart`,
+      event !== undefined,
+      `message ${ack.messageId} (seq ${ack.seq}) survived the restart in history`,
     );
-    assert.equal(message.seq, ack.seq, 'the replayed message kept its sequence');
+    assert.equal(event.seq, ack.seq, 'history kept the message at its sequence');
   }
-  const replayedIds = replayed.map((message) => message.messageId);
-  assert.equal(new Set(replayedIds).size, replayedIds.length, 'no message replayed twice');
+  const historySeqs = history.messages.map((event) => event.seq);
+  assert.deepEqual(
+    historySeqs,
+    [...historySeqs].sort((a, b) => a - b),
+    'history replays in sequence order',
+  );
+  assert.equal(new Set(historySeqs).size, historySeqs.length, 'no event appears twice in history');
+  assert.equal(history.more, false, 'the whole log came back in one page');
+  assert.ok(
+    history.toSeq >= (acks[acks.length - 1]?.seq ?? 0),
+    'the log reaches past the last acknowledged message',
+  );
 
-  // And the restarted node still serves live traffic: bob resumes too, and a message he
-  // sends now reaches alice's restored device over the socket.
+  // And the restarted node still serves live traffic — the half that proves the
+  // restored device's crypto rebuilt from the snapshot's seeds alone. Bob resumes too
+  // (his own sender-key state and pairwise sessions died with his process, so his next
+  // send starts over: a fresh chain, distributed through a brand-new X3DH prekey
+  // envelope against alice's still-published bundle — her one-time prekeys were never
+  // consumed, she was the initiator every time before). Alice's restored store opens
+  // it, accepts the fresh chain, and decrypts his message over the socket.
   const bobBack = client('restart_bob', KeyStore.restore(bobKeys));
   await bobBack.resume(bob.grant);
   await bobBack.watchConversation(conversationId);
@@ -826,9 +838,9 @@ scenario('a node restart keeps history and lets the same device resume', async (
     text: postRestartText,
   });
   await until('the restored device receives a live message after restart', () =>
-    replayed.some((message) => message.messageId === postRestartAck.messageId),
+    received.some((message) => message.messageId === postRestartAck.messageId),
   );
-  const liveAfterRestart = replayed.find(
+  const liveAfterRestart = received.find(
     (message) => message.messageId === postRestartAck.messageId,
   );
   assert.ok(liveAfterRestart !== undefined);

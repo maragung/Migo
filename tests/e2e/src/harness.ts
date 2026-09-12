@@ -301,10 +301,13 @@ export class NodeHarness {
     // the resume path the durability scenario asserts cannot exist. Production
     // configures a real key; this run generates its own — random per run, so a key
     // never leaves the run directory it was born in, but stable across the restart,
-    // which is the property under test.
+    // which is the property under test. The value is the seed's bytes verbatim
+    // (`resolve_node_secret` hands the string straight to `NodeSecret::from_seed`,
+    // which demands exactly 32 bytes), so it is written as 32 hex characters rather
+    // than a base64 blob that would be 44.
     const config = [
       '[node]',
-      `signing_key = "${randomBytes(32).toString('base64')}"`,
+      `signing_key = "${randomBytes(16).toString('hex')}"`,
       '',
       '[rate_limit]',
       'user_burst = 1000',
