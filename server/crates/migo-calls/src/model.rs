@@ -262,6 +262,15 @@ impl Call {
             call_id: self.call_id,
             state: CallState::Ended.to_wire(),
             reason: self.end_reason.map(|reason| reason.to_wire()),
+            // The 1:1 fields the group-call extension added stay absent: an
+            // ended 1:1 call has no roster to name, and an old peer reading
+            // the frame must find them skippable exactly as it does.
+            conversation_id: None,
+            user_id: None,
+            device_id: None,
+            participant_count: None,
+            sealed_offer: None,
+            participants: None,
         }
     }
 

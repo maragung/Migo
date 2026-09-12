@@ -68,7 +68,7 @@ use migo_protocol::{codes, fault, CallInviteEvent, CallStateEvent, Opcode};
 use migo_ratelimit::{BucketKey, RateLimiter, SharedRateLimiter};
 
 use crate::group_store::{
-    group_join_event, group_leave_event, GroupCallStore, MemoryGroupCallStore, SharedGroupCallStore,
+    group_join_event, group_leave_event, MemoryGroupCallStore, SharedGroupCallStore,
 };
 use crate::metrics::{AnswerOutcome, GroupJoinKind, InviteOutcome, Meters, RelayKind};
 use crate::model::{
@@ -94,9 +94,9 @@ pub fn open(
     registry: &Registry,
     config: CallsConfig,
 ) -> SharedCallkeeper {
-    Arc::new(Calls::new(
+    Arc::new(Calls::with_group_store(
         store,
-        MemoryGroupCallStore::new(),
+        Arc::new(MemoryGroupCallStore::new()),
         limiter,
         gate,
         registry,
@@ -133,7 +133,7 @@ where
     ) -> Self {
         Self::with_group_store(
             store,
-            MemoryGroupCallStore::new(),
+            Arc::new(MemoryGroupCallStore::new()),
             limiter,
             gate,
             registry,
@@ -332,6 +332,14 @@ fn state_event(call: &Call) -> CallStateEvent {
         call_id: call.call_id,
         state: call.state.to_wire(),
         reason: None,
+        // The group-call fields stay absent on 1:1 events: a 1:1 call has no
+        // roster, and old peers must find them skippable exactly as they do.
+        conversation_id: None,
+        user_id: None,
+        device_id: None,
+        participant_count: None,
+        sealed_offer: None,
+        participants: None,
     }
 }
 
@@ -782,7 +790,7 @@ where
         conversation_id: Id,
         media_kind: u32,
         sealed_offer: Vec<u8>,
-    ) -> Result<(GroupJoinOutcome, GroupCall, Option<CallStateEvent>)> {
+    ) -> Result<(GroupJoinOutcome, GroupCall, Vec<CallStateEvent>)> {
         // Shape first and before the limiter, the same order the invite keeps:
         // a malformed join is a client bug, and charging for it would let one
         // broken build take its user's working devices down with it.
