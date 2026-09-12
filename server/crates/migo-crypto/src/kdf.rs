@@ -33,6 +33,12 @@ pub const LABEL_SENDER_MESSAGE: &[u8] = b"migo-sender-message-v1";
 pub const LABEL_BACKUP: &[u8] = b"migo-backup-v1";
 /// Label for deriving a device-storage key from a recovery key.
 pub const LABEL_RECOVERY: &[u8] = b"migo-recovery-v1";
+/// Label for a call's media key, derived from the pairwise session secret.
+///
+/// A call key must never collide with a message key from the same session:
+/// section 163 forbids one key for two purposes, and the label is how the
+/// prohibition is enforced rather than remembered.
+pub const LABEL_CALL_KEY: &[u8] = b"migo-call-key-v1";
 
 /// Derives `N` bytes from `secret` under `label`.
 ///
@@ -121,6 +127,7 @@ mod tests {
             LABEL_SENDER_MESSAGE,
             LABEL_BACKUP,
             LABEL_RECOVERY,
+            LABEL_CALL_KEY,
         ];
         let mut sorted = labels.to_vec();
         sorted.sort_unstable();
