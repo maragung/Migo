@@ -34,6 +34,13 @@
 //! other's proof through [`migo_federation::Mesh::authenticate`], which refuses an unknown, paused, or
 //! blocked peer *before* looking at the signature.
 //!
+//! Both halves of the handshake run under a budget — `federation.handshake_timeout_ms`,
+//! ten seconds by default — measured on the node's injected clock the same way the
+//! gateway's liveness deadlines are (ADR-0009), so a peer that accepts the connection but
+//! never speaks costs one bounded wait: the attempt fails into the ordinary delivery
+//! backoff and the drain moves on, rather than parking a drain on a silent socket
+//! (section 173).
+//!
 //! # What arrives, and where it goes
 //!
 //! A `FED_FORWARD`'s payload is itself an encoded MWP frame — the original event, opcode
@@ -54,6 +61,7 @@
 //! queued event from one node's outbox into the other's ingest, over TCP.
 
 use std::collections::HashMap;
+use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -71,7 +79,7 @@ use migo_protocol::{fault, from_frame, to_frame, Encode, Frame, Opcode};
 use migo_wire::limits::MAX_FRAME_BYTES;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::time::timeout;
+use tokio::time::{interval, timeout, MissedTickBehavior};
 
 /// How long a delivery session may stay quiet before the sender gives up on its acks and
 /// reschedules the batch. A link that cannot ack five seconds' worth of frames is not a
@@ -171,6 +179,85 @@ fn framed<T: Encode>(opcode: Opcode, correlation: u32, value: &T) -> Result<Fram
 // Handshake
 // ---------------------------------------------------------------------------
 
+/// How often a handshake in flight re-checks its deadline. The gateway's liveness tick
+/// runs at the same cadence: often enough that an expired budget is noticed promptly,
+/// rarely enough that an idle handshake costs nothing.
+const HANDSHAKE_TICK: Duration = Duration::from_millis(250);
+
+/// The budget a mesh handshake must finish within, measured on the node's injected
+/// clock — the same convention the gateway's liveness deadlines follow (ADR-0009), so a
+/// deterministic test advances a manual clock past the deadline instead of sleeping the
+/// wait out.
+///
+/// A peer that accepts the TCP connection but never speaks would otherwise park the
+/// handshake's first read forever, and one such peer hangs a whole drain (section 173):
+/// the runner walks the outbox peer by peer, so an unbounded handshake is an unbounded
+/// queue. The budget turns that peer into an ordinary failure — the batch settles
+/// through the same backoff a refused connection takes, and the drain moves on.
+///
+/// `pub(crate)` to match `serve_session`, whose signature names it: a private type in
+/// a `pub(crate)` interface is a `private-interfaces` violation under `-D warnings`.
+#[derive(Clone)]
+pub(crate) struct HandshakeBudget {
+    /// The clock the budget is measured on.
+    clock: Arc<dyn Clock>,
+    /// How many milliseconds the whole exchange — both hellos, both proofs — may take.
+    timeout_ms: u64,
+}
+
+impl HandshakeBudget {
+    /// A budget of `timeout_ms` milliseconds, measured on `clock`.
+    fn new(clock: Arc<dyn Clock>, timeout_ms: u64) -> Self {
+        Self { clock, timeout_ms }
+    }
+
+    /// The instant a handshake that starts at `started` must finish by: exactly the
+    /// configured budget past its start, neither more nor less.
+    fn deadline(&self, started: Timestamp) -> Timestamp {
+        started.saturating_add_millis(self.timeout_ms as i64)
+    }
+
+    /// Whether `now` is past a handshake's deadline — strictly past, matching the
+    /// gateway's heartbeat deadline: a handshake that lands exactly on the deadline
+    /// finished within it.
+    fn expired(&self, now: Timestamp, deadline: Timestamp) -> bool {
+        now > deadline
+    }
+
+    /// Reads one frame while `deadline` has not passed.
+    ///
+    /// The read is raced against a tick that consults the injected clock rather than
+    /// wrapped in a wall-clock timeout, because the deadline belongs to the node's own
+    /// clock: production reads whatever the composition root injected, and a test
+    /// drives a `ManualClock` by hand. The read future is pinned across ticks so a
+    /// frame that arrives split around one is assembled, not lost — `read_frame` is
+    /// cancel-safe between frames, not through them.
+    async fn read_frame_within<S: AsyncRead + Unpin + Send>(
+        &self,
+        io: &mut S,
+        deadline: Timestamp,
+    ) -> Result<Option<Frame>> {
+        let mut ticker = interval(HANDSHAKE_TICK);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        // An interval's first tick completes immediately; consume it so only real
+        // cadence ticks carry the deadline check.
+        ticker.tick().await;
+        let mut read = pin!(read_frame(io));
+        loop {
+            tokio::select! {
+                frame = &mut read => return frame,
+                _ = ticker.tick() => {
+                    if self.expired(self.clock.now(), deadline) {
+                        return Err(fault::internal(
+                            "the peer did not finish its handshake within the budget",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// One side of a completed handshake.
 struct Handshook {
     /// The peer, now proven rather than merely claimed.
@@ -243,13 +330,18 @@ fn proof_from_wire(wire: &migo_protocol::FedAuth) -> Result<NodeProof> {
 /// Runs the client side of the handshake on a fresh connection to `peer`.
 ///
 /// Both hellos, both proofs, each side verified through the mesh — after this returns the
-/// link is a proven session with `peer`, numbered from sequence one.
+/// link is a proven session with `peer`, numbered from sequence one. The whole exchange
+/// must land inside the budget measured from the drain's own timestamp, so a peer that
+/// accepts the connection and then says nothing costs one bounded wait, never a parked
+/// drain (section 173).
 async fn handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
     io: &mut S,
     mesh: &SharedMesh,
     region: &str,
     now: Timestamp,
+    budget: &HandshakeBudget,
 ) -> Result<Handshook> {
+    let deadline = budget.deadline(now);
     let local = mesh.hello();
     write_frame(
         io,
@@ -261,7 +353,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
     )
     .await?;
 
-    let Some(reply) = read_frame(io).await? else {
+    let Some(reply) = budget.read_frame_within(io, deadline).await? else {
         return Err(fault::mesh_auth_failed(
             "the peer closed during the handshake",
         ));
@@ -286,7 +378,7 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
     )
     .await?;
 
-    let Some(counter_reply) = read_frame(io).await? else {
+    let Some(counter_reply) = budget.read_frame_within(io, deadline).await? else {
         return Err(fault::mesh_auth_failed(
             "the peer closed during the handshake",
         ));
@@ -309,12 +401,16 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin + Send>(
 /// The peer speaks first, so the listener learns who claims to be talking before it
 /// reveals anything but its own hello; the proof it demands answers the claim, and the
 /// mesh refuses an unknown peer before the signature is even checked (section 169).
+/// The exchange runs under the same budget the client side does: a connected peer that
+/// never speaks costs the listener one bounded wait, then the socket is dropped.
 async fn handshake_server<S: AsyncRead + AsyncWrite + Unpin + Send>(
     io: &mut S,
     mesh: &SharedMesh,
     now: Timestamp,
+    budget: &HandshakeBudget,
 ) -> Result<Handshook> {
-    let Some(opening) = read_frame(io).await? else {
+    let deadline = budget.deadline(now);
+    let Some(opening) = budget.read_frame_within(io, deadline).await? else {
         return Err(fault::mesh_auth_failed(
             "the peer closed during the handshake",
         ));
@@ -339,7 +435,7 @@ async fn handshake_server<S: AsyncRead + AsyncWrite + Unpin + Send>(
     )
     .await?;
 
-    let Some(proof_frame) = read_frame(io).await? else {
+    let Some(proof_frame) = budget.read_frame_within(io, deadline).await? else {
         return Err(fault::mesh_auth_failed(
             "the peer closed during the handshake",
         ));
@@ -779,14 +875,16 @@ impl MeshMeters {
 /// Every accepted `FED_FORWARD` is sequence-checked on the peer's link, ingested, and
 /// covered by the cumulative `FED_ACK` this task sends back. A replay is dropped without
 /// an ack — the sender will retry it — and a gap is a torn link: the session ends, the
-/// link state resets, and the peer re-handshakes from sequence one.
+/// link state resets, and the peer re-handshakes from sequence one. The handshake runs
+/// under the transport's budget, so a connected-but-silent peer costs one bounded wait.
 pub(crate) async fn serve_session<S: AsyncRead + AsyncWrite + Unpin + Send>(
     mut io: S,
     mesh: SharedMesh,
     router: Arc<IngestRouter>,
     now: Timestamp,
+    budget: HandshakeBudget,
 ) -> Result<()> {
-    let handshook = handshake_server(&mut io, &mesh, now).await?;
+    let handshook = handshake_server(&mut io, &mesh, now, &budget).await?;
     let peer = handshook.peer;
     // A completed inbound handshake is proof of life from the other direction: whatever a
     // previous drain's failed connect believed, the peer is there now, so the rooms it
@@ -906,7 +1004,10 @@ fn peer_to_wire(peer: PeerView) -> migo_protocol::FedPeerView {
 /// The whole session is one unit of work: handshake, send every event numbered from one,
 /// hold the link open until the peer's cumulative watermark covers the batch, and report
 /// exactly which events the watermark covered. Anything short of full coverage is a
-/// partial failure — the caller marks what arrived and reschedules the rest.
+/// partial failure — the caller marks what arrived and reschedules the rest. The
+/// handshake runs under the transport's budget, so a peer that accepts the connection
+/// but never speaks fails into that backoff after one bounded wait instead of parking
+/// the drain (section 173).
 async fn deliver_batch<S: AsyncRead + AsyncWrite + Unpin + Send>(
     mut io: S,
     mesh: &SharedMesh,
@@ -914,8 +1015,9 @@ async fn deliver_batch<S: AsyncRead + AsyncWrite + Unpin + Send>(
     peer_view: &PeerView,
     events: &[PendingEvent],
     now: Timestamp,
+    budget: &HandshakeBudget,
 ) -> Result<Vec<Id>> {
-    let handshook = handshake(&mut io, mesh, mesh.region(), now).await?;
+    let handshook = handshake(&mut io, mesh, mesh.region(), now, budget).await?;
     let _ = handshook;
 
     let mut delivered: Vec<Id> = Vec::new();
@@ -1007,12 +1109,14 @@ fn endpoint_of(base_url: &str) -> Result<String> {
 // ---------------------------------------------------------------------------
 
 /// The mesh transport a composition root owns: the allow-list and outbox it drains, the
-/// gateway its ingest path publishes into, and the counters both report through.
+/// gateway its ingest path publishes into, the counters both report through, and the
+/// budget every handshake it starts runs under.
 pub struct MeshTransport {
     mesh: SharedMesh,
     router: Arc<IngestRouter>,
     meters: MeshMeters,
     clock: Arc<dyn Clock>,
+    budget: HandshakeBudget,
 }
 
 impl MeshTransport {
@@ -1022,7 +1126,9 @@ impl MeshTransport {
         relay: Option<Arc<crate::room_relay::RoomRelay>>,
         registry: &Registry,
         clock: Arc<dyn Clock>,
+        handshake_timeout_ms: u64,
     ) -> Self {
+        let budget = HandshakeBudget::new(Arc::clone(&clock), handshake_timeout_ms);
         Self {
             router: Arc::new(IngestRouter::new(
                 gateway,
@@ -1033,6 +1139,7 @@ impl MeshTransport {
             meters: MeshMeters::new(registry),
             mesh,
             clock,
+            budget,
         }
     }
 
@@ -1060,7 +1167,10 @@ impl MeshTransport {
                             let now = transport.clock.now();
                             let mesh = Arc::clone(&transport.mesh);
                             let router = Arc::clone(&transport.router);
-                            if let Err(error) = serve_session(stream, mesh, router, now).await {
+                            let budget = transport.budget.clone();
+                            if let Err(error) =
+                                serve_session(stream, mesh, router, now, budget).await
+                            {
                                 tracing::warn!(%error, "mesh session ended");
                             }
                         });
@@ -1186,7 +1296,17 @@ impl MeshTransport {
                     continue;
                 }
             };
-            match deliver_batch(stream, &self.mesh, &self.router, &peer, &events, now).await {
+            match deliver_batch(
+                stream,
+                &self.mesh,
+                &self.router,
+                &peer,
+                &events,
+                now,
+                &self.budget,
+            )
+            .await
+            {
                 Ok(delivered) => {
                     // A delivered batch is proof the link is up, whichever direction last
                     // said otherwise: the rooms this peer homes are writable again.
@@ -1241,6 +1361,7 @@ mod tests {
     //! and the ingest path, byte for byte, with nothing faked but the wire.
 
     use super::*;
+    use migo_core::config::DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS;
     use migo_core::random::SeededRandom;
     use migo_core::{ManualClock, SystemClock};
     use migo_crypto::NodeSecret;
@@ -1252,6 +1373,16 @@ mod tests {
     use tokio::io::duplex;
 
     const NOW: i64 = 1_700_000_000_000;
+
+    /// The budget the production transport runs with, on a system clock: the ten-second
+    /// window the composition root configures, for the tests that only need a handshake
+    /// that works. Tests about the budget itself build their own on a `ManualClock`.
+    fn default_budget() -> HandshakeBudget {
+        HandshakeBudget::new(
+            Arc::new(SystemClock),
+            DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
+        )
+    }
 
     /// A store holding one room whose `home_region` is `home_region`.
     ///
@@ -1375,6 +1506,7 @@ mod tests {
             None,
             &registry,
             Arc::new(SystemClock),
+            DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
         ));
 
         let event = FederatedEvent {
@@ -1394,10 +1526,11 @@ mod tests {
         let peer_view = mesh_a.peer(b_id).await.expect("the peer resolves");
         let server_mesh = mesh_b;
         let server_router = transport_b.router_ref().clone();
-        let server =
-            tokio::spawn(
-                async move { serve_session(server_io, server_mesh, server_router, now).await },
-            );
+        let server_budget = default_budget();
+        let server = tokio::spawn(async move {
+            serve_session(server_io, server_mesh, server_router, now, server_budget).await
+        });
+        let client_budget = default_budget();
         let delivered = deliver_batch(
             client_io,
             &mesh_a,
@@ -1405,6 +1538,7 @@ mod tests {
             &peer_view,
             &due,
             now,
+            &client_budget,
         )
         .await
         .expect("the batch is delivered and acknowledged");
@@ -1448,6 +1582,7 @@ mod tests {
             None,
             &registry,
             Arc::new(SystemClock),
+            DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
         ));
 
         let event = FederatedEvent {
@@ -1463,10 +1598,11 @@ mod tests {
         let peer_view = mesh_b.peer(a_id).await.expect("the peer resolves");
         let server_mesh = mesh_a;
         let server_router = transport_a.router_ref().clone();
-        let server =
-            tokio::spawn(
-                async move { serve_session(server_io, server_mesh, server_router, now).await },
-            );
+        let server_budget = default_budget();
+        let server = tokio::spawn(async move {
+            serve_session(server_io, server_mesh, server_router, now, server_budget).await
+        });
+        let client_budget = default_budget();
         let delivered = deliver_batch(
             client_io,
             &mesh_b,
@@ -1474,6 +1610,7 @@ mod tests {
             &peer_view,
             &due,
             now,
+            &client_budget,
         )
         .await
         .expect("B delivers to A");
@@ -1498,15 +1635,16 @@ mod tests {
             None,
             &registry,
             Arc::new(SystemClock),
+            DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
         ));
 
         let (mut client_io, server_io) = duplex(64 * 1024);
         let server_mesh = mesh_b;
         let server_router = transport_b.router_ref().clone();
-        let server =
-            tokio::spawn(
-                async move { serve_session(server_io, server_mesh, server_router, now).await },
-            );
+        let server_budget = default_budget();
+        let server = tokio::spawn(async move {
+            serve_session(server_io, server_mesh, server_router, now, server_budget).await
+        });
 
         // Client side of the handshake, by hand, so the sequence can be driven directly.
         // The server waits for the client's hello, so the client speaks first.
@@ -1626,6 +1764,7 @@ mod tests {
             Some(Arc::clone(&relay_b)),
             &registry,
             Arc::new(SystemClock),
+            DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
         ));
 
         let room_id = Id::from(0x7777);
@@ -1659,10 +1798,11 @@ mod tests {
         let peer_view = mesh_a.peer(b_id).await.expect("the peer resolves");
         let server_mesh = mesh_b;
         let server_router = transport_b.router_ref().clone();
-        let server =
-            tokio::spawn(
-                async move { serve_session(server_io, server_mesh, server_router, now).await },
-            );
+        let server_budget = default_budget();
+        let server = tokio::spawn(async move {
+            serve_session(server_io, server_mesh, server_router, now, server_budget).await
+        });
+        let client_budget = default_budget();
         let delivered = deliver_batch(
             client_io,
             &mesh_a,
@@ -1670,6 +1810,7 @@ mod tests {
             &peer_view,
             &due,
             now,
+            &client_budget,
         )
         .await
         .expect("the subscribe is delivered and acknowledged");
@@ -1709,6 +1850,7 @@ mod tests {
             None,
             &registry,
             Arc::new(SystemClock),
+            DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
         ));
 
         let routing = migo_protocol::FedRouting {
@@ -1790,9 +1932,11 @@ mod tests {
         let peer_view = mesh_b.peer(a_id).await.expect("the peer resolves");
         let server_mesh = mesh_a;
         let server_router = transport_a.router_ref().clone();
+        let server_budget = default_budget();
         let server = tokio::spawn(async move {
-            serve_session(server_io, server_mesh, server_router, later).await
+            serve_session(server_io, server_mesh, server_router, later, server_budget).await
         });
+        let client_budget = default_budget();
         let delivered = deliver_batch(
             client_io,
             &mesh_b,
@@ -1800,6 +1944,7 @@ mod tests {
             &peer_view,
             &a_events,
             later,
+            &client_budget,
         )
         .await
         .expect("the batch is delivered and acknowledged");
@@ -1863,6 +2008,7 @@ mod tests {
             Some(relay_b.clone()),
             &registry,
             Arc::new(ManualClock::new(later)),
+            DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
         ));
 
         // B holds the watch table: A and a third node have subscribers of the room.
@@ -1917,9 +2063,11 @@ mod tests {
         let peer_view = mesh_a.peer(b_id).await.expect("the peer resolves");
         let server_mesh = mesh_b.clone();
         let server_router = transport_b.router_ref().clone();
+        let server_budget = transport_b.budget.clone();
         let server = tokio::spawn(async move {
-            serve_session(server_io, server_mesh, server_router, later).await
+            serve_session(server_io, server_mesh, server_router, later, server_budget).await
         });
+        let client_budget = default_budget();
         deliver_batch(
             client_io,
             &mesh_a,
@@ -1927,6 +2075,7 @@ mod tests {
             &peer_view,
             &due,
             later,
+            &client_budget,
         )
         .await
         .expect("the batch is delivered and acknowledged");
@@ -1954,6 +2103,120 @@ mod tests {
         assert_eq!(
             onward[0].target_node, third,
             "the other watching node, and only it"
+        );
+    }
+
+    /// The budget's arithmetic is the gateway's heartbeat convention exactly: the deadline
+    /// lands a whole budget past the start, and only a clock strictly past it counts as
+    /// expired — a handshake that lands exactly on the deadline finished inside it, so a
+    /// peer is never failed a millisecond early. Pure clock arithmetic, so a plain test
+    /// with a manual clock pins it with no timing at all.
+    #[test]
+    fn the_handshake_budget_expires_strictly_past_the_deadline() {
+        let clock = Arc::new(ManualClock::new(Timestamp::from_millis(NOW)));
+        let budget = HandshakeBudget::new(
+            Arc::clone(&clock) as Arc<dyn Clock>,
+            DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
+        );
+        let started = Timestamp::from_millis(NOW);
+        let deadline = budget.deadline(started);
+        assert_eq!(
+            deadline.as_millis(),
+            NOW + DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS as i64,
+            "the deadline is exactly one budget past the start"
+        );
+        // One millisecond before the deadline: still inside, by construction.
+        clock.set(Timestamp::from_millis(
+            NOW + DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS as i64 - 1,
+        ));
+        assert!(
+            !budget.expired(clock.now(), deadline),
+            "the last millisecond inside the budget is inside the budget"
+        );
+        // Exactly on the deadline: still inside — the gateway's liveness rule, strictly
+        // greater, applied to the handshake.
+        clock.set(deadline);
+        assert!(
+            !budget.expired(clock.now(), deadline),
+            "a handshake that lands exactly on the deadline finished within it"
+        );
+        // One millisecond past: expired, and the attempt fails into the backoff.
+        clock.set(Timestamp::from_millis(
+            NOW + DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS as i64 + 1,
+        ));
+        assert!(
+            budget.expired(clock.now(), deadline),
+            "one millisecond past the deadline is past the deadline"
+        );
+    }
+
+    /// A handshake with the budget nearly spent is untouched by the deadline: the reads
+    /// complete because the peer speaks, not because the clock forgives it. The budget's
+    /// clock is parked one millisecond inside the deadline — the last instant a handshake
+    /// may legally take — for the whole session, and the exchange still finishes, one
+    /// event delivered and ingested.
+    #[tokio::test]
+    async fn a_handshake_on_the_last_millisecond_inside_the_budget_still_completes() {
+        let (mesh_a, mesh_b, _a_id, b_id) = pair().await;
+        let now = Timestamp::from_millis(NOW);
+        let registry = registry();
+        let transport_b = Arc::new(MeshTransport::new(
+            mesh_b.clone(),
+            None,
+            None,
+            &registry,
+            Arc::new(SystemClock),
+            DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
+        ));
+
+        let event = FederatedEvent {
+            target_node: b_id,
+            opcode: Opcode::FedPresenceDigest.to_wire() as i32,
+            payload: digest_frame("inside the budget").to_vec(),
+        };
+        mesh_a
+            .enqueue(event, now)
+            .await
+            .expect("a federation-band event enqueues");
+        let due = mesh_a.due(now).await.expect("the queue reads");
+        assert_eq!(due.len(), 1);
+
+        let last_instant =
+            Timestamp::from_millis(NOW + DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS as i64 - 1);
+        let clock = Arc::new(ManualClock::new(last_instant));
+        let budget = HandshakeBudget::new(
+            Arc::clone(&clock) as Arc<dyn Clock>,
+            DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
+        );
+
+        let (client_io, server_io) = duplex(64 * 1024);
+        let peer_view = mesh_a.peer(b_id).await.expect("the peer resolves");
+        let server_mesh = mesh_b;
+        let server_router = transport_b.router_ref().clone();
+        let server_budget = budget.clone();
+        let server = tokio::spawn(async move {
+            serve_session(server_io, server_mesh, server_router, now, server_budget).await
+        });
+        let delivered = deliver_batch(
+            client_io,
+            &mesh_a,
+            transport_b.router_ref(),
+            &peer_view,
+            &due,
+            now,
+            &budget,
+        )
+        .await
+        .expect("a peer that speaks inside the budget is delivered to");
+        server
+            .await
+            .expect("the server session completes")
+            .expect("the server side of the session is clean");
+        assert_eq!(delivered.len(), 1, "the watermark covered the batch");
+        assert_eq!(
+            transport_b.ingested().len(),
+            1,
+            "the peer ingested the event"
         );
     }
 }
