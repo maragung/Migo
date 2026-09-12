@@ -458,6 +458,10 @@ async fn a_notification_list_pages_by_cursor_over_the_socket() {
     let first: InboxResponse = from_frame(&frame).expect("the page decodes");
     assert_eq!(first.items.len(), 2, "the limit the client asked for");
     assert_eq!(
+        first.unread, Some(5),
+        "every page carries the whole inbox's unread count (section 156), so a badge never counts the rows the page happens to hold"
+    );
+    assert_eq!(
         first.items[0].at,
         Timestamp::from_millis(BASE + 4 * SECOND),
         "newest first, so a client woken mid-stream sees the newest thing first"
@@ -500,6 +504,11 @@ async fn a_notification_list_pages_by_cursor_over_the_socket() {
     );
     let second: InboxResponse = from_frame(&frame).expect("the page decodes");
     assert_eq!(second.items.len(), 2);
+    assert_eq!(
+        second.unread,
+        Some(5),
+        "the count is fresh on every page, not a fact of the first one"
+    );
     let seen: Vec<migo_core::Id> = first
         .items
         .iter()
@@ -535,7 +544,44 @@ async fn a_notification_list_pages_by_cursor_over_the_socket() {
     let third: InboxResponse = from_frame(&frame).expect("the page decodes");
     assert_eq!(third.items.len(), 1, "five rows in pages of two leave one");
     assert_eq!(
+        third.unread, Some(5),
+        "the tail page still names the whole inbox's unread, including the rows the earlier pages hold"
+    );
+    assert_eq!(
         third.next_cursor, None,
         "a page that was not full carries no cursor: this is the end"
+    );
+
+    // Acknowledging through the newest row moves the counter, and the next page
+    // — the same first page again — says so, without a single new frame.
+    session
+        .ask_for_frame(
+            Opcode::NotificationAck,
+            85,
+            &NotificationAck {
+                id: first.items[0].id,
+            },
+        )
+        .await;
+    let frame = session
+        .ask_for_frame(
+            Opcode::NotificationList,
+            86,
+            &InboxReq {
+                limit: 2,
+                cursor: None,
+            },
+        )
+        .await;
+    assert!(
+        !frame.header.is_error(),
+        "the page after the acknowledgement is served: {:?}",
+        from_frame::<migo_protocol::Error>(&frame)
+    );
+    let settled: InboxResponse = from_frame(&frame).expect("the page decodes");
+    assert_eq!(
+        settled.unread,
+        Some(0),
+        "the counter moved with the acknowledgement; the page needed no event to learn it"
     );
 }

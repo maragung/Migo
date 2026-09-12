@@ -32,7 +32,8 @@ use migo_auth::{DeviceClaim, Grant, Registration, RequestContext};
 use migo_core::{Config, Secret, Timestamp};
 use migo_protocol::{
     from_frame, to_frame, Acknowledged, Encode, Frame, Hello, Opcode, Platform, PresenceState,
-    PresenceUpdate, RoomJoinRequest, RoomKind, RoomLeaveRequest, Welcome, PROTOCOL_VERSION,
+    PresenceUpdate, RoomJoinRequest, RoomKind, RoomLeaveRequest, RosterReq, RosterResponse,
+    Welcome, PROTOCOL_VERSION,
 };
 use migo_ratelimit::TrustTier;
 use migo_rooms::{Caller as RoomCaller, NewRoomRequest};
@@ -285,5 +286,83 @@ async fn a_presence_set_and_both_room_leaves_are_answered_on_the_wire() {
     assert!(
         repeat.ok,
         "the idempotent no-op leave is still acknowledged"
+    );
+}
+
+#[tokio::test]
+async fn a_roster_reply_carries_the_revision_the_page_was_read_at() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the listener is bound");
+
+    // The rooms service already pins that a roster page names the room's state
+    // revision; this test pins the last inch of wire, where the dispatcher maps
+    // the service's page onto the reply. A handler that dropped the field would
+    // answer a well-formed page with an anchor-free one, and a client holding it
+    // could never tell a missed delta from a fresh roster (brief section 156).
+    let owner = registered_grant(&app, "rosterowner").await;
+    let member = registered_grant(&app, "rostermember").await;
+    let caller = |grant: &Grant| {
+        RoomCaller::new(
+            grant.account_id,
+            grant.device_id,
+            TrustTier::Established,
+            Timestamp::from_millis(1),
+        )
+    };
+    let room = app
+        .rooms
+        .create(
+            &caller(&owner),
+            NewRoomRequest {
+                slug: "roster-room".to_string(),
+                name: "The Roster Room".to_string(),
+                topic: None,
+                kind: RoomKind::Public,
+                max_members: None,
+            },
+        )
+        .await
+        .expect("the owner founds the room");
+    app.rooms
+        .join(
+            &caller(&member),
+            RoomJoinRequest {
+                room_id: room.room_id,
+                invite_code: None,
+            },
+        )
+        .await
+        .expect("the member joins the room");
+
+    let mut session = LiveSession::connect(addr, &member).await;
+    // `ask` answers with an `Acknowledged`; the roster reply is a page, so the
+    // frame is asked for and read directly, the same way the push suite does.
+    send(
+        &mut session.stream,
+        Opcode::RoomRoster,
+        51,
+        &RosterReq {
+            room_id: room.room_id,
+            limit: Some(10),
+            after: None,
+        },
+    )
+    .await;
+    let frame = recv(&mut session.stream).await;
+    assert_eq!(
+        frame.header.correlation, 51,
+        "the reply must echo the request's correlation (section 139)"
+    );
+    assert!(
+        !frame.header.is_error(),
+        "the roster page is served: {:?}",
+        from_frame::<migo_protocol::Error>(&frame)
+    );
+    let page: RosterResponse = from_frame(&frame).expect("the page decodes");
+    assert_eq!(page.members.len(), 2, "the owner and the member");
+    assert_eq!(
+        page.revision,
+        Some(1),
+        "creation sat at 0 and the member's join advanced the room to 1 (section 156)"
     );
 }

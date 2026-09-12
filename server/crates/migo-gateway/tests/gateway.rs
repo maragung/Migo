@@ -1734,6 +1734,7 @@ async fn a_revoked_account_stops_hearing_the_topic_it_lost() {
             role: None,
             member_count: Some(1),
             change: Some(MemberChange::Kicked),
+            revision: None,
         };
         h.gateway
             .broadcast_to_topic(&room, Opcode::RoomMemberEvent, &removal, ts(NOW));
@@ -1753,6 +1754,7 @@ async fn a_revoked_account_stops_hearing_the_topic_it_lost() {
             role: None,
             member_count: Some(2),
             change: Some(MemberChange::Joined),
+            revision: None,
         };
         h.gateway
             .broadcast_to_topic(&room, Opcode::RoomMemberEvent, &after, ts(NOW));

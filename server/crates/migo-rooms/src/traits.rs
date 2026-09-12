@@ -159,7 +159,8 @@ pub trait Roomkeeper: Send + Sync {
     /// Rooms this account is currently in.
     async fn mine(&self, caller: &Caller) -> Result<Vec<RoomSummary>>;
 
-    /// A page of the roster, highest role first.
+    /// A page of the roster, highest role first, with the room's state revision
+    /// the page was read at (brief section 156).
     ///
     /// Members only, and only to members. A roster is the membership list of a
     /// community, and handing it to anyone who knows the room id would make every
@@ -170,7 +171,7 @@ pub trait Roomkeeper: Send + Sync {
         room_id: Id,
         limit: u16,
         after: Option<Id>,
-    ) -> Result<Vec<RoomMember>>;
+    ) -> Result<crate::model::Roster>;
 
     /// Changes name, topic, slow mode, or join policy.
     ///
