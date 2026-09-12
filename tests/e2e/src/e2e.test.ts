@@ -288,6 +288,37 @@ async function metric(name: string): Promise<number | undefined> {
 }
 
 /**
+ * Reads a gauge once it has stopped moving: two consecutive reads, a second apart, agree.
+ *
+ * A gauge that a moment ago counted sessions being reaped is not a baseline. The previous
+ * scenario's disconnects resolve on the client before the node frees the slots — the close
+ * frame crosses the wire, the gateway notices, the gauge drops a beat later — and a sample
+ * taken inside that beat sees a number that is about to change for reasons that have
+ * nothing to do with whatever comes next. The next scenario's session and the late reap
+ * then cancel out and a `moved above the baseline` assertion can never fire, even though
+ * the gauge is tracking every session perfectly. Settling first makes the value the floor
+ * the scenario's own traffic moves from, and nothing else's.
+ */
+async function settledMetric(name: string): Promise<number | undefined> {
+  const deadline = Date.now() + DELIVERY_TIMEOUT_MS;
+  let previous = await metric(name);
+  for (;;) {
+    await sleep(1000);
+    const current = await metric(name);
+    if (current === previous) {
+      return current;
+    }
+    previous = current;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `the ${name} gauge never settled within ${DELIVERY_TIMEOUT_MS}ms ` +
+          `(last value: ${current})`,
+      );
+    }
+  }
+}
+
+/**
  * Polls a metric until it satisfies `accepts`, returning the value that did.
  *
  * Gauges move when the node processes the event, which is after the call that caused it
@@ -850,8 +881,12 @@ scenario('a node restart keeps history and lets the same device resume', async (
 scenario('the metrics endpoint observes the session that is live right now', async () => {
   // Brief section 174's runtime half: the gauges and counters are not decoration, they
   // track real sessions. A session opens, the gauge moves; it closes, the gauge moves
-  // back — an observability contract asserted against the running node.
-  const before = await metric('migo_gateway_sessions_live');
+  // back — an observability contract asserted against the running node. The baseline is
+  // taken settled, not raw: the restart scenario before this one disconnects its clients
+  // in its `finally`, and the node reaps those sessions a beat after the client-side
+  // disconnect resolves, so a raw sample would freeze the scenario onto a floor the
+  // reaps are still carving (see {@link settledMetric}).
+  const before = await settledMetric('migo_gateway_sessions_live');
   assert.ok(before !== undefined, 'the sessions gauge is registered');
 
   const user = await register('metrics_user');
