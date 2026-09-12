@@ -464,6 +464,30 @@ async fn a_created_conversation_names_its_members_on_their_own_topics() {
     let mut founder_session = LiveSession::connect(addr, &founder).await;
     let mut peer_session = LiveSession::connect(addr, &peer).await;
 
+    // Default message privacy accepts friends only, so the pair is made
+    // friends first — through the domain service, as the reaction test does,
+    // because the wire path under test is the create, not the friendship.
+    let friender = migo_social::Caller::new(
+        founder.account_id,
+        founder.device_id,
+        migo_ratelimit::TrustTier::Established,
+        app.clock.now(),
+    );
+    let accepter = migo_social::Caller::new(
+        peer.account_id,
+        peer.device_id,
+        migo_ratelimit::TrustTier::Established,
+        app.clock.now(),
+    );
+    app.social
+        .request_friend(&friender, peer.account_id)
+        .await
+        .expect("a friend request between fresh accounts must be taken");
+    app.social
+        .respond_friend(&accepter, founder.account_id, true)
+        .await
+        .expect("the friend request must be accepted");
+
     // A direct conversation created by the founder. Before the fix, the create
     // produced no fanout at all: the peer was a member of a conversation their
     // client had never heard of, so the first message sealed for an audience
