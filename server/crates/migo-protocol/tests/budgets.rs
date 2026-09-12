@@ -90,8 +90,9 @@ fn seal_with_derived_nonce(
     let nonce = kdf::derive::<NONCE_LEN>(key.expose(), None, b"budget gate nonce");
     let mut sealed = aead::seal_with_nonce(key, &nonce, associated_data, plaintext)
         .unwrap_or_else(|e| panic!("sealing with a valid key cannot fail: {e}"));
-    let wire_only = sealed.split_off(NONCE_LEN);
-    wire_only
+    // Drained rather than returned through a binding: `split_off` leaves the
+    // nonce behind in `sealed` and hands back ciphertext and tag.
+    sealed.split_off(NONCE_LEN)
 }
 
 /// Builds the 1-on-1 cryptographic envelope exactly as the brief's E2E MESSAGE

@@ -122,10 +122,12 @@ async fn admit(mesh: &SharedMesh, peer: Id, peer_key: &[u8], base_url: String, r
 }
 
 /// A node's transport, with no gateway behind it: these tests assert on the link and
-/// the outbox, which the ingest window already exposes.
+/// the outbox, which the ingest window already exposes. No room relay either — nothing
+/// here fans a room out across nodes, so the relay has no work to do.
 fn transport(mesh: &SharedMesh) -> Arc<MeshTransport> {
     Arc::new(MeshTransport::new(
         mesh.clone(),
+        None,
         None,
         &Registry::new(),
         Arc::new(SystemClock) as Arc<dyn Clock>,
@@ -705,6 +707,7 @@ async fn a_handshake_from_a_clock_outside_the_skew_window_is_refused_on_the_wire
 
     let transport_a = Arc::new(MeshTransport::new(
         Arc::clone(&mesh_a),
+        None,
         None,
         &Registry::new(),
         Arc::new(ManualClock::new(now)) as Arc<dyn Clock>,
