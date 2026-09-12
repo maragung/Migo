@@ -311,6 +311,85 @@ impl RoomRelay {
         )
     }
 
+    /// Whether a room's writes may proceed on this node — the read-only half of
+    /// section 173's scenario 2.
+    ///
+    /// The sequencer rule of section 170 is why this gate exists: one sequencer
+    /// per room, at the home node, and a second one must never be appointed,
+    /// because two sequencers mean two orders that cannot be merged without
+    /// losing messages. So when this node does *not* home the room and the home
+    /// node has proven unreachable — a delivery attempt that could not connect —
+    /// a write here could only be ordered by a sequencer that must not exist.
+    /// The write is refused with
+    /// [`room_read_only_partition`](migo_protocol::fault::room_read_only_partition)
+    /// instead: the room is read-only on this node for as long as the partition
+    /// stands, and the answer is retryable, because a link that heals — a
+    /// delivered batch or an inbound handshake — makes the very same write
+    /// succeed.
+    ///
+    /// Everything else stays writable, by the same rule read the other way. A
+    /// room this node homes keeps its single sequencer here and writes
+    /// freely — that is the sequencer that exists, not a second one. A room
+    /// whose home region no allowed peer answers is a configuration gap, not a
+    /// partition, and refusing on it would break deployments where the row
+    /// arrived without the peer; it warns on the publish path as before. And a
+    /// link never tried reads as reachable, because the mesh remembers
+    /// evidence, it does not guess.
+    ///
+    /// # Errors
+    ///
+    /// [`room_read_only_partition`](migo_protocol::fault::room_read_only_partition)
+    /// — and nothing else — when the room is homed elsewhere and that home node
+    /// is marked down. Store failures propagate.
+    pub async fn ensure_writable(&self, room_id: Id) -> Result<()> {
+        match self.store.room(room_id).await? {
+            Some(room) => self.room_writable(&room).await,
+            // No row, so nothing names a home node: the write is this node's
+            // alone and there is no second sequencer to refuse.
+            None => Ok(()),
+        }
+    }
+
+    /// The same gate for a conversation: a room's chat is its conversation, so
+    /// a message write names a conversation, not a room.
+    ///
+    /// The store tells the two kinds of conversation apart: a room's resolves
+    /// to its row and is gated by where that room is homed; a direct or group
+    /// conversation resolves to nothing, has no home node and no sequencer to
+    /// duplicate, and passes — which is section 173's own split, that a private
+    /// message survives the partition because it never needed the far node's
+    /// order in the first place.
+    pub async fn ensure_conversation_writable(&self, conversation_id: Id) -> Result<()> {
+        match self.store.room_by_conversation(conversation_id).await? {
+            Some(room) => self.room_writable(&room).await,
+            None => Ok(()),
+        }
+    }
+
+    /// The gate's decision for one already-read room row.
+    async fn room_writable(&self, room: &Room) -> Result<()> {
+        if room.home_region == self.mesh.region() {
+            // This node is the home node: the sequencer that exists is here.
+            return Ok(());
+        }
+        let Some(home) = self.home_node(&room.home_region).await? else {
+            // A configuration gap, not a partition: no peer to have proven
+            // unreachable. The publish path already warns; refusing here would
+            // break shared-store deployments where the row arrived without the
+            // peer ever being admitted.
+            return Ok(());
+        };
+        if self.mesh.link_reachable(home) {
+            return Ok(());
+        }
+        tracing::warn!(
+            room = %room.room_id.to_text(),
+            home = %room.home_region,
+            "room is read-only on this node: its home node is unreachable, so a write here would need a second sequencer"
+        );
+        Err(fault::room_read_only_partition())
+    }
+
     /// Hands an event to the node that owns its fan-out: this one, or the home
     /// node.
     ///

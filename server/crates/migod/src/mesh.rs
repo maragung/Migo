@@ -913,6 +913,10 @@ pub(crate) async fn serve_session<S: AsyncRead + AsyncWrite + Unpin + Send>(
 ) -> Result<()> {
     let handshook = handshake_server(&mut io, &mesh, now).await?;
     let peer = handshook.peer;
+    // A completed inbound handshake is proof of life from the other direction: whatever a
+    // previous drain's failed connect believed, the peer is there now, so the rooms it
+    // homes may be written to again (section 173, scenario 2's recovery half).
+    mesh.note_link_up(peer);
     let mut watermark: u64 = 0;
     let result = serve_reads(&mut io, &mesh, &router, peer, &mut watermark).await;
     // The link is over, whatever the reason: the next session with this peer must start
@@ -1285,9 +1289,6 @@ impl MeshTransport {
         }
         let mut groups: HashMap<Id, Vec<PendingEvent>> = HashMap::new();
         for event in due {
-            // One session carries at most BATCH_LIMIT events: a queue far longer than that
-            // drains across several sessions, each with its own handshake and watermark,
-            // so one slow link cannot hold the whole outbox hostage.
             // One session carries at most BATCH_LIMIT events: a queue far longer than
             // that drains across several passes, each with its own handshake and
             // watermark, so one slow link cannot hold the whole outbox hostage. An event
@@ -1316,6 +1317,9 @@ impl MeshTransport {
             };
             match self.deliver_to(&endpoint, &peer, &events, now).await {
                 Ok(delivered) => {
+                    // A delivered batch is proof the link is up, whichever direction last
+                    // said otherwise: the rooms this peer homes are writable again.
+                    self.mesh.note_link_up(peer.node_id);
                     self.meters.delivered(delivered.len() as u64);
                     for event_id in delivered {
                         self.mesh.mark_delivered(event_id, now).await?;
@@ -1337,6 +1341,10 @@ impl MeshTransport {
                     );
                     match self.deliver_to(&endpoint, &peer, &events, now).await {
                         Ok(delivered) => {
+                            // A delivered batch is proof the link is up, whichever
+                            // direction last said otherwise: the rooms this peer homes
+                            // are writable again.
+                            self.mesh.note_link_up(peer.node_id);
                             self.meters.delivered(delivered.len() as u64);
                             for event_id in delivered {
                                 self.mesh.mark_delivered(event_id, now).await?;
@@ -1361,7 +1369,9 @@ impl MeshTransport {
     /// The dial and the session are one helper because they fail as one: a peer that cannot
     /// be reached and a peer that refuses the session both leave the batch undelivered, and
     /// the one failure a refresh turns into a success — the stale-view refusal — is caught
-    /// by the caller rather than absorbed here.
+    /// by the caller rather than absorbed here. An unreachable dial is also the one place a
+    /// partition is discovered, so the link is marked down here for the read-only rule of
+    /// section 170 to run on; a delivered batch or an inbound handshake lifts the mark.
     async fn deliver_to(
         &self,
         endpoint: &str,
@@ -1369,11 +1379,19 @@ impl MeshTransport {
         events: &[PendingEvent],
         now: Timestamp,
     ) -> std::result::Result<Vec<Id>, SessionFailure> {
-        let stream = tokio::net::TcpStream::connect(endpoint)
-            .await
-            .map_err(|error| {
-                SessionFailure::Failed(fault::internal(format!("cannot reach the peer: {error}")))
-            })?;
+        let stream = match tokio::net::TcpStream::connect(endpoint).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                // The one place a partition is discovered: the peer's address does not
+                // answer. The mark is what the read-only rule of section 170 runs on —
+                // a room homed on this peer is refused further writes from this node
+                // until a delivery or an inbound handshake contradicts the mark.
+                self.mesh.note_link_down(peer.node_id);
+                return Err(SessionFailure::Failed(fault::internal(format!(
+                    "cannot reach the peer: {error}"
+                ))));
+            }
+        };
         deliver_batch(stream, &self.mesh, &self.router, peer, events, now).await
     }
 
