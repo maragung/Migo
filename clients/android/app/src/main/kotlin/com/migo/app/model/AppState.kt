@@ -782,6 +782,11 @@ data class ChatMessage(
     val mine: Boolean,
     /** Who sent it, as a display string. Empty for own messages, which need no label. */
     val author: String,
+    /**
+     * The account that sent it, for the avatar a run head draws. Null nowhere today, but nullable
+     * so a synthetic row (a draft, a future surface) can exist without inventing an id.
+     */
+    val senderId: Id? = null,
     val text: String,
     val at: Long,
     /** True for a message sitting in the list before the server has accepted it. */

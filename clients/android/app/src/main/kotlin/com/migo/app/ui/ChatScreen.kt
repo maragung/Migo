@@ -6,6 +6,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
@@ -62,6 +63,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import com.migo.app.media.formatBytes
 import com.migo.app.media.formatDuration
 import com.migo.app.model.Attachment
@@ -236,6 +238,11 @@ fun ChatScreen(
     onSaveDocument: (Attachment) -> Unit = {},
     /** The session's resolved media, by media id — what an attachment bubble reads its object from. */
     mediaObjects: Map<Id, MediaObject> = emptyMap(),
+    /**
+     * The session's avatars, by account id — what a run head and the sheets read their pictures
+     * from. Absent keys render as the monogram, which is the avatar's loading state.
+     */
+    avatarBytes: Map<Id, ByteArray> = emptyMap(),
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -378,6 +385,7 @@ fun ChatScreen(
                                 is TimelineItem.Message -> MessageLine(
                                     message = item.message,
                                     head = heads[item.key] == true,
+                                    avatarBytes = item.message.senderId?.let { avatarBytes[it] },
                                     onReact = onReact,
                                     onEdit = onEdit,
                                     onDelete = onDelete,
@@ -436,6 +444,7 @@ fun ChatScreen(
             MembersSheet(
                 chat = chat,
                 selfId = selfId,
+                avatarBytes = avatarBytes,
                 onClose = onCloseMembers,
                 onVoteKick = onVoteKick,
                 onSanction = onSanction,
@@ -451,6 +460,7 @@ fun ChatScreen(
                 chat = chat,
                 selfId = selfId,
                 invitees = groupInvitees,
+                avatarBytes = avatarBytes,
                 onClose = onCloseGroupMembers,
                 onInvite = onInvite,
                 onVoteKick = onGroupVoteKick,
@@ -519,7 +529,7 @@ private fun ChatHeader(
         ) {
             // No back control: the window strip above is the chat's own way back, the mobile
             // reference's windows having no title bars.
-            Monogram(name = chat.title, size = 36.dp)
+            Avatar(name = chat.title, bytes = chat.peerId?.let { avatarBytes[it] }, size = 36.dp)
             Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
@@ -914,6 +924,7 @@ private fun GuessCard(
 private fun MessageLine(
     message: ChatMessage,
     head: Boolean,
+    avatarBytes: ByteArray?,
     onReact: (Id, String) -> Unit,
     onEdit: (Id, String) -> Unit,
     onDelete: (Id) -> Unit,
@@ -981,7 +992,7 @@ private fun MessageLine(
     ) {
         Box(modifier = Modifier.width(24.dp)) {
             if (head) {
-                Monogram(name = name, size = 22.dp, modifier = Modifier.padding(top = 1.dp))
+                Avatar(name = name, bytes = avatarBytes, size = 22.dp, modifier = Modifier.padding(top = 1.dp))
             }
         }
         Column(modifier = Modifier.weight(1f)) {
@@ -1137,6 +1148,27 @@ private fun ImageBubble(
         BitmapFactory.decodeByteArray(it, 0, it.size)
     }
     val shape = RoundedCornerShape(12.dp)
+    // The lightbox: a tap on the rendered image opens it fullscreen, the same second look the web
+    // client's overlay gives. A dialog rather than a navigation so back closes only the picture.
+    var lightboxOpen by remember { mutableStateOf(false) }
+    if (lightboxOpen && bitmap != null) {
+        Dialog(onDismissRequest = { lightboxOpen = false }) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.9f))
+                    .combinedClickable(onClick = { lightboxOpen = false }),
+                contentAlignment = Alignment.Center,
+            ) {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = attachment.caption ?: "Photo",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
     Column(modifier = Modifier.padding(top = 4.dp)) {
         when {
             bitmap != null -> Image(
@@ -1154,7 +1186,8 @@ private fun ImageBubble(
                             base
                         }
                     }
-                    .clip(shape),
+                    .clip(shape)
+                    .combinedClickable(onClick = { lightboxOpen = true }),
             )
 
             mediaObject is MediaObject.Failed -> Text(
@@ -1649,6 +1682,7 @@ private fun GroupMembersSheet(
     chat: ChatState,
     selfId: Id,
     invitees: List<GroupInviteCandidate>,
+    avatarBytes: Map<Id, ByteArray>,
     onClose: () -> Unit,
     onInvite: (Id) -> Unit,
     onVoteKick: (Id) -> Unit,
@@ -1729,6 +1763,7 @@ private fun GroupMembersSheet(
                             items(candidates, key = { "invite-" + it.userId.value }) { person ->
                                 GroupInviteRow(
                                     name = person.name,
+                                    avatarBytes = avatarBytes[person.userId],
                                     busy = person.userId in chat.acting,
                                     onInvite = { onInvite(person.userId) },
                                 )
@@ -1745,6 +1780,7 @@ private fun GroupMembersSheet(
                             items(roster, key = { "member-" + it.userId.value }) { member ->
                                 GroupMemberRow(
                                     member = member,
+                                    avatarBytes = avatarBytes[member.userId],
                                     isSelf = member.userId == selfId,
                                     myRole = myRole,
                                     tally = chat.votes[member.userId],
@@ -1768,12 +1804,12 @@ private fun GroupMembersSheet(
  * because an invite is one person's call and no other row should wait for it.
  */
 @Composable
-private fun GroupInviteRow(name: String, busy: Boolean, onInvite: () -> Unit) {
+private fun GroupInviteRow(name: String, avatarBytes: ByteArray?, busy: Boolean, onInvite: () -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Monogram(name = name, size = 32.dp)
+        Avatar(name = name, bytes = avatarBytes, size = 32.dp)
         Spacer(modifier = Modifier.width(12.dp))
         Text(
             text = name,
@@ -1800,6 +1836,7 @@ private fun GroupInviteRow(name: String, busy: Boolean, onInvite: () -> Unit) {
 @Composable
 private fun GroupMemberRow(
     member: GroupMember,
+    avatarBytes: ByteArray?,
     isSelf: Boolean,
     myRole: ConversationRole,
     tally: VoteTally?,
@@ -1815,7 +1852,7 @@ private fun GroupMemberRow(
 
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Monogram(name = member.name, size = 32.dp)
+            Avatar(name = member.name, bytes = avatarBytes, size = 32.dp)
             Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
@@ -1898,6 +1935,7 @@ private fun GroupMemberRow(
 private fun MembersSheet(
     chat: ChatState,
     selfId: Id,
+    avatarBytes: Map<Id, ByteArray>,
     onClose: () -> Unit,
     onVoteKick: (Id) -> Unit,
     onSanction: (Id, SanctionAction) -> Unit,
@@ -1943,6 +1981,7 @@ private fun MembersSheet(
                         items(roster, key = { "member-" + it.userId.value }) { member ->
                             MemberRow(
                                 member = member,
+                                avatarBytes = avatarBytes[member.userId],
                                 isSelf = member.userId == selfId,
                                 myRole = myRole,
                                 tally = chat.votes[member.userId],
@@ -1963,6 +2002,7 @@ private fun MembersSheet(
                             items(mutedOnly, key = { "muted-" + it.value }) { id ->
                                 MutedRow(
                                     name = rosterNames[id] ?: id.value.take(8),
+                                    avatarBytes = avatarBytes[id],
                                     acting = id in chat.acting,
                                     onUnmute = { onMuteForMe(id, false) },
                                 )
@@ -1985,6 +2025,7 @@ private fun MembersSheet(
 @Composable
 private fun MemberRow(
     member: RosterMember,
+    avatarBytes: ByteArray?,
     isSelf: Boolean,
     myRole: RoomRole,
     tally: VoteTally?,
@@ -1999,7 +2040,7 @@ private fun MemberRow(
 
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Monogram(name = member.name, size = 32.dp)
+            Avatar(name = member.name, bytes = avatarBytes, size = 32.dp)
             Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
@@ -2044,12 +2085,12 @@ private fun MemberRow(
 
 /** One account this device has muted who is not in the room, with the control to lift it. */
 @Composable
-private fun MutedRow(name: String, acting: Boolean, onUnmute: () -> Unit) {
+private fun MutedRow(name: String, avatarBytes: ByteArray?, acting: Boolean, onUnmute: () -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Monogram(name = name, size = 32.dp)
+        Avatar(name = name, bytes = avatarBytes, size = 32.dp)
         Spacer(modifier = Modifier.width(12.dp))
         Text(
             text = name,
