@@ -47,12 +47,14 @@ use std::sync::Arc;
 use migo_core::{Id, Result, Timestamp};
 use migo_federation::model::{FederatedEvent, PeerStatus};
 use migo_federation::SharedMesh;
-use migo_protocol::{fault, to_frame, Encode, FedRoomEvent, FedRouting, Frame, Opcode};
+use migo_protocol::{
+    fault, to_frame, Encode, FedRoomEvent, FedRouting, Frame, Opcode, RoomMemberEvent,
+    RoomStateEvent, RoomVoteEvent,
+};
 use migo_rooms::{Broadcast as RoomBroadcast, Fanout as RoomFanout};
 use migo_store::SharedStore;
 
 use crate::room_presence::RoomPublisher;
-use migo_protocol::{RoomMemberEvent, RoomStateEvent, RoomVoteEvent};
 
 /// How many allow-list rows one home-node lookup reads. The page clamp the
 /// directory answers with, reused because a home-region scan is the same
@@ -306,11 +308,11 @@ mod tests {
 
     use super::*;
     use migo_core::random::SeededRandom;
-    use migo_core::SystemClock;
     use migo_crypto::NodeSecret;
     use migo_federation::{MeshService, NewPeerSpec};
     use migo_protocol::{EncryptionMode, RoomKind};
-    use migo_store::{MemoryStore, NewRoom};
+    use migo_store::model::NewRoom;
+    use migo_store::MemoryStore;
 
     const NOW: i64 = 1_700_000_000_000;
 
@@ -337,7 +339,8 @@ mod tests {
                 public_key: NodeSecret::from_seed(&[9u8; 32])
                     .expect("a seed builds a key")
                     .public()
-                    .to_bytes(),
+                    .to_bytes()
+                    .to_vec(),
                 base_url: "wss://peer.test:9999".to_string(),
                 region: peer_region.to_string(),
             },

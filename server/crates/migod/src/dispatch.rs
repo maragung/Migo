@@ -1154,20 +1154,23 @@ impl AppDispatcher {
                     now,
                 );
                 let granted = self.rooms.authorize(&caller, topic.id, 0).await.is_ok();
-                if granted {
-                    // The granted subscription is the moment this node first has a reason
-                    // to hear the room's federated stream: tiered fanout (section 170)
-                    // asks the room's home node to watch it, once per room. Best-effort
-                    // for the same reason every other half here is — the local
-                    // subscription already succeeded, and the ask is retried by the next
-                    // granted `SUBSCRIBE` if it could not be made.
-                    if let Err(error) = self.room_relay.subscribe_to(topic.id, now).await {
-                        tracing::warn!(
-                            %error,
-                            room = %topic.id.to_text(),
-                            "cannot ask the home node to watch this room"
-                        );
-                    }
+                // The granted subscription is the moment this node first has a reason to
+                // hear the room's federated stream: tiered fanout (section 170) asks the
+                // room's home node to watch it, once per room. Best-effort for the same
+                // reason every other half here is — the local subscription already
+                // succeeded, and the ask is retried by the next granted `SUBSCRIBE` if it
+                // could not be made.
+                let watch = if granted {
+                    self.room_relay.subscribe_to(topic.id, now).await
+                } else {
+                    Ok(())
+                };
+                if let Err(error) = watch {
+                    tracing::warn!(
+                        %error,
+                        room = %topic.id.to_text(),
+                        "cannot ask the home node to watch this room"
+                    );
                 }
                 granted
             }
