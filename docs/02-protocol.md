@@ -226,7 +226,11 @@ can never invent a code the server does not know.
 
 ## 10. Security properties of the transport
 
-- TLS 1.3 (or QUIC) is mandatory; MWP defines no plaintext transport, not even in dev.
+- TLS is terminated in-process on the QUIC listener; the WebSocket listener is plain TCP,
+  and any deployment where it is reachable off loopback must have TLS terminated in front
+  of it (reverse proxy or load balancer). Plaintext is allowed on loopback only — the
+  shipped development stack is plaintext, and that residual is recorded in
+  [03-security-threat-model.md](03-security-threat-model.md) (finding F1).
 - MWP does **not** protect message confidentiality by itself — private content is
   already sealed by E2E ([03-security-threat-model.md](03-security-threat-model.md)).
   Transport encryption protects metadata and room content.
