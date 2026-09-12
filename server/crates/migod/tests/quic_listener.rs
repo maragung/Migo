@@ -13,6 +13,9 @@
 //!      length-prefixed stream framing carries the session's lifecycle — here an invalid first
 //!      frame, which the gateway must answer by ending the session cleanly rather than by
 //!      hanging or tearing down the process.
+//!   3. The datagram binding (section 138): a whole MWP frame sent as one bare QUIC datagram
+//!      reaches the session's frame reader — same session, same stream, no length prefix —
+//!      and a frame too large for the datagram path stays on the length-prefixed stream.
 //!
 //! The client verifier in this file skips certificate verification on purpose: the listener's
 //! leaf is self-signed by design (the module doc in `migod::quic` explains why), so a test client
@@ -252,6 +255,314 @@ async fn the_listener_serves_the_ipv6_loopback_the_same_way() {
     .expect("the IPv6 session ends promptly after an invalid frame");
 
     let _ = send.finish();
+}
+
+/// The datagram binding (section 138), from the client's side of the same connection the
+/// session's stream lives on.
+///
+/// A whole MWP frame sent as one bare QUIC datagram — no length prefix, the datagram's own
+/// boundary as the length — reaches the session the stream serves. The observable proof from
+/// outside the process is the session's response: an eligible frame the gateway must answer
+/// (an ERROR reply, which the class table marks critical but the flag makes a reply) rides back
+/// on the *stream*, because a reply is a record the session cannot drop. So the test sends a
+/// bare PING datagram, and asserts the PONG comes back framed on the stream — proving both
+/// halves at once: the datagram arrived as a frame, and the reply stayed where the class rules
+/// put it.
+///
+/// A PING datagram is Critical-class, which the *client's* send path would hold back to its
+/// stream; here the test drives the raw wire the way a peer that chose to send it anyway
+/// would, and the listener's job — reading datagrams as frames and routing them into the
+/// session — is what is under test.
+#[tokio::test]
+async fn a_bare_frame_datagram_reaches_the_session_and_the_reply_rides_the_stream() {
+    let app = build_app(&[("MIGO_QUIC__BIND", "127.0.0.1:0")]).await;
+    let addr = app.quic_bind.expect("the listener is bound");
+
+    let connection = connect(addr)
+        .await
+        .expect("the TLS 1.3 handshake completes against the self-signed leaf");
+
+    let (mut send, mut recv) = tokio::time::timeout(STEP, connection.open_bi())
+        .await
+        .expect("opening a stream does not stall")
+        .expect("the stream opens");
+
+    // The session must exist before its datagram reader can matter, so the handshake rides the
+    // stream first — exactly as a real client does.
+    let hello = migo_protocol::Hello {
+        protocol_version: migo_protocol::PROTOCOL_VERSION,
+        features: features::QUIC,
+        ..Default::default()
+    };
+    let frame = migo_protocol::to_frame(migo_protocol::Opcode::Hello.to_wire(), 7, &hello)
+        .expect("the HELLO encodes");
+    let wire = frame
+        .encode_length_prefixed()
+        .expect("the HELLO frames for the stream binding");
+    send.write_all(&wire).await.expect("the HELLO is written");
+
+    // Drain the WELCOME off the stream before sending the datagram, so the reply asserted on
+    // below cannot be the handshake's own.
+    let mut scratch = vec![0u8; 64 * 1024];
+    let mut seen = Vec::new();
+    tokio::time::timeout(STEP, async {
+        loop {
+            let read = recv.read(&mut scratch).await.expect("the stream reads");
+            let Some(n) = read else {
+                panic!("the stream ended before the WELCOME")
+            };
+            seen.extend_from_slice(&scratch[..n]);
+            if let Ok(Some((_welcome, consumed))) =
+                migo_wire::Frame::decode_length_prefixed(&bytes::Bytes::copy_from_slice(&seen))
+            {
+                seen.drain(..consumed);
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the WELCOME arrives within the step budget");
+
+    // One bare PING frame as one QUIC datagram: no length prefix anywhere.
+    let ping = migo_protocol::Ping {
+        client_time: migo_core::Timestamp::now(),
+    };
+    let frame = migo_protocol::to_frame(migo_protocol::Opcode::Ping.to_wire(), 8, &ping)
+        .expect("the PING encodes");
+    let bytes = frame.encode().expect("the PING encodes as a bare frame");
+    connection
+        .send_datagram(bytes)
+        .expect("the datagram is queued");
+
+    // The reply rides the stream framing — the length-prefixed path — because a reply is a
+    // record the session cannot afford to lose. Reading it there proves the datagram was
+    // consumed as a frame by the session's own reader.
+    let mut seen = Vec::new();
+    let reply = tokio::time::timeout(STEP, async {
+        loop {
+            if let Ok(Some((frame, consumed))) =
+                migo_wire::Frame::decode_length_prefixed(&bytes::Bytes::copy_from_slice(&seen))
+            {
+                let _ = consumed;
+                return frame;
+            }
+            let read = recv.read(&mut scratch).await.expect("the stream reads");
+            let Some(n) = read else {
+                panic!("the stream ended before the reply")
+            };
+            seen.extend_from_slice(&scratch[..n]);
+        }
+    })
+    .await
+    .expect("the reply arrives within the step budget");
+
+    assert_ne!(
+        reply.header.opcode,
+        migo_protocol::Opcode::Hello.to_wire(),
+        "the reply is not the handshake echoed back"
+    );
+    assert!(
+        !reply.header.is_error(),
+        "a datagram-delivered PING is answered, not refused: {:?}",
+        reply.header
+    );
+
+    let _ = send.finish();
+}
+
+/// The other half of the datagram contract (section 138): a frame too large for the datagram
+/// path -- or one whose delivery class forbids the lossy ride -- stays on the length-prefixed
+/// stream. What is under test is the transport adapter itself, so this builds a bare quinn
+/// endpoint pair (no gateway, no session) and drives `QuicStreamTransport` from both sides:
+///
+///   * a datagram the client sends whole arrives from `recv` as exactly those frame bytes,
+///     never mixed into the stream buffer;
+///   * a frame the transport sends that fits the MTU and the class rules rides one bare
+///     datagram;
+///   * a Critical frame rides the length-prefixed stream even when it would fit a datagram,
+///     and so does an eligible frame that does not fit.
+#[tokio::test]
+async fn the_datagram_binding_round_trips_and_oversized_frames_stay_on_the_stream() {
+    use migo_gateway::Transport as _;
+    use migod::quic::QuicStreamTransport;
+
+    // A bare server endpoint with its own self-signed leaf, the same way the listener mints
+    // one -- the transport adapter is what is under test, so no session, no gateway.
+    let certificate = rcgen::generate_simple_self_signed(vec!["migo-node".to_owned()])
+        .expect("the test certificate mints");
+    let server_config = quinn::ServerConfig::with_single_cert(
+        vec![rustls::pki_types::CertificateDer::from(certificate.cert)],
+        rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.key_pair.serialize_der()).into(),
+    )
+    .expect("the test server config builds");
+    let server = quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap())
+        .expect("the test endpoint binds");
+    let server_addr = server
+        .local_addr()
+        .expect("the test endpoint reports its address");
+
+    // The server side has to be accepting before the client dials: quinn buffers a client's
+    // Initial packet in an `IncomingBuffer` and only mints the connection -- and the handshake
+    // reply -- once `accept()` is polled, so a connect that races ahead of the accept loop
+    // stalls instead of shaking hands.
+    let server_task = tokio::spawn(async move {
+        let incoming = server.accept().await.expect("a connection arrives");
+        let connection = incoming.await.expect("the handshake completes");
+        let (write, read) = connection.accept_bi().await.expect("the stream opens");
+        let mut transport = QuicStreamTransport::new(connection.clone(), write, read);
+
+        // A whole bare frame arrives from recv as exactly those bytes: no prefix peeled, no
+        // mixing into the stream buffer.
+        let received = transport
+            .recv()
+            .await
+            .expect("the datagram is not an error")
+            .expect("the datagram is a frame");
+        (transport, received)
+    });
+
+    let client = connect(server_addr)
+        .await
+        .expect("the client connects to the test endpoint");
+
+    // One stream, opened by the client exactly the way a session's is: the server's transport
+    // writes to its half, the client reads from its half, and datagrams ride the connection
+    // alongside.
+    let (mut client_send, mut client_recv) = tokio::time::timeout(STEP, client.open_bi())
+        .await
+        .expect("opening a stream does not stall")
+        .expect("the stream opens");
+    let _ = &mut client_send;
+
+    // quinn does not announce a stream to its peer until the stream carries data or a FIN, so
+    // the client writes one byte to make the server's accept_bi fire. The byte is a partial
+    // frame on purpose: the transport must bank it in its stream buffer and keep waiting,
+    // which is exactly the discipline under test -- datagram frames come back whole, never
+    // folded into the stream buffer, and banked stream bytes never leak into a datagram.
+    client_send
+        .write_all(&[0u8])
+        .await
+        .expect("the stream byte is written");
+
+    // One bare frame as one datagram from the client -- no length prefix anywhere.
+    let ping = migo_protocol::Ping {
+        client_time: migo_core::Timestamp::now(),
+    };
+    let bare = migo_protocol::to_frame(migo_protocol::Opcode::Ping.to_wire(), 1, &ping)
+        .expect("the frame encodes")
+        .encode()
+        .expect("the frame encodes as a bare frame");
+    client
+        .send_datagram(bare.clone())
+        .expect("the datagram is queued");
+
+    let (mut transport, received) = tokio::time::timeout(STEP, server_task)
+        .await
+        .expect("the datagram round trip completes")
+        .expect("the server task finishes");
+    assert_eq!(
+        received, bare,
+        "a datagram arrives from recv as exactly one bare frame"
+    );
+
+    // A frame the transport sends rides one bare datagram when it fits and the class allows:
+    // TYPING is Coalescable, the whole point of the binding.
+    let typing = migo_wire::Frame::simple(
+        migo_protocol::Opcode::Typing.to_wire(),
+        2,
+        bytes::Bytes::from_static(b"typing"),
+    )
+    .encode()
+    .expect("the TYPING encodes");
+    transport
+        .send(typing.clone())
+        .await
+        .expect("the eligible frame sends");
+    let back = tokio::time::timeout(STEP, client.read_datagram())
+        .await
+        .expect("the datagram arrives within the step budget")
+        .expect("the datagram reads");
+    assert_eq!(
+        back, typing,
+        "an eligible frame rides one bare datagram, no prefix"
+    );
+
+    // A Critical frame stays on the length-prefixed stream even though it would fit a
+    // datagram: a PING reply (opcode 2 reuses PING for the reply, per section 139) is not a
+    // record the session may drop.
+    let pong = migo_protocol::to_frame(
+        migo_protocol::Opcode::Ping.to_wire(),
+        3,
+        &migo_protocol::Pong {
+            client_time: migo_core::Timestamp::now(),
+            server_time: migo_core::Timestamp::now(),
+        },
+    )
+    .expect("the PONG encodes")
+    .encode()
+    .expect("the PONG encodes as a frame");
+    transport
+        .send(pong.clone())
+        .await
+        .expect("the critical frame sends");
+
+    // An eligible frame that does not fit the datagram path stays on the stream too: the
+    // fallback is part of the binding, not a failure of it.
+    let big = migo_wire::Frame::simple(
+        migo_protocol::Opcode::Typing.to_wire(),
+        4,
+        bytes::Bytes::from(vec![0u8; 64 * 1024]),
+    )
+    .encode()
+    .expect("the big TYPING encodes");
+    transport
+        .send(big.clone())
+        .await
+        .expect("the oversized frame sends");
+
+    /// Reads one length-prefixed record off the client's receive half of the stream, banking
+    /// anything past the record's end in `seen` — the two records were written back to back,
+    /// so one read can (and does) deliver bytes of the second inside the first's chunk.
+    async fn read_stream_record(
+        client_recv: &mut quinn::RecvStream,
+        seen: &mut Vec<u8>,
+    ) -> bytes::Bytes {
+        loop {
+            if let Ok(Some((frame, consumed))) =
+                migo_wire::Frame::decode_length_prefixed(&bytes::Bytes::copy_from_slice(seen))
+            {
+                seen.drain(..consumed);
+                return frame.encode().expect("the frame re-encodes");
+            }
+            let mut buf = [0u8; 16 * 1024];
+            let read = client_recv
+                .read(&mut buf)
+                .await
+                .expect("the stream reads")
+                .expect("the stream has not ended");
+            seen.extend_from_slice(&buf[..read]);
+        }
+    }
+
+    // Both stream-bound records arrive in order behind the u32 prefix: the Critical PONG and
+    // then the oversized-but-eligible TYPING.
+    let mut leftover = Vec::new();
+    let framed_pong =
+        tokio::time::timeout(STEP, read_stream_record(&mut client_recv, &mut leftover))
+            .await
+            .expect("the critical reply arrives within the step budget");
+    assert_eq!(
+        framed_pong, pong,
+        "a Critical frame rides the length-prefixed stream, not a datagram"
+    );
+    let framed_big =
+        tokio::time::timeout(STEP, read_stream_record(&mut client_recv, &mut leftover))
+            .await
+            .expect("the oversized frame arrives within the step budget");
+    assert_eq!(
+        framed_big, big,
+        "a frame too large for a datagram rides the length-prefixed stream"
+    );
 }
 
 /// A full handshake against a live deployment, not one built in this process.

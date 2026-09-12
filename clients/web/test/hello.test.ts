@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { BandwidthMode, Platform } from '@migo/sdk';
+import { BandwidthMode, DEFAULT_CLIENT_FEATURES, Platform, protocol } from '@migo/sdk';
 
 import { config } from '../src/lib/config.js';
 import { deviceDisplayName, webHello } from '../src/lib/migo/hello.js';
@@ -27,6 +27,32 @@ test('the hello reports the web platform, the configured version, and server-pac
     assert.equal(hello.platform, Platform.Web);
     assert.equal(hello.bandwidthMode, BandwidthMode.Auto);
     assert.equal(hello.appVersion, config.appVersion);
+  } finally {
+    restore.restore();
+  }
+});
+
+test('the hello offers the stock features plus the group-call bit this client has a UI for', () => {
+  // The GROUP_CALL bit is opt-in by the SDK's own rule — a client that offers it should be one
+  // that has a group-call UI — so the web hello offering it is a statement that travels with the
+  // roster screen, and a build that drops the screen must drop the bit with it.
+  const restore = installNavigator({ language: 'en-GB' });
+  try {
+    // `?? 0n` keeps the assertions typed on bigint alone — and 0n is itself the failure, since a
+    // stated feature set is never empty (the stock bits are always offered).
+    const features = webHello().features ?? 0n;
+    assert.notEqual(features, 0n, 'the features are stated, not left to the default');
+    assert.equal(
+      (features & protocol.FEATURE.GROUP_CALL) === protocol.FEATURE.GROUP_CALL,
+      true,
+      'GROUP_CALL is offered',
+    );
+    // And every stock bit still is: the opt-in is an addition, not a replacement.
+    assert.equal(
+      (features & DEFAULT_CLIENT_FEATURES) === DEFAULT_CLIENT_FEATURES,
+      true,
+      'the stock feature set is intact',
+    );
   } finally {
     restore.restore();
   }

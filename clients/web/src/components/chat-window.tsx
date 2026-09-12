@@ -22,6 +22,7 @@ import {
 import type { ConversationLog } from '@/lib/chat-logs.js';
 import { isAutoSaveEnabled, storeChatLogSnapshot } from '@/lib/storage/chat-log-store.js';
 import { useCall } from '@/lib/migo/call-manager.js';
+import { useGroupCall } from '@/lib/migo/group-call-manager.js';
 import { useChat } from '@/lib/migo/use-chat.js';
 import { useGameEvents } from '@/lib/migo/use-game-events.js';
 import { useRoomNotices } from '@/lib/migo/use-room-notices.js';
@@ -39,7 +40,7 @@ import { closeConversation } from '@/lib/migo/use-open-conversation.js';
 import { useOwnedPacks } from '@/lib/migo/use-owned-packs.js';
 
 import { Avatar } from './avatar.js';
-import { CallButtons } from './call-buttons.js';
+import { CallButtons, GroupCallButton } from './call-buttons.js';
 import { DirectInfoPanel, SafetyWarningBannerView } from './direct-info-panel.js';
 import { EmoticonPicker } from './emoticon-picker.js';
 import { GameEventList } from './game-events.js';
@@ -159,6 +160,7 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
   } = useChat(conversationId, { endToEnd });
   const game = useGameEvents(conversationId);
   const { startCall } = useCall();
+  const { joinGroupCall } = useGroupCall();
   const { muted } = useMuted();
 
   // The thread's overlays: the peer's profile (a direct chat), the room's details (a room), and
@@ -593,9 +595,10 @@ export function ChatWindow({ conversationId }: { conversationId: Id }): ReactNod
             ⓘ
           </button>
         ) : null}
-        {/* A 1:1 is the one conversation this build can call: the wire's invite names a single
-            callee, and a group call needs the SFU this build does not have. */}
+        {/* A 1:1 is the one conversation the wire's 1:1 invite can name a callee for; a group
+            conversation has the SFU roster instead, which anyone in it may join. */}
         <CallButtons conversationId={conversationId} peerId={peerId} onStartCall={startCall} />
+        <GroupCallButton conversationId={isGroup ? conversationId : null} onJoin={joinGroupCall} />
         {supportsGames ? <GameLauncher onStart={game.startGame} /> : null}
       </header>
 

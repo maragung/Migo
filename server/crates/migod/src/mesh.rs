@@ -377,11 +377,15 @@ async fn handshake_server<S: AsyncRead + AsyncWrite + Unpin + Send>(
 ///
 /// A room event is the one with a complete final mile: its subscribers are already in the
 /// gateway's hub, authorized once at subscribe time, so the event is published to the room
-/// topic exactly as a local session's would be. The others are real, validated frames whose
-/// final-mile crates do not yet expose an ingest port — presence aggregation and call
-/// signaling — and the honest treatment is count-and-log, not a pretend success deeper in.
+/// topic exactly as a local session's would be. A room *subscribe* is the home-node half of
+/// tiered fanout (section 170): the authenticated peer is recorded as holding subscribers of
+/// the room, so this node's publishes forward it one federated copy. The others are real,
+/// validated frames whose final-mile crates do not yet expose an ingest port — presence
+/// aggregation and call signaling — and the honest treatment is count-and-log, not a pretend
+/// success deeper in.
 pub(crate) struct IngestRouter {
     gateway: Option<Arc<Gateway>>,
+    relay: Option<Arc<crate::room_relay::RoomRelay>>,
     meters: MeshMeters,
     clock: Arc<dyn Clock>,
     /// What this node has ingested, capped, so the operator's metrics answer "is anything
@@ -390,9 +394,15 @@ pub(crate) struct IngestRouter {
 }
 
 impl IngestRouter {
-    fn new(gateway: Option<Arc<Gateway>>, registry: &Registry, clock: Arc<dyn Clock>) -> Self {
+    fn new(
+        gateway: Option<Arc<Gateway>>,
+        relay: Option<Arc<crate::room_relay::RoomRelay>>,
+        registry: &Registry,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         Self {
             gateway,
+            relay,
             meters: MeshMeters::new(registry),
             clock,
             seen: parking_lot::Mutex::new(Vec::new()),
@@ -414,7 +424,7 @@ impl IngestRouter {
         self.seen.lock().clone()
     }
 
-    fn ingest(&self, inner: Frame) -> Result<()> {
+    fn ingest(&self, peer: Id, inner: Frame) -> Result<()> {
         let opcode = Opcode::from_wire(inner.header.opcode)
             .ok_or_else(|| fault::validation("opcode", "not a known federation event"))?;
         match opcode {
@@ -454,6 +464,13 @@ impl IngestRouter {
             Opcode::FedRoomSubscribe => {
                 let routing: migo_protocol::FedRouting =
                     from_frame(&inner).map_err(fault::from_wire)?;
+                // Tiered fanout, home-node half (section 170): the peer holds subscribers of
+                // this room, so this node's publishes owe it one federated copy each. The
+                // registration is idempotent and refuses a stale routing epoch, which tears
+                // the link so the peer re-handshakes onto the current view.
+                if let Some(relay) = &self.relay {
+                    relay.register_watcher(peer, &routing)?;
+                }
                 tracing::info!(
                     room = %routing.room_id.to_text(),
                     home = %routing.home_region,
@@ -506,7 +523,10 @@ impl IngestRouter {
     ///
     /// The inner payload is itself an encoded frame — the event as the home region's
     /// session would have pushed it — so the routing question is only which topic it
-    /// belongs on, and the answer is the room the forward names.
+    /// belongs on, and the answer is the room the forward names. The coalescing mirrors
+    /// the home node's request path exactly (section 154): a member event is delivered
+    /// whole, because collapsing two joins would lose one arrival, while state and vote
+    /// events are keyed by room so a backed-up consumer keeps only the latest of each.
     fn route_room_event(&self, event: migo_protocol::FedRoomEvent) -> Result<()> {
         let inner = Frame::decode(Bytes::from(event.payload)).map_err(fault::from_wire)?;
         let inner_opcode = Opcode::from_wire(inner.header.opcode)
@@ -526,7 +546,24 @@ impl IngestRouter {
                 Opcode::RoomStateEvent => {
                     let event: migo_protocol::RoomStateEvent =
                         from_frame(&inner).map_err(fault::from_wire)?;
-                    gateway.broadcast_to_topic(&topic, Opcode::RoomStateEvent, &event, now);
+                    gateway.broadcast_to_topic_coalesced(
+                        &topic,
+                        Opcode::RoomStateEvent,
+                        &event,
+                        crate::dispatch::coalesce_key_of(&topic.id),
+                        now,
+                    );
+                }
+                Opcode::RoomVoteEvent => {
+                    let event: migo_protocol::RoomVoteEvent =
+                        from_frame(&inner).map_err(fault::from_wire)?;
+                    gateway.broadcast_to_topic_coalesced(
+                        &topic,
+                        Opcode::RoomVoteEvent,
+                        &event,
+                        crate::dispatch::coalesce_key_of(&topic.id),
+                        now,
+                    );
                 }
                 _ => {
                     return Err(fault::validation(
@@ -646,7 +683,7 @@ async fn serve_reads<S: AsyncRead + AsyncWrite + Unpin + Send>(
                 }
                 let inner =
                     Frame::decode(Bytes::from(forward.payload)).map_err(fault::from_wire)?;
-                router.ingest(inner)?;
+                router.ingest(peer, inner)?;
                 *watermark = (*watermark).max(sequence);
                 write_frame(
                     io,
@@ -828,11 +865,17 @@ impl MeshTransport {
     pub fn new(
         mesh: SharedMesh,
         gateway: Option<Arc<Gateway>>,
+        relay: Option<Arc<crate::room_relay::RoomRelay>>,
         registry: &Registry,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
-            router: Arc::new(IngestRouter::new(gateway, registry, Arc::clone(&clock))),
+            router: Arc::new(IngestRouter::new(
+                gateway,
+                relay,
+                registry,
+                Arc::clone(&clock),
+            )),
             meters: MeshMeters::new(registry),
             mesh,
             clock,
@@ -1119,6 +1162,7 @@ mod tests {
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
             None,
+            None,
             &registry,
             Arc::new(SystemClock),
         ));
@@ -1191,6 +1235,7 @@ mod tests {
         let transport_a = Arc::new(MeshTransport::new(
             mesh_a.clone(),
             None,
+            None,
             &registry,
             Arc::new(SystemClock),
         ));
@@ -1239,6 +1284,7 @@ mod tests {
         let registry = registry();
         let transport_b = Arc::new(MeshTransport::new(
             mesh_b.clone(),
+            None,
             None,
             &registry,
             Arc::new(SystemClock),
@@ -1350,5 +1396,221 @@ mod tests {
             "only the first forward was ingested; the replay was dropped and the gap was not"
         );
         let _ = identity;
+    }
+
+    /// Tiered fanout, subscribe half over the wire: node A asks to watch a room, and the
+    /// home node B records the *authenticated* peer — the id the handshake proved, not one
+    /// the frame claims — as the room's watcher.
+    #[tokio::test]
+    async fn a_room_subscribe_over_the_wire_registers_the_peer_as_a_watcher() {
+        let (mesh_a, mesh_b, a_id, b_id) = pair().await;
+        let now = Timestamp::from_millis(NOW);
+        let registry = registry();
+        let relay_b = Arc::new(crate::room_relay::RoomRelay::new(
+            mesh_b.clone(),
+            Arc::new(MemoryStore::new()),
+        ));
+        let transport_b = Arc::new(MeshTransport::new(
+            mesh_b.clone(),
+            None,
+            Some(Arc::clone(&relay_b)),
+            &registry,
+            Arc::new(SystemClock),
+        ));
+
+        let room_id = Id::from(0x7777);
+        mesh_a
+            .enqueue(
+                FederatedEvent {
+                    target_node: b_id,
+                    opcode: Opcode::FedRoomSubscribe.to_wire() as i32,
+                    payload: framed(
+                        Opcode::FedRoomSubscribe,
+                        0,
+                        &migo_protocol::FedRouting {
+                            epoch: mesh_a.epoch(),
+                            home_region: "region-2".to_string(),
+                            room_id,
+                        },
+                    )
+                    .expect("the subscribe encodes")
+                    .encode()
+                    .expect("the frame encodes")
+                    .to_vec(),
+                },
+                now,
+            )
+            .await
+            .expect("the subscribe enqueues");
+        let due = mesh_a.due(now).await.expect("the queue reads");
+        assert_eq!(due.len(), 1);
+
+        let (client_io, server_io) = duplex(64 * 1024);
+        let peer_view = mesh_a.peer(b_id).await.expect("the peer resolves");
+        let server_mesh = mesh_b;
+        let server_router = transport_b.router_ref().clone();
+        let server =
+            tokio::spawn(
+                async move { serve_session(server_io, server_mesh, server_router, now).await },
+            );
+        let delivered = deliver_batch(
+            client_io,
+            &mesh_a,
+            transport_b.router_ref(),
+            &peer_view,
+            &due,
+            now,
+        )
+        .await
+        .expect("the subscribe is delivered and acknowledged");
+        server
+            .await
+            .expect("the server session completes")
+            .expect("the server side of the session is clean");
+
+        assert_eq!(delivered.len(), 1, "the watermark covered the subscribe");
+        assert_eq!(
+            relay_b.watchers_of(room_id),
+            vec![a_id],
+            "the authenticated peer is the watcher the home node records"
+        );
+    }
+
+    /// Tiered fanout, forward half: the home node enqueues one federated copy per watching
+    /// *node* — not per session, and not per member — and the receiving node ingests the
+    /// member and vote events exactly as a local publish would have carried them.
+    #[tokio::test]
+    async fn a_room_event_is_one_federated_copy_per_watching_node() {
+        use migo_rooms::{Broadcast as RoomBroadcast, Fanout as RoomFanout};
+
+        let (mesh_a, mesh_b, a_id, _b_id) = pair().await;
+        let now = Timestamp::from_millis(NOW);
+        let registry = registry();
+        let relay_b = Arc::new(crate::room_relay::RoomRelay::new(
+            mesh_b.clone(),
+            Arc::new(MemoryStore::new()),
+        ));
+        let transport_a = Arc::new(MeshTransport::new(
+            mesh_a.clone(),
+            None,
+            None,
+            &registry,
+            Arc::new(SystemClock),
+        ));
+
+        let room_id = Id::from(0x7777);
+        let routing = migo_protocol::FedRouting {
+            epoch: mesh_b.epoch(),
+            home_region: "region-2".to_string(),
+            room_id,
+        };
+        // A watches the room; so does a third node. Re-registering A changes nothing —
+        // one entry per node is the whole point of the tier.
+        let third = Id::from(0x0303);
+        relay_b
+            .register_watcher(a_id, &routing)
+            .expect("a current epoch admits the watch");
+        relay_b
+            .register_watcher(a_id, &routing)
+            .expect("a re-delivered subscribe is idempotent");
+        relay_b
+            .register_watcher(third, &routing)
+            .expect("a second node may watch too");
+
+        let member = migo_protocol::RoomMemberEvent {
+            room_id,
+            user_id: Id::from(0x8888),
+            joined: true,
+            role: None,
+            member_count: Some(3),
+            change: None,
+        };
+        let vote = migo_protocol::RoomVoteEvent {
+            room_id,
+            target_id: Id::from(0x8888),
+            votes: 1,
+            needed: 2,
+            member_count: 3,
+            closed: None,
+        };
+        // The vote is enqueued a moment after the member event, so the outbox's
+        // oldest-first drain — and therefore the per-link sequence — carries them in
+        // publish order, which is the ordering the room's own topic promises.
+        let later = Timestamp::from_millis(NOW + 60_000);
+        relay_b
+            .forward(
+                &RoomFanout {
+                    room_id,
+                    exclude_device: None,
+                    event: RoomBroadcast::Member(member.clone()),
+                },
+                now,
+            )
+            .await
+            .expect("the member event forwards");
+        relay_b
+            .forward(
+                &RoomFanout {
+                    room_id,
+                    exclude_device: None,
+                    event: RoomBroadcast::Vote(vote.clone()),
+                },
+                later,
+            )
+            .await
+            .expect("the vote event forwards");
+
+        let due = mesh_b.due(later).await.expect("the queue reads");
+        assert_eq!(
+            due.len(),
+            4,
+            "two events times two watching nodes, and no third copy for A's re-subscribe"
+        );
+        // Deliver only A's half: the third node has no link in this test.
+        let a_events: Vec<PendingEvent> = due
+            .into_iter()
+            .filter(|event| event.target_node == a_id)
+            .collect();
+        assert_eq!(a_events.len(), 2, "one copy of each event per node");
+
+        let (client_io, server_io) = duplex(64 * 1024);
+        let peer_view = mesh_b.peer(a_id).await.expect("the peer resolves");
+        let server_mesh = mesh_a;
+        let server_router = transport_a.router_ref().clone();
+        let server = tokio::spawn(async move {
+            serve_session(server_io, server_mesh, server_router, later).await
+        });
+        let delivered = deliver_batch(
+            client_io,
+            &mesh_b,
+            transport_a.router_ref(),
+            &peer_view,
+            &a_events,
+            later,
+        )
+        .await
+        .expect("the batch is delivered and acknowledged");
+        server
+            .await
+            .expect("the server session completes")
+            .expect("the server side of the session is clean");
+        assert_eq!(delivered.len(), 2, "the watermark covered both events");
+
+        let member_payload = framed(Opcode::RoomMemberEvent, 0, &member)
+            .expect("the member event encodes")
+            .payload
+            .len();
+        let vote_payload = framed(Opcode::RoomVoteEvent, 0, &vote)
+            .expect("the vote event encodes")
+            .payload
+            .len();
+        assert_eq!(
+            transport_a.ingested(),
+            vec![
+                (Opcode::RoomMemberEvent.to_wire(), member_payload),
+                (Opcode::RoomVoteEvent.to_wire(), vote_payload),
+            ],
+            "A ingested one member and one vote event, in publish order"
+        );
     }
 }

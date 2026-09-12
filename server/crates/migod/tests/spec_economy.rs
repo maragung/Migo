@@ -529,6 +529,52 @@ async fn charge_kick_retry_does_not_double_charge() {
     assert_eq!(wallet.coins, 4, "the retry charged nothing further");
 }
 
+/// The re-kick edge across currencies: the first kick of a triple was paid in Kick
+/// Points, and the founder later holds none — the second kick of the same rejoined
+/// member must stay free, not become an error, because the kick's key names the
+/// triple and not the currency it was settled in. The store now refuses a spent key
+/// arriving with a different payload; this is the one key whose different payload is
+/// not a client bug, and the tariff interprets the refusal instead of forwarding it.
+#[tokio::test]
+async fn charge_kick_re_kick_across_currencies_stays_free() {
+    let (svc, store) = harness();
+    seed_account(&store, 1, "kicker").await;
+    grant(&svc, 1, 5).await;
+    grant_kp(&svc, 1, 1, "seed:kp:1").await;
+
+    let first = svc
+        .charge_kick(
+            Id::from(1u128),
+            Id::from(50u128),
+            Id::from(2u128),
+            Timestamp::from_millis(NOW),
+        )
+        .await
+        .expect("the point settles the first kick");
+    assert!(first.spent_kick_point);
+
+    // No Kick Point is held now, so the second kick of the same triple takes the
+    // coin branch — the branch whose payload differs from the one the key paid for.
+    let second = svc
+        .charge_kick(
+            Id::from(1u128),
+            Id::from(50u128),
+            Id::from(2u128),
+            Timestamp::from_millis(NOW),
+        )
+        .await
+        .expect("the re-kick is priced, not refused");
+    assert!(!second.spent_kick_point);
+    assert_eq!(second.paid_coins, 0, "the triple was already paid for");
+
+    let wallet = svc.wallet(&caller(1, 101)).await.expect("wallet read");
+    assert_eq!(
+        wallet.coins, 5,
+        "the cross-currency re-kick charged no coin"
+    );
+    assert_eq!(wallet.kick_points, 0);
+}
+
 /// Each pack on the table buys: coins out, points in, at the table's price.
 #[tokio::test]
 async fn kick_point_packs_buy_at_their_table_price() {
@@ -666,4 +712,82 @@ async fn kick_points_sum_to_zero_across_a_grant_and_a_spend() {
         wallet.kick_points, 1,
         "the kicker holds what the grants left them"
     );
+}
+
+/// Section 153's other half, on the most costly surface the section names: a client
+/// that reuses a gift's key for a *different* gift — a different slug here, a
+/// different recipient just as easily — is answered IDEMPOTENCY_MISMATCH rather
+/// than silently credited with whatever the first send delivered. A key that
+/// answers two payloads was never a key.
+#[tokio::test]
+async fn a_gift_key_reused_for_a_different_gift_is_refused() {
+    let (svc, store) = harness();
+    seed_account(&store, 1, "sender").await;
+    seed_account(&store, 2, "recipient").await;
+    let sender = caller(1, 101);
+    grant(&svc, 1, 1000).await;
+
+    svc.send_gift(
+        &sender,
+        SendGift {
+            recipient_id: Id::from(2u128),
+            gift: Gift::Rose,
+            conversation_id: None,
+            client_key: "spec:dup".to_string(),
+        },
+    )
+    .await
+    .expect("the first gift is sent");
+
+    let after_first = svc.wallet(&sender).await.expect("wallet read").coins;
+    let error = svc
+        .send_gift(
+            &sender,
+            SendGift {
+                recipient_id: Id::from(2u128),
+                gift: Gift::Heart,
+                conversation_id: None,
+                client_key: "spec:dup".to_string(),
+            },
+        )
+        .await
+        .expect_err("a key may not stand for two payloads");
+    assert_eq!(error.code(), migo_protocol::codes::IDEMPOTENCY_MISMATCH);
+    assert_eq!(
+        svc.wallet(&sender).await.expect("wallet read").coins,
+        after_first,
+        "the refused replay charges nothing"
+    );
+}
+
+/// The purchase path answers the same way: the same key buying a different item is
+/// a mismatch, not the first item again — the receipt the retry would be handed
+/// names an item the client never asked for under this key.
+#[tokio::test]
+async fn a_purchase_key_reused_for_a_different_item_is_refused() {
+    let (svc, store) = harness();
+    seed_account(&store, 1, "buyer").await;
+    let buyer = caller(1, 101);
+    grant(&svc, 1, 1000).await;
+    let rose = migo_economy::Sku::parse("gift.rose").expect("the default catalogue prices it");
+    let heart = migo_economy::Sku::parse("gift.heart").expect("the default catalogue prices it");
+
+    svc.purchase(&buyer, &rose, "spec:dup", None)
+        .await
+        .expect("the first purchase is made");
+    let after_first = svc.wallet(&buyer).await.expect("wallet read").coins;
+
+    let error = svc
+        .purchase(&buyer, &heart, "spec:dup", None)
+        .await
+        .expect_err("a key may not stand for two payloads");
+    assert_eq!(error.code(), migo_protocol::codes::IDEMPOTENCY_MISMATCH);
+    assert_eq!(
+        svc.wallet(&buyer).await.expect("wallet read").coins,
+        after_first,
+        "the refused replay charges nothing"
+    );
+    let owned = svc.entitlements(&buyer).await.expect("entitlements read");
+    assert_eq!(owned.len(), 1, "the refused replay granted nothing");
+    assert_eq!(owned[0].sku, "gift.rose");
 }
