@@ -210,7 +210,7 @@ class GroupCallTest {
     }
 
     @Test
-    fun `a departure removes the seat; a count of zero retires the call`() {
+    fun `a departure removes the seat and a count of zero retires the call`() {
         val seats = seatsFromSnapshot(
             listOf(
                 participant(ME, ME_DEVICE, NOW - 60_000),
@@ -267,7 +267,7 @@ class GroupCallTest {
     }
 
     @Test
-    fun `a leave is the 1:1 end frame stamped with the caller-withdrew reason`() {
+    fun `a leave is the 1-on-1 end frame stamped with the caller-withdrew reason`() {
         val fake = FakeTransport(reply = { w -> Acknowledged(ok = true).encode(w) })
         val domain = GroupCallsDomain(Rpc(fake), ME_DEVICE)
 
