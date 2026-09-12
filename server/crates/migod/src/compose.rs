@@ -942,7 +942,7 @@ pub async fn apply_mesh_peers(
             );
         }
         let public_key = decode_key_material(peer.public_key.trim());
-        let view = mesh
+        let view = match mesh
             .apply_peer(
                 NewPeerSpec {
                     node_id,
@@ -953,7 +953,13 @@ pub async fn apply_mesh_peers(
                 now,
             )
             .await
-            .with_context(|| format!("cannot admit the configured mesh peer {}", peer.node_id))?;
+        {
+            Ok(view) => view,
+            Err(error) => bail!(
+                "cannot admit the configured mesh peer {}: {error}",
+                peer.node_id
+            ),
+        };
         tracing::info!(
             node = %view.node_id,
             region = %view.region,
