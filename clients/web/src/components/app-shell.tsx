@@ -28,7 +28,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
-import { CallMediaKind, ConversationKind } from '@migo/sdk';
+import { CallMediaKind, ConversationKind, MemberChange } from '@migo/sdk';
 import type { ConversationSummary, Id, RoomSummary } from '@migo/sdk';
 
 import { AccountPanel } from './account-panel.js';
@@ -302,6 +302,52 @@ export function AppShell(): ReactNode {
   // ---- message arrival: mint windows, count attention ----
   winIdsRef.current = new Set(windows.map((w) => w.id));
   activeIdRef.current = activeId;
+  // ---- arrival before the window exists: member-join mints the thread too ----
+  // A conversation's first fanout is a member-Joined on this account's own user topic — the peer
+  // was seated while no listener existed for the conversation, so the window the message-mint
+  // below would build never comes to be and the first message stays fetched by nobody. Minting on
+  // the join as well mounts the thread's ChatWindow, whose catch-up replays the sealed history
+  // (the join and the message both ride the conversation's own topic once subscribed), so the
+  // first message of a new direct chat arrives without the peer clicking anything.
+  useEffect(() => {
+    if (client === null || accountId === null) {
+      return;
+    }
+    const off = client.conversations.onMember((event) => {
+      if (event.userId !== accountId || event.change !== MemberChange.Joined) {
+        return;
+      }
+      const id = chatWinId(event.conversationId);
+      if (winIdsRef.current.has(id)) {
+        return;
+      }
+      zRef.current += 1;
+      const z = zRef.current;
+      const step = (cascadeRef.current = (cascadeRef.current + 1) % 8);
+      setWindows((ws) => {
+        if (ws.some((w) => w.id === id)) {
+          return ws;
+        }
+        return [
+          ...ws.map((x) => (isMobile ? { ...x, minimized: true } : x)),
+          {
+            id,
+            kind: 'chat' as const,
+            conversationId: event.conversationId,
+            title: '',
+            x: isMobile ? 0 : 270 + step * 26,
+            y: isMobile ? 0 : 30 + step * 24,
+            z,
+            minimized: isMobile,
+          },
+        ];
+      });
+    });
+    return () => {
+      off();
+    };
+  }, [client, accountId, isMobile]);
+
   useEffect(() => {
     if (client === null || accountId === null) {
       return;
