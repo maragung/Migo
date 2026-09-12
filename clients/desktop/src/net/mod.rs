@@ -28,6 +28,7 @@
 pub mod call;
 pub(crate) mod call_audio;
 pub(crate) mod call_signal;
+pub(crate) mod call_video;
 pub mod chain;
 pub mod gateway;
 pub(crate) mod media;

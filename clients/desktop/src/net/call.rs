@@ -43,7 +43,7 @@ use migo_core::{Id, OsRandom, Timestamp};
 use migo_protocol::{MessageKind, Opcode};
 use tokio::sync::mpsc;
 
-use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_PCMU};
+use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_PCMU, MIME_TYPE_VP8};
 use webrtc::api::APIBuilder;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_server::RTCIceServer;
@@ -52,9 +52,12 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::sdp_type::RTCSdpType;
 use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::rtp_transceiver::rtp_codec::{
     RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
 };
+use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
+use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_remote::TrackRemote;
 
@@ -66,6 +69,7 @@ use super::call_signal::{
     seal_call_signal, CallDeclineReason, CallEndReason, CallMediaKind, CallState, IceCandidateJson,
     ANSWERED_ELSEWHERE_MESSAGE, CALL_KEY_EVENT, CALL_KEY_LEN, INVITE_RINGING, MISSED_CALL_MESSAGE,
 };
+use super::call_video;
 use super::{Event, Sink, Worker};
 use crate::crypto::content::{self, Content};
 use crate::model::ToastKind;
@@ -263,6 +267,10 @@ pub struct CallView {
     pub ended_at: Option<Timestamp>,
     /// The line under the phase on an ended call: the reason, or a note this build knows.
     pub line: Option<String>,
+    /// The remote's decoded video, when the call carries any: the overlay polls this every
+    /// repaint while the call is connected. `None` for the pre-call screens (a ring, a
+    /// placement, an accept) — there is no track yet to decode.
+    pub video: Option<call_video::VideoSlot>,
 }
 
 /// The overlay's phases: the wire's states plus the ones the server never sees — this device's
@@ -340,6 +348,10 @@ struct TrackedCall {
     pc: Arc<RTCPeerConnection>,
     microphone: Option<call_audio::Microphone>,
     speaker: Option<call_audio::Speaker>,
+    /// The latest decoded frame of the remote's video, when the call carries any. Allocated
+    /// for every call (the peer's description decides what arrives); read by the overlay
+    /// through the view, written only by the video pump.
+    video: call_video::VideoSlot,
     /// The peer device relays are addressed to; the caller learns it from the answer, the
     /// callee knew it from the invite.
     peer_device: Option<Id>,
@@ -446,6 +458,7 @@ impl Calls {
             ended_at: call.ended_at,
             line: ended
                 .then(|| call_signal::ended_reason_line(call.invite_status, call.end_reason)),
+            video: Some(call.video.clone()),
         })
     }
 
@@ -461,6 +474,7 @@ impl Calls {
             started_at: None,
             ended_at: None,
             line: None,
+            video: None,
         })
     }
 
@@ -477,6 +491,7 @@ impl Calls {
             started_at: None,
             ended_at: None,
             line: None,
+            video: None,
         })
     }
 
@@ -493,6 +508,7 @@ impl Calls {
             started_at: None,
             ended_at: None,
             line: None,
+            video: None,
         })
     }
 
@@ -726,8 +742,9 @@ impl Worker {
     /// the PCMU track, the audio devices, and the pumps that move sound between them and the
     /// wire. Both roles build exactly this; only the description exchange differs.
     ///
-    /// PCMU only: the one codec every Migo client speaks, so an offer that names anything else
-    /// answers nothing and a negotiation that could pick Opus cannot strand a peer.
+    /// PCMU for audio because it is the one codec every Migo client speaks. VP8 for video
+    /// because it is the one the web client's browser always offers — a video invite answered
+    /// by this build must decode the sender's actual stream, not a codec wishlist.
     async fn build_media(
         &self,
         call_id: Id,
@@ -738,6 +755,7 @@ impl Worker {
             call_audio::Microphone,
             call_audio::Speaker,
             Arc<AtomicBool>,
+            call_video::VideoSlot,
         ),
         String,
     > {
@@ -757,6 +775,25 @@ impl Worker {
                 RTPCodecType::Audio,
             )
             .map_err(|error| format!("could not register the call's codec: {error}"))?;
+        // Payload type 96 is the video convention — the first dynamic slot, and the one every
+        // browser's VP8 offer names, so the answer's numbers match the offer's without a
+        // remap. The clock is always 90 kHz for video: timestamps are frame times, not sample
+        // counts.
+        engine
+            .register_codec(
+                RTCRtpCodecParameters {
+                    capability: RTCRtpCodecCapability {
+                        mime_type: MIME_TYPE_VP8.to_owned(),
+                        clock_rate: 90_000,
+                        channels: 0,
+                        ..Default::default()
+                    },
+                    payload_type: 96,
+                    ..Default::default()
+                },
+                RTPCodecType::Video,
+            )
+            .map_err(|error| format!("could not register the call's video codec: {error}"))?;
         let api = APIBuilder::new().with_media_engine(engine).build();
         let pc = api
             .new_peer_connection(RTCConfiguration {
@@ -820,12 +857,50 @@ impl Worker {
         // an await.
         let speaker_tx = Arc::new(Mutex::new(speaker.frames.clone()));
         let speaker_rate = speaker.rate;
-        pc.on_track(Box::new(move |track, _, _| {
+        // The video slot the pump parks decoded frames in; the overlay reads it every repaint.
+        // Allocated for every call — audio included — because which tracks arrive is not known
+        // until the peer's description does, and a slot that might not exist is a video path
+        // that might not start. The handler below is a move closure and takes its captures by
+        // value, so it gets a clone of its own here — the original stays with the builder and
+        // crosses out in the return as the overlay's share of the same frame store.
+        let video_slot: call_video::VideoSlot = Arc::default();
+        let track_video_slot = video_slot.clone();
+        // The peer connection crosses into the video pump by weak reference, not a clone: the
+        // pump outlives this builder (it runs until the track closes), and a strong reference
+        // held by a handler the closed connection never clears would keep the whole transport
+        // alive after teardown. The pump upgrades once per keyframe request and stops when the
+        // upgrade fails — a closed connection has no keyframes left to ask for.
+        let video_pc = Arc::downgrade(&pc);
+        pc.on_track(Box::new(move |track, _receiver, _transceiver| {
             let speaker_tx = speaker_tx.clone();
+            let video_slot = track_video_slot.clone();
+            let video_pc = video_pc.clone();
             Box::pin(async move {
-                tokio::spawn(async move {
-                    playback_pump(track, speaker_tx, speaker_rate).await;
-                });
+                if track.kind() == RTPCodecType::Video {
+                    tokio::spawn(async move {
+                        let pc = video_pc;
+                        let media_ssrc = track.ssrc();
+                        let pli = move || {
+                            let request = PictureLossIndication {
+                                sender_ssrc: media_ssrc,
+                                media_ssrc,
+                            };
+                            if let Some(pc) = pc.upgrade() {
+                                tokio::spawn(async move {
+                                    let packet: Box<
+                                        dyn webrtc::rtcp::packet::Packet + Send + Sync,
+                                    > = Box::new(request);
+                                    let _ = pc.write_rtcp(&[packet]).await;
+                                });
+                            }
+                        };
+                        call_video::video_pump(track, video_slot, Arc::new(pli)).await;
+                    });
+                } else {
+                    tokio::spawn(async move {
+                        playback_pump(track, speaker_tx, speaker_rate).await;
+                    });
+                }
             })
         }));
         let tick_tx = self.calls.tick_tx.clone();
@@ -840,7 +915,10 @@ impl Worker {
         // its drop at call end is the signal the whole capture chain unwinds on.
         let mic_frames = microphone.take_frames();
         spawn_capture_pump(mic_frames, microphone.rate, muted.clone(), sample_tx);
-        Ok((pc, microphone, speaker, muted))
+        // The slot itself returns untouched: the handler's share was cloned off before the
+        // closure was built, so this is the same Arc the closure holds, not a borrow after a
+        // move.
+        Ok((pc, microphone, speaker, muted, video_slot))
     }
 
     /// The placement's second half, on the TURN answer or its timeout: media, offer, invite.
@@ -853,7 +931,7 @@ impl Worker {
             worker.sink.toast(reason, ToastKind::Error);
             worker.calls.emit(&worker.sink);
         };
-        let (pc, microphone, speaker, muted_flag) =
+        let (pc, microphone, speaker, muted_flag, video) =
             match self.build_media(place.call_id, servers).await {
                 Ok(media) => media,
                 Err(reason) => {
@@ -924,6 +1002,7 @@ impl Worker {
             pc,
             microphone: Some(microphone),
             speaker: Some(speaker),
+            video,
             peer_device: None,
             ice_batch: Vec::new(),
             ice_linger_armed: false,
@@ -994,7 +1073,7 @@ impl Worker {
         let Some(key) = answer.key else {
             return;
         };
-        let (pc, microphone, speaker, muted_flag) =
+        let (pc, microphone, speaker, muted_flag, video) =
             match self.build_media(answer.call_id, servers).await {
                 Ok(media) => media,
                 Err(reason) => {
@@ -1002,6 +1081,33 @@ impl Worker {
                     return;
                 }
             };
+        // A video invite is answered with a receive-only video m-line: this build decodes and
+        // renders the caller's picture but has no camera to send back. The transceiver must
+        // exist before the answer is built — webrtc-rs matches every remote m-line to a local
+        // transceiver (by MID, then by kind-and-direction) when assembling the answer, and a
+        // video m-line with nothing to match fails the whole answer, audio and all. RecvOnly
+        // is what satisfies a Sendrecv video offer without promising a track this build
+        // cannot add.
+        if answer.kind == CallMediaKind::Video {
+            if let Err(reason) = pc
+                .add_transceiver_from_kind(
+                    RTPCodecType::Video,
+                    Some(RTCRtpTransceiverInit {
+                        direction: RTCRtpTransceiverDirection::Recvonly,
+                        send_encodings: vec![],
+                    }),
+                )
+                .await
+            {
+                let _ = pc.close().await;
+                self.abort_answer_busy(
+                    answer.call_id,
+                    format!("could not answer the call's video: {reason}"),
+                )
+                .await;
+                return;
+            }
+        }
         let offer = open_call_signal(&answer.sealed_offer, &key, &answer.call_id)
             .and_then(|bytes| decode_sdp_description(&bytes));
         let offer = match offer {
@@ -1093,6 +1199,7 @@ impl Worker {
             pc,
             microphone: Some(microphone),
             speaker: Some(speaker),
+            video,
             peer_device: Some(answer.caller_device),
             ice_batch: Vec::new(),
             ice_linger_armed: false,
