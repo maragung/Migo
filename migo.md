@@ -4994,7 +4994,7 @@ Target bandwidth call ada di section 171.
 
 167. VOICE NOTE PROTOCOL
 
-STATUS: BUILT untuk jalur web, yaitu rekaman yang disegel, waveform, dan unggah sebagai MESSAGE_SEND kind Voice dengan media tersegel, serta pengunggah dan pengunduh voice note di client web; requirement produknya ada di section 179. STATUS: SPEC untuk perekaman voice note di client native.
+STATUS: BUILT untuk jalur web, yaitu rekaman yang disegel, waveform, dan unggah sebagai MESSAGE_SEND kind Voice dengan media tersegel, serta pengunggah dan pengunduh voice note di client web; requirement produknya ada di section 179. STATUS: BUILT untuk perekaman voice note di client Android, yaitu rekaman inkremental ke penyimpanan privat (Ogg Opus di API 29+, AAC/MPEG-4 di bawahnya) dengan seal VOICE seperti media lain, waveform hidup yang melipat ke 50 bar yang sama dengan web, dua mode interaksi pada satu tombol mic (tekan-tahan dengan geser-batal dan kunci, serta dua langkah dengan preview), jeda/lanjut, pause otomatis saat interupsi (panggilan, fokus audio, aplikasi ke belakang) tanpa membatalkan rekaman, undo beberapa detik untuk batal, dan draft yang pulih setelah aplikasi mati di tengah rekaman. STATUS: SPEC untuk perekaman voice note di client desktop.
 
 Voice note bukan jenis pesan terpisah. Voice note adalah MESSAGE_SEND dengan kind bernilai Voice, sehingga seluruh mekanisme urutan, dedup, offline queue, receipt, dan sync dipakai ulang tanpa jalur paralel yang harus dijaga sendiri.
 
@@ -5664,7 +5664,7 @@ Bila audit menemukan pertentangan, yang diperbaiki adalah dokumennya, bukan kode
 
 179. VOICE NOTE PRODUCT REQUIREMENT
 
-STATUS: SPEC. Spesifikasi protokolnya ada di section 167, arsitektur media di section 168, dan target bandwidth di section 171. Bagian ini adalah requirement produknya. Letaknya di akhir dokumen karena penomoran section 1 sampai 135 dibekukan, bukan karena prioritasnya rendah.
+STATUS: BUILT untuk perekaman di web dan di Android. Sisi web penuh (rekaman, waveform, unggah, putar). Sisi Android mencakup perekaman: dua mode interaksi (tekan-tahan dengan geser-batal dan kunci, serta dua langkah dengan preview), timer dan waveform hidup, jeda/lanjut, pause otomatis saat interupsi tanpa membatalkan, batas 5 menit yang mengirim otomatis, undo untuk batal, draft yang pulih setelah aplikasi mati di tengah rekaman, dan seal VOICE pada media sebelum unggah. Pemutaran dan kontrolnya di Android mengikuti rendering attachment yang sama; sisanya (perekaman di client desktop, mark as listened) masih SPEC. Spesifikasi protokolnya ada di section 167, arsitektur media di section 168, dan target bandwidth di section 171. Bagian ini adalah requirement produknya. Letaknya di akhir dokumen karena penomoran section 1 sampai 135 dibekukan, bukan karena prioritasnya rendah.
 
 Voice note adalah pesan audio asynchronous: direkam, dikirim, lalu didengar kapan saja. Voice call adalah percakapan realtime. Keduanya sering dianggap satu fitur dan itu keliru, karena tuntutan tekniknya berlawanan. Voice note dioptimalkan untuk ukuran dan keandalan pengiriman, boleh tertunda, dan WAJIB bertahan melewati aplikasi yang ditutup. Voice call dioptimalkan untuk latensi dan kehilangan maknanya bila tertunda satu detik. Voice note memakai jalur pesan pada section 167, voice call memakai jalur signaling pada section 180.
 

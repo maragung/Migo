@@ -1,7 +1,11 @@
 package com.migo.app
 
 import android.app.Application
+import android.content.Context
 import android.content.Intent
+import android.media.AudioFocusRequest
+import android.media.AudioManager
+import android.media.MediaExtractor
 import android.net.Uri
 import android.os.Environment
 import android.provider.OpenableColumns
@@ -13,12 +17,17 @@ import com.migo.app.call.MICROPHONE_UNAVAILABLE
 import com.migo.app.media.MEDIA_SEAL_DOMAIN
 import com.migo.app.media.VOICE_NOTE_MAX_MS
 import com.migo.app.media.VOICE_SEAL_DOMAIN
+import com.migo.app.media.VoiceNoteDraft
+import com.migo.app.media.VoiceNoteDrafts
 import com.migo.app.media.VoiceNoteRecorder
+import com.migo.app.media.WAVEFORM_BARS
+import com.migo.app.media.amplitudeToBar
 import com.migo.app.media.isLegacyPlaintext
 import com.migo.app.media.openMedia
 import com.migo.app.media.uploadDocumentAttachment
 import com.migo.app.media.uploadImageAttachment
 import com.migo.app.media.uploadVoiceNote
+import com.migo.app.media.voiceNoteContainerMime
 import com.migo.app.model.ActivityCategory
 import com.migo.app.model.ActivityRow
 import com.migo.app.model.AppState
@@ -39,6 +48,7 @@ import com.migo.app.model.RoomLiveInfo
 import com.migo.app.model.RoomNotice
 import com.migo.app.model.RosterMember
 import com.migo.app.model.TrackingChainTx
+import com.migo.app.model.VoiceNotePreview
 import com.migo.app.model.VoteTally
 import com.migo.app.model.WindowTab
 import com.migo.app.model.gameEventLine
@@ -127,6 +137,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.webrtc.EglBase
@@ -217,8 +228,50 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** The live recording, or null while the composer is the text field. */
     private var noteRecorder: VoiceNoteRecorder? = null
 
-    /** The auto-stop that enforces the five-minute cap on a recording left running. */
-    private var noteCapJob: Job? = null
+    /**
+     * The recording's own clock: samples the amplitude, advances the timer, persists the draft
+     * descriptor, and stops the recording at the cap. One job instead of a bare delay because the
+     * cap is now only one of the things the tick owes the bar it drives.
+     */
+    private var noteTickJob: Job? = null
+
+    /** The amplitudes sampled so far, as 0–255 bars — the live waveform's tail and the fold's input. */
+    private var noteAmplitudes: IntArray = IntArray(0)
+
+    /**
+     * A finished recording the composer is holding — the preview, the undo window's cancelled
+     * note, or a draft recovered after an app death. The bytes live in the draft store; this is
+     * the handle the Send and Delete controls act on.
+     */
+    private var pendingNote: VoiceNoteDraft? = null
+
+    /** The undo window's closer: the few seconds a cancelled note stays recoverable. */
+    private var noteUndoJob: Job? = null
+
+    /**
+     * Whether the recording stands paused by an interruption — a call, a lock, the app going to
+     * background — rather than by the speaker's own Pause. Only an interruption resumes itself
+     * when it passes; a pause the speaker chose is theirs to lift.
+     */
+    private var notePausedByInterruption: Boolean = false
+
+    /**
+     * The audio focus the recording holds while it runs. Focus is what carries brief 179's
+     * interruption rule onto the platform: a call or another app's playback takes focus, the
+     * listener pauses the note, and focus coming back resumes it — the recording is never the
+     * thing an interruption cancels.
+     */
+    private var noteFocusRequest: AudioFocusRequest? = null
+
+    private val noteFocusListener = AudioManager.OnAudioFocusChangeListener { change ->
+        when (change) {
+            AudioManager.AUDIOFOCUS_LOSS,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+            -> pauseNote(byInterruption = true)
+
+            AudioManager.AUDIOFOCUS_GAIN -> resumeNote(afterInterruption = true)
+        }
+    }
 
     /**
      * A document whose Save button was pressed, waiting for the create-document picker to name a
@@ -978,6 +1031,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 },
             )
         }
+        // A recording the last session died in the middle of is waiting in the draft store; the
+        // composer's recovered-draft chip is this conversation's, so the recovery reads here.
+        recoverVoiceNoteDraft(conversationId)
         viewModelScope.launch {
             try {
                 live.client.watchConversation(conversationId)
@@ -1336,23 +1392,73 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      *
      * The microphone must already be permitted — [stageVoiceNote] is the path that asks — because
      * the first moment of a recording cannot be recovered once the permission dialog has eaten it.
-     * A recording left running stops itself at the cap, so the five-minute ceiling is enforced
-     * even by a phone put in a pocket.
+     * The recording is written incrementally into the draft store's file, so it exists on disk
+     * from its first second; the tick job drives the bar (timer, live waveform), persists the
+     * draft descriptor every second, and sends the note at the cap, so the five-minute ceiling is
+     * enforced even by a phone put in a pocket. Audio focus is held for the recording's whole
+     * life, so a call or another app's playback pauses the note rather than talking over it.
      */
     fun startVoiceNote() {
         val chat = (_state.value as? AppState.SignedIn)?.open ?: return
         if (chat.recording || chat.uploading) return
+        val conversationId = chat.conversationId
+        val files = getApplication<Application>().filesDir
         val recorder = try {
-            VoiceNoteRecorder(getApplication<Application>())
+            VoiceNoteRecorder(
+                getApplication<Application>(),
+                VoiceNoteDrafts.fileFor(files, conversationId, voiceNoteContainerMime()),
+            )
         } catch (failure: Exception) {
             signedIn { it.copy(failure = readable(failure)) }
             return
         }
+        stopNoteTick()
+        noteUndoJob?.cancel()
+        noteUndoJob = null
         noteRecorder = recorder
-        inChat(chat.conversationId) { it.copy(recording = true) }
-        noteCapJob = viewModelScope.launch {
-            delay(VOICE_NOTE_MAX_MS - recorder.elapsedMs())
-            stopVoiceNote()
+        noteAmplitudes = IntArray(0)
+        notePausedByInterruption = false
+        requestNoteFocus()
+        inChat(conversationId) {
+            it.copy(
+                recording = true,
+                recordingPaused = false,
+                recordingElapsedMs = 0,
+                recordingAmplitudes = emptyList(),
+                notePreview = null,
+                noteDiscardUndo = false,
+            )
+        }
+        noteTickJob = viewModelScope.launch {
+            var sincePersistMs = 0L
+            while (isActive) {
+                delay(NOTE_TICK_MS)
+                val live = noteRecorder ?: break
+                if (!live.isPaused) {
+                    val bar = amplitudeToBar(live.maxAmplitude())
+                    if (bar > 0) {
+                        noteAmplitudes = noteAmplitudes + bar
+                    }
+                }
+                val elapsed = live.elapsedMs()
+                inChat(conversationId) {
+                    it.copy(
+                        recordingElapsedMs = elapsed,
+                        recordingAmplitudes = noteAmplitudes.takeLast(WAVEFORM_BARS),
+                    )
+                }
+                sincePersistMs += NOTE_TICK_MS
+                if (sincePersistMs >= NOTE_PERSIST_MS) {
+                    sincePersistMs = 0
+                    persistNoteDraft(conversationId, live.mimeType, elapsed)
+                }
+                if (elapsed >= VOICE_NOTE_MAX_MS) {
+                    // The cap is a send, not a stop: a recording the pocket ran to its ceiling
+                    // finishes its journey rather than waiting on nobody to press Send.
+                    finishAndSendNote()
+                    break
+                }
+            }
         }
     }
 
@@ -1363,54 +1469,318 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Finishes the recording and sends it: the note is uploaded, then the message that references
-     * it — the same ordering rule [sendAttachment] keeps, so a failed upload never leaves the
-     * conversation holding a reference to nothing.
+     * Pauses the capture — the speaker's own Pause, an interruption (a call, a lock, the app
+     * going to background), or the undo window's restore. The file stays open and the paused span
+     * is kept out of the timer and the cap; only the microphone stands down.
+     */
+    fun pauseVoiceNote() {
+        pauseNote(byInterruption = false)
+    }
+
+    /** Resumes a paused capture on the speaker's own word. */
+    fun resumeVoiceNote() {
+        resumeNote(afterInterruption = false)
+    }
+
+    /**
+     * The interruption pair the shell reports from the activity's lifecycle: a recording that
+     * goes to the background pauses — brief 179 answers an interruption with a pause, never a
+     * cancellation — and resumes itself when the interruption passes.
+     */
+    fun recordingWentToBackground() {
+        pauseNote(byInterruption = true)
+    }
+
+    fun recordingReturnedToForeground() {
+        resumeNote(afterInterruption = true)
+    }
+
+    /**
+     * Stops the capture and holds the finished note for the composer's word: the two-step mode's
+     * preview, with Send and Delete as the question. The bytes stay in the draft store, so the
+     * preview survives a rotation and a death alike.
      */
     fun stopVoiceNote() {
-        val live = session ?: return
-        val chat = (_state.value as? AppState.SignedIn)?.open ?: return
-        val recorder = noteRecorder ?: return
-        noteCapJob?.cancel()
-        noteCapJob = null
-        noteRecorder = null
-        val note = try {
-            recorder.stop()
-        } catch (failure: Exception) {
-            inChat(chat.conversationId) { it.copy(recording = false) }
-            signedIn { it.copy(failure = readable(failure)) }
+        val conversationId = (_state.value as? AppState.SignedIn)?.open?.conversationId ?: return
+        val draft = finalizeNote() ?: return
+        pendingNote = draft
+        inChat(conversationId) {
+            it.copy(
+                recording = false,
+                recordingPaused = false,
+                notePreview = VoiceNotePreview(draft.durationMs, draft.waveform),
+            )
+        }
+    }
+
+    /**
+     * Sends the held note — the preview's Send, or the whole journey for a recording stopped by
+     * the cap or released to send. The note is uploaded first, then the message that references
+     * it — the same ordering rule [sendAttachment] keeps, so a failed upload never leaves the
+     * conversation holding a reference to nothing. A failed upload puts the preview back rather
+     * than deleting the note: five minutes of speech is not a thing to lose to one dropped
+     * request, and the Send button is right there.
+     */
+    fun sendVoiceNote() {
+        // A hold mode release arrives here while the recorder is still live — the note was never
+        // stopped into a preview — so the send finalises it first. The preview's Send finds the
+        // recorder already gone and takes the plain pending-note path.
+        if (pendingNote == null && noteRecorder != null) {
+            finishAndSendNote()
             return
         }
-        inChat(chat.conversationId) { it.copy(recording = false, uploading = true) }
+        val draft = pendingNote ?: return
+        uploadPendingNote(draft)
+    }
+
+    /**
+     * Cancels the recording — the slide-to-cancel of the hold mode, the bar's Cancel, or the
+     * preview's Delete. Nothing is deleted outright: brief 179's rule keeps the note as a draft
+     * for the undo window, because a slide nobody meant is the mistake the hold mode makes easy.
+     */
+    fun cancelVoiceNote() {
+        discardNoteWithUndo()
+    }
+
+    /** The preview's Delete: the same undo window a cancel gets. */
+    fun deleteVoiceNoteDraft() {
+        discardNoteWithUndo()
+    }
+
+    /** Restores a cancelled note from the undo window, back into the preview it was stopped at. */
+    fun undoVoiceNoteDiscard() {
+        val conversationId = (_state.value as? AppState.SignedIn)?.open?.conversationId ?: return
+        val draft = pendingNote ?: return
+        noteUndoJob?.cancel()
+        noteUndoJob = null
+        inChat(conversationId) {
+            it.copy(noteDiscardUndo = false, notePreview = VoiceNotePreview(draft.durationMs, draft.waveform))
+        }
+    }
+
+    /**
+     * Pauses the live recording. [byInterruption] marks a pause the model resumes on its own when
+     * the interruption passes — a pause the speaker chose is theirs to lift.
+     */
+    private fun pauseNote(byInterruption: Boolean) {
+        val conversationId = (_state.value as? AppState.SignedIn)?.open?.conversationId ?: return
+        val recorder = noteRecorder ?: return
+        if (recorder.isPaused) return
+        recorder.pause()
+        notePausedByInterruption = byInterruption
+        inChat(conversationId) { it.copy(recordingPaused = true) }
+    }
+
+    /** Resumes a paused recording; an interruption's resume only lifts an interruption's pause. */
+    private fun resumeNote(afterInterruption: Boolean) {
+        val conversationId = (_state.value as? AppState.SignedIn)?.open?.conversationId ?: return
+        val recorder = noteRecorder ?: return
+        if (afterInterruption && !notePausedByInterruption) return
+        if (!recorder.isPaused) return
+        recorder.resume()
+        notePausedByInterruption = false
+        inChat(conversationId) { it.copy(recordingPaused = false) }
+    }
+
+    /** Stops the tick job; the recording it drove has ended one way or the other. */
+    private fun stopNoteTick() {
+        noteTickJob?.cancel()
+        noteTickJob = null
+    }
+
+    /** Rewrites the draft descriptor beside the recording's own incremental file. */
+    private fun persistNoteDraft(conversationId: Id, mimeType: String, elapsedMs: Long) {
+        val files = getApplication<Application>().filesDir
+        VoiceNoteDrafts.save(
+            files,
+            VoiceNoteDraft(
+                conversationId = conversationId,
+                file = VoiceNoteDrafts.fileFor(files, conversationId, mimeType),
+                mimeType = mimeType,
+                durationMs = elapsedMs,
+                amplitudes = noteAmplitudes,
+            ),
+        )
+    }
+
+    /** Holds audio focus for the recording; the listener is the interruption rule's other half. */
+    private fun requestNoteFocus() {
+        val manager = getApplication<Application>()
+            .getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+            .setOnAudioFocusChangeListener(noteFocusListener)
+            .build()
+        noteFocusRequest = request
+        manager.requestAudioFocus(request)
+    }
+
+    /** Gives the recording's focus back, on every path a recording can end by. */
+    private fun abandonNoteFocus() {
+        if (noteFocusRequest == null) return
+        val manager = getApplication<Application>()
+            .getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        noteFocusRequest?.let { manager.abandonAudioFocusRequest(it) }
+        noteFocusRequest = null
+    }
+
+    /**
+     * Finalises the live recording into a draft, or null when there was nothing live to finalise
+     * or the finalisation itself failed. The recorder's file is the draft's file — the bytes are
+     * already where the store keeps them — so finalising is a stop and a descriptor write.
+     */
+    private fun finalizeNote(): VoiceNoteDraft? {
+        val conversationId = (_state.value as? AppState.SignedIn)?.open?.conversationId
+        val recorder = noteRecorder ?: return null
+        stopNoteTick()
+        noteRecorder = null
+        abandonNoteFocus()
+        if (conversationId == null) {
+            recorder.cancel()
+            return null
+        }
+        return try {
+            val note = recorder.stop()
+            val draft = VoiceNoteDraft(
+                conversationId = conversationId,
+                file = VoiceNoteDrafts.fileFor(
+                    getApplication<Application>().filesDir,
+                    conversationId,
+                    note.mimeType,
+                ),
+                mimeType = note.mimeType,
+                durationMs = note.durationMs,
+                amplitudes = noteAmplitudes,
+            )
+            VoiceNoteDrafts.save(getApplication<Application>().filesDir, draft)
+            draft
+        } catch (failure: Exception) {
+            // The stop refused — a recording with no captured audio is the usual cause — so the
+            // note never existed as bytes and the composer goes back to being a text field.
+            recorder.cancel()
+            inChat(conversationId) { it.copy(recording = false, recordingPaused = false) }
+            signedIn { it.copy(failure = readable(failure)) }
+            null
+        }
+    }
+
+    /** Finalises and sends in one motion: the cap's auto-stop and the hold mode's release-to-send. */
+    private fun finishAndSendNote() {
+        val draft = finalizeNote() ?: pendingNote ?: return
+        pendingNote = draft
+        uploadPendingNote(draft)
+    }
+
+    /**
+     * Cancels, keeping the note as a draft for the undo window. A live recording is finalised
+     * first — a cancelled note the undo window might still send has to be bytes that can be
+     * played, not a capture that was never closed.
+     */
+    private fun discardNoteWithUndo() {
+        val conversationId = (_state.value as? AppState.SignedIn)?.open?.conversationId ?: return
+        val draft = finalizeNote() ?: pendingNote
+        if (draft == null) {
+            inChat(conversationId) {
+                it.copy(recording = false, recordingPaused = false, notePreview = null, noteDiscardUndo = false)
+            }
+            return
+        }
+        pendingNote = draft
+        inChat(conversationId) {
+            it.copy(recording = false, recordingPaused = false, notePreview = null, noteDiscardUndo = true)
+        }
+        noteUndoJob?.cancel()
+        noteUndoJob = viewModelScope.launch {
+            delay(NOTE_UNDO_MS)
+            if (pendingNote === draft) {
+                pendingNote = null
+            }
+            VoiceNoteDrafts.clear(getApplication<Application>().filesDir, draft.conversationId, draft.mimeType)
+            inChat(conversationId) { it.copy(noteDiscardUndo = false) }
+        }
+    }
+
+    /** Uploads and sends a held note; on failure the preview returns with the failure's words. */
+    private fun uploadPendingNote(draft: VoiceNoteDraft) {
+        val live = session
+        val chat = (_state.value as? AppState.SignedIn)?.open
+        if (live == null || chat == null || chat.conversationId != draft.conversationId) {
+            // The conversation closed under the note; the draft's bytes stay in the store for
+            // the conversation's next open, which is where the recovery chip finds them.
+            return
+        }
+        noteUndoJob?.cancel()
+        noteUndoJob = null
+        inChat(draft.conversationId) { it.copy(uploading = true, notePreview = null, noteDiscardUndo = false) }
         viewModelScope.launch {
             try {
+                val bytes = draft.file.readBytes()
                 val content = uploadVoiceNote(
                     live.client.media,
-                    chat.conversationId,
-                    note.bytes,
-                    note.mimeType,
-                    note.durationMs,
+                    draft.conversationId,
+                    bytes,
+                    draft.mimeType,
+                    draft.durationMs,
                     endToEnd = chat.kind != ConversationKind.Room,
+                    waveform = draft.waveform,
                 )
-                note.bytes.fill(0)
-                sendContent(chat.conversationId, content)
+                bytes.fill(0)
+                if (pendingNote === draft) {
+                    pendingNote = null
+                }
+                VoiceNoteDrafts.clear(getApplication<Application>().filesDir, draft.conversationId, draft.mimeType)
+                sendContent(draft.conversationId, content)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                inChat(chat.conversationId) { it.copy(uploading = false) }
+                // The note is not lost: the draft keeps it and the preview comes back, with the
+                // failure's own words, so a retry is the Send button and not another recording.
+                inChat(draft.conversationId) {
+                    it.copy(
+                        uploading = false,
+                        notePreview = VoiceNotePreview(draft.durationMs, draft.waveform),
+                    )
+                }
                 signedIn { it.copy(failure = readable(failure)) }
             }
         }
     }
 
-    /** Throws the recording away. Nothing was said if nobody will hear it. */
-    fun cancelVoiceNote() {
-        val chat = (_state.value as? AppState.SignedIn)?.open ?: return
-        noteCapJob?.cancel()
-        noteCapJob = null
-        noteRecorder?.cancel()
-        noteRecorder = null
-        inChat(chat.conversationId) { it.copy(recording = false) }
+    /**
+     * Finds a draft the last recording left behind — the app-death rule of brief 179 — and offers
+     * it as the preview the composer would show a note it had just stopped. A recording this
+     * session already holds recovers nothing, and a file the platform cannot play (an MPEG-4
+     * capture that died before its finalising stop) is a draft nobody can hear, deleted quietly
+     * rather than offered as speech it is not.
+     */
+    private fun recoverVoiceNoteDraft(conversationId: Id) {
+        if (noteRecorder != null || pendingNote != null) return
+        val files = getApplication<Application>().filesDir
+        val draft = VoiceNoteDrafts.load(files, conversationId) ?: return
+        if (!draft.file.isFile || draft.file.length() == 0L || !noteIsPlayable(draft.file)) {
+            VoiceNoteDrafts.clear(files, draft.conversationId, draft.mimeType)
+            return
+        }
+        pendingNote = draft
+        inChat(conversationId) {
+            it.copy(notePreview = VoiceNotePreview(draft.durationMs, draft.waveform))
+        }
+    }
+
+    /**
+     * Whether a recovered file can be read as media, asked of the platform's own parser: an Ogg
+     * stream is playable at any page that was written, while an MPEG-4 file needs the stop that
+     * finalises it, and only the parser knows which one this file is.
+     */
+    private fun noteIsPlayable(file: File): Boolean {
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(file.absolutePath)
+            extractor.trackCount > 0
+        } catch (_: Exception) {
+            false
+        } finally {
+            extractor.release()
+        }
     }
 
     /**
@@ -4135,7 +4505,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         callManager = manager
         subscriptions.addAll(manager.attach())
         callStateJob?.cancel()
-        callStateJob = viewModelScope.launch { manager.state.collect { _callState.value = it } }
+        callStateJob = viewModelScope.launch {
+            manager.state.collect { state ->
+                // A call is the loudest interruption a recording can meet: brief 179 answers it
+                // with a pause, never a cancellation, and the resume is as automatic as the pause
+                // — the call ending is the interruption passing.
+                val wasCalling = _callState.value.call != null || _callState.value.incoming != null
+                _callState.value = state
+                val calling = state.call != null || state.incoming != null
+                if (calling && !wasCalling) {
+                    pauseNote(byInterruption = true)
+                } else if (!calling && wasCalling) {
+                    resumeNote(afterInterruption = true)
+                }
+            }
+        }
         refreshConversations()
         // The wallet's combined read also fills the banner's $MIG balance, so the session starts
         // with it -- the desktop client issues its wallet command at sign-in for the same reason.
@@ -4205,12 +4589,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         callManager?.close()
         callManager = null
         stagedCall = null
-        // A recording in flight dies with the session it was for; the recorder deletes its own
-        // file, so there is nothing on disk to clean up here.
-        noteCapJob?.cancel()
-        noteCapJob = null
+        // A recording in flight dies with the session it was for; its bytes deliberately do not.
+        // The draft store owns them now — brief 179's rule is that a recording survives the app
+        // closing — so the file stays for the conversation's next open, and only the capture
+        // (the microphone, the tick, the focus) is torn down here.
+        stopNoteTick()
+        noteUndoJob?.cancel()
+        noteUndoJob = null
         noteRecorder?.cancel()
         noteRecorder = null
+        pendingNote = null
+        abandonNoteFocus()
         stagedVoiceNote = null
         _callState.value = CallUiState()
         subscriptions.forEach { it.cancel() }
@@ -5033,6 +5422,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         const val SEARCH_DEBOUNCE_MS = 300L
         /** One screen of conversations, and more on demand rather than a list nobody scrolls. */
         const val CONVERSATION_PAGE = 50L
+
+        /** The recording's tick: the timer the bar shows, the amplitude the waveform samples. */
+        const val NOTE_TICK_MS = 100L
+
+        /** How often the draft descriptor is rewritten while recording — the app-death rule's budget. */
+        const val NOTE_PERSIST_MS = 1_000L
+
+        /** How long a cancelled note stays recoverable: brief 179's undo window. */
+        const val NOTE_UNDO_MS = 5_000L
 
         /** Catch up from the beginning: there is no local store to have a high-water mark in. */
         const val HISTORY_FROM = 0L
