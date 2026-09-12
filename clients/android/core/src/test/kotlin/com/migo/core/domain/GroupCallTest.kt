@@ -79,7 +79,7 @@ class GroupCallTest {
         private val BEN_PHONE: Id = parseId("0123456789ABCDEFGHJKMNPQ24")
         private val CALL: Id = parseId("0123456789ABCDEFGHJKMNPQRS")
         private val OTHER_CALL: Id = parseId("0123456789ABCDEFGHJKMNPQRT")
-        private val CONVERSATION: Id = parseId("0123456789ABCDEFGHJKMNPQRU")
+        private val CONVERSATION: Id = parseId("0123456789ABCDEFGHJKMNPQ25")
 
         private val NOW: Long = Instant.parse("2026-09-12T12:00:00Z").toEpochMilli()
 
