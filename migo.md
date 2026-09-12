@@ -3819,7 +3819,7 @@ Alasan angkanya. Sebuah pesan chat dengan empat id, satu timestamp, dan tiga enu
 
 138. TRANSPORT BINDINGS
 
-STATUS: BUILT untuk WebSocket (web), TCP listener untuk client native (diaktifkan lewat MIGO_TCP__BIND), length-prefixed stream, dan listener QUIC opsional (diaktifkan lewat MIGO_QUIC__BIND; bit QUIC hanya diiklankan saat listener aktif). STATUS: SPEC untuk QUIC datagram dan jalur data QUIC pada client.
+STATUS: BUILT untuk WebSocket (web), TCP listener untuk client native (diaktifkan lewat MIGO_TCP__BIND), length-prefixed stream, dan listener QUIC opsional (diaktifkan lewat MIGO_QUIC__BIND; bit QUIC hanya diiklankan saat listener aktif), termasuk jalur data QUIC datagram: satu MWP frame per datagram tanpa length prefix di kedua arah (server pada QuicStreamTransport di server/crates/migod/src/quic.rs, client desktop pada QuicGateway di clients/desktop/src/net/quic.rs). Frame Critical (dan reply ERROR) tetap di stream length-prefixed karena datagram tidak andal; frame Coalescable/Droppable (typing, reaction, presence) yang muat dalam path MTU boleh naik datagram. Handshake HELLO dan jawabannya selalu di stream.
 
 Per client:
 
