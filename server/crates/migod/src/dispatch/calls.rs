@@ -449,8 +449,13 @@ pub(crate) async fn handle_group_end(
         // No group call held this id, or the caller held no seat in one that
         // did. `group_leave` answers NOT_FOUND for the first, so reaching here
         // with `Ok(None)` means the call exists and the caller was not seated:
-        // a 1:1 call cannot share the id (the id spaces are distinct stores),
-        // so this is a stranger's leave of a group call and is answered.
+        // a retried leave after a seat replacement, or a member who never
+        // joined. A 1:1 call cannot share the id (the id spaces are distinct
+        // stores), and the leave is already true — the caller is not in the
+        // call — so the frame is acknowledged as the idempotent no-op it is,
+        // the same answer ROOM_LEAVE gives to somebody already gone. Silence
+        // here left the client hanging until its request timer fired.
+        ctx.reply(&Acknowledged { ok: true })?;
         return Ok(true);
     };
     ctx.reply(&Acknowledged { ok: true })?;
