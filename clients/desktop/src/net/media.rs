@@ -66,6 +66,49 @@ pub(crate) const VOICE_NOTE_MAX_MS: u64 = 300_000;
 /// the five-minute cap it produces 4.8 MB, less than the byte cap the policy states.
 pub(crate) const VOICE_NOTE_SAMPLE_RATE: u32 = 8_000;
 
+/// How many bars a recorded waveform folds into, and what a bubble renders at most — the
+/// web client's `WAVEFORM_BARS` and the Android client's, the same number, so a note
+/// recorded on any client carries the same fifty-byte preview section 167 asks for.
+pub(crate) const WAVEFORM_BARS: usize = 50;
+
+/// How many samples of the note's own rate one live waveform bar covers: a tenth of a
+/// second, the cadence the Android recorder samples at and the web's analyser graph
+/// approximates, so the bar a speaker watches land is the bar the fold will keep.
+pub(crate) const WAVEFORM_WINDOW_SAMPLES: u64 = u64::from(VOICE_NOTE_SAMPLE_RATE) / 10;
+
+/// One sampled amplitude as a 0–255 bar: the scale the Android client's `amplitudeToBar`
+/// states, so a whisper recorded on either client draws the same height on the third.
+pub(crate) fn amplitude_to_bar(amplitude: i16) -> u8 {
+    let magnitude = u32::from(amplitude.unsigned_abs());
+    ((magnitude * 255) / 32_767).min(255) as u8
+}
+
+/// Folds a stream of sampled bars into the fixed-width waveform a message carries and a
+/// bubble renders.
+///
+/// Each output bar is the *maximum* bar in its slice of the input, because a peak — not an
+/// average — is what a waveform bar is drawn from: a syllable landing inside a bucket must
+/// show, and averaging would flatten it into the silence around it. The output is always
+/// exactly [`WAVEFORM_BARS`] bytes: an input shorter than the bar count pads with silence at
+/// the tail (a very short recording simply runs out of samples) and an empty input is all
+/// silence. The fold only ever runs on this client's own samples; a waveform that arrives
+/// from a peer is drawn as it stands, and the strip that draws it clips to its own width
+/// rather than trusting the sender's to be sane.
+pub(crate) fn downsample_waveform(bars: &[u8]) -> Vec<u8> {
+    let mut folded = vec![0u8; WAVEFORM_BARS];
+    if bars.is_empty() {
+        return folded;
+    }
+    let bucket = (bars.len() + WAVEFORM_BARS - 1) / WAVEFORM_BARS;
+    for (index, bar) in bars.iter().enumerate() {
+        let slot = (index / bucket).min(WAVEFORM_BARS - 1);
+        if *bar > folded[slot] {
+            folded[slot] = *bar;
+        }
+    }
+    folded
+}
+
 /// The key and nonce slots a room's plaintext upload fills: all zeroes, so a receiver can
 /// tell "sealed" from "was never sealed" without another wire field. The web client's
 /// `LEGACY_PLAINTEXT_SLOTS`, byte for byte.
@@ -167,6 +210,9 @@ pub(crate) struct OutgoingMedia {
     pub height: Option<u32>,
     /// The playing time, for a voice note.
     pub duration_ms: Option<u64>,
+    /// The folded waveform, for a voice note — the sender's own samples, computed before the
+    /// seal because the sealed bytes are the one place the server can never compute it from.
+    pub waveform: Option<Vec<u8>>,
     /// A sender-typed caption, for an image.
     pub caption: Option<String>,
     /// The disappearing lifetime the send was armed with, sealed into the content beside the
@@ -196,7 +242,7 @@ impl OutgoingMedia {
                 duration_ms: u32::try_from(self.duration_ms.unwrap_or(0)).unwrap_or(0),
                 key: self.key.clone(),
                 nonce: self.nonce.clone(),
-                waveform: None,
+                waveform: self.waveform.clone(),
                 expires_in_ms: self.expires_in_ms,
             },
             _ => Content::MediaRef {
@@ -220,6 +266,7 @@ impl OutgoingMedia {
             KIND_VOICE_NOTE => Body::VoiceNote {
                 media_id,
                 duration_ms: u32::try_from(self.duration_ms.unwrap_or(0)).unwrap_or(0),
+                waveform: self.waveform.clone(),
             },
             _ => Body::Media {
                 media_id,
@@ -639,5 +686,50 @@ mod tests {
         let max_samples = VOICE_NOTE_MAX_MS * u64::from(VOICE_NOTE_SAMPLE_RATE) / 1_000;
         let wav = wav_bytes(&vec![0i16; max_samples as usize], VOICE_NOTE_SAMPLE_RATE);
         assert!(wav.len() as u64 <= VOICE_NOTE_MAX_BYTES);
+    }
+
+    /// The amplitude scale is the Android client's: silence is 0, full scale is 255, and the
+    /// slope between them is the plain ratio, so the same sample draws the same bar on either
+    /// client.
+    #[test]
+    fn an_amplitude_scales_to_its_bar() {
+        assert_eq!(amplitude_to_bar(0), 0);
+        assert_eq!(amplitude_to_bar(i16::MIN), 255);
+        assert_eq!(amplitude_to_bar(i16::MAX), 255);
+        // A quarter of full scale rounds to its own share, not down to nothing.
+        assert_eq!(amplitude_to_bar(8_192), 63);
+    }
+
+    /// The fold keeps peaks, not averages: a syllable landing inside a bucket shows at its own
+    /// height however quiet the silence around it, and the output is always exactly the fixed
+    /// width — a short input pads with silence and an empty input is all silence.
+    #[test]
+    fn the_waveform_fold_keeps_peaks_at_a_fixed_width() {
+        assert_eq!(downsample_waveform(&[]), vec![0u8; WAVEFORM_BARS]);
+        // A note too short to fill the bars: the samples it did take keep their order at the
+        // head and the tail stays silent.
+        let short = downsample_waveform(&[10, 200, 30]);
+        assert_eq!(short.len(), WAVEFORM_BARS);
+        assert_eq!(&short[..3], &[10, 200, 30]);
+        assert!(short[3..].iter().all(|bar| *bar == 0));
+        // A sample count the width itself: one bar per bucket, every sample keeps its own
+        // place, and the fold changes nothing.
+        let bars: Vec<u8> = (0..WAVEFORM_BARS)
+            .map(|bucket| if bucket == 7 { 240 } else { (bucket % 3) as u8 })
+            .collect();
+        let folded = downsample_waveform(&bars);
+        assert_eq!(folded, bars);
+        // More samples than buckets: the fold packs them three to a bucket (150 samples,
+        // fifty bars), and each bucket keeps the peak that landed in it — the loud samples
+        // sit at 5, 55, and 105, which the fold files under bars 1, 18, and 35.
+        let long: Vec<u8> = (0..WAVEFORM_BARS * 3)
+            .map(|index| if index % WAVEFORM_BARS == 5 { 128 } else { 1 })
+            .collect();
+        let folded = downsample_waveform(&long);
+        assert_eq!(folded.len(), WAVEFORM_BARS);
+        assert!(folded.iter().enumerate().all(|(slot, bar)| match slot {
+            1 | 18 | 35 => *bar == 128,
+            _ => *bar == 1,
+        }));
     }
 }

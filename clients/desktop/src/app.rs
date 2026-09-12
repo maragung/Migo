@@ -29,7 +29,9 @@ use crate::settings::{self, Settings};
 use crate::theme::{self, font, palette, radius, space, Theme};
 use crate::ui::alerts::AlertsState;
 use crate::ui::auth::AuthState;
-use crate::ui::chat::{ChatState, ImageBlob, RoomNotice, MAX_ROOM_NOTICES};
+use crate::ui::chat::{
+    ChatState, ImageBlob, NotePreview, RecordingView, RoomNotice, MAX_ROOM_NOTICES,
+};
 use crate::ui::desktop::{self, Desktop, TaskAction, TaskEntry};
 use crate::ui::friends::FriendsState;
 use crate::ui::rooms::RoomsState;
@@ -861,20 +863,83 @@ impl App {
                     self.chat.media.failures.insert(media_id, reason);
                 }
                 Event::RecordingStarted { conversation_id } => {
-                    // The conversation id rides along so a recording left behind by a
-                    // conversation switch still clears its own bar, not whichever one is open.
-                    self.chat.recording = Some((conversation_id, std::time::Instant::now()));
+                    // The live face is filed fresh and empty: the worker's tick owns every
+                    // fact from here on, so a pause that stands the capture's clock still
+                    // stands the screen's too. The conversation id rides along so a bar left
+                    // behind by a window switch clears when its own recording ends.
+                    self.chat.recording = Some(RecordingView {
+                        conversation_id,
+                        elapsed_ms: 0,
+                        paused: false,
+                        amplitudes: Vec::new(),
+                    });
+                    // A new recording is a decision about the old note: whatever was held —
+                    // a preview, an undo window's restore, a recovered draft — gives way to
+                    // it, the same call the worker makes when it clears its own hold.
+                    self.chat.note_preview = None;
+                    self.chat.note_discard_undo = None;
+                }
+                Event::RecordingProgress {
+                    conversation_id,
+                    elapsed_ms,
+                    paused,
+                    amplitudes,
+                } => {
+                    if let Some(view) = self.chat.recording.as_mut() {
+                        if view.conversation_id == conversation_id {
+                            view.elapsed_ms = elapsed_ms;
+                            view.paused = paused;
+                            view.amplitudes = amplitudes;
+                        }
+                    }
                 }
                 Event::RecordingStopped { conversation_id } => {
-                    // `is_some_and` hands the tuple out of the Option by value, so `recording`
-                    // here is already an owned `Id` — no reference, no dereference, a plain
-                    // `Id == Id` compare.
+                    // The capture ended — into the preview, a cancel, or a send — so the
+                    // live face goes away. A hold still standing when the note ends on its
+                    // own (the five-minute cap, reached under a finger that never let go)
+                    // ends with it: the note already went, and the release has nothing left
+                    // to decide.
                     if self
                         .chat
                         .recording
-                        .is_some_and(|(recording, _)| recording == conversation_id)
+                        .as_ref()
+                        .is_some_and(|view| view.conversation_id == conversation_id)
                     {
                         self.chat.recording = None;
+                        self.chat.mic_held = false;
+                        self.chat.mic_press_origin = None;
+                        self.chat.mic_hold_started = None;
+                        self.chat.mic_cancel_slide = false;
+                    }
+                }
+                Event::RecordingPreview {
+                    conversation_id,
+                    duration_ms,
+                    waveform,
+                } => {
+                    // The finished note waits on the composer's word — the two-step mode's
+                    // Stop, an undo window's restore, or a draft recovered after an app
+                    // death — and the undo chip it may have left standing is spent: the
+                    // window's note is back on screen, not in it.
+                    self.chat.note_preview = Some(NotePreview {
+                        conversation_id,
+                        duration_ms,
+                        waveform,
+                    });
+                    self.chat.note_discard_undo = None;
+                }
+                Event::NoteDiscarded {
+                    conversation_id,
+                    undoable,
+                } => {
+                    // The preview is gone either way; what differs is where the note went.
+                    // Into the window (the chip, whose deadline the worker keeps) or out of
+                    // it with the window closed (the chip withdrawn, the bytes gone).
+                    self.chat.note_preview = None;
+                    if undoable {
+                        self.chat.note_discard_undo = Some(conversation_id);
+                    } else if self.chat.note_discard_undo == Some(conversation_id) {
+                        self.chat.note_discard_undo = None;
                     }
                 }
                 Event::VoicePlaying { media_id } => {

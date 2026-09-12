@@ -35,10 +35,11 @@ pub(crate) mod media;
 pub mod quic;
 pub mod rest;
 pub mod tcp;
+pub(crate) mod voice_draft;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -502,8 +503,27 @@ pub enum Command {
         conversation_id: Id,
         expires_in_ms: Option<u32>,
     },
-    /// End the recording in progress: send it, or throw it away.
-    StopRecording { send: bool },
+    /// Pause the live recording — the speaker's own word. The capture stands down, the timer
+    /// and the cap stand still, and nothing recorded so far is touched.
+    PauseRecording,
+    /// Resume a paused recording.
+    ResumeRecording,
+    /// Stop the live recording into the preview: the two-step mode's Stop, holding the note
+    /// for the composer's Send or Delete rather than sending on the spot.
+    StopRecording,
+    /// Send the note — the preview's Send, or a hold-mode release while the recorder is still
+    /// live, which finalises and sends in one motion.
+    SendVoiceNote,
+    /// Cancel — the bar's Cancel, the preview's Delete, or a hold-mode slide away. Nothing is
+    /// deleted outright: the note stays a draft for the undo window, section 179's rule that
+    /// an accidental cancel must be a recoverable mistake.
+    CancelVoiceNote,
+    /// Restore a cancelled note from its undo window, back into the preview it was stopped at.
+    UndoVoiceNoteDiscard,
+    /// Offer a draft the last session left behind — the app-death rule of section 179 — as
+    /// the preview the composer would show a note it had just stopped. Asked on every
+    /// conversation open; the worker ignores it when a note is already live or held.
+    RecoverVoiceDraft { conversation_id: Id },
     /// React to one message with one emoji. Add-only, the same shape every Migo client
     /// sends: the server mints a deterministic message id from the envelope, and the UI adds
     /// its own chip on the click rather than waiting for an echo this device suppresses.
@@ -890,8 +910,28 @@ pub enum Event {
     MediaFailed { media_id: Id, reason: String },
     /// A voice-note recording began, so the composer trades its field for the recording bar.
     RecordingStarted { conversation_id: Id },
-    /// The recording ended — sent or discarded. The bar goes away.
+    /// The live recording's own state, on the recording's own tick: how long it has run
+    /// (standing still through a pause exactly as the capture does), whether it is paused,
+    /// and the waveform's sampled bars so the bar can draw what is being said.
+    RecordingProgress {
+        conversation_id: Id,
+        elapsed_ms: u64,
+        paused: bool,
+        amplitudes: Vec<u8>,
+    },
+    /// The capture ended — into the preview, into a cancel, or into a send. The bar goes away.
     RecordingStopped { conversation_id: Id },
+    /// A finished note waits on the composer's word: the two-step mode's preview, an undo
+    /// window's restore, or a draft recovered after an app death. The duration and waveform
+    /// are the sender's own measurements, so the preview lays out before any byte is read.
+    RecordingPreview {
+        conversation_id: Id,
+        duration_ms: u32,
+        waveform: Vec<u8>,
+    },
+    /// A note was discarded: `undoable` says whether the undo window holds it (the chip is
+    /// shown) or the window has just closed and the bytes are gone (the chip is withdrawn).
+    NoteDiscarded { conversation_id: Id, undoable: bool },
     /// A voice note started playing; the bubble's button becomes a stop.
     VoicePlaying { media_id: Id },
     /// A voice note stopped playing — the stop button, or the last sample itself.
@@ -1183,6 +1223,11 @@ struct AttachmentBegin {
     /// The bytes for the PUT: the sealed blob for an end-to-end upload, the plaintext for a
     /// room's.
     wire_bytes: Vec<u8>,
+    /// When the attachment is a voice note, the conversation its draft belongs to. The draft
+    /// outlives the upload on purpose: it is cleared only when the object is committed, and
+    /// every failure on the way hands the note back to the preview rather than deleting
+    /// five minutes of speech over one dropped request.
+    voice_note: Option<Id>,
 }
 
 /// One attachment upload between its `MEDIA_UPLOAD_COMMIT` and the acknowledgement that says
@@ -1198,6 +1243,9 @@ struct AttachmentCommit {
     media_id: Id,
     /// What the message will claim, key slots included.
     plan: media::OutgoingMedia,
+    /// The voice note's conversation, carried the whole way so the commit's success is the
+    /// one door the draft leaves by.
+    voice_note: Option<Id>,
 }
 
 /// One fetch waiting on its signed URL, keyed by the correlation the reply will carry.
@@ -1235,6 +1283,17 @@ struct MediaCache {
 /// small enough that a long session's media cannot grow the worker without end.
 const MEDIA_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
 
+/// How often the live recording states itself: the cadence the bar's clock and waveform
+/// move at, fast enough to feel live and slow enough that a repaint is not the recording's
+/// main cost. The Android recorder's own tick runs at 100ms on a phone's composer; a
+/// desktop frame does not need to wake that often to look awake.
+const RECORDING_TICK_MS: u64 = 250;
+
+/// How long a discarded note stays recoverable — the undo window section 179 keeps open
+/// because a slide nobody meant is the mistake the hold mode makes easy. The Android
+/// composer's `NOTE_UNDO_MS`, the same five seconds.
+const NOTE_UNDO_WINDOW: Duration = Duration::from_secs(5);
+
 impl MediaCache {
     fn new() -> Self {
         Self {
@@ -1270,8 +1329,29 @@ impl MediaCache {
     }
 }
 
-/// One voice-note recording in progress: the open microphone, the samples it has produced,
-/// and the moment the cap ends it.
+/// The capture pump's shared half: what the worker reads while the pump writes.
+///
+/// The samples are *counted*, not kept — the bytes themselves are appended to the draft file
+/// as the chunks arrive, so the count is the recording's own clock (elapsed is the count over
+/// the note's rate) and the worker's memory holds one note's facts, not one note's audio —
+/// section 179's incremental rule, the same one the Android recorder keeps by writing into
+/// its file from the first second.
+struct RecordShared {
+    /// The samples taken so far. Frozen through a pause, because paused chunks are dropped
+    /// rather than buffered — a pause is time the note does not contain.
+    samples: AtomicU64,
+    /// The live waveform's sampled bars, one per tenth of a second, pushed by the pump as
+    /// each window fills.
+    amplitudes: Mutex<Vec<u8>>,
+    /// The pump's stop flag, so an end is an end even mid-chunk.
+    stop: AtomicBool,
+    /// The pause flag: chunks that arrive paused are dropped, and the timer and the cap both
+    /// stand still because the count is what drives them.
+    paused: AtomicBool,
+}
+
+/// One voice-note recording in progress: the open microphone, the pump appending its chunks
+/// to the draft file, and the interruption state only the worker knows.
 struct Recording {
     /// The conversation the note will land in.
     conversation_id: Id,
@@ -1279,20 +1359,38 @@ struct Recording {
     /// not here — the capture pump owns it now. Never read: the handle exists to be held.
     #[allow(dead_code)]
     microphone: call_audio::Microphone,
-    /// Where the capture pump appends, shared with the pump thread. A mutex over one vector
-    /// because the pump produces and the stop consumes; a channel would only move the same
-    /// hand-off somewhere else.
-    samples: Arc<Mutex<Vec<i16>>>,
-    /// The pump's stop flag, so an end is an end even mid-chunk.
-    stop: Arc<AtomicBool>,
+    /// The pump's shared half: the count, the bars, and the two flags.
+    shared: Arc<RecordShared>,
+    /// The pump thread's handle, joined when the recording ends so the draft file is fully
+    /// written before anyone reads it back.
+    pump: Option<std::thread::JoinHandle<()>>,
     /// The disappearing lifetime the composer was armed with when the recording began, so the
     /// finished note keeps the promise that was standing when its recording started — an arm
     /// switched off mid-note does not retroactively un-promise a send that had one.
     expires_in_ms: Option<u32>,
-    /// The five-minute cap, as an instant the select loop can sleep to — a recording that
-    /// reaches it is ended and sent, not cut, because five minutes of someone's voice must
-    /// not be lost to a timer nobody watched.
-    deadline: std::time::Instant,
+    /// Whether the pause standing now was set by an interruption — a call arriving, a call
+    /// being placed — rather than the speaker's own Pause. An interruption's pause is lifted
+    /// by the interruption passing; a pause the speaker chose is theirs to lift.
+    paused_by_interruption: bool,
+    /// The last elapsed the tick persisted to the draft descriptor, so the descriptor is
+    /// rewritten on its own once-a-second cadence rather than on every tick.
+    persisted_ms: u64,
+}
+
+/// A finished recording the composer is holding: the two-step mode's preview, the undo
+/// window's cancelled note, or a draft recovered after an app death. The bytes stay in the
+/// draft store — the send reads them back — so holding a note costs the worker its facts
+/// and nothing else.
+struct HeldNote {
+    /// The conversation the note will land in.
+    conversation_id: Id,
+    /// The playing time, from the samples themselves: the count over the rate, the same
+    /// clock the live bar ticked.
+    duration_ms: u64,
+    /// The sampled amplitude bars, unfolded — the fold happens when the message is built.
+    amplitudes: Vec<u8>,
+    /// The disappearing arm the recording began under, when one stood.
+    expires_in_ms: Option<u32>,
 }
 
 /// One voice note playing: the open speaker and the pump that feeds it.
@@ -1550,6 +1648,17 @@ struct Worker {
     media_cache: MediaCache,
     /// The voice-note recording in progress, if one runs.
     recording: Option<Recording>,
+    /// A finished note the composer is holding — the preview, the undo window's cancelled
+    /// note, or a recovered draft. One at a time, like the recording: the composer is one
+    /// surface, and two held notes would be a question asked twice.
+    held_note: Option<HeldNote>,
+    /// When the undo window on a discarded note closes, if one stands. The deadline belongs
+    /// to the loop because the bytes are deleted by it — the window's expiry is the one
+    /// moment the draft store's door swings shut on its own.
+    note_undo_until: Option<std::time::Instant>,
+    /// The voice-note draft store, beside the vault. The recording writes into it
+    /// incrementally, the preview holds from it, and the send reads it back.
+    drafts: voice_draft::VoiceDraftStore,
     /// The voice note playing, if one plays. One at a time, like the recording: a speaker is
     /// a device, and the second note would mix with the first.
     playing: Option<Playing>,
@@ -1573,6 +1682,9 @@ struct Worker {
 
 impl Worker {
     fn new(sink: Sink, commands: mpsc::UnboundedSender<Command>, vault_path: PathBuf) -> Self {
+        // The draft store stands beside the vault and borrows its path only here, before the
+        // struct literal moves it.
+        let drafts = voice_draft::VoiceDraftStore::beside(&vault_path);
         Self {
             sink,
             commands,
@@ -1597,6 +1709,9 @@ impl Worker {
             media_fetching: HashSet::new(),
             media_cache: MediaCache::new(),
             recording: None,
+            held_note: None,
+            note_undo_until: None,
+            drafts,
             playing: None,
             group_rosters: HashMap::new(),
             group_leave: None,
@@ -1659,17 +1774,30 @@ impl Worker {
             // the borrow this future holds on the engine ends before `on_call_tick` takes its
             // own — the same discipline the frame arm follows with the gateway.
             let call_tick = self.calls.next_tick();
-            // A recording's cap, the same shape one more time: the deadline belongs to the
-            // loop because ending a recording touches the worker's own state (the recording,
-            // the pump's flag, the upload that follows), and a timer that fired from a
-            // sibling task would race every hand that touches them.
-            let record_until = self.recording.as_ref().map(|recording| recording.deadline);
+            // The recording's own tick, the same shape one more time: a quarter-second
+            // cadence while a note is live, driving the bar's clock and waveform, persisting
+            // the draft descriptor once a second, and ending the note at the cap. It belongs
+            // to the loop because all of that touches the worker's own state, and a timer
+            // that fired from a sibling task would race every hand that touches them. The
+            // cap itself is read from the sample count rather than the wall clock, so a
+            // pause stands the cap still the same way it stands the timer still.
+            let recording_live = self.recording.is_some();
             let record = async move {
-                match record_until {
+                if recording_live {
+                    tokio::time::sleep(Duration::from_millis(RECORDING_TICK_MS)).await
+                } else {
+                    // Nothing recording: park, so this arm never completes and never spins.
+                    std::future::pending::<()>().await
+                }
+            };
+            // The undo window on a discarded note, the same shape again: the bytes are
+            // deleted by its expiry, and the deletion is the loop's to make.
+            let note_until = self.note_undo_until;
+            let note_window = async move {
+                match note_until {
                     Some(deadline) => {
                         tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await
                     }
-                    // Nothing recording: park, so this arm never completes and never spins.
                     None => std::future::pending::<()>().await,
                 }
             };
@@ -1690,7 +1818,8 @@ impl Worker {
                 () = due => self.reconnect().await,
                 () = beat => self.send_heartbeat().await,
                 Some(tick) = call_tick => self.on_call_tick(tick).await,
-                () = record => self.recording_deadline_reached().await,
+                () = record => self.recording_ticked().await,
+                () = note_window => self.note_undo_expired(),
             }
         }
 
@@ -1936,7 +2065,15 @@ impl Worker {
             } => {
                 self.start_recording(conversation_id, expires_in_ms);
             }
-            Command::StopRecording { send } => self.stop_recording(send).await,
+            Command::PauseRecording => self.pause_recording(false),
+            Command::ResumeRecording => self.resume_recording(false),
+            Command::StopRecording => self.stop_recording(),
+            Command::SendVoiceNote => self.send_voice_note().await,
+            Command::CancelVoiceNote => self.cancel_voice_note(),
+            Command::UndoVoiceNoteDiscard => self.undo_note_discard(),
+            Command::RecoverVoiceDraft { conversation_id } => {
+                self.recover_voice_draft(conversation_id);
+            }
             Command::SendReaction {
                 conversation_id,
                 target_message_id,
@@ -3197,7 +3334,7 @@ impl Worker {
                 (plan, bytes)
             }
         };
-        self.begin_attachment(conversation_id, plan, plaintext)
+        self.begin_attachment(conversation_id, plan, plaintext, None)
             .await;
     }
 
@@ -3216,6 +3353,7 @@ impl Worker {
         conversation_id: Id,
         mut plan: media::OutgoingMedia,
         plaintext: Vec<u8>,
+        voice_note: Option<Id>,
     ) {
         let sealed = match self.signed.as_ref() {
             // Documents are always sealed. Everything else follows the conversation: an
@@ -3223,7 +3361,12 @@ impl Worker {
             Some(signed) => {
                 plan.kind == media::KIND_DOCUMENT || signed.e2e.contains(&conversation_id)
             }
-            None => return,
+            // Not signed in: nothing can be sent, and a voice note's draft goes back to the
+            // preview rather than being spent on a refusal.
+            None => {
+                self.restore_voice_note_preview(voice_note);
+                return;
+            }
         };
         let (key, nonce, wire_bytes, content_type, size) = if sealed {
             let domain = if plan.kind == media::KIND_VOICE_NOTE {
@@ -3235,6 +3378,7 @@ impl Worker {
                 Ok(sealed) => sealed,
                 Err(reason) => {
                     self.sink.toast(reason, ToastKind::Error);
+                    self.restore_voice_note_preview(voice_note);
                     return;
                 }
             };
@@ -3272,6 +3416,7 @@ impl Worker {
             .send_and_remember(Opcode::MediaUploadBegin, &begin)
             .await
         else {
+            self.restore_voice_note_preview(voice_note);
             return;
         };
         self.attachment_begins.insert(
@@ -3281,8 +3426,38 @@ impl Worker {
                 message_id,
                 plan,
                 wire_bytes,
+                voice_note,
             },
         );
+    }
+
+    /// Hands a failed voice-note upload back to the preview, from the draft that outlived
+    /// the attempt: the note is not lost, and a retry is the Send button rather than another
+    /// five minutes at the microphone. An attachment that was not a voice note restores
+    /// nothing.
+    fn restore_voice_note_preview(&mut self, voice_note: Option<Id>) {
+        let Some(conversation_id) = voice_note else {
+            return;
+        };
+        let Some(draft) = self.drafts.load(conversation_id) else {
+            return;
+        };
+        let Some(samples) = self.drafts.read_samples(conversation_id) else {
+            self.drafts.clear(conversation_id);
+            return;
+        };
+        if (samples.len() as u64) < u64::from(media::VOICE_NOTE_SAMPLE_RATE) / 4 {
+            self.drafts.clear(conversation_id);
+            return;
+        }
+        self.hold_note(HeldNote {
+            conversation_id,
+            duration_ms: samples.len() as u64 * 1_000 / u64::from(media::VOICE_NOTE_SAMPLE_RATE),
+            amplitudes: draft.amplitudes,
+            // The arm the recording began under is gone with the note it rode on; the
+            // restored preview sends without it rather than inventing a promise nobody made.
+            expires_in_ms: None,
+        });
     }
 
     /// A `MEDIA_UPLOAD_BEGIN` reply arrived for an attachment: PUT the bytes and commit them
@@ -3300,6 +3475,7 @@ impl Worker {
             return;
         };
         let Some(signed) = self.signed.as_ref() else {
+            self.restore_voice_note_preview(pending.voice_note);
             return;
         };
         if let Err(error) = signed
@@ -3312,6 +3488,7 @@ impl Worker {
                 format!("Could not upload the attachment: {error}"),
                 ToastKind::Error,
             );
+            self.restore_voice_note_preview(pending.voice_note);
             return;
         }
         let digest = {
@@ -3329,6 +3506,7 @@ impl Worker {
             .await
         else {
             self.abort_attachment(ticket.upload_id).await;
+            self.restore_voice_note_preview(pending.voice_note);
             return;
         };
         self.attachment_commits.insert(
@@ -3338,6 +3516,7 @@ impl Worker {
                 message_id: pending.message_id,
                 media_id: ticket.upload_id,
                 plan: pending.plan,
+                voice_note: pending.voice_note,
             },
         );
     }
@@ -3353,6 +3532,12 @@ impl Worker {
         let Some(pending) = self.attachment_commits.remove(&correlation) else {
             return;
         };
+        // The object exists, so a voice note's draft has finished its journey: the bytes are
+        // the server's ciphertext now, and the draft's own door closes behind them. Every
+        // earlier failure on the way left it open on purpose.
+        if let Some(conversation_id) = pending.voice_note {
+            self.drafts.clear(conversation_id);
+        }
         // File the keying now, from the plan that minted it: a fetch of our own object —
         // from this device after an eviction, or another device entirely — opens with the
         // same slots the message carries.
@@ -3531,9 +3716,19 @@ impl Worker {
     }
 
     /// Begins a voice-note recording: opens the microphone and hands its chunks to a pump
-    /// that appends them at the note's own rate.
+    /// that appends them to the draft file at the note's own rate, counting samples and
+    /// folding the live waveform as it goes.
     fn start_recording(&mut self, conversation_id: Id, expires_in_ms: Option<u32>) {
         if self.recording.is_some() {
+            return;
+        }
+        // A call owns the microphone while it runs, and section 179 answers a call with a
+        // pause rather than a fight over the device: the note waits for the call to end.
+        if self.calls.busy() {
+            self.sink.toast(
+                "A call is using the microphone. The note can be recorded once it ends.",
+                ToastKind::Info,
+            );
             return;
         }
         // `mut` because `take_frames` hands the receiver out of the microphone by &mut self —
@@ -3549,52 +3744,338 @@ impl Worker {
                 return;
             }
         };
+        // The draft's file is created before the pump exists, so the recording is on disk from
+        // its first chunk — an app death a second in leaves a draft, not nothing. Creating it
+        // also truncates whatever draft this conversation held before, the one-draft-per-
+        // conversation rule's own mechanics.
+        let out = match self.drafts.create_pcm(conversation_id) {
+            Ok(file) => std::io::BufWriter::new(file),
+            Err(error) => {
+                self.sink.toast(
+                    format!("Could not open the recording's draft file: {error}"),
+                    ToastKind::Error,
+                );
+                return;
+            }
+        };
         let rate = microphone.rate;
         let frames = microphone.take_frames();
-        let samples = Arc::new(Mutex::new(Vec::<i16>::new()));
-        let stop = Arc::new(AtomicBool::new(false));
-        spawn_recording_pump(frames, rate, Arc::clone(&samples), Arc::clone(&stop));
+        let shared = Arc::new(RecordShared {
+            samples: AtomicU64::new(0),
+            amplitudes: Mutex::new(Vec::new()),
+            stop: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+        });
+        let pump = spawn_recording_pump(frames, rate, Arc::clone(&shared), out);
+        // A new recording is a new note: whatever the composer was holding — a preview, an
+        // undo window's cancelled note — stands down, the same handoff the Android composer
+        // makes. The bytes stay in the store, where this conversation's own file is the one
+        // just truncated and any other conversation's draft keeps waiting for its own window.
+        self.held_note = None;
+        self.note_undo_until = None;
         self.recording = Some(Recording {
             conversation_id,
             microphone,
-            samples,
-            stop,
+            shared,
+            pump: Some(pump),
             expires_in_ms,
-            deadline: std::time::Instant::now() + Duration::from_millis(media::VOICE_NOTE_MAX_MS),
+            paused_by_interruption: false,
+            persisted_ms: 0,
         });
         self.sink.send(Event::RecordingStarted { conversation_id });
     }
 
-    /// Ends the recording in progress: sends it, or throws it away.
-    async fn stop_recording(&mut self, send: bool) {
-        let Some(recording) = self.recording.take() else {
-            return;
-        };
-        let conversation_id = recording.conversation_id;
-        let recording_expires_in_ms = recording.expires_in_ms;
-        recording.stop.store(true, Ordering::Relaxed);
-        let samples = recording
-            .samples
-            .lock()
-            .map(|mut buffer| std::mem::take(&mut *buffer))
-            .unwrap_or_default();
-        // Dropping the handle stops capture; the pump thread ends with its channel.
-        drop(recording);
-        self.sink.send(Event::RecordingStopped { conversation_id });
-        if !send {
+    /// Ends the capture and holds the finished note for the composer's word: the two-step
+    /// mode's Stop. The bytes stay in the draft store, so the preview survives a death the
+    /// same way a mid-recording draft does.
+    fn stop_recording(&mut self) {
+        if let Some(note) = self.finalize_recording() {
+            self.hold_note(note);
+        }
+    }
+
+    /// Sends the note: the preview's Send, or a hold-mode release while the recorder is still
+    /// live, which finalises and sends in one motion — the whole journey for a recording
+    /// stopped by the cap or released to send.
+    async fn send_voice_note(&mut self) {
+        if self.recording.is_some() {
+            let note = self.finalize_recording();
+            if let Some(note) = note {
+                self.upload_held_note(note).await;
+            }
             return;
         }
-        // A note shorter than a quarter-second is a click, not a message: refuse it as one.
+        let Some(note) = self.held_note.take() else {
+            return;
+        };
+        self.note_undo_until = None;
+        self.upload_held_note(note).await;
+    }
+
+    /// Cancels — the bar's Cancel, the preview's Delete, or a hold-mode slide away. Nothing
+    /// is deleted outright: the note becomes the undo window's draft, because a slide nobody
+    /// meant is the one mistake the hold mode makes easy.
+    fn cancel_voice_note(&mut self) {
+        if self.recording.is_some() {
+            let note = self.finalize_recording();
+            if let Some(note) = note {
+                self.held_note = Some(note);
+            }
+        }
+        let Some(note) = self.held_note.as_ref() else {
+            return;
+        };
+        let conversation_id = note.conversation_id;
+        self.note_undo_until = Some(std::time::Instant::now() + NOTE_UNDO_WINDOW);
+        self.sink.send(Event::NoteDiscarded {
+            conversation_id,
+            undoable: true,
+        });
+    }
+
+    /// Restores a cancelled note from its undo window, back into the preview it was stopped
+    /// at. The bytes never moved: only the window's deadline does.
+    fn undo_note_discard(&mut self) {
+        if self.held_note.is_some() {
+            self.note_undo_until = None;
+            self.emit_note_preview();
+        }
+    }
+
+    /// The undo window closed on its own: the note is gone for real now, bytes and all, and
+    /// the chip that offered the restore is withdrawn.
+    fn note_undo_expired(&mut self) {
+        self.note_undo_until = None;
+        if let Some(note) = self.held_note.take() {
+            self.drafts.clear(note.conversation_id);
+            self.sink.send(Event::NoteDiscarded {
+                conversation_id: note.conversation_id,
+                undoable: false,
+            });
+        }
+    }
+
+    /// Holds a finished note as the composer's preview.
+    fn hold_note(&mut self, note: HeldNote) {
+        self.note_undo_until = None;
+        self.held_note = Some(note);
+        self.emit_note_preview();
+    }
+
+    /// States the held note to the composer: the duration and the folded waveform, so the
+    /// preview lays out before any byte is read back.
+    fn emit_note_preview(&self) {
+        if let Some(note) = self.held_note.as_ref() {
+            self.sink.send(Event::RecordingPreview {
+                conversation_id: note.conversation_id,
+                duration_ms: u32::try_from(note.duration_ms).unwrap_or(0),
+                waveform: media::downsample_waveform(&note.amplitudes),
+            });
+        }
+    }
+
+    /// Finds a draft the last session left behind — the app-death rule of section 179 — and
+    /// offers it as the preview the composer would show a note it had just stopped. A
+    /// recording this session already holds recovers nothing, and a draft whose bytes cannot
+    /// be read or hold less than a quarter-second of speech is a draft nobody can hear,
+    /// cleared quietly rather than offered as speech it is not. A recovered note makes no
+    /// disappearing promise: the arm belonged to the recording that died, not this one.
+    fn recover_voice_draft(&mut self, conversation_id: Id) {
+        if self.recording.is_some() || self.held_note.is_some() {
+            return;
+        }
+        let Some(draft) = self.drafts.load(conversation_id) else {
+            return;
+        };
+        let Some(samples) = self.drafts.read_samples(conversation_id) else {
+            self.drafts.clear(conversation_id);
+            return;
+        };
         if (samples.len() as u64) < u64::from(media::VOICE_NOTE_SAMPLE_RATE) / 4 {
+            self.drafts.clear(conversation_id);
+            return;
+        }
+        let duration_ms = samples.len() as u64 * 1_000 / u64::from(media::VOICE_NOTE_SAMPLE_RATE);
+        self.hold_note(HeldNote {
+            conversation_id,
+            duration_ms,
+            amplitudes: draft.amplitudes,
+            expires_in_ms: None,
+        });
+    }
+
+    /// Ends the live capture and collects the finished note, or `None` when there was
+    /// nothing live or the note never became speech. The draft file is the recording's own
+    /// memory, so finalising is a join of the pump, a last descriptor write, and the
+    /// judgement on what was said.
+    fn finalize_recording(&mut self) -> Option<HeldNote> {
+        let mut recording = self.recording.take()?;
+        let conversation_id = recording.conversation_id;
+        let expires_in_ms = recording.expires_in_ms;
+        recording.shared.stop.store(true, Ordering::Relaxed);
+        // Dropping the microphone closes the pump's channel, and joining the pump waits for
+        // its last write to hit the file — the read-back below must not race a buffered tail.
+        drop(recording.microphone);
+        if let Some(pump) = recording.pump.take() {
+            let _ = pump.join();
+        }
+        let count = recording.shared.samples.load(Ordering::Relaxed);
+        let amplitudes = recording
+            .shared
+            .amplitudes
+            .lock()
+            .map(|bars| bars.clone())
+            .unwrap_or_default();
+        self.sink.send(Event::RecordingStopped { conversation_id });
+        // A note shorter than a quarter-second is a click, not a message: refuse it as one,
+        // on every path a recording can end by.
+        if count < u64::from(media::VOICE_NOTE_SAMPLE_RATE) / 4 {
+            self.drafts.clear(conversation_id);
             self.sink.toast(
                 "Hold the microphone a moment longer to record a note.",
                 ToastKind::Info,
             );
+            return None;
+        }
+        let duration_ms = count * 1_000 / u64::from(media::VOICE_NOTE_SAMPLE_RATE);
+        // The final descriptor, so a death between here and the send still finds a draft
+        // that states the note's whole length rather than the last tick's.
+        self.drafts.save(conversation_id, duration_ms, &amplitudes);
+        Some(HeldNote {
+            conversation_id,
+            duration_ms,
+            amplitudes,
+            expires_in_ms,
+        })
+    }
+
+    /// The recording's own tick: state the live note to the composer, persist the draft
+    /// descriptor once a second, and end the note at the cap — a send, not a stop, because a
+    /// recording that ran to its ceiling finishes its journey rather than waiting on nobody
+    /// to press Send.
+    async fn recording_ticked(&mut self) {
+        // The cap, read from the sample count: a pause stood it still, and the pump's own
+        // backstop stopped appending at the same place, so the tick's job is only to notice.
+        let max_samples =
+            media::VOICE_NOTE_MAX_MS * u64::from(media::VOICE_NOTE_SAMPLE_RATE) / 1_000;
+        let (conversation_id, elapsed_ms, paused, count) = {
+            let Some(recording) = self.recording.as_mut() else {
+                return;
+            };
+            let count = recording.shared.samples.load(Ordering::Relaxed);
+            let elapsed_ms = count * 1_000 / u64::from(media::VOICE_NOTE_SAMPLE_RATE);
+            // The descriptor rides the recording's own once-a-second cadence — a death
+            // between ticks costs at most a second of the timer's precision.
+            if elapsed_ms.saturating_sub(recording.persisted_ms) >= 1_000 {
+                recording.persisted_ms = elapsed_ms;
+                let amplitudes = recording
+                    .shared
+                    .amplitudes
+                    .lock()
+                    .map(|bars| bars.clone())
+                    .unwrap_or_default();
+                self.drafts
+                    .save(recording.conversation_id, elapsed_ms, &amplitudes);
+            }
+            (
+                recording.conversation_id,
+                elapsed_ms,
+                recording.shared.paused.load(Ordering::Relaxed),
+                count,
+            )
+        };
+        // The event carries only the newest bars — the bar draws the last of them, and the
+        // descriptor above is where the whole stream is kept.
+        let amplitudes = self
+            .recording
+            .as_ref()
+            .and_then(|live| live.shared.amplitudes.lock().ok())
+            .map(|bars| {
+                let kept = bars.len().saturating_sub(media::WAVEFORM_BARS);
+                bars[kept..].to_vec()
+            })
+            .unwrap_or_default();
+        self.sink.send(Event::RecordingProgress {
+            conversation_id,
+            elapsed_ms,
+            paused,
+            amplitudes,
+        });
+        if count >= max_samples {
+            let note = self.finalize_recording();
+            if let Some(note) = note {
+                self.upload_held_note(note).await;
+            }
+        }
+    }
+
+    /// Pauses the live capture. `by_interruption` marks a pause the worker lifts itself when
+    /// the interruption passes — a call arriving, a call being placed — while a pause the
+    /// speaker chose is theirs to lift.
+    fn pause_recording(&mut self, by_interruption: bool) {
+        let Some(recording) = self.recording.as_mut() else {
+            return;
+        };
+        if recording.shared.paused.load(Ordering::Relaxed) {
             return;
         }
-        // The cap, enforced on the samples the pump actually produced. The deadline arm ends
-        // the recording at the same cap, so this truncation is the backstop for a pump that
-        // appended past the deadline in its last chunk.
+        recording.shared.paused.store(true, Ordering::Relaxed);
+        recording.paused_by_interruption = by_interruption;
+        self.emit_recording_progress();
+    }
+
+    /// Resumes a paused capture; an interruption's resume only lifts an interruption's pause.
+    fn resume_recording(&mut self, after_interruption: bool) {
+        let Some(recording) = self.recording.as_mut() else {
+            return;
+        };
+        if after_interruption && !recording.paused_by_interruption {
+            return;
+        }
+        if !recording.shared.paused.load(Ordering::Relaxed) {
+            return;
+        }
+        recording.shared.paused.store(false, Ordering::Relaxed);
+        recording.paused_by_interruption = false;
+        self.emit_recording_progress();
+    }
+
+    /// States the live recording to the composer at once — the pause and resume paths' own
+    /// event, so the bar's glyph flips on the press and not on the next tick.
+    fn emit_recording_progress(&self) {
+        if let Some(recording) = self.recording.as_ref() {
+            let count = recording.shared.samples.load(Ordering::Relaxed);
+            self.sink.send(Event::RecordingProgress {
+                conversation_id: recording.conversation_id,
+                elapsed_ms: count * 1_000 / u64::from(media::VOICE_NOTE_SAMPLE_RATE),
+                paused: recording.shared.paused.load(Ordering::Relaxed),
+                amplitudes: recording
+                    .shared
+                    .amplitudes
+                    .lock()
+                    .map(|bars| bars.clone())
+                    .unwrap_or_default(),
+            });
+        }
+    }
+
+    /// Uploads and sends a held note. The note is read back from the draft store — the same
+    /// bytes the pump wrote — and the draft survives every failure on the way: the commit's
+    /// success is the one door it leaves by, so a dropped request costs a retry and not five
+    /// minutes of speech.
+    async fn upload_held_note(&mut self, note: HeldNote) {
+        let conversation_id = note.conversation_id;
+        let Some(samples) = self.drafts.read_samples(conversation_id) else {
+            self.sink.toast(
+                "The recording's draft could not be read back.",
+                ToastKind::Error,
+            );
+            self.drafts.clear(conversation_id);
+            return;
+        };
+        // The cap, enforced on the samples the pump actually wrote. The tick ends the
+        // recording at the same cap, so this truncation is the backstop for a pump that
+        // appended past it in its last chunk.
         let max_samples =
             media::VOICE_NOTE_MAX_MS * u64::from(media::VOICE_NOTE_SAMPLE_RATE) / 1_000;
         let mut samples = samples;
@@ -3606,6 +4087,7 @@ impl Worker {
             // budget), but the byte cap is the policy and the policy is checked, not assumed.
             self.sink
                 .toast("That recording is too long to send.", ToastKind::Error);
+            self.drafts.clear(conversation_id);
             return;
         }
         let plan = media::OutgoingMedia {
@@ -3619,21 +4101,17 @@ impl Worker {
             width: None,
             height: None,
             duration_ms: Some(duration_ms),
+            // The waveform the pump sampled, folded to the fixed width every client renders —
+            // computed here, before the seal, the only moment the plaintext exists.
+            waveform: (!note.amplitudes.is_empty())
+                .then(|| media::downsample_waveform(&note.amplitudes)),
             caption: None,
             // The lifetime the composer was armed with when recording began — a disappearing
             // arm covers the voice note too, the same rule every body follows.
-            expires_in_ms: recording_expires_in_ms,
+            expires_in_ms: note.expires_in_ms,
         };
-        self.begin_attachment(conversation_id, plan, wav).await;
-    }
-
-    /// The recording's cap arrived without a stop: end it and send, the same action the Send
-    /// button performs. A note lost to silence at its own five-minute mark is the one
-    /// failure of a deadline nobody was watching.
-    async fn recording_deadline_reached(&mut self) {
-        if self.recording.is_some() {
-            self.stop_recording(true).await;
-        }
+        self.begin_attachment(conversation_id, plan, wav, Some(conversation_id))
+            .await;
     }
 
     /// Plays one voice note, or stops it if it is the one already playing. Any other note
@@ -7174,12 +7652,14 @@ fn body_of(content: Content) -> (Body, Option<u32>) {
         Content::VoiceNoteRef {
             media_id,
             duration_ms,
+            waveform,
             expires_in_ms,
             ..
         } => (
             Body::VoiceNote {
                 media_id,
                 duration_ms,
+                waveform: waveform.clone(),
             },
             expires_in_ms,
         ),
@@ -7203,46 +7683,86 @@ fn body_of(content: Content) -> (Body, Option<u32>) {
 ///
 /// A plain thread, not a task, because the microphone's chunks arrive on a *blocking* std
 /// channel — a runtime thread would sit parked on `recv()` anyway, and a plain thread says
-/// so honestly. The pump owns the receiver and nothing else; the worker keeps the device
-/// handle, and dropping that handle is what stops capture and (via the closed channel) ends
-/// this thread. The samples append at whatever rate the host granted, resampled to the
-/// note's own rate when the host insisted on another.
+/// so honestly. The pump owns the receiver and the draft file, and nothing else; the worker
+/// keeps the device handle, and dropping that handle is what stops capture and (via the
+/// closed channel) ends this thread. The samples append at whatever rate the host granted,
+/// resampled to the note's own rate when the host insisted on another, written to the file
+/// as they arrive — never buffered into a second copy of the note — with each tenth of a
+/// second folded into one live-waveform bar on the way past. A paused recording drops its
+/// chunks: a pause is time the note does not contain, so neither the count nor the file
+/// grows through one. The cap's own backstop lives here too — the pump stops appending at
+/// the cap even if nobody noticed the tick — and the last thing the pump does is flush,
+/// so the file a finalisation reads back is the whole note.
 fn spawn_recording_pump(
     frames: std_mpsc::Receiver<Vec<i16>>,
     source_rate: u32,
-    samples: Arc<Mutex<Vec<i16>>>,
-    stop: Arc<AtomicBool>,
-) {
+    shared: Arc<RecordShared>,
+    mut out: std::io::BufWriter<std::fs::File>,
+) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("migo-voice-record".to_owned())
         .spawn(move || {
+            let max_samples =
+                media::VOICE_NOTE_MAX_MS * u64::from(media::VOICE_NOTE_SAMPLE_RATE) / 1_000;
             let mut resampler = (source_rate != media::VOICE_NOTE_SAMPLE_RATE)
                 .then(|| call_audio::Resampler::new(source_rate, media::VOICE_NOTE_SAMPLE_RATE));
             let mut resampled: Vec<i16> = Vec::new();
+            // One waveform bar's window: the loudest sample so far and how many samples the
+            // window has taken. A window that a pause or the end interrupts is dropped, not
+            // flushed — a bar stands for a tenth of a second someone spoke.
+            let mut window_peak: i16 = 0;
+            let mut window_len: u64 = 0;
+            let mut byte: [u8; 2] = [0; 2];
             // `while let` stops when the channel closes — the microphone was dropped, so the
-            // recording is over whatever the flag says, and everything appended so far is
+            // recording is over whatever the flag says, and everything written so far is
             // the note.
             while let Ok(chunk) = frames.recv() {
-                if stop.load(Ordering::Relaxed) {
+                if shared.stop.load(Ordering::Relaxed) {
                     break;
                 }
+                if shared.paused.load(Ordering::Relaxed) {
+                    continue;
+                }
+                if shared.samples.load(Ordering::Relaxed) >= max_samples {
+                    break;
+                }
+                resampled.clear();
                 match resampler.as_mut() {
                     Some(resampler) => {
-                        resampled.clear();
                         resampler.process(&chunk, &mut resampled);
-                        if let Ok(mut buffer) = samples.lock() {
-                            buffer.extend_from_slice(&resampled);
-                        }
                     }
-                    None => {
-                        if let Ok(mut buffer) = samples.lock() {
-                            buffer.extend_from_slice(&chunk);
+                    None => resampled.extend_from_slice(&chunk),
+                }
+                if resampled.is_empty() {
+                    continue;
+                }
+                for sample in &resampled {
+                    if sample.unsigned_abs() > window_peak.unsigned_abs() {
+                        window_peak = *sample;
+                    }
+                    window_len += 1;
+                    if window_len >= media::WAVEFORM_WINDOW_SAMPLES {
+                        if let Ok(mut bars) = shared.amplitudes.lock() {
+                            bars.push(media::amplitude_to_bar(window_peak));
                         }
+                        window_peak = 0;
+                        window_len = 0;
+                    }
+                    byte.copy_from_slice(&sample.to_le_bytes());
+                    if out.write_all(&byte).is_err() {
+                        // The disk refused the note's next sample: the note is what was
+                        // written, and pressing on would only lie about it.
+                        let _ = out.flush();
+                        return;
                     }
                 }
+                shared
+                    .samples
+                    .fetch_add(resampled.len() as u64, Ordering::Relaxed);
             }
+            let _ = out.flush();
         })
-        .ok();
+        .expect("the recording pump's thread spawns")
 }
 
 /// The playback pump for a voice note.
