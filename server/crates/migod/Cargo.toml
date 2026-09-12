@@ -75,3 +75,6 @@ base64 = { workspace = true }
 # the listener serves, against the self-signed certificate the listener mints at boot.
 quinn = { workspace = true }
 rustls = { workspace = true }
+# The incident-record test captures the structured warn the gateway files when a client
+# socket sends a Server-auth frame, through the same tracing pipeline production logs ride.
+tracing-subscriber = { workspace = true }

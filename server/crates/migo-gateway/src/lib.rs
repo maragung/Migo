@@ -447,6 +447,38 @@ impl Gateway {
             None,
         );
     }
+
+    /// Publishes an already-encoded frame to one topic, unchanged.
+    ///
+    /// The federated ingest path is the caller: a room event arrives from a peer as a whole
+    /// encoded frame — the bytes the origin node's own subscribers were handed — and the
+    /// only honest thing to do with it is hand the same bytes to this node's subscribers.
+    /// Decoding it into a typed event and re-encoding would produce an equal frame for a
+    /// well-formed event and *nothing at all* for one this build cannot map, so a peer one
+    /// version ahead would silently lose events here. It also means the receiver of a
+    /// room's text sees exactly what the sender's node sent, byte for byte (section 145).
+    ///
+    /// `coalesce_key` is `None` for a stream that must be delivered whole, and the key the
+    /// stream's own publisher would have used otherwise, so a copy arriving over the mesh
+    /// collapses into the same per-subscriber stream as a locally published one.
+    pub fn broadcast_frame_to_topic(
+        &self,
+        topic: &migo_protocol::Topic,
+        opcode: migo_protocol::Opcode,
+        frame: &bytes::Bytes,
+        coalesce_key: Option<u64>,
+        now: migo_core::Timestamp,
+    ) {
+        self.inner.hub.broadcast(
+            topic,
+            frame,
+            opcode,
+            opcode.class(),
+            coalesce_key,
+            now,
+            None,
+        );
+    }
 }
 
 /// A stable per-process key that groups the frames of one Coalescable stream.

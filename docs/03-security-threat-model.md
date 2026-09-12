@@ -13,16 +13,16 @@ Security is an architectural property here, not a feature backlog item (brief §
 
 ## 2. Adversaries we design against
 
-| Adversary                | Capability                           | Primary mitigation                                                                       |
-| ------------------------ | ------------------------------------ | ---------------------------------------------------------------------------------------- |
-| Network attacker         | Observe/modify traffic               | TLS 1.3 everywhere, E2E for private content, no plaintext transport                      |
-| Malicious user           | Full control of a client             | Server-authoritative everything; client input is untrusted                               |
-| Malicious room member    | Legitimate access to a room          | Granular permissions, rate limits, audit, moderation tooling                             |
-| Malicious bot developer  | Runs code, holds a token             | Minimum-permission default, no DB access, sandbox, per-bot quotas                        |
-| Compromised single node  | Reads its own DB, holds its node key | Private content is E2E; node keys are revocable; mesh allow-list                         |
-| Curious insider / admin  | Database and log access              | E2E means no plaintext exists to read; admin actions are audit-logged                    |
-| Stolen device            | Local storage access                 | Keys in platform keystore, app lock, remote session revocation                           |
-| Automated abuse at scale | Many accounts, high rate             | Cost-based distributed rate limits, trust scoring, phone/email friction on abuse signals |
+| Adversary                | Capability                           | Primary mitigation                                                                                                                            |
+| ------------------------ | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Network attacker         | Observe/modify traffic               | TLS 1.3 (in-process on QUIC, terminated in front of any off-loopback WebSocket listener), E2E for private content, plaintext on loopback only |
+| Malicious user           | Full control of a client             | Server-authoritative everything; client input is untrusted                                                                                    |
+| Malicious room member    | Legitimate access to a room          | Granular permissions, rate limits, audit, moderation tooling                                                                                  |
+| Malicious bot developer  | Runs code, holds a token             | Minimum-permission default, no DB access, sandbox, per-bot quotas                                                                             |
+| Compromised single node  | Reads its own DB, holds its node key | Private content is E2E; node keys are revocable; mesh allow-list                                                                              |
+| Curious insider / admin  | Database and log access              | E2E means no plaintext exists to read; admin actions are audit-logged                                                                         |
+| Stolen device            | Local storage access                 | Keys in platform keystore, app lock, remote session revocation                                                                                |
+| Automated abuse at scale | Many accounts, high rate             | Cost-based distributed rate limits, trust scoring, phone/email friction on abuse signals                                                      |
 
 Explicitly **out of scope**: a compromised client OS, a malicious platform keystore, and
 global-passive-adversary traffic analysis. We reduce metadata but do not claim
@@ -235,15 +235,15 @@ mechanism is §12.3 C1–C25); node private keys exist only inside boundary 3.
 
 ### 12.2 Adversaries, restated for this codebase
 
-| Adversary                           | What they actually hold in this system                                                | Where the model answers them                                                                                                             |
-| ----------------------------------- | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Passive network attacker            | Captured WebSocket/QUIC bytes                                                         | TLS on QUIC; **the WebSocket path is plaintext in the shipped development stack — finding F1 below**                                     |
-| Active network attacker             | Inject, reorder, duplicate, replay frames                                             | Replay refusal and state-commit-after-success in the ratchets (C4–C8); wire canonicality (W2)                                            |
-| Malicious server / compromised node | The full database, every published bundle, every frame; can serve any bundle it likes | X3DH signature check (C2), whole-record test (C25), MAC domain separation (C19); the _residual_ risk is whole-identity substitution (C3) |
-| Malicious group member              | The chain key, every member's public identity                                         | Per-sender signatures (C10), group-bound AAD (C11), rotation on membership change (C13); no PCS within a chain (C16)                     |
-| Stolen device                       | The device's private keys and ratchet state                                           | DH-ratchet healing (C5), sender-key rotation bound (C16), remote session revocation (auth crate, §4)                                     |
-| Compromised peer node               | Its own node key, captured handshakes                                                 | Mesh mutual authentication, freshness, reflection refusal (C24, M1–M5); allow-list revocation                                            |
-| Curious insider / DB dump           | Boundary-5 contents in full                                                           | Nothing at boundary 5 is a working credential: passphrases are Argon2id (C20), tokens are HMAC tags (C19), messages are ciphertext (C25) |
+| Adversary                           | What they actually hold in this system                                                | Where the model answers them                                                                                                                                                  |
+| ----------------------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Passive network attacker            | Captured WebSocket/QUIC bytes                                                         | TLS on QUIC; the WebSocket listener is plain TCP and requires TLS termination in front of it off loopback — **the shipped development stack is plaintext — finding F1 below** |
+| Active network attacker             | Inject, reorder, duplicate, replay frames                                             | Replay refusal and state-commit-after-success in the ratchets (C4–C8); wire canonicality (W2)                                                                                 |
+| Malicious server / compromised node | The full database, every published bundle, every frame; can serve any bundle it likes | X3DH signature check (C2), whole-record test (C25), MAC domain separation (C19); the _residual_ risk is whole-identity substitution (C3)                                      |
+| Malicious group member              | The chain key, every member's public identity                                         | Per-sender signatures (C10), group-bound AAD (C11), rotation on membership change (C13); no PCS within a chain (C16)                                                          |
+| Stolen device                       | The device's private keys and ratchet state                                           | DH-ratchet healing (C5), sender-key rotation bound (C16), remote session revocation (auth crate, §4)                                                                          |
+| Compromised peer node               | Its own node key, captured handshakes                                                 | Mesh mutual authentication, freshness, reflection refusal (C24, M1–M5); allow-list revocation                                                                                 |
+| Curious insider / DB dump           | Boundary-5 contents in full                                                           | Nothing at boundary 5 is a working credential: passphrases are Argon2id (C20), tokens are HMAC tags (C19), messages are ciphertext (C25)                                      |
 
 ### 12.3 Claims and the tests that pin them
 
@@ -296,16 +296,16 @@ prekey at most once, and never serves a revoked device — all four rules in
 
 #### The gateway (`server/crates/migo-gateway`)
 
-| #   | Claim                                                                                                           | Pinned by                                                                                                                                                                                                                                               |
-| --- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| G1  | An oversize frame is refused before allocation and the session survives                                         | `gateway.rs::an_oversize_frame_is_refused_before_any_allocation`                                                                                                                                                                                        |
-| G2  | A server-only opcode from a client socket is refused and the session is closed as a protocol violation          | `gateway.rs::a_server_to_client_opcode_from_a_client_closes_the_session`, `the_wire_is_push_only_and_has_no_request_or_response_opcode`                                                                                                                 |
-| G3  | Application opcodes never run before authentication                                                             | `gateway.rs::the_first_frame_must_be_a_hello_or_the_connection_is_refused` and the phase-gate tests; the mechanism is the `AuthLevel` phase gate in `connection.rs`                                                                                     |
-| G4  | `SUBSCRIBE` authorization is read from the domain, never from the frame; the null dispatcher grants nothing     | `gateway.rs::a_subscribe_keeps_only_the_topics_that_belong_to_the_caller`, `a_subscribe_on_a_null_dispatcher_grants_nothing`                                                                                                                            |
-| G5  | Error frames carry only the public face of a fault; internal text and ids never reach the client or the metrics | `gateway.rs::error_frames_carry_only_their_public_face`                                                                                                                                                                                                 |
-| G6  | Backpressure drops droppable and coalescable frames but never Critical ones                                     | `gateway.rs::backpressure_drops_droppable_and_coalescable_but_never_critical`                                                                                                                                                                           |
-| G7  | The exact ordering of the pre-dispatch checks (version, flags, length, opcode, phase, auth, rate, decode)       | **Unverified as an ordering.** Each check is individually pinned (W1, G2, G3); no test asserts the cheap rejections happen before the payload decode. The ordering is a cost property, and a refactor that decodes first would pass every existing test |
-| G8  | No plaintext transport, including in development                                                                | **Contradicted — finding F1 below**                                                                                                                                                                                                                     |
+| #   | Claim                                                                                                                                                                    | Pinned by                                                                                                                                                                                                                                                                                                            |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| G1  | An oversize frame is refused before allocation and the session survives                                                                                                  | `gateway.rs::an_oversize_frame_is_refused_before_any_allocation`                                                                                                                                                                                                                                                     |
+| G2  | A server-only opcode from a client socket is refused, the session is closed as a protocol violation, and the refusal is filed as a structured incident record            | `gateway.rs::a_server_to_client_opcode_from_a_client_closes_the_session`, `the_wire_is_push_only_and_has_no_request_or_response_opcode`; the incident record by `migod/tests/incident_log.rs` (the F3 close)                                                                                                         |
+| G3  | Application opcodes never run before authentication                                                                                                                      | `gateway.rs::the_first_frame_must_be_a_hello_or_the_connection_is_refused` and the phase-gate tests; the mechanism is the `AuthLevel` phase gate in `connection.rs`                                                                                                                                                  |
+| G4  | `SUBSCRIBE` authorization is read from the domain, never from the frame; the null dispatcher grants nothing                                                              | `gateway.rs::a_subscribe_keeps_only_the_topics_that_belong_to_the_caller`, `a_subscribe_on_a_null_dispatcher_grants_nothing`                                                                                                                                                                                         |
+| G5  | Error frames carry only the public face of a fault; internal text and ids never reach the client or the metrics                                                          | `gateway.rs::error_frames_carry_only_their_public_face`                                                                                                                                                                                                                                                              |
+| G6  | Backpressure drops droppable and coalescable frames but never Critical ones                                                                                              | `gateway.rs::backpressure_drops_droppable_and_coalescable_but_never_critical`                                                                                                                                                                                                                                        |
+| G7  | The exact ordering of the pre-dispatch checks (version, flags, length, opcode, phase, auth, rate, decode)                                                                | **Unverified as an ordering.** Each check is individually pinned (W1, G2, G3); no test asserts the cheap rejections happen before the payload decode. The ordering is a cost property, and a refactor that decodes first would pass every existing test                                                              |
+| G8  | TLS is terminated in-process on QUIC; the WebSocket listener is plain TCP, and any deployment where it is reachable off loopback must have TLS terminated in front of it | **Unverified — a deployment property.** The brief's §162 states this as an explicit operational requirement (finding F1, closed as a brief amendment). No test in this repository can pin what a deployment puts in front of its listener, and the shipped development stack is plaintext (`ws://localhost:8080/ws`) |
 
 #### Federation, the mesh between nodes (`server/crates/migo-federation`)
 
@@ -360,15 +360,23 @@ Stated plainly, because a guarantee overstated is worse than one not made
 These were found while grounding this section, are reported rather than papered
 over, and should each close as either a code change or a brief amendment:
 
-- **F1 — plaintext WebSocket transport.** Brief section 162 requires "no plaintext
-  transport, including in development". The gateway's WebSocket listener binds
-  a plain TCP socket (`migod/src/serve.rs`; the `Transport` trait carries no
+- **F1 — plaintext WebSocket transport. CLOSED, as a brief amendment.** Brief section 162
+  required "no plaintext transport, including in development". The gateway's WebSocket
+  listener binds a plain TCP socket (`migod/src/serve.rs`; the `Transport` trait carries no
   TLS), the development stack advertises `ws://localhost:8080/ws`
-  (`infra/compose/docker-compose.yml`), and `Environment::Staging` is documented
-  as "Production checks apply, **minus TLS**" (`migo-core/src/config.rs`). Only
-  the QUIC listener terminates TLS (rustls). As written, the claim holds for no
-  WebSocket deployment in this repository. Until TLS (in-process or a mandated
-  terminating proxy) exists on the WS path, G8 above stays unverified.
+  (`infra/compose/docker-compose.yml`), and `Environment::Staging` is documented as
+  "Production checks apply, **minus TLS**" (`migo-core/src/config.rs`). Only the QUIC
+  listener terminates TLS (rustls). Adding TLS to the WebSocket path is an infrastructure
+  change — certificate provisioning, renewal, listener configuration — not a change this
+  repository can land and verify as code, so the honest close is amendment, not deletion:
+  the brief now allows plaintext on loopback only, states that TLS is terminated
+  in-process on QUIC, and makes it an explicit operational requirement that any deployment
+  where the WebSocket listener is reachable off loopback MUST have TLS terminated in front
+  of it. The residual stays visible in both documents rather than smoothed over: the
+  shipped development stack is plaintext, `Environment::Staging` may run without TLS, and
+  the protection therefore holds for no WebSocket deployment in this repository until
+  something terminates TLS in front of the listener. G8 above is restated to match and
+  remains unverified — no test can pin a deployment's fronting proxy.
 - **F2 — receiver-side epoch enforcement is not built.** Brief section 163 says every
   membership change raises the group epoch _and_ distributes a fresh chain, and
   the epoch "tidak pernah mundur" (never regresses). The sender half is built
@@ -387,17 +395,28 @@ over, and should each close as either a code change or a brief amendment:
   same epoch is refused, and a newer epoch installs after zeroizing the old
   material — mirrored across `migo-crypto`, the desktop, the TypeScript SDK,
   and Android. C15 is now pinned above.
-- **F3 — "recorded as an incident" is a counter, not a record.** Brief section 162
-  says a Server-auth-level frame from a client socket "WAJIB ditolak dan
-  dicatat sebagai insiden" (must be refused and recorded as an incident). The
-  gateway closes the session with reason `protocol_violation` and counts it in
-  the metrics registry; there is no durable incident record beyond that
-  counter. If an operator needs an alertable incident trail, that is missing.
+- **F3 — "recorded as an incident" is a counter, not a record. CLOSED, as a code change.**
+  Brief section 162 says a Server-auth-level frame from a client socket "WAJIB ditolak dan
+  dicatat sebagai insiden" (must be refused and recorded as an incident). The gateway
+  closed the session with reason `protocol_violation` and counted it in the metrics
+  registry, and a counter is a number that goes up, not a record an operator can act on.
+  The gateway now files a structured, durable incident record at the refusal site, through
+  the same tracing pipeline production logs ride (`migo-gateway/src/connection.rs`): the
+  session, the account and device when the session has authenticated, the remote network
+  class (never a whole address — the brief truncates IP data to the network class), the
+  offending opcode's number and name, and the refusal reason. The record is identification
+  only: no payload, no token, no key material, nothing the wire is forbidden to carry. It
+  is pinned end to end by `migod/tests/incident_log.rs`, which registers a real account,
+  drives a real TCP session, sends a Server-auth frame carrying a recognisable envelope,
+  and asserts both halves — the error frame and the close on the wire, and the incident
+  line in the captured log, including that neither the envelope marker nor the access
+  token ever appears in it.
 - **F4 — the mid-call joiner's first key is caller wiring.** Brief section 163's
   "sealed for them at join" for a participant joining a group call is a
   convention documented in `call_key.rs`, not code: `migo-crypto` provides the
   sealed-rotation mechanism (C18) but nothing distributes the epoch-0 key to a
-  joiner. Same status as F2 — SPEC, and marked unverified here.
+  joiner. Same kind of gap as F2 — an unbuilt requirement, not a quiet
+  divergence.
   **Closed at the mechanism level (see C26):**
   `CallKeyState::sealed_join_distribution` seals the current epoch and key
   under a wrapping key derived from the *joiner's* pairwise session (HKDF
@@ -412,7 +431,7 @@ over, and should each close as either a code change or a brief amendment:
 
 ### 12.6 Verification index
 
-Pinned claims live in five places, all run by CI:
+Pinned claims live in seven places, all run by CI:
 
 | Suite                          | File                                                                                 | Holds                                               |
 | ------------------------------ | ------------------------------------------------------------------------------------ | --------------------------------------------------- |
@@ -420,10 +439,13 @@ Pinned claims live in five places, all run by CI:
 | Crypto unit tests              | `server/crates/migo-crypto/src/*.rs`, `#[cfg(test)]`                                 | C1, C2, C4–C15, C17–C20, C22, C24, C26              |
 | Cross-language vectors         | `server/crates/migo-crypto/tests/vectors.rs`, `packages/crypto/test/vectors.test.ts` | L2, and the byte-level construction of KDF/AEAD/MAC |
 | Gateway integration tests      | `server/crates/migo-gateway/tests/gateway.rs`                                        | G1–G6, W1                                           |
+| Incident-record test           | `server/crates/migod/tests/incident_log.rs`                                          | G2's incident half (the F3 close)                   |
 | Federation integration tests   | `server/crates/migo-federation/tests/federation.rs`                                  | C24 (runtime half), M1–M5                           |
 | Group-call wire tests          | `server/crates/migod/tests/sfu_wire.rs`                                              | C26 (the sealed first key over real sockets)        |
 
-Currently unverified: G7 (check ordering), G8 (WS TLS, contradicted by F1), L4
-(platform key storage). Everything else in this section names its test.
+Currently unverified: G7 (check ordering), G8 (off-loopback TLS
+termination — an operational requirement no test can pin; finding F1 closed as a brief
+amendment), L4 (platform key storage). Everything else in this
+section names its test.
 
 Report a vulnerability: see [`../SECURITY.md`](../SECURITY.md).

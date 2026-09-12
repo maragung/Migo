@@ -38,7 +38,8 @@ pub struct RequestContext {
     /// would let one internal caller rate limit every other internal caller.
     ///
     /// Never stored whole: what reaches the database is the truncated network class
-    /// (brief section 162), and what reaches a log is nothing.
+    /// (brief section 162), and what reaches a log is at most that same class — the
+    /// gateway's protocol-incident record names the remote network, never the address.
     pub ip: Option<IpAddr>,
     /// Client user agent, shown in the user's own session list.
     pub user_agent: Option<String>,
