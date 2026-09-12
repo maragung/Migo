@@ -3,10 +3,9 @@ package com.migo.app.media
 import android.graphics.BitmapFactory
 import com.migo.core.crypto.AEAD_KEY_LEN
 import com.migo.core.crypto.AEAD_NONCE_LEN
-import com.migo.core.crypto.Aead
 import com.migo.core.crypto.Content
-import com.migo.core.crypto.CryptoError
-import com.migo.core.crypto.SymmetricKey
+import com.migo.core.crypto.SealedContent
+import com.migo.core.crypto.Sealing
 import com.migo.core.domain.MediaDomain
 import com.migo.core.domain.MediaKinds
 import com.migo.core.wire.Id
@@ -61,29 +60,11 @@ const val VOICE_NOTE_MAX_MS: Long = 300_000L
 class AttachmentRefusal(message: String) : Exception(message)
 
 /**
- * A fresh per-object seal: the travelling key and nonce for the message's slots, and the
- * `nonce || ciphertext || tag` bytes to upload.
- *
- * The key is drawn inside [sealMedia] and never accepted from a caller, for the same reason the
- * web module refuses it: per-object sealing only means anything if no two objects can ever share
- * key material by accident.
+ * Seals [plaintext] under [domain] with a fresh random key -- :core's [Sealing], the same
+ * primitive the web client's `media.ts` reaches through `@migo/sdk`, so the sealed layout and the
+ * travelling-slot discipline can only be implemented once per build.
  */
-class SealedMedia internal constructor(
-    val key: ByteArray,
-    val nonce: ByteArray,
-    val sealed: ByteArray,
-)
-
-/** Seals [plaintext] under [domain] with a fresh random key. */
-fun sealMedia(plaintext: ByteArray, domain: ByteArray): SealedMedia {
-    val key = SymmetricKey.generate()
-    val sealed = Aead.seal(key, domain, plaintext)
-    // The travelling copy is made before the key's own buffer is destroyed: what leaves this
-    // function is the copy alone, exactly the discipline the web module keeps.
-    val travelling = key.expose().copyOf()
-    key.destroy()
-    return SealedMedia(travelling, sealed.copyOfRange(0, AEAD_NONCE_LEN), sealed)
-}
+fun sealMedia(plaintext: ByteArray, domain: ByteArray): SealedContent = Sealing.seal(plaintext, domain)
 
 /**
  * Whether a message's key slot is the zero-filled placeholder of a legacy plaintext upload: bytes
@@ -102,17 +83,8 @@ fun isLegacyPlaintext(key: ByteArray): Boolean =
  * different object than its bytes fails here as a decryption failure -- the same refusal for
  * every cause, telling a wrong key from edited bytes apart is a fact the caller must never learn.
  */
-fun openMedia(key: ByteArray, nonce: ByteArray, domain: ByteArray, stored: ByteArray): ByteArray {
-    if (stored.size < AEAD_NONCE_LEN) {
-        throw CryptoError.badLength("sealed content", AEAD_NONCE_LEN, stored.size)
-    }
-    for (i in 0 until AEAD_NONCE_LEN) {
-        if (stored[i] != nonce[i]) {
-            throw CryptoError.decryptionFailed()
-        }
-    }
-    return Aead.open(SymmetricKey.fromBytes(key), domain, stored)
-}
+fun openMedia(key: ByteArray, nonce: ByteArray, domain: ByteArray, stored: ByteArray): ByteArray =
+    Sealing.open(key, nonce, domain, stored)
 
 /**
  * The pixel bounds of an image, read from the bytes' header alone -- [BitmapFactory] with
