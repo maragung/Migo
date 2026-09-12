@@ -88,9 +88,14 @@ pub fn maybe_deflate(payload: &[u8]) -> Option<Vec<u8>> {
 ///   entire stream, and miniz_oxide takes the assertion literally: its one-shot
 ///   fast path writes straight into the caller's buffer and, on overflow, marks
 ///   the decompressor `Failed`, after which every later call errors. Passing
-///   `Finish` on every call therefore refused every payload over one chunk —
-///   found by an 8721-byte SUBSCRIBE response, the first input in CI to cross
-///   the boundary. See the loop below for the flush discipline that replaces it.
+///   `Finish` on every call therefore refuses every payload over one chunk.
+///   See the loop below for the flush discipline that replaces it.
+/// * **The decoder must be the encoder's mirror.** Raw DEFLATE on the way out
+///   means `Decompress::new(false)` on the way in: the flag is not "produce raw
+///   output" but "expect a zlib header", and a `true` under raw DEFLATE fails
+///   the first call on every payload. Found by the gateway suite in CI — its
+///   513-topic SUBSCRIBE was the only input there to trip the compression
+///   policy, and it failed before the chunk boundary was ever reached.
 ///
 /// When a stream is both over the limit and truncated, the size error wins: it
 /// is the more specific fault, and it is checked first so the decision is
@@ -100,8 +105,16 @@ pub fn inflate_raw(compressed: &[u8], max: usize) -> Result<Bytes> {
     const CHUNK: usize = 8 * 1024;
     let mut scratch = vec![0u8; CHUNK];
     let mut out = Vec::with_capacity(compressed.len().saturating_mul(4).min(limit));
-    // Raw DEFLATE: no zlib header, no Adler-32 trailer.
-    let mut inflater = flate2::Decompress::new(true);
+    // Raw DEFLATE: no zlib header, no Adler-32 trailer. `false` is what makes
+    // flate2 agree — `Decompress::new(zlib_header)` takes "is a zlib header
+    // *expected*", and passing `true` here made miniz_oxide try to read a
+    // two-byte header the encoder never wrote, so the very first call failed
+    // and every compressed payload came back DecompressFailed. The gateway
+    // suite caught it: its 513-topic SUBSCRIBE was the only input in CI to
+    // trip the compression policy, and it never reached the chunk logic at
+    // all. (The encoder below is `write::DeflateEncoder`, the raw one; the
+    // decode side must be its mirror.)
+    let mut inflater = flate2::Decompress::new(false);
 
     // Driving flate2 has one rule with teeth, and it is documented on
     // `Decompress::decompress`: a *first* call with `FlushDecompress::Finish`
@@ -109,13 +122,11 @@ pub fn inflate_raw(compressed: &[u8], max: usize) -> Result<Bytes> {
     // promise literally — its first-call fast path decompresses straight into
     // the caller's buffer and, when the buffer is too small, marks the
     // decompressor `Failed`, so every later call errors no matter what flush it
-    // passes. Feeding `Finish` on every call therefore worked for every payload
-    // that fit in one chunk and refused everything larger — a bug the gateway
-    // suite found first, because an 8.7 KiB SUBSCRIBE response was the first
-    // input in CI to cross a chunk boundary. So: `None` while input remains,
-    // which streams through miniz_oxide's dictionary in any buffer size, and
-    // `Finish` only once the input is gone, to make the core prove the stream
-    // ended rather than merely run out.
+    // passes. Feeding `Finish` on every call therefore works only for payloads
+    // that fit in one chunk and refuses everything larger. So: `None` while
+    // input remains, which streams through miniz_oxide's dictionary in any
+    // buffer size, and `Finish` only once the input is gone, to make the core
+    // prove the stream ended rather than merely run out.
     loop {
         let before_in = inflater.total_in() as usize;
         let before_out = inflater.total_out() as usize;
@@ -172,14 +183,15 @@ mod tests {
 
     #[test]
     fn round_trips_straddle_the_decoder_chunk_boundary() {
-        // inflate_raw reads through an 8 KiB scratch buffer, and the gateway
-        // suite found in CI that a first call promising `Finish` sent miniz_oxide
-        // down its one-shot fast path, which poisons the decompressor the moment
-        // the plain size exceeds that buffer: every payload over 8192 bytes came
-        // back DecompressFailed. These sizes walk the boundary from both sides
-        // and through both multiples, with structured content — sequential u128
-        // ids, like a SUBSCRIBE that names its topics — rather than one repeated
-        // byte, so an off-by-one in the loop cannot hide behind a trivial stream.
+        // inflate_raw reads through an 8 KiB scratch buffer, and flate2's
+        // `Finish`-on-a-first-call is a promise the buffer cannot keep: miniz_oxide's
+        // one-shot fast path writes straight into the caller's buffer and poisons the
+        // decompressor the moment the plain size exceeds it, so every payload over
+        // 8192 bytes would come back DecompressFailed. These sizes walk the boundary
+        // from both sides and through both multiples, with structured content —
+        // sequential u128 ids, like a SUBSCRIBE that names its topics — rather than
+        // one repeated byte, so an off-by-one in the loop cannot hide behind a
+        // trivial stream.
         const CHUNK: usize = 8 * 1024;
         for len in [CHUNK - 1, CHUNK, CHUNK + 1, CHUNK * 2, CHUNK * 2 + 1] {
             let mut payload = Vec::with_capacity(len);
