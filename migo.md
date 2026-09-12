@@ -5165,13 +5165,16 @@ Packet dari node yang tidak dikenal ditolak sebelum decode payload
 
 170. FEDERATION ROUTING, DISCOVERY, FAILOVER, SHARDING
 
-STATUS: BUILT untuk FED_DIRECTORY, join eksplisit dengan allow-list, home node tunggal per room di migo-federation, dan fan-out bertingkat lintas node di migod melalui room_relay: node yang anggotanya mendapat topik room lewat SUBSCRIBE mengirim FED_ROOM_SUBSCRIBE sekali per room ke home node (node yang dijawab oleh label home_region pada baris room), home node mencatat peer yang berlangganan per room, lalu setiap publish room, baik dari jalur request maupun dari room-presence, mengantre satu salinan FED_ROOM_EVENT per node yang berlangganan dan node penerima menyebarkannya ke hub lokalnya. IDL yang dibekukan belum memiliki opcode unsubscribe, jadi daftar watcher hanya bertumbuh dan salinan yang tiba tanpa pelanggan lokal adalah no-op murah. STATUS: SPEC untuk pengarahan client ke node terdekat berdasarkan latensi terukur dan untuk failover antar node. Keduanya tidak lagi membutuhkan topology multi-region nyata karena beberapa node berdampingan mengikuti pola tools/2node cukup untuk mengujinya, dan keduanya tetap SPEC karena kodenya belum ditulis.
+STATUS: BUILT untuk FED_DIRECTORY, join eksplisit dengan allow-list, home node tunggal per room di migo-federation, dan fan-out bertingkat lintas node di migod melalui room_relay: node yang anggotanya mendapat topik room lewat SUBSCRIBE mengirim FED_ROOM_SUBSCRIBE sekali per room ke home node (node yang dijawab oleh label home_region pada baris room), home node mencatat peer yang berlangganan per room, lalu setiap publish room, baik dari jalur request maupun dari room-presence, mengantre satu salinan FED_ROOM_EVENT per node yang berlangganan dan node penerima menyebarkannya ke hub lokalnya. IDL yang dibekukan belum memiliki opcode unsubscribe, jadi daftar watcher hanya bertumbuh dan salinan yang tiba tanpa pelanggan lokal adalah no-op murah. STATUS: BUILT pula untuk pengarahan client ke node terdekat berdasarkan latensi terukur dan untuk failover antar node: dokumen /v1/config memuat array nodes berisi node ini lebih dulu lalu peer yang dikonfigurasi operator pada federation.client_peers, SDK memeringkat kandidat lewat probe GET /health dan memilih node tercepat sebagai server utama sambil menyisakan sisanya sebagai kandidat failover, dan transport SDK berpindah ke kandidat berikutnya saat handshake gagal karena node tidak terjangkau. Beberapa node berdampingan mengikuti pola tools/2node cukup untuk mengujinya.
 
 Discovery:
 
 Setiap node mengetahui peer-nya melalui konfigurasi dan FED_DIRECTORY, dan setiap entri membawa label region tempat peer itu berjalan
 Node baru bergabung dengan proses join yang eksplisit dan disetujui, bukan dengan auto-discovery terbuka. Auto-discovery terbuka di mesh yang membawa pesan pengguna adalah permukaan serangan yang tidak perlu
 Client diarahkan ke node terdekat berdasarkan latensi terukur, bukan hanya berdasarkan GeoIP
+Daftar node bagi client dibawa oleh dokumen /v1/config pada field nodes, berisi node ini lebih dulu lalu entri federation.client_peers. FED_DIRECTORY tetap khusus server-ke-server dengan auth Server, jadi client tidak perlu membacanya
+Entri federation.client_peers berisi node_id, region, country, dan public_url http(s). Validasi menolak node_id atau public_url yang kosong dan public_url yang bukan URL http(s) absolut. Entri di sini TIDAK harus menjadi peer mesh: allow-list federation mengecilkan link server-ke-server, sedangkan daftar ini menamai pintu yang boleh dituju client, dan keduanya ditulis operator yang sama
+Client SDK memeringkat kandidat dengan probe GET /health ke setiap node secara paralel, mengurutkan berdasarkan latensi terukur, dan menempatkan node yang tidak menjawab di akhir daftar alih-alih membuangnya. Hasil peringkat menjadi server utama dan sisa kandidat menjadi failoverServers pada transport
 
 Routing:
 
@@ -5191,6 +5194,9 @@ Health check dan failover:
 FED_HEALTH berkala per link
 Node yang gagal health check ditandai degraded dan dikeluarkan dari routing untuk traffic baru, tetapi koneksi yang berjalan diberi kesempatan drain
 Kegagalan node dijawab REGION_DEGRADED, nama yang diwarisi dari schema, dan client diarahkan ke node terdekat berikutnya
+Failover di sisi client hanya maju pada kegagalan tingkat koneksi, yaitu node yang tidak pernah menjawab handshake. Penolakan yang dijawab node yang hidup, misalnya token ditolak, TIDAK dipindahkan ke node lain karena penolakan itu pasti diulang oleh setiap node. Satu siklus koneksi mencoba setiap kandidat maksimal satu kali
+Setelah sesi berjalan lalu node mati, transport mencoba node yang sama lebih dulu untuk menoleransi blip sesaat, baru maju ke kandidat berikutnya bila percobaan itu juga tidak terjawab
+Resume lintas node TIDAK mungkin karena state sesi milik node yang membuatnya (section 150). Failover ke node lain selalu berakhir sebagai sesi baru: node penerima menjawab RESUME_REQUIRED atau Welcome baru, client menjalankan jalur reset, yaitu berlangganan ulang dan sinkronisasi per percakapan (section 158)
 Bila home node sebuah room tidak terjangkau, room menjadi read-only dan dijawab ROOM_READ_ONLY_PARTITION. TIDAK BOLEH ada sequencer kedua yang diangkat, karena dua sequencer berarti dua urutan yang tidak dapat digabungkan tanpa kehilangan pesan
 Private message tetap dapat dikirim saat node tujuan tidak terjangkau, karena pesan disimpan di node pengirim dan diteruskan ketika link kembali. Inilah alasan private message tidak memerlukan sequencer global
 
