@@ -484,6 +484,7 @@ mod tests {
             body_text(&crate::model::Body::VoiceNote {
                 media_id: migo_core::Id::from_bytes([1; 16]),
                 duration_ms: 1500,
+                waveform: None,
             }),
             "Voice note (2s)"
         );
