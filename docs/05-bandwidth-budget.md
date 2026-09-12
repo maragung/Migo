@@ -5,16 +5,23 @@ a change that exceeds one needs a justification in review, not a shrug.
 
 ## 1. Per-event budget (payload + frame header, before TLS)
 
-| Event                            | Budget                           | Notes                                                      |
-| -------------------------------- | -------------------------------- | ---------------------------------------------------------- |
-| Text message (≤ 120 chars, E2E)  | **≤ 96 B** overhead + ciphertext | 4 B header, ids are raw 16 B, timestamp varint             |
-| Message receipt (delivered/read) | ≤ 24 B                           | Cumulative watermark, not per message                      |
-| Typing start/stop                | ≤ 12 B                           | Debounced, coalesced, never per keypress (brief §15)       |
-| Presence change                  | ≤ 16 B                           | Only on change; aggregated per room (brief §14)            |
-| Room member count update         | ≤ 10 B                           | Coalesced, ≥ 5 s apart, delta only                         |
-| PING/PONG                        | ≤ 6 B                            | Interval dictated by the server, adaptive on battery saver |
-| ACK                              | ≤ 10 B                           | One ACK retires hundreds of frames                         |
-| Sync response header             | ≤ 32 B                           | Then only the missing range                                |
+| Event                            | Budget                           | Notes                                                                                                     |
+| -------------------------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Text message (≤ 120 chars, E2E)  | **≤ 96 B** overhead + ciphertext | 4 B header, ids are raw 16 B, timestamp varint                                                            |
+| Message receipt (delivered/read) | ≤ 24 B                           | Cumulative watermark, not per message; the fan-out form carrying the reader's id adds 18 B                |
+| Typing start/stop                | ≤ 48 B                           | Debounced, coalesced, never per keypress (brief §15). The 16 B conversation id is a frozen required field |
+| Presence change                  | ≤ 16 B client / ≤ 32 B fan-out   | Only on change; aggregated per room (brief §14). The fan-out carries the 16 B user id                     |
+| Room member count update         | ≤ 32 B                           | Coalesced, ≥ 5 s apart, delta only; the 16 B room id is a frozen required field                           |
+| PING/PONG                        | ≤ 16 B / ≤ 24 B                  | Interval dictated by the server, adaptive on battery saver; a Migo-epoch timestamp is a 6 B varint        |
+| ACK                              | ≤ 10 B                           | One ACK retires hundreds of frames                                                                        |
+| Sync response header             | ≤ 32 B                           | Then only the missing range                                                                               |
+
+These per-event and per-session numbers are measured, not eyeballed:
+`server/crates/migo-protocol/tests/budgets.rs` builds typical frames with the real
+encoder and the real AEAD and fails the build naming the budget it broke
+(`make budget-check`, brief §56). Where an old target could not be met by the
+frozen MWP/1 required-field layout, the budget was moved to the measured truth
+and the reason recorded beside it.
 
 ## 2. Per-session budget
 
@@ -56,6 +63,10 @@ not render. Client-side filtering saves rendering; server-side filtering saves b
 
 ## 5. Measurement
 
+- **Frame-size gate (CI):** `make budget-check` runs
+  `server/crates/migo-protocol/tests/budgets.rs`, which encodes typical frames
+  with the real encoder and the real AEAD and asserts each budget above. A
+  struct that grows a field fails the build naming the budget it broke.
 - The gateway exports `migo_gateway_frames_in_total` and
   `migo_gateway_frames_out_total` (unlabelled) plus
   `migo_gateway_frames_dropped_total` labelled by delivery class, so a regression

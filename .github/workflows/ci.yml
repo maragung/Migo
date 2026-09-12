@@ -211,6 +211,14 @@ jobs:
         # is the last step of the `web` job; both must pass for the claim to hold.
         run: make test-vectors-rust
 
+      - name: Protocol budgets, brief sections 56 and 171
+        # The bandwidth targets are budgets, and this is what makes that sentence
+        # true: typical frames measured with the real encoder against the numbers
+        # the brief promises. Runs in this job because it needs the warm target/
+        # the tests above already built — on its own it would pay a full workspace
+        # build to measure seven frames.
+        run: make budget-check
+
   # ------------------------------------------------------------------ msrv
   # `rust-version = "1.94"` in server/Cargo.toml is a promise to anyone who depends on
   # these crates, and a promise nothing verifies is a comment. It gates, because breaking

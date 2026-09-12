@@ -140,6 +140,27 @@ mod tests {
     }
 
     #[test]
+    fn no_opcode_lives_in_the_never_allocated_span_of_the_reserved_range() {
+        // Section 146: the reserved range is enforced at the gateway, which refuses
+        // anything in 241-255 from a client. A generated variant landing inside that
+        // span would make the gateway refuse an opcode this build claims to speak —
+        // the gateway gate and this registry must agree, so the allocation decision
+        // (section 145's store carve-out at 239-240 is the only one ever made from
+        // the reserved head) has to be re-read before a number in 241-255 is given
+        // out, not after.
+        for &opcode in Opcode::ALL {
+            let number = opcode.to_wire();
+            assert!(
+                !(241..=255).contains(&number),
+                "{} is allocated at {}, inside the never-allocated reserved span; \
+                 a written decision must precede any allocation there",
+                opcode.name(),
+                number
+            );
+        }
+    }
+
+    #[test]
     fn free_opcodes_are_only_the_ones_that_must_be_free() {
         // A zero-cost opcode is exempt from rate limiting, which makes it a
         // potential flood vector. The exemption list is small and deliberate:
