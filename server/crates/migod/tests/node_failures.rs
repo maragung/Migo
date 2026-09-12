@@ -14,11 +14,13 @@
 //! * **1 (a node dies mid-flight)** — events bound for a dead node survive in the
 //!   durable outbox, are pushed out on the backoff rather than retried hot, and after
 //!   the node recovers arrive once each, in the order they were queued.
-//! * **2 (split brain)** — the delivery half: a partitioned link holds the outbox
-//!   without loss and preserves FIFO order across the outage, which is what "no second
-//!   sequencer" means on the wire — one sender, one sequence, resuming where it left
-//!   off. (The read-only room answer `ROOM_READ_ONLY_PARTITION` has no runtime
-//!   implementation yet; that gap stays open below and in the brief.)
+//! * **2 (split brain)** — both halves. The delivery half: a partitioned link holds
+//!   the outbox without loss and preserves FIFO order across the outage, which is what
+//!   "no second sequencer" means on the wire — one sender, one sequence, resuming
+//!   where it left off. The read-only half: a room whose home node the partition cut
+//!   away answers its mutations with `ROOM_READ_ONLY_PARTITION` (1702) instead of
+//!   silently diverging, while a room this node homes and a private conversation keep
+//!   writing, and the refusal lifts the moment the link heals.
 //! * **3 (a slow link, not a dead one)** — a peer that completes the handshake but
 //!   never acknowledges holds a batch for exactly the watermark budget, then fails it:
 //!   the events are rescheduled on the doubling backoff, nothing piles up beyond one
@@ -40,10 +42,10 @@
 //! Scenarios 4, 5 and 6 are not link failures and live where their seams are:
 //! storage-unavailable and outbox idempotency in `migo-federation`'s suite, cache loss
 //! in `migo-cache`'s contracts, media unavailability in `migo-media`'s. The gaps this
-//! file cannot close — the unused `ROOM_READ_ONLY_PARTITION` code, the missing
-//! degraded-peer marking, the absent handshake timeout, no automatic directory refetch
-//! on a stale epoch, and no `RECONNECT_HINT` to members of a rebalanced room — are
-//! recorded in the brief rather than papered over here.
+//! file cannot close — the missing degraded-peer marking, the absent handshake
+//! timeout, no automatic directory refetch on a stale epoch, and no `RECONNECT_HINT`
+//! to members of a rebalanced room — are recorded in the brief rather than papered
+//! over here.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,11 +61,14 @@ use migo_federation::{
     FederatedEvent, MeshConfig, MeshService, NewPeerSpec, PeerStatus, SharedMesh,
 };
 use migo_protocol::{
-    from_frame, to_frame, FedAck, FedAuth, FedHello, FedPresenceDigest, Frame, Opcode,
+    codes, from_frame, to_frame, EncryptionMode, FedAck, FedAuth, FedHello, FedPresenceDigest,
+    Frame, Opcode, RoomKind,
 };
-use migo_store::MemoryStore;
+use migo_store::model::NewRoom;
+use migo_store::{MemoryStore, SharedStore};
 use migo_wire::Writer;
 use migod::mesh::MeshTransport;
+use migod::room_relay::RoomRelay;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -176,6 +181,52 @@ async fn closed_port() -> u16 {
         .port();
     drop(holder);
     port
+}
+
+/// Builds one independent node over a store the test holds. The read-only scenario
+/// places a room row on the node that serves it, and [`node`] keeps no handle to the
+/// store it built the mesh over — this is the same construction with the store handed
+/// in, so the row and the mesh see the same world.
+async fn node_over_store(name: u8, region: &str, store: SharedStore) -> SharedMesh {
+    let mesh = MeshService::new(
+        store,
+        MeshConfig::default(),
+        node_id(name),
+        region.to_string(),
+        NodeSecret::from_seed(&[name; 32]).expect("a 32-byte seed builds a key"),
+        Box::new(migo_core::random::SeededRandom::new(u64::from(name) * 7919)),
+        &Registry::new(),
+    )
+    .expect("the mesh configuration is valid");
+    Arc::new(mesh)
+}
+
+/// Creates one room row on `store`: the room `room_id`, its chat the conversation
+/// `conversation_id`, homed at `home_region`. A room a node serves but does not home is
+/// exactly the row a sync or an operator tooling places on it.
+async fn room_on(
+    store: &SharedStore,
+    room_id: Id,
+    conversation_id: Id,
+    home_region: &str,
+    at: Timestamp,
+) {
+    store
+        .create_room(NewRoom {
+            room_id,
+            conversation_id,
+            slug: format!("room-{}", room_id.to_text()),
+            name: "a room".to_string(),
+            topic: None,
+            kind: RoomKind::Public,
+            owner_id: Id::from(0x3333),
+            home_region: home_region.to_string(),
+            max_members: 100,
+            encryption: EncryptionMode::Transport,
+            created_at: at,
+        })
+        .await
+        .expect("a fresh store creates the room");
 }
 
 /// The events a node still owes its peers, at a timestamp far past every backoff —
@@ -397,6 +448,161 @@ async fn events_bound_for_a_dead_node_survive_and_arrive_after_recovery_without_
         5,
         "no event was redelivered after the queue settled"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 2, the read-only half — a room whose home node is partitioned away
+// ---------------------------------------------------------------------------
+
+/// Section 173, scenario 2, the half the send-side test above cannot see: a node cut
+/// off from the home node of a room it serves must not keep writing that room, because
+/// the write would need a second sequencer that must never exist (section 170). The
+/// partition is discovered the only honest way — a delivery attempt that cannot
+/// connect — and from that moment the room's mutations on this node are refused with
+/// `ROOM_READ_ONLY_PARTITION` (1702) instead of silently diverging. Everything else
+/// keeps working: a room this node homes stays writable (that is the one sequencer
+/// that exists), a private conversation stays writable (it has no home node), and the
+/// moment the link heals the very same write succeeds, because the refusal was about
+/// the link and never about the room.
+#[tokio::test]
+async fn a_partitioned_room_is_read_only_until_the_link_heals() {
+    // The address the home node should answer at: nothing listens there, which is what
+    // a partition is to a node that still has the address.
+    let port = closed_port().await;
+    let (mesh_a, _) = node(1, "region-a").await;
+    let store_b: SharedStore = Arc::new(MemoryStore::new());
+    let mesh_b = node_over_store(2, "region-b", Arc::clone(&store_b)).await;
+    admit(
+        &mesh_a,
+        node_id(2),
+        &key_bytes(2),
+        "wss://b.invalid:1".to_string(),
+        "region-b",
+    )
+    .await;
+    admit(
+        &mesh_b,
+        node_id(1),
+        &key_bytes(1),
+        format!("wss://127.0.0.1:{port}"),
+        "region-a",
+    )
+    .await;
+
+    // Node B serves two rooms: one homed at region-a — the far node — and one it homes
+    // itself. The far-homed room is the split-brain case; the local one is the control
+    // that the refusal is the partition and not some blanket lock.
+    let now = Timestamp::now();
+    let far_room = Id::from(0x9101);
+    let far_conversation = Id::from(0x9102);
+    let local_room = Id::from(0x9201);
+    let local_conversation = Id::from(0x9202);
+    room_on(&store_b, far_room, far_conversation, "region-a", now).await;
+    room_on(&store_b, local_room, local_conversation, "region-b", now).await;
+    let relay = Arc::new(RoomRelay::new(Arc::clone(&mesh_b), Arc::clone(&store_b)));
+
+    // Before any delivery attempt the link is unknown, and the mesh treats the unknown
+    // as reachable: it remembers evidence, it does not guess. Both rooms write.
+    assert!(
+        mesh_b.link_reachable(node_id(1)),
+        "a link never tried reads as reachable"
+    );
+    relay
+        .ensure_writable(far_room)
+        .await
+        .expect("a partition nobody discovered yet refuses nothing");
+    relay
+        .ensure_writable(local_room)
+        .await
+        .expect("a room this node homes is always writable");
+
+    // The partition is discovered: an event bound for the home node cannot connect.
+    queue(&mesh_b, node_id(1), 1, now).await;
+    let transport_b = transport(&mesh_b);
+    transport_b
+        .drain_once(now)
+        .await
+        .expect("a dead peer is a settled failure, not a drain error");
+    assert!(
+        !mesh_b.link_reachable(node_id(1)),
+        "the failed connect marks the link down"
+    );
+
+    // And the far-homed room is read-only: its mutations are refused with 1702, on the
+    // room itself and on the conversation that carries its chat.
+    let error = relay
+        .ensure_writable(far_room)
+        .await
+        .expect_err("a partitioned room is read-only");
+    assert_eq!(
+        error.code(),
+        codes::ROOM_READ_ONLY_PARTITION,
+        "the refusal is the brief's own error, not a generic one"
+    );
+    assert_eq!(
+        error.symbol(),
+        "ROOM_READ_ONLY_PARTITION",
+        "and it names itself on the wire"
+    );
+    let error = relay
+        .ensure_conversation_writable(far_conversation)
+        .await
+        .expect_err("the room's chat is the room: read-only together");
+    assert_eq!(
+        error.code(),
+        codes::ROOM_READ_ONLY_PARTITION,
+        "a message write against the room's conversation is refused the same way"
+    );
+
+    // The controls, while the partition stands: the room this node homes keeps its
+    // single sequencer and writes freely, and a conversation no room names — a private
+    // message — was never the far node's to order and stays writable.
+    relay
+        .ensure_writable(local_room)
+        .await
+        .expect("the sequencer that exists is here; no partition removes it");
+    relay
+        .ensure_conversation_writable(local_conversation)
+        .await
+        .expect("the local room's chat writes with it");
+    relay
+        .ensure_conversation_writable(Id::from(0x9301))
+        .await
+        .expect("a private conversation has no home node to be partitioned from");
+
+    // The link heals — the home node answers at the address again — and the held event
+    // delivers. A delivered batch is proof the peer is back, so the read-only mark
+    // lifts and the very write that was refused succeeds.
+    let transport_a = transport(&mesh_a);
+    transport_a
+        .spawn_listener(&format!("127.0.0.1:{port}"))
+        .await
+        .expect("the healed node binds its old address");
+    transport_b
+        .drain_once(now.saturating_add_millis(1_000))
+        .await
+        .expect("the drain completes against the healed node");
+    assert_eq!(
+        transport_a.ingested().len(),
+        1,
+        "the held event arrived exactly once"
+    );
+    assert!(
+        mesh_b.link_reachable(node_id(1)),
+        "the delivered batch marks the link up"
+    );
+    assert!(
+        everything_owed(&mesh_b).await.is_empty(),
+        "the recovery left nothing queued"
+    );
+    relay
+        .ensure_writable(far_room)
+        .await
+        .expect("a healed link lifts the read-only mark");
+    relay
+        .ensure_conversation_writable(far_conversation)
+        .await
+        .expect("and the room's chat with it");
 }
 
 // ---------------------------------------------------------------------------
@@ -1059,7 +1265,7 @@ async fn a_mass_backlog_drains_in_bounded_batches_without_loss_or_duplication() 
 // ---------------------------------------------------------------------------
 
 /// Section 173 closes with the rule that every scenario be runnable as an automated
-/// test with injected time and randomness. The six scenarios above each build their
+/// test with injected time and randomness. The seven scenarios above each build their
 /// nodes with seeded keys and seeded randomness (`node(name)` derives both from one
 /// byte), drive every delivery through `drain_once` at timestamps the test names, and
 /// pin the one clock that matters (the skew window) with a `ManualClock` — so this
