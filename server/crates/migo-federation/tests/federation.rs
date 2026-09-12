@@ -1655,9 +1655,9 @@ async fn queue_for(mesh: &MeshService<MemoryStore>, target: Id, count: usize) ->
 fn the_default_watermark_sits_above_the_largest_backlog_the_brief_tests() {
     // Section 173's scenario 10 drains a 300-event backlog as a matter of course — a mass
     // sync after an outage is traffic, not a fault — so the default watermark must sit
-    // above it or every recovery burst would cry degraded. This pin fails the day someone
-    // lowers the default past the brief's own scale.
-    assert!(
+    // above it or every recovery burst would cry degraded. The pin is a const assertion:
+    // lowering the default past the brief's own scale is a compile error, not a red test.
+    const _: () = assert!(
         DEFAULT_DEGRADED_OUTBOX_WATERMARK > 300,
         "the default watermark must clear the brief's 300-event mass-sync backlog"
     );
