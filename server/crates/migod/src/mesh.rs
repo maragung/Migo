@@ -256,11 +256,21 @@ async fn refuse_stale_epoch<S: AsyncWrite + Unpin + Send>(
         message: "the routing epoch carried is stale; refresh the view and retry".to_string(),
         epoch: Some(mesh.epoch()),
     };
-    if let Err(write_error) = write_frame(io, &framed(Opcode::FedError, 0, &refusal)).await {
-        tracing::debug!(
-            %write_error,
-            "cannot hand a stale-epoch refusal to the peer before the link closes"
-        );
+    match framed(Opcode::FedError, 0, &refusal) {
+        Ok(frame) => {
+            if let Err(write_error) = write_frame(io, &frame).await {
+                tracing::debug!(
+                    %write_error,
+                    "cannot hand a stale-epoch refusal to the peer before the link closes"
+                );
+            }
+        }
+        Err(encode_error) => {
+            tracing::debug!(
+                %encode_error,
+                "cannot encode a stale-epoch refusal for the peer"
+            );
+        }
     }
 }
 
