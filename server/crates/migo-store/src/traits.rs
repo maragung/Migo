@@ -465,6 +465,13 @@ pub trait RoomStore: Send + Sync {
     /// Reads a room by slug, case-insensitively.
     async fn room_by_slug(&self, slug: &str) -> Result<Option<Room>>;
 
+    /// Reads only a room's state revision (brief section 156).
+    ///
+    /// One column, not the whole row, because the only caller stamps it onto a
+    /// roster page it has already fetched and paying for the rest of the room
+    /// would be a page-sized read for a number-sized question.
+    async fn room_revision(&self, room_id: Id) -> Result<i64>;
+
     /// Reads the room that owns a conversation, if any.
     ///
     /// For the send path, which knows a conversation id and must ask the room
@@ -503,7 +510,13 @@ pub trait RoomStore: Send + Sync {
     async fn join_room(&self, member: RoomMember) -> Result<RoomMember>;
 
     /// Marks a member as having left.
-    async fn leave_room(&self, room_id: Id, account_id: Id, at: Timestamp) -> Result<()>;
+    ///
+    /// Returns the room's state revision after the write, so the departure event
+    /// can name the number the room now sits at (brief section 156). A departure
+    /// that found no seat to empty advances nothing and answers with the
+    /// revision the room already had; a room that does not exist answers zero,
+    /// because there is nothing to version and nothing to announce.
+    async fn leave_room(&self, room_id: Id, account_id: Id, at: Timestamp) -> Result<i64>;
 
     /// Reads one membership, including a lapsed or banned one — the caller needs
     /// to see a ban in order to enforce it.
@@ -521,13 +534,19 @@ pub trait RoomStore: Send + Sync {
     async fn rooms_for_account(&self, account_id: Id) -> Result<Vec<Room>>;
 
     /// Sets a member's role.
+    ///
+    /// Returns the room's state revision after the write, so the promotion event
+    /// can carry it (brief section 156). The role is on the roster, so a role
+    /// that moved is a change a snapshot can observe and the revision answers
+    /// for it; the service refuses to set a role the member already holds, so
+    /// reaching this write means it really moved.
     async fn set_room_role(
         &self,
         room_id: Id,
         account_id: Id,
         role: migo_protocol::RoomRole,
         at: Timestamp,
-    ) -> Result<()>;
+    ) -> Result<i64>;
 
     /// Moves ownership from one member to another, atomically.
     ///
@@ -541,13 +560,16 @@ pub trait RoomStore: Send + Sync {
     /// outgoing owner is demoted rather than removed: brief section 85 asks for a
     /// transfer, and a transfer that ejected the previous owner would make a mistaken
     /// one unrecoverable by the only person who could explain it.
+    ///
+    /// Returns the room's state revision after the write, so the one event a
+    /// transfer publishes can carry it (brief section 156).
     async fn transfer_room_ownership(
         &self,
         room_id: Id,
         from: Id,
         to: Id,
         at: Timestamp,
-    ) -> Result<()>;
+    ) -> Result<i64>;
 
     /// Sets per-member permission overrides.
     async fn set_room_permissions(
@@ -560,6 +582,12 @@ pub trait RoomStore: Send + Sync {
     ) -> Result<()>;
 
     /// Applies a mute or a ban. `None` lifts it.
+    ///
+    /// Returns the room's state revision after the write (brief section 156). A
+    /// ban advances it, because it stamps a departure the roster can observe; a
+    /// mute and an unban do not, because neither is on any wire surface a
+    /// client can hold, and the revision is the number that tells a client
+    /// whether a re-read is due.
     async fn set_room_sanction(
         &self,
         room_id: Id,
@@ -568,7 +596,7 @@ pub trait RoomStore: Send + Sync {
         banned_until: Option<Timestamp>,
         reason: Option<String>,
         at: Timestamp,
-    ) -> Result<()>;
+    ) -> Result<i64>;
 
     /// Recomputes the cached member count from the membership rows.
     ///

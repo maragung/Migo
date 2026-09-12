@@ -2538,6 +2538,136 @@ pub async fn updating_a_room_can_clear_a_topic_without_clearing_a_name(store: &S
     );
 }
 
+pub async fn the_room_revision_advances_only_on_writes_a_snapshot_can_observe(store: &SharedStore) {
+    let alice = seed_account(store, 1, "alice").await;
+    let bob = seed_account(store, 2, "bob").await;
+    store
+        .create_room(room_row(id(100), id(200), "lounge", alice, 50))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.room_revision(id(100)).await.unwrap(),
+        0,
+        "the owner's seat is the birth state; nothing was ever published for it"
+    );
+
+    // A seat appearing is on the roster, so the revision moves and the number
+    // the room sits at is the one the join event will carry (brief section 156).
+    store
+        .join_room(member_row(id(100), bob, 4_100))
+        .await
+        .unwrap();
+    assert_eq!(store.room_revision(id(100)).await.unwrap(), 1);
+
+    // A join that found the member already seated writes nothing, so it must
+    // not send every client re-reading a roster identical to the one it holds.
+    store
+        .join_room(member_row(id(100), bob, 4_150))
+        .await
+        .unwrap();
+    assert_eq!(store.room_revision(id(100)).await.unwrap(), 1);
+
+    // A role and a hand-over are both on the roster; each write answers with
+    // the number it advanced the room to.
+    assert_eq!(
+        store
+            .set_room_role(id(100), bob, RoomRole::Moderator, ts(4_200))
+            .await
+            .unwrap(),
+        2,
+        "the role write returns the revision it advanced to"
+    );
+    assert_eq!(
+        store
+            .transfer_room_ownership(id(100), alice, bob, ts(4_300))
+            .await
+            .unwrap(),
+        3,
+        "so does a transfer"
+    );
+    assert_eq!(
+        store
+            .transfer_room_ownership(id(100), bob, bob, ts(4_350))
+            .await
+            .unwrap(),
+        3,
+        "a transfer to the owner the room already has moves nothing"
+    );
+
+    let departed = store.leave_room(id(100), bob, ts(4_400)).await.unwrap();
+    assert_eq!(departed, 4, "a departure returns its revision");
+    assert_eq!(
+        store.leave_room(id(100), bob, ts(4_450)).await.unwrap(),
+        4,
+        "leaving a seat that is already empty moves nothing"
+    );
+
+    // A ban stamps a departure even on a member who already left, so the roster
+    // moved; a mute and an unban are on no wire surface a client can hold, so
+    // neither may advance the number.
+    assert_eq!(
+        store
+            .set_room_sanction(id(100), bob, None, Some(ts(9_000)), None, ts(4_500))
+            .await
+            .unwrap(),
+        5,
+        "a ban advances the revision"
+    );
+    assert_eq!(
+        store
+            .set_room_sanction(id(100), alice, Some(ts(5_000)), None, None, ts(4_600))
+            .await
+            .unwrap(),
+        5,
+        "a mute does not"
+    );
+    assert_eq!(
+        store
+            .set_room_sanction(id(100), bob, None, None, None, ts(4_650))
+            .await
+            .unwrap(),
+        5,
+        "an unban does not either"
+    );
+
+    // A settings write advances it even for the fields no state event can
+    // carry — a rename — because the revision is the record that a held
+    // summary is now stale.
+    let renamed = store
+        .update_room(
+            id(100),
+            Some("Lounge".to_string()),
+            Patch::Keep,
+            None,
+            None,
+            ts(4_700),
+        )
+        .await
+        .unwrap();
+    assert_eq!(renamed.revision, 6);
+    assert_eq!(
+        store.room(id(100)).await.unwrap().unwrap().revision,
+        6,
+        "the row the write returned and the row the read returns agree"
+    );
+
+    // Archiving hides the room from every listing, so it moves the revision —
+    // once, because the second press of the button writes nothing.
+    store.archive_room(id(100), ts(4_800)).await.unwrap();
+    assert_eq!(store.room_revision(id(100)).await.unwrap(), 7);
+    store.archive_room(id(100), ts(4_900)).await.unwrap();
+    assert_eq!(store.room_revision(id(100)).await.unwrap(), 7);
+
+    // A recount that confirms the cached count changed nothing a snapshot can
+    // observe, so it must not advance the number either.
+    assert_eq!(store.recount_room(id(100)).await.unwrap(), 1);
+    assert_eq!(store.room_revision(id(100)).await.unwrap(), 7);
+
+    // Leaving a room that does not exist has nothing to version.
+    assert_eq!(store.leave_room(id(999), bob, ts(4_950)).await.unwrap(), 0);
+    expect_code(store.room_revision(id(999)).await, codes::NOT_FOUND);
+}
+
 // --- social graph ---------------------------------------------------------
 
 fn edge(account_id: Id, other_id: Id, kind: RelationshipKind, created_at: i64) -> Relationship {
@@ -3572,6 +3702,7 @@ macro_rules! for_each_contract_case {
         $case!(a_network_ban_is_one_row_upserted_or_deleted);
         $case!(archiving_a_room_closes_it_without_deleting_it);
         $case!(updating_a_room_can_clear_a_topic_without_clearing_a_name);
+        $case!(the_room_revision_advances_only_on_writes_a_snapshot_can_observe);
         $case!(a_block_stops_contact_in_both_directions);
         $case!(accepting_a_friend_request_writes_both_sides);
         $case!(pair_writes_and_pair_removals_leave_no_half_pair_behind);
