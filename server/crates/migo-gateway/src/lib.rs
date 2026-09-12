@@ -325,6 +325,7 @@ impl Gateway {
         self.inner.hub.broadcast(
             &topic,
             &bytes,
+            Opcode::NotificationEvent,
             Opcode::NotificationEvent.class(),
             Some(coalesce_key_for(&recipient)),
             now,

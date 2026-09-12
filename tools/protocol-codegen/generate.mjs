@@ -71,7 +71,7 @@ for (const s of structs) {
 
 const seenCodes = new Map();
 const bandwidthVariants = new Set(
-  (enums.find((e) => e.name === 'BandwidthMode') || { variants: [] }).variants.map((v) => v.name)
+  (enums.find((e) => e.name === 'BandwidthMode') || { variants: [] }).variants.map((v) => v.name),
 );
 for (const op of opcodesDoc.opcodes) {
   if (seenCodes.has(op.code))
@@ -89,7 +89,9 @@ for (const op of opcodesDoc.opcodes) {
   if (op.paced !== undefined && op.paced !== true)
     problems.push(`opcode ${op.name}: paced, when present, must be true`);
   if (op.paced && op.class !== 'Coalescable')
-    problems.push(`opcode ${op.name}: pacing rides the coalescing key, so a paced opcode must be Coalescable`);
+    problems.push(
+      `opcode ${op.name}: pacing rides the coalescing key, so a paced opcode must be Coalescable`,
+    );
   if (op.paced && !op.coalesce_key)
     problems.push(`opcode ${op.name}: a paced opcode must declare a coalesce_key to pace by`);
   for (const mode of op.suppress_on || []) {
@@ -469,12 +471,13 @@ ${opcodesDoc.opcodes.map((o) => `            Self::${pascal(o.name.toLowerCase()
     /// HELLO, so the server stops sending a frame the client will not render.
     #[must_use]
     pub const fn suppressed_on(self, mode: BandwidthMode) -> bool {
-        matches!((self, mode)${
-          opcodesDoc.opcodes
-            .filter((o) => o.suppress_on)
-            .map((o) => `, (Self::${pascal(o.name.toLowerCase())}, BandwidthMode::${o.suppress_on.join(' | BandwidthMode::')})`)
-            .join('')
-        })
+        matches!((self, mode)${opcodesDoc.opcodes
+          .filter((o) => o.suppress_on)
+          .map(
+            (o) =>
+              `, (Self::${pascal(o.name.toLowerCase())}, BandwidthMode::${o.suppress_on.join(' | BandwidthMode::')})`,
+          )
+          .join('')})
     }
 
     #[must_use]

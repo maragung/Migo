@@ -108,21 +108,6 @@ impl Caller {
 /// pay it, because the gateway calls `disconnected` and the entry goes immediately.
 pub const MISSED_HEARTBEATS: u32 = 3;
 
-/// Shortest heartbeat the server will advertise, in milliseconds.
-///
-/// Mirrors `GatewayConfig` validation, which already refuses anything below this.
-/// Repeated here as a clamp rather than a second rejection: a presence service
-/// that refuses to start because somebody typed a small number has turned a
-/// configuration typo into an outage.
-pub const MIN_HEARTBEAT_MS: u32 = 1_000;
-
-/// Longest heartbeat the server will advertise, in milliseconds.
-///
-/// Five minutes. Beyond this the `UltraLowData` multiplier would push a presence
-/// lifetime past an hour, at which point "online" stops describing anything: the
-/// entry outlives the session, the battery, and usually the train journey.
-pub const MAX_HEARTBEAT_MS: u32 = 300_000;
-
 /// Accounts one snapshot will answer for.
 ///
 /// Matches [`migo_cache::traits::MAX_PRESENCE_FANOUT`], because that is where the
