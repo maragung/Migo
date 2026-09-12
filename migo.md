@@ -4202,7 +4202,7 @@ Biaya harga kick. Opcode 47 dan 48 di atas adalah biaya rate-limit ADR-0006, buk
 
 Opcode store ditempatkan di kepala range reserved, bukan di range economy, karena range economy 160 sampai 175 sudah terisi penuh oleh opcode yang lebih dulu; nomor 239 dan 240 terkirim bersama v0.16.4 sehingga tidak dinomori ulang.
 
-Opcode yang direncanakan. STATUS: BUILT untuk seluruh range yang tercantum di atas, termasuk call 224 sampai 238 (SFU join 237 kini berjalan; lihat section 165). STATUS: SCHEMA untuk metadata block section 141 dan flag bit 0x40 yang belum masuk registri. Setiap opcode ditambahkan ke opcodes.json bersamaan dengan implementasi handler-nya, sesuai aturan alokasi section 146.
+Opcode yang direncanakan. STATUS: BUILT untuk seluruh range yang tercantum di atas, termasuk call 224 sampai 238 (SFU join 237 kini berjalan di server; lihat section 165). STATUS: SCHEMA untuk metadata block section 141 dan flag bit 0x40 yang belum masuk registri. STATUS: SPEC untuk sisi client SFU group call (roster UI dan kunci frame antar peserta) yang belum memiliki kode client. Setiap opcode ditambahkan ke opcodes.json bersamaan dengan implementasi handler-nya, sesuai aturan alokasi section 146.
 
 Messaging:
 
