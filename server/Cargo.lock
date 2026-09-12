@@ -2235,6 +2235,7 @@ dependencies = [
 name = "migo-protocol"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "migo-core",
  "migo-crypto",
  "migo-wire",

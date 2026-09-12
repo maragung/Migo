@@ -28,8 +28,16 @@ const URL_IPV6_HOST = new RegExp(`^(${SCHEME})\\[[0-9a-f:]+\\]`, 'i');
 const SECRET_KEY =
   'passphrase|passwd|pwd|secret|token|api[-_]?key|apikey|access[-_]?key|authorization|auth|credential|private[-_]?key';
 
-/** `secret_key=value` or `secret_key: value`, capturing the label so only the value is masked. */
-const SECRET_ASSIGNMENT = new RegExp(`(\\b(?:${SECRET_KEY})\\b\\s*[=:]\\s*)(\\S+)`, 'gi');
+/**
+ * `secret_key=value` or `secret_key: value`, capturing the label so only the value is masked.
+ * The value is never the word `Bearer` — the {@link BEARER} rule has already claimed that line's
+ * token, and letting the assignment rule run again would mask the scheme word too, printing two
+ * `[redacted]` markers for one secret (a reader then cannot tell one credential from two).
+ */
+const SECRET_ASSIGNMENT = new RegExp(
+  `(\\b(?:${SECRET_KEY})\\b\\s*[=:]\\s*)(?!Bearer\\b)(\\S+)`,
+  'gi',
+);
 
 /** A bearer token in an Authorization header or log line. */
 const BEARER = /\bBearer\s+\S+/gi;

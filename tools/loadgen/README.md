@@ -58,6 +58,7 @@ useful as a CI gate.
 
 ## Safety
 
-The generator only ever registers fresh throwaway accounts (`--prefix`, default `loadgen-…`); it
-never reads or writes real user data. The target server must allow registration, which it does in
+The generator only ever registers fresh throwaway accounts (`--prefix`, default `loadgen_…` — the
+username it builds is `prefix_runTag_index`, underscore-separated because the server's credential
+rules admit only letters, digits, dots and underscores); it never reads or writes real user data. The target server must allow registration, which it does in
 development. Do not point it at a production deployment.

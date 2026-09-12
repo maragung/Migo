@@ -48,7 +48,7 @@ use migo_protocol::{
     ReconnectHint, ResumeRequest, RoomMemberEvent, SubscribeRequest, SubscribeResponse, Topic,
     TopicKind, Welcome, PROTOCOL_VERSION,
 };
-use migo_ratelimit::{CacheRateLimiter, Policies, SharedRateLimiter, TrustTier};
+use migo_ratelimit::{CacheRateLimiter, Policies, Scope, SharedRateLimiter, TrustTier};
 
 use migo_gateway::{
     ClientContext, Dispatcher, FeatureGate, FullRollout, Gateway, GatewayServices, NoopDispatcher,
@@ -3183,4 +3183,226 @@ async fn a_batched_burst_preserves_the_mailbox_order() {
     );
     let out = h.counter("migo_gateway_frames_out_total", &[]);
     assert!(out >= 9, "the counted frames match what was drained: {out}");
+}
+
+// ===========================================================================
+// Stress — the section 160 contracts under flood, asserted as contracts.
+//
+// The three tests below are the deterministic half of brief section 172's
+// stress list, and they deliberately assert nothing that a wall clock could
+// make flaky: no latency, no throughput, no timeouts. What they assert is the
+// *answer* the specification demands — RATE_LIMITED with a retry hint instead
+// of a close, an anonymous tier that caps fresh connections per address, and a
+// registry whose gauges balance after a concurrent fan-in. The ManualClock
+// never advances in any of them, so the limiter's buckets never refill and the
+// arithmetic is exact rather than "usually about twenty".
+// ===========================================================================
+
+/// A flood of charged frames from one authenticated session: the account
+/// bucket drains, every later frame is answered `RATE_LIMITED` with a retry
+/// hint, and — the actual contract — the connection is never closed for it.
+#[tokio::test]
+async fn stress_a_flood_of_charged_frames_is_throttled_but_the_session_survives() {
+    // ProfileFetch costs 3 against the default user burst of 200, so the
+    // account bucket is dry after 66 frames; 200 frames is comfortably past
+    // that without the assertion depending on the exact count, which is what
+    // keeps it honest if the schema reprices the opcode.
+    use migo_protocol::ProfileRequest;
+    let h = Harness::new();
+    let pipe = Pipe::new();
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+    for i in 0..200_u32 {
+        pipe.client(Opcode::ProfileFetch, 1_000 + i, &ProfileRequest::default());
+    }
+    // The proof the session survived the flood: a PING is the wire's own
+    // liveness frame and is never charged, so it must still be answered after
+    // the bucket is dry. Then the script ends and the client hangs up cleanly.
+    pipe.client(
+        Opcode::Ping,
+        9_000,
+        &Pong {
+            client_time: ts(NOW),
+            server_time: ts(NOW),
+        },
+    );
+
+    h.serve(&pipe).await;
+
+    let frames = pipe.sent();
+    let _welcome = welcome_in(&frames);
+    let rate_limited: Vec<ErrorMessage> = errors_in(&frames)
+        .into_iter()
+        .filter(|error| error.code == codes::RATE_LIMITED)
+        .collect();
+    assert!(
+        !rate_limited.is_empty(),
+        "a 200-frame flood must reach the account bucket and be refused"
+    );
+    for error in &rate_limited {
+        assert!(
+            error.retry_after_ms.unwrap_or(0) > 0,
+            "every RATE_LIMITED carries a retry hint, got {error:?}"
+        );
+    }
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame.header.correlation == 9_000 && !frame.header.is_error()),
+        "the PING after the flood must still be answered — a rate limit is a \
+         throttle, not a close (section 160)"
+    );
+    assert_eq!(
+        h.sessions_closed("protocol_violation"),
+        0,
+        "a throttled client is never disconnected for flooding"
+    );
+    assert_eq!(
+        h.sessions_live(),
+        0,
+        "the session still ends cleanly on the client's own hangup"
+    );
+}
+
+/// One peer address opening fresh connections without bound: the anonymous
+/// tier throttles the flood at the handshake with `RATE_LIMITED`, and the
+/// count it admits is derived from the limiter's own policy rather than
+/// restated by hand.
+///
+/// An unauthenticated first frame charges two surfaces together — the
+/// caller's network (`Scope::Ip`) and the opcode's endpoint
+/// (`Scope::Endpoint`) — and the first surface to refuse wins. The endpoint
+/// surface is the binding one: it scales with the tier, so it takes the
+/// anonymous burst (20) halved by its scope factor (1,2) — 10 tokens — while
+/// the shared IP surface quadruples the user base it does not scale with
+/// (200 × 4 = 800), which no six-connection flood will ever reach. At
+/// HELLO's cost of 5, ten tokens admit two handshakes; the frozen clock
+/// refills nothing in between. A hand-written count here would be a copy of
+/// that arithmetic, and it would drift the day the schema's costs or the
+/// scope factors change — so the assertion asks the policy instead.
+#[tokio::test]
+async fn stress_one_ip_flooding_fresh_handshakes_is_throttled_at_the_anonymous_tier() {
+    let h = Harness::new();
+    let ip: std::net::IpAddr = "203.0.113.7"
+        .parse()
+        .expect("a documentation address parses");
+    let context = RequestContext::at(ts(NOW)).from_ip(ip);
+
+    // The same policy objects the harness's limiter was built from, so the
+    // expectation can never disagree with the enforcement.
+    let policies = Policies::from_config(&Config::default().rate_limit)
+        .expect("the default rate-limit policies are valid");
+    let endpoint = policies.resolve(Scope::Endpoint, TrustTier::Anonymous);
+    let expected = (endpoint.capacity() / Opcode::Hello.cost()) as usize;
+
+    let mut pipes = Vec::new();
+    for _ in 0..6 {
+        let pipe = Pipe::new();
+        pipe.client(
+            Opcode::Hello,
+            1,
+            &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+        );
+        pipes.push(pipe);
+    }
+    // Sequential, on purpose: the frozen clock makes the bucket state a simple
+    // running total, so exactly the first `expected` connections are admitted.
+    for pipe in &pipes {
+        h.serve_with(pipe, context.clone()).await;
+    }
+
+    let mut welcomed = 0;
+    let mut refused = 0;
+    for pipe in &pipes {
+        let frames = pipe.sent();
+        if frames.iter().any(|frame| {
+            Opcode::from_wire(frame.header.opcode) == Some(Opcode::Hello)
+                && !frame.header.is_error()
+        }) {
+            welcomed += 1;
+        } else {
+            let error = sole_error(&frames);
+            assert_eq!(
+                error.code,
+                codes::RATE_LIMITED,
+                "a past-burst handshake is throttled, not refused as a protocol fault"
+            );
+            assert!(
+                error.retry_after_ms.unwrap_or(0) > 0,
+                "the refusal tells the peer when to come back, got {error:?}"
+            );
+            refused += 1;
+        }
+        assert!(
+            pipe.was_closed(),
+            "every connection, admitted or not, is closed"
+        );
+    }
+    assert_eq!(
+        welcomed, expected,
+        "the anonymous endpoint bucket admits capacity/cost handshakes and no more"
+    );
+    assert_eq!(
+        refused,
+        pipes.len() - expected,
+        "every handshake past the bucket is refused at the handshake"
+    );
+    assert_eq!(
+        h.sessions_opened(),
+        expected as u64,
+        "a throttled handshake opens no session and holds no slot"
+    );
+    assert_eq!(
+        h.sessions_live(),
+        0,
+        "the gauge is balanced after the flood"
+    );
+}
+
+/// A concurrent fan-in of handshakes through one gateway: every session is
+/// admitted, answered, and released, and the registry's gauges agree at the
+/// end. This is the deterministic core of the load story — the shape is
+/// concurrent, the assertion is on the counts, and nothing depends on how the
+/// tasks interleave.
+#[tokio::test]
+async fn stress_many_concurrent_sessions_handshake_and_release_their_slots() {
+    const SESSIONS: usize = 128;
+    let h = Arc::new(Harness::new());
+    let mut pipes = Vec::new();
+    let mut tasks = Vec::new();
+    for _ in 0..SESSIONS {
+        let pipe = Pipe::new();
+        pipe.client(
+            Opcode::Hello,
+            1,
+            &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+        );
+        pipes.push(pipe.clone());
+        let server = Arc::clone(&h);
+        tasks.push(tokio::spawn(async move {
+            server.serve(&pipe).await;
+        }));
+    }
+    for task in tasks {
+        task.await.expect("no serve task panics under the fan-in");
+    }
+    for pipe in &pipes {
+        let frames = pipe.sent();
+        // Every session was answered before it hung up.
+        let _welcome = welcome_in(&frames);
+        assert!(pipe.was_closed(), "every transport is closed at the end");
+    }
+    assert_eq!(
+        h.sessions_opened() as usize,
+        SESSIONS,
+        "every concurrent handshake was admitted"
+    );
+    assert_eq!(
+        h.sessions_live(),
+        0,
+        "the live gauge is back to zero once every session hung up"
+    );
 }

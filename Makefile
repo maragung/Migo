@@ -368,6 +368,55 @@ test-web: build-ts ## Run web/TypeScript tests
 	# by not existing.
 	$(PNPM) -r --if-present test
 
+# ---------------------------------------------------------------- hardening
+# Fuzz, stress, and security: brief section 172's bounded suites. All four
+# categories are contract assertions with fixed iteration counts and seeded
+# inputs, so they terminate deterministically — the unbounded, continuous
+# fuzzing the brief also describes stays outside CI by design, because a fuzz
+# budget stated in wall-clock is a test that only "passes" until the runner is
+# slower than the budget.
+
+.PHONY: test-fuzz
+test-fuzz: ## Bounded, seeded fuzz suites for the wire codec and the generated decoders (CI gate, brief section 172)
+	# The §172 corpus (non-canonical varints, eleven-byte varints, lengths past
+	# the frame, depth 17, a two-billion-item list, invalid UTF-8, trailing
+	# bytes, reserved flags, opcode zero, huge correlations, BATCH-in-BATCH,
+	# FRAGMENT total zero) plus seeded random buffers and seeded mutations of
+	# the conformance vectors. Seeded via SIM_SEED, the same variable the
+	# simulator reads, so a failure reproduces by re-running.
+	$(CARGO) test $(MANIFEST) -p migo-wire -p migo-protocol --test fuzz
+
+.PHONY: test-stress
+test-stress: ## Gateway stress suite: throttle and session-slot contracts (CI gate, brief sections 160/172)
+	# The observable contracts of §160 rather than timings: a flood of charged
+	# frames throttles with RATE_LIMITED and the session still answers PING, a
+	# single IP flooding handshakes is throttled at the anonymous tier, and many
+	# concurrent sessions all release their admission slots. The clocks are
+	# manual and frozen, so the arithmetic is exact, not racy.
+	$(CARGO) test $(MANIFEST) -p migo-gateway --test gateway stress
+
+.PHONY: test-security
+test-security: ## Negative wire tests against a real TCP listener (CI gate, brief sections 95/172)
+	# The refusals a stranger can probe, over a real socket with the whole node
+	# assembled the way a deployment assembles it: the whole reserved span
+	# 241-255 terminal, the allocated 240 refused by the phase gate with no
+	# disclosure, unknown opcodes answered with the session kept, forged tokens
+	# and pre-auth user opcodes refused opaquely, replayed HELLOs, garbage
+	# frames, and a length prefix past the frame ceiling — and the listener
+	# still serving the next client afterwards.
+	$(CARGO) test $(MANIFEST) -p migod --test security_wire
+
+.PHONY: test-load
+test-load: ## One-node load run: build migod (release), run tools/load/run.sh
+	# Like smoke-2node, deliberately outside the `ci` aggregate: the load run
+	# wants a release binary (a debug build's stalls are the tool's errors, not
+	# the server's), and paying for that build belongs in its own CI job, not in
+	# every developer's `make ci`. The script owns the topology, the fixed
+	# session count, and the error budget; this target guarantees the binary at
+	# the path its default points at.
+	$(CARGO) build $(MANIFEST) --release --bin migod
+	tools/load/run.sh
+
 # ---------------------------------------------------------------- smoke
 
 .PHONY: smoke-2node
@@ -393,7 +442,7 @@ audit: ## Dependency vulnerability + licence audit
 	$(PNPM) audit --audit-level high || true
 
 .PHONY: ci
-ci: protocol-check entity-check brief-check vector-check kotlin-check infra-check pydeps-check secret-check fmt-check build-ts lint doc-check test test-vectors budget-check ## Everything CI runs
+ci: protocol-check entity-check brief-check vector-check kotlin-check infra-check pydeps-check secret-check fmt-check build-ts lint doc-check test test-vectors budget-check test-fuzz test-stress test-security ## Everything CI runs
 
 # ---------------------------------------------------------------- misc
 
