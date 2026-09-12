@@ -999,15 +999,15 @@ mod tests {
     #[test]
     fn the_kill_switch_removes_named_bits_and_refuses_unknown_names() {
         use migo_protocol::features;
-        let base = advertised_features(true, true, &[]).expect("no kill switch builds");
+        let base = advertised_features(true, true, true, &[]).expect("no kill switch builds");
         assert!(base & features::QUIC != 0, "the QUIC listener is on");
         assert!(base & features::BATCHING != 0);
 
-        let killed = advertised_features(true, true, &["quic".into(), "calls".into()])
+        let killed = advertised_features(true, true, true, &["quic".into(), "calls".into()])
             .expect("known names build");
         assert_eq!(killed, base & !features::QUIC & !features::CALLS);
 
-        let error = advertised_features(true, true, &["teapot".into()])
+        let error = advertised_features(true, true, true, &["teapot".into()])
             .expect_err("an unknown name must stop the node");
         assert!(
             error.to_string().contains("teapot"),
