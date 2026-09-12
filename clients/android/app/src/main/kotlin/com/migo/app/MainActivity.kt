@@ -20,6 +20,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -35,6 +36,7 @@ import com.migo.app.ui.ChatScreen
 import com.migo.app.ui.ErrorBanner
 import com.migo.app.ui.GamesScreen
 import com.migo.app.ui.GroupInviteCandidate
+import com.migo.app.ui.LocalCallEglContext
 import com.migo.app.ui.MigoTheme
 import com.migo.app.ui.MobileHome
 import com.migo.app.ui.MobileTabStrip
@@ -107,19 +109,57 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
     // needs the microphone is the one that explains why. The launcher lives here — the shell's
     // only composition root — so the button deep in a chat header can reach it without threading
     // an activity through the screens, and the model's staged call is what carries the intent
-    // across the permission dialog's asynchronous answer.
+    // across the permission dialog's asynchronous answer. A video call asks for the camera too,
+    // in the same one dialog: the two permissions serve one gesture, and two questions for one
+    // tap is the dialog the user has already learned to distrust.
     val context = LocalContext.current
     val microphone = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted -> model.microphonePermission(granted) }
-    val requestVoiceCall: (Id, Id) -> Unit = { conversationId, peerId ->
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            model.startVoiceCall(conversationId, peerId)
-        } else {
-            model.stageVoiceCall(conversationId, peerId)
-            microphone.launch(Manifest.permission.RECORD_AUDIO)
+    val callPermissions = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { grants ->
+        // The microphone is the call itself; the camera is the video half. A grant of the mic
+        // alone on a video call still places the video call — the manager's answer path is where
+        // a missing camera falls back, and a refused mic is the one refusal that is stated.
+        val microphoneGranted =
+            grants[Manifest.permission.RECORD_AUDIO] == true
+        val cameraGranted = grants[Manifest.permission.CAMERA] == true
+        model.callPermissions(microphoneGranted, cameraGranted)
+    }
+    val requestCall: (Id, Id, Boolean) -> Unit = { conversationId, peerId, video ->
+        val microphoneNeeded = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO,
+        ) != PackageManager.PERMISSION_GRANTED
+        val cameraNeeded = video && ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA,
+        ) != PackageManager.PERMISSION_GRANTED
+        when {
+            !microphoneNeeded && !cameraNeeded ->
+                if (video) {
+                    model.startVideoCall(conversationId, peerId)
+                } else {
+                    model.startVoiceCall(conversationId, peerId)
+                }
+
+            video -> {
+                // One dialog, both permissions: a camera without a microphone is a silent
+                // camera, and a microphone without a camera is the voice call nobody asked
+                // for. Both are always requested together even when one is already granted --
+                // the system asks only for what is missing, and the answer map then holds both
+                // keys, which is what the model's answer path reads.
+                model.stageVideoCall(conversationId, peerId)
+                callPermissions.launch(
+                    arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA),
+                )
+            }
+
+            else -> {
+                model.stageVoiceCall(conversationId, peerId)
+                microphone.launch(Manifest.permission.RECORD_AUDIO)
+            }
         }
     }
     // The same moment-of-use asking for the composer's microphone: the mic button is the one
@@ -164,7 +204,7 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
                     is AppState.SignedIn -> ShellScreen(
                         state = current,
                         model = model,
-                        onRequestVoiceCall = requestVoiceCall,
+                        onRequestCall = requestCall,
                         onRequestVoiceNote = requestVoiceNote,
                     )
                 }
@@ -174,19 +214,27 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
             // from anything, the same rule the web client's overlay keeps — and renders nothing at all
             // when no call is ringing, live, just ended, or failed to start. The peer's name is
             // resolved here at the composition root, the one place that holds both the call state and
-            // the model that knows the names.
+            // the model that knows the names. The video tracks are collected here too — the peer's
+            // as state, because it lands mid-call, ours read once per composition — and the session's
+            // shared video GL context is provided here so every renderer below the overlay shares
+            // the one the call manager minted with its factories.
             val callPeerId = callState.incoming?.callerId
                 ?: callState.call?.let { if (it.isCaller) it.calleeId else it.callerId }
-            CallOverlay(
-                state = callState,
-                peerName = if (callPeerId != null) model.displayName(callPeerId) else "",
-                onAccept = model::acceptCall,
-                onDecline = model::declineCall,
-                onCancel = model::cancelCall,
-                onHangUp = model::hangUpCall,
-                onToggleMute = model::toggleCallMute,
-                onDismiss = model::dismissCallScreen,
-            )
+            val remoteVideo by model.remoteVideo.collectAsState()
+            CompositionLocalProvider(LocalCallEglContext provides model.callEglContext) {
+                CallOverlay(
+                    state = callState,
+                    peerName = if (callPeerId != null) model.displayName(callPeerId) else "",
+                    onAccept = model::acceptCall,
+                    onDecline = model::declineCall,
+                    onCancel = model::cancelCall,
+                    onHangUp = model::hangUpCall,
+                    onToggleMute = model::toggleCallMute,
+                    onDismiss = model::dismissCallScreen,
+                    localVideo = model.localVideo,
+                    remoteVideo = remoteVideo,
+                )
+            }
         }
     }
 }
@@ -205,7 +253,7 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
 private fun ShellScreen(
     state: AppState.SignedIn,
     model: AppViewModel,
-    onRequestVoiceCall: (Id, Id) -> Unit,
+    onRequestCall: (Id, Id, Boolean) -> Unit,
     onRequestVoiceNote: () -> Unit,
 ) {
     val open = state.open
@@ -344,7 +392,7 @@ private fun ShellScreen(
                     onGuess = { value -> model.submitGuess(open.conversationId, value) },
                     selfId = state.accountId,
                     onAcknowledgeSafety = model::acknowledgeSafetyChange,
-                    onStartCall = { peerId -> onRequestVoiceCall(open.conversationId, peerId) },
+                    onStartCall = { peerId, video -> onRequestCall(open.conversationId, peerId, video) },
                     onExportLog = { model.shareChatLog(open.conversationId) },
                     onToggleSearch = model::toggleChatSearch,
                     onSearchQuery = model::setChatSearchQuery,

@@ -4969,7 +4969,7 @@ Panggilan lintas region diteruskan melalui FED_CALL_RELAY, tetap sebagai blob te
 
 166. WEBRTC MEDIA ARCHITECTURE
 
-STATUS: BUILT untuk jalur 1-on-1 di web, yaitu RTCPeerConnection dengan media tersegel di bawah kunci panggilan yang didistribusikan lewat jalur signaling; requirement produknya ada di section 180. STATUS: BUILT juga untuk sisi media desktop, yaitu PCMU dua arah ditambah VP8 yang diterima dan dirender: klien desktop menjawab undangan video dengan m-line RecvOnly, mendepacketisasi VP8 lewat webrtc-rs, mendekode dengan decoder stateful oxideav-vp8, meminta keyframe lewat RTCP PLI, dan menggambar pikselnya di panggung overlay call, sementara pengiriman kamera sendiri tidak dimiliki build ini karena dependensi capture lintas platform belum diambil. STATUS: SPEC untuk SFU group call.
+STATUS: BUILT untuk jalur 1-on-1 di web dan di Android: web memakai RTCPeerConnection dengan media tersegel di bawah kunci panggilan yang didistribusikan lewat jalur signaling, dan Android memakai stream-webrtc-android (org.webrtc) dengan panggung video lengkap — kamera depan 640x480@30, pratinjau lokal di sudut, video lawan full-bleed, serta jawaban audio-saja ketika kamera tidak tersedia. STATUS: BUILT juga untuk sisi media desktop, yaitu PCMU dua arah ditambah VP8 yang diterima dan dirender: klien desktop menjawab undangan video dengan m-line RecvOnly, mendepacketisasi VP8 lewat webrtc-rs, mendekode dengan decoder stateful oxideav-vp8, meminta keyframe lewat RTCP PLI, dan menggambar pikselnya di panggung overlay call, sementara pengiriman kamera sendiri tidak dimiliki build ini karena dependensi capture lintas platform belum diambil; requirement produknya ada di section 180. STATUS: SPEC untuk SFU group call.
 
 Arsitektur media 1-on-1:
 

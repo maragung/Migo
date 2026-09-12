@@ -13,6 +13,14 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
+    <!-- The video call's camera, asked for at the video call button the same moment-of-use way as
+         the microphone (a runtime permission, one dialog for both when the call asks for video).
+         It is optional in the only sense that matters: a video invite answered without it is
+         still answered, as an audio call, so refusing the camera never costs the conversation.
+         XML comments cannot contain a double hyphen, so this comment uses parentheses where
+         prose would reach for one. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
     <application
         android:name=".MigoApplication"
         android:allowBackup="false"
