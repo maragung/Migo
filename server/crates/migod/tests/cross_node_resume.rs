@@ -64,7 +64,15 @@ fn valid_token_key() -> String {
 
 /// The two nodes share one token key the way a deployment must: the access
 /// token node alpha minted has to verify on node beta, or the failover dies at
-/// the handshake before any reset path can run.
+/// the handshake before any reset path can run. The anonymous handshake budget
+/// is raised because the failover itself is a burst of HELLOs from one peer
+/// address — the reset path's fresh session is the third anonymous handshake
+/// on the second node inside a second, and the default endpoint bucket (ten
+/// tokens, a HELLO costs five) is sized for strangers, not for a scripted
+/// client proving that a refused resume is followed by an accepted fresh one.
+/// Raising the ceiling is configuration, not clock-waiting: the test stays
+/// deterministic because every charge fits inside the burst, refill never
+/// enters the picture.
 async fn build_node(store: &migo_store::SharedStore, node_id: &str, region: &str) -> App {
     let config = Config::from_sources(
         &[],
@@ -73,6 +81,10 @@ async fn build_node(store: &migo_store::SharedStore, node_id: &str, region: &str
             ("MIGO_TCP__BIND".to_string(), "127.0.0.1:0".to_string()),
             ("MIGO_NODE__ID".to_string(), node_id.to_string()),
             ("MIGO_NODE__REGION".to_string(), region.to_string()),
+            (
+                "MIGO_RATE_LIMIT__ANONYMOUS_BURST".to_string(),
+                "100".to_string(),
+            ),
         ],
     )
     .expect("configuration should parse");
