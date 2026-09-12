@@ -14,6 +14,9 @@ package com.migo.core.wire
  * [8]u8   span_id          only when TRACED
  * varint  fragment_index   only when FRAGMENT
  * varint  fragment_total   only when FRAGMENT
+ * varint  frame_seq        only when METADATA
+ * varint  sent_at_delta    only when METADATA
+ * varint  payload_len      only when METADATA; zero means not stated
  * ...     payload          the remainder of the frame
  * ```
  *
@@ -47,6 +50,24 @@ class TraceContext(val traceId: ByteArray, val spanId: ByteArray)
 /** Position of a frame within a fragmented message. Chat messages never fragment. */
 data class Fragment(val index: Long, val total: Long)
 
+/**
+ * Frame-level metadata (section 141), present only when the `METADATA` flag is set.
+ *
+ * `payloadLen` is the exception to the frame's no-length rule: it is present only when the
+ * frame must state its own length. The block is **always three varints** — a trailing
+ * optional varint cannot be decoded, because nothing on the wire would distinguish "the
+ * block ended here" from "the block continues". Presence is carried by the value instead:
+ * a zero decodes to `null`, meaning "not stated".
+ */
+data class MetadataBlock(
+    /** Per-direction, per-session frame sequence number. */
+    val frameSeq: Long,
+    /** Milliseconds since the direction's anchor: server_time for server-to-client, HELLO time for client-to-server. */
+    val sentAtDelta: Long,
+    /** Present when the frame must state its own payload length; `null` when not stated. */
+    val payloadLen: Long?,
+)
+
 /** The parsed header of an MWP/1 frame. */
 data class FrameHeader(
     /** Protocol version byte as it appeared on the wire. */
@@ -61,14 +82,16 @@ data class FrameHeader(
     val trace: TraceContext?,
     /** Present when the `FRAGMENT` flag is set. */
     val fragment: Fragment?,
+    /** Present when the `METADATA` flag is set. */
+    val metadata: MetadataBlock?,
 )
 
 /** A complete frame: header plus payload bytes, still compressed if `COMPRESSED` is set. */
 class Frame(val header: FrameHeader, val payload: ByteArray)
 
-/** A minimal header: current version, no flags, no trace, no fragment. */
+/** A minimal header: current version, no flags, no optional blocks. */
 fun frameHeader(opcode: Long, correlation: Long = 0L): FrameHeader =
-    FrameHeader(PROTOCOL_VERSION, 0, opcode, correlation, null, null)
+    FrameHeader(PROTOCOL_VERSION, 0, opcode, correlation, null, null, null)
 
 /** True when both identifiers are all zero, which W3C Trace Context defines as invalid. */
 fun isInvalidTrace(trace: TraceContext): Boolean =
@@ -83,6 +106,12 @@ fun headerEncodedLen(header: FrameHeader): Int {
     if (header.trace != null) len += TRACE_ENCODED_LEN
     val fragment = header.fragment
     if (fragment != null) len += Varint.encodedLen(fragment.index) + Varint.encodedLen(fragment.total)
+    val metadata = header.metadata
+    if (metadata != null) {
+        len += Varint.encodedLen(metadata.frameSeq) + Varint.encodedLen(metadata.sentAtDelta)
+        // Always three varints; a zero means "not stated".
+        len += Varint.encodedLen(metadata.payloadLen ?: 0L)
+    }
     return len
 }
 
@@ -91,12 +120,14 @@ fun headerEncodedLen(header: FrameHeader): Int {
  *
  * The flag bits and the optional blocks are written from the same source of truth — the
  * nullable fields — so a header can never claim `TRACED` without carrying a trace. A
- * caller-supplied `TRACED` bit with no trace is therefore corrected, not honoured.
+ * caller-supplied `TRACED` bit with no trace is therefore corrected, not honoured; the
+ * same holds for `FRAGMENT` and `METADATA`.
  */
 fun encodeHeader(header: FrameHeader, out: ByteSink) {
-    var bits = header.flags and (Flags.TRACED or Flags.FRAGMENT).inv()
+    var bits = header.flags and (Flags.TRACED or Flags.FRAGMENT or Flags.METADATA).inv()
     if (header.trace != null) bits = bits or Flags.TRACED
     if (header.fragment != null) bits = bits or Flags.FRAGMENT
+    if (header.metadata != null) bits = bits or Flags.METADATA
     val reserved = bits and Flags.RESERVED_MASK
     if (reserved != 0) throw WireError.reservedFlags(reserved)
 
@@ -118,6 +149,13 @@ fun encodeHeader(header: FrameHeader, out: ByteSink) {
         Varint.encodeU64(fragment.index, out)
         Varint.encodeU64(fragment.total, out)
     }
+    val metadata = header.metadata
+    if (metadata != null) {
+        Varint.encodeU64(metadata.frameSeq, out)
+        Varint.encodeU64(metadata.sentAtDelta, out)
+        // Always three varints; a zero payload_len means "not stated".
+        Varint.encodeU64(metadata.payloadLen ?: 0L, out)
+    }
 }
 
 /** The result of [decodeHeader]: the header and where its payload begins. */
@@ -127,7 +165,8 @@ data class DecodedHeader(val header: FrameHeader, val offset: Int)
  * Parses a header from the front of [input].
  *
  * Rejects, in this order: a short frame, an unsupported version, reserved flag bits, a
- * truncated trace block, and an impossible fragment pair. Reserved bits are an error and not
+ * truncated trace block, an impossible fragment pair, and a truncated or over-wide metadata
+ * block. Reserved bits are an error and not
  * something to ignore — a peer that sets them is speaking a dialect we do not know, and
  * silently discarding the bits would let a future extension be stripped by an old node that
  * had no idea it was doing so.
@@ -169,8 +208,26 @@ fun decodeHeader(input: ByteArray): DecodedHeader {
         validateFragment(fragment)
     }
 
+    var metadata: MetadataBlock? = null
+    if ((bits and Flags.METADATA) != 0) {
+        val seqRaw = Varint.scan(input, offset)
+        offset += seqRaw.used
+        val deltaRaw = Varint.scan(input, offset)
+        offset += deltaRaw.used
+        val lenRaw = Varint.scan(input, offset)
+        offset += lenRaw.used
+        val len = narrow(lenRaw, "payload_len")
+        metadata = MetadataBlock(
+            narrow(seqRaw, "frame_seq"),
+            narrow(deltaRaw, "sent_at_delta"),
+            // The block is always three varints; a zero payload_len means
+            // "not stated" and normalises to null.
+            if (len == 0L) null else len,
+        )
+    }
+
     return DecodedHeader(
-        FrameHeader(version, bits, opcode, correlation, trace, fragment),
+        FrameHeader(version, bits, opcode, correlation, trace, fragment, metadata),
         offset,
     )
 }
