@@ -536,9 +536,11 @@ impl Sfu {
             self.config.ramp_interval_ms,
         );
         let changed = stepped != sub.quality;
-        self.meters.adapt(if stepped < sub.quality {
+        // The derived order puts the best rung lowest, so a step that
+        // compares greater is a step down the ladder.
+        self.meters.adapt(if stepped > sub.quality {
             AdaptKind::Lowered
-        } else if stepped > sub.quality {
+        } else if stepped < sub.quality {
             AdaptKind::Raised
         } else {
             AdaptKind::Held

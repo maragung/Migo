@@ -73,13 +73,15 @@ pub fn target_step(stats: &LinkStats, thresholds: &AdaptiveThresholds) -> Qualit
 
 /// Moves a subscription from its current rung toward the target.
 ///
-/// Down is immediate: a saturated link helps nobody, and the ladder's order
-/// is the order of what is given up, so landing directly on a low rung has
-/// passed through the same sacrifices in the same sequence. Up is one rung
-/// at a time, and only after [`SfuConfig::ramp_interval_ms`] has elapsed
-/// since the last move — never a jump, because a jump is the oscillation the
-/// brief forbids. A target above the current rung that arrives too soon
-/// changes nothing.
+/// The derived order on [`QualityStep`](crate::model::QualityStep) puts the
+/// best rung lowest, so "down the ladder" is the direction where the target
+/// compares *greater* than the current rung. Down is immediate: a saturated
+/// link helps nobody, and the ladder's order is the order of what is given
+/// up, so landing directly on a low rung has passed through the same
+/// sacrifices in the same sequence. Up is one rung at a time, and only after
+/// [`SfuConfig::ramp_interval_ms`] has elapsed since the last move — never a
+/// jump, because a jump is the oscillation the brief forbids. A target above
+/// the current rung that arrives too soon changes nothing.
 #[must_use]
 pub fn advance(
     current: QualityStep,
@@ -88,12 +90,15 @@ pub fn advance(
     now: Timestamp,
     ramp_interval_ms: i64,
 ) -> QualityStep {
-    if target <= current {
+    if target >= current {
+        // Equal, or further down the ladder: land there now.
         return target;
     }
+    // The target is a better rung: climb toward it one rung per interval,
+    // from the current rung's position toward the top at zero.
     let interval = ramp_interval_ms.max(1) as u64;
     if now.saturating_since(changed_at) >= interval {
-        QualityStep::at(current.index() + 1)
+        QualityStep::at(current.index().saturating_sub(1))
     } else {
         current
     }
