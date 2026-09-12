@@ -147,7 +147,7 @@ import org.webrtc.audio.JavaAudioDeviceModule
  * recomposition.
  */
 class CallManager(
-    context: Context,
+    private val context: Context,
     private val client: MigoClient,
     private val accountId: Id,
     /** The session's own scope: every ordinary launch, and every timer, dies with it. */
@@ -1086,8 +1086,9 @@ class CallManager(
             // The peer's camera, arriving as a track on a call that may already be connected. The
             // track is handed to the state the screen renders from rather than rendered here --
             // the manager knows media, not surfaces -- and only a video track is news: the audio
-            // path is owned by the audio module the factory was built on.
-            val track = transceiver?.track ?: return
+            // path is owned by the audio module the factory was built on. The SDK's transceiver
+            // has no track getter of its own; the receiver it wraps carries the incoming one.
+            val track = transceiver?.receiver?.track() ?: return
             if (track is VideoTrack) {
                 _remoteVideo.value = track
             }
