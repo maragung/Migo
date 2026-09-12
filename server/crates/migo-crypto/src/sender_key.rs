@@ -944,7 +944,7 @@ mod tests {
         let mut sender = SenderKeyState::create(1, 1, &mut random);
         let mut receiver = ReceiverKeyState::accept(&sender.distribution(&identity));
 
-        let mut impostor = SenderKeyState::create(1, 2, &mut random);
+        let impostor = SenderKeyState::create(1, 2, &mut random);
         assert_eq!(
             receiver.adopt(&impostor.distribution(&identity)),
             Err(CryptoError::KeyAlreadyUsed),
@@ -981,7 +981,7 @@ mod tests {
 
         // And measured from that baseline: an epoch-4 distribution, which a
         // founding member would rightly refuse, is refused here too.
-        let mut older = SenderKeyState::create(4, 6, &mut random);
+        let older = SenderKeyState::create(4, 6, &mut random);
         assert_eq!(
             latecomer.adopt(&older.distribution(&identity)),
             Err(CryptoError::KeyAlreadyUsed)
