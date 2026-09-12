@@ -2997,6 +2997,44 @@ main {
   color: var(--text-dim);
 }
 
+/*
+ * The group-call roster rides in the same overlay, between the identity and the actions: a
+ * bounded, scrollable column of seats (a call can hold more participants than a screen), each a
+ * translucent row over the overlay's ground so the column reads as one surface.
+ */
+.group-call-roster {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: min(340px, 92vw);
+  max-height: 46vh;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  z-index: 1;
+}
+.group-call-seat {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-alt);
+}
+.group-call-seat-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The honest one-liner under the count: this build carries the roster, not the media. */
+.call-roster-note {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
 /* --- settings, profiles, rooms, presence, gifts: the expanded feature surfaces --- */
 
 /* A small pill tag: the current-device mark, the chosen recipient mark. */

@@ -3006,6 +3006,87 @@ pub async fn a_retried_payment_charges_once(store: &SharedStore) {
     );
 }
 
+/// Section 153's other half: a retry key that arrives with a different payload is
+/// `IDEMPOTENCY_MISMATCH`, not the first answer again. A key that stands for two
+/// payloads was never a key, and on money a silently accepted second payload is a
+/// second purchase wearing the first one's receipt.
+pub async fn a_reused_key_with_a_different_payload_is_refused(store: &SharedStore) {
+    let (mint, alice_wallet, bob_wallet) = seed_ledger(store).await;
+
+    store
+        .post_transaction(transaction_row(
+            400,
+            "purchase-1",
+            Currency::Coins,
+            vec![leg(mint, -100), leg(alice_wallet, 100)],
+        ))
+        .await
+        .unwrap();
+
+    // Same key, different money. A retry in name, a second transfer in fact.
+    expect_code(
+        store
+            .post_transaction(transaction_row(
+                401,
+                "purchase-1",
+                Currency::Coins,
+                vec![leg(mint, -50), leg(bob_wallet, 50)],
+            ))
+            .await,
+        codes::IDEMPOTENCY_MISMATCH,
+    );
+    assert_eq!(
+        store.balance(bob_wallet).await.unwrap(),
+        0,
+        "a refused replay moves no money"
+    );
+    assert_eq!(
+        store.ledger_history(alice_wallet, 10).await.unwrap().len(),
+        1,
+        "the refused replay left no entry behind"
+    );
+
+    // The delivery is compared too, not just the legs: two items at the same price
+    // balance identically, so the legs alone cannot tell a retry from a different
+    // purchase. The receipt is what the mismatch rule reads.
+    let mut first = transaction_row(
+        402,
+        "purchase-2",
+        Currency::Coins,
+        vec![leg(mint, -100), leg(alice_wallet, 100)],
+    );
+    first.created_by = Some(id(1));
+    first.receipt = Some(Receipt::Entitlement {
+        sku: "theme.midnight".to_string(),
+    });
+    store.post_transaction(first).await.unwrap();
+    let mut second = transaction_row(
+        403,
+        "purchase-2",
+        Currency::Coins,
+        vec![leg(mint, -100), leg(alice_wallet, 100)],
+    );
+    second.created_by = Some(id(1));
+    second.receipt = Some(Receipt::Entitlement {
+        sku: "theme.sunrise".to_string(),
+    });
+    expect_code(
+        store.post_transaction(second).await,
+        codes::IDEMPOTENCY_MISMATCH,
+    );
+    assert!(
+        !store.has_entitlement(id(1), "theme.sunrise").await.unwrap(),
+        "the refused replay granted nothing"
+    );
+    assert!(
+        store
+            .has_entitlement(id(1), "theme.midnight")
+            .await
+            .unwrap(),
+        "the original delivery stands"
+    );
+}
+
 pub async fn the_ledger_refuses_anything_that_does_not_balance(store: &SharedStore) {
     let (mint, alice_wallet, bob_wallet) = seed_ledger(store).await;
     let alice = id(1);
@@ -3443,6 +3524,7 @@ macro_rules! for_each_contract_case {
         $case!(a_wallet_is_opened_once_however_often_it_is_asked_for);
         $case!(a_transfer_moves_value_without_creating_any);
         $case!(a_retried_payment_charges_once);
+        $case!(a_reused_key_with_a_different_payload_is_refused);
         $case!(the_ledger_refuses_anything_that_does_not_balance);
         $case!(a_deleted_media_row_outlives_its_bytes);
         $case!(the_moderation_queue_is_oldest_first_and_resolves_once);
