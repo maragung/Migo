@@ -262,6 +262,15 @@ impl Call {
             call_id: self.call_id,
             state: CallState::Ended.to_wire(),
             reason: self.end_reason.map(|reason| reason.to_wire()),
+            // The 1:1 fields the group-call extension added stay absent: an
+            // ended 1:1 call has no roster to name, and an old peer reading
+            // the frame must find them skippable exactly as it does.
+            conversation_id: None,
+            user_id: None,
+            device_id: None,
+            participant_count: None,
+            sealed_offer: None,
+            participants: None,
         }
     }
 
@@ -323,6 +332,14 @@ pub struct InviteOutcome {
     pub expires_at: Timestamp,
 }
 
+/// The largest group call one conversation may hold.
+///
+/// The brief's ceiling for a group call (section 166): an SFU that forwards
+/// for more participants than this is a different deployment, and a join
+/// that would cross the line is refused with a validation error the client
+/// can render ("the call is full") rather than a conflict it must guess at.
+pub const MAX_GROUP_PARTICIPANTS: usize = 25;
+
 /// The wire's invite frame, under the service's own name.
 pub type CallInviteWire = migo_protocol::CallInvite;
 
@@ -355,4 +372,97 @@ impl Default for CallsConfig {
             turn_servers: Vec::new(),
         }
     }
+}
+
+// --- the group call, as this node forwards it ------------------------------
+//
+// The SFU the brief describes is a *forwarder*: every participant seals their
+// media for the call's members, and the server's whole job is to seat the
+// roster, tell it about itself, and move sealed bytes between its devices. The
+// roster below is the state that job needs; the sealed offers are its cargo,
+// stored and re-served but never opened — the same promise the 1:1 relay makes,
+// extended from "two named devices" to "a roster".
+
+/// One seat in a group call.
+///
+/// A device, not an account: a person may rejoin from a new device, and the old
+/// seat must be replaced rather than joined by a twin that would receive the
+/// roster twice and relay through two `from_device`s. The sealed offer is the
+/// participant's own media description, sealed for the call's members — this
+/// crate moves it and stores it, and reads it never.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupParticipant {
+    /// The account that joined.
+    pub account_id: Id,
+    /// The device they joined with, from the authenticated connection.
+    pub device_id: Id,
+    /// When they joined, for the roster's own ordering.
+    pub joined_at: Timestamp,
+    /// Their sealed media description, passed through unopened.
+    pub sealed_offer: Vec<u8>,
+}
+
+/// A group call bound to a conversation, held in memory for this node's life.
+///
+/// The call id is client-minted and is the join's idempotency key: a retried
+/// join from the same device is the same seat, answered with the same roster
+/// and no second announcement. A join from a *different* device of the same
+/// account replaces the seat, exactly as a second answer wins a 1:1 ring's
+/// device only when it is the first from that device — and the replaced
+/// device's clients learn they left through the departure event, not silence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupCall {
+    /// Client-minted, and the idempotency key for the first join.
+    pub call_id: Id,
+    /// The conversation the call belongs to; the membership gate's subject.
+    pub conversation_id: Id,
+    /// The account that created the call by joining first.
+    pub founder_id: Id,
+    /// The roster, in join order.
+    pub participants: Vec<GroupParticipant>,
+    /// When the call began (the first join).
+    pub started_at: Timestamp,
+    /// When the last participant left, if the call has emptied.
+    pub ended_at: Option<Timestamp>,
+}
+
+impl GroupCall {
+    /// The seat an account holds, if any.
+    #[must_use]
+    pub fn seat_of(&self, account_id: Id) -> Option<&GroupParticipant> {
+        self.participants
+            .iter()
+            .find(|participant| participant.account_id == account_id)
+    }
+
+    /// The account a device in this call belongs to, if it is on the roster.
+    ///
+    /// The relay path's routing question, the group twin of
+    /// [`Call::account_of_device`].
+    #[must_use]
+    pub fn account_of_device(&self, device_id: Id) -> Option<Id> {
+        self.participants
+            .iter()
+            .find(|participant| participant.device_id == device_id)
+            .map(|participant| participant.account_id)
+    }
+}
+
+/// What a join came to, for the joining client's own screen.
+///
+/// `Duplicate` is the re-join of the same seat: the same roster, no second
+/// announcement. `Full` is the ceiling; `Blocked` is the gate's refusal, named
+/// for what the caller's screen should render rather than which table said no.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupJoinOutcome {
+    /// Seated (or re-seated); the roster is attached.
+    Joined,
+    /// The same call id and conversation from a device already seated.
+    Duplicate,
+    /// The roster is at [`MAX_GROUP_PARTICIPANTS`].
+    Full,
+    /// Membership, a block, or the conversation's call policy said no.
+    Blocked,
+    /// The call id was already used for a different conversation's call.
+    Conflict,
 }

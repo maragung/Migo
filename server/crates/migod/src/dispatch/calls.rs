@@ -18,20 +18,20 @@
 //! | `CALL_ANSWER`      | `CallAnswer`       | `answer`                  | `Acknowledged`      | state event → caller     |
 //! | `CALL_DECLINE`     | `CallDecline`      | `decline`                 | `Acknowledged`      | state event → caller     |
 //! | `CALL_CANCEL`      | `CallCancel`       | `cancel`                  | `Acknowledged`      | state event → callee     |
-//! | `CALL_END`         | `CallEnd`          | `end`                     | `Acknowledged`      | state event → other party|
+//! | `CALL_END`         | `CallEnd`          | `end` / `group_leave`     | `Acknowledged`      | state event → other party|
 //! | `CALL_SDP`         | `CallSdp`          | `relay_sdp`               | `Acknowledged`      | relayed frame → target   |
 //! | `CALL_ICE`         | `CallIce`          | `relay_ice`               | `Acknowledged`      | relayed frame → target   |
 //! | `CALL_RENEGOTIATE` | `CallRenegotiate`  | `relay_sdp` (projected)   | `Acknowledged`      | relayed frame → target   |
 //! | `CALL_KEY_UPDATE`  | `CallKeyUpdate`    | `call` (authorisation)    | `Acknowledged`      | key update → other party |
 //! | `CALL_STATS`       | `CallStats`        | — (metrics only)          | `Acknowledged`      | —                        |
 //! | `CALL_TURN_FETCH`  | `CallTurnFetch`    | `turn_servers`            | `CallTurnResponse`  | —                        |
-//! | `CALL_SFU_JOIN`    | `CallInvite`       | —                         | `FEATURE_DISABLED`  | —                        |
+//! | `CALL_SFU_JOIN`    | `CallInvite`       | `group_join`              | `CallTurnResponse`  | roster → joiner; join → conversation |
 //!
 //! `CALL_INVITE_EVENT`, `CALL_STATE_EVENT`, and `CALL_SFU_EVENT` are
 //! server-originated: the gateway refuses them from a client before the
 //! dispatcher is ever asked, and the dispatcher's default arm answers
 //! `FEATURE_DISABLED` naming the opcode if one ever arrives by another path.
-//! This module *publishes* the first two; it never receives them.
+//! This module *publishes* the first two, and the third for the group call.
 //!
 //! # Who hears what
 //!
@@ -58,7 +58,7 @@
 //! forwarding it as well would deliver the same sealed bytes to the caller
 //! twice for one answer.
 
-use migo_calls::{Caller as CallCaller, SharedCallkeeper};
+use migo_calls::{roster_wire, Caller as CallCaller, SharedCallkeeper};
 use migo_core::Error;
 use migo_gateway::ClientContext;
 use migo_notify::{Event as NotificationEvent, SharedNotifier};
@@ -354,14 +354,114 @@ pub(crate) async fn handle_turn_fetch(
     ctx.reply(&CallTurnResponse { servers })
 }
 
-/// Refuses an SFU group-call join.
+/// Joins (or re-joins) a group call on this node.
 ///
-/// Group calls are a separate deployment (brief section 166); this node
-/// signals 1:1 calls only, and the honest answer for the opcode is the
-/// feature's name, so a client can render "not on this server" instead of
-/// retrying a join that will never succeed.
-pub(crate) fn refuse_sfu_join() -> Result<(), Error> {
-    Err(fault::feature_disabled(Opcode::CallSfuJoin.name()))
+/// The payload is a `CallInvite` — the same frame a 1:1 ring carries, read
+/// with group semantics: the `call_id` names the *group* call (the join's
+/// idempotency key), the `conversation_id` is the conversation whose members
+/// may join, and the `sealed_offer` is the joiner's sealed media description.
+/// `callee_id`, `caller_device`, and `capabilities` are ignored — the joining
+/// device is the connection's own, and a group call has no single callee.
+///
+/// The reply is a `CallTurnResponse`, the frame the registry froze for this
+/// opcode; its `servers` list carries the configured TURN relays, exactly as
+/// a 1:1 fetch would. The roster itself is *published* to the joiner's own
+/// user topic as a `CALL_SFU_EVENT` carrying the full participant list — the
+/// one event the registry gives this opcode a coalescing key for — and the
+/// join announcement is published to the conversation's topic for the rest of
+/// the roster.
+pub(crate) async fn handle_sfu_join(
+    ctx: &ClientContext<'_>,
+    frame: &Frame,
+    svc: &SharedCallkeeper,
+) -> Result<(), Error> {
+    let caller = caller_of(ctx);
+    let request: CallInvite = from_frame(frame).map_err(fault::from_wire)?;
+    let (outcome, call, announcements) = svc
+        .group_join(
+            &caller,
+            request.call_id,
+            request.conversation_id,
+            request.media_kind,
+            request.sealed_offer,
+        )
+        .await?;
+    let servers = svc.turn_servers(request.call_id).await?;
+    ctx.reply(&CallTurnResponse { servers })?;
+    // The joiner's own roster: their screen builds the call from this frame,
+    // on their own user topic so it arrives whether or not their client ever
+    // subscribed to the conversation. The coalescing key is `None` even
+    // though the opcode's class is Coalescable: a retried join's roster is a
+    // second fact the joiner's screen may still be waiting for, and the
+    // reply rule is answered by the TURN list — this frame is the roster,
+    // and dropping it to a collapse would leave a joiner holding a reply and
+    // no call. The joiner's connection is not excluded — this is the reply
+    // the frame shape could not carry.
+    let roster = migo_protocol::CallStateEvent {
+        call_id: call.call_id,
+        state: migo_calls::group_store::GROUP_STATE_CONNECTED,
+        reason: None,
+        conversation_id: Some(call.conversation_id),
+        user_id: Some(caller.account_id),
+        device_id: Some(caller.device_id),
+        participant_count: Some(call.participants.len() as u32),
+        sealed_offer: None,
+        participants: Some(roster_wire(&call)),
+    };
+    let user_topic = Topic {
+        kind: TopicKind::User,
+        id: caller.account_id,
+    };
+    if let Err(error) = ctx.publish(&user_topic, Opcode::CallSfuEvent, &roster, None) {
+        tracing::warn!(%error, "group-call roster publication failed");
+    }
+    for event in announcements {
+        // The roster hears each announcement on the conversation's topic, in
+        // the order the service produced them — a seat replacement is a
+        // departure followed by an arrival, and the roster hears both facts.
+        // `None` for the coalescing key because no two membership facts may
+        // collapse into one, whatever the opcode's class allows.
+        let topic = Topic {
+            kind: TopicKind::Conversation,
+            id: call.conversation_id,
+        };
+        if let Err(error) = ctx.publish_excluding_self(&topic, Opcode::CallSfuEvent, &event, None) {
+            tracing::warn!(%error, "group-call join announcement failed");
+        }
+    }
+    let _ = outcome;
+    Ok(())
+}
+
+/// Leaves a group call: the `CALL_END` frame, routed to the group service
+/// when the id names a group call.
+///
+/// Returns `Ok(true)` when the frame was a group leave and is fully answered,
+/// and `Ok(false)` when the id names no group call — the 1:1 handler's turn.
+pub(crate) async fn handle_group_end(
+    ctx: &ClientContext<'_>,
+    frame: &Frame,
+    svc: &SharedCallkeeper,
+) -> Result<bool, Error> {
+    let caller = caller_of(ctx);
+    let request: CallEnd = from_frame(frame).map_err(fault::from_wire)?;
+    let Some(event) = svc.group_leave(&caller, request.call_id).await? else {
+        // No group call held this id, or the caller held no seat in one that
+        // did. `group_leave` answers NOT_FOUND for the first, so reaching here
+        // with `Ok(None)` means the call exists and the caller was not seated:
+        // a 1:1 call cannot share the id (the id spaces are distinct stores),
+        // so this is a stranger's leave of a group call and is answered.
+        return Ok(true);
+    };
+    ctx.reply(&Acknowledged { ok: true })?;
+    let topic = Topic {
+        kind: TopicKind::Conversation,
+        id: event.conversation_id.unwrap_or_default(),
+    };
+    if let Err(error) = ctx.publish_excluding_self(&topic, Opcode::CallSfuEvent, &event, None) {
+        tracing::warn!(%error, "group-call departure publication failed");
+    }
+    Ok(true)
 }
 
 /// The domain caller for this connection, built the same way every module

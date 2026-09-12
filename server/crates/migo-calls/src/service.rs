@@ -46,9 +46,14 @@
 //! owns, and until there is a configured relay there is an honest empty list;
 //! see `CallsConfig`.
 //!
-//! *No SFU.* Group calls are a separate deployment with their own join path;
-//! the dispatcher answers those opcodes `FEATURE_DISABLED` and this crate
-//! has nothing to say about them.
+//! *The group call is a forwarder, not a mixer.* `group_join` seats a roster,
+//! `group_leave` vacates it, and `group_relay` moves sealed bytes between
+//! seated devices — but no media plane exists here, on purpose: the brief's
+//! SFU "hanya meneruskan paket" (section 166), and the forwarding this node
+//! does is the *signalling* half — roster events and sealed descriptions. A
+//! participant's sealed offer is stored and re-served to joiners, never
+//! opened, which is the 1:1 relay's mail-slot promise extended from two named
+//! devices to a roster.
 //!
 //! *No push.* Whether a ring should wake a device that is offline is
 //! `migo-notify`'s question, and the invite event the dispatcher publishes
@@ -62,10 +67,14 @@ use migo_core::{Id, Result, Timestamp};
 use migo_protocol::{codes, fault, CallInviteEvent, CallStateEvent, Opcode};
 use migo_ratelimit::{BucketKey, RateLimiter, SharedRateLimiter};
 
-use crate::metrics::{AnswerOutcome, InviteOutcome, Meters, RelayKind};
+use crate::group_store::{
+    group_join_event, group_leave_event, MemoryGroupCallStore, SharedGroupCallStore,
+};
+use crate::metrics::{AnswerOutcome, GroupJoinKind, InviteOutcome, Meters, RelayKind};
 use crate::model::{
     Call, CallIceWire, CallInviteWire, CallSdpWire, CallState, Caller, CallsConfig, EndReason,
-    InviteOutcome as WireOutcome, TurnServerWire, MAX_SEALED_LEN, MEDIA_VIDEO,
+    GroupCall, GroupJoinOutcome, GroupParticipant, InviteOutcome as WireOutcome, TurnServerWire,
+    MAX_GROUP_PARTICIPANTS, MAX_SEALED_LEN, MEDIA_VIDEO,
 };
 use crate::store::{CallStore, SharedCallStore};
 use crate::traits::{CallGate, Callkeeper, SharedCallGate, SharedCallkeeper};
@@ -85,7 +94,14 @@ pub fn open(
     registry: &Registry,
     config: CallsConfig,
 ) -> SharedCallkeeper {
-    Arc::new(Calls::new(store, limiter, gate, registry, config))
+    Arc::new(Calls::with_group_store(
+        store,
+        Arc::new(MemoryGroupCallStore::new()),
+        limiter,
+        gate,
+        registry,
+        config,
+    ))
 }
 
 /// Calls over a store and a rate limiter.
@@ -95,6 +111,7 @@ pub fn open(
 /// the monomorphised one over the in-memory store and the real limiter.
 pub struct Calls<S: ?Sized = dyn CallStore, L: ?Sized = dyn RateLimiter> {
     store: Arc<S>,
+    groups: SharedGroupCallStore,
     limiter: Arc<L>,
     gate: Arc<dyn CallGate>,
     config: CallsConfig,
@@ -114,8 +131,30 @@ where
         registry: &Registry,
         config: CallsConfig,
     ) -> Self {
+        Self::with_group_store(
+            store,
+            Arc::new(MemoryGroupCallStore::new()),
+            limiter,
+            gate,
+            registry,
+            config,
+        )
+    }
+
+    /// The same, over an explicit group-call store — the seam a test or a
+    /// production backend plugs its own roster store into.
+    #[must_use]
+    pub fn with_group_store(
+        store: Arc<S>,
+        groups: SharedGroupCallStore,
+        limiter: Arc<L>,
+        gate: Arc<dyn CallGate>,
+        registry: &Registry,
+        config: CallsConfig,
+    ) -> Self {
         Self {
             store,
+            groups,
             limiter,
             gate,
             config,
@@ -293,6 +332,14 @@ fn state_event(call: &Call) -> CallStateEvent {
         call_id: call.call_id,
         state: call.state.to_wire(),
         reason: None,
+        // The group-call fields stay absent on 1:1 events: a 1:1 call has no
+        // roster, and old peers must find them skippable exactly as they do.
+        conversation_id: None,
+        user_id: None,
+        device_id: None,
+        participant_count: None,
+        sealed_offer: None,
+        participants: None,
     }
 }
 
@@ -733,6 +780,219 @@ where
         if call.other_party(caller.account_id).is_none() {
             return Err(fault::not_found("call"));
         }
+        Ok(call)
+    }
+
+    async fn group_join(
+        &self,
+        caller: &Caller,
+        call_id: Id,
+        conversation_id: Id,
+        media_kind: u32,
+        sealed_offer: Vec<u8>,
+    ) -> Result<(GroupJoinOutcome, GroupCall, Vec<CallStateEvent>)> {
+        // Shape first and before the limiter, the same order the invite keeps:
+        // a malformed join is a client bug, and charging for it would let one
+        // broken build take its user's working devices down with it.
+        if call_id.is_nil() {
+            self.meters.group_join(GroupJoinKind::Invalid);
+            return Err(fault::field_required("call_id"));
+        }
+        if conversation_id.is_nil() {
+            self.meters.group_join(GroupJoinKind::Invalid);
+            return Err(fault::field_required("conversation_id"));
+        }
+        if media_kind > MEDIA_VIDEO {
+            self.meters.group_join(GroupJoinKind::Invalid);
+            return Err(fault::validation("media_kind", "a call is audio or video"));
+        }
+        if sealed_offer.is_empty() {
+            self.meters.group_join(GroupJoinKind::Invalid);
+            return Err(fault::field_required("sealed_offer"));
+        }
+        if sealed_offer.len() > MAX_SEALED_LEN {
+            self.meters.group_join(GroupJoinKind::Invalid);
+            return Err(fault::field_too_long("sealed_offer", MAX_SEALED_LEN));
+        }
+
+        if let Err(error) = self.charge(caller, Opcode::CallSfuJoin).await {
+            self.meters.group_join(GroupJoinKind::RateLimited);
+            return Err(error);
+        }
+
+        // The call the id names, if it names one. Read before the gate so
+        // the gate can be asked about the conversation the call actually
+        // lives in — a retried id that names the wrong conversation is a
+        // client bug the mismatch below must answer, not something a
+        // membership question about a conversation the call was never
+        // minted for should shadow.
+        let existing = self.groups.get(call_id).await?;
+
+        // The gate, asked the membership question only: a group call's roster
+        // is the conversation's members, so the pairwise questions the 1:1
+        // gate asks have no group counterpart to ask — the caller is seated
+        // among the very people the block tables would be asked about, and
+        // the conversation's own existence as a call-able thing rides the
+        // same membership row. Fail closed, and answer NOT_FOUND so a
+        // stranger learns nothing about which conversations hold calls.
+        let gated_conversation = existing
+            .as_ref()
+            .map_or(conversation_id, |call| call.conversation_id);
+        if !self
+            .gate
+            .may_invite(gated_conversation, caller.account_id)
+            .await
+        {
+            self.meters.group_join(GroupJoinKind::Blocked);
+            return Err(fault::not_found("conversation"));
+        }
+
+        let mut call = existing.unwrap_or_else(|| GroupCall {
+            call_id,
+            conversation_id,
+            founder_id: caller.account_id,
+            participants: Vec::new(),
+            started_at: caller.now,
+            ended_at: None,
+        });
+        if call.conversation_id != conversation_id {
+            // The id is spent on a different conversation's call: the same
+            // IDEMPOTENCY_MISMATCH the invite path answers, for the same
+            // client bug.
+            self.meters.group_join(GroupJoinKind::Conflict);
+            return Err(fault::error(
+                codes::IDEMPOTENCY_MISMATCH,
+                "this call id was already used for a different group call",
+            ));
+        }
+
+        // The idempotent seat: this device is already in the roster, so the
+        // retry gets the roster it asked for and nobody is told anything.
+        if let Some(seat) = call
+            .participants
+            .iter()
+            .find(|participant| participant.device_id == caller.device_id)
+        {
+            if seat.sealed_offer == sealed_offer {
+                self.meters.group_join(GroupJoinKind::Duplicate);
+                return Ok((GroupJoinOutcome::Duplicate, call, Vec::new()));
+            }
+        }
+
+        // The seat this account already holds, if any. A new device of a
+        // seated account replaces the seat — the roster hears the departure
+        // of the old device and the arrival of the new one, in that order,
+        // because the departure is the fact the old device's clients act on
+        // and the arrival is the fact everyone else does.
+        let seat = call
+            .participants
+            .iter()
+            .position(|participant| participant.account_id == caller.account_id);
+
+        if call.participants.len() >= MAX_GROUP_PARTICIPANTS && seat.is_none() {
+            // The roster is full and the caller holds no seat a replacement
+            // would free. Nothing is written — a refusal must not consume a
+            // seat — and the caller is told with a validation error their
+            // screen can name.
+            self.meters.group_join(GroupJoinKind::Full);
+            return Err(fault::validation("participants", "the group call is full"));
+        }
+
+        let mut announcements = Vec::new();
+        if let Some(index) = seat {
+            let replaced = call.participants.remove(index);
+            self.meters.group_left();
+            announcements.push(group_leave_event(
+                &call,
+                replaced.account_id,
+                replaced.device_id,
+                call.participants.len() as u32,
+            ));
+        }
+
+        let participant = GroupParticipant {
+            account_id: caller.account_id,
+            device_id: caller.device_id,
+            joined_at: caller.now,
+            sealed_offer,
+        };
+        call.participants.push(participant.clone());
+        self.groups.put(&call).await?;
+        self.meters.group_join(GroupJoinKind::Joined);
+        announcements.push(group_join_event(&call, &participant));
+        Ok((GroupJoinOutcome::Joined, call, announcements))
+    }
+
+    async fn group_leave(&self, caller: &Caller, call_id: Id) -> Result<Option<CallStateEvent>> {
+        if call_id.is_nil() {
+            return Err(fault::field_required("call_id"));
+        }
+        self.charge(caller, Opcode::CallEnd).await?;
+        let mut call = self
+            .groups
+            .get(call_id)
+            .await?
+            .ok_or_else(|| fault::not_found("call"))?;
+        let Some(index) = call
+            .participants
+            .iter()
+            .position(|participant| participant.account_id == caller.account_id)
+        else {
+            // A stranger's leave, or a retried leave after a replacement:
+            // nothing changed, and the honest answer is the one that says so.
+            return Ok(None);
+        };
+        let leaving = call.participants.remove(index);
+        if call.participants.is_empty() {
+            call.ended_at = Some(caller.now);
+        }
+        self.groups.put(&call).await?;
+        self.groups.retire_if_empty(call_id).await?;
+        self.meters.group_left();
+        Ok(Some(group_leave_event(
+            &call,
+            leaving.account_id,
+            leaving.device_id,
+            call.participants.len() as u32,
+        )))
+    }
+
+    async fn group_relay(
+        &self,
+        caller: &Caller,
+        call_id: Id,
+        from_device: Id,
+        to_device: Id,
+        sealed: &[u8],
+    ) -> Result<GroupCall> {
+        if sealed.is_empty() {
+            return Err(fault::field_required("sealed_sdp"));
+        }
+        if sealed.len() > MAX_SEALED_LEN {
+            return Err(fault::field_too_long("sealed_sdp", MAX_SEALED_LEN));
+        }
+        self.charge(caller, Opcode::CallSdp).await?;
+        let call = self
+            .groups
+            .get(call_id)
+            .await?
+            .ok_or_else(|| fault::not_found("call"))?;
+        // The roster's own routing checks, the group twin of `route`: the
+        // sender must be a seated device of the caller's account, and the
+        // target a different seat. A frame that names nobody on the roster is
+        // refused the same way a stranger's relay is — permission denied, and
+        // never a hint about which devices are seated.
+        if call.account_of_device(from_device) != Some(caller.account_id) {
+            return Err(fault::permission_denied(
+                "only a seated device may relay through a group call",
+            ));
+        }
+        if to_device == from_device || call.account_of_device(to_device).is_none() {
+            return Err(fault::permission_denied(
+                "the relay target is not a seated device in this call",
+            ));
+        }
+        self.meters.group_relayed();
         Ok(call)
     }
 }

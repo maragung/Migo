@@ -3328,6 +3328,73 @@
           "optional": true,
           "id": 1,
           "doc": "Present when state is Ended."
+        },
+        {
+          "name": "conversation_id",
+          "type": "id",
+          "optional": true,
+          "id": 2,
+          "doc": "SFU events: the conversation the group call belongs to."
+        },
+        {
+          "name": "user_id",
+          "type": "id",
+          "optional": true,
+          "id": 3,
+          "doc": "SFU events: the participant the event names - who joined, or who left."
+        },
+        {
+          "name": "device_id",
+          "type": "id",
+          "optional": true,
+          "id": 4,
+          "doc": "SFU events: the device that participant joined with."
+        },
+        {
+          "name": "participant_count",
+          "type": "u32",
+          "optional": true,
+          "id": 5,
+          "doc": "SFU events: the call's size after the change."
+        },
+        {
+          "name": "sealed_offer",
+          "type": "bytes",
+          "optional": true,
+          "id": 6,
+          "doc": "SFU join announcements: the joiner's sealed media description, passed through unopened."
+        },
+        {
+          "name": "participants",
+          "type": "list<CallSfuParticipant>",
+          "optional": true,
+          "id": 7,
+          "doc": "SFU roster events: the full participant list, sent to a joiner's own topic."
+        }
+      ]
+    },
+    {
+      "name": "CallSfuParticipant",
+      "doc": "One participant in an SFU group call, as a joining client's roster line carries them. The sealed offer is the participant's own media description, sealed for the call's members; the server stores and re-serves it without ever opening it.",
+      "fields": [
+        {
+          "name": "user_id",
+          "type": "id",
+          "doc": "The participant's account."
+        },
+        {
+          "name": "device_id",
+          "type": "id",
+          "doc": "The device they joined with; relays target it."
+        },
+        {
+          "name": "joined_at",
+          "type": "timestamp"
+        },
+        {
+          "name": "sealed_offer",
+          "type": "bytes",
+          "doc": "E2E-sealed media description; the server never reads it."
         }
       ]
     },

@@ -995,14 +995,27 @@ impl Dispatcher for AppDispatcher {
             Opcode::CallAnswer => calls::handle_answer(context, frame, &self.calls).await,
             Opcode::CallDecline => calls::handle_decline(context, frame, &self.calls).await,
             Opcode::CallCancel => calls::handle_cancel(context, frame, &self.calls).await,
-            Opcode::CallEnd => calls::handle_end(context, frame, &self.calls).await,
+            Opcode::CallEnd => {
+                // The id may name a 1:1 call or a group call; the group
+                // handler answers the frame when it does, and the 1:1 handler
+                // takes it otherwise. NOT_FOUND from the group service is the
+                // handoff, not an error the caller sees.
+                match calls::handle_group_end(context, frame, &self.calls).await {
+                    Ok(true) => Ok(()),
+                    Ok(false) => calls::handle_end(context, frame, &self.calls).await,
+                    Err(error) if error.code() == migo_protocol::codes::NOT_FOUND => {
+                        calls::handle_end(context, frame, &self.calls).await
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             Opcode::CallSdp => calls::handle_sdp(context, frame, &self.calls).await,
             Opcode::CallIce => calls::handle_ice(context, frame, &self.calls).await,
             Opcode::CallRenegotiate => calls::handle_renegotiate(context, frame, &self.calls).await,
             Opcode::CallKeyUpdate => calls::handle_key_update(context, frame, &self.calls).await,
             Opcode::CallStats => calls::handle_stats(context, frame).await,
             Opcode::CallTurnFetch => calls::handle_turn_fetch(context, frame, &self.calls).await,
-            Opcode::CallSfuJoin => calls::refuse_sfu_join(),
+            Opcode::CallSfuJoin => calls::handle_sfu_join(context, frame, &self.calls).await,
 
             // Every other opcode is one this node speaks the transport for but does not route.
             other => Err(fault::feature_disabled(other.name())),
