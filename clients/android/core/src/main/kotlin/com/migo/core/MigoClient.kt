@@ -10,6 +10,10 @@ import com.migo.core.domain.DeviceDirectory
 import com.migo.core.domain.EconomyDomain
 import com.migo.core.domain.EventErrorHandler
 import com.migo.core.domain.GamesDomain
+import com.migo.core.domain.GroupCallJoinedEvent
+import com.migo.core.domain.GroupCallLeftEvent
+import com.migo.core.domain.GroupCallRoster
+import com.migo.core.domain.GroupCallsDomain
 import com.migo.core.domain.IncomingMessage
 import com.migo.core.domain.KeyStore
 import com.migo.core.domain.KeysDomain
@@ -370,6 +374,11 @@ class MigoClient private constructor(
     private val callStateListeners = ListenerSet<CallStateEvent>(Op.CALL_STATE_EVENT, options.onEventError)
     private val callSdpListeners = ListenerSet<CallSdp>(Op.CALL_SDP, options.onEventError)
     private val callIceListeners = ListenerSet<CallIce>(Op.CALL_ICE, options.onEventError)
+    private val groupCallRosterListeners = ListenerSet<GroupCallRoster>(Op.CALL_SFU_EVENT, options.onEventError)
+    private val groupCallJoinedListeners =
+        ListenerSet<GroupCallJoinedEvent>(Op.CALL_SFU_EVENT, options.onEventError)
+    private val groupCallLeftListeners =
+        ListenerSet<GroupCallLeftEvent>(Op.CALL_SFU_EVENT, options.onEventError)
 
     /** Conversation id to its member account ids and whether that set is known whole; backs [recipientDevices]. */
     private val members = HashMap<Id, MemberCache>()
@@ -476,6 +485,12 @@ class MigoClient private constructor(
     /** The call signaling plane of the live session: invite, answer, and the sealed relays. */
     val calls: CallsDomain get() = requireConnected().calls
 
+    /**
+     * The group-call plane of the live session: SFU joins, the roster snapshot, and the membership
+     * announcements a roster UI renders.
+     */
+    val groupCalls: GroupCallsDomain get() = requireConnected().groupCalls
+
     /** Friendship changes, bridged across reconnects like every application-facing stream. */
     fun onFriendEvent(listener: Listener<FriendEvent>): Subscription = friendListeners.add(listener)
 
@@ -541,6 +556,27 @@ class MigoClient private constructor(
 
     /** Registers a handler for batched ICE candidate relays addressed to this device. */
     fun onCallIce(listener: Listener<CallIce>): Subscription = callIceListeners.add(listener)
+
+    /**
+     * Registers a handler for group-call roster snapshots: the full participant list the server
+     * publishes to this account's own topic when a join is accepted. Bridged across reconnects.
+     */
+    fun onGroupCallRoster(listener: Listener<GroupCallRoster>): Subscription =
+        groupCallRosterListeners.add(listener)
+
+    /**
+     * Registers a handler for group-call join announcements, bridged across reconnects. A seat
+     * replacement -- the same account on a new device -- arrives as a departure then one of these.
+     */
+    fun onGroupCallJoined(listener: Listener<GroupCallJoinedEvent>): Subscription =
+        groupCallJoinedListeners.add(listener)
+
+    /**
+     * Registers a handler for group-call departure announcements, bridged across reconnects. A
+     * remaining count of zero is the retirement: the call no longer exists server-side.
+     */
+    fun onGroupCallLeft(listener: Listener<GroupCallLeftEvent>): Subscription =
+        groupCallLeftListeners.add(listener)
 
     // --- bringing the client online ---
 
@@ -1433,6 +1469,7 @@ class MigoClient private constructor(
             economy = EconomyDomain(rpc),
             media = MediaDomain(rpc, rest),
             calls = CallsDomain(rpc, deviceId, options.onEventError),
+            groupCalls = GroupCallsDomain(rpc, deviceId, options.onEventError),
         )
         session.startAll()
         bridge(session)
@@ -1464,6 +1501,9 @@ class MigoClient private constructor(
         session.calls.onCallState { callStateListeners.deliver(it) }
         session.calls.onSdp { callSdpListeners.deliver(it) }
         session.calls.onIce { callIceListeners.deliver(it) }
+        session.groupCalls.onRoster { groupCallRosterListeners.deliver(it) }
+        session.groupCalls.onParticipantJoined { groupCallJoinedListeners.deliver(it) }
+        session.groupCalls.onParticipantLeft { groupCallLeftListeners.deliver(it) }
         // Membership movement keeps the membership cache true, so the sender-key audience the
         // next send builds is the group as it stands, not the group as a list row previewed
         // it. The live subscription lives on this session's Rpc, so it goes with the session
@@ -1709,6 +1749,7 @@ private class Session(
     val economy: EconomyDomain,
     val media: MediaDomain,
     val calls: CallsDomain,
+    val groupCalls: GroupCallsDomain,
 ) {
     /** Registers every inbound handler. Called before the pump starts. */
     fun startAll() {
@@ -1721,6 +1762,7 @@ private class Session(
         games.start()
         social.start()
         calls.start()
+        groupCalls.start()
     }
 
     /** Unregisters them. The stateless domains have nothing to stop. */
@@ -1734,6 +1776,7 @@ private class Session(
         games.stop()
         social.stop()
         calls.stop()
+        groupCalls.stop()
     }
 }
 
