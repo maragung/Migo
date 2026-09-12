@@ -810,8 +810,8 @@ impl<T: Transport> Connection<'_, T> {
     /// reserved range.
     ///
     /// Section 146: the head of the reserved range is enforced as never-allocated. The
-    /// range 240-255 was set aside before v0.16.4 carved STORE_PURCHASE (239) and
-    /// ENTITLEMENTS (240) out of its head — the last numbers ever to be taken from it,
+    /// range 240-255 was set aside before v0.16.4 carved `STORE_PURCHASE` (239) and
+    /// `ENTITLEMENTS` (240) out of its head — the last numbers ever to be taken from it,
     /// per the written decision in section 145 — so the never-allocated span this gate
     /// polices is 241-255. A client speaking one is speaking a dialect this node promised
     /// not to know — and unlike a merely unknown opcode (a newer client, answered and
