@@ -3438,6 +3438,35 @@ impl FederationStore for MemoryStore {
         Ok(Some(peer.clone()))
     }
 
+    async fn transition_peer_status(
+        &self,
+        node_id: &str,
+        from: i16,
+        to: i16,
+    ) -> Result<Option<PeerRecord>> {
+        let mut s = self.state.write();
+        let Some(peer) = s.peers.get_mut(node_id) else {
+            return Ok(None);
+        };
+        // The precondition rides the write: a status that changed underneath the
+        // caller leaves the row exactly as the changer wrote it.
+        if peer.status == from {
+            peer.status = to;
+        }
+        Ok(Some(peer.clone()))
+    }
+
+    async fn pending_depth(&self, target_node: &str) -> Result<u64> {
+        let s = self.state.read();
+        let owed = s
+            .outbox_order
+            .iter()
+            .filter_map(|id| s.outbox.get(id))
+            .filter(|event| event.delivered_at.is_none() && event.target_node == target_node)
+            .count();
+        Ok(owed as u64)
+    }
+
     async fn touch_peer(&self, node_id: &str, seen_at: Timestamp) -> Result<Option<PeerRecord>> {
         let mut s = self.state.write();
         let Some(peer) = s.peers.get_mut(node_id) else {
