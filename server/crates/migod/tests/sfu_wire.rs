@@ -3,7 +3,7 @@
 //!
 //! The SFU this node serves is a *forwarding* one (brief section 166): the
 //! roster, its events, and sealed descriptions moved between seated devices.
-//! The five tests here drive real TCP sessions against a bound migod and pin
+//! The seven tests here drive real TCP sessions against a bound migod and pin
 //! the properties the service's own tests cannot see:
 //!
 //! * **The joiner hears their roster.** The reply frame is a TURN list (the
@@ -22,6 +22,14 @@
 //!   replacement, and the leave of a member who never joined, both find
 //!   the call alive with nothing to remove — the acknowledgement is owed
 //!   either way, and silence was the bug.
+//! * **A rotation reaches the other seat.** `CALL_KEY_UPDATE` names no
+//!   target, so the dispatcher asks the roster *who* and publishes to each
+//!   account once; a seated device that did not mint the frame hears the
+//!   material it cannot open, byte for byte (brief section 180).
+//! * **A sealed frame reaches the seat it names.** `CALL_SDP` on a group
+//!   call routes through the group store and lands on the named device's
+//!   account, while a device that holds no seat is refused rather than
+//!   silently dropped.
 //!
 //! Each test uses the reply rule as its clock: every frame waited for is one
 //! the server owes somebody, so the timeout is the assertion.
@@ -635,4 +643,139 @@ async fn a_seatless_leave_is_acknowledged_not_silent() {
         bystander_leave.ok,
         "a leave from a member with no seat is a success"
     );
+}
+
+/// Seats two accounts on one group call and returns the sessions, both
+/// subscribed to the conversation, past the point where both joins have been
+/// announced.
+///
+/// The app is borrowed rather than built here because it owns the listener
+/// the sessions are talking to: a caller that let it drop would be driving
+/// sockets into a closed server.
+///
+/// Waiting for the founder's announcement of the second arrival — and not
+/// merely for the second join's reply — is what makes the tests below
+/// deterministic: the roster the rotation is read against must already hold
+/// both seats when the frame is sent, and the announcement is the last fact
+/// the server produces for the second join.
+async fn a_group_call_with_two_seats(
+    app: &App,
+    call_id: migo_core::Id,
+    founder_name: &str,
+    second_name: &str,
+) -> (LiveSession, LiveSession, Grant, Grant) {
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let founder = registered_grant(app, founder_name).await;
+    let second = registered_grant(app, second_name).await;
+
+    let mut founder_session = LiveSession::connect(addr, &founder).await;
+    let mut second_session = LiveSession::connect(addr, &second).await;
+
+    let summary: migo_protocol::ConversationSummary = founder_session
+        .ask(
+            Opcode::ConversationCreate,
+            11,
+            &ConversationCreateRequest {
+                kind: ConversationKind::Group,
+                members: vec![second.account_id],
+                title: Some("The Sealed Group".to_string()),
+            },
+        )
+        .await;
+    let conversation_id = summary.conversation_id;
+
+    founder_session
+        .subscribe_conversation(conversation_id, 12)
+        .await;
+    second_session
+        .subscribe_conversation(conversation_id, 13)
+        .await;
+
+    let _: migo_protocol::CallTurnResponse = founder_session
+        .ask(Opcode::CallSfuJoin, 14, &sfu_join(call_id, conversation_id))
+        .await;
+    let _ = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
+
+    let _: migo_protocol::CallTurnResponse = second_session
+        .ask(Opcode::CallSfuJoin, 15, &sfu_join(call_id, conversation_id))
+        .await;
+    let _ = next_event_of(&mut second_session.stream, Opcode::CallSfuEvent).await;
+    let _ = next_event_of(&mut founder_session.stream, Opcode::CallSfuEvent).await;
+
+    (founder_session, second_session, founder, second)
+}
+
+#[tokio::test]
+async fn a_group_key_rotation_reaches_the_seat_that_did_not_mint_it() {
+    let app = build_app().await;
+    let call_id = migo_core::Id::from(0x5f05u128);
+    let (mut founder_session, mut second_session, _founder, _second) =
+        a_group_call_with_two_seats(&app, call_id, "sfurekeyfounder", "sfurekeysecond").await;
+
+    // The rotation the founder's device mints. It names no target — a
+    // rotation is every participant's business — and the material is sealed,
+    // so nothing in this frame is something the server can read.
+    let update = migo_protocol::CallKeyUpdate {
+        call_id,
+        epoch: 2,
+        sealed_key_material: b"sealed-epoch-two".to_vec(),
+    };
+    let ack: migo_protocol::Acknowledged = founder_session
+        .ask(Opcode::CallKeyUpdate, 16, &update)
+        .await;
+    assert!(ack.ok, "the rotation is acknowledged");
+
+    // The other seat hears it on its own user topic, unchanged: the server
+    // routed the frame by roster and never opened it.
+    let frame = next_event_of(&mut second_session.stream, Opcode::CallKeyUpdate).await;
+    let heard: migo_protocol::CallKeyUpdate =
+        from_frame(&frame).expect("the relayed rotation decodes");
+    assert_eq!(
+        heard, update,
+        "the rotation reaches the other seat byte for byte"
+    );
+}
+
+#[tokio::test]
+async fn a_group_relay_lands_on_the_named_seat_and_refuses_a_stranger() {
+    let app = build_app().await;
+    let call_id = migo_core::Id::from(0x5f06u128);
+    let (mut founder_session, mut second_session, founder, second) =
+        a_group_call_with_two_seats(&app, call_id, "sfurelayfounder", "sfurelaysecond").await;
+
+    // The addressed frame: the roster, not a pair, says whether `to_device`
+    // is somewhere real. The seat the join recorded is the connection's own
+    // device, which is what a client that has not re-joined since a
+    // replacement would still name.
+    let sdp = migo_protocol::CallSdp {
+        call_id,
+        from_device: founder.device_id,
+        to_device: second.device_id,
+        sealed_sdp: b"sealed-group-renegotiation".to_vec(),
+    };
+    let ack: migo_protocol::Acknowledged = founder_session.ask(Opcode::CallSdp, 17, &sdp).await;
+    assert!(ack.ok, "the relay is acknowledged");
+
+    let frame = next_event_of(&mut second_session.stream, Opcode::CallSdp).await;
+    let heard: migo_protocol::CallSdp = from_frame(&frame).expect("the relayed SDP decodes");
+    assert_eq!(
+        heard.sealed_sdp, sdp.sealed_sdp,
+        "the sealed description arrives unchanged"
+    );
+    assert_eq!(heard.from_device, founder.device_id);
+
+    // A device nobody seated is not a target on a group call either: the
+    // refusal is the same one a stranger's device gets on a 1:1 relay, and
+    // it is *not* `NOT_FOUND` — the id names a live call, and the frame was
+    // refused on the roster rather than handed to the other store.
+    let stranger = migo_protocol::CallSdp {
+        call_id,
+        from_device: founder.device_id,
+        to_device: migo_core::Id::from(0xdead_beefu128),
+        sealed_sdp: b"sealed-to-nobody".to_vec(),
+    };
+    let error = founder_session
+        .ask_error(Opcode::CallSdp, 18, &stranger)
+        .await;
+    assert_eq!(error.code, migo_protocol::codes::PERMISSION_DENIED);
 }

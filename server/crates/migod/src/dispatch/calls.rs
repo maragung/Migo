@@ -19,10 +19,10 @@
 //! | `CALL_DECLINE`     | `CallDecline`      | `decline`                 | `Acknowledged`      | state event → caller     |
 //! | `CALL_CANCEL`      | `CallCancel`       | `cancel`                  | `Acknowledged`      | state event → callee     |
 //! | `CALL_END`         | `CallEnd`          | `end` / `group_leave`     | `Acknowledged`      | state event → other party|
-//! | `CALL_SDP`         | `CallSdp`          | `relay_sdp`               | `Acknowledged`      | relayed frame → target   |
-//! | `CALL_ICE`         | `CallIce`          | `relay_ice`               | `Acknowledged`      | relayed frame → target   |
-//! | `CALL_RENEGOTIATE` | `CallRenegotiate`  | `relay_sdp` (projected)   | `Acknowledged`      | relayed frame → target   |
-//! | `CALL_KEY_UPDATE`  | `CallKeyUpdate`    | `call` (authorisation)    | `Acknowledged`      | key update → other party |
+//! | `CALL_SDP`         | `CallSdp`          | `relay_sdp` / `group_relay` | `Acknowledged`    | relayed frame → target   |
+//! | `CALL_ICE`         | `CallIce`          | `relay_ice` / `group_relay` | `Acknowledged`    | relayed frame → target   |
+//! | `CALL_RENEGOTIATE` | `CallRenegotiate`  | `relay_sdp` (projected) / `group_relay` | `Acknowledged` | relayed frame → target |
+//! | `CALL_KEY_UPDATE`  | `CallKeyUpdate`    | `group_key_audience` / `call` | `Acknowledged`  | key update → other party, or the whole roster |
 //! | `CALL_STATS`       | `CallStats`        | — (metrics only)          | `Acknowledged`      | —                        |
 //! | `CALL_TURN_FETCH`  | `CallTurnFetch`    | `turn_servers`            | `CallTurnResponse`  | —                        |
 //! | `CALL_SFU_JOIN`    | `CallInvite`       | `group_join`              | `CallTurnResponse`  | roster → joiner; join → conversation |
@@ -35,12 +35,17 @@
 //!
 //! # Who hears what
 //!
-//! Every call event has an audience of exactly one account — the one that
+//! Every 1:1 call event has an audience of exactly one account — the one that
 //! did not send the frame. The sender has the reply, and their own client
 //! knows what it just did; the other side has only the event. The handler
 //! works the audience out from the call row (via [`Callkeeper::call`], the
 //! service's own participant-checked read) rather than from the frame,
 //! because the frame names devices and calls, never topics.
+//!
+//! A group call has no "other side" to name: its audience is a roster, and
+//! which seats are on it is the group store's answer, not the frame's. The
+//! one frame that must reach all of them is `CALL_KEY_UPDATE`, and it reaches
+//! them one account at a time — see the handler for why.
 //!
 //! # The relay's target
 //!
@@ -49,6 +54,13 @@
 //! place that says whose device it is — so the handler loads the call after
 //! the relay succeeds (the relay is the authority on whether the target is
 //! legitimate) and maps device → account through it.
+//!
+//! A group call answers the same question against its roster, and answers it
+//! with the roster the *relay itself* returned: a group call and a 1:1 call
+//! share no store, so every addressed relay tries the group store first and
+//! reads the other's `NOT_FOUND` as the handoff between them. The device →
+//! account map is then the roster's, one lookup either way, and the rest of
+//! the handler is unchanged.
 //!
 //! # The sealed answer on `CALL_ANSWER`
 //!
@@ -210,13 +222,14 @@ pub(crate) async fn handle_end(
     Ok(())
 }
 
-/// Relays sealed SDP to the other device.
+/// Relays sealed SDP to the target device.
 ///
 /// One frame is both the request and the payload: the relay method validates
-/// the routing headers against the call row and returns the frame unchanged,
-/// and this handler publishes it — still unchanged, still sealed — to the
-/// account that owns the target device. `Critical` and uncoalesced: a lost
-/// answer is a call that never connects.
+/// the routing headers against the call row — or the roster, when the id names
+/// a group call — and returns the frame unchanged, and this handler publishes
+/// it, still unchanged and still sealed, to the account that owns the target
+/// device. `Critical` and uncoalesced: a lost answer is a call that never
+/// connects.
 pub(crate) async fn handle_sdp(
     ctx: &ClientContext<'_>,
     frame: &Frame,
@@ -224,7 +237,7 @@ pub(crate) async fn handle_sdp(
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallSdp = from_frame(frame).map_err(fault::from_wire)?;
-    relay_sdp(ctx, svc, &caller, request).await
+    relay_sdp(ctx, svc, &caller, Opcode::CallSdp, request).await
 }
 
 /// Relays a mid-call renegotiation. `CallRenegotiate` and `CallSdp` are the
@@ -241,6 +254,7 @@ pub(crate) async fn handle_renegotiate(
         ctx,
         svc,
         &caller,
+        Opcode::CallRenegotiate,
         CallSdp {
             call_id: request.call_id,
             from_device: request.from_device,
@@ -251,7 +265,61 @@ pub(crate) async fn handle_renegotiate(
     .await
 }
 
-/// Relays sealed SDP after the service has validated its routing.
+/// Tries the group-call relay, returning the roster when the id named one.
+///
+/// A group call and a 1:1 call live in distinct stores, so the group read's
+/// `NOT_FOUND` is the fact that this id belongs to the other kind — the
+/// handoff, not an error the caller sees. It is the same idiom the
+/// dispatcher's `CALL_END` arm uses, kept here in one place for the three
+/// addressed relays. Every other failure — a sender who is not seated, a
+/// target who is not on the roster, the rate limit — is the caller's answer
+/// and travels on unchanged.
+async fn try_group_relay(
+    svc: &SharedCallkeeper,
+    caller: &CallCaller,
+    opcode: Opcode,
+    call_id: migo_core::Id,
+    from_device: migo_core::Id,
+    to_device: migo_core::Id,
+    sealed: &[u8],
+) -> Result<Option<migo_calls::GroupCall>, Error> {
+    match svc
+        .group_relay(caller, opcode, call_id, from_device, to_device, sealed)
+        .await
+    {
+        Ok(group) => Ok(Some(group)),
+        Err(error) if error.code() == migo_protocol::codes::NOT_FOUND => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Publishes a relayed frame to the account whose device the relay targeted.
+///
+/// The group twin of the 1:1 relay's routing read: the service has already
+/// proved `to_device` is a seated device — the relay's own check is the
+/// authority on that — so the roster it handed back says which account's
+/// topic reaches it. A device absent from the roster would be a publication
+/// to nobody, which is why the miss is logged rather than invented into a
+/// target; within one frame it cannot happen, because the roster the relay
+/// validated is the roster this reads.
+fn publish_to_group_device<T: migo_protocol::Encode>(
+    ctx: &ClientContext<'_>,
+    group: &migo_calls::GroupCall,
+    to_device: migo_core::Id,
+    opcode: Opcode,
+    frame: &T,
+) {
+    match group.account_of_device(to_device) {
+        Some(account) => publish_to_user(ctx, account, opcode, frame),
+        None => tracing::warn!(
+            target_device = %to_device,
+            "group relay target is not on the roster; the frame reached nobody"
+        ),
+    }
+}
+
+/// Relays sealed SDP after the service has validated its routing, on
+/// whichever store the call id names.
 ///
 /// When the relayed frame is the callee's first answer — the moment the call
 /// turns `Connected` — the service hands back the `Connected` state event
@@ -259,12 +327,37 @@ pub(crate) async fn handle_renegotiate(
 /// side's screen has a `Connecting` state to retire, and the wire's promise
 /// is that the authoritative transitions arrive as events, not as side
 /// effects of frames a client must infer from.
+///
+/// A group call knows no such transition: a roster has no second party to
+/// turn `Connected`, its seats are connected by joining, and the join
+/// announcement is the event that said so. So the group path publishes the
+/// relayed frame and nothing else.
 async fn relay_sdp(
     ctx: &ClientContext<'_>,
     svc: &SharedCallkeeper,
     caller: &CallCaller,
+    opcode: Opcode,
     request: CallSdp,
 ) -> Result<(), Error> {
+    if let Some(group) = try_group_relay(
+        svc,
+        caller,
+        opcode,
+        request.call_id,
+        request.from_device,
+        request.to_device,
+        &request.sealed_sdp,
+    )
+    .await?
+    {
+        ctx.reply(&Acknowledged { ok: true })?;
+        // `CALL_SDP` and not `opcode`: a renegotiation is the same frame under
+        // another name, and the 1:1 path already projects it to `CALL_SDP` for
+        // the peer — the name the sender used is for the sender's own charge,
+        // not for what the target's client has to decode.
+        publish_to_group_device(ctx, &group, request.to_device, Opcode::CallSdp, &request);
+        return Ok(());
+    }
     let (relayed, connected) = svc.relay_sdp(caller, request).await?;
     let call = svc.call(caller, relayed.call_id).await?;
     ctx.reply(&Acknowledged { ok: true })?;
@@ -281,8 +374,9 @@ async fn relay_sdp(
 }
 
 /// Relays a batch of sealed ICE candidates to the other device. Same shape
-/// as the SDP relay; never coalesced, because candidates are additive facts
-/// and collapsing two batches would lose candidates.
+/// as the SDP relay — including the group store's turn at the id — never
+/// coalesced, because candidates are additive facts and collapsing two
+/// batches would lose candidates.
 pub(crate) async fn handle_ice(
     ctx: &ClientContext<'_>,
     frame: &Frame,
@@ -290,6 +384,21 @@ pub(crate) async fn handle_ice(
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallIce = from_frame(frame).map_err(fault::from_wire)?;
+    if let Some(group) = try_group_relay(
+        svc,
+        &caller,
+        Opcode::CallIce,
+        request.call_id,
+        request.from_device,
+        request.to_device,
+        &request.sealed_candidates,
+    )
+    .await?
+    {
+        ctx.reply(&Acknowledged { ok: true })?;
+        publish_to_group_device(ctx, &group, request.to_device, Opcode::CallIce, &request);
+        return Ok(());
+    }
     let relayed = svc.relay_ice(&caller, request).await?;
     let call = svc.call(&caller, relayed.call_id).await?;
     ctx.reply(&Acknowledged { ok: true })?;
@@ -303,10 +412,20 @@ pub(crate) async fn handle_ice(
 /// Re-keys a live call's media encryption.
 ///
 /// The payload is sealed key material the devices exchange; the server's
-/// whole role is to check that the sender is a party to the call (the
-/// service's own participant-checked read) and to hand the frame to the
-/// other party. There is no service method for this because there is no
-/// state to move — the epoch inside the ciphertext is the callers' business.
+/// whole role is to check that the sender is a party to the call and to hand
+/// the frame on. There is no service method for the *material* because there
+/// is no state to move — the epoch inside the ciphertext is the callers'
+/// business, and this node cannot open it.
+///
+/// Who is a party is the one thing that differs by kind. A 1:1 call has a
+/// second party, so the frame goes to the one account that is not the sender.
+/// A group call has a roster, every seat of which holds the same frame key
+/// and must rotate with it (section 166), and the frame names no target to
+/// pick between them — so the audience is the whole roster, read from the
+/// group store, and each account is published to once. The sender's own
+/// account is in that audience: its other seated devices hold the key too.
+/// The publication excludes the originating connection, so the sender does
+/// not hear its own rotation back.
 pub(crate) async fn handle_key_update(
     ctx: &ClientContext<'_>,
     frame: &Frame,
@@ -314,6 +433,22 @@ pub(crate) async fn handle_key_update(
 ) -> Result<(), Error> {
     let caller = caller_of(ctx);
     let request: CallKeyUpdate = from_frame(frame).map_err(fault::from_wire)?;
+    // The group store first, for the reason the addressed relays try it
+    // first: the id names one kind of call and the other store's `NOT_FOUND`
+    // is how this handler learns which. A group rotation reaches the roster;
+    // a seatless caller — or an id that names no group call at all — falls
+    // through to the 1:1 read, which answers for its own store.
+    match svc.group_key_audience(&caller, request.call_id).await {
+        Ok(audience) => {
+            ctx.reply(&Acknowledged { ok: true })?;
+            for account in audience {
+                publish_to_user(ctx, account, Opcode::CallKeyUpdate, &request);
+            }
+            return Ok(());
+        }
+        Err(error) if error.code() == migo_protocol::codes::NOT_FOUND => {}
+        Err(error) => return Err(error),
+    }
     let call = svc.call(&caller, request.call_id).await?;
     ctx.reply(&Acknowledged { ok: true })?;
     // A key update for a call that is over reaches nobody who cares, and

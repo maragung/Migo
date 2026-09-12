@@ -206,6 +206,7 @@ pub(crate) struct Meters {
     group_join: Vec<Arc<Counter>>,
     group_left: Arc<Counter>,
     group_relayed: Arc<Counter>,
+    group_rekeyed: Arc<Counter>,
 }
 
 impl Meters {
@@ -290,6 +291,11 @@ impl Meters {
                 "Sealed payloads relayed between group-call devices.",
                 &[],
             ),
+            group_rekeyed: registry.counter(
+                "migo_calls_group_rekeyed_total",
+                "Group-call frame-key rotations this node distributed to a roster.",
+                &[],
+            ),
         }
     }
 
@@ -343,6 +349,10 @@ impl Meters {
 
     pub(crate) fn group_relayed(&self) {
         self.group_relayed.inc();
+    }
+
+    pub(crate) fn group_rekeyed(&self) {
+        self.group_rekeyed.inc();
     }
 }
 
