@@ -1598,6 +1598,10 @@ impl RoomStore for MemoryStore {
             created_at: new.created_at,
             updated_at: new.created_at,
             archived_at: None,
+            // Zero, the revision of the birth state: the owner's seat is the
+            // room's first fact and nothing was ever published for it, so the
+            // first number a delta can carry is the first change after creation.
+            revision: 0,
         };
         // The room, its conversation, and the owner's membership are one unit. A
         // room without a conversation is unusable and a room without an owner is
@@ -1673,6 +1677,14 @@ impl RoomStore for MemoryStore {
             .cloned())
     }
 
+    async fn room_revision(&self, room_id: Id) -> Result<i64> {
+        let s = self.state.read();
+        s.rooms
+            .get(&room_id)
+            .map(|room| room.revision)
+            .ok_or_else(|| fault::not_found("room"))
+    }
+
     async fn update_room(
         &self,
         room_id: Id,
@@ -1704,6 +1716,13 @@ impl RoomStore for MemoryStore {
             room.join_policy = policy;
         }
         room.updated_at = at;
+        // Advanced unconditionally, mirroring the Postgres statement: every
+        // caller has already dropped a request that changed nothing, so
+        // reaching this write means the room's observable state moved —
+        // including a rename or a policy change, where no frame follows and
+        // the revision advancing is the only record that a held summary is
+        // now stale (brief section 156).
+        room.revision += 1;
         Ok(room.clone())
     }
 
@@ -1713,6 +1732,10 @@ impl RoomStore for MemoryStore {
             Some(room) if room.archived_at.is_none() => {
                 room.archived_at = Some(at);
                 room.updated_at = at;
+                // The room's visibility in every listing moved, so the
+                // revision moves with it — but only on the first archival,
+                // which is the only one that writes (brief section 156).
+                room.revision += 1;
                 Some(room.conversation_id)
             }
             _ => None,
@@ -1799,6 +1822,9 @@ impl RoomStore for MemoryStore {
             let count = s.active_room_members(stored.room_id) as i32;
             if let Some(room) = s.rooms.get_mut(&stored.room_id) {
                 room.member_count = count;
+                // The seat appeared, so the roster every client holds is one
+                // behind (brief section 156).
+                room.revision += 1;
             }
             let members = s.conversation_members.entry(conversation_id).or_default();
             if let Some(existing) = members.iter_mut().find(|m| m.account_id == account_id) {
@@ -1824,10 +1850,11 @@ impl RoomStore for MemoryStore {
         Ok(stored)
     }
 
-    async fn leave_room(&self, room_id: Id, account_id: Id, at: Timestamp) -> Result<()> {
+    async fn leave_room(&self, room_id: Id, account_id: Id, at: Timestamp) -> Result<i64> {
         let mut s = self.state.write();
         let Some(conversation_id) = s.rooms.get(&room_id).map(|room| room.conversation_id) else {
-            return Ok(());
+            // Nothing to version and nothing to announce (brief section 156).
+            return Ok(0);
         };
         let left = s
             .room_members
@@ -1838,18 +1865,28 @@ impl RoomStore for MemoryStore {
                 m.left_at = Some(at);
             })
             .is_some();
-        if left {
-            let count = s.active_room_members(room_id) as i32;
-            if let Some(room) = s.rooms.get_mut(&room_id) {
+        if !left {
+            // No seat to empty, so nothing moved and the revision the room
+            // already had is the honest answer.
+            return Ok(s.rooms.get(&room_id).map_or(0, |room| room.revision));
+        }
+        let count = s.active_room_members(room_id) as i32;
+        let revision = s
+            .rooms
+            .get_mut(&room_id)
+            .map(|room| {
                 room.member_count = count;
-            }
-            if let Some(members) = s.conversation_members.get_mut(&conversation_id) {
-                if let Some(member) = members.iter_mut().find(|m| m.account_id == account_id) {
-                    member.left_at = Some(at);
-                }
+                // The seat emptied, so the roster moved (brief section 156).
+                room.revision += 1;
+                room.revision
+            })
+            .unwrap_or(0);
+        if let Some(members) = s.conversation_members.get_mut(&conversation_id) {
+            if let Some(member) = members.iter_mut().find(|m| m.account_id == account_id) {
+                member.left_at = Some(at);
             }
         }
-        Ok(())
+        Ok(revision)
     }
 
     async fn room_member(&self, room_id: Id, account_id: Id) -> Result<Option<RoomMember>> {
@@ -1913,7 +1950,7 @@ impl RoomStore for MemoryStore {
         account_id: Id,
         role: RoomRole,
         _at: Timestamp,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let mut s = self.state.write();
         let member = s
             .room_members
@@ -1921,7 +1958,17 @@ impl RoomStore for MemoryStore {
             .and_then(|rows| rows.iter_mut().find(|m| m.account_id == account_id))
             .ok_or_else(|| fault::not_found("room member"))?;
         member.role = role;
-        Ok(())
+        // The role is on the roster, so a role that moved is a change a
+        // snapshot can observe (brief section 156).
+        let revision = s
+            .rooms
+            .get_mut(&room_id)
+            .map(|room| {
+                room.revision += 1;
+                room.revision
+            })
+            .ok_or_else(|| fault::not_found("room"))?;
+        Ok(revision)
     }
 
     async fn transfer_room_ownership(
@@ -1930,7 +1977,7 @@ impl RoomStore for MemoryStore {
         from: Id,
         to: Id,
         at: Timestamp,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let mut s = self.state.write();
         let room = s
             .rooms
@@ -1941,7 +1988,9 @@ impl RoomStore for MemoryStore {
             return Err(fault::conflict("not the owner of the room"));
         }
         if from == to {
-            return Ok(());
+            // Already the owner: nothing moved, so the revision the room
+            // already had is the honest answer (brief section 156).
+            return Ok(room.revision);
         }
         let rows = s
             .room_members
@@ -1964,11 +2013,20 @@ impl RoomStore for MemoryStore {
                 member.role = RoomRole::Manager;
             }
         }
-        if let Some(room) = s.rooms.get_mut(&room_id) {
-            room.owner_id = to;
-            room.updated_at = at;
-        }
-        Ok(())
+        let revision = s
+            .rooms
+            .get_mut(&room_id)
+            .map(|room| {
+                room.owner_id = to;
+                room.updated_at = at;
+                // Both roles and the owner column are on snapshots a client can
+                // hold, so the revision advances with the write that moved them
+                // (brief section 156).
+                room.revision += 1;
+                room.revision
+            })
+            .ok_or_else(|| fault::not_found("room"))?;
+        Ok(revision)
     }
 
     async fn set_room_permissions(
@@ -1998,7 +2056,7 @@ impl RoomStore for MemoryStore {
         banned_until: Option<Timestamp>,
         reason: Option<String>,
         at: Timestamp,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let mut s = self.state.write();
         let Some(conversation_id) = s.rooms.get(&room_id).map(|room| room.conversation_id) else {
             return Err(fault::not_found("room"));
@@ -2015,30 +2073,53 @@ impl RoomStore for MemoryStore {
         if banned && member.left_at.is_none() {
             member.left_at = Some(at);
         }
+        let revision;
         if banned {
             // A ban that leaves the conversation membership in place would leave
             // the banned account still receiving the room's messages.
             let count = s.active_room_members(room_id) as i32;
-            if let Some(room) = s.rooms.get_mut(&room_id) {
-                room.member_count = count;
-            }
+            revision = s
+                .rooms
+                .get_mut(&room_id)
+                .map(|room| {
+                    room.member_count = count;
+                    // The ban stamps a departure, so the roster moved even
+                    // though the write names a sanction column (brief
+                    // section 156). A mute or an unban does not reach here:
+                    // neither is on any wire surface a client can hold.
+                    room.revision += 1;
+                    room.revision
+                })
+                .ok_or_else(|| fault::not_found("room"))?;
             if let Some(members) = s.conversation_members.get_mut(&conversation_id) {
                 if let Some(member) = members.iter_mut().find(|m| m.account_id == account_id) {
                     member.left_at = Some(at);
                 }
             }
+        } else {
+            revision = s
+                .rooms
+                .get(&room_id)
+                .map(|room| room.revision)
+                .ok_or_else(|| fault::not_found("room"))?;
         }
-        Ok(())
+        Ok(revision)
     }
 
     async fn recount_room(&self, room_id: Id) -> Result<i32> {
         let mut s = self.state.write();
-        if !s.rooms.contains_key(&room_id) {
-            return Err(fault::not_found("room"));
-        }
         let count = s.active_room_members(room_id) as i32;
-        if let Some(room) = s.rooms.get_mut(&room_id) {
+        let Some(room) = s.rooms.get_mut(&room_id) else {
+            return Err(fault::not_found("room"));
+        };
+        if count != room.member_count {
             room.member_count = count;
+            // A recount that corrected the cached count changed something a
+            // snapshot can observe, so the revision answers for it; one that
+            // confirmed the number changed nothing and must not send every
+            // client re-reading a roster identical to the one it holds
+            // (brief section 156).
+            room.revision += 1;
         }
         Ok(count)
     }

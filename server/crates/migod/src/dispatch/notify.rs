@@ -111,7 +111,15 @@ pub(crate) async fn handle_list(
     } else {
         None
     };
-    ctx.reply(&InboxResponse { items, next_cursor })
+    ctx.reply(&InboxResponse {
+        items,
+        next_cursor,
+        // The badge's number, fresh on every page (brief section 156): a client
+        // paging the inbox must not derive the badge from the rows a page
+        // happens to hold, or the badge would swell and shrink as the user
+        // scrolls.
+        unread: Some(inbox.unread),
+    })
 }
 
 /// Records the calling device's push registration.

@@ -1005,6 +1005,14 @@ pub struct Room {
     pub updated_at: Timestamp,
     /// Archival time.
     pub archived_at: Option<Timestamp>,
+    /// The room's state revision (brief section 156): advanced by the store on
+    /// every write a snapshot can observe — a membership movement, a role or
+    /// ownership change, a settings write. It is the number that links a
+    /// published delta to the snapshot a client holds, so a client that missed
+    /// frames can tell and re-read rather than re-fetch on every doubt. It does
+    /// not advance on changes no wire surface can see, such as a mute or a
+    /// per-member permission override.
+    pub revision: i64,
 }
 
 impl Room {
@@ -1091,7 +1099,7 @@ pub struct NewRoom {
 }
 
 /// Room membership, including the moderation state that attaches to it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomMember {
     /// Room.
     pub room_id: Id,

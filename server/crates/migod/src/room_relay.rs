@@ -681,6 +681,7 @@ mod tests {
             role: None,
             member_count: Some(2),
             change: None,
+            revision: None,
         };
         relay
             .forward(

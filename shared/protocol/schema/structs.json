@@ -1071,6 +1071,13 @@
           "optional": true,
           "id": 10,
           "doc": "The room's capacity ceiling; join is refused once member_count reaches it."
+        },
+        {
+          "name": "revision",
+          "type": "u64",
+          "optional": true,
+          "id": 11,
+          "doc": "The room's state revision this summary was read at (section 156). A summary is a snapshot; comparing its revision with the one a held roster or state cache was built at says whether the cache is stale without re-reading the room."
         }
       ]
     },
@@ -1206,6 +1213,13 @@
           "optional": true,
           "id": 3,
           "doc": "Why the membership changed. Absent on legacy join/leave, where `joined` says it."
+        },
+        {
+          "name": "revision",
+          "type": "u64",
+          "optional": true,
+          "id": 4,
+          "doc": "The room's state revision this change advanced it to (section 156). Absent on the presence edges (Connected/Disconnected/Reconnected), which move no state a roster can observe."
         }
       ]
     },
@@ -1247,6 +1261,13 @@
           "optional": true,
           "id": 5,
           "doc": "The room's capacity ceiling, sent when it changes."
+        },
+        {
+          "name": "revision",
+          "type": "u64",
+          "optional": true,
+          "id": 6,
+          "doc": "The room's state revision this change advanced it to (section 156). Absent on the online-count frames the gateway's own tally publishes, which move no stored state."
         }
       ]
     },
@@ -1632,6 +1653,13 @@
           "type": "string",
           "optional": true,
           "id": 1
+        },
+        {
+          "name": "unread",
+          "type": "u32",
+          "optional": true,
+          "id": 2,
+          "doc": "The unread count across the whole inbox, not just this page (section 156's counter): fresh with every page, so a badge never counts the rows it happens to hold."
         }
       ]
     },
@@ -2650,6 +2678,13 @@
         {
           "name": "members",
           "type": "list<RosterEntry>"
+        },
+        {
+          "name": "revision",
+          "type": "u64",
+          "optional": true,
+          "id": 1,
+          "doc": "The room's state revision this page was read at (section 156). A member or state event that arrives carrying a revision beyond it means a delta was missed and the roster should be re-read."
         }
       ]
     },
