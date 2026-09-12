@@ -694,9 +694,10 @@ mod tests {
         let new_epoch = g.sender.rotate(2, &mut g.random);
         assert_eq!(new_epoch, 2);
         assert_eq!(g.sender.chain_id(), 2);
-        // The receiver still holds the old chain, so the new one is reported as
-        // unknown rather than mis-decrypted — the caller fetches the new
-        // distribution and retries.
+        // A member who joins the new chain receives its distribution at the
+        // position it starts from, which is before the first message is sealed.
+        // Once that distribution lands, the messages flow again.
+        let mut caught_up = ReceiverKeyState::accept(&g.sender.distribution(&g.sender_identity));
         let message = g
             .sender
             .encrypt(&g.sender_identity, GROUP, b"after the change")
@@ -705,8 +706,6 @@ mod tests {
             g.receiver.decrypt(GROUP, &message),
             Err(CryptoError::NoSession)
         );
-        // Once the new distribution lands, the messages flow again.
-        let mut caught_up = ReceiverKeyState::accept(&g.sender.distribution(&g.sender_identity));
         assert_eq!(
             caught_up.decrypt(GROUP, &message).expect("decrypts"),
             b"after the change"
