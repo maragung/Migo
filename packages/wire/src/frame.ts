@@ -12,6 +12,9 @@
  * [8]u8   span_id          only when TRACED
  * varint  fragment_index   only when FRAGMENT
  * varint  fragment_total   only when FRAGMENT
+ * varint  frame_seq        only when METADATA
+ * varint  sent_at_delta    only when METADATA
+ * varint  payload_len      only when METADATA; zero means not stated
  * ...     payload          the remainder of the frame
  * ```
  *
@@ -66,6 +69,24 @@ export interface Fragment {
   readonly total: number;
 }
 
+/**
+ * Frame-level metadata (section 141), present only when the `METADATA` flag is set.
+ *
+ * `payloadLen` is the exception to the frame's no-length rule: it is present only when
+ * the frame must state its own length. The block is **always three varints** — a
+ * trailing optional varint cannot be decoded, because nothing on the wire would
+ * distinguish "the block ended here" from "the block continues". Presence is carried by
+ * the value instead: a zero decodes to `null`, meaning "not stated".
+ */
+export interface MetadataBlock {
+  /** Per-direction, per-session frame sequence number. */
+  readonly frameSeq: number;
+  /** Milliseconds since the direction's anchor: server_time for server-to-client, HELLO time for client-to-server. */
+  readonly sentAtDelta: number;
+  /** Present when the frame must state its own payload length; `null` when not stated. */
+  readonly payloadLen: number | null;
+}
+
 /** The parsed header of an MWP/1 frame. */
 export interface FrameHeader {
   /** Protocol version byte as it appeared on the wire. */
@@ -80,6 +101,8 @@ export interface FrameHeader {
   readonly trace: TraceContext | null;
   /** Present when the `FRAGMENT` flag is set. */
   readonly fragment: Fragment | null;
+  /** Present when the `METADATA` flag is set. */
+  readonly metadata: MetadataBlock | null;
 }
 
 /** A complete frame: header plus payload bytes, still compressed if `COMPRESSED` is set. */
@@ -88,7 +111,7 @@ export interface Frame {
   readonly payload: Uint8Array;
 }
 
-/** A minimal header: current version, no flags, no trace, no fragment. */
+/** A minimal header: current version, no flags, no optional blocks. */
 export function frameHeader(opcode: number, correlation = 0): FrameHeader {
   return {
     version: PROTOCOL_VERSION,
@@ -97,6 +120,7 @@ export function frameHeader(opcode: number, correlation = 0): FrameHeader {
     correlation,
     trace: null,
     fragment: null,
+    metadata: null,
   };
 }
 
@@ -122,6 +146,12 @@ export function headerEncodedLen(header: FrameHeader): number {
   if (header.fragment !== null) {
     len += varint.encodedLen(header.fragment.index) + varint.encodedLen(header.fragment.total);
   }
+  if (header.metadata !== null) {
+    len +=
+      varint.encodedLen(header.metadata.frameSeq) + varint.encodedLen(header.metadata.sentAtDelta);
+    // Always three varints; a zero means "not stated".
+    len += varint.encodedLen(header.metadata.payloadLen ?? 0);
+  }
   return len;
 }
 
@@ -130,12 +160,14 @@ export function headerEncodedLen(header: FrameHeader): number {
  *
  * The flag bits and the optional blocks are written from the same source of truth — the
  * nullable fields — so a header can never claim `TRACED` without carrying a trace. A
- * caller-supplied `TRACED` bit with no trace is therefore corrected, not honoured.
+ * caller-supplied `TRACED` bit with no trace is therefore corrected, not honoured; the
+ * same holds for `FRAGMENT` and `METADATA`.
  */
 export function encodeHeader(header: FrameHeader, out: number[]): void {
-  let bits = header.flags & ~(flags.TRACED | flags.FRAGMENT);
+  let bits = header.flags & ~(flags.TRACED | flags.FRAGMENT | flags.METADATA);
   if (header.trace !== null) bits |= flags.TRACED;
   if (header.fragment !== null) bits |= flags.FRAGMENT;
+  if (header.metadata !== null) bits |= flags.METADATA;
   if ((bits & flags.RESERVED_MASK) !== 0) {
     throw WireError.reservedFlags(bits & flags.RESERVED_MASK);
   }
@@ -155,6 +187,12 @@ export function encodeHeader(header: FrameHeader, out: number[]): void {
     varint.encodeU64(header.fragment.index, out);
     varint.encodeU64(header.fragment.total, out);
   }
+  if (header.metadata !== null) {
+    varint.encodeU64(header.metadata.frameSeq, out);
+    varint.encodeU64(header.metadata.sentAtDelta, out);
+    // Always three varints; a zero payload_len means "not stated".
+    varint.encodeU64(header.metadata.payloadLen ?? 0, out);
+  }
 }
 
 /**
@@ -162,7 +200,8 @@ export function encodeHeader(header: FrameHeader, out: number[]): void {
  * payload begins.
  *
  * Rejects, in this order: a short frame, an unsupported version, reserved flag bits, a
- * truncated trace block, and an impossible fragment pair. Reserved bits are an error and
+ * truncated trace block, an impossible fragment pair, and a truncated or over-wide
+ * metadata block. Reserved bits are an error and
  * not something to ignore — a peer that sets them is speaking a dialect we do not know,
  * and silently discarding the bits would let a future extension be stripped by an old
  * node that had no idea it was doing so.
@@ -214,8 +253,31 @@ export function decodeHeader(input: Uint8Array): { header: FrameHeader; offset: 
     validateFragment(fragment);
   }
 
+  let metadata: MetadataBlock | null = null;
+  if ((bits & flags.METADATA) !== 0) {
+    // Each varint is narrowed the moment it is read: an over-wide frame_seq must fail
+    // with FieldOverflow even when the block is also truncated after it, not fall
+    // through to UnexpectedEnd on the next field.
+    const seqRaw = varint.scan(input, offset);
+    const frameSeq = narrow(seqRaw, 'frame_seq');
+    offset += seqRaw.used;
+    const deltaRaw = varint.scan(input, offset);
+    const sentAtDelta = narrow(deltaRaw, 'sent_at_delta');
+    offset += deltaRaw.used;
+    const lenRaw = varint.scan(input, offset);
+    const len = narrow(lenRaw, 'payload_len');
+    offset += lenRaw.used;
+    metadata = {
+      frameSeq,
+      sentAtDelta,
+      // The block is always three varints; a zero payload_len means "not
+      // stated" and normalises to null.
+      payloadLen: len === 0 ? null : len,
+    };
+  }
+
   return {
-    header: { version, flags: bits, opcode, correlation, trace, fragment },
+    header: { version, flags: bits, opcode, correlation, trace, fragment, metadata },
     offset,
   };
 }

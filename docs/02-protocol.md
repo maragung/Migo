@@ -59,16 +59,16 @@ Minimum header: **4 bytes** (`version`, `flags`, 1-byte opcode, 1-byte correlati
 
 ### Flags
 
-| Bit    | Name           | Meaning                                                                                  |
-| ------ | -------------- | ---------------------------------------------------------------------------------------- |
-| `0x01` | `COMPRESSED`   | Payload is `deflate-raw`. Only set when it actually shrinks (§6)                         |
-| `0x02` | `TRACED`       | 16-byte trace id + 8-byte span id precede the payload                                    |
-| `0x04` | `BATCH`        | Payload is `varint count` then `count × (varint len, sub-frame)` (§7)                    |
-| `0x08` | `ERROR`        | Payload is `Error` instead of the opcode's normal response type                          |
-| `0x10` | `ACK_REQUIRED` | Receiver must acknowledge by watermark (§8)                                              |
-| `0x20` | `FRAGMENT`     | Followed by `varint index`, `varint total`; payload is a slice of a larger logical frame |
-| `0x40` | _reserved_     | Must be 0; receivers reject unknown flag bits                                            |
-| `0x80` | `FLAGS_EXT`    | A second flags byte follows (reserved for MWP/2)                                         |
+| Bit    | Name           | Meaning                                                                                                  |
+| ------ | -------------- | -------------------------------------------------------------------------------------------------------- |
+| `0x01` | `COMPRESSED`   | Payload is `deflate-raw`. Only set when it actually shrinks (§6)                                         |
+| `0x02` | `TRACED`       | 16-byte trace id + 8-byte span id precede the payload                                                    |
+| `0x04` | `BATCH`        | Payload is `varint count` then `count × (varint len, sub-frame)` (§7)                                    |
+| `0x08` | `ERROR`        | Payload is `Error` instead of the opcode's normal response type                                          |
+| `0x10` | `ACK_REQUIRED` | Receiver must acknowledge by watermark (§8)                                                              |
+| `0x20` | `FRAGMENT`     | Followed by `varint index`, `varint total`; payload is a slice of a larger logical frame                 |
+| `0x40` | `METADATA`     | Followed by `varint frame_seq`, `varint sent_at_delta`, `varint payload_len` (zero = not stated); see §8 |
+| `0x80` | `FLAGS_EXT`    | A second flags byte follows (reserved for MWP/2)                                                         |
 
 Rejecting unknown flag bits is intentional: silently ignoring them is how you ship a
 protocol you can never extend safely.
@@ -189,6 +189,19 @@ client sends `ACK { watermark }`. Watermarks are cumulative, so one ACK retires 
 frames (a few bytes for hundreds of messages). On resume, everything above the last
 acknowledged watermark is replayed — in order, with the original IDs, so client-side
 dedup makes replay harmless.
+
+The `METADATA` flag (§3) carries the per-frame sequence number the watermark refers to,
+plus a send timestamp, in a block after trace and fragment: `varint frame_seq` (rising by
+one per frame, per direction, per session), `varint sent_at_delta` (milliseconds since
+the direction's anchor — the server's `server_time` for server-to-client, the HELLO time
+for client-to-server), and `varint payload_len`. The block is **always three varints** —
+a trailing optional varint cannot be decoded, because nothing on the wire would
+distinguish "the block ended here" from "the block continues" — so `payload_len` is
+always written and a value of zero means "not stated" (used only when the frame must
+state its own length, e.g. in a redelivery buffer or forwarded without a transport
+boundary). Both sides must negotiate the feature before either sends one, and
+Droppable-class frames should not carry one — a frame that may be lost does not need
+tracking.
 
 ## 9. Errors
 

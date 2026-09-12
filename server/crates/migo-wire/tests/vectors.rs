@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use bytes::Bytes;
 use migo_core::{Id, Timestamp};
 use migo_wire::error::WireError;
-use migo_wire::frame::{Fragment, FrameHeader, TraceContext};
+use migo_wire::frame::{Fragment, FrameHeader, MetadataBlock, TraceContext};
 use migo_wire::{varint, Frame, Reader, Writer};
 use serde_json::Value;
 
@@ -236,6 +236,17 @@ fn header_from_case(frame: &Value) -> FrameHeader {
             index: small(fragment, "index"),
             total: small(fragment, "total"),
         });
+    let metadata = frame
+        .get("metadata")
+        .filter(|v| !v.is_null())
+        .map(|meta| MetadataBlock {
+            frame_seq: small(meta, "frame_seq"),
+            sent_at_delta: small(meta, "sent_at_delta"),
+            payload_len: meta
+                .get("payload_len")
+                .filter(|v| !v.is_null())
+                .map(|_| small(meta, "payload_len")),
+        });
 
     FrameHeader {
         version: small(frame, "version") as u8,
@@ -244,6 +255,7 @@ fn header_from_case(frame: &Value) -> FrameHeader {
         correlation: small(frame, "correlation"),
         trace,
         fragment,
+        metadata,
     }
 }
 
