@@ -1648,7 +1648,43 @@ fn subscribe_response_in(frames: &[Frame]) -> SubscribeResponse {
         .find(|frame| {
             frame.header.opcode == Opcode::Subscribe.to_wire() && !frame.header.is_error()
         })
-        .expect("a SUBSCRIBE request must be answered with a SUBSCRIBE response");
+        .unwrap_or_else(|| {
+            // Naming what the session answered instead of only that it did not
+            // answer: an error reply and a silent close look identical to the
+            // old message, and telling them apart by hand costs a CI round.
+            let answered: Vec<String> = frames
+                .iter()
+                .map(|frame| {
+                    if frame.header.is_error() {
+                        match from_frame::<ErrorMessage>(frame) {
+                            Ok(error) => format!(
+                                "error {} [{}] ({}), payload {} bytes",
+                                error.code,
+                                error.symbol,
+                                error.message.as_deref().unwrap_or("no detail"),
+                                frame.payload.len()
+                            ),
+                            Err(error) => format!("error frame that does not decode: {error}"),
+                        }
+                    } else {
+                        format!(
+                            "opcode {} ({}), error flag {}, payload {} bytes",
+                            frame.header.opcode,
+                            Opcode::from_wire(frame.header.opcode)
+                                .map_or("unknown".to_string(), |op| format!("{op:?}")),
+                            frame.header.is_error(),
+                            frame.payload.len()
+                        )
+                    }
+                })
+                .collect();
+            let what = if answered.is_empty() {
+                "nothing (the session closed or stayed silent)".to_string()
+            } else {
+                answered.join("; ")
+            };
+            panic!("a SUBSCRIBE request must be answered with a SUBSCRIBE response, but the session answered: {what}");
+        });
     from_frame::<SubscribeResponse>(frame).expect("the SUBSCRIBE response must decode")
 }
 
@@ -2047,6 +2083,115 @@ async fn a_subscribe_keeps_only_the_topics_that_belong_to_the_caller() {
         rejected.contains(&a_strangers_conversation),
         "a conversation that is not the caller's is rejected"
     );
+}
+
+#[test]
+fn a_compressed_subscribe_request_survives_the_round_trip() {
+    // The surplus test's request is the one payload in this suite that crosses a
+    // decoder chunk boundary: 513 topics of 16-byte ids are ~10 KB of plain
+    // bytes, which `to_frame`'s compression policy definitely compresses. This
+    // is that round trip in isolation — encode to wire bytes, decode back, same
+    // topics — so a defect in the codec and a refusal in the session handling
+    // cannot hide behind each other: if the surplus test fails while this one
+    // passes, the request decode is innocent.
+    let topics: Vec<Topic> = (0_u32..513)
+        .map(|i| Topic {
+            kind: TopicKind::User,
+            id: id(ACCOUNT + i as u128),
+        })
+        .collect();
+    let frame = to_frame(
+        Opcode::Subscribe.to_wire(),
+        4,
+        &SubscribeRequest {
+            topics: topics.clone(),
+        },
+    )
+    .expect("a subscribe encodes");
+    assert!(
+        frame.header.is_compressed(),
+        "513 topics must trip the compression policy, or this test guards nothing"
+    );
+    let bytes = frame.encode().expect("a compressed frame encodes");
+    let decoded = Frame::decode(bytes).expect("the encoded frame decodes");
+    let restored: SubscribeRequest = match from_frame(&decoded) {
+        Ok(request) => request,
+        Err(error) => {
+            // DIAGNOSTIC — strip once the decoder defect is closed. The real
+            // decoder has just refused this frame; before letting the panic
+            // speak, replay inflate_raw's driving loop verbatim with a
+            // per-call trace, so the failure names the exact call sequence
+            // (flush, status, consumed, produced) instead of the variant
+            // alone. On a green run this never executes.
+            trace_inflate_calls(&decoded.payload);
+            panic!("the request inflates and decodes: {error}");
+        }
+    };
+    assert_eq!(restored.topics, topics);
+}
+
+/// A verbatim replay of `migo_wire::compress::inflate_raw`'s driving loop,
+/// instrumented per call and printed to stderr (which `cargo test` shows for a
+/// failing test). Exists only for the diagnostic above; it must track the real
+/// loop's shape — chunk size, flush choice, end conditions — or its trace lies.
+fn trace_inflate_calls(compressed: &[u8]) {
+    use flate2::{Decompress, FlushDecompress, Status};
+
+    const CHUNK: usize = 8 * 1024;
+    let mut scratch = vec![0u8; CHUNK];
+    let mut inflater = Decompress::new(false);
+    let head = &compressed[..compressed.len().min(16)];
+    let tail = &compressed[compressed.len().saturating_sub(16)..];
+    eprintln!(
+        "DIAGNOSTIC inflate trace: compressed {} bytes, first16 {head:02x?}, last16 {tail:02x?}",
+        compressed.len()
+    );
+    for call in 0_u32.. {
+        let before_in = inflater.total_in() as usize;
+        let before_out = inflater.total_out() as usize;
+        let remaining = &compressed[before_in..];
+        let flush = if remaining.is_empty() {
+            FlushDecompress::Finish
+        } else {
+            FlushDecompress::None
+        };
+        let flush_name = if remaining.is_empty() {
+            "Finish"
+        } else {
+            "None"
+        };
+        match inflater.decompress(remaining, &mut scratch, flush) {
+            Ok(status) => {
+                let consumed = inflater.total_in() as usize - before_in;
+                let produced = inflater.total_out() as usize - before_out;
+                eprintln!(
+                    "DIAGNOSTIC call {call}: flush {flush_name}, in_len {}, status {status:?}, \
+                     consumed {consumed}, produced {produced}, total_in {}, total_out {}",
+                    remaining.len(),
+                    inflater.total_in(),
+                    inflater.total_out()
+                );
+                if status == Status::StreamEnd {
+                    eprintln!("DIAGNOSTIC loop ends: StreamEnd");
+                    return;
+                }
+                if consumed == 0 && produced == 0 {
+                    eprintln!("DIAGNOSTIC loop ends: no progress with the stream not ended");
+                    return;
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "DIAGNOSTIC call {call}: flush {flush_name}, in_len {}, Err({error}), \
+                     total_in {}, total_out {}",
+                    remaining.len(),
+                    inflater.total_in(),
+                    inflater.total_out()
+                );
+                return;
+            }
+        }
+    }
 }
 
 #[tokio::test]
