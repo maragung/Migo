@@ -33,7 +33,7 @@ use std::collections::{HashMap, VecDeque};
 use async_trait::async_trait;
 use migo_core::{Id, Result, Timestamp};
 use migo_protocol::{
-    fault, ConversationKind, ConversationRole, EncryptionMode, RelationshipKind, RoomRole,
+    codes, fault, ConversationKind, ConversationRole, EncryptionMode, RelationshipKind, RoomRole,
 };
 use parking_lot::RwLock;
 
@@ -41,9 +41,9 @@ use crate::model::{
     advanced_token, game_status, notification_kind, report_status, Account, AccountStatus,
     AdvanceGame, Appended, AuditEntry, BadgeAward, Bot, CappedXpAward, Conversation,
     ConversationMember, ConversationPosition, ConversationSummary, Currency, Cursor, Device,
-    DeviceStatus, Entitlement, GameSession, GiftSent, GlobalAdmin, IdentityKeyStatus, KeyBundle,
-    LedgerAccount, LedgerAccountKind, LedgerTransaction, MediaObject, NewAccount, NewBot,
-    NewDevice, NewGame, NewMessage, NewModerationAction, NewOutboxEvent, NewPeer, NewRoom,
+    DeviceStatus, Entitlement, GameSession, GiftReceipt, GiftSent, GlobalAdmin, IdentityKeyStatus,
+    KeyBundle, LedgerAccount, LedgerAccountKind, LedgerTransaction, MediaObject, NewAccount,
+    NewBot, NewDevice, NewGame, NewMessage, NewModerationAction, NewOutboxEvent, NewPeer, NewRoom,
     NewSession, NewTransaction, NewXpAward, Notification, OutboxRecord, Patch, PeerRecord, Posted,
     Profile, ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Receipt,
     Relationship, Report, RevokeReason, Room, RoomMember, RoomNetworkBan, Scope, Session, Standing,
@@ -2359,14 +2359,22 @@ impl EconomyStore for MemoryStore {
         let mut s = self.state.write();
         if let Some(existing) = s.tx_idempotency.get(&new.idempotency_key) {
             let id = *existing;
-            return s
-                .transactions
-                .get(&id)
-                .cloned()
-                .map(Posted::Duplicate)
-                .ok_or_else(|| {
-                    fault::internal("idempotency index points at a missing transaction")
-                });
+            let stored = s.transactions.get(&id).cloned().ok_or_else(|| {
+                fault::internal("idempotency index points at a missing transaction")
+            })?;
+            // Section 153's other half: the same key and the same payload is the
+            // original answer, and the same key with a different payload is
+            // IDEMPOTENCY_MISMATCH. The delivery is read back from the rows the
+            // original wrote, so what is compared is what happened, not what the
+            // first attempt said it would do.
+            let delivery = delivery_of(&s, id);
+            if !new.replays(&stored, delivery.as_ref()) {
+                return Err(fault::error(
+                    codes::IDEMPOTENCY_MISMATCH,
+                    "this idempotency key was already used for a different transaction",
+                ));
+            }
+            return Ok(Posted::Duplicate(stored));
         }
         if new.legs.len() < 2 {
             return Err(fault::validation(
@@ -2910,6 +2918,33 @@ impl ProgressionStore for MemoryStore {
             limit,
         ))
     }
+}
+
+/// The delivery a transaction wrote, read back from the rows it wrote.
+///
+/// Section 153's mismatch rule compares a retry against what the original did, and
+/// the parts of a purchase that are not money — which gift, which item — live in
+/// the receipt rows, not in the legs.
+fn delivery_of(s: &State, tx_id: Id) -> Option<Receipt> {
+    if let Some(sent) = s
+        .gift_by_tx
+        .get(&tx_id)
+        .and_then(|gift_id| s.gifts.get(gift_id))
+    {
+        return Some(Receipt::Gift(GiftReceipt {
+            gift_id: sent.gift_id,
+            sender_id: sent.sender_id,
+            recipient_id: sent.recipient_id,
+            gift_code: sent.gift_code.clone(),
+            conversation_id: sent.conversation_id,
+        }));
+    }
+    s.entitlements
+        .values()
+        .find(|entitlement| entitlement.tx_id == Some(tx_id))
+        .map(|entitlement| Receipt::Entitlement {
+            sku: entitlement.sku.clone(),
+        })
 }
 
 /// Sorts progression rows into a leaderboard page.

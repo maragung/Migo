@@ -4519,7 +4519,7 @@ Gap pada federation link sequence berarti dugaan replay atau kehilangan link, da
 
 153. DEDUPLICATION AND IDEMPOTENCY
 
-STATUS: BUILT untuk deduplikasi client_msg_id di backend in-memory migo-store. STATUS: SPEC untuk idempotency di seluruh surface lain.
+STATUS: BUILT. Message memakai client_msg_id dengan deduplikasi di migo-store dan penolakan IDEMPOTENCY_MISMATCH untuk isi berbeda di migo-messaging. Reaction memakai id yang diturunkan dari hash caller dan seluruh request, sehingga pengulangan yang byte-identikal konvergen ke baris yang sama. Gift dan transaksi ekonomi memakai idempotency key eksplisit dari client, dan post_transaction di kedua backend kini membandingkan percobaan ulang terhadap transaksi yang tersimpan — reason, poster, legs, dan delivery yang dibaca kembali dari baris receipt — lalu menolak key yang dipakai ulang untuk payload berbeda dengan IDEMPOTENCY_MISMATCH. Media upload memakai upload_id, dan commit yang diulang membandingkan checksum: checksum yang berbeda dijawab IDEMPOTENCY_MISMATCH, bukan jawaban commit pertama. Friend request memakai kombinasi pasangan account, yang menjadikan pengulangan sebagai outcome dan bukan error karena payload tidak mungkin berbeda. Call invite memakai call_id dengan penolakan mismatch di jalur invite.
 
 Aturan dan layernya ada di section 68. Bagian ini menetapkan aturan protokolnya.
 
