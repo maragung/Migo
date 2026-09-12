@@ -76,7 +76,7 @@ const CONTENT_TYPES = new Map(
  *
  *   * `default-src 'self'` — the baseline: everything same-origin unless a directive below says
  *     otherwise, and nothing from a data: URL by accident.
- *   * `script-src 'self'` plus one `sha256-…` per inline script — the one exception the framework
+ *   * `script-src 'self'` plus one `'sha256-…'` per inline script — the one exception the framework
  *     forces. Next's App Router embeds its hydration payload as inline
  *     `<script>self.__next_f.push(...)</script>` chunks (server/app-render/use-flight-response.js
  *     writes them) whose bytes differ per build, so they cannot be listed ahead of time. Each one
@@ -134,7 +134,7 @@ const STATIC_DIRECTIVES = [
  * baseline, and the single, hash-scoped exception the framework's hydration payload forces onto it.
  */
 export function buildContentSecurityPolicy(inlineScriptDigests = []) {
-  const digests = [...new Set(inlineScriptDigests)].map((digest) => `sha256-${digest}`);
+  const digests = [...new Set(inlineScriptDigests)].map((digest) => `'sha256-${digest}'`);
   const scriptSrc = `script-src 'self'${digests.length === 0 ? '' : ` ${digests.join(' ')}`}`;
   const [baseline, ...rest] = STATIC_DIRECTIVES;
   return [baseline, scriptSrc, ...rest].join('; ');

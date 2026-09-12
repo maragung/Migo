@@ -125,10 +125,12 @@ test('script-src is self plus one sha256 per inline script, and nothing else', a
   assert.equal(serve.buildContentSecurityPolicy(), serve.buildContentSecurityPolicy([]));
   assert.ok(serve.buildContentSecurityPolicy().includes("script-src 'self';"));
 
-  // With digests: self first, then base64 SHA-256 tokens, deduplicated.
+  // With digests: self first, then quoted hash tokens, deduplicated. A hash source is only valid
+  // CSP when quoted ('sha256-…') — unquoted, the browser drops it with a console warning and
+  // every inline script it was meant to allow comes back blocked.
   const withHashes = serve.buildContentSecurityPolicy(['digest-a', 'digest-a', 'digest-b']);
   const tokens = parsePolicy(withHashes).get('script-src') ?? [];
-  assert.deepEqual(tokens, ["'self'", 'sha256-digest-a', 'sha256-digest-b']);
+  assert.deepEqual(tokens, ["'self'", "'sha256-digest-a'", "'sha256-digest-b'"]);
 });
 
 test('the digest scan hashes inline scripts byte for byte and ignores external ones', async () => {
