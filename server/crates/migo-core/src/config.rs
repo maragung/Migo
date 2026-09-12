@@ -631,8 +631,16 @@ pub struct MeshPeer {
     pub region: String,
 }
 
-/// Server-to-server mesh.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// The mesh handshake budget, in milliseconds: how long the whole exchange — both
+/// hellos, both proofs — may take before the attempt fails into the delivery backoff.
+/// A peer that accepts the TCP connection but never speaks would otherwise park a
+/// drain forever (brief section 173).
+pub const DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
+
+/// Server-to-server mesh. `Default` is a manual impl rather than a derive because
+/// the handshake budget's default is the [`DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS`]
+/// convention and not zero, which validation would refuse.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct FederationConfig {
     /// Whether to accept and originate mesh connections.
@@ -646,11 +654,28 @@ pub struct FederationConfig {
     /// the node federates with nobody, which validation refuses outside
     /// development while `enabled` is true (ADR-0005).
     pub peers: Vec<MeshPeer>,
+    /// How long a mesh handshake may take, in milliseconds, measured on the node's
+    /// injected clock: the whole exchange — both hellos, both proofs — must finish
+    /// inside it. A peer that accepts the TCP connection but never speaks is failed
+    /// at the deadline and enters the same backoff a refused connection does, so one
+    /// silent node cannot hang a drain (brief section 173).
+    pub handshake_timeout_ms: u64,
     /// Peer nodes the config document offers to clients, so a client can
     /// measure latency per node and fail over between them (section 170).
     /// Empty — the single-node posture — means the document lists this node
     /// alone and clients have nowhere else to go.
     pub client_peers: Vec<ClientPeer>,
+}
+
+impl Default for FederationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            peers: Vec::new(),
+            handshake_timeout_ms: DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
+            client_peers: Vec::new(),
+        }
+    }
 }
 
 /// Cost-based abuse control (ADR-0006). Per-opcode costs live in the protocol
@@ -1135,6 +1160,13 @@ impl Config {
             problems.push(
                 "federation.peers names a node but federation.enabled is false: enable \
                  federation or remove the entries, a disabled mesh admits nothing"
+                    .to_string(),
+            );
+        }
+        if self.federation.handshake_timeout_ms == 0 {
+            problems.push(
+                "federation.handshake_timeout_ms must be greater than zero: a zero budget \
+                 fails every handshake"
                     .to_string(),
             );
         }

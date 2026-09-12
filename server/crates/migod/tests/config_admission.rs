@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use migo_core::config::MeshPeer;
+use migo_core::config::{MeshPeer, DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS};
 use migo_core::metrics::Registry;
 use migo_core::{Clock, Id, SystemClock, Timestamp};
 use migo_crypto::NodeSecret;
@@ -104,6 +104,7 @@ async fn configured_peers_link_two_nodes_over_a_real_mesh() {
         None,
         &Registry::new(),
         clock.clone(),
+        DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
     ));
     let bound = transport_a
         .spawn_listener("127.0.0.1:0")
@@ -161,6 +162,7 @@ async fn configured_peers_link_two_nodes_over_a_real_mesh() {
         None,
         &Registry::new(),
         clock.clone(),
+        DEFAULT_FEDERATION_HANDSHAKE_TIMEOUT_MS,
     ));
     transport_b.spawn_runner(clock.clone());
 
