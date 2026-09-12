@@ -1051,7 +1051,7 @@ where
         &self,
         caller: &Caller,
         request: ConversationCreateRequest,
-    ) -> Result<ConversationSummary> {
+    ) -> Result<(ConversationSummary, Vec<Fanout>)> {
         // Dedup and drop the caller: a client that lists its own user in the
         // member set is not making a mistake worth an error, and two copies of one
         // member would either violate the primary key or silently create a group
@@ -1238,7 +1238,7 @@ where
         members.push(caller.account_id);
         members.extend_from_slice(&others);
         members.sort_unstable();
-        Ok(ConversationSummary {
+        let summary = ConversationSummary {
             conversation_id: conversation.conversation_id,
             kind: conversation.kind,
             encryption: conversation.encryption,
@@ -1254,7 +1254,33 @@ where
             muted_until: None,
             pinned: None,
             archived: conversation.archived_at.is_some().then_some(true),
-        })
+        };
+        // One arrival per person the create seated, on the same wire the invite
+        // path uses: the conversation's subscribers are exactly the people who
+        // already knew, and a member who has just been added is not one of them
+        // yet. Their client cannot subscribe to a topic it has never heard of,
+        // so the member-Joined published to the conversation topic would never
+        // reach them; the dispatcher also publishes each event to that member's
+        // own user topic, and the peer's client fetches its list and the thread
+        // appears without a refresh. Without this, a direct chat's first message
+        // is sealed for a peer who does not know the conversation exists.
+        let count = others.len() as u32 + 1;
+        let fanouts = others
+            .iter()
+            .map(|member| {
+                Fanout::to_conversation(
+                    summary.conversation_id,
+                    caller.device_id,
+                    Broadcast::Member(ConversationMemberEvent {
+                        conversation_id: summary.conversation_id,
+                        user_id: *member,
+                        change: MemberChange::Joined,
+                        member_count: count,
+                    }),
+                )
+            })
+            .collect();
+        Ok((summary, fanouts))
     }
 
     async fn invite(

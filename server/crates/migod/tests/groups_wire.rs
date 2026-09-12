@@ -453,3 +453,40 @@ async fn a_retried_reaction_is_one_reaction_not_two() {
         "a retried reaction is delivered once — the retry converged on the stored row"
     );
 }
+
+#[tokio::test]
+async fn a_created_conversation_names_its_members_on_their_own_topics() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let founder = registered_grant(&app, "dmfounder").await;
+    let peer = registered_grant(&app, "dmpeer").await;
+
+    let mut founder_session = LiveSession::connect(addr, &founder).await;
+    let mut peer_session = LiveSession::connect(addr, &peer).await;
+
+    // A direct conversation created by the founder. Before the fix, the create
+    // produced no fanout at all: the peer was a member of a conversation their
+    // client had never heard of, so the first message sealed for an audience
+    // that could not be subscribed to the topic.
+    let summary: migo_protocol::ConversationSummary = founder_session
+        .ask(
+            Opcode::ConversationCreate,
+            31,
+            &ConversationCreateRequest {
+                kind: ConversationKind::Direct,
+                members: vec![peer.account_id],
+                title: None,
+            },
+        )
+        .await;
+    let conversation_id = summary.conversation_id;
+
+    // The frame the conversation topic could never deliver: the peer is not a
+    // subscriber of a topic they have never loaded, so this arrives on their
+    // own user topic or not at all — the same door the invite path uses.
+    let frame = next_event_of(&mut peer_session.stream, Opcode::ConversationMemberEvent).await;
+    let event: ConversationMemberEvent = from_frame(&frame).expect("the join decodes");
+    assert_eq!(event.conversation_id, conversation_id);
+    assert_eq!(event.user_id, peer.account_id, "the join names the peer");
+    assert_eq!(event.change, MemberChange::Joined);
+}

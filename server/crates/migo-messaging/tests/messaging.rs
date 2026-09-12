@@ -201,6 +201,7 @@ impl Harness {
             )
             .await
             .expect("a direct conversation between two strangers is allowed")
+            .0
             .conversation_id
     }
 
@@ -217,6 +218,7 @@ impl Harness {
             )
             .await
             .expect("a group of three is allowed")
+            .0
             .conversation_id
     }
 
@@ -1399,6 +1401,7 @@ async fn the_conversation_list_pages_by_cursor_without_repeating_or_dropping_a_r
             )
             .await
             .expect("a group is creatable")
+            .0
             .conversation_id;
         harness
             .send(
@@ -1504,6 +1507,7 @@ async fn creating_a_direct_conversation_twice_converges_on_one() {
         )
         .await
         .expect("tapping message twice is not an error");
+    let again = again.0;
     assert_eq!(
         again.conversation_id, first,
         "two devices converge on one conversation"
@@ -1525,7 +1529,7 @@ async fn creating_a_direct_conversation_twice_converges_on_one() {
         )
         .await
         .expect("the pair is unordered");
-    assert_eq!(from_the_other_side.conversation_id, first);
+    assert_eq!(from_the_other_side.0.conversation_id, first);
 }
 
 #[tokio::test]
@@ -1542,7 +1546,8 @@ async fn creating_drops_the_caller_from_their_own_member_list() {
             },
         )
         .await
-        .expect("a redundant member list is a client habit, not an error");
+        .expect("a redundant member list is a client habit, not an error")
+        .0;
 
     assert_eq!(summary.kind, ConversationKind::Direct);
     assert_eq!(
@@ -2035,6 +2040,7 @@ async fn an_invite_refuses_blocks_and_a_full_group() {
         )
         .await
         .expect("a group of 256 is allowed")
+        .0
         .conversation_id;
     expect_code(
         harness
@@ -2066,6 +2072,7 @@ async fn the_last_founder_out_names_an_heir() {
         )
         .await
         .expect("a group of four")
+        .0
         .conversation_id;
 
     // Alice leaves first. Bob is still a founder, so nothing is promoted.
@@ -2536,6 +2543,7 @@ async fn a_vote_carries_at_a_majority_and_the_removal_is_its_closing() {
         )
         .await
         .expect("a group of four")
+        .0
         .conversation_id;
 
     // Founders are beyond a vote.
@@ -2684,6 +2692,7 @@ async fn a_vote_nobody_finishes_closes_lazily_when_the_group_moves_on() {
         )
         .await
         .expect("a group of four")
+        .0
         .conversation_id;
 
     harness
@@ -2742,6 +2751,7 @@ async fn a_vote_loses_its_question_when_the_target_walks_out() {
         )
         .await
         .expect("a group of four")
+        .0
         .conversation_id;
 
     harness
@@ -3162,6 +3172,7 @@ async fn a_sync_page_that_exceeds_the_byte_budget_pages_instead_of_erroring() {
         )
         .await
         .expect("a direct conversation between two strangers is allowed")
+        .0
         .conversation_id;
     harness
         .send_raw(conversation2, 21_004, huge, 8 * MINUTE)

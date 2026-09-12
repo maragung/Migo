@@ -913,7 +913,8 @@ async fn direct_conversation(app: &migod::App, a: Id, b: Id) -> Id {
             },
         )
         .await
-        .expect("a direct conversation between two friends must build");
+        .expect("a direct conversation between two friends must build")
+        .0;
     summary.conversation_id
 }
 

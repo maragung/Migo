@@ -157,11 +157,16 @@ pub trait Messaging: Send + Sync {
     /// join policy, a member count, and a moderation surface, and creating one
     /// through the conversation endpoint would create the conversation without any
     /// of them.
+    ///
+    /// The fanouts carry one member-Joined per person the create seated: their
+    /// clients cannot be subscribed to a conversation they have never heard of, so
+    /// the dispatcher also publishes each arrival to that member's own user topic
+    /// — the same door the invite path uses.
     async fn create(
         &self,
         caller: &Caller,
         request: ConversationCreateRequest,
-    ) -> Result<ConversationSummary>;
+    ) -> Result<(ConversationSummary, Vec<Fanout>)>;
 
     /// Seats new members in a group.
     ///

@@ -506,8 +506,17 @@ impl Dispatcher for AppDispatcher {
                 );
                 let request: ConversationCreateRequest =
                     from_frame(frame).map_err(fault::from_wire)?;
-                let summary = self.messaging.create(&caller, request).await?;
-                context.reply(&summary)
+                // The reply carries the summary the creator's list needs; the fanouts carry
+                // one arrival each for everyone the create seated — on the user topic the
+                // dispatcher adds, since a brand-new member cannot be a subscriber of a
+                // conversation they have never heard of.
+                let (summary, fanouts) = self.messaging.create(&caller, request).await?;
+                context.reply(&summary)?;
+                for fanout in fanouts {
+                    self.publish_messaging(context, caller.account_id, fanout)
+                        .await?;
+                }
+                Ok(())
             }
             Opcode::Typing => {
                 let caller = MessageCaller::new(

@@ -165,6 +165,7 @@ mod tests {
             )
             .await
             .expect("a direct conversation between two strangers is allowed")
+            .0
             .conversation_id;
 
         let accepted: MessageAccepted = messaging
