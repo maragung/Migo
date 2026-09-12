@@ -1173,7 +1173,7 @@ async fn a_moved_room_hands_its_members_a_reconnect_hint_naming_the_new_node() {
         .create_room(migo_store::model::NewRoom {
             room_id,
             conversation_id: Id::from(0x2222),
-            slug: format!("room-{room_id:x}"),
+            slug: format!("room-{room_id}"),
             name: "a room".to_string(),
             topic: None,
             kind: RoomKind::Public,
