@@ -1683,7 +1683,7 @@ impl Worker {
                 }
                 Some(result) = frame => {
                     match result {
-                        Ok(frame) => self.on_frame(frame).await,
+                        Ok(frame) => self.on_record(frame).await,
                         Err(error) => self.on_disconnect(error),
                     }
                 }
@@ -2360,11 +2360,12 @@ impl Worker {
             },
             // Only what this client actually implements. Claiming a feature it cannot honour would
             // make the server send frames it then ignores, and the user would see silence rather than
-            // an error.
+            // an error. BATCHING is honoured since inbound envelopes are unpacked in `on_record`.
             features: features::E2E_V1
                 | features::PRESENCE
                 | features::TYPING
-                | features::COMPRESSION,
+                | features::COMPRESSION
+                | features::BATCHING,
             locale: "en".to_owned(),
             bandwidth_mode: migo_protocol::BandwidthMode::Auto,
             access_token: Some(signed.access_token.clone()),
@@ -6166,6 +6167,32 @@ impl Worker {
         }
     }
 
+    /// Dispatches one inbound record, batch or not.
+    ///
+    /// The transports return whole records off the wire; a record carrying the BATCH flag is
+    /// an envelope of frames, so this is the one place every inbound frame is funnelled
+    /// through [`migo_wire::decode_batch`] — which hands a bare frame back as a one-element
+    /// list, keeping a single dispatch path whether a frame arrived alone or inside a batch.
+    /// Replies ride the same funnel: they are matched by correlation inside `on_frame`, so a
+    /// reply that arrived inside an envelope is dispatched exactly like a solo one.
+    ///
+    /// A batch the decoder refuses is dropped rather than fatal: the envelope is a transport
+    /// optimisation, and the penalty for a broken one is the same as the frames having been
+    /// lost in transit — the resume path and the user's retries recover. Disconnecting here
+    /// would turn a benign envelope fault into a session outage.
+    async fn on_record(&mut self, frame: migo_protocol::Frame) {
+        match migo_wire::decode_batch(&frame) {
+            Ok(elements) => {
+                for element in elements {
+                    self.on_frame(element).await;
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "an inbound batch envelope was refused");
+            }
+        }
+    }
+
     /// Dispatches one inbound frame.
     async fn on_frame(&mut self, frame: migo_protocol::Frame) {
         if gateway::is_error(&frame) {
@@ -7529,5 +7556,54 @@ mod tests {
             Id::from_bytes([1; 16]),
             root_bytes
         ));
+    }
+
+    /// A frame for the batch tests, distinct by correlation so the envelope's element order
+    /// can be asserted. `PING` is the shape a server batches least, which is exactly why it
+    /// makes an honest element: nothing about the test's envelope depends on the payload type.
+    fn batched_frame(correlation: u32) -> Frame {
+        Frame::new(
+            migo_wire::FrameHeader::new(Opcode::Ping.to_wire(), correlation),
+            bytes::Bytes::new(),
+        )
+    }
+
+    /// A BATCH envelope arrives as one record and dispatches as its elements, in order — the
+    /// funnel `on_record` exists for. The elements carry their own correlations, so a reply
+    /// inside an envelope is matched exactly like a solo one.
+    #[test]
+    fn a_batch_envelope_unpacks_to_its_elements_in_order() {
+        let elements = vec![batched_frame(11), batched_frame(12), batched_frame(13)];
+        let envelope = migo_wire::encode_batch(&elements).expect("the envelope encodes");
+        assert!(
+            envelope.header.is_batch(),
+            "three elements are worth wrapping"
+        );
+
+        let unpacked = migo_wire::decode_batch(&envelope).expect("the envelope unpacks");
+        let correlations: Vec<u32> = unpacked
+            .iter()
+            .map(|frame| frame.header.correlation)
+            .collect();
+        assert_eq!(
+            correlations,
+            vec![11, 12, 13],
+            "the elements keep their order"
+        );
+    }
+
+    /// A bare frame passes the same funnel untouched — one dispatch path whether a frame
+    /// arrived alone or inside a batch, which is the whole point of `decode_batch` handing a
+    /// one-element list back for a plain record.
+    #[test]
+    fn a_bare_frame_passes_the_funnel_as_itself() {
+        let solo = batched_frame(21);
+        let unpacked = migo_wire::decode_batch(&solo).expect("a bare frame is not an error");
+        assert_eq!(unpacked.len(), 1);
+        assert_eq!(unpacked[0].header.correlation, 21);
+        assert!(
+            !unpacked[0].header.is_batch(),
+            "the bare frame is not re-wrapped"
+        );
     }
 }
