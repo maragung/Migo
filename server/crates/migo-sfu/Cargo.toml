@@ -1,0 +1,15 @@
+[package]
+name = "migo-sfu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The group-call media plane: a forwarding SFU that routes sealed frames, selects simulcast layers, and shapes quality without ever holding a call key."
+
+[dependencies]
+migo-core.workspace = true
+migo-protocol.workspace = true
+
+parking_lot.workspace = true
