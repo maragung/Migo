@@ -1212,6 +1212,7 @@ where
                 who_can_message: Visibility::Friends,
                 who_can_add: Visibility::Everyone,
                 searchable: true,
+                custom_status: None,
                 updated_at: now,
             })
             .await?;

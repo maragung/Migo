@@ -39,6 +39,10 @@ export type {
   WalletSummary,
 } from './rest.js';
 
+// --- client node routing (§170): measure the node list, pick the fastest, fail over ---
+export { candidatesFromConfig, rankNodesByLatency, routingPlanFromConfig } from './node-router.js';
+export type { NodeCandidate, RankedNode, RankOptions, RoutingPlan } from './node-router.js';
+
 // --- the user-configured server endpoint (host, port, scheme, transport) ---
 export {
   assertValidServerEndpoint,
@@ -132,7 +136,6 @@ export { SyncGate } from './sync-gate.js';
 
 export { TypingDomain } from './domains/typing.js';
 export { PresenceDomain } from './domains/presence.js';
-export type { PresenceOptions } from './domains/presence.js';
 export { RoomsDomain } from './domains/rooms.js';
 export type { RoomListFilter } from './domains/rooms.js';
 export {

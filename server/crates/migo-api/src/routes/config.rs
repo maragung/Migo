@@ -7,11 +7,18 @@
 //! largest body the server accepts, the biggest page a listing will return. It is derived
 //! entirely from configuration and node identity, so it exposes no secret and touches no
 //! service; every value here is one a client is meant to know.
+//!
+//! The document also carries the `nodes` list (section 170): this node first, then the peers
+//! the operator has offered clients as alternatives. A client measures the list per node and
+//! connects to the fastest, keeping the rest as failover candidates — the routing decision the
+//! doc assigns to the client, with the server only naming the doors.
 
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
+
+use migo_protocol::NodeInfo;
 
 use crate::pagination::MAX_PAGE_SIZE;
 use crate::ApiState;
@@ -28,6 +35,19 @@ struct Node {
     region: String,
     country: String,
     public_url: String,
+}
+
+impl Node {
+    /// The node-as-this-server entry: identity from `NodeInfo`, address from the policy's
+    /// public URL, matching the single `node` field beside it.
+    fn self_node(node: &NodeInfo, public_url: &str) -> Self {
+        Self {
+            id: node.node_id.clone(),
+            region: node.region.clone(),
+            country: node.country.clone(),
+            public_url: public_url.to_string(),
+        }
+    }
 }
 
 /// The policy limits a client validates its own forms against, so a request that is bound to be
@@ -53,6 +73,10 @@ struct Captcha {
 #[derive(Serialize)]
 struct Document {
     node: Node,
+    /// Every node a client may connect to, this one first (section 170). A single-node
+    /// deployment still lists itself, so the list is never empty and a client can treat
+    /// "measure the list, connect to the fastest" as its one path.
+    nodes: Vec<Node>,
     features: u64,
     limits: Limits,
     captcha: Captcha,
@@ -63,13 +87,16 @@ struct Document {
 async fn config(State(state): State<ApiState>) -> Json<Document> {
     let node = state.node();
     let policy = state.policy();
+    let mut nodes = vec![Node::self_node(node, &policy.public_url)];
+    nodes.extend(state.client_peers().iter().map(|peer| Node {
+        id: peer.node_id.clone(),
+        region: peer.region.clone(),
+        country: peer.country.clone(),
+        public_url: peer.public_url.clone(),
+    }));
     Json(Document {
-        node: Node {
-            id: node.node_id.clone(),
-            region: node.region.clone(),
-            country: node.country.clone(),
-            public_url: policy.public_url.clone(),
-        },
+        node: Node::self_node(node, &policy.public_url),
+        nodes,
         features: state.features(),
         limits: Limits {
             allow_registration: policy.allow_registration,

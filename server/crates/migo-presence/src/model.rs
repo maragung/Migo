@@ -21,6 +21,14 @@ use migo_core::{Id, Timestamp};
 use migo_protocol::BandwidthMode;
 use migo_ratelimit::TrustTier;
 
+// The cadence table moved to `migo-protocol` (see `migo_protocol::cadence`): the
+// gateway's coalescing queue now enforces the presence interval section 159
+// assigns to it, the gateway may not name this crate (section 177), and a table
+// two crates must agree on can only live where both may read it. Re-exported
+// here so every caller that learned these names from `migo_presence` keeps
+// compiling against the same values rather than a copy.
+pub use migo_protocol::{cadence_for, Cadence, PresenceScope, MAX_HEARTBEAT_MS, MIN_HEARTBEAT_MS};
+
 /// Who is calling, reduced to what presence actually needs.
 ///
 /// Deliberately **not** `migo_auth::RequestContext`, and deliberately not the same
@@ -100,21 +108,6 @@ impl Caller {
 /// pay it, because the gateway calls `disconnected` and the entry goes immediately.
 pub const MISSED_HEARTBEATS: u32 = 3;
 
-/// Shortest heartbeat the server will advertise, in milliseconds.
-///
-/// Mirrors `GatewayConfig` validation, which already refuses anything below this.
-/// Repeated here as a clamp rather than a second rejection: a presence service
-/// that refuses to start because somebody typed a small number has turned a
-/// configuration typo into an outage.
-pub const MIN_HEARTBEAT_MS: u32 = 1_000;
-
-/// Longest heartbeat the server will advertise, in milliseconds.
-///
-/// Five minutes. Beyond this the `UltraLowData` multiplier would push a presence
-/// lifetime past an hour, at which point "online" stops describing anything: the
-/// entry outlives the session, the battery, and usually the train journey.
-pub const MAX_HEARTBEAT_MS: u32 = 300_000;
-
 /// Accounts one snapshot will answer for.
 ///
 /// Matches [`migo_cache::traits::MAX_PRESENCE_FANOUT`], because that is where the
@@ -136,108 +129,23 @@ pub const MAX_SNAPSHOT_SUBJECTS: usize = migo_cache::traits::MAX_PRESENCE_FANOUT
 /// identically, so the degradation is invisible rather than wrong.
 pub const MAX_LAST_SEEN_LOOKUPS: usize = 64;
 
-/// Which presence a session wants delivered to it.
+/// How long a presence entry from one cadence should live.
 ///
-/// Brief section 159 asks the *server* to stop sending presence a low-bandwidth
-/// client will not render, on the grounds that filtering at the client saves
-/// rendering while filtering at the server saves bytes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PresenceScope {
-    /// Everything the session is subscribed to.
-    Everything,
-    /// Only conversations and rooms the user currently has open.
-    ///
-    /// Section 159 makes this a recommendation on `LowData` and a requirement on
-    /// `UltraLowData`. Both are answered the same way here, because a
-    /// recommendation the server declines to follow costs a mobile user real
-    /// bytes for a presence dot they cannot see, and the client re-reads presence
-    /// when it opens a conversation anyway.
-    OpenOnly,
-}
-
-/// The intervals one session runs at.
-///
-/// Not stored anywhere. Computed from the session's bandwidth mode every time it
-/// is needed, because it is a pure function of two numbers and a cached copy is
-/// one more thing that can disagree with the `Welcome` the client was sent.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Cadence {
-    /// What to advertise in `Limits.heartbeat_ms` for this session.
-    pub heartbeat_ms: u32,
-    /// Shortest gap between two presence frames about the same user.
-    ///
-    /// Advisory *here*, enforced at the gateway. See the note on
-    /// [`Cadence::min_interval_ms`] in the module documentation of
-    /// `crate::service`: a floor can only be applied without losing the final
-    /// state by a queue with a trailing edge, and the queue lives in the gateway.
-    pub min_interval_ms: u32,
-    /// Whether typing indicators are sent to this session at all.
-    pub typing: bool,
-    /// How wide the presence subscription is.
-    pub scope: PresenceScope,
-}
-
-impl Cadence {
-    /// How long a presence entry from this session should live.
-    ///
+/// An extension trait rather than an inherent method only because [`Cadence`]
+/// now lives in `migo-protocol` and a `Ttl` is a cache type this crate owns; the
+/// method keeps its name and its call sites.
+pub trait CadenceTtl {
     /// [`MISSED_HEARTBEATS`] times the heartbeat, saturating. The saturation is
     /// not decoration: `heartbeat_ms` is bounded by [`MAX_HEARTBEAT_MS`] and the
     /// multiplier by three, so the product cannot overflow a `u32` today — and a
     /// future mode with a longer multiplier would silently wrap instead of
     /// clamping if this said `*`.
-    #[must_use]
-    pub fn presence_ttl(self) -> Ttl {
-        Ttl::from_millis(self.heartbeat_ms.saturating_mul(MISSED_HEARTBEATS))
-    }
+    fn presence_ttl(&self) -> Ttl;
 }
 
-/// The cadence for one bandwidth mode, derived from the base heartbeat.
-///
-/// Brief section 159 fixes the shape of the table and this fixes the arithmetic:
-///
-/// - `Normal` runs at the configured heartbeat, with a floor of a sixth of it.
-///   The floor exists even at full frequency because a user cannot meaningfully
-///   change state faster than they can report it, and a client that sends
-///   `PRESENCE_SET` in a loop should cost the network one frame per floor rather
-///   than one frame per call.
-/// - `LowData` doubles the heartbeat and multiplies the floor by four, which is
-///   the "throttled four times slower" the section asks for stated as a number.
-/// - `UltraLowData` quadruples the heartbeat — the section's "maximum interval" —
-///   turns typing off entirely, and raises the floor to a whole heartbeat, so a
-///   session on a metered connection receives at most one presence frame per
-///   subject per heartbeat.
-///
-/// `Auto` and `Unknown` both resolve to `Normal`. `Auto` means the client asked
-/// the server to decide and gave it nothing to decide with; `Unknown` means a peer
-/// on either side of this version does not know the enum. Answering both with full
-/// frequency is the choice that renders correctly on a client that has not
-/// understood the negotiation — degrading a peer we failed to understand would
-/// make a version mismatch look like a broken presence feature.
-#[must_use]
-pub fn cadence_for(mode: BandwidthMode, heartbeat_ms: u32) -> Cadence {
-    let base = heartbeat_ms.clamp(MIN_HEARTBEAT_MS, MAX_HEARTBEAT_MS);
-    // A sixth of the heartbeat, at least a second: the floor has to stay a floor
-    // even when an operator configures the shortest heartbeat allowed.
-    let unit = (base / 6).max(MIN_HEARTBEAT_MS);
-    match mode {
-        BandwidthMode::LowData => Cadence {
-            heartbeat_ms: base.saturating_mul(2).min(MAX_HEARTBEAT_MS),
-            min_interval_ms: unit.saturating_mul(4),
-            typing: true,
-            scope: PresenceScope::OpenOnly,
-        },
-        BandwidthMode::UltraLowData => Cadence {
-            heartbeat_ms: base.saturating_mul(4).min(MAX_HEARTBEAT_MS),
-            min_interval_ms: base,
-            typing: false,
-            scope: PresenceScope::OpenOnly,
-        },
-        BandwidthMode::Normal | BandwidthMode::Auto | BandwidthMode::Unknown => Cadence {
-            heartbeat_ms: base,
-            min_interval_ms: unit,
-            typing: true,
-            scope: PresenceScope::Everything,
-        },
+impl CadenceTtl for Cadence {
+    fn presence_ttl(&self) -> Ttl {
+        Ttl::from_millis(self.heartbeat_ms.saturating_mul(MISSED_HEARTBEATS))
     }
 }
 

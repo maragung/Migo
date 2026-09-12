@@ -6937,6 +6937,8 @@ pub struct ProfileUpdate {
     pub who_can_add: Option<u32>,
     /// New search visibility.
     pub searchable: Option<bool>,
+    /// New custom status, the RICH_PRESENCE bit's own field; present only on a session that negotiated the bit.
+    pub custom_status: Option<String>,
 }
 
 impl Encode for ProfileUpdate {
@@ -6949,7 +6951,8 @@ impl Encode for ProfileUpdate {
             + usize::from(self.show_last_seen.is_some())
             + usize::from(self.who_can_message.is_some())
             + usize::from(self.who_can_add.is_some())
-            + usize::from(self.searchable.is_some());
+            + usize::from(self.searchable.is_some())
+            + usize::from(self.custom_status.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.display_name {
             w.optional(1, |w| {
@@ -6999,6 +7002,12 @@ impl Encode for ProfileUpdate {
                 Ok(())
             })?;
         }
+        if let Some(v) = &self.custom_status {
+            w.optional(9, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -7021,6 +7030,7 @@ impl Decode for ProfileUpdate {
                 6 => out.who_can_message = Some(sub.read_u32()?),
                 7 => out.who_can_add = Some(sub.read_u32()?),
                 8 => out.searchable = Some(sub.read_bool()?),
+                9 => out.custom_status = Some(sub.read_string()?),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }
@@ -8186,20 +8196,27 @@ impl Decode for GiftCatalogueResponse {
     }
 }
 
-/// Reads the caller's statement.
+/// Reads one keyset page of the caller's statement; the cursor is the position of the last entry a previous page returned.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LedgerReq {
     pub limit: Option<u32>,
+    pub cursor: Option<String>,
 }
 
 impl Encode for LedgerReq {
     fn encode(&self, w: &mut Writer) -> Result<()> {
         w.enter()?;
-        let present = usize::from(self.limit.is_some());
+        let present = usize::from(self.limit.is_some()) + usize::from(self.cursor.is_some());
         w.write_u32(present as u32);
         if let Some(v) = &self.limit {
             w.optional(1, |w| {
                 w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.cursor {
+            w.optional(2, |w| {
+                w.write_str(v)?;
                 Ok(())
             })?;
         }
@@ -8218,6 +8235,7 @@ impl Decode for LedgerReq {
             let sub = &mut owned;
             match field_id {
                 1 => out.limit = Some(sub.read_u32()?),
+                2 => out.cursor = Some(sub.read_string()?),
                 _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
             }
         }
@@ -8282,10 +8300,11 @@ impl Decode for LedgerEntryWire {
     }
 }
 
-/// A page of the caller's statement.
+/// A page of the caller's statement, with the cursor of the next page whenever this one was full.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LedgerResponse {
     pub entries: Vec<LedgerEntryWire>,
+    pub next_cursor: Option<String>,
 }
 
 impl Encode for LedgerResponse {
@@ -8297,7 +8316,14 @@ impl Encode for LedgerResponse {
                 item.encode(w)?;
             }
         }
-        w.write_u32(0);
+        let present = usize::from(self.next_cursor.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.next_cursor {
+            w.optional(1, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -8317,9 +8343,12 @@ impl Decode for LedgerResponse {
         };
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
-            // No optional fields are defined for this struct in this
-            // protocol build; a newer peer's fields are skipped by length.
-            let _ = r.read_optional()?;
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.next_cursor = Some(sub.read_string()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
         }
         r.leave();
         Ok(out)
@@ -10268,14 +10297,30 @@ impl Decode for KickPointsBuyResult {
     }
 }
 
-/// Empty; the caller's own entitlements are the session's.
+/// Reads one keyset page of the caller's own entitlements; the cursor is the position of the last row a previous page returned.
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct EntitlementsReq {}
+pub struct EntitlementsReq {
+    pub limit: Option<u32>,
+    pub cursor: Option<String>,
+}
 
 impl Encode for EntitlementsReq {
     fn encode(&self, w: &mut Writer) -> Result<()> {
         w.enter()?;
-        w.write_u32(0);
+        let present = usize::from(self.limit.is_some()) + usize::from(self.cursor.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.limit {
+            w.optional(1, |w| {
+                w.write_u32(*v);
+                Ok(())
+            })?;
+        }
+        if let Some(v) = &self.cursor {
+            w.optional(2, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -10284,12 +10329,16 @@ impl Encode for EntitlementsReq {
 impl Decode for EntitlementsReq {
     fn decode(r: &mut Reader) -> Result<Self> {
         r.enter()?;
-        let out = Self::default();
+        let mut out = Self::default();
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
-            // No optional fields are defined for this struct in this
-            // protocol build; a newer peer's fields are skipped by length.
-            let _ = r.read_optional()?;
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.limit = Some(sub.read_u32()?),
+                2 => out.cursor = Some(sub.read_string()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
         }
         r.leave();
         Ok(out)
@@ -10331,10 +10380,11 @@ impl Decode for Entitlement {
     }
 }
 
-/// Everything the caller owns, oldest first.
+/// One page of what the caller owns, oldest first, with the cursor of the next page whenever this one was full.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EntitlementsResponse {
     pub items: Vec<Entitlement>,
+    pub next_cursor: Option<String>,
 }
 
 impl Encode for EntitlementsResponse {
@@ -10346,7 +10396,14 @@ impl Encode for EntitlementsResponse {
                 item.encode(w)?;
             }
         }
-        w.write_u32(0);
+        let present = usize::from(self.next_cursor.is_some());
+        w.write_u32(present as u32);
+        if let Some(v) = &self.next_cursor {
+            w.optional(1, |w| {
+                w.write_str(v)?;
+                Ok(())
+            })?;
+        }
         w.leave();
         Ok(())
     }
@@ -10366,9 +10423,12 @@ impl Decode for EntitlementsResponse {
         };
         let optional_count = r.read_u32()?;
         for _ in 0..optional_count {
-            // No optional fields are defined for this struct in this
-            // protocol build; a newer peer's fields are skipped by length.
-            let _ = r.read_optional()?;
+            let (field_id, mut owned) = r.read_optional()?;
+            let sub = &mut owned;
+            match field_id {
+                1 => out.next_cursor = Some(sub.read_string()?),
+                _ => { /* unknown optional field: skipped by length (forward compatibility) */ }
+            }
         }
         r.leave();
         Ok(out)
@@ -10432,6 +10492,7 @@ pub enum Opcode {
     Sync = 36,
     ConversationList = 37,
     ConversationCreate = 38,
+    /// Typing start/stop marks. Never delivered to a session on a mode in suppress_on (brief 159: typing is off entirely on UltraLowData), so the gateway drops the frame at the mailbox rather than spending the bytes.
     Typing = 39,
     /// Edits a message's text in place.
     MessageEdit = 40,
@@ -10458,6 +10519,7 @@ pub enum Opcode {
     /// A founder renames a group.
     ConversationUpdate = 51,
     PresenceSet = 64,
+    /// Presence for one user. Paced (brief 159): two frames about the same user are spaced by the session's presence minimum interval, applied by the gateway's coalescing queue as a hold with a trailing edge so the newest state is never lost.
     PresenceEvent = 65,
     RoomJoin = 80,
     RoomLeave = 81,
@@ -11099,6 +11161,143 @@ impl Opcode {
         }
     }
 
+    /// Whether this opcode's frames are paced by the session's presence minimum
+    /// interval (brief section 159): two frames about the same coalescing key are
+    /// spaced by that interval, applied as a hold with a trailing edge by the
+    /// gateway's coalescing queue, so the newest state is never lost.
+    #[must_use]
+    pub const fn paced(self) -> bool {
+        match self {
+            Self::Hello => false,
+            Self::Ping => false,
+            Self::Ack => false,
+            Self::Error => false,
+            Self::ReconnectHint => false,
+            Self::Authenticate => false,
+            Self::Subscribe => false,
+            Self::Unsubscribe => false,
+            Self::KeyPublish => false,
+            Self::KeyBundleFetch => false,
+            Self::MessageSend => false,
+            Self::MessageEvent => false,
+            Self::MessageReceipt => false,
+            Self::MessageDelete => false,
+            Self::Sync => false,
+            Self::ConversationList => false,
+            Self::ConversationCreate => false,
+            Self::Typing => false,
+            Self::MessageEdit => false,
+            Self::ReactionSet => false,
+            Self::ReactionEvent => false,
+            Self::ConversationInvite => false,
+            Self::ConversationLeave => false,
+            Self::ConversationRoster => false,
+            Self::ConversationMute => false,
+            Self::ConversationKick => false,
+            Self::ConversationVoteKick => false,
+            Self::ConversationVoteEvent => false,
+            Self::ConversationMemberEvent => false,
+            Self::ConversationUpdate => false,
+            Self::PresenceSet => false,
+            Self::PresenceEvent => true,
+            Self::RoomJoin => false,
+            Self::RoomLeave => false,
+            Self::RoomList => false,
+            Self::RoomMemberEvent => false,
+            Self::RoomStateEvent => false,
+            Self::RoomCreate => false,
+            Self::RoomRoster => false,
+            Self::RoomRoleSet => false,
+            Self::RoomUpdate => false,
+            Self::RoomArchive => false,
+            Self::RoomVoteKick => false,
+            Self::RoomVoteEvent => false,
+            Self::RoomSanction => false,
+            Self::ProfileUpdate => false,
+            Self::ProfileFetch => false,
+            Self::FriendRequest => false,
+            Self::FriendRespond => false,
+            Self::FriendEvent => false,
+            Self::BlockSet => false,
+            Self::RelationshipList => false,
+            Self::Suggestions => false,
+            Self::Search => false,
+            Self::MuteSet => false,
+            Self::MediaUploadBegin => false,
+            Self::MediaUploadStatus => false,
+            Self::MediaUploadCommit => false,
+            Self::MediaUploadAbort => false,
+            Self::MediaFetchUrl => false,
+            Self::MediaStateEvent => false,
+            Self::NotificationEvent => false,
+            Self::NotificationAck => false,
+            Self::NotificationList => false,
+            Self::PushRegister => false,
+            Self::PushUnregister => false,
+            Self::GiftSend => false,
+            Self::BalanceFetch => false,
+            Self::EconomyEvent => false,
+            Self::GiftCatalogue => false,
+            Self::LedgerHistory => false,
+            Self::Progression => false,
+            Self::Badges => false,
+            Self::Leaderboard => false,
+            Self::GameAction => false,
+            Self::GameEvent => false,
+            Self::BotCommand => false,
+            Self::BotEvent => false,
+            Self::BotRegister => false,
+            Self::GameStart => false,
+            Self::GameView => false,
+            Self::GameAbandon => false,
+            Self::GameCatalogue => false,
+            Self::ReportCreate => false,
+            Self::ModerationAction => false,
+            Self::ModerationEvent => false,
+            Self::FedHello => false,
+            Self::FedAuth => false,
+            Self::FedPing => false,
+            Self::FedForward => false,
+            Self::FedAck => false,
+            Self::FedRoomSubscribe => false,
+            Self::FedRoomEvent => false,
+            Self::FedPresenceDigest => false,
+            Self::FedKeyRotate => false,
+            Self::FedHealth => false,
+            Self::FedShardMap => false,
+            Self::FedError => false,
+            Self::FedCallRelay => false,
+            Self::FedDirectory => false,
+            Self::CallInvite => false,
+            Self::CallInviteEvent => false,
+            Self::CallAnswer => false,
+            Self::CallDecline => false,
+            Self::CallCancel => false,
+            Self::CallEnd => false,
+            Self::CallSdp => false,
+            Self::CallIce => false,
+            Self::CallStateEvent => false,
+            Self::CallRenegotiate => false,
+            Self::CallKeyUpdate => false,
+            Self::CallStats => false,
+            Self::CallTurnFetch => false,
+            Self::CallSfuJoin => false,
+            Self::CallSfuEvent => false,
+            Self::ConversationStateEvent => false,
+            Self::StorePurchase => false,
+            Self::Entitlements => false,
+            Self::KickPointsBuy => false,
+        }
+    }
+
+    /// Whether this opcode's frames are never delivered to a session on `mode`
+    /// (brief section 159): the session negotiated that bandwidth mode in its
+    /// HELLO, so the server stops sending a frame the client will not render.
+    #[must_use]
+    pub const fn suppressed_on(self, mode: BandwidthMode) -> bool {
+        matches!((self, mode), (Self::Typing, BandwidthMode::UltraLowData))
+    }
+
     #[must_use]
     pub const fn auth(self) -> AuthLevel {
         match self {
@@ -11221,6 +11420,33 @@ impl Opcode {
             Self::StorePurchase => AuthLevel::User,
             Self::Entitlements => AuthLevel::User,
             Self::KickPointsBuy => AuthLevel::User,
+        }
+    }
+
+    /// The negotiable feature bit this opcode is gated on, if any (section 148).
+    ///
+    /// `None` for an opcode any authenticated client may send. `Some(bit)` names the
+    /// feature the registry ties the opcode to, so the dispatcher refuses it with
+    /// FEATURE_NOT_NEGOTIATED on a session whose negotiated set does not carry the bit —
+    /// the client asks for the feature in its HELLO rather than guessing at support.
+    #[must_use]
+    pub const fn feature(self) -> Option<u64> {
+        match self {
+            Self::FedHello => Some(features::FEDERATION),
+            Self::FedAuth => Some(features::FEDERATION),
+            Self::FedPing => Some(features::FEDERATION),
+            Self::FedForward => Some(features::FEDERATION),
+            Self::FedAck => Some(features::FEDERATION),
+            Self::FedRoomSubscribe => Some(features::FEDERATION),
+            Self::FedRoomEvent => Some(features::FEDERATION),
+            Self::FedPresenceDigest => Some(features::FEDERATION),
+            Self::FedKeyRotate => Some(features::FEDERATION),
+            Self::FedHealth => Some(features::FEDERATION),
+            Self::FedShardMap => Some(features::FEDERATION),
+            Self::FedError => Some(features::FEDERATION),
+            Self::FedCallRelay => Some(features::FEDERATION),
+            Self::FedDirectory => Some(features::FEDERATION),
+            _ => None,
         }
     }
 

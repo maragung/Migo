@@ -180,10 +180,19 @@ impl<T: Transport> Connection<'_, T> {
 
         // The slot is now held. The only exits below are a failed WELCOME (which releases it and
         // returns None) and success (which hands it to the session, released in teardown).
+        //
+        // The mailbox is built from the mode the client declared, so the cadence it derives
+        // (section 159) — the heartbeat this WELCOME advertises, the presence floor its queue
+        // enforces, the typing suppression it applies — is a fact of the session from its first
+        // frame rather than something the writer re-derives later.
+        let heartbeat_base_ms =
+            u32::try_from(self.gateway.settings.heartbeat.as_millis()).unwrap_or(u32::MAX);
         let outbound = Arc::new(Outbound::new(
             self.gateway.settings.queue_capacity,
             self.gateway.settings.resume_buffer_frames,
             self.gateway.settings.resume_window_ms,
+            hello.bandwidth_mode,
+            heartbeat_base_ms,
         ));
         let (resumed, resume_from_seq) = match &plan {
             Plan::Resume {
@@ -199,28 +208,54 @@ impl<T: Transport> Connection<'_, T> {
             .inline_auth(hello.access_token.as_deref(), hello.device_id, now)
             .await;
 
+        // Section 175: a staged rollout trims the advertised set for this one session before
+        // the mask is cut, decided here and only here so a session's frames keep one shape for
+        // its whole life. The account is the bucket key when the greeting carried a token — the
+        // same account lands in the same bucket across reconnects — and the fresh session id
+        // otherwise.
+        let admitted = self.gateway.feature_gate.admit(
+            self.gateway.features,
+            identity.as_ref().map(Identity::account_id),
+            session_id,
+        );
+
         // Section 154 is opt-in on both sides: the envelope leaves this node only for a client
         // that asked for it in its HELLO and a node that offers it. Decided here, once, so the
         // writer never re-derives it and a session's frames keep one shape for its whole life.
         self.batching = hello.features & migo_protocol::features::BATCHING != 0
-            && self.gateway.features & migo_protocol::features::BATCHING != 0;
+            && admitted & migo_protocol::features::BATCHING != 0;
+
+        // Section 148: the session's feature set is the intersection of what the client asked
+        // for and what this node advertised *to this session* — the rollout-trimmed `admitted`
+        // set, so a session the staged rollout held back never negotiates what it withheld. It
+        // is the same value WELCOME reports back. Decided once here and stored on the session
+        // handle, because the intersection is fixed for the session's lifetime and every later
+        // frame's feature gate reads it rather than re-deriving it.
+        let negotiated = hello.features & admitted;
 
         if !self
             .send_welcome(
                 session_id,
                 correlation,
                 hello.features,
+                admitted,
                 now,
                 resumed,
                 resume_from_seq,
                 identity.as_ref(),
+                outbound.cadence(),
             )
             .await
         {
             return None;
         }
 
-        let handle = SessionHandle::new(session_id, Arc::clone(&outbound), hello.bandwidth_mode);
+        let handle = SessionHandle::new(
+            session_id,
+            Arc::clone(&outbound),
+            hello.bandwidth_mode,
+            negotiated,
+        );
         self.gateway.hub.register(handle.clone());
         self.gateway.meters.session_opened();
 
@@ -436,22 +471,29 @@ impl<T: Transport> Connection<'_, T> {
     /// Builds and sends `WELCOME`, the first frame out (section 139: it reuses the `HELLO` opcode
     /// and correlation). Returns whether it was sent; on failure the admission slot is released
     /// and the socket closed, and the caller returns `None`.
+    ///
+    /// `client_features` is what the greeting asked for and `admitted` is what this node offers
+    /// this session after the staged rollout trimmed it (section 175); the feature set reported
+    /// back is their intersection, and `admitted` is passed rather than re-derived so the value in
+    /// the frame and the value the session gate later reads cannot drift apart.
     #[allow(clippy::too_many_arguments)]
     async fn send_welcome(
         &mut self,
         session_id: Id,
         correlation: u32,
         client_features: u64,
+        admitted: u64,
         now: Timestamp,
         resumed: Option<bool>,
         resume_from_seq: Option<u64>,
         identity: Option<&Identity>,
+        cadence: migo_protocol::Cadence,
     ) -> bool {
         let gateway = self.gateway;
         let welcome = Welcome {
             session_id,
             node: gateway.node.clone(),
-            features: client_features & gateway.features,
+            features: client_features & admitted,
             server_time: now,
             limits: Limits {
                 max_frame_bytes: u32::try_from(migo_wire::limits::MAX_FRAME_BYTES)
@@ -459,8 +501,13 @@ impl<T: Transport> Connection<'_, T> {
                 max_batch_items: u32::try_from(migo_wire::limits::MAX_BATCH_ITEMS)
                     .unwrap_or(u32::MAX),
                 max_subscriptions: u32::try_from(MAX_SUBSCRIPTIONS).unwrap_or(u32::MAX),
-                heartbeat_ms: u32::try_from(gateway.settings.heartbeat.as_millis())
-                    .unwrap_or(u32::MAX),
+                // The mode-adjusted heartbeat of section 159, not the node's base one: a
+                // LowData session is told to beat half as often and an UltraLowData one a
+                // quarter as often, and every deadline derived from what was advertised —
+                // the liveness deadline below, the presence TTL in the domain — reads this
+                // same cadence, so a client obeying its WELCOME is never judged by a number
+                // it was never given.
+                heartbeat_ms: cadence.heartbeat_ms,
             },
             resumed,
             resume_from_seq,
@@ -497,9 +544,13 @@ impl<T: Transport> Connection<'_, T> {
     async fn ready_loop(&mut self, established: &mut Established) -> Closed {
         let shutdown = self.gateway.shutdown.clone();
         let outbound = Arc::clone(&established.outbound);
-        let heartbeat_deadline_ms = u64::try_from(self.gateway.settings.heartbeat.as_millis())
-            .unwrap_or(u64::MAX)
-            .saturating_mul(2);
+        // Two missed heartbeats closes the session — counted in the heartbeat this session
+        // was actually told to send (section 159), not the node's base one. An UltraLowData
+        // session beating four times more slowly must not be pronounced dead between two
+        // punctual beats, and the number it was told is the one in its mailbox's cadence,
+        // the same number the WELCOME carried.
+        let heartbeat_deadline_ms =
+            u64::from(established.handle.cadence().heartbeat_ms).saturating_mul(2);
         let lagging_deadline_ms = self.gateway.settings.lagging_deadline_ms;
         // The hard bound on one drain attempt (section 160). A drain that completes but took
         // longer than `lagging_deadline_ms` is judged at the loop head below; a drain that never
@@ -729,7 +780,7 @@ impl<T: Transport> Connection<'_, T> {
     /// bytes and buys nothing. Order is the mailbox's order throughout, so nothing a client could
     /// notice is reordered.
     async fn flush(&mut self, outbound: &Outbound) -> bool {
-        let mut ready = outbound.take_ready();
+        let mut ready = outbound.take_ready(self.gateway.now());
         if !self.batching {
             if ready.is_empty() {
                 return true;
@@ -758,7 +809,7 @@ impl<T: Transport> Connection<'_, T> {
             tokio::select! {
                 () = &mut linger => break,
                 () = outbound.wait() => {
-                    let more = outbound.take_ready();
+                    let more = outbound.take_ready(self.gateway.now());
                     if more.is_empty() && outbound.is_closed() {
                         break;
                     }
@@ -861,6 +912,43 @@ impl<T: Transport> Connection<'_, T> {
         true
     }
 
+    /// Refuses a frame whose opcode falls inside the never-allocated span of the
+    /// reserved range.
+    ///
+    /// Section 146: the head of the reserved range is enforced as never-allocated. The
+    /// range 240-255 was set aside before v0.16.4 carved `STORE_PURCHASE` (239) and
+    /// `ENTITLEMENTS` (240) out of its head — the last numbers ever to be taken from it,
+    /// per the written decision in section 145 — so the never-allocated span this gate
+    /// polices is 241-255. A client speaking one is speaking a dialect this node promised
+    /// not to know — and unlike a merely unknown opcode (a newer client, answered and
+    /// kept going), a reserved number is one this build has sworn an opinion about, so
+    /// continuing would risk a future allocation being misread by an old session. The
+    /// refusal is terminal for the same reason the server-only-opcode violation is: the
+    /// peer is not speaking this protocol.
+    fn refuse_reserved_range(
+        &self,
+        outbound: &Outbound,
+        opcode_raw: u32,
+        correlation: u32,
+        now: Timestamp,
+    ) -> FrameOutcome {
+        let error = fault::error(
+            codes::UNKNOWN_OPCODE,
+            "reserved opcode range 241-255 is refused until a written decision allocates it",
+        )
+        .public("reserved opcode");
+        push_error(
+            outbound,
+            &self.gateway.meters,
+            opcode_raw,
+            correlation,
+            &error,
+            now,
+            self.compression,
+        );
+        FrameOutcome::Close(Closed::ProtocolViolation)
+    }
+
     /// Applies the section 149 phase gate to one decoded frame, then either answers a lifecycle
     /// opcode directly or delegates an application opcode to its handler.
     async fn dispatch_frame(
@@ -873,6 +961,12 @@ impl<T: Transport> Connection<'_, T> {
         let opcode_raw = frame.header.opcode;
         let correlation = frame.header.correlation;
         let meters = &self.gateway.meters;
+
+        // Section 146: a number inside the never-allocated span of the reserved range
+        // is refused before the opcode is even resolved — terminal, not answered.
+        if (241..=255).contains(&opcode_raw) {
+            return self.refuse_reserved_range(outbound, opcode_raw, correlation, now);
+        }
 
         let Some(opcode) = Opcode::from_wire(opcode_raw) else {
             // An opcode this build does not know: answer and keep going, since a newer client
@@ -936,6 +1030,22 @@ impl<T: Transport> Connection<'_, T> {
                 self.compression,
             );
             return FrameOutcome::Close(Closed::ProtocolViolation);
+        }
+
+        // Section 148 feature gate: an opcode the registry ties to a feature bit may only be
+        // dispatched on a session that negotiated that bit. The refusal is answered, not fatal —
+        // the session keeps serving every frame the negotiated set does allow.
+        if let Some(error) = feature_refusal(opcode, established.handle.features()) {
+            push_error(
+                outbound,
+                meters,
+                opcode_raw,
+                correlation,
+                &error,
+                now,
+                self.compression,
+            );
+            return FrameOutcome::Continue;
         }
 
         match opcode {
@@ -1175,7 +1285,12 @@ impl<T: Transport> Connection<'_, T> {
             .gateway
             .dispatcher
             .authorize_topics(
-                &TopicRequest::new(identity, established.session_id, now),
+                &TopicRequest::new(
+                    identity,
+                    established.session_id,
+                    established.handle.bandwidth_mode(),
+                    now,
+                ),
                 asked,
             )
             .await;
@@ -1510,7 +1625,7 @@ fn push_message<M: Encode>(
 ) {
     match encode_message(opcode.to_wire(), correlation, message, compression) {
         Ok(bytes) => {
-            if let PushOutcome::Dropped(dropped) = outbound.push(bytes, class, None, now) {
+            if let PushOutcome::Dropped(dropped) = outbound.push(bytes, class, opcode, None, now) {
                 meters.frame_dropped(dropped);
             }
         }
@@ -1526,6 +1641,10 @@ fn push_message<M: Encode>(
 
 /// Encodes an error and pushes it into a mailbox as a Critical frame — a client that asked for
 /// something is owed the verdict, so an error reply is never dropped.
+///
+/// The wire opcode is echoed from the request it answers; the metadata the mailbox consults is
+/// that of the reply, and a reply is neither paced nor suppressed, so the fallback for an
+/// unknown wire value is the one opcode that is neither.
 fn push_error(
     outbound: &Outbound,
     meters: &Meters,
@@ -1535,10 +1654,11 @@ fn push_error(
     now: Timestamp,
     compression: bool,
 ) {
-    match encode_error(opcode, correlation, error, compression) {
+    let opcode = Opcode::from_wire(opcode).unwrap_or(Opcode::Error);
+    match encode_error(opcode.to_wire(), correlation, error, compression) {
         Ok(bytes) => {
             if let PushOutcome::Dropped(dropped) =
-                outbound.push(bytes, DeliveryClass::Critical, None, now)
+                outbound.push(bytes, DeliveryClass::Critical, opcode, None, now)
             {
                 meters.frame_dropped(dropped);
             }
@@ -1546,5 +1666,68 @@ fn push_error(
         Err(inner) => {
             tracing::warn!(?inner, "failed to encode an error reply");
         }
+    }
+}
+
+/// Section 148's answer for an opcode the registry ties to a feature bit the session did not
+/// negotiate: `Some(FEATURE_NOT_NEGOTIATED)` when the opcode carries a bit the negotiated set
+/// lacks, `None` when the opcode is untagged or the bit is present.
+///
+/// Pure, so the rule is pinned by a unit test rather than a socket script. The registry decides
+/// which opcodes carry a bit; this decides what a session without the bit hears — error 1007,
+/// answered on the connection, which continues, because a client asking for a feature it never
+/// negotiated is misinformed rather than hostile, and the next frame may be perfectly legal.
+///
+/// The only tagged opcodes today are the FED_* range, which a client socket cannot reach at all
+/// (`AuthLevel::Server` is refused before this gate), so the gate is the enforcement the registry
+/// promises, held ready for the first client-facing opcode the registry ties to a bit.
+fn feature_refusal(opcode: Opcode, negotiated: u64) -> Option<CoreError> {
+    let bit = opcode.feature()?;
+    (negotiated & bit == 0).then(|| {
+        fault::error(
+            codes::FEATURE_NOT_NEGOTIATED,
+            format!(
+                "{} requires a feature this session did not negotiate",
+                opcode.name()
+            ),
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::feature_refusal;
+    use migo_protocol::features;
+    use migo_protocol::{codes, Opcode};
+
+    #[test]
+    fn an_untagged_opcode_passes_the_feature_gate_whatever_the_session_negotiated() {
+        // The overwhelming majority of the registry is untagged, so the gate must be a
+        // no-op for it — even a session that negotiated nothing at all.
+        assert!(feature_refusal(Opcode::Ping, 0).is_none());
+        assert!(feature_refusal(Opcode::ProfileUpdate, 0).is_none());
+        assert!(feature_refusal(Opcode::ProfileUpdate, u64::MAX).is_none());
+    }
+
+    #[test]
+    fn a_tagged_opcode_is_refused_on_a_session_without_the_bit() {
+        let refusal = feature_refusal(Opcode::FedHello, 0).expect("FED_HELLO carries a bit");
+        assert_eq!(refusal.code(), codes::FEATURE_NOT_NEGOTIATED);
+
+        // A session that negotiated a different bit is still refused: the intersection is
+        // per-bit, not a blanket "some features were agreed".
+        let refusal = feature_refusal(Opcode::FedForward, features::BATCHING)
+            .expect("FED_FORWARD carries a bit");
+        assert_eq!(refusal.code(), codes::FEATURE_NOT_NEGOTIATED);
+    }
+
+    #[test]
+    fn a_tagged_opcode_passes_once_the_session_negotiated_its_bit() {
+        assert!(feature_refusal(Opcode::FedHello, features::FEDERATION).is_none());
+        assert!(feature_refusal(
+            Opcode::FedDirectory,
+            features::FEDERATION | features::BATCHING
+        )
+        .is_none());
     }
 }

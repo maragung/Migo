@@ -25,7 +25,7 @@
 //! only, both of them reads about somebody else's privacy settings, plus one write
 //! that records when a device was last seen.
 //!
-//! # Why the minimum interval is advertised and not enforced here
+//! # Why the minimum interval is advertised here and enforced elsewhere
 //!
 //! Brief section 159 asks for a server-side floor on how often one user's presence
 //! may be republished. [`Cadence::min_interval_ms`](crate::model::Cadence) computes
@@ -40,15 +40,23 @@
 //! `Coalescable` keyed by user id). Publishing the number and letting the component
 //! with the queue apply it keeps one mechanism instead of two that can disagree.
 //!
+//! The gateway does apply it now: the table lives in `migo-protocol` so the queue
+//! can read it without naming this crate (section 177), and the frame's `paced`
+//! metadata in the schema is what tells the queue which `Coalescable` keys carry
+//! the floor. This crate's part remains the same — compute the number, store the
+//! entry, plan the fanout — and it still sends nothing itself.
+//!
 //! # What is deliberately absent
 //!
 //! No custom status. `PresenceUpdate` carries the field and this server refuses it
 //! with `FEATURE_DISABLED` rather than accepting it into a presence entry, because a
 //! custom status is expected to outlive a disconnect and everything in this crate
 //! evaporates with the cache — storing it here would make section 173's "losing
-//! Redis loses nothing but ephemeral state" quietly false. Its home is a profile
-//! column, and `UserProfile.custom_status` in the IDL is already where it will be
-//! read from.
+//! Redis loses nothing but ephemeral state" quietly false. Its home is the profile
+//! column the RICH_PRESENCE feature bit gates: `PROFILE_UPDATE.custom_status` writes
+//! it and `UserProfile.custom_status` reads it back, so the refusal here stays even
+//! though the field now has a durable home — a presence entry is the wrong home, and
+//! two homes would disagree the first time one of them was edited.
 //!
 //! No away-detection. Nothing here decides that a user has gone idle: the client
 //! knows whether its window has focus and this crate would be guessing from a
@@ -75,7 +83,7 @@ use migo_store::{SharedStore, Store};
 use crate::fanout::Fanout;
 use crate::metrics::{LastSeenOutcome, Meters, SessionEvent, UpdateOutcome};
 use crate::model::{
-    cadence_for, Cadence, Caller, Detail, PresenceConfig, MAX_LAST_SEEN_LOOKUPS,
+    cadence_for, Cadence, CadenceTtl, Caller, Detail, PresenceConfig, MAX_LAST_SEEN_LOOKUPS,
     MAX_SNAPSHOT_SUBJECTS,
 };
 use crate::state::{

@@ -43,7 +43,7 @@ use migo_core::metrics::Registry;
 use migo_core::{Clock, Error, Id, ManualClock, SeededRandom, Shutdown, Timestamp};
 use migo_protocol::{
     codes, fault, from_frame, to_frame, BandwidthMode, CloseReason, ConversationMemberEvent,
-    Encode, Error as ErrorMessage, Frame, FrameHeader, Hello, MemberChange, MessageEvent,
+    Encode, Error as ErrorMessage, FedHello, Frame, FrameHeader, Hello, MemberChange, MessageEvent,
     MessageKind, NodeInfo, NotificationEvent, Opcode, Ping, Pong, PresenceState, PresenceUpdate,
     ReconnectHint, ResumeRequest, RoomMemberEvent, SubscribeRequest, SubscribeResponse, Topic,
     TopicKind, Welcome, PROTOCOL_VERSION,
@@ -51,8 +51,8 @@ use migo_protocol::{
 use migo_ratelimit::{CacheRateLimiter, Policies, SharedRateLimiter, TrustTier};
 
 use migo_gateway::{
-    ClientContext, Dispatcher, Gateway, GatewayServices, NoopDispatcher, TopicRequest, Transport,
-    TransportError,
+    ClientContext, Dispatcher, FeatureGate, FullRollout, Gateway, GatewayServices, NoopDispatcher,
+    TopicRequest, Transport, TransportError,
 };
 
 // ---------------------------------------------------------------------------
@@ -642,6 +642,7 @@ struct HarnessBuilder {
     auth: FakeAuth,
     dispatcher: Arc<dyn Dispatcher>,
     features: u64,
+    feature_gate: Arc<dyn FeatureGate>,
     clock: ManualClock,
     shutdown: Shutdown,
 }
@@ -655,6 +656,7 @@ impl HarnessBuilder {
             // Advertise every feature bit so a client's requested features pass the mask
             // unchanged unless a test narrows this on purpose.
             features: u64::MAX,
+            feature_gate: Arc::new(FullRollout),
             clock: ManualClock::new(ts(NOW)),
             shutdown: Shutdown::new(),
         }
@@ -684,6 +686,7 @@ impl HarnessBuilder {
                 shutdown: shutdown.clone(),
                 node: NodeInfo::default(),
                 features: self.features,
+                feature_gate: self.feature_gate,
             },
         );
         Harness {
@@ -1182,6 +1185,101 @@ async fn a_second_hello_after_the_handshake_closes_the_connection() {
         0,
         "the live-session gauge is balanced after the violation close"
     );
+}
+
+#[tokio::test]
+async fn a_reserved_opcode_is_refused_and_closes_the_connection() {
+    // Section 146: the never-allocated span of the reserved range is policed at the
+    // gateway. 250 carries no enum variant and must not fall into the tolerant
+    // unknown-opcode path — a merely unknown verb is a newer client, but a reserved
+    // number is one this build has a written opinion about, so the peer is not
+    // speaking this protocol and the session ends as a violation.
+    let h = Harness::new();
+    let pipe = Pipe::new();
+    pipe.client(Opcode::Hello, 1, &hello());
+    // A raw frame, because the enum deliberately has no variant at 250.
+    let frame = to_frame(250, 2, &Ping::default()).expect("a scripted frame must encode");
+    pipe.push_bytes(frame.encode().expect("a scripted frame must encode"));
+
+    h.serve(&pipe).await;
+
+    let frames = pipe.sent();
+    let _welcome = welcome_in(&frames);
+    let error = sole_error(&frames);
+    assert_eq!(
+        error.code,
+        codes::UNKNOWN_OPCODE,
+        "a reserved opcode is refused under the unknown-opcode code, the same code an \
+         unallocated number already answers with — the reserved range is a promise about \
+         allocation, not a third error taxonomy"
+    );
+    assert_eq!(
+        error.message.as_deref(),
+        Some("reserved opcode"),
+        "the public hint names the reserved range without disclosing the internal rule"
+    );
+    assert_eq!(
+        h.sessions_closed("protocol_violation"),
+        1,
+        "the session closes as a protocol violation, unlike the tolerant unknown-opcode path"
+    );
+    assert_eq!(
+        h.sessions_live(),
+        0,
+        "the live-session gauge is balanced after the violation close"
+    );
+    assert!(
+        pipe.was_closed(),
+        "the socket is closed after the reserved-opcode refusal"
+    );
+}
+
+#[tokio::test]
+async fn an_allocated_opcode_at_the_reserved_head_is_not_caught_by_the_range_gate() {
+    // 240 is ENTITLEMENTS — the last number ever carved from the reserved head (section
+    // 145). The range gate must police 241-255 and leave the allocated head alone.
+    let h = Harness::new();
+    let pipe = Pipe::new();
+    pipe.client(Opcode::Hello, 1, &hello());
+    // An Entitlements request out of session state: the phase gate answers it, which is
+    // exactly the proof that the range gate did not intercept it first. The page
+    // arguments are empty because the request never reaches the listing handler.
+    pipe.client(
+        Opcode::Entitlements,
+        2,
+        &migo_protocol::EntitlementsReq {
+            limit: None,
+            cursor: None,
+        },
+    );
+
+    h.serve(&pipe).await;
+
+    let frames = pipe.sent();
+    let _welcome = welcome_in(&frames);
+    let error = sole_error(&frames);
+    assert_eq!(
+        error.code,
+        codes::UNEXPECTED_OPCODE,
+        "240 reaches the phase gate and is answered for its phase, not its range"
+    );
+    // The proof that the range gate let 240 through is what the refusal does *not* carry:
+    // disclosure is opt-in (`Error::public`, and `fault::error` leaves the detail unset), so
+    // the phase gate's internal "the session is not authenticated" never reaches the wire —
+    // the one refusal on this path that says anything is the range gate's, and its hint is
+    // the literal "reserved opcode" under UNKNOWN_OPCODE, as the test above pins. A hint
+    // here would mean the range gate had intercepted an allocated opcode.
+    assert_ne!(
+        error.message.as_deref(),
+        Some("reserved opcode"),
+        "the refusal is the phase gate's — proof the range gate let 240 through"
+    );
+    assert_eq!(
+        h.sessions_closed("protocol_violation"),
+        1,
+        "the phase gate is terminal, but for the session's phase, not its opcode number"
+    );
+    assert_eq!(h.sessions_live(), 0);
 }
 
 #[tokio::test]
@@ -2586,6 +2684,67 @@ async fn a_server_to_client_opcode_from_a_client_closes_the_session() {
     );
 }
 
+#[tokio::test]
+async fn a_federation_opcode_from_a_client_socket_closes_the_session() {
+    // The FED_* range is the one the registry tags with the FEDERATION feature bit
+    // (section 148), but a client never reaches the feature gate with one: every FED_*
+    // opcode is server-auth, and server-auth frames are refused on direction grounds
+    // before the feature gate runs. The negotiated-bit gate is a second lock on a door
+    // that is already shut — this pins the ordering, so a client sending FED frames
+    // hears UNEXPECTED_OPCODE and loses the connection, not a feature refusal.
+    let h = Harness::new();
+    let pipe = Pipe::new();
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_token(VALID_TOKEN, device_of(ACCOUNT)),
+    );
+    pipe.client(Opcode::FedHello, 2, &FedHello::default());
+
+    h.serve(&pipe).await;
+
+    let frames = pipe.sent();
+    let _ = welcome_in(&frames);
+    let error = sole_error(&frames);
+    assert_eq!(
+        error.code,
+        codes::UNEXPECTED_OPCODE,
+        "a FED_* frame from a client is refused as a server-auth opcode, not by the feature gate"
+    );
+    assert_eq!(
+        h.sessions_closed("protocol_violation"),
+        1,
+        "the session is closed as a protocol violation"
+    );
+}
+
+#[tokio::test]
+async fn the_welcome_reports_the_intersection_of_requested_and_advertised_features() {
+    // Section 148's negotiation cut, observed on the wire: the session's feature set is
+    // the client's request masked against the node's advertised set, and WELCOME reports
+    // exactly that intersection — a bit the node never offered cannot be negotiated
+    // unilaterally, and a bit the client never asked for is not granted either.
+    let mut builder = HarnessBuilder::new();
+    builder.features = migo_protocol::features::BATCHING | migo_protocol::features::FEDERATION;
+    let h = builder.build();
+    let pipe = Pipe::new();
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_features(migo_protocol::features::BATCHING | migo_protocol::features::QUIC),
+    );
+
+    h.serve(&pipe).await;
+
+    let welcome = welcome_in(&pipe.sent());
+    assert_eq!(
+        welcome.features,
+        migo_protocol::features::BATCHING,
+        "the session carries only the bits both sides named: FEDERATION was never asked \
+         for, QUIC was never offered"
+    );
+}
+
 // ===========================================================================
 // Invariant — nothing sensitive is logged or metered; every error a client
 // sees carries only the public face of the fault.
@@ -2893,6 +3052,69 @@ async fn a_session_that_did_not_ask_keeps_bare_frames() {
         .filter(|frame| Opcode::from_wire(frame.header.opcode) == Some(Opcode::PresenceEvent))
         .count();
     assert!(presence >= 8, "the burst still arrives, bare: {presence}");
+    assert_eq!(
+        h.counter("migo_gateway_batches_out_total", &[]),
+        0,
+        "no envelope, no batch metric"
+    );
+}
+
+/// Section 175's staged rollout in its simplest shape: a gate that withholds one bit from
+/// every session. The WELCOME mask and the writer's batching decision must come from the
+/// same admitted set, so a client can never be denied the bit in the mask and then spoken
+/// to in the envelope shape it never negotiated — or the reverse.
+struct WithholdBatching;
+
+impl FeatureGate for WithholdBatching {
+    fn admit(&self, base: u64, _account: Option<Id>, _session: Id) -> u64 {
+        base & !migo_protocol::features::BATCHING
+    }
+}
+
+#[tokio::test]
+async fn a_rollout_that_withholds_batching_keeps_the_whole_session_bare() {
+    let mut builder = HarnessBuilder::new();
+    builder.dispatcher = Arc::new(Burst {
+        topic: Topic {
+            kind: TopicKind::User,
+            id: id(ACCOUNT),
+        },
+    });
+    builder.feature_gate = Arc::new(WithholdBatching);
+    let h = builder.build();
+    let pipe = Pipe::new();
+    // The client asks for BATCHING; the node's advertised set has it; the rollout gate is
+    // what says no — the shape a staged feature takes while it rolls out.
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_features(migo_protocol::features::BATCHING),
+    );
+    pipe.client(
+        Opcode::Subscribe,
+        2,
+        &SubscribeRequest {
+            topics: vec![Topic {
+                kind: TopicKind::User,
+                id: id(ACCOUNT),
+            }],
+        },
+    );
+    use migo_protocol::ProfileRequest;
+    pipe.client(Opcode::ProfileFetch, 100, &ProfileRequest::default());
+    h.serve(&pipe).await;
+
+    let sent = pipe.sent();
+    let welcome = welcome_in(&sent);
+    assert_eq!(
+        welcome.features & migo_protocol::features::BATCHING,
+        0,
+        "the mask the session negotiates is the admitted set, not the advertised set"
+    );
+    assert!(
+        sent.iter().all(|frame| !frame.header.is_batch()),
+        "the writer must take its batching decision from the same admitted set"
+    );
     assert_eq!(
         h.counter("migo_gateway_batches_out_total", &[]),
         0,

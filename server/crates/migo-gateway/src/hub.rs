@@ -222,17 +222,22 @@ impl Hub {
 
     /// Fans one pre-encoded frame out to every subscriber of a topic.
     ///
-    /// `encoded` is the whole frame, encoded once; each subscriber receives a clone. Frames
-    /// dropped under a subscriber's backpressure are counted here, so a slow client shows up
-    /// in the drop metric rather than stalling the sender. `exclude`, when set, is the one
-    /// session id that is skipped — the originator of a mutation, so a caller does not receive
-    /// the echo of its own change (a domain fanout carries the sender's device for exactly
-    /// this) while every other device on the topic, including the sender's own other
-    /// connections, still does.
+    /// `encoded` is the whole frame, encoded once; each subscriber receives a clone. The
+    /// `opcode` rides along so each session's mailbox can apply the delivery metadata the
+    /// schema attaches to it — pacing for a presence stream, suppression for typing on a
+    /// session that negotiated `UltraLowData` (section 159) — against that session's own
+    /// bandwidth mode, which the hub does not have to know anything about. Frames dropped
+    /// under a subscriber's backpressure are counted here, so a slow client shows up in the
+    /// drop metric rather than stalling the sender. `exclude`, when set, is the one session id
+    /// that is skipped — the originator of a mutation, so a caller does not receive the echo
+    /// of its own change (a domain fanout carries the sender's device for exactly this) while
+    /// every other device on the topic, including the sender's own other connections, still
+    /// does.
     pub(crate) fn broadcast(
         &self,
         topic: &Topic,
         encoded: &Bytes,
+        opcode: migo_protocol::Opcode,
         class: DeliveryClass,
         coalesce_key: Option<u64>,
         now: Timestamp,
@@ -248,9 +253,10 @@ impl Hub {
                 continue;
             }
             if let Some(handle) = self.sessions.get(&session_id) {
-                let outcome = handle
-                    .outbound()
-                    .push(encoded.clone(), class, coalesce_key, now);
+                let outcome =
+                    handle
+                        .outbound()
+                        .push(encoded.clone(), class, opcode, coalesce_key, now);
                 if let PushOutcome::Dropped(class) = outcome {
                     self.meters.frame_dropped(class);
                 }

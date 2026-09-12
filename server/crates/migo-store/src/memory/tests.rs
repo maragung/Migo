@@ -49,6 +49,7 @@ async fn seed_account(store: &MemoryStore, value: u128, username: &str) -> Id {
             who_can_message: Visibility::Everyone,
             who_can_add: Visibility::Everyone,
             searchable: true,
+            custom_status: None,
             updated_at: ts(1_000),
         })
         .await

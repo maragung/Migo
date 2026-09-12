@@ -5582,6 +5582,8 @@ data class ProfileUpdate(
     val whoCanAdd: Long? = null,
     /** New search visibility. */
     val searchable: Boolean? = null,
+    /** New custom status, the RICH_PRESENCE bit's own field; present only on a session that negotiated the bit. */
+    val customStatus: String? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
@@ -5594,6 +5596,7 @@ data class ProfileUpdate(
         if (whoCanMessage != null) present++
         if (whoCanAdd != null) present++
         if (searchable != null) present++
+        if (customStatus != null) present++
         w.u32(present)
         if (displayName != null) {
             val value = displayName
@@ -5643,6 +5646,12 @@ data class ProfileUpdate(
                 w.bool(value)
             }
         }
+        if (customStatus != null) {
+            val value = customStatus
+            w.optional(9) { w ->
+                w.str(value)
+            }
+        }
         w.leave()
     }
 
@@ -5657,6 +5666,7 @@ data class ProfileUpdate(
             var whoCanMessage: Long? = null
             var whoCanAdd: Long? = null
             var searchable: Boolean? = null
+            var customStatus: String? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
@@ -5669,11 +5679,12 @@ data class ProfileUpdate(
                     6L -> whoCanMessage = sub.u32()
                     7L -> whoCanAdd = sub.u32()
                     8L -> searchable = sub.bool()
+                    9L -> customStatus = sub.str()
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return ProfileUpdate(displayName, bio, avatarMediaId, birthYear, showLastSeen, whoCanMessage, whoCanAdd, searchable)
+            return ProfileUpdate(displayName, bio, avatarMediaId, birthYear, showLastSeen, whoCanMessage, whoCanAdd, searchable, customStatus)
         }
     }
 }
@@ -6634,19 +6645,27 @@ data class GiftCatalogueResponse(
     }
 }
 
-/** Reads the caller's statement. */
+/** Reads one keyset page of the caller's statement; the cursor is the position of the last entry a previous page returned. */
 data class LedgerReq(
     val limit: Long? = null,
+    val cursor: String? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
         var present = 0
         if (limit != null) present++
+        if (cursor != null) present++
         w.u32(present)
         if (limit != null) {
             val value = limit
             w.optional(1) { w ->
                 w.u32(value)
+            }
+        }
+        if (cursor != null) {
+            val value = cursor
+            w.optional(2) { w ->
+                w.str(value)
             }
         }
         w.leave()
@@ -6656,16 +6675,18 @@ data class LedgerReq(
         fun decode(r: Reader): LedgerReq {
             r.enter()
             var limit: Long? = null
+            var cursor: String? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
                 val (fieldId, sub) = r.optional()
                 when (fieldId) {
                     1L -> limit = sub.u32()
+                    2L -> cursor = sub.str()
                     else -> {} // unknown optional field: skipped by length (forward compatibility)
                 }
             }
             r.leave()
-            return LedgerReq(limit)
+            return LedgerReq(limit, cursor)
         }
     }
 }
@@ -6722,15 +6743,24 @@ data class LedgerEntryWire(
     }
 }
 
-/** A page of the caller's statement. */
+/** A page of the caller's statement, with the cursor of the next page whenever this one was full. */
 data class LedgerResponse(
     val entries: List<LedgerEntryWire>,
+    val nextCursor: String? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
         w.listLen(entries.size)
         for (item in entries) { item.encode(w) }
-        w.u32(0)
+        var present = 0
+        if (nextCursor != null) present++
+        w.u32(present)
+        if (nextCursor != null) {
+            val value = nextCursor
+            w.optional(1) { w ->
+                w.str(value)
+            }
+        }
         w.leave()
     }
 
@@ -6738,12 +6768,17 @@ data class LedgerResponse(
         fun decode(r: Reader): LedgerResponse {
             r.enter()
             val entries = run { val n = r.listLen(); val acc = ArrayList<LedgerEntryWire>(n); for (i in 0 until n) acc.add(LedgerEntryWire.decode(r)); acc }
+            var nextCursor: String? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
-                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> nextCursor = sub.str()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
             }
             r.leave()
-            return LedgerResponse(entries)
+            return LedgerResponse(entries, nextCursor)
         }
     }
 }
@@ -8353,24 +8388,48 @@ data class KickPointsBuyResult(
     }
 }
 
-/** Empty; the caller's own entitlements are the session's. */
-class EntitlementsReq(
+/** Reads one keyset page of the caller's own entitlements; the cursor is the position of the last row a previous page returned. */
+data class EntitlementsReq(
+    val limit: Long? = null,
+    val cursor: String? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
-        w.u32(0)
+        var present = 0
+        if (limit != null) present++
+        if (cursor != null) present++
+        w.u32(present)
+        if (limit != null) {
+            val value = limit
+            w.optional(1) { w ->
+                w.u32(value)
+            }
+        }
+        if (cursor != null) {
+            val value = cursor
+            w.optional(2) { w ->
+                w.str(value)
+            }
+        }
         w.leave()
     }
 
     companion object {
         fun decode(r: Reader): EntitlementsReq {
             r.enter()
+            var limit: Long? = null
+            var cursor: String? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
-                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> limit = sub.u32()
+                    2L -> cursor = sub.str()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
             }
             r.leave()
-            return EntitlementsReq()
+            return EntitlementsReq(limit, cursor)
         }
     }
 }
@@ -8403,15 +8462,24 @@ data class Entitlement(
     }
 }
 
-/** Everything the caller owns, oldest first. */
+/** One page of what the caller owns, oldest first, with the cursor of the next page whenever this one was full. */
 data class EntitlementsResponse(
     val items: List<Entitlement>,
+    val nextCursor: String? = null,
 ) {
     fun encode(w: Writer) {
         w.enter()
         w.listLen(items.size)
         for (item in items) { item.encode(w) }
-        w.u32(0)
+        var present = 0
+        if (nextCursor != null) present++
+        w.u32(present)
+        if (nextCursor != null) {
+            val value = nextCursor
+            w.optional(1) { w ->
+                w.str(value)
+            }
+        }
         w.leave()
     }
 
@@ -8419,12 +8487,17 @@ data class EntitlementsResponse(
         fun decode(r: Reader): EntitlementsResponse {
             r.enter()
             val items = run { val n = r.listLen(); val acc = ArrayList<Entitlement>(n); for (i in 0 until n) acc.add(Entitlement.decode(r)); acc }
+            var nextCursor: String? = null
             val optionalCount = r.u32()
             for (i in 0L until optionalCount) {
-                r.optional() // no optional fields in this build; a newer peer's are skipped by length
+                val (fieldId, sub) = r.optional()
+                when (fieldId) {
+                    1L -> nextCursor = sub.str()
+                    else -> {} // unknown optional field: skipped by length (forward compatibility)
+                }
             }
             r.leave()
-            return EntitlementsResponse(items)
+            return EntitlementsResponse(items, nextCursor)
         }
     }
 }
@@ -8459,6 +8532,7 @@ object Op {
     const val SYNC: Long = 36L
     const val CONVERSATION_LIST: Long = 37L
     const val CONVERSATION_CREATE: Long = 38L
+    /** Typing start/stop marks. Never delivered to a session on a mode in suppress_on (brief 159: typing is off entirely on UltraLowData), so the gateway drops the frame at the mailbox rather than spending the bytes. */
     const val TYPING: Long = 39L
     /** Edits a message's text in place. */
     const val MESSAGE_EDIT: Long = 40L
@@ -8485,6 +8559,7 @@ object Op {
     /** A founder renames a group. */
     const val CONVERSATION_UPDATE: Long = 51L
     const val PRESENCE_SET: Long = 64L
+    /** Presence for one user. Paced (brief 159): two frames about the same user are spaced by the session's presence minimum interval, applied by the gateway's coalescing queue as a hold with a trailing edge so the newest state is never lost. */
     const val PRESENCE_EVENT: Long = 65L
     const val ROOM_JOIN: Long = 80L
     const val ROOM_LEAVE: Long = 81L
@@ -8629,128 +8704,131 @@ data class OpcodeMeta(
     val payload: String,
     val response: String? = null,
     val coalesceKey: String? = null,
+    val paced: Boolean = false,
+    val suppressOn: List<String> = emptyList(),
+    val feature: String? = null,
 )
 
 val OPCODES: Map<Long, OpcodeMeta> = mapOf(
-    1L to OpcodeMeta(1L, "HELLO", 5, DeliveryClass.Critical, AuthLevel.None, Direction.ClientToServer, false, "Hello", "Welcome", null),
-    2L to OpcodeMeta(2L, "PING", 1, DeliveryClass.Critical, AuthLevel.None, Direction.Both, false, "Ping", "Pong", null),
-    3L to OpcodeMeta(3L, "ACK", 0, DeliveryClass.Critical, AuthLevel.None, Direction.ClientToServer, false, "Ack", null, null),
-    4L to OpcodeMeta(4L, "ERROR", 0, DeliveryClass.Critical, AuthLevel.None, Direction.ServerToClient, false, "Error", null, null),
-    5L to OpcodeMeta(5L, "RECONNECT_HINT", 0, DeliveryClass.Critical, AuthLevel.None, Direction.ServerToClient, false, "ReconnectHint", null, null),
-    6L to OpcodeMeta(6L, "AUTHENTICATE", 10, DeliveryClass.Critical, AuthLevel.None, Direction.ClientToServer, false, "Authenticate", "Authenticated", null),
-    7L to OpcodeMeta(7L, "SUBSCRIBE", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "SubscribeRequest", "SubscribeResponse", null),
-    8L to OpcodeMeta(8L, "UNSUBSCRIBE", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "SubscribeRequest", "SubscribeResponse", null),
-    16L to OpcodeMeta(16L, "KEY_PUBLISH", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "KeyPublish", "KeyPublishResult", null),
-    17L to OpcodeMeta(17L, "KEY_BUNDLE_FETCH", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "KeyBundleRequest", "KeyBundleResponse", null),
-    32L to OpcodeMeta(32L, "MESSAGE_SEND", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MessageSend", "MessageAccepted", null),
-    33L to OpcodeMeta(33L, "MESSAGE_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, true, "MessageEvent", null, null),
-    34L to OpcodeMeta(34L, "MESSAGE_RECEIPT", 1, DeliveryClass.Critical, AuthLevel.User, Direction.Both, false, "MessageReceipt", null, null),
-    35L to OpcodeMeta(35L, "MESSAGE_DELETE", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MessageDelete", "MessageAccepted", null),
-    36L to OpcodeMeta(36L, "SYNC", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "SyncRequest", "SyncResponse", null),
-    37L to OpcodeMeta(37L, "CONVERSATION_LIST", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationListRequest", "ConversationListResponse", null),
-    38L to OpcodeMeta(38L, "CONVERSATION_CREATE", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationCreateRequest", "ConversationSummary", null),
-    39L to OpcodeMeta(39L, "TYPING", 1, DeliveryClass.Coalescable, AuthLevel.User, Direction.Both, false, "TypingEvent", null, "conversation_id"),
-    40L to OpcodeMeta(40L, "MESSAGE_EDIT", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MessageEdit", "Acknowledged", null),
-    41L to OpcodeMeta(41L, "REACTION_SET", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ReactionSet", "Acknowledged", null),
-    42L to OpcodeMeta(42L, "REACTION_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ReactionEvent", null, "target_message_id+actor_id"),
-    43L to OpcodeMeta(43L, "CONVERSATION_INVITE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationInviteRequest", "ConversationSummary", null),
-    44L to OpcodeMeta(44L, "CONVERSATION_LEAVE", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationLeaveRequest", "Acknowledged", null),
-    45L to OpcodeMeta(45L, "CONVERSATION_ROSTER", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationRosterRequest", "ConversationRosterResponse", null),
-    46L to OpcodeMeta(46L, "CONVERSATION_MUTE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationMuteRequest", "Acknowledged", null),
-    47L to OpcodeMeta(47L, "CONVERSATION_KICK", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationKickRequest", "Acknowledged", null),
-    48L to OpcodeMeta(48L, "CONVERSATION_VOTE_KICK", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationVoteKickRequest", "ConversationVoteKickResponse", null),
-    49L to OpcodeMeta(49L, "CONVERSATION_VOTE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ConversationVoteEvent", null, "conversation_id"),
-    50L to OpcodeMeta(50L, "CONVERSATION_MEMBER_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "ConversationMemberEvent", null, null),
-    51L to OpcodeMeta(51L, "CONVERSATION_UPDATE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationUpdateRequest", "ConversationSummary", null),
-    64L to OpcodeMeta(64L, "PRESENCE_SET", 1, DeliveryClass.Coalescable, AuthLevel.User, Direction.ClientToServer, false, "PresenceUpdate", "Acknowledged", null),
-    65L to OpcodeMeta(65L, "PRESENCE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "PresenceEvent", null, "user_id"),
-    80L to OpcodeMeta(80L, "ROOM_JOIN", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomJoinRequest", "RoomJoinResponse", null),
-    81L to OpcodeMeta(81L, "ROOM_LEAVE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomLeaveRequest", "Acknowledged", null),
-    82L to OpcodeMeta(82L, "ROOM_LIST", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomListRequest", "RoomListResponse", null),
-    83L to OpcodeMeta(83L, "ROOM_MEMBER_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "RoomMemberEvent", null, null),
-    84L to OpcodeMeta(84L, "ROOM_STATE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "RoomStateEvent", null, "room_id"),
-    85L to OpcodeMeta(85L, "ROOM_CREATE", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomCreate", "RoomJoinResponse", null),
-    86L to OpcodeMeta(86L, "ROOM_ROSTER", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RosterReq", "RosterResponse", null),
-    87L to OpcodeMeta(87L, "ROOM_ROLE_SET", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomRoleSet", "Acknowledged", null),
-    88L to OpcodeMeta(88L, "ROOM_UPDATE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomUpdate", "Acknowledged", null),
-    89L to OpcodeMeta(89L, "ROOM_ARCHIVE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomArchive", "Acknowledged", null),
-    90L to OpcodeMeta(90L, "ROOM_VOTE_KICK", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomVoteKick", "RoomVoteKickResponse", null),
-    91L to OpcodeMeta(91L, "ROOM_VOTE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "RoomVoteEvent", null, "room_id"),
-    92L to OpcodeMeta(92L, "ROOM_SANCTION", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomSanction", "Acknowledged", null),
-    111L to OpcodeMeta(111L, "PROFILE_UPDATE", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ProfileUpdate", "UserProfile", null),
-    112L to OpcodeMeta(112L, "PROFILE_FETCH", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ProfileRequest", "ProfileResponse", null),
-    113L to OpcodeMeta(113L, "FRIEND_REQUEST", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "FriendTarget", "Acknowledged", null),
-    114L to OpcodeMeta(114L, "FRIEND_RESPOND", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "FriendRespond", "Acknowledged", null),
-    115L to OpcodeMeta(115L, "FRIEND_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "FriendEvent", null, null),
-    116L to OpcodeMeta(116L, "BLOCK_SET", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "FriendTarget", "Acknowledged", null),
-    117L to OpcodeMeta(117L, "RELATIONSHIP_LIST", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RelationshipListReq", "RelationshipList", null),
-    118L to OpcodeMeta(118L, "SUGGESTIONS", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "SuggestReq", "SearchResponse", null),
-    119L to OpcodeMeta(119L, "SEARCH", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "SearchReq", "SearchResponse", null),
-    120L to OpcodeMeta(120L, "MUTE_SET", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MuteSet", "Acknowledged", null),
-    128L to OpcodeMeta(128L, "MEDIA_UPLOAD_BEGIN", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaBegin", "MediaTicket", null),
-    129L to OpcodeMeta(129L, "MEDIA_UPLOAD_STATUS", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaStatusReq", "MediaProgress", null),
-    130L to OpcodeMeta(130L, "MEDIA_UPLOAD_COMMIT", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaCommit", "Acknowledged", null),
-    131L to OpcodeMeta(131L, "MEDIA_UPLOAD_ABORT", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaAbort", "Acknowledged", null),
-    132L to OpcodeMeta(132L, "MEDIA_FETCH_URL", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaFetch", "MediaUrl", null),
-    133L to OpcodeMeta(133L, "MEDIA_STATE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "MediaStateEvent", null, "object_id"),
-    144L to OpcodeMeta(144L, "NOTIFICATION_EVENT", 0, DeliveryClass.Droppable, AuthLevel.User, Direction.ServerToClient, false, "NotificationEvent", null, null),
-    145L to OpcodeMeta(145L, "NOTIFICATION_ACK", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "NotificationAck", "Acknowledged", null),
-    146L to OpcodeMeta(146L, "NOTIFICATION_LIST", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "InboxReq", "InboxResponse", null),
-    147L to OpcodeMeta(147L, "PUSH_REGISTER", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "PushRegister", "Acknowledged", null),
-    148L to OpcodeMeta(148L, "PUSH_UNREGISTER", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "PushUnregister", "Acknowledged", null),
-    160L to OpcodeMeta(160L, "GIFT_SEND", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GiftSend", "GiftSendResult", null),
-    161L to OpcodeMeta(161L, "BALANCE_FETCH", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "WalletReq", "WalletView", null),
-    162L to OpcodeMeta(162L, "ECONOMY_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "EconomyEvent", null, null),
-    163L to OpcodeMeta(163L, "GIFT_CATALOGUE", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GiftCatalogueReq", "GiftCatalogueResponse", null),
-    164L to OpcodeMeta(164L, "LEDGER_HISTORY", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "LedgerReq", "LedgerResponse", null),
-    165L to OpcodeMeta(165L, "PROGRESSION", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ProgressionReq", "ProgressionWire", null),
-    166L to OpcodeMeta(166L, "BADGES", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "BadgesReq", "BadgesResponse", null),
-    167L to OpcodeMeta(167L, "LEADERBOARD", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "LeaderboardReq", "LeaderboardResponse", null),
-    176L to OpcodeMeta(176L, "GAME_ACTION", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GameAction", "Acknowledged", null),
-    177L to OpcodeMeta(177L, "GAME_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "GameEvent", null, null),
-    178L to OpcodeMeta(178L, "BOT_COMMAND", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "BotCommand", "Acknowledged", null),
-    179L to OpcodeMeta(179L, "BOT_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "BotEvent", null, null),
-    180L to OpcodeMeta(180L, "BOT_REGISTER", 20, DeliveryClass.Critical, AuthLevel.Bot, Direction.ClientToServer, false, "BotRegister", "BotView", null),
-    183L to OpcodeMeta(183L, "GAME_START", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GameStart", "GameViewWire", null),
-    184L to OpcodeMeta(184L, "GAME_VIEW", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GameId", "GameViewWire", null),
-    185L to OpcodeMeta(185L, "GAME_ABANDON", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GameId", "Acknowledged", null),
-    186L to OpcodeMeta(186L, "GAME_CATALOGUE", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GiftCatalogueReq", "GameCatalogueResponse", null),
-    192L to OpcodeMeta(192L, "REPORT_CREATE", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ReportFile", "Acknowledged", null),
-    193L to OpcodeMeta(193L, "MODERATION_ACTION", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ModAction", "Acknowledged", null),
-    194L to OpcodeMeta(194L, "MODERATION_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "ModerationEvent", null, null),
-    208L to OpcodeMeta(208L, "FED_HELLO", 5, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedHello", "FedHello", null),
-    209L to OpcodeMeta(209L, "FED_AUTH", 5, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedAuth", "Acknowledged", null),
-    210L to OpcodeMeta(210L, "FED_PING", 1, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedPing", "FedPong", null),
-    211L to OpcodeMeta(211L, "FED_FORWARD", 1, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedForward", "Acknowledged", null),
-    212L to OpcodeMeta(212L, "FED_ACK", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedAck", "Acknowledged", null),
-    213L to OpcodeMeta(213L, "FED_ROOM_SUBSCRIBE", 2, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedRouting", "Acknowledged", null),
-    214L to OpcodeMeta(214L, "FED_ROOM_EVENT", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedRoomEvent", "Acknowledged", null),
-    215L to OpcodeMeta(215L, "FED_PRESENCE_DIGEST", 0, DeliveryClass.Coalescable, AuthLevel.Server, Direction.Both, false, "FedPresenceDigest", "Acknowledged", "region"),
-    216L to OpcodeMeta(216L, "FED_KEY_ROTATE", 5, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedKeyRotate", "Acknowledged", null),
-    217L to OpcodeMeta(217L, "FED_HEALTH", 1, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedHealth", "FedHealth", null),
-    218L to OpcodeMeta(218L, "FED_SHARD_MAP", 2, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedShardMap", "Acknowledged", null),
-    219L to OpcodeMeta(219L, "FED_ERROR", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedError", "Acknowledged", null),
-    220L to OpcodeMeta(220L, "FED_CALL_RELAY", 1, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedForward", "Acknowledged", null),
-    221L to OpcodeMeta(221L, "FED_DIRECTORY", 2, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedDirectoryReq", "FedDirectory", null),
-    224L to OpcodeMeta(224L, "CALL_INVITE", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallInvite", "CallInviteResult", null),
-    225L to OpcodeMeta(225L, "CALL_INVITE_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "CallInviteEvent", null, null),
-    226L to OpcodeMeta(226L, "CALL_ANSWER", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallAnswer", "Acknowledged", null),
-    227L to OpcodeMeta(227L, "CALL_DECLINE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallDecline", "Acknowledged", null),
-    228L to OpcodeMeta(228L, "CALL_CANCEL", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallCancel", "Acknowledged", null),
-    229L to OpcodeMeta(229L, "CALL_END", 2, DeliveryClass.Critical, AuthLevel.User, Direction.Both, false, "CallEnd", "Acknowledged", null),
-    230L to OpcodeMeta(230L, "CALL_SDP", 3, DeliveryClass.Critical, AuthLevel.User, Direction.Both, false, "CallSdp", "Acknowledged", null),
-    231L to OpcodeMeta(231L, "CALL_ICE", 1, DeliveryClass.Critical, AuthLevel.User, Direction.Both, false, "CallIce", "Acknowledged", null),
-    232L to OpcodeMeta(232L, "CALL_STATE_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "CallStateEvent", null, null),
-    233L to OpcodeMeta(233L, "CALL_RENEGOTIATE", 3, DeliveryClass.Critical, AuthLevel.User, Direction.Both, false, "CallRenegotiate", "Acknowledged", null),
-    234L to OpcodeMeta(234L, "CALL_KEY_UPDATE", 3, DeliveryClass.Critical, AuthLevel.User, Direction.Both, false, "CallKeyUpdate", "Acknowledged", null),
-    235L to OpcodeMeta(235L, "CALL_STATS", 1, DeliveryClass.Droppable, AuthLevel.User, Direction.ClientToServer, false, "CallStats", "Acknowledged", null),
-    236L to OpcodeMeta(236L, "CALL_TURN_FETCH", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallTurnFetch", "CallTurnResponse", null),
-    237L to OpcodeMeta(237L, "CALL_SFU_JOIN", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallInvite", "CallTurnResponse", null),
-    238L to OpcodeMeta(238L, "CALL_SFU_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "CallStateEvent", null, "call_id"),
-    52L to OpcodeMeta(52L, "CONVERSATION_STATE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ConversationStateEvent", null, "conversation_id"),
-    239L to OpcodeMeta(239L, "STORE_PURCHASE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "StorePurchase", "StorePurchaseResult", null),
-    240L to OpcodeMeta(240L, "ENTITLEMENTS", 1, DeliveryClass.Droppable, AuthLevel.User, Direction.ClientToServer, false, "EntitlementsReq", "EntitlementsResponse", null),
-    168L to OpcodeMeta(168L, "KICK_POINTS_BUY", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "KickPointsBuy", "KickPointsBuyResult", null),
+    1L to OpcodeMeta(1L, "HELLO", 5, DeliveryClass.Critical, AuthLevel.None, Direction.ClientToServer, false, "Hello", "Welcome", null, false, listOf(), null),
+    2L to OpcodeMeta(2L, "PING", 1, DeliveryClass.Critical, AuthLevel.None, Direction.Both, false, "Ping", "Pong", null, false, listOf(), null),
+    3L to OpcodeMeta(3L, "ACK", 0, DeliveryClass.Critical, AuthLevel.None, Direction.ClientToServer, false, "Ack", null, null, false, listOf(), null),
+    4L to OpcodeMeta(4L, "ERROR", 0, DeliveryClass.Critical, AuthLevel.None, Direction.ServerToClient, false, "Error", null, null, false, listOf(), null),
+    5L to OpcodeMeta(5L, "RECONNECT_HINT", 0, DeliveryClass.Critical, AuthLevel.None, Direction.ServerToClient, false, "ReconnectHint", null, null, false, listOf(), null),
+    6L to OpcodeMeta(6L, "AUTHENTICATE", 10, DeliveryClass.Critical, AuthLevel.None, Direction.ClientToServer, false, "Authenticate", "Authenticated", null, false, listOf(), null),
+    7L to OpcodeMeta(7L, "SUBSCRIBE", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "SubscribeRequest", "SubscribeResponse", null, false, listOf(), null),
+    8L to OpcodeMeta(8L, "UNSUBSCRIBE", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "SubscribeRequest", "SubscribeResponse", null, false, listOf(), null),
+    16L to OpcodeMeta(16L, "KEY_PUBLISH", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "KeyPublish", "KeyPublishResult", null, false, listOf(), null),
+    17L to OpcodeMeta(17L, "KEY_BUNDLE_FETCH", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "KeyBundleRequest", "KeyBundleResponse", null, false, listOf(), null),
+    32L to OpcodeMeta(32L, "MESSAGE_SEND", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MessageSend", "MessageAccepted", null, false, listOf(), null),
+    33L to OpcodeMeta(33L, "MESSAGE_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, true, "MessageEvent", null, null, false, listOf(), null),
+    34L to OpcodeMeta(34L, "MESSAGE_RECEIPT", 1, DeliveryClass.Critical, AuthLevel.User, Direction.Both, false, "MessageReceipt", null, null, false, listOf(), null),
+    35L to OpcodeMeta(35L, "MESSAGE_DELETE", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MessageDelete", "MessageAccepted", null, false, listOf(), null),
+    36L to OpcodeMeta(36L, "SYNC", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "SyncRequest", "SyncResponse", null, false, listOf(), null),
+    37L to OpcodeMeta(37L, "CONVERSATION_LIST", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationListRequest", "ConversationListResponse", null, false, listOf(), null),
+    38L to OpcodeMeta(38L, "CONVERSATION_CREATE", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationCreateRequest", "ConversationSummary", null, false, listOf(), null),
+    39L to OpcodeMeta(39L, "TYPING", 1, DeliveryClass.Coalescable, AuthLevel.User, Direction.Both, false, "TypingEvent", null, "conversation_id", false, listOf("UltraLowData"), null),
+    40L to OpcodeMeta(40L, "MESSAGE_EDIT", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MessageEdit", "Acknowledged", null, false, listOf(), null),
+    41L to OpcodeMeta(41L, "REACTION_SET", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ReactionSet", "Acknowledged", null, false, listOf(), null),
+    42L to OpcodeMeta(42L, "REACTION_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ReactionEvent", null, "target_message_id+actor_id", false, listOf(), null),
+    43L to OpcodeMeta(43L, "CONVERSATION_INVITE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationInviteRequest", "ConversationSummary", null, false, listOf(), null),
+    44L to OpcodeMeta(44L, "CONVERSATION_LEAVE", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationLeaveRequest", "Acknowledged", null, false, listOf(), null),
+    45L to OpcodeMeta(45L, "CONVERSATION_ROSTER", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationRosterRequest", "ConversationRosterResponse", null, false, listOf(), null),
+    46L to OpcodeMeta(46L, "CONVERSATION_MUTE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationMuteRequest", "Acknowledged", null, false, listOf(), null),
+    47L to OpcodeMeta(47L, "CONVERSATION_KICK", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationKickRequest", "Acknowledged", null, false, listOf(), null),
+    48L to OpcodeMeta(48L, "CONVERSATION_VOTE_KICK", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationVoteKickRequest", "ConversationVoteKickResponse", null, false, listOf(), null),
+    49L to OpcodeMeta(49L, "CONVERSATION_VOTE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ConversationVoteEvent", null, "conversation_id", false, listOf(), null),
+    50L to OpcodeMeta(50L, "CONVERSATION_MEMBER_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "ConversationMemberEvent", null, null, false, listOf(), null),
+    51L to OpcodeMeta(51L, "CONVERSATION_UPDATE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ConversationUpdateRequest", "ConversationSummary", null, false, listOf(), null),
+    64L to OpcodeMeta(64L, "PRESENCE_SET", 1, DeliveryClass.Coalescable, AuthLevel.User, Direction.ClientToServer, false, "PresenceUpdate", "Acknowledged", null, false, listOf(), null),
+    65L to OpcodeMeta(65L, "PRESENCE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "PresenceEvent", null, "user_id", true, listOf(), null),
+    80L to OpcodeMeta(80L, "ROOM_JOIN", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomJoinRequest", "RoomJoinResponse", null, false, listOf(), null),
+    81L to OpcodeMeta(81L, "ROOM_LEAVE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomLeaveRequest", "Acknowledged", null, false, listOf(), null),
+    82L to OpcodeMeta(82L, "ROOM_LIST", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomListRequest", "RoomListResponse", null, false, listOf(), null),
+    83L to OpcodeMeta(83L, "ROOM_MEMBER_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "RoomMemberEvent", null, null, false, listOf(), null),
+    84L to OpcodeMeta(84L, "ROOM_STATE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "RoomStateEvent", null, "room_id", false, listOf(), null),
+    85L to OpcodeMeta(85L, "ROOM_CREATE", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomCreate", "RoomJoinResponse", null, false, listOf(), null),
+    86L to OpcodeMeta(86L, "ROOM_ROSTER", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RosterReq", "RosterResponse", null, false, listOf(), null),
+    87L to OpcodeMeta(87L, "ROOM_ROLE_SET", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomRoleSet", "Acknowledged", null, false, listOf(), null),
+    88L to OpcodeMeta(88L, "ROOM_UPDATE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomUpdate", "Acknowledged", null, false, listOf(), null),
+    89L to OpcodeMeta(89L, "ROOM_ARCHIVE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomArchive", "Acknowledged", null, false, listOf(), null),
+    90L to OpcodeMeta(90L, "ROOM_VOTE_KICK", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomVoteKick", "RoomVoteKickResponse", null, false, listOf(), null),
+    91L to OpcodeMeta(91L, "ROOM_VOTE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "RoomVoteEvent", null, "room_id", false, listOf(), null),
+    92L to OpcodeMeta(92L, "ROOM_SANCTION", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RoomSanction", "Acknowledged", null, false, listOf(), null),
+    111L to OpcodeMeta(111L, "PROFILE_UPDATE", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ProfileUpdate", "UserProfile", null, false, listOf(), null),
+    112L to OpcodeMeta(112L, "PROFILE_FETCH", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ProfileRequest", "ProfileResponse", null, false, listOf(), null),
+    113L to OpcodeMeta(113L, "FRIEND_REQUEST", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "FriendTarget", "Acknowledged", null, false, listOf(), null),
+    114L to OpcodeMeta(114L, "FRIEND_RESPOND", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "FriendRespond", "Acknowledged", null, false, listOf(), null),
+    115L to OpcodeMeta(115L, "FRIEND_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "FriendEvent", null, null, false, listOf(), null),
+    116L to OpcodeMeta(116L, "BLOCK_SET", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "FriendTarget", "Acknowledged", null, false, listOf(), null),
+    117L to OpcodeMeta(117L, "RELATIONSHIP_LIST", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "RelationshipListReq", "RelationshipList", null, false, listOf(), null),
+    118L to OpcodeMeta(118L, "SUGGESTIONS", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "SuggestReq", "SearchResponse", null, false, listOf(), null),
+    119L to OpcodeMeta(119L, "SEARCH", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "SearchReq", "SearchResponse", null, false, listOf(), null),
+    120L to OpcodeMeta(120L, "MUTE_SET", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MuteSet", "Acknowledged", null, false, listOf(), null),
+    128L to OpcodeMeta(128L, "MEDIA_UPLOAD_BEGIN", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaBegin", "MediaTicket", null, false, listOf(), null),
+    129L to OpcodeMeta(129L, "MEDIA_UPLOAD_STATUS", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaStatusReq", "MediaProgress", null, false, listOf(), null),
+    130L to OpcodeMeta(130L, "MEDIA_UPLOAD_COMMIT", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaCommit", "Acknowledged", null, false, listOf(), null),
+    131L to OpcodeMeta(131L, "MEDIA_UPLOAD_ABORT", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaAbort", "Acknowledged", null, false, listOf(), null),
+    132L to OpcodeMeta(132L, "MEDIA_FETCH_URL", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "MediaFetch", "MediaUrl", null, false, listOf(), null),
+    133L to OpcodeMeta(133L, "MEDIA_STATE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "MediaStateEvent", null, "object_id", false, listOf(), null),
+    144L to OpcodeMeta(144L, "NOTIFICATION_EVENT", 0, DeliveryClass.Droppable, AuthLevel.User, Direction.ServerToClient, false, "NotificationEvent", null, null, false, listOf(), null),
+    145L to OpcodeMeta(145L, "NOTIFICATION_ACK", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "NotificationAck", "Acknowledged", null, false, listOf(), null),
+    146L to OpcodeMeta(146L, "NOTIFICATION_LIST", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "InboxReq", "InboxResponse", null, false, listOf(), null),
+    147L to OpcodeMeta(147L, "PUSH_REGISTER", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "PushRegister", "Acknowledged", null, false, listOf(), null),
+    148L to OpcodeMeta(148L, "PUSH_UNREGISTER", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "PushUnregister", "Acknowledged", null, false, listOf(), null),
+    160L to OpcodeMeta(160L, "GIFT_SEND", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GiftSend", "GiftSendResult", null, false, listOf(), null),
+    161L to OpcodeMeta(161L, "BALANCE_FETCH", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "WalletReq", "WalletView", null, false, listOf(), null),
+    162L to OpcodeMeta(162L, "ECONOMY_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "EconomyEvent", null, null, false, listOf(), null),
+    163L to OpcodeMeta(163L, "GIFT_CATALOGUE", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GiftCatalogueReq", "GiftCatalogueResponse", null, false, listOf(), null),
+    164L to OpcodeMeta(164L, "LEDGER_HISTORY", 3, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "LedgerReq", "LedgerResponse", null, false, listOf(), null),
+    165L to OpcodeMeta(165L, "PROGRESSION", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ProgressionReq", "ProgressionWire", null, false, listOf(), null),
+    166L to OpcodeMeta(166L, "BADGES", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "BadgesReq", "BadgesResponse", null, false, listOf(), null),
+    167L to OpcodeMeta(167L, "LEADERBOARD", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "LeaderboardReq", "LeaderboardResponse", null, false, listOf(), null),
+    176L to OpcodeMeta(176L, "GAME_ACTION", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GameAction", "Acknowledged", null, false, listOf(), null),
+    177L to OpcodeMeta(177L, "GAME_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "GameEvent", null, null, false, listOf(), null),
+    178L to OpcodeMeta(178L, "BOT_COMMAND", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "BotCommand", "Acknowledged", null, false, listOf(), null),
+    179L to OpcodeMeta(179L, "BOT_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "BotEvent", null, null, false, listOf(), null),
+    180L to OpcodeMeta(180L, "BOT_REGISTER", 20, DeliveryClass.Critical, AuthLevel.Bot, Direction.ClientToServer, false, "BotRegister", "BotView", null, false, listOf(), null),
+    183L to OpcodeMeta(183L, "GAME_START", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GameStart", "GameViewWire", null, false, listOf(), null),
+    184L to OpcodeMeta(184L, "GAME_VIEW", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GameId", "GameViewWire", null, false, listOf(), null),
+    185L to OpcodeMeta(185L, "GAME_ABANDON", 2, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GameId", "Acknowledged", null, false, listOf(), null),
+    186L to OpcodeMeta(186L, "GAME_CATALOGUE", 1, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "GiftCatalogueReq", "GameCatalogueResponse", null, false, listOf(), null),
+    192L to OpcodeMeta(192L, "REPORT_CREATE", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ReportFile", "Acknowledged", null, false, listOf(), null),
+    193L to OpcodeMeta(193L, "MODERATION_ACTION", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "ModAction", "Acknowledged", null, false, listOf(), null),
+    194L to OpcodeMeta(194L, "MODERATION_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "ModerationEvent", null, null, false, listOf(), null),
+    208L to OpcodeMeta(208L, "FED_HELLO", 5, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedHello", "FedHello", null, false, listOf(), "FEDERATION"),
+    209L to OpcodeMeta(209L, "FED_AUTH", 5, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedAuth", "Acknowledged", null, false, listOf(), "FEDERATION"),
+    210L to OpcodeMeta(210L, "FED_PING", 1, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedPing", "FedPong", null, false, listOf(), "FEDERATION"),
+    211L to OpcodeMeta(211L, "FED_FORWARD", 1, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedForward", "Acknowledged", null, false, listOf(), "FEDERATION"),
+    212L to OpcodeMeta(212L, "FED_ACK", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedAck", "Acknowledged", null, false, listOf(), "FEDERATION"),
+    213L to OpcodeMeta(213L, "FED_ROOM_SUBSCRIBE", 2, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedRouting", "Acknowledged", null, false, listOf(), "FEDERATION"),
+    214L to OpcodeMeta(214L, "FED_ROOM_EVENT", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedRoomEvent", "Acknowledged", null, false, listOf(), "FEDERATION"),
+    215L to OpcodeMeta(215L, "FED_PRESENCE_DIGEST", 0, DeliveryClass.Coalescable, AuthLevel.Server, Direction.Both, false, "FedPresenceDigest", "Acknowledged", "region", false, listOf(), "FEDERATION"),
+    216L to OpcodeMeta(216L, "FED_KEY_ROTATE", 5, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedKeyRotate", "Acknowledged", null, false, listOf(), "FEDERATION"),
+    217L to OpcodeMeta(217L, "FED_HEALTH", 1, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedHealth", "FedHealth", null, false, listOf(), "FEDERATION"),
+    218L to OpcodeMeta(218L, "FED_SHARD_MAP", 2, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedShardMap", "Acknowledged", null, false, listOf(), "FEDERATION"),
+    219L to OpcodeMeta(219L, "FED_ERROR", 0, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedError", "Acknowledged", null, false, listOf(), "FEDERATION"),
+    220L to OpcodeMeta(220L, "FED_CALL_RELAY", 1, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedForward", "Acknowledged", null, false, listOf(), "FEDERATION"),
+    221L to OpcodeMeta(221L, "FED_DIRECTORY", 2, DeliveryClass.Critical, AuthLevel.Server, Direction.Both, false, "FedDirectoryReq", "FedDirectory", null, false, listOf(), "FEDERATION"),
+    224L to OpcodeMeta(224L, "CALL_INVITE", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallInvite", "CallInviteResult", null, false, listOf(), null),
+    225L to OpcodeMeta(225L, "CALL_INVITE_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "CallInviteEvent", null, null, false, listOf(), null),
+    226L to OpcodeMeta(226L, "CALL_ANSWER", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallAnswer", "Acknowledged", null, false, listOf(), null),
+    227L to OpcodeMeta(227L, "CALL_DECLINE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallDecline", "Acknowledged", null, false, listOf(), null),
+    228L to OpcodeMeta(228L, "CALL_CANCEL", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallCancel", "Acknowledged", null, false, listOf(), null),
+    229L to OpcodeMeta(229L, "CALL_END", 2, DeliveryClass.Critical, AuthLevel.User, Direction.Both, false, "CallEnd", "Acknowledged", null, false, listOf(), null),
+    230L to OpcodeMeta(230L, "CALL_SDP", 3, DeliveryClass.Critical, AuthLevel.User, Direction.Both, false, "CallSdp", "Acknowledged", null, false, listOf(), null),
+    231L to OpcodeMeta(231L, "CALL_ICE", 1, DeliveryClass.Critical, AuthLevel.User, Direction.Both, false, "CallIce", "Acknowledged", null, false, listOf(), null),
+    232L to OpcodeMeta(232L, "CALL_STATE_EVENT", 0, DeliveryClass.Critical, AuthLevel.User, Direction.ServerToClient, false, "CallStateEvent", null, null, false, listOf(), null),
+    233L to OpcodeMeta(233L, "CALL_RENEGOTIATE", 3, DeliveryClass.Critical, AuthLevel.User, Direction.Both, false, "CallRenegotiate", "Acknowledged", null, false, listOf(), null),
+    234L to OpcodeMeta(234L, "CALL_KEY_UPDATE", 3, DeliveryClass.Critical, AuthLevel.User, Direction.Both, false, "CallKeyUpdate", "Acknowledged", null, false, listOf(), null),
+    235L to OpcodeMeta(235L, "CALL_STATS", 1, DeliveryClass.Droppable, AuthLevel.User, Direction.ClientToServer, false, "CallStats", "Acknowledged", null, false, listOf(), null),
+    236L to OpcodeMeta(236L, "CALL_TURN_FETCH", 10, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallTurnFetch", "CallTurnResponse", null, false, listOf(), null),
+    237L to OpcodeMeta(237L, "CALL_SFU_JOIN", 20, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "CallInvite", "CallTurnResponse", null, false, listOf(), null),
+    238L to OpcodeMeta(238L, "CALL_SFU_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "CallStateEvent", null, "call_id", false, listOf(), null),
+    52L to OpcodeMeta(52L, "CONVERSATION_STATE_EVENT", 0, DeliveryClass.Coalescable, AuthLevel.User, Direction.ServerToClient, false, "ConversationStateEvent", null, "conversation_id", false, listOf(), null),
+    239L to OpcodeMeta(239L, "STORE_PURCHASE", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "StorePurchase", "StorePurchaseResult", null, false, listOf(), null),
+    240L to OpcodeMeta(240L, "ENTITLEMENTS", 1, DeliveryClass.Droppable, AuthLevel.User, Direction.ClientToServer, false, "EntitlementsReq", "EntitlementsResponse", null, false, listOf(), null),
+    168L to OpcodeMeta(168L, "KICK_POINTS_BUY", 5, DeliveryClass.Critical, AuthLevel.User, Direction.ClientToServer, false, "KickPointsBuy", "KickPointsBuyResult", null, false, listOf(), null),
 )
 
 /** Human name for an opcode, for logs and errors. Never used on the wire. */

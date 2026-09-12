@@ -63,8 +63,9 @@ pub mod traits;
 
 pub use crate::fanout::Fanout;
 pub use crate::model::{
-    cadence_for, Cadence, Caller, Detail, PresenceConfig, PresenceScope, MAX_HEARTBEAT_MS,
-    MAX_LAST_SEEN_LOOKUPS, MAX_SNAPSHOT_SUBJECTS, MIN_HEARTBEAT_MS, MISSED_HEARTBEATS,
+    cadence_for, Cadence, CadenceTtl, Caller, Detail, PresenceConfig, PresenceScope,
+    MAX_HEARTBEAT_MS, MAX_LAST_SEEN_LOOKUPS, MAX_SNAPSHOT_SUBJECTS, MIN_HEARTBEAT_MS,
+    MISSED_HEARTBEATS,
 };
 pub use crate::service::{open, Presences, SharedPresence};
 pub use crate::state::{declared_state, visible_state};

@@ -328,6 +328,17 @@ test-contract: ## Contract suites against real backends (needs MIGO_TEST_DATABAS
 .PHONY: test-vectors
 test-vectors: test-vectors-rust test-vectors-ts ## Cross-language conformance: Rust and TS must agree on the wire + crypto vectors
 
+.PHONY: budget-check
+budget-check: ## Protocol budgets from the brief are not exceeded (CI gate, brief section 171)
+	# The bandwidth targets in brief sections 56 and 171 are budgets, and until
+	# this target existed they were enforced only by reading. The budgets test
+	# measures typical frames with the real encoder and fails naming the budget
+	# it broke, so a struct that grows a field costs its author a doc update,
+	# not a quiet per-message regression shipped to every client. A separate
+	# target rather than a fold into test-server so the failure reads as what
+	# it is — a budget, not a test — and so `make ci` lists it as a gate.
+	$(CARGO) test $(MANIFEST) -p migo-protocol --test budgets
+
 .PHONY: test-vectors-rust
 test-vectors-rust: vector-check ## The Rust half of the conformance vectors (CI gate)
 	# migo-account's consumer also covers the two rust-reference files: it
@@ -382,7 +393,7 @@ audit: ## Dependency vulnerability + licence audit
 	$(PNPM) audit --audit-level high || true
 
 .PHONY: ci
-ci: protocol-check entity-check brief-check vector-check kotlin-check infra-check pydeps-check secret-check fmt-check build-ts lint doc-check test test-vectors ## Everything CI runs
+ci: protocol-check entity-check brief-check vector-check kotlin-check infra-check pydeps-check secret-check fmt-check build-ts lint doc-check test test-vectors budget-check ## Everything CI runs
 
 # ---------------------------------------------------------------- misc
 

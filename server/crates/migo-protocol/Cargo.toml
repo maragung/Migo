@@ -10,3 +10,9 @@ description = "MWP/1 message types, opcodes, and error codes, generated from the
 [dependencies]
 migo-core.workspace = true
 migo-wire.workspace = true
+
+[dev-dependencies]
+# The budget gate (tests/budgets.rs) seals its sample envelopes with the real
+# AEAD rather than padding with placeholder bytes, so a budget that only passes
+# because the sample ciphertext shrank is not a budget that was ever met.
+migo-crypto.workspace = true

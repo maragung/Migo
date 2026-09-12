@@ -19,14 +19,19 @@
 //! server holds. A draft that names no plausible year is a typo, and the pane sends only
 //! what it can stand behind.
 //!
-//! # The status rides a different wire
+//! # The status line and the bit that governs it
 //!
-//! The custom status is not a profile field: it publishes on the presence wire, beside the
-//! account's last-known state, so saving a status never flips the account online or offline
-//! as a side effect. The one honest wrinkle: the server this build talks to declines to
-//! store a custom status (`presence_custom_status`), so the save is refused — a refusal that
-//! arrives as the toast the presence wire already raises, which is the same treatment the
-//! web and Android clients give it.
+//! The custom status is part of the account's public face, and its writable home is the
+//! profile patch: `PROFILE_UPDATE.custom_status`, the RICH_PRESENCE bit's own field (brief
+//! section 148), stored in a column that outlives a disconnect. The presence wire, which
+//! once carried it, refuses it with `FEATURE_DISABLED` — a presence entry evaporates with
+//! the cache and a status is not supposed to — so this pane never sends one there.
+//!
+//! The field is editable only on a session whose WELCOME put the bit in the negotiated
+//! intersection: the brief's own rule is that a feature nobody negotiated is not asked for
+//! at all, and a field whose every save is answered with a refusal is a promise the
+//! interface cannot keep. On a session without the bit the line is drawn as a read-only
+//! fact with the reason why.
 
 use egui::{Align, Layout, RichText, Ui};
 
@@ -57,7 +62,9 @@ pub struct ProfileState {
     display_name: String,
     /// The form's draft bio.
     bio: String,
-    /// The form's draft custom status.
+    /// The form's draft custom status. Drawn as an editable field only while the session
+    /// negotiated RICH_PRESENCE; on a session without the bit the draft is never drawn and
+    /// never joins a save, whatever a stale copy of it still holds.
     custom_status: String,
     /// The form's draft birth year — a string, because the field is a person typing digits.
     birth_year: String,
@@ -126,11 +133,15 @@ impl ProfileState {
     /// Whether anything in the form is worth a save.
     ///
     /// The same rule the save itself applies: a patch that changes nothing is not a save, and
-    /// a button that always works is a button that lies about having done something.
-    fn dirty(&self, profile: &OwnProfile) -> bool {
+    /// a button that always works is a button that lies about having done something. The
+    /// status joins that rule only while the session negotiated RICH_PRESENCE — a draft
+    /// against a bit the server never agreed to is a save that could only be refused, so it
+    /// is not a change at all.
+    fn dirty(&self, profile: &OwnProfile, rich_presence: bool) -> bool {
         self.display_name.trim() != profile.display_name
             || self.bio != profile.bio.clone().unwrap_or_default()
-            || self.custom_status.trim() != profile.custom_status.clone().unwrap_or_default()
+            || (rich_presence
+                && self.custom_status.trim() != profile.custom_status.clone().unwrap_or_default())
             || self.birth_year
                 != profile
                     .birth_year
@@ -283,12 +294,14 @@ fn avatar_section(ui: &mut Ui, context: &mut Context<'_>, state: &mut ProfileSta
 ///
 /// The card rides in for the field hints the drafts cannot know — the status line's current
 /// value, shown through the draft until it is edited — and for the field-level comparison a
-/// placeholder cannot stand behind.
+/// placeholder cannot stand behind. The status itself is a field only while the session
+/// negotiated RICH_PRESENCE; without the bit the card's copy is drawn as a read-only fact,
+/// because an edit there could only be refused.
 fn form_section(
     ui: &mut Ui,
     context: &mut Context<'_>,
     state: &mut ProfileState,
-    _profile: &OwnProfile,
+    profile: &OwnProfile,
 ) {
     let colors = palette(context.theme);
     widgets::subheader(ui, context.theme, "Edit profile");
@@ -309,20 +322,53 @@ fn form_section(
         false,
         "A line about you",
     );
-    widgets::field(
-        ui,
-        context.theme,
-        "Custom status",
-        &mut state.custom_status,
-        false,
-        "What are you up to?",
-    );
-    ui.label(
-        RichText::new("Shown beside your presence, everywhere your name appears.")
+    if context.rich_presence {
+        widgets::field(
+            ui,
+            context.theme,
+            "Custom status",
+            &mut state.custom_status,
+            false,
+            "What are you up to?",
+        );
+        ui.label(
+            RichText::new("Shown beside your presence, everywhere your name appears.")
+                .font(egui::FontId::proportional(font::TINY))
+                .color(colors.text_muted),
+        );
+        ui.add_space(space::SM);
+    } else {
+        // The card's copy, as a fact rather than a field. This session did not negotiate the
+        // bit the status save rides on, so an editable line here would be a save the server
+        // answers with a refusal every time — the honest surface is the value the card
+        // carries plus the reason it cannot be touched here.
+        ui.label(
+            RichText::new("Custom status")
+                .text_style(crate::theme::named(text_style::OVERLINE))
+                .color(colors.text_muted),
+        );
+        ui.add_space(space::XS);
+        ui.label(
+            RichText::new(
+                profile
+                    .custom_status
+                    .clone()
+                    .unwrap_or_else(|| "None set".to_owned()),
+            )
+            .font(egui::FontId::proportional(font::BODY))
+            .color(colors.text_muted),
+        );
+        ui.add_space(space::XS);
+        ui.label(
+            RichText::new(
+                "Read-only on this server: it did not agree to the custom-status feature, \
+                 so a save here could only be refused.",
+            )
             .font(egui::FontId::proportional(font::TINY))
             .color(colors.text_muted),
-    );
-    ui.add_space(space::SM);
+        );
+        ui.add_space(space::MD);
+    }
     widgets::field(
         ui,
         context.theme,
@@ -403,21 +449,19 @@ fn save_section(
     state: &mut ProfileState,
     profile: &OwnProfile,
 ) {
-    let dirty = state.dirty(profile);
+    // The status joins a save only on a session that negotiated the bit. Taken from the
+    // context once, here, so the button's dirty gate and the patch it issues cannot hold
+    // two opinions about whether the status is savable.
+    let rich_presence = context.rich_presence;
+    let dirty = state.dirty(profile, rich_presence);
     if widgets::primary_button(ui, context.theme, "Save changes", dirty)
         .on_hover_text(
             "Only the fields you changed are sent; everything else keeps its server-side value.",
         )
         .clicked()
     {
-        let patch = build_patch(state, profile);
-        if let Some(patch) = patch {
+        if let Some(patch) = build_patch(state, profile, rich_presence) {
             context.issue(patch);
-        }
-        // The status saves on its own wire, so it does not wait for the profile patch.
-        let status = state.custom_status.trim().to_owned();
-        if status != profile.custom_status.clone().unwrap_or_default() {
-            context.issue(Command::SaveStatus { status });
         }
         state.saved = false;
         state.failure = None;
@@ -472,10 +516,13 @@ fn valid_birth_year(raw: &str) -> Option<u32> {
 /// and the privacy choices only when a choice was made at all. The birth year follows the
 /// text fields' rule now that the wire echoes it back: the draft joins only when it differs
 /// from the year the card carries, and a differing draft must still name a plausible year —
-/// "carbuncle" is a typo, and the pane sends only what it can stand behind. The result is a
-/// save that touches exactly what the user touched — the wire's absent-means-unchanged
-/// contract.
-fn build_patch(state: &ProfileState, profile: &OwnProfile) -> Option<Command> {
+/// "carbuncle" is a typo, and the pane sends only what it can stand behind. The custom
+/// status follows the bio's rule on a session that negotiated its bit — a differing draft
+/// joins as it stands, an empty string included, because on this wire an empty string *sets*
+/// an empty status and only the field's absence means "keep" — and never joins a session
+/// that did not. The result is a save that touches exactly what the user touched — the
+/// wire's absent-means-unchanged contract.
+fn build_patch(state: &ProfileState, profile: &OwnProfile, rich_presence: bool) -> Option<Command> {
     let current_year = profile
         .birth_year
         .map(|year| year.to_string())
@@ -485,10 +532,18 @@ fn build_patch(state: &ProfileState, profile: &OwnProfile) -> Option<Command> {
     } else {
         None
     };
+    let current_status = profile.custom_status.clone().unwrap_or_default();
+    let custom_status = rich_presence
+        .then(|| {
+            let draft = state.custom_status.trim();
+            (draft != current_status).then(|| draft.to_owned())
+        })
+        .flatten();
     let patch = crate::net::ProfilePatch {
         display_name: (state.display_name.trim() != profile.display_name)
             .then(|| state.display_name.trim().to_owned()),
         bio: (state.bio != profile.bio.clone().unwrap_or_default()).then(|| state.bio.clone()),
+        custom_status,
         birth_year,
         show_last_seen: choice_value(state.show_last_seen),
         who_can_message: choice_value(state.who_can_message),
@@ -497,6 +552,7 @@ fn build_patch(state: &ProfileState, profile: &OwnProfile) -> Option<Command> {
     };
     let changed = patch.display_name.is_some()
         || patch.bio.is_some()
+        || patch.custom_status.is_some()
         || patch.birth_year.is_some()
         || patch.show_last_seen.is_some()
         || patch.who_can_message.is_some()
@@ -510,5 +566,69 @@ fn choice_value(choice: i8) -> Option<u32> {
     match choice {
         0..=2 => Some(choice as u32),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Presence;
+
+    /// A card with every field present, for the drafts to differ from.
+    fn card() -> OwnProfile {
+        OwnProfile {
+            account_id: migo_core::Id::default(),
+            username: "alice".to_owned(),
+            display_name: "Alice".to_owned(),
+            public_id: "MGO-ALICE".to_owned(),
+            bio: Some("a line about me".to_owned()),
+            custom_status: Some("in a meeting".to_owned()),
+            birth_year: Some(1990),
+            presence: Presence::Online,
+        }
+    }
+
+    #[test]
+    fn a_status_save_rides_the_patch_only_where_the_session_negotiated_it() {
+        // The dead end this pane once held: a status sent on a wire the server always
+        // refuses. The pin is the second half — a draft against a session without the
+        // RICH_PRESENCE bit must not be a save at all, whatever the draft holds.
+        let profile = card();
+        let mut state = ProfileState::default();
+        state.file(profile.clone(), false);
+
+        // The draft seeds from the card, so an untouched form is not a save — bit or no bit.
+        assert!(!state.dirty(&profile, true));
+        assert!(build_patch(&state, &profile, true).is_none());
+
+        state.custom_status = "gone fishing".to_owned();
+
+        // With the bit, the edit is a change and joins the profile patch.
+        assert!(state.dirty(&profile, true));
+        let Command::SaveProfile(patch) = build_patch(&state, &profile, true).unwrap() else {
+            panic!("a differing status must join the patch");
+        };
+        assert_eq!(patch.custom_status.as_deref(), Some("gone fishing"));
+
+        // Without the bit, the same edit is nothing: the field's wire was never agreed to,
+        // so the pane offers no save the server would only refuse.
+        assert!(!state.dirty(&profile, false));
+        assert!(build_patch(&state, &profile, false).is_none());
+    }
+
+    #[test]
+    fn an_emptied_status_sets_an_empty_status_the_way_the_bio_does() {
+        // The wire's own semantics, corrected once already: an empty string *sets* an empty
+        // status — only the field's absence means "keep" — so emptying the line against a
+        // card that carried one is a save carrying Some(""), not a silent keep.
+        let profile = card();
+        let mut state = ProfileState::default();
+        state.file(profile.clone(), false);
+        state.custom_status = "   ".to_owned();
+
+        let Command::SaveProfile(patch) = build_patch(&state, &profile, true).unwrap() else {
+            panic!("an emptied status is a change, not a keep");
+        };
+        assert_eq!(patch.custom_status, Some(String::new()));
     }
 }

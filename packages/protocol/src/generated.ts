@@ -4360,6 +4360,8 @@ export interface ProfileUpdate {
   whoCanAdd?: number;
   /** New search visibility. */
   searchable?: boolean;
+  /** New custom status, the RICH_PRESENCE bit's own field; present only on a session that negotiated the bit. */
+  customStatus?: string;
 }
 
 export function encodeProfileUpdate(w: Writer, v: ProfileUpdate): void {
@@ -4373,6 +4375,7 @@ export function encodeProfileUpdate(w: Writer, v: ProfileUpdate): void {
   if (v.whoCanMessage !== undefined) present++;
   if (v.whoCanAdd !== undefined) present++;
   if (v.searchable !== undefined) present++;
+  if (v.customStatus !== undefined) present++;
   w.u32(present);
   if (v.displayName !== undefined) { const value = v.displayName; w.optional(1, (w) => { w.str(value); }); }
   if (v.bio !== undefined) { const value = v.bio; w.optional(2, (w) => { w.str(value); }); }
@@ -4382,6 +4385,7 @@ export function encodeProfileUpdate(w: Writer, v: ProfileUpdate): void {
   if (v.whoCanMessage !== undefined) { const value = v.whoCanMessage; w.optional(6, (w) => { w.u32(value); }); }
   if (v.whoCanAdd !== undefined) { const value = v.whoCanAdd; w.optional(7, (w) => { w.u32(value); }); }
   if (v.searchable !== undefined) { const value = v.searchable; w.optional(8, (w) => { w.bool(value); }); }
+  if (v.customStatus !== undefined) { const value = v.customStatus; w.optional(9, (w) => { w.str(value); }); }
   w.leave();
 }
 
@@ -4400,6 +4404,7 @@ export function decodeProfileUpdate(r: Reader): ProfileUpdate {
       case 6: out.whoCanMessage = sub.u32(); break;
       case 7: out.whoCanAdd = sub.u32(); break;
       case 8: out.searchable = sub.bool(); break;
+      case 9: out.customStatus = sub.str(); break;
       default: break; // unknown optional field: skipped by length
     }
   }
@@ -5248,17 +5253,20 @@ export function decodeGiftCatalogueResponse(r: Reader): GiftCatalogueResponse {
   return out;
 }
 
-/** Reads the caller's statement. */
+/** Reads one keyset page of the caller's statement; the cursor is the position of the last entry a previous page returned. */
 export interface LedgerReq {
   limit?: number;
+  cursor?: string;
 }
 
 export function encodeLedgerReq(w: Writer, v: LedgerReq): void {
   w.enter();
   let present = 0;
   if (v.limit !== undefined) present++;
+  if (v.cursor !== undefined) present++;
   w.u32(present);
   if (v.limit !== undefined) { const value = v.limit; w.optional(1, (w) => { w.u32(value); }); }
+  if (v.cursor !== undefined) { const value = v.cursor; w.optional(2, (w) => { w.str(value); }); }
   w.leave();
 }
 
@@ -5270,6 +5278,7 @@ export function decodeLedgerReq(r: Reader): LedgerReq {
     const [fieldId, sub] = r.optional();
     switch (fieldId) {
       case 1: out.limit = sub.u32(); break;
+      case 2: out.cursor = sub.str(); break;
       default: break; // unknown optional field: skipped by length
     }
   }
@@ -5322,15 +5331,19 @@ export function decodeLedgerEntryWire(r: Reader): LedgerEntryWire {
   return out;
 }
 
-/** A page of the caller's statement. */
+/** A page of the caller's statement, with the cursor of the next page whenever this one was full. */
 export interface LedgerResponse {
   entries: LedgerEntryWire[];
+  nextCursor?: string;
 }
 
 export function encodeLedgerResponse(w: Writer, v: LedgerResponse): void {
   w.enter();
   { w.listLen(v.entries.length); for (const item of v.entries) { encodeLedgerEntryWire(w, item); } }
-  w.u32(0);
+  let present = 0;
+  if (v.nextCursor !== undefined) present++;
+  w.u32(present);
+  if (v.nextCursor !== undefined) { const value = v.nextCursor; w.optional(1, (w) => { w.str(value); }); }
   w.leave();
 }
 
@@ -5339,9 +5352,13 @@ export function decodeLedgerResponse(r: Reader): LedgerResponse {
   const entries = ((): LedgerEntryWire[] => { const n = r.listLen(); const v: LedgerEntryWire[] = []; for (let i = 0; i < n; i++) v.push(decodeLedgerEntryWire(r)); return v; })();
   const out: LedgerResponse = { entries } as LedgerResponse;
   const optionalCount = r.u32();
-  // No optional fields in this version of the struct. Each entry is length-delimited,
-  // so reading it is skipping it, and a newer peer may well have sent one.
-  for (let i = 0; i < optionalCount; i++) r.optional();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.nextCursor = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
   r.leave();
   return out;
 }
@@ -6781,13 +6798,20 @@ export function decodeKickPointsBuyResult(r: Reader): KickPointsBuyResult {
   return out;
 }
 
-/** Empty; the caller's own entitlements are the session's. */
+/** Reads one keyset page of the caller's own entitlements; the cursor is the position of the last row a previous page returned. */
 export interface EntitlementsReq {
+  limit?: number;
+  cursor?: string;
 }
 
-export function encodeEntitlementsReq(w: Writer, _v: EntitlementsReq): void {
+export function encodeEntitlementsReq(w: Writer, v: EntitlementsReq): void {
   w.enter();
-  w.u32(0);
+  let present = 0;
+  if (v.limit !== undefined) present++;
+  if (v.cursor !== undefined) present++;
+  w.u32(present);
+  if (v.limit !== undefined) { const value = v.limit; w.optional(1, (w) => { w.u32(value); }); }
+  if (v.cursor !== undefined) { const value = v.cursor; w.optional(2, (w) => { w.str(value); }); }
   w.leave();
 }
 
@@ -6795,9 +6819,14 @@ export function decodeEntitlementsReq(r: Reader): EntitlementsReq {
   r.enter();
   const out: EntitlementsReq = {  } as EntitlementsReq;
   const optionalCount = r.u32();
-  // No optional fields in this version of the struct. Each entry is length-delimited,
-  // so reading it is skipping it, and a newer peer may well have sent one.
-  for (let i = 0; i < optionalCount; i++) r.optional();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.limit = sub.u32(); break;
+      case 2: out.cursor = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
   r.leave();
   return out;
 }
@@ -6829,15 +6858,19 @@ export function decodeEntitlement(r: Reader): Entitlement {
   return out;
 }
 
-/** Everything the caller owns, oldest first. */
+/** One page of what the caller owns, oldest first, with the cursor of the next page whenever this one was full. */
 export interface EntitlementsResponse {
   items: Entitlement[];
+  nextCursor?: string;
 }
 
 export function encodeEntitlementsResponse(w: Writer, v: EntitlementsResponse): void {
   w.enter();
   { w.listLen(v.items.length); for (const item of v.items) { encodeEntitlement(w, item); } }
-  w.u32(0);
+  let present = 0;
+  if (v.nextCursor !== undefined) present++;
+  w.u32(present);
+  if (v.nextCursor !== undefined) { const value = v.nextCursor; w.optional(1, (w) => { w.str(value); }); }
   w.leave();
 }
 
@@ -6846,9 +6879,13 @@ export function decodeEntitlementsResponse(r: Reader): EntitlementsResponse {
   const items = ((): Entitlement[] => { const n = r.listLen(); const v: Entitlement[] = []; for (let i = 0; i < n; i++) v.push(decodeEntitlement(r)); return v; })();
   const out: EntitlementsResponse = { items } as EntitlementsResponse;
   const optionalCount = r.u32();
-  // No optional fields in this version of the struct. Each entry is length-delimited,
-  // so reading it is skipping it, and a newer peer may well have sent one.
-  for (let i = 0; i < optionalCount; i++) r.optional();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.nextCursor = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
   r.leave();
   return out;
 }
@@ -6879,6 +6916,7 @@ export const OP = {
   SYNC: 36,
   CONVERSATION_LIST: 37,
   CONVERSATION_CREATE: 38,
+  /** Typing start/stop marks. Never delivered to a session on a mode in suppress_on (brief 159: typing is off entirely on UltraLowData), so the gateway drops the frame at the mailbox rather than spending the bytes. */
   TYPING: 39,
   /** Edits a message's text in place. */
   MESSAGE_EDIT: 40,
@@ -6905,6 +6943,7 @@ export const OP = {
   /** A founder renames a group. */
   CONVERSATION_UPDATE: 51,
   PRESENCE_SET: 64,
+  /** Presence for one user. Paced (brief 159): two frames about the same user are spaced by the session's presence minimum interval, applied by the gateway's coalescing queue as a hold with a trailing edge so the newest state is never lost. */
   PRESENCE_EVENT: 65,
   ROOM_JOIN: 80,
   ROOM_LEAVE: 81,
@@ -7049,128 +7088,131 @@ export interface OpcodeMeta {
   readonly payload: string;
   readonly response?: string;
   readonly coalesceKey?: string;
+  readonly paced: boolean;
+  readonly suppressOn: ReadonlyArray<'Unknown' | 'Auto' | 'Normal' | 'LowData' | 'UltraLowData'>;
+  readonly feature?: string;
 }
 
 export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
-  1: { code: 1, name: 'HELLO', cost: 5, cls: 'Critical', auth: 'None', direction: 'client_to_server', ackRequired: false, payload: 'Hello', response: 'Welcome' },
-  2: { code: 2, name: 'PING', cost: 1, cls: 'Critical', auth: 'None', direction: 'both', ackRequired: false, payload: 'Ping', response: 'Pong' },
-  3: { code: 3, name: 'ACK', cost: 0, cls: 'Critical', auth: 'None', direction: 'client_to_server', ackRequired: false, payload: 'Ack' },
-  4: { code: 4, name: 'ERROR', cost: 0, cls: 'Critical', auth: 'None', direction: 'server_to_client', ackRequired: false, payload: 'Error' },
-  5: { code: 5, name: 'RECONNECT_HINT', cost: 0, cls: 'Critical', auth: 'None', direction: 'server_to_client', ackRequired: false, payload: 'ReconnectHint' },
-  6: { code: 6, name: 'AUTHENTICATE', cost: 10, cls: 'Critical', auth: 'None', direction: 'client_to_server', ackRequired: false, payload: 'Authenticate', response: 'Authenticated' },
-  7: { code: 7, name: 'SUBSCRIBE', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'SubscribeRequest', response: 'SubscribeResponse' },
-  8: { code: 8, name: 'UNSUBSCRIBE', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'SubscribeRequest', response: 'SubscribeResponse' },
-  16: { code: 16, name: 'KEY_PUBLISH', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'KeyPublish', response: 'KeyPublishResult' },
-  17: { code: 17, name: 'KEY_BUNDLE_FETCH', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'KeyBundleRequest', response: 'KeyBundleResponse' },
-  32: { code: 32, name: 'MESSAGE_SEND', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MessageSend', response: 'MessageAccepted' },
-  33: { code: 33, name: 'MESSAGE_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: true, payload: 'MessageEvent' },
-  34: { code: 34, name: 'MESSAGE_RECEIPT', cost: 1, cls: 'Critical', auth: 'User', direction: 'both', ackRequired: false, payload: 'MessageReceipt' },
-  35: { code: 35, name: 'MESSAGE_DELETE', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MessageDelete', response: 'MessageAccepted' },
-  36: { code: 36, name: 'SYNC', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'SyncRequest', response: 'SyncResponse' },
-  37: { code: 37, name: 'CONVERSATION_LIST', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationListRequest', response: 'ConversationListResponse' },
-  38: { code: 38, name: 'CONVERSATION_CREATE', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationCreateRequest', response: 'ConversationSummary' },
-  39: { code: 39, name: 'TYPING', cost: 1, cls: 'Coalescable', auth: 'User', direction: 'both', ackRequired: false, payload: 'TypingEvent', coalesceKey: 'conversation_id' },
-  40: { code: 40, name: 'MESSAGE_EDIT', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MessageEdit', response: 'Acknowledged' },
-  41: { code: 41, name: 'REACTION_SET', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ReactionSet', response: 'Acknowledged' },
-  42: { code: 42, name: 'REACTION_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ReactionEvent', coalesceKey: 'target_message_id+actor_id' },
-  43: { code: 43, name: 'CONVERSATION_INVITE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationInviteRequest', response: 'ConversationSummary' },
-  44: { code: 44, name: 'CONVERSATION_LEAVE', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationLeaveRequest', response: 'Acknowledged' },
-  45: { code: 45, name: 'CONVERSATION_ROSTER', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationRosterRequest', response: 'ConversationRosterResponse' },
-  46: { code: 46, name: 'CONVERSATION_MUTE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationMuteRequest', response: 'Acknowledged' },
-  47: { code: 47, name: 'CONVERSATION_KICK', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationKickRequest', response: 'Acknowledged' },
-  48: { code: 48, name: 'CONVERSATION_VOTE_KICK', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationVoteKickRequest', response: 'ConversationVoteKickResponse' },
-  49: { code: 49, name: 'CONVERSATION_VOTE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ConversationVoteEvent', coalesceKey: 'conversation_id' },
-  50: { code: 50, name: 'CONVERSATION_MEMBER_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ConversationMemberEvent' },
-  51: { code: 51, name: 'CONVERSATION_UPDATE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationUpdateRequest', response: 'ConversationSummary' },
-  64: { code: 64, name: 'PRESENCE_SET', cost: 1, cls: 'Coalescable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'PresenceUpdate', response: 'Acknowledged' },
-  65: { code: 65, name: 'PRESENCE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'PresenceEvent', coalesceKey: 'user_id' },
-  80: { code: 80, name: 'ROOM_JOIN', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomJoinRequest', response: 'RoomJoinResponse' },
-  81: { code: 81, name: 'ROOM_LEAVE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomLeaveRequest', response: 'Acknowledged' },
-  82: { code: 82, name: 'ROOM_LIST', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomListRequest', response: 'RoomListResponse' },
-  83: { code: 83, name: 'ROOM_MEMBER_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'RoomMemberEvent' },
-  84: { code: 84, name: 'ROOM_STATE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'RoomStateEvent', coalesceKey: 'room_id' },
-  85: { code: 85, name: 'ROOM_CREATE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomCreate', response: 'RoomJoinResponse' },
-  86: { code: 86, name: 'ROOM_ROSTER', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RosterReq', response: 'RosterResponse' },
-  87: { code: 87, name: 'ROOM_ROLE_SET', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomRoleSet', response: 'Acknowledged' },
-  88: { code: 88, name: 'ROOM_UPDATE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomUpdate', response: 'Acknowledged' },
-  89: { code: 89, name: 'ROOM_ARCHIVE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomArchive', response: 'Acknowledged' },
-  90: { code: 90, name: 'ROOM_VOTE_KICK', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomVoteKick', response: 'RoomVoteKickResponse' },
-  91: { code: 91, name: 'ROOM_VOTE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'RoomVoteEvent', coalesceKey: 'room_id' },
-  92: { code: 92, name: 'ROOM_SANCTION', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomSanction', response: 'Acknowledged' },
-  111: { code: 111, name: 'PROFILE_UPDATE', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ProfileUpdate', response: 'UserProfile' },
-  112: { code: 112, name: 'PROFILE_FETCH', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ProfileRequest', response: 'ProfileResponse' },
-  113: { code: 113, name: 'FRIEND_REQUEST', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'FriendTarget', response: 'Acknowledged' },
-  114: { code: 114, name: 'FRIEND_RESPOND', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'FriendRespond', response: 'Acknowledged' },
-  115: { code: 115, name: 'FRIEND_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'FriendEvent' },
-  116: { code: 116, name: 'BLOCK_SET', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'FriendTarget', response: 'Acknowledged' },
-  117: { code: 117, name: 'RELATIONSHIP_LIST', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RelationshipListReq', response: 'RelationshipList' },
-  118: { code: 118, name: 'SUGGESTIONS', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'SuggestReq', response: 'SearchResponse' },
-  119: { code: 119, name: 'SEARCH', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'SearchReq', response: 'SearchResponse' },
-  120: { code: 120, name: 'MUTE_SET', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MuteSet', response: 'Acknowledged' },
-  128: { code: 128, name: 'MEDIA_UPLOAD_BEGIN', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaBegin', response: 'MediaTicket' },
-  129: { code: 129, name: 'MEDIA_UPLOAD_STATUS', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaStatusReq', response: 'MediaProgress' },
-  130: { code: 130, name: 'MEDIA_UPLOAD_COMMIT', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaCommit', response: 'Acknowledged' },
-  131: { code: 131, name: 'MEDIA_UPLOAD_ABORT', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaAbort', response: 'Acknowledged' },
-  132: { code: 132, name: 'MEDIA_FETCH_URL', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaFetch', response: 'MediaUrl' },
-  133: { code: 133, name: 'MEDIA_STATE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'MediaStateEvent', coalesceKey: 'object_id' },
-  144: { code: 144, name: 'NOTIFICATION_EVENT', cost: 0, cls: 'Droppable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'NotificationEvent' },
-  145: { code: 145, name: 'NOTIFICATION_ACK', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'NotificationAck', response: 'Acknowledged' },
-  146: { code: 146, name: 'NOTIFICATION_LIST', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'InboxReq', response: 'InboxResponse' },
-  147: { code: 147, name: 'PUSH_REGISTER', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'PushRegister', response: 'Acknowledged' },
-  148: { code: 148, name: 'PUSH_UNREGISTER', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'PushUnregister', response: 'Acknowledged' },
-  160: { code: 160, name: 'GIFT_SEND', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GiftSend', response: 'GiftSendResult' },
-  161: { code: 161, name: 'BALANCE_FETCH', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'WalletReq', response: 'WalletView' },
-  162: { code: 162, name: 'ECONOMY_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'EconomyEvent' },
-  163: { code: 163, name: 'GIFT_CATALOGUE', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GiftCatalogueReq', response: 'GiftCatalogueResponse' },
-  164: { code: 164, name: 'LEDGER_HISTORY', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'LedgerReq', response: 'LedgerResponse' },
-  165: { code: 165, name: 'PROGRESSION', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ProgressionReq', response: 'ProgressionWire' },
-  166: { code: 166, name: 'BADGES', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'BadgesReq', response: 'BadgesResponse' },
-  167: { code: 167, name: 'LEADERBOARD', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'LeaderboardReq', response: 'LeaderboardResponse' },
-  176: { code: 176, name: 'GAME_ACTION', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GameAction', response: 'Acknowledged' },
-  177: { code: 177, name: 'GAME_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'GameEvent' },
-  178: { code: 178, name: 'BOT_COMMAND', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'BotCommand', response: 'Acknowledged' },
-  179: { code: 179, name: 'BOT_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'BotEvent' },
-  180: { code: 180, name: 'BOT_REGISTER', cost: 20, cls: 'Critical', auth: 'Bot', direction: 'client_to_server', ackRequired: false, payload: 'BotRegister', response: 'BotView' },
-  183: { code: 183, name: 'GAME_START', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GameStart', response: 'GameViewWire' },
-  184: { code: 184, name: 'GAME_VIEW', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GameId', response: 'GameViewWire' },
-  185: { code: 185, name: 'GAME_ABANDON', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GameId', response: 'Acknowledged' },
-  186: { code: 186, name: 'GAME_CATALOGUE', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GiftCatalogueReq', response: 'GameCatalogueResponse' },
-  192: { code: 192, name: 'REPORT_CREATE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ReportFile', response: 'Acknowledged' },
-  193: { code: 193, name: 'MODERATION_ACTION', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ModAction', response: 'Acknowledged' },
-  194: { code: 194, name: 'MODERATION_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ModerationEvent' },
-  208: { code: 208, name: 'FED_HELLO', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedHello', response: 'FedHello' },
-  209: { code: 209, name: 'FED_AUTH', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedAuth', response: 'Acknowledged' },
-  210: { code: 210, name: 'FED_PING', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedPing', response: 'FedPong' },
-  211: { code: 211, name: 'FED_FORWARD', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedForward', response: 'Acknowledged' },
-  212: { code: 212, name: 'FED_ACK', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedAck', response: 'Acknowledged' },
-  213: { code: 213, name: 'FED_ROOM_SUBSCRIBE', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedRouting', response: 'Acknowledged' },
-  214: { code: 214, name: 'FED_ROOM_EVENT', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedRoomEvent', response: 'Acknowledged' },
-  215: { code: 215, name: 'FED_PRESENCE_DIGEST', cost: 0, cls: 'Coalescable', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedPresenceDigest', response: 'Acknowledged', coalesceKey: 'region' },
-  216: { code: 216, name: 'FED_KEY_ROTATE', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedKeyRotate', response: 'Acknowledged' },
-  217: { code: 217, name: 'FED_HEALTH', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedHealth', response: 'FedHealth' },
-  218: { code: 218, name: 'FED_SHARD_MAP', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedShardMap', response: 'Acknowledged' },
-  219: { code: 219, name: 'FED_ERROR', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedError', response: 'Acknowledged' },
-  220: { code: 220, name: 'FED_CALL_RELAY', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedForward', response: 'Acknowledged' },
-  221: { code: 221, name: 'FED_DIRECTORY', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedDirectoryReq', response: 'FedDirectory' },
-  224: { code: 224, name: 'CALL_INVITE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallInvite', response: 'CallInviteResult' },
-  225: { code: 225, name: 'CALL_INVITE_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallInviteEvent' },
-  226: { code: 226, name: 'CALL_ANSWER', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallAnswer', response: 'Acknowledged' },
-  227: { code: 227, name: 'CALL_DECLINE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallDecline', response: 'Acknowledged' },
-  228: { code: 228, name: 'CALL_CANCEL', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallCancel', response: 'Acknowledged' },
-  229: { code: 229, name: 'CALL_END', cost: 2, cls: 'Critical', auth: 'User', direction: 'both', ackRequired: false, payload: 'CallEnd', response: 'Acknowledged' },
-  230: { code: 230, name: 'CALL_SDP', cost: 3, cls: 'Critical', auth: 'User', direction: 'both', ackRequired: false, payload: 'CallSdp', response: 'Acknowledged' },
-  231: { code: 231, name: 'CALL_ICE', cost: 1, cls: 'Critical', auth: 'User', direction: 'both', ackRequired: false, payload: 'CallIce', response: 'Acknowledged' },
-  232: { code: 232, name: 'CALL_STATE_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallStateEvent' },
-  233: { code: 233, name: 'CALL_RENEGOTIATE', cost: 3, cls: 'Critical', auth: 'User', direction: 'both', ackRequired: false, payload: 'CallRenegotiate', response: 'Acknowledged' },
-  234: { code: 234, name: 'CALL_KEY_UPDATE', cost: 3, cls: 'Critical', auth: 'User', direction: 'both', ackRequired: false, payload: 'CallKeyUpdate', response: 'Acknowledged' },
-  235: { code: 235, name: 'CALL_STATS', cost: 1, cls: 'Droppable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallStats', response: 'Acknowledged' },
-  236: { code: 236, name: 'CALL_TURN_FETCH', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallTurnFetch', response: 'CallTurnResponse' },
-  237: { code: 237, name: 'CALL_SFU_JOIN', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallInvite', response: 'CallTurnResponse' },
-  238: { code: 238, name: 'CALL_SFU_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallStateEvent', coalesceKey: 'call_id' },
-  52: { code: 52, name: 'CONVERSATION_STATE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ConversationStateEvent', coalesceKey: 'conversation_id' },
-  239: { code: 239, name: 'STORE_PURCHASE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'StorePurchase', response: 'StorePurchaseResult' },
-  240: { code: 240, name: 'ENTITLEMENTS', cost: 1, cls: 'Droppable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'EntitlementsReq', response: 'EntitlementsResponse' },
-  168: { code: 168, name: 'KICK_POINTS_BUY', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'KickPointsBuy', response: 'KickPointsBuyResult' },
+  1: { code: 1, name: 'HELLO', cost: 5, cls: 'Critical', auth: 'None', direction: 'client_to_server', ackRequired: false, payload: 'Hello', response: 'Welcome', paced: false, suppressOn: [] },
+  2: { code: 2, name: 'PING', cost: 1, cls: 'Critical', auth: 'None', direction: 'both', ackRequired: false, payload: 'Ping', response: 'Pong', paced: false, suppressOn: [] },
+  3: { code: 3, name: 'ACK', cost: 0, cls: 'Critical', auth: 'None', direction: 'client_to_server', ackRequired: false, payload: 'Ack', paced: false, suppressOn: [] },
+  4: { code: 4, name: 'ERROR', cost: 0, cls: 'Critical', auth: 'None', direction: 'server_to_client', ackRequired: false, payload: 'Error', paced: false, suppressOn: [] },
+  5: { code: 5, name: 'RECONNECT_HINT', cost: 0, cls: 'Critical', auth: 'None', direction: 'server_to_client', ackRequired: false, payload: 'ReconnectHint', paced: false, suppressOn: [] },
+  6: { code: 6, name: 'AUTHENTICATE', cost: 10, cls: 'Critical', auth: 'None', direction: 'client_to_server', ackRequired: false, payload: 'Authenticate', response: 'Authenticated', paced: false, suppressOn: [] },
+  7: { code: 7, name: 'SUBSCRIBE', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'SubscribeRequest', response: 'SubscribeResponse', paced: false, suppressOn: [] },
+  8: { code: 8, name: 'UNSUBSCRIBE', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'SubscribeRequest', response: 'SubscribeResponse', paced: false, suppressOn: [] },
+  16: { code: 16, name: 'KEY_PUBLISH', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'KeyPublish', response: 'KeyPublishResult', paced: false, suppressOn: [] },
+  17: { code: 17, name: 'KEY_BUNDLE_FETCH', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'KeyBundleRequest', response: 'KeyBundleResponse', paced: false, suppressOn: [] },
+  32: { code: 32, name: 'MESSAGE_SEND', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MessageSend', response: 'MessageAccepted', paced: false, suppressOn: [] },
+  33: { code: 33, name: 'MESSAGE_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: true, payload: 'MessageEvent', paced: false, suppressOn: [] },
+  34: { code: 34, name: 'MESSAGE_RECEIPT', cost: 1, cls: 'Critical', auth: 'User', direction: 'both', ackRequired: false, payload: 'MessageReceipt', paced: false, suppressOn: [] },
+  35: { code: 35, name: 'MESSAGE_DELETE', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MessageDelete', response: 'MessageAccepted', paced: false, suppressOn: [] },
+  36: { code: 36, name: 'SYNC', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'SyncRequest', response: 'SyncResponse', paced: false, suppressOn: [] },
+  37: { code: 37, name: 'CONVERSATION_LIST', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationListRequest', response: 'ConversationListResponse', paced: false, suppressOn: [] },
+  38: { code: 38, name: 'CONVERSATION_CREATE', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationCreateRequest', response: 'ConversationSummary', paced: false, suppressOn: [] },
+  39: { code: 39, name: 'TYPING', cost: 1, cls: 'Coalescable', auth: 'User', direction: 'both', ackRequired: false, payload: 'TypingEvent', coalesceKey: 'conversation_id', paced: false, suppressOn: ['UltraLowData'] },
+  40: { code: 40, name: 'MESSAGE_EDIT', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MessageEdit', response: 'Acknowledged', paced: false, suppressOn: [] },
+  41: { code: 41, name: 'REACTION_SET', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ReactionSet', response: 'Acknowledged', paced: false, suppressOn: [] },
+  42: { code: 42, name: 'REACTION_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ReactionEvent', coalesceKey: 'target_message_id+actor_id', paced: false, suppressOn: [] },
+  43: { code: 43, name: 'CONVERSATION_INVITE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationInviteRequest', response: 'ConversationSummary', paced: false, suppressOn: [] },
+  44: { code: 44, name: 'CONVERSATION_LEAVE', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationLeaveRequest', response: 'Acknowledged', paced: false, suppressOn: [] },
+  45: { code: 45, name: 'CONVERSATION_ROSTER', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationRosterRequest', response: 'ConversationRosterResponse', paced: false, suppressOn: [] },
+  46: { code: 46, name: 'CONVERSATION_MUTE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationMuteRequest', response: 'Acknowledged', paced: false, suppressOn: [] },
+  47: { code: 47, name: 'CONVERSATION_KICK', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationKickRequest', response: 'Acknowledged', paced: false, suppressOn: [] },
+  48: { code: 48, name: 'CONVERSATION_VOTE_KICK', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationVoteKickRequest', response: 'ConversationVoteKickResponse', paced: false, suppressOn: [] },
+  49: { code: 49, name: 'CONVERSATION_VOTE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ConversationVoteEvent', coalesceKey: 'conversation_id', paced: false, suppressOn: [] },
+  50: { code: 50, name: 'CONVERSATION_MEMBER_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ConversationMemberEvent', paced: false, suppressOn: [] },
+  51: { code: 51, name: 'CONVERSATION_UPDATE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ConversationUpdateRequest', response: 'ConversationSummary', paced: false, suppressOn: [] },
+  64: { code: 64, name: 'PRESENCE_SET', cost: 1, cls: 'Coalescable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'PresenceUpdate', response: 'Acknowledged', paced: false, suppressOn: [] },
+  65: { code: 65, name: 'PRESENCE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'PresenceEvent', coalesceKey: 'user_id', paced: true, suppressOn: [] },
+  80: { code: 80, name: 'ROOM_JOIN', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomJoinRequest', response: 'RoomJoinResponse', paced: false, suppressOn: [] },
+  81: { code: 81, name: 'ROOM_LEAVE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomLeaveRequest', response: 'Acknowledged', paced: false, suppressOn: [] },
+  82: { code: 82, name: 'ROOM_LIST', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomListRequest', response: 'RoomListResponse', paced: false, suppressOn: [] },
+  83: { code: 83, name: 'ROOM_MEMBER_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'RoomMemberEvent', paced: false, suppressOn: [] },
+  84: { code: 84, name: 'ROOM_STATE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'RoomStateEvent', coalesceKey: 'room_id', paced: false, suppressOn: [] },
+  85: { code: 85, name: 'ROOM_CREATE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomCreate', response: 'RoomJoinResponse', paced: false, suppressOn: [] },
+  86: { code: 86, name: 'ROOM_ROSTER', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RosterReq', response: 'RosterResponse', paced: false, suppressOn: [] },
+  87: { code: 87, name: 'ROOM_ROLE_SET', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomRoleSet', response: 'Acknowledged', paced: false, suppressOn: [] },
+  88: { code: 88, name: 'ROOM_UPDATE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomUpdate', response: 'Acknowledged', paced: false, suppressOn: [] },
+  89: { code: 89, name: 'ROOM_ARCHIVE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomArchive', response: 'Acknowledged', paced: false, suppressOn: [] },
+  90: { code: 90, name: 'ROOM_VOTE_KICK', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomVoteKick', response: 'RoomVoteKickResponse', paced: false, suppressOn: [] },
+  91: { code: 91, name: 'ROOM_VOTE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'RoomVoteEvent', coalesceKey: 'room_id', paced: false, suppressOn: [] },
+  92: { code: 92, name: 'ROOM_SANCTION', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RoomSanction', response: 'Acknowledged', paced: false, suppressOn: [] },
+  111: { code: 111, name: 'PROFILE_UPDATE', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ProfileUpdate', response: 'UserProfile', paced: false, suppressOn: [] },
+  112: { code: 112, name: 'PROFILE_FETCH', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ProfileRequest', response: 'ProfileResponse', paced: false, suppressOn: [] },
+  113: { code: 113, name: 'FRIEND_REQUEST', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'FriendTarget', response: 'Acknowledged', paced: false, suppressOn: [] },
+  114: { code: 114, name: 'FRIEND_RESPOND', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'FriendRespond', response: 'Acknowledged', paced: false, suppressOn: [] },
+  115: { code: 115, name: 'FRIEND_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'FriendEvent', paced: false, suppressOn: [] },
+  116: { code: 116, name: 'BLOCK_SET', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'FriendTarget', response: 'Acknowledged', paced: false, suppressOn: [] },
+  117: { code: 117, name: 'RELATIONSHIP_LIST', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'RelationshipListReq', response: 'RelationshipList', paced: false, suppressOn: [] },
+  118: { code: 118, name: 'SUGGESTIONS', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'SuggestReq', response: 'SearchResponse', paced: false, suppressOn: [] },
+  119: { code: 119, name: 'SEARCH', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'SearchReq', response: 'SearchResponse', paced: false, suppressOn: [] },
+  120: { code: 120, name: 'MUTE_SET', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MuteSet', response: 'Acknowledged', paced: false, suppressOn: [] },
+  128: { code: 128, name: 'MEDIA_UPLOAD_BEGIN', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaBegin', response: 'MediaTicket', paced: false, suppressOn: [] },
+  129: { code: 129, name: 'MEDIA_UPLOAD_STATUS', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaStatusReq', response: 'MediaProgress', paced: false, suppressOn: [] },
+  130: { code: 130, name: 'MEDIA_UPLOAD_COMMIT', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaCommit', response: 'Acknowledged', paced: false, suppressOn: [] },
+  131: { code: 131, name: 'MEDIA_UPLOAD_ABORT', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaAbort', response: 'Acknowledged', paced: false, suppressOn: [] },
+  132: { code: 132, name: 'MEDIA_FETCH_URL', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'MediaFetch', response: 'MediaUrl', paced: false, suppressOn: [] },
+  133: { code: 133, name: 'MEDIA_STATE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'MediaStateEvent', coalesceKey: 'object_id', paced: false, suppressOn: [] },
+  144: { code: 144, name: 'NOTIFICATION_EVENT', cost: 0, cls: 'Droppable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'NotificationEvent', paced: false, suppressOn: [] },
+  145: { code: 145, name: 'NOTIFICATION_ACK', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'NotificationAck', response: 'Acknowledged', paced: false, suppressOn: [] },
+  146: { code: 146, name: 'NOTIFICATION_LIST', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'InboxReq', response: 'InboxResponse', paced: false, suppressOn: [] },
+  147: { code: 147, name: 'PUSH_REGISTER', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'PushRegister', response: 'Acknowledged', paced: false, suppressOn: [] },
+  148: { code: 148, name: 'PUSH_UNREGISTER', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'PushUnregister', response: 'Acknowledged', paced: false, suppressOn: [] },
+  160: { code: 160, name: 'GIFT_SEND', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GiftSend', response: 'GiftSendResult', paced: false, suppressOn: [] },
+  161: { code: 161, name: 'BALANCE_FETCH', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'WalletReq', response: 'WalletView', paced: false, suppressOn: [] },
+  162: { code: 162, name: 'ECONOMY_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'EconomyEvent', paced: false, suppressOn: [] },
+  163: { code: 163, name: 'GIFT_CATALOGUE', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GiftCatalogueReq', response: 'GiftCatalogueResponse', paced: false, suppressOn: [] },
+  164: { code: 164, name: 'LEDGER_HISTORY', cost: 3, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'LedgerReq', response: 'LedgerResponse', paced: false, suppressOn: [] },
+  165: { code: 165, name: 'PROGRESSION', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ProgressionReq', response: 'ProgressionWire', paced: false, suppressOn: [] },
+  166: { code: 166, name: 'BADGES', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'BadgesReq', response: 'BadgesResponse', paced: false, suppressOn: [] },
+  167: { code: 167, name: 'LEADERBOARD', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'LeaderboardReq', response: 'LeaderboardResponse', paced: false, suppressOn: [] },
+  176: { code: 176, name: 'GAME_ACTION', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GameAction', response: 'Acknowledged', paced: false, suppressOn: [] },
+  177: { code: 177, name: 'GAME_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'GameEvent', paced: false, suppressOn: [] },
+  178: { code: 178, name: 'BOT_COMMAND', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'BotCommand', response: 'Acknowledged', paced: false, suppressOn: [] },
+  179: { code: 179, name: 'BOT_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'BotEvent', paced: false, suppressOn: [] },
+  180: { code: 180, name: 'BOT_REGISTER', cost: 20, cls: 'Critical', auth: 'Bot', direction: 'client_to_server', ackRequired: false, payload: 'BotRegister', response: 'BotView', paced: false, suppressOn: [] },
+  183: { code: 183, name: 'GAME_START', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GameStart', response: 'GameViewWire', paced: false, suppressOn: [] },
+  184: { code: 184, name: 'GAME_VIEW', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GameId', response: 'GameViewWire', paced: false, suppressOn: [] },
+  185: { code: 185, name: 'GAME_ABANDON', cost: 2, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GameId', response: 'Acknowledged', paced: false, suppressOn: [] },
+  186: { code: 186, name: 'GAME_CATALOGUE', cost: 1, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'GiftCatalogueReq', response: 'GameCatalogueResponse', paced: false, suppressOn: [] },
+  192: { code: 192, name: 'REPORT_CREATE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ReportFile', response: 'Acknowledged', paced: false, suppressOn: [] },
+  193: { code: 193, name: 'MODERATION_ACTION', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ModAction', response: 'Acknowledged', paced: false, suppressOn: [] },
+  194: { code: 194, name: 'MODERATION_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ModerationEvent', paced: false, suppressOn: [] },
+  208: { code: 208, name: 'FED_HELLO', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedHello', response: 'FedHello', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  209: { code: 209, name: 'FED_AUTH', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedAuth', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  210: { code: 210, name: 'FED_PING', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedPing', response: 'FedPong', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  211: { code: 211, name: 'FED_FORWARD', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedForward', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  212: { code: 212, name: 'FED_ACK', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedAck', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  213: { code: 213, name: 'FED_ROOM_SUBSCRIBE', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedRouting', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  214: { code: 214, name: 'FED_ROOM_EVENT', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedRoomEvent', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  215: { code: 215, name: 'FED_PRESENCE_DIGEST', cost: 0, cls: 'Coalescable', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedPresenceDigest', response: 'Acknowledged', coalesceKey: 'region', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  216: { code: 216, name: 'FED_KEY_ROTATE', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedKeyRotate', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  217: { code: 217, name: 'FED_HEALTH', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedHealth', response: 'FedHealth', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  218: { code: 218, name: 'FED_SHARD_MAP', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedShardMap', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  219: { code: 219, name: 'FED_ERROR', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedError', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  220: { code: 220, name: 'FED_CALL_RELAY', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedForward', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  221: { code: 221, name: 'FED_DIRECTORY', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedDirectoryReq', response: 'FedDirectory', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  224: { code: 224, name: 'CALL_INVITE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallInvite', response: 'CallInviteResult', paced: false, suppressOn: [] },
+  225: { code: 225, name: 'CALL_INVITE_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallInviteEvent', paced: false, suppressOn: [] },
+  226: { code: 226, name: 'CALL_ANSWER', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallAnswer', response: 'Acknowledged', paced: false, suppressOn: [] },
+  227: { code: 227, name: 'CALL_DECLINE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallDecline', response: 'Acknowledged', paced: false, suppressOn: [] },
+  228: { code: 228, name: 'CALL_CANCEL', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallCancel', response: 'Acknowledged', paced: false, suppressOn: [] },
+  229: { code: 229, name: 'CALL_END', cost: 2, cls: 'Critical', auth: 'User', direction: 'both', ackRequired: false, payload: 'CallEnd', response: 'Acknowledged', paced: false, suppressOn: [] },
+  230: { code: 230, name: 'CALL_SDP', cost: 3, cls: 'Critical', auth: 'User', direction: 'both', ackRequired: false, payload: 'CallSdp', response: 'Acknowledged', paced: false, suppressOn: [] },
+  231: { code: 231, name: 'CALL_ICE', cost: 1, cls: 'Critical', auth: 'User', direction: 'both', ackRequired: false, payload: 'CallIce', response: 'Acknowledged', paced: false, suppressOn: [] },
+  232: { code: 232, name: 'CALL_STATE_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallStateEvent', paced: false, suppressOn: [] },
+  233: { code: 233, name: 'CALL_RENEGOTIATE', cost: 3, cls: 'Critical', auth: 'User', direction: 'both', ackRequired: false, payload: 'CallRenegotiate', response: 'Acknowledged', paced: false, suppressOn: [] },
+  234: { code: 234, name: 'CALL_KEY_UPDATE', cost: 3, cls: 'Critical', auth: 'User', direction: 'both', ackRequired: false, payload: 'CallKeyUpdate', response: 'Acknowledged', paced: false, suppressOn: [] },
+  235: { code: 235, name: 'CALL_STATS', cost: 1, cls: 'Droppable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallStats', response: 'Acknowledged', paced: false, suppressOn: [] },
+  236: { code: 236, name: 'CALL_TURN_FETCH', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallTurnFetch', response: 'CallTurnResponse', paced: false, suppressOn: [] },
+  237: { code: 237, name: 'CALL_SFU_JOIN', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallInvite', response: 'CallTurnResponse', paced: false, suppressOn: [] },
+  238: { code: 238, name: 'CALL_SFU_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallStateEvent', coalesceKey: 'call_id', paced: false, suppressOn: [] },
+  52: { code: 52, name: 'CONVERSATION_STATE_EVENT', cost: 0, cls: 'Coalescable', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ConversationStateEvent', coalesceKey: 'conversation_id', paced: false, suppressOn: [] },
+  239: { code: 239, name: 'STORE_PURCHASE', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'StorePurchase', response: 'StorePurchaseResult', paced: false, suppressOn: [] },
+  240: { code: 240, name: 'ENTITLEMENTS', cost: 1, cls: 'Droppable', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'EntitlementsReq', response: 'EntitlementsResponse', paced: false, suppressOn: [] },
+  168: { code: 168, name: 'KICK_POINTS_BUY', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'KickPointsBuy', response: 'KickPointsBuyResult', paced: false, suppressOn: [] },
 };
 
 export function opcodeName(code: number): string {

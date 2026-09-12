@@ -70,6 +70,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::all)]
 
+pub mod cursor;
 pub mod fanout;
 mod metrics;
 pub mod model;

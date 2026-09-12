@@ -578,6 +578,27 @@ impl Default for GatewayConfig {
     }
 }
 
+/// One peer node a client may be directed to, as `/v1/config` reports it.
+///
+/// The mesh's own allow-list names peers by node id alone, because a peer's
+/// address is the operator's business. This entry carries the client-facing
+/// half the allow-list cannot: the public URL a client reaches the node at.
+/// The two lists are written by the same operator but gate different doors —
+/// the allow-list admits server-to-server links, this one names where a
+/// client may be sent — so an entry here is not required to be a mesh peer.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ClientPeer {
+    /// The peer's node id, as the mesh allow-list names it.
+    pub node_id: String,
+    /// The node's region label, carried straight from its own identity.
+    pub region: String,
+    /// The node's country label, for display.
+    pub country: String,
+    /// The base URL a client reaches the node at, e.g. `https://node-b.example`.
+    pub public_url: String,
+}
+
 /// Server-to-server mesh.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -587,6 +608,11 @@ pub struct FederationConfig {
     /// Explicit allow-list of peer node ids. Empty means accept none.
     #[serde(deserialize_with = "comma_separated_strings")]
     pub allowed_peers: Vec<String>,
+    /// Peer nodes the config document offers to clients, so a client can
+    /// measure latency per node and fail over between them (section 170).
+    /// Empty — the single-node posture — means the document lists this node
+    /// alone and clients have nowhere else to go.
+    pub client_peers: Vec<ClientPeer>,
     /// Rejection threshold for handshake clock skew.
     pub max_clock_skew_seconds: u64,
     /// Per-peer outbound queue depth.
@@ -598,6 +624,7 @@ impl Default for FederationConfig {
         Self {
             enabled: false,
             allowed_peers: Vec::new(),
+            client_peers: Vec::new(),
             max_clock_skew_seconds: 60,
             peer_queue_capacity: 4096,
         }
@@ -671,6 +698,26 @@ impl Default for CallsConfig {
     }
 }
 
+/// Staged rollout of the feature bits the node advertises (section 175).
+///
+/// A protocol change ships additive: the server learns the feature first, then advertises the
+/// bit, then clients that ask for it negotiate it. This section is the operator's control over
+/// the middle step — which bits a node advertises at all, and to what share of its sessions.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct FeaturesConfig {
+    /// Bits this node must not advertise, by feature name — the per-feature kill switch
+    /// (section 175: switching a feature off means the node stops advertising the bit; a
+    /// session that already negotiated it keeps it until it ends). The `QUIC` and
+    /// `TCP_TRANSPORT` bits are only ever advertised while their listeners are bound, so
+    /// listing them here only removes the promise, never the listener itself.
+    #[serde(deserialize_with = "comma_separated_strings")]
+    pub disabled: Vec<String>,
+    /// Bits admitted to a share of sessions, by feature name and percent 0..=100. A bit not
+    /// listed runs at 100 percent. A percent of 0 is equivalent to disabling the bit.
+    pub rollout: BTreeMap<String, u8>,
+}
+
 /// The whole configuration.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -703,6 +750,8 @@ pub struct Config {
     pub captcha: CaptchaConfig,
     /// Call signaling.
     pub calls: CallsConfig,
+    /// Staged rollout of advertised feature bits.
+    pub features: FeaturesConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -1009,6 +1058,37 @@ impl Config {
                     .to_string(),
             );
         }
+        for peer in &self.federation.client_peers {
+            if peer.node_id.trim().is_empty() {
+                problems
+                    .push("federation.client_peers has an entry with an empty node_id".to_string());
+            }
+            if peer.public_url.trim().is_empty() {
+                problems.push(format!(
+                    "federation.client_peers entry {:?} has an empty public_url",
+                    peer.node_id
+                ));
+                continue;
+            }
+            let scheme = peer
+                .public_url
+                .split("://")
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if peer.public_url.contains("://") && scheme != "http" && scheme != "https" {
+                problems.push(format!(
+                    "federation.client_peers entry {:?} public_url must be http(s), not {:?}",
+                    peer.node_id, scheme
+                ));
+            }
+            if !peer.public_url.contains("://") {
+                problems.push(format!(
+                    "federation.client_peers entry {:?} public_url must be an absolute URL",
+                    peer.node_id
+                ));
+            }
+        }
 
         // --- safety checks that only apply outside development ---
         if hardened {
@@ -1109,6 +1189,32 @@ impl Config {
                 "http.public_url is plaintext http in production: tokens would travel in the clear"
                     .to_string(),
             );
+        }
+
+        // --- staged feature rollout (section 175) ---
+        // The kill switch and the percentages are validated here so a typo cannot silently
+        // leave a feature fully on (or fully off). The names themselves are resolved against
+        // the protocol registry where the bits live, in the composition root, which refuses
+        // to start on a name it does not know.
+        for name in self
+            .features
+            .disabled
+            .iter()
+            .chain(self.features.rollout.keys())
+        {
+            if name.trim().is_empty() {
+                problems.push(
+                    "features: an empty feature name is a configuration mistake, not a no-op"
+                        .to_string(),
+                );
+            }
+        }
+        for (name, percent) in &self.features.rollout {
+            if *percent > 100 {
+                problems.push(format!(
+                    "features.rollout.{name} is {percent}: a rollout percent must be 0..=100"
+                ));
+            }
         }
 
         if problems.is_empty() {
@@ -1401,6 +1507,55 @@ mod tests {
     }
 
     #[test]
+    fn feature_rollout_defaults_to_everything_advertised() {
+        let config = Config::from_sources(&[], &[]).expect("builds");
+        config.validate().expect("defaults are valid");
+        assert!(config.features.disabled.is_empty());
+        assert!(config.features.rollout.is_empty());
+    }
+
+    #[test]
+    fn feature_kill_switch_accepts_a_list_or_a_comma_separated_env_value() {
+        let from_file = Config::from_toml_str(
+            "[features]\ndisabled = [\"group_call\", \"rich_presence\"]\n",
+            &[],
+        )
+        .expect("builds");
+        assert_eq!(
+            from_file.features.disabled,
+            vec!["group_call".to_string(), "rich_presence".to_string()]
+        );
+
+        let from_env = Config::from_sources(
+            &[],
+            &env(&[("MIGO_FEATURES__DISABLED", "calls, translation")]),
+        )
+        .expect("builds");
+        assert_eq!(
+            from_env.features.disabled,
+            vec!["calls".to_string(), "translation".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_rollout_percent_above_one_hundred_is_refused() {
+        let config =
+            Config::from_toml_str("[features.rollout]\ngroup_call = 101\n", &[]).expect("builds");
+        let error = config.validate().expect_err("101 percent is not a share");
+        assert!(
+            error.to_string().contains("features.rollout.group_call"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_empty_feature_name_is_refused() {
+        let config = Config::from_toml_str("[features.rollout]\n\"\" = 50\n", &[]).expect("builds");
+        let error = config.validate().expect_err("an empty name is a mistake");
+        assert!(error.to_string().contains("empty feature name"), "{error}");
+    }
+
+    #[test]
     fn empty_environment_values_mean_unset() {
         let config = Config::from_sources(
             &[],
@@ -1598,6 +1753,52 @@ mod tests {
         let rendered = config.validate().expect_err("must refuse").to_string();
         assert!(
             rendered.contains("federation.enabled is false"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn client_peers_round_trip_and_a_valid_list_passes() {
+        let config = Config::from_toml_str(
+            "[federation]\nenabled = true\n\
+             [[federation.client_peers]]\nnode_id = \"node-b\"\nregion = \"eu-central\"\n\
+             country = \"DE\"\npublic_url = \"https://node-b.example\"\n",
+            &[],
+        )
+        .expect("builds");
+        config.validate().expect("a well-formed peer list is valid");
+        let peer = &config.federation.client_peers[0];
+        assert_eq!(peer.node_id, "node-b");
+        assert_eq!(peer.public_url, "https://node-b.example");
+    }
+
+    #[test]
+    fn client_peer_entries_are_shape_checked() {
+        let config = Config::from_toml_str(
+            "[[federation.client_peers]]\nnode_id = \"\"\nregion = \"r\"\ncountry = \"C\"\n\
+             public_url = \"https://ok.example\"\n\
+             [[federation.client_peers]]\nnode_id = \"no-url\"\nregion = \"r\"\ncountry = \"C\"\n\
+             public_url = \"\"\n\
+             [[federation.client_peers]]\nnode_id = \"ftp-node\"\nregion = \"r\"\ncountry = \"C\"\n\
+             public_url = \"ftp://files.example\"\n\
+             [[federation.client_peers]]\nnode_id = \"relative\"\nregion = \"r\"\ncountry = \"C\"\n\
+             public_url = \"node-d.example:8443\"\n",
+            &[],
+        )
+        .expect("builds");
+        let rendered = config.validate().expect_err("must refuse").to_string();
+        assert!(rendered.contains("empty node_id"), "{rendered}");
+        assert!(
+            rendered.contains(r#"client_peers entry "no-url" has an empty public_url"#),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(r#"client_peers entry "ftp-node" public_url must be http(s)"#),
+            "{rendered}"
+        );
+        assert!(
+            rendered
+                .contains(r#"client_peers entry "relative" public_url must be an absolute URL"#),
             "{rendered}"
         );
     }

@@ -58,6 +58,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod catalogue;
+pub mod cursor;
 mod metrics;
 pub mod model;
 pub mod service;

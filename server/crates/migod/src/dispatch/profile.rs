@@ -24,8 +24,8 @@
 use migo_core::Error;
 use migo_gateway::ClientContext;
 use migo_protocol::{
-    fault, from_frame, Frame, ProfileUpdate, SearchReq, SearchResponse, SuggestReq, SuggestedUser,
-    UserProfile,
+    codes, fault, from_frame, Frame, ProfileUpdate, SearchReq, SearchResponse, SuggestReq,
+    SuggestedUser, UserProfile,
 };
 use migo_social::Caller as SocialCaller;
 use migo_social::SharedSocial;
@@ -52,6 +52,12 @@ fn caller(ctx: &ClientContext<'_>) -> SocialCaller {
 /// options (an absent field is "keep"), so clearing bio or avatar is a later wire
 /// addition — an empty string sets an empty bio, which the service's own length
 /// validation accepts or refuses on its own rules.
+///
+/// `custom_status` is the RICH_PRESENCE bit's own field (section 148): the one field
+/// here the registry ties to a feature, so it is answered FEATURE_NOT_NEGOTIATED on a
+/// session that did not ask for the bit. The gate is on the field, not the opcode —
+/// PROFILE_UPDATE itself serves every deployed client, and a client built before the
+/// bit never sends the field, so its profile updates are untouched.
 pub(crate) async fn handle_profile_update(
     ctx: &ClientContext<'_>,
     frame: &Frame,
@@ -60,6 +66,15 @@ pub(crate) async fn handle_profile_update(
 ) -> Result<(), Error> {
     let who = caller(ctx);
     let request: ProfileUpdate = from_frame(frame).map_err(fault::from_wire)?;
+
+    if request.custom_status.is_some()
+        && ctx.features() & migo_protocol::features::RICH_PRESENCE == 0
+    {
+        return Err(fault::error(
+            codes::FEATURE_NOT_NEGOTIATED,
+            "custom_status requires the RICH_PRESENCE feature bit",
+        ));
+    }
 
     let patch = ProfilePatch {
         display_name: request.display_name,
@@ -73,6 +88,7 @@ pub(crate) async fn handle_profile_update(
             .and_then(|year| i16::try_from(year).ok())
             .map(Patch::Set)
             .unwrap_or(Patch::Keep),
+        custom_status: request.custom_status.map(Patch::Set).unwrap_or(Patch::Keep),
         show_last_seen: request
             .show_last_seen
             .and_then(visibility_of)
@@ -199,7 +215,7 @@ fn wire_profile(card: migo_social::model::ProfileCard) -> UserProfile {
         presence: None,
         badges: None,
         verified: None,
-        custom_status: None,
+        custom_status: card.custom_status,
         birth_year: card.birth_year.map(|year| year as u32),
     }
 }

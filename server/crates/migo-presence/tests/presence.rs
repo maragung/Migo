@@ -24,7 +24,7 @@ use migo_presence::model::{
 };
 use migo_presence::service::Presences;
 use migo_presence::traits::Presence;
-use migo_presence::{cadence_for, Detail, Fanout, PresenceConfig, PresenceScope};
+use migo_presence::{cadence_for, CadenceTtl, Detail, Fanout, PresenceConfig, PresenceScope};
 use migo_protocol::{
     codes, BandwidthMode, Platform, PresenceEvent, PresenceState, PresenceUpdate, RelationshipKind,
 };
@@ -126,6 +126,7 @@ impl Harness {
                 who_can_message: Visibility::Everyone,
                 who_can_add: Visibility::Everyone,
                 searchable: true,
+                custom_status: None,
                 updated_at: ts(SECOND),
             })
             .await

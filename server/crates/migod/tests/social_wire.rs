@@ -1,6 +1,6 @@
 //! The SOCIAL opcodes answered on the wire, where the handler layer lives.
 //!
-//! Two behaviours only the dispatcher can get wrong, because the service under it is
+//! Three behaviours only the dispatcher can get wrong, because the service under it is
 //! correct in isolation:
 //!
 //! * **A full friends page must not hide the request behind it.** The combined
@@ -17,8 +17,16 @@
 //!   handler once labelled every request-path notice `request`, so the original
 //!   asker heard "request" for an event that was an acceptance. The second test
 //!   drives the crossing over TCP and asserts the label.
+//! * **A custom status belongs to the session that negotiated RICH_PRESENCE.** The
+//!   field is the feature bit's own surface (section 148): a session that asked for
+//!   the bit sets and reads back its status, and a session that did not is answered
+//!   FEATURE_NOT_NEGOTIATED for the field — while the rest of PROFILE_UPDATE keeps
+//!   working, because every deployed client sends that opcode without the bit. One of
+//!   the tests below drives the pair the way a client uses it: the bit set a stock
+//!   client offers, a status written through the profile patch, and the value read
+//!   back off the card by a different session — the half the other two cannot see.
 //!
-//! Both tests use the reply rule as their clock: every frame they wait for is one
+//! Every test uses the reply rule as its clock: every frame it waits for is one
 //! the server owes somebody, so the timeout is the assertion.
 
 use std::net::SocketAddr;
@@ -31,9 +39,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use migo_auth::{DeviceClaim, Grant, Registration, RequestContext};
 use migo_core::{Clock, Config, Secret};
 use migo_protocol::{
-    from_frame, to_frame, Acknowledged, Encode, Frame, FriendEvent, FriendRespond, FriendTarget,
-    Opcode, RelationshipList, RelationshipListReq, SubscribeRequest, SubscribeResponse, Topic,
-    TopicKind, PROTOCOL_VERSION,
+    codes, from_frame, to_frame, Acknowledged, Encode, Frame, FriendEvent, FriendRespond,
+    FriendTarget, Opcode, ProfileRequest, ProfileResponse, ProfileUpdate, RelationshipList,
+    RelationshipListReq, SubscribeRequest, SubscribeResponse, Topic, TopicKind, UserProfile,
+    PROTOCOL_VERSION,
 };
 use migod::App;
 
@@ -139,11 +148,21 @@ struct LiveSession {
 }
 
 impl LiveSession {
+    /// A session that negotiated no feature bits — the honest set of every
+    /// deployed client, which sends no bit it does not know.
+    async fn connect(addr: SocketAddr, grant: &Grant) -> Self {
+        Self::connect_with_features(addr, grant, 0).await
+    }
+
+    /// A live session whose HELLO asked for the given feature bits. The node
+    /// advertises RICH_PRESENCE, so a client that asks for it negotiates it and
+    /// the session carries the bit for its whole lifetime (section 148).
+    ///
     /// The pre-auth HELLO is charged against the peer IP at the anonymous tier, and a
     /// development endpoint bucket holds two hellos and refills 2.5 tokens a second —
     /// so a test that opens several sessions spaces them, the same consideration a
     /// client's reconnect backoff has, instead of racing the refill.
-    async fn connect(addr: SocketAddr, grant: &Grant) -> Self {
+    async fn connect_with_features(addr: SocketAddr, grant: &Grant, features: u64) -> Self {
         tokio::time::sleep(Duration::from_millis(1500)).await;
         let mut stream = tokio::time::timeout(STEP, tokio::net::TcpStream::connect(addr))
             .await
@@ -154,6 +173,7 @@ impl LiveSession {
             protocol_version: PROTOCOL_VERSION,
             access_token: Some(grant.access_token.clone()),
             device_id: Some(grant.device_id),
+            features,
             ..Default::default()
         };
         send(&mut stream, Opcode::Hello, 1, &hello).await;
@@ -405,5 +425,191 @@ async fn a_paged_walk_over_tcp_reaches_friends_beyond_the_first_page() {
         seen.len(),
         5,
         "every friend is reached exactly once: {seen:?}"
+    );
+}
+
+/// The RICH_PRESENCE bit's own surface, end to end: a session that asked for the bit
+/// sets a custom status through PROFILE_UPDATE and the reply reads it back, and a
+/// later patch that names other fields keeps the status — the wire's "absent means
+/// leave alone" extended to the new field.
+#[tokio::test]
+async fn a_rich_presence_session_sets_and_keeps_its_custom_status() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let grant = registered_grant(&app, "carol").await;
+    let mut session =
+        LiveSession::connect_with_features(addr, &grant, migo_protocol::features::RICH_PRESENCE)
+            .await;
+
+    let reply: UserProfile = session
+        .ask(
+            Opcode::ProfileUpdate,
+            10,
+            &ProfileUpdate {
+                custom_status: Some("sedang di jalan".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert_eq!(
+        reply.custom_status.as_deref(),
+        Some("sedang di jalan"),
+        "the reply is the caller's refreshed card, and the card carries the status"
+    );
+    assert_eq!(reply.user_id, grant.account_id);
+
+    // A patch that names only the display name must keep the status: the field is
+    // optional on the wire, and absent means leave alone.
+    let kept: UserProfile = session
+        .ask(
+            Opcode::ProfileUpdate,
+            11,
+            &ProfileUpdate {
+                display_name: Some("Carol Kota".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert_eq!(
+        kept.custom_status.as_deref(),
+        Some("sedang di jalan"),
+        "a patch that does not name the status leaves it alone"
+    );
+    assert_eq!(kept.display_name, "Carol Kota");
+}
+
+/// The pair from the client's end: a session shaped like a stock client — the bit set
+/// `packages/sdk/src/transport.ts` offers by default, which the web client's HELLO
+/// carries — negotiates RICH_PRESENCE, writes a status, and a *different* session
+/// reads that status back off the profile card.
+///
+/// This is the shape the two half-tests around it cannot pin. The bit being advertised
+/// is proved elsewhere; the field round-tripping through PROFILE_UPDATE's own reply is
+/// proved above. What neither covers is the pair as a client actually uses it: the
+/// stock bit set negotiating at all, and the value being readable by somebody else —
+/// the read side the friend list and the profile panel render from. A bit no shipped
+/// client offers, or a status only its author can see, is the same dead end one step
+/// further along.
+#[tokio::test]
+async fn a_stock_client_session_writes_a_status_a_peer_reads_back() {
+    // The bits `DEFAULT_CLIENT_FEATURES` states, by name. Kept as a literal rather than
+    // derived: the point is that a client offering an arbitrary set of *known* bits
+    // negotiates the one it needs, and a helper that computed the set from the crates
+    // would agree with the server by construction and prove nothing.
+    const STOCK_CLIENT_FEATURES: u64 = migo_protocol::features::COMPRESSION
+        | migo_protocol::features::BATCHING
+        | migo_protocol::features::E2E_V1
+        | migo_protocol::features::GROUP_E2E_V1
+        | migo_protocol::features::PRESENCE
+        | migo_protocol::features::TYPING
+        | migo_protocol::features::ROOMS
+        | migo_protocol::features::RESUME
+        | migo_protocol::features::VOICE_MESSAGE
+        | migo_protocol::features::RICH_PRESENCE;
+
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let author_grant = registered_grant(&app, "erin").await;
+    let reader_grant = registered_grant(&app, "frank").await;
+
+    let mut author =
+        LiveSession::connect_with_features(addr, &author_grant, STOCK_CLIENT_FEATURES).await;
+
+    let written: UserProfile = author
+        .ask(
+            Opcode::ProfileUpdate,
+            10,
+            &ProfileUpdate {
+                custom_status: Some("di dapur".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert_eq!(
+        written.custom_status.as_deref(),
+        Some("di dapur"),
+        "the stock bit set negotiates RICH_PRESENCE, so the field is admitted"
+    );
+
+    // A reader that negotiated nothing at all — an older client, which knows no bit for
+    // this — still gets the status on the card: reading the field has never needed the
+    // bit, and gating the read would be a second, invisible dead end.
+    let mut reader = LiveSession::connect(addr, &reader_grant).await;
+    let card: ProfileResponse = reader
+        .ask(
+            Opcode::ProfileFetch,
+            10,
+            &ProfileRequest {
+                user_ids: vec![author_grant.account_id],
+            },
+        )
+        .await;
+    let seen = card
+        .profiles
+        .iter()
+        .find(|profile| profile.user_id == author_grant.account_id)
+        .expect("the author's card is served to a peer");
+    assert_eq!(
+        seen.custom_status.as_deref(),
+        Some("di dapur"),
+        "the status a stock client wrote is what another session renders"
+    );
+}
+
+/// The gate on the other side of the bit: a session that did not negotiate
+/// RICH_PRESENCE is answered FEATURE_NOT_NEGOTIATED for the field — and the session,
+/// and every other field of the opcode, keep working, which is what keeps every
+/// deployed client (none of which send the field) unaffected.
+#[tokio::test]
+async fn a_custom_status_without_the_rich_presence_bit_is_refused_but_the_session_is_not() {
+    let app = build_app().await;
+    let addr = app.tcp_bind.expect("the TCP listener is bound");
+    let grant = registered_grant(&app, "dave").await;
+    let mut session = LiveSession::connect(addr, &grant).await;
+
+    send(
+        &mut session.stream,
+        Opcode::ProfileUpdate,
+        10,
+        &ProfileUpdate {
+            custom_status: Some("tidak diizinkan".to_string()),
+            ..Default::default()
+        },
+    )
+    .await;
+    loop {
+        let frame = recv_within(&mut session.stream, STEP).await;
+        if frame.header.correlation == 10 {
+            assert!(
+                frame.header.is_error(),
+                "the custom status is refused on a session without the bit"
+            );
+            let error: migo_protocol::Error = from_frame(&frame).expect("the error frame decodes");
+            assert_eq!(
+                error.code,
+                codes::FEATURE_NOT_NEGOTIATED,
+                "section 148's answer for a feature the session did not negotiate"
+            );
+            break;
+        }
+    }
+
+    // The refusal was answered, not fatal: the same session goes on serving the rest
+    // of the opcode, so a client that merely asked for a field it never negotiated
+    // loses that one frame and nothing else.
+    let still_working: UserProfile = session
+        .ask(
+            Opcode::ProfileUpdate,
+            11,
+            &ProfileUpdate {
+                display_name: Some("Dave Kota".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert_eq!(still_working.display_name, "Dave Kota");
+    assert_eq!(
+        still_working.custom_status, None,
+        "the refused field was never written"
     );
 }
