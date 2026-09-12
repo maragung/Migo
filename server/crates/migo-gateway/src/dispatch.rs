@@ -113,7 +113,7 @@ impl<'a> ClientContext<'a> {
     ///
     /// Section 148's gate for a handler whose opcode surface belongs to a feature bit: the
     /// intersection is fixed for the session's lifetime, so a field or frame the registry
-    /// ties to a bit is answered FEATURE_NOT_NEGOTIATED here rather than served to a client
+    /// ties to a bit is answered `FEATURE_NOT_NEGOTIATED` here rather than served to a client
     /// that never asked for the feature.
     #[must_use]
     pub fn features(&self) -> u64 {
