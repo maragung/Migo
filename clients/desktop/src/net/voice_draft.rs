@@ -26,18 +26,14 @@ use migo_core::Id;
 /// and the send need, with the bytes staying in the store until one of them asks.
 pub(crate) struct VoiceDraft {
     /// The playing time the descriptor last stated — the tick's own count, which stands
-    /// still through a pause exactly as the recording does.
+    /// still through a pause exactly as the recording does. The recorder's own statement of
+    /// how long it ran: a death between ticks can leave it up to a second behind the bytes,
+    /// and the send settles on the bytes' own count, but the preview the recovery shows is
+    /// this one — the last thing the recording said about itself.
     pub duration_ms: u64,
     /// The sampled amplitude bars, 0–255, unfolded — the fold is a send-time judgement,
     /// and a draft recovered for preview shows the same live bars it recorded.
     pub amplitudes: Vec<u8>,
-}
-
-impl VoiceDraft {
-    /// The fixed-width waveform the message carries, folded from the sampled bars.
-    pub fn waveform(&self) -> Option<Vec<u8>> {
-        (!self.amplitudes.is_empty()).then(|| super::media::downsample_waveform(&self.amplitudes))
-    }
 }
 
 /// The draft store: one draft per conversation, in the app's private config directory.
@@ -121,10 +117,15 @@ impl VoiceDraftStore {
         if bytes.len() % 2 != 0 {
             return None;
         }
+        // `as_chunks` rather than `chunks_exact`: the file was already refused above for an
+        // odd length, so the remainder half is empty by construction and the pairs are real
+        // arrays the conversion can take whole.
         Some(
             bytes
-                .chunks_exact(2)
-                .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| i16::from_le_bytes(*pair))
                 .collect(),
         )
     }
@@ -186,7 +187,10 @@ mod tests {
         expected[0] = 3;
         expected[1] = 40;
         expected[2] = 250;
-        assert_eq!(draft.waveform().expect("the fold is taken"), expected);
+        assert_eq!(
+            super::super::media::downsample_waveform(&draft.amplitudes),
+            expected
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

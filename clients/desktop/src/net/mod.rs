@@ -3455,7 +3455,10 @@ impl Worker {
         }
         self.hold_note(HeldNote {
             conversation_id,
-            duration_ms: samples.len() as u64 * 1_000 / u64::from(media::VOICE_NOTE_SAMPLE_RATE),
+            // The descriptor's own statement of how long the note ran — the same figure the
+            // preview would have shown before the upload failed, rather than a recount from
+            // the bytes that could differ by the tick's last, unwritten second.
+            duration_ms: draft.duration_ms,
             amplitudes: draft.amplitudes,
             // The arm the recording began under is gone with the note it rode on; the
             // restored preview sends without it rather than inventing a promise nobody made.
@@ -3898,10 +3901,12 @@ impl Worker {
             self.drafts.clear(conversation_id);
             return;
         }
-        let duration_ms = samples.len() as u64 * 1_000 / u64::from(media::VOICE_NOTE_SAMPLE_RATE);
         self.hold_note(HeldNote {
             conversation_id,
-            duration_ms,
+            // The descriptor's own statement of how long the recording ran, which is the
+            // figure the bar was ticking when the app died — the bytes can hold a fraction
+            // of a second more, and the send settles the final figure from them.
+            duration_ms: draft.duration_ms,
             amplitudes: draft.amplitudes,
             expires_in_ms: None,
         });

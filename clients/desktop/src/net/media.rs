@@ -101,7 +101,7 @@ pub(crate) fn downsample_waveform(bars: &[u8]) -> Vec<u8> {
     if bars.is_empty() {
         return folded;
     }
-    let bucket = (bars.len() + WAVEFORM_BARS - 1) / WAVEFORM_BARS;
+    let bucket = bars.len().div_ceil(WAVEFORM_BARS);
     for (index, bar) in bars.iter().enumerate() {
         let slot = (index / bucket).min(WAVEFORM_BARS - 1);
         if *bar > folded[slot] {

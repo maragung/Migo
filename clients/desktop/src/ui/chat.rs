@@ -1788,9 +1788,11 @@ fn message_row(
                             ui,
                             context,
                             message.outgoing,
-                            *media_id,
-                            *duration_ms,
-                            waveform.as_deref(),
+                            &VoiceNoteView {
+                                media_id: *media_id,
+                                duration_ms: *duration_ms,
+                                waveform: waveform.clone(),
+                            },
                             &meta,
                             media,
                         );
@@ -2108,6 +2110,19 @@ fn image_bubble(
     );
 }
 
+/// One voice note's own facts, as a row receives them from the message body: the media id
+/// the fetch flow needs, the playing time the sender measured, and the sender's sampled
+/// waveform. A struct because the row was an eight-argument call by the time the waveform
+/// landed, and eight arguments is a call site nobody can check.
+pub struct VoiceNoteView {
+    /// The media the note's bytes live behind.
+    pub media_id: Id,
+    /// The playing time the sender measured.
+    pub duration_ms: u32,
+    /// The folded waveform the sender sampled, when one came on the wire.
+    pub waveform: Option<Vec<u8>>,
+}
+
 /// One voice note: a play/stop button, the note's own shape — the bars the sender's
 /// microphone sampled, folded to the fixed width the message carries — and the delivery
 /// state.
@@ -2119,15 +2134,13 @@ fn voice_bubble(
     ui: &mut Ui,
     context: &mut Context<'_>,
     outgoing: bool,
-    media_id: Id,
-    duration_ms: u32,
-    waveform: Option<&[u8]>,
+    note: &VoiceNoteView,
     meta: &str,
     media: &mut MediaState,
 ) {
     let colors = palette(context.theme);
-    let playing = media.playing == Some(media_id);
-    if let Some(reason) = media.failures.get(&media_id) {
+    let playing = media.playing == Some(note.media_id);
+    if let Some(reason) = media.failures.get(&note.media_id) {
         widgets::bubble(
             ui,
             context.theme,
@@ -2137,8 +2150,8 @@ fn voice_bubble(
             BubbleTone::Problem,
         );
         if ui.button("Try again").clicked() {
-            media.requested.remove(&media_id);
-            media.failures.remove(&media_id);
+            media.requested.remove(&note.media_id);
+            media.failures.remove(&note.media_id);
         }
         return;
     }
@@ -2163,7 +2176,9 @@ fn voice_bubble(
             if playing {
                 context.issue(Command::StopVoiceNote);
             } else {
-                context.issue(Command::PlayVoiceNote { media_id });
+                context.issue(Command::PlayVoiceNote {
+                    media_id: note.media_id,
+                });
             }
         }
         ui.add_space(space::XS);
@@ -2189,13 +2204,13 @@ fn voice_bubble(
                 ui.set_max_width((ui.available_width() * 0.68).max(140.0));
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
-                        let bars = waveform.unwrap_or(&[]);
+                        let bars = note.waveform.as_deref().unwrap_or(&[]);
                         if !bars.is_empty() {
                             waveform_bars(ui, bars, foreground, 160.0);
                             ui.add_space(space::SM);
                         }
                         ui.label(
-                            RichText::new(human_duration(duration_ms))
+                            RichText::new(human_duration(note.duration_ms))
                                 .font(egui::FontId::proportional(font::BODY))
                                 .color(foreground),
                         );
