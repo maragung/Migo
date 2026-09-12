@@ -5269,7 +5269,7 @@ Watermark kumulatif, maksimum 16 byte
 
 Cara pengukuran:
 
-Gateway mengekspor migo_frames_total, migo_frame_bytes_bucket, dan migo_dropped_frames_total, semuanya berlabel opcode dan delivery class. Regresi terlihat sebagai pergeseran byte per pesan
+Gateway mengekspor migo_gateway_frames_in_total dan migo_gateway_frames_out_total tanpa label, plus migo_gateway_frames_dropped_total berlabel class, sehingga regresi terlihat sebagai pergeseran rasio frame masuk ke keluar; histogram byte per opcode memang tidak diekspor karena panjang ciphertext adalah side channel (section 174), jadi pengukuran byte per pesan dilakukan oleh test ukuran frame per opcode, bukan oleh seri metrik
 tools/loadgen melaporkan byte per user per menit untuk setiap skenario, dan CI menggagalkan job performa bila sebuah skenario melewati budget lebih dari 10 persen
 Web client mencatat penghitung byte per session pada mode development, sehingga biaya sebuah fitur terlihat saat fitur itu ditulis, bukan setelah diluncurkan
 Setiap penambahan opcode WAJIB disertai satu test yang mengukur ukuran frame tipikalnya dan membandingkannya dengan budget
@@ -5362,26 +5362,43 @@ Semua skenario di atas WAJIB dapat dijalankan sebagai test otomatis. Simulasi de
 
 174. PROTOCOL OBSERVABILITY, METRICS, LOGGING
 
-STATUS: BUILT untuk exporternya, yaitu GET /metrics pada router REST yang merender Registry metrik yang sama yang dipakai seluruh crate, dan log_level serta log_format kini benar-benar dijalankan migod lewat migo-core telemetry init, sementara opsi OTLP dan trace sampling dihapus dari config karena tidak ada exporternya dan field yang diabaikan lebih buruk daripada field yang tidak ada. STATUS: SPEC untuk nama metric yang tersisa dari daftar di bawah yang belum terdaftar, karena implementasi menamai beberapa di antaranya secara lebih spesifik, misalnya migo_gateway_frames_dropped_total alih-alih migo_dropped_frames_total, dan daftar yang benar hari ini dibaca dari kode, bukan dari bagian ini.
+STATUS: BUILT untuk exporternya, yaitu GET /metrics pada router REST yang merender Registry metrik yang sama yang dipakai seluruh crate, dan log_level serta log_format kini benar-benar dijalankan migod lewat migo-core telemetry init, sementara opsi OTLP dan trace sampling dihapus dari config karena tidak ada exporternya dan field yang diabaikan lebih buruk daripada field yang tidak ada. STATUS: BUILT untuk daftar nama di bawah yang benar-benar terdaftar: daftar ini kini ditulis mengikuti kode, bukan sebaliknya, dan setiap seri didaftarkan pada nol saat startup oleh modul metrics masing-masing crate. STATUS: SPEC untuk entri yang ditandai belum ada di kode.
 
-Metrics wajib:
+Aturan untuk seri metric:
 
-migo_frames_total, berlabel opcode, direction, dan delivery class
-migo_frame_bytes_bucket, berlabel opcode
-migo_dropped_frames_total, berlabel opcode dan alasan
-migo_sessions_active
-migo_session_lagging_total
-migo_resume_total, berlabel hasil yaitu resumed atau required
+Setiap seri didaftarkan pada nol saat startup, karena counter yang baru muncul pada kejadian pertamanya membuat alarm yang menunggunya gagal dievaluasi, bukan bernilai salah
+Label hanya enum tertutup yang kardinalitasnya tetap pada waktu kompilasi
+TIDAK BOLEH ada seri berlabel account, device, conversation, atau session id, karena label seperti itu adalah daftar hadir per orang yang diekspor ke siapa pun yang men-scrape endpoint metrik; jumlah prekey per account tidak diekspor atas alasan yang sama
+Histogram ukuran envelope sengaja tidak ada, karena panjang ciphertext adalah side channel yang membedakan "ya" dari sebuah paragraf
+
+Metrics wajib, nama persis seperti didaftarkan kode:
+
+migo_gateway_frames_in_total dan migo_gateway_frames_out_total, tanpa label
+migo_gateway_frames_dropped_total, berlabel class yaitu coalescable atau droppable; kelas Critical sengaja absen karena frame Critical memang tidak pernah dijatuhkan
+migo_gateway_batches_out_total, envelope BATCH yang keluar; setiap elemennya sudah terhitung di frames_out, jadi seri ini mengukur kiriman yang dihemat batching, bukan lalu lintas
+migo_gateway_sessions_live dan migo_gateway_subscriptions_live, gauge sesi dan langganan topik yang sedang dipegang
+migo_gateway_sessions_opened_total, dan migo_gateway_sessions_closed_total berlabel reason; sesi yang diberhentikan karena lagging terhitung sebagai reason session_lagging
+migo_gateway_resume_total, berlabel outcome yaitu resumed, rejected, atau unknown
+migo_gateway_handshake_rejected_total, berlabel reason, karena client yang ditolak menerima error yang sama-sama opaque dan hanya seri ini yang membedakan satu insiden dari insiden lain
+migo_gateway_subscriptions_refused_total, berlabel reason yaitu cap atau unauthorized
+migo_gateway_rate_limited_total, migo_ratelimit_rejections_total berlabel scope, migo_ratelimit_degraded_total, dan migo_ratelimit_fallback_saturated_total
+migo_keys_published_total, migo_keys_publish_rejected_total berlabel reason, migo_keys_one_time_prekeys_accepted_total, migo_keys_one_time_prekeys_skipped_total, migo_keys_bundles_served_total, migo_keys_bundles_without_one_time_prekey_total, dan migo_keys_fetches_refused_exhausted_total
+migo_calls_invite_total dan migo_calls_answer_total berlabel outcome, migo_calls_connected_total, migo_calls_ended_total berlabel reason, migo_calls_expired_total, migo_calls_relayed_total berlabel kind, migo_calls_group_join_total berlabel outcome, migo_calls_group_left_total, dan migo_calls_group_relayed_total
+migo_media_uploads_begun_total, migo_media_uploads_committed_total, dan migo_media_bytes_committed_total berlabel kind, migo_media_upload_refusals_total berlabel reason, migo_media_url_grants_total berlabel outcome, migo_media_scan_results_total berlabel status, migo_media_content_identified_total berlabel format, migo_media_content_unidentified_total, migo_media_uploads_aborted_total, dan migo_media_objects_deleted_total
+migo_federation_handshakes_total, migo_federation_handshake_rejected_total dan migo_federation_replay_rejected_total berlabel reason, migo_federation_links_reset_total, migo_federation_peers_added_total, migo_federation_outbox_enqueued_total, migo_federation_outbox_delivered_total, dan migo_federation_outbox_failed_total
+
+Belum ada di kode dan tetap menjadi requirement, STATUS: SPEC:
+
+migo_frame_bytes_bucket, histogram byte per opcode — ditahan oleh aturan side channel di atas
 migo_reconnect_total, berlabel reason
-migo_decode_errors_total, berlabel error symbol
-migo_rate_limited_total, berlabel opcode
+migo_decode_errors_total, berlabel error symbol; kegagalan decode hari ini terlihat sebagai penutupan sesi dengan reason protocol_violation
 migo_errors_total, berlabel error symbol dan class
-migo_e2e_prekeys_remaining, sebagai histogram per account
+migo_e2e_prekeys_remaining sebagai histogram per account — bentuk per account mustahil di bawah larangan label identitas di atas, dan kebutuhan operasionalnya dipenuhi migo_keys_bundles_without_one_time_prekey_total serta migo_keys_fetches_refused_exhausted_total
 migo_call_setup_seconds
-migo_call_p2p_success_ratio
+migo_call_p2p_success_ratio — hari ini diturunkan dari migo_calls_connected_total terhadap migo_calls_invite_total, bukan seri tersendiri
 migo_call_turn_fallback_total
-migo_media_upload_bytes_total dan migo_media_upload_resume_total
-migo_federation_link_up, migo_federation_lag_seconds, migo_federation_replay_rejected_total
+migo_media_upload_resume_total — menunggu bit MEDIA_RESUMABLE_UPLOAD yang masih direncanakan pada section 72
+migo_federation_link_up dan migo_federation_lag_seconds — kesehatan link hari ini terbaca dari migo_federation_outbox_failed_total dan migo_federation_links_reset_total
 migo_conversation_seq_gap_total
 
 Tracing:
