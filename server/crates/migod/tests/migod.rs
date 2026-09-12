@@ -808,7 +808,7 @@ async fn filesystem_storage_reports_an_absent_object_as_absent() {
 use migo_auth::Identity as AuthIdentity;
 use migo_gateway::{Dispatcher as GatewayDispatcher, TopicRequest as GatewayTopicRequest};
 use migo_messaging::Caller as MessageCaller;
-use migo_protocol::{ConversationKind, RoomKind, Topic, TopicKind};
+use migo_protocol::{BandwidthMode, ConversationKind, RoomKind, Topic, TopicKind};
 use migo_ratelimit::TrustTier;
 use migo_rooms::NewRoomRequest;
 use migod::dispatch::AppDispatcher;
@@ -927,7 +927,7 @@ async fn authorize_topics_grants_the_caller_their_own_user_topic() {
     let verdict = h
         .dispatcher
         .authorize_topics(
-            &GatewayTopicRequest::new(&identity, id(0x5E_0000), now()),
+            &GatewayTopicRequest::new(&identity, id(0x5E_0000), BandwidthMode::Normal, now()),
             &[Topic {
                 kind: TopicKind::User,
                 id: alice,
@@ -956,7 +956,7 @@ async fn authorize_topics_grants_conversation_membership() {
     let alice_verdict = h
         .dispatcher
         .authorize_topics(
-            &GatewayTopicRequest::new(&alice_identity, id(0x5E_0000), now()),
+            &GatewayTopicRequest::new(&alice_identity, id(0x5E_0000), BandwidthMode::Normal, now()),
             &[Topic {
                 kind: TopicKind::Conversation,
                 id: conversation,
@@ -972,7 +972,7 @@ async fn authorize_topics_grants_conversation_membership() {
     let carol_verdict = h
         .dispatcher
         .authorize_topics(
-            &GatewayTopicRequest::new(&carol_identity, id(0x5E_0000), now()),
+            &GatewayTopicRequest::new(&carol_identity, id(0x5E_0000), BandwidthMode::Normal, now()),
             &[Topic {
                 kind: TopicKind::Conversation,
                 id: conversation,
@@ -990,7 +990,7 @@ async fn authorize_topics_grants_conversation_membership() {
     let absent = h
         .dispatcher
         .authorize_topics(
-            &GatewayTopicRequest::new(&alice_identity, id(0x5E_0000), now()),
+            &GatewayTopicRequest::new(&alice_identity, id(0x5E_0000), BandwidthMode::Normal, now()),
             &[Topic {
                 kind: TopicKind::Conversation,
                 id: id(0xDEAD_BEEF),
@@ -1035,7 +1035,7 @@ async fn authorize_topics_grants_room_membership() {
     let owner_verdict = h
         .dispatcher
         .authorize_topics(
-            &GatewayTopicRequest::new(&owner_identity, id(0x5E_0000), now()),
+            &GatewayTopicRequest::new(&owner_identity, id(0x5E_0000), BandwidthMode::Normal, now()),
             &[Topic {
                 kind: TopicKind::Room,
                 id: room.room_id,
@@ -1051,7 +1051,7 @@ async fn authorize_topics_grants_room_membership() {
     let guest_verdict = h
         .dispatcher
         .authorize_topics(
-            &GatewayTopicRequest::new(&guest_identity, id(0x5E_0000), now()),
+            &GatewayTopicRequest::new(&guest_identity, id(0x5E_0000), BandwidthMode::Normal, now()),
             &[Topic {
                 kind: TopicKind::Room,
                 id: room.room_id,
@@ -1079,7 +1079,7 @@ async fn authorize_topics_honours_the_presence_privacy_gate() {
     let verdict = h
         .dispatcher
         .authorize_topics(
-            &GatewayTopicRequest::new(&alice_identity, id(0x5E_0000), now()),
+            &GatewayTopicRequest::new(&alice_identity, id(0x5E_0000), BandwidthMode::Normal, now()),
             &[Topic {
                 kind: TopicKind::User,
                 id: bob,
@@ -1094,6 +1094,76 @@ async fn authorize_topics_honours_the_presence_privacy_gate() {
 }
 
 #[tokio::test]
+async fn authorize_topics_narrows_a_low_data_session_to_its_own_presence() {
+    let h = dispatcher().await;
+    let alice = registered_account(&h.app, "alice").await;
+    let bob = registered_account(&h.app, "bob").await;
+
+    // Friends, so the privacy gate alone would grant: the only thing that can refuse bob's
+    // topic below is the bandwidth mode, which is the property under test.
+    let social_alice =
+        migo_social::Caller::new(alice, id(0xD1_0001), TrustTier::Established, now());
+    let social_bob = migo_social::Caller::new(bob, id(0xD1_0002), TrustTier::Established, now());
+    h.app
+        .social
+        .request_friend(&social_alice, bob)
+        .await
+        .expect("a friend request between real accounts must be taken");
+    h.app
+        .social
+        .respond_friend(&social_bob, alice, true)
+        .await
+        .expect("the friend request must be accepted");
+
+    let alice_identity = identity_for(alice, "alice");
+
+    // Normal mode sees every stream: section 159 narrows nothing for it.
+    let normal = h
+        .dispatcher
+        .authorize_topics(
+            &GatewayTopicRequest::new(&alice_identity, id(0x5E_0000), BandwidthMode::Normal, now()),
+            &[Topic {
+                kind: TopicKind::User,
+                id: bob,
+            }],
+        )
+        .await;
+    assert_eq!(
+        normal,
+        vec![true],
+        "a normal-mode session may hold a friend's presence stream"
+    );
+
+    // LowData and UltraLowData narrow the scope to the conversations the session has open, and
+    // the narrowing is a refused subscription rather than a filtered broadcast — a session that
+    // cannot subscribe cannot be delivered to.
+    for mode in [BandwidthMode::LowData, BandwidthMode::UltraLowData] {
+        let verdict = h
+            .dispatcher
+            .authorize_topics(
+                &GatewayTopicRequest::new(&alice_identity, id(0x5E_0000), mode, now()),
+                &[
+                    Topic {
+                        kind: TopicKind::User,
+                        id: bob,
+                    },
+                    Topic {
+                        kind: TopicKind::User,
+                        id: alice,
+                    },
+                ],
+            )
+            .await;
+        assert_eq!(
+            verdict,
+            vec![false, true],
+            "a session on {:?} keeps its own stream and loses a peer's",
+            mode
+        );
+    }
+}
+
+#[tokio::test]
 async fn authorize_topics_refuses_unknown_and_game_topics() {
     let h = dispatcher().await;
     let alice = registered_account(&h.app, "alice").await;
@@ -1102,7 +1172,7 @@ async fn authorize_topics_refuses_unknown_and_game_topics() {
     let verdict = h
         .dispatcher
         .authorize_topics(
-            &GatewayTopicRequest::new(&alice_identity, id(0x5E_0000), now()),
+            &GatewayTopicRequest::new(&alice_identity, id(0x5E_0000), BandwidthMode::Normal, now()),
             &[
                 Topic {
                     kind: TopicKind::Unknown,

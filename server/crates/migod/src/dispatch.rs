@@ -83,9 +83,9 @@ use migo_protocol::{
     ConversationRosterRequest, ConversationUpdateRequest, ConversationVoteKickRequest, Encode,
     Frame, GameAction, GameEvent, KeyBundle as WireBundle, KeyBundleRequest, KeyBundleResponse,
     KeyPublish, KeyPublishResult, MemberChange, MessageDelete, MessageEdit, MessageKind,
-    MessageReceipt, MessageSend, Opcode, PresenceUpdate, ProfileRequest, ProfileResponse,
-    ReactionSet, RoomJoinRequest, RoomLeaveRequest, RoomListRequest, SyncRequest, Topic, TopicKind,
-    TypingEvent, UserProfile,
+    MessageReceipt, MessageSend, Opcode, PresenceScope, PresenceUpdate, ProfileRequest,
+    ProfileResponse, ReactionSet, RoomJoinRequest, RoomLeaveRequest, RoomListRequest, SyncRequest,
+    Topic, TopicKind, TypingEvent, UserProfile,
 };
 use migo_rooms::{
     Broadcast as RoomBroadcast, Caller as RoomCaller, Fanout as RoomFanout, SharedRooms,
@@ -1025,9 +1025,10 @@ impl Dispatcher for AppDispatcher {
     async fn authorize_topics(&self, request: &TopicRequest<'_>, topics: &[Topic]) -> Vec<bool> {
         let identity = request.identity();
         let now = request.now();
+        let mode = request.bandwidth_mode();
         let mut verdicts = Vec::with_capacity(topics.len());
         for topic in topics {
-            verdicts.push(self.authorize_topic(identity, now, topic).await);
+            verdicts.push(self.authorize_topic(identity, now, mode, topic).await);
         }
         verdicts
     }
@@ -1097,7 +1098,13 @@ impl AppDispatcher {
     /// the whole batch for one bad topic, or leaks which topic was bad — is exactly the probe this
     /// path must not become. `unwrap_or(false)` is that posture: a domain lookup that cannot answer
     /// must answer "no".
-    async fn authorize_topic(&self, identity: &Identity, now: Timestamp, topic: &Topic) -> bool {
+    async fn authorize_topic(
+        &self,
+        identity: &Identity,
+        now: Timestamp,
+        mode: BandwidthMode,
+        topic: &Topic,
+    ) -> bool {
         match topic.kind {
             // A conversation's topic is its private stream — message, receipt, typing and game
             // events — and only its members may hold it. Membership is the question, and it is
@@ -1130,10 +1137,19 @@ impl AppDispatcher {
             // A user topic is a presence stream. The caller's own presence is theirs by right; a
             // peer's is theirs only when the peer's own `show_last_seen` rule says so — the very
             // gate the presence read path already consults, so the subscribe door cannot show a
-            // user who the read door hides (section 180).
+            // user who the read door hides (section 180). And a session that narrowed its
+            // presence scope (section 159) may not add a peer's stream at all: on LowData and
+            // UltraLowData the cadence table limits a session to the streams of the
+            // conversations it has open, and refusing the subscription here — rather than
+            // filtering every broadcast per subscriber — is how that narrowing is enforced,
+            // because a session that cannot subscribe cannot be delivered to. The same refusal
+            // as every other "no" here: it names nothing, and is indistinguishable from a topic
+            // that does not exist.
             TopicKind::User => {
                 if topic.id == identity.account_id() {
                     true
+                } else if self.presence.cadence(mode).scope != PresenceScope::Everything {
+                    false
                 } else {
                     let caller = SocialCaller::new(
                         identity.account_id(),

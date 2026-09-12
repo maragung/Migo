@@ -24,7 +24,7 @@ use migo_presence::model::{
 };
 use migo_presence::service::Presences;
 use migo_presence::traits::Presence;
-use migo_presence::{cadence_for, Detail, Fanout, PresenceConfig, PresenceScope};
+use migo_presence::{cadence_for, CadenceTtl, Detail, Fanout, PresenceConfig, PresenceScope};
 use migo_protocol::{
     codes, BandwidthMode, Platform, PresenceEvent, PresenceState, PresenceUpdate, RelationshipKind,
 };

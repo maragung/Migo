@@ -70,6 +70,9 @@ for (const s of structs) {
 }
 
 const seenCodes = new Map();
+const bandwidthVariants = new Set(
+  (enums.find((e) => e.name === 'BandwidthMode') || { variants: [] }).variants.map((v) => v.name)
+);
 for (const op of opcodesDoc.opcodes) {
   if (seenCodes.has(op.code))
     problems.push(`opcode ${op.name}: code ${op.code} already used by ${seenCodes.get(op.code)}`);
@@ -83,6 +86,16 @@ for (const op of opcodesDoc.opcodes) {
     problems.push(`opcode ${op.name}: unknown response struct "${op.response}"`);
   const inRange = opcodesDoc.ranges.some((r) => op.code >= r.from && op.code <= r.to);
   if (!inRange) problems.push(`opcode ${op.name}: code ${op.code} outside every declared range`);
+  if (op.paced !== undefined && op.paced !== true)
+    problems.push(`opcode ${op.name}: paced, when present, must be true`);
+  if (op.paced && op.class !== 'Coalescable')
+    problems.push(`opcode ${op.name}: pacing rides the coalescing key, so a paced opcode must be Coalescable`);
+  if (op.paced && !op.coalesce_key)
+    problems.push(`opcode ${op.name}: a paced opcode must declare a coalesce_key to pace by`);
+  for (const mode of op.suppress_on || []) {
+    if (!bandwidthVariants.has(mode))
+      problems.push(`opcode ${op.name}: suppress_on names "${mode}", not a BandwidthMode variant`);
+  }
 }
 
 const seenErr = new Set();
@@ -440,6 +453,30 @@ ${opcodesDoc.opcodes.map((o) => `            Self::${pascal(o.name.toLowerCase()
         }
     }
 
+    /// Whether this opcode's frames are paced by the session's presence minimum
+    /// interval (brief section 159): two frames about the same coalescing key are
+    /// spaced by that interval, applied as a hold with a trailing edge by the
+    /// gateway's coalescing queue, so the newest state is never lost.
+    #[must_use]
+    pub const fn paced(self) -> bool {
+        match self {
+${opcodesDoc.opcodes.map((o) => `            Self::${pascal(o.name.toLowerCase())} => ${o.paced ? 'true' : 'false'},`).join('\n')}
+        }
+    }
+
+    /// Whether this opcode's frames are never delivered to a session on \`mode\`
+    /// (brief section 159): the session negotiated that bandwidth mode in its
+    /// HELLO, so the server stops sending a frame the client will not render.
+    #[must_use]
+    pub const fn suppressed_on(self, mode: BandwidthMode) -> bool {
+        matches!((self, mode)${
+          opcodesDoc.opcodes
+            .filter((o) => o.suppress_on)
+            .map((o) => `, (Self::${pascal(o.name.toLowerCase())}, BandwidthMode::${o.suppress_on.join(' | BandwidthMode::')})`)
+            .join('')
+        })
+    }
+
     #[must_use]
     pub const fn auth(self) -> AuthLevel {
         match self {
@@ -625,8 +662,8 @@ function genTs() {
 
   out += `export type DeliveryClass = ${meta.delivery_classes.map((c) => `'${c.name}'`).join(' | ')};\nexport type AuthLevel = ${meta.auth_levels.map((a) => `'${a.name}'`).join(' | ')};\nexport type Direction = 'client_to_server' | 'server_to_client' | 'both';\n\n`;
   out += `export const OP = {\n${opcodesDoc.opcodes.map((o) => `${o.doc ? `  /** ${o.doc} */\n` : ''}  ${o.name}: ${o.code},`).join('\n')}\n} as const;\nexport type OpcodeValue = (typeof OP)[keyof typeof OP];\n\n`;
-  out += `export interface OpcodeMeta {\n  readonly code: number;\n  readonly name: string;\n  readonly cost: number;\n  readonly cls: DeliveryClass;\n  readonly auth: AuthLevel;\n  readonly direction: Direction;\n  readonly ackRequired: boolean;\n  readonly payload: string;\n  readonly response?: string;\n  readonly coalesceKey?: string;\n}\n\n`;
-  out += `export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {\n${opcodesDoc.opcodes.map((o) => `  ${o.code}: { code: ${o.code}, name: '${o.name}', cost: ${o.cost}, cls: '${o.class}', auth: '${o.auth}', direction: '${o.direction}', ackRequired: ${!!o.ack_required}, payload: '${o.payload}'${o.response ? `, response: '${o.response}'` : ''}${o.coalesce_key ? `, coalesceKey: '${o.coalesce_key}'` : ''} },`).join('\n')}\n};\n\n`;
+  out += `export interface OpcodeMeta {\n  readonly code: number;\n  readonly name: string;\n  readonly cost: number;\n  readonly cls: DeliveryClass;\n  readonly auth: AuthLevel;\n  readonly direction: Direction;\n  readonly ackRequired: boolean;\n  readonly payload: string;\n  readonly response?: string;\n  readonly coalesceKey?: string;\n  readonly paced: boolean;\n  readonly suppressOn: ReadonlyArray<'Unknown' | 'Auto' | 'Normal' | 'LowData' | 'UltraLowData'>;\n}\n\n`;
+  out += `export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {\n${opcodesDoc.opcodes.map((o) => `  ${o.code}: { code: ${o.code}, name: '${o.name}', cost: ${o.cost}, cls: '${o.class}', auth: '${o.auth}', direction: '${o.direction}', ackRequired: ${!!o.ack_required}, payload: '${o.payload}'${o.response ? `, response: '${o.response}'` : ''}${o.coalesce_key ? `, coalesceKey: '${o.coalesce_key}'` : ''}, paced: ${!!o.paced}, suppressOn: [${(o.suppress_on || []).map((m) => `'${m}'`).join(', ')}] },`).join('\n')}\n};\n\n`;
   out += `export function opcodeName(code: number): string {\n  return OPCODES[code]?.name ?? \`UNKNOWN(0x\${code.toString(16)})\`;\n}\n`;
   return out;
 }
@@ -976,7 +1013,7 @@ function genKotlin() {
   out += kdoc(
     'Static metadata for one opcode: its rate-limit cost, delivery class, required auth, and shape.',
   );
-  out += `data class OpcodeMeta(\n    val code: Long,\n    val name: String,\n    val cost: Int,\n    val cls: DeliveryClass,\n    val auth: AuthLevel,\n    val direction: Direction,\n    val ackRequired: Boolean,\n    val payload: String,\n    val response: String? = null,\n    val coalesceKey: String? = null,\n)\n\n`;
+  out += `data class OpcodeMeta(\n    val code: Long,\n    val name: String,\n    val cost: Int,\n    val cls: DeliveryClass,\n    val auth: AuthLevel,\n    val direction: Direction,\n    val ackRequired: Boolean,\n    val payload: String,\n    val response: String? = null,\n    val coalesceKey: String? = null,\n    val paced: Boolean = false,\n    val suppressOn: List<String> = emptyList(),\n)\n\n`;
 
   out += `val OPCODES: Map<Long, OpcodeMeta> = mapOf(\n`;
   for (const o of opcodesDoc.opcodes) {
@@ -991,6 +1028,8 @@ function genKotlin() {
       `"${o.payload}"`,
       o.response ? `"${o.response}"` : 'null',
       o.coalesce_key ? `"${o.coalesce_key}"` : 'null',
+      `${!!o.paced}`,
+      `listOf(${(o.suppress_on || []).map((m) => `"${m}"`).join(', ')})`,
     ];
     out += `    ${o.code}L to OpcodeMeta(${parts.join(', ')}),\n`;
   }
