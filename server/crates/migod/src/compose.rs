@@ -212,8 +212,8 @@ pub struct App {
     /// exact instance at `/metrics`. Held here so an integration test can render it directly and
     /// assert that nothing sensitive ever reached a metric, without driving an HTTP request.
     pub registry: Arc<Registry>,
-    /// The feature set this node advertises in the handshake and `/v1/config`, as
-    /// [`advertised_features`] settles it: `CALLS`, `BATCHING`, `VOICE_NOTE`, `GROUP_CALL`, and
+    /// The feature set this node advertises in the handshake and `/v1/config`, as the private
+    /// `advertised_features` helper settles it: `CALLS`, `BATCHING`, `VOICE_NOTE`, `GROUP_CALL`, and
     /// `RICH_PRESENCE` always, `QUIC` and `TCP_TRANSPORT` exactly when their listeners are bound,
     /// and `FEDERATION` exactly while the mesh listener is. Held here so a test can assert the
     /// advertised set and the served set never disagree.
