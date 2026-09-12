@@ -22,6 +22,8 @@
 -- ---------------------------------------------------------------------------
 
 -- Free text the owner set, shown wherever the profile is; null not set. An
--- empty string clears it (the wire's optional field cannot express "clear", so
--- the empty string carries that meaning, the same convention as `bio`).
+-- empty string sets an empty status rather than clearing the column — the same
+-- meaning it carries for `bio`, because the wire's optional field cannot say
+-- "clear" (absent means "leave alone"), which is what leaves the store's
+-- Patch::Clear unreachable from a client until the wire grows a way to ask.
 alter table profile add column custom_status text;
