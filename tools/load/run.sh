@@ -130,15 +130,28 @@ set -e
 cat "$REPORT_FILE"
 
 # The run's own verdict, in full: a nonzero loadgen exit fails the script with
-# the same code so CI's failure names the gate that broke.
+# the same code so CI's failure names the gate that broke. The node's own log
+# is dumped too — every rejection the server made (validation, rate limits,
+# auth) is explained there, and a load harness that hides the server's error
+# message cannot be debugged from the CI log alone.
 if [ "$LOAD_STATUS" -ne 0 ]; then
   echo "==> loadgen exited $LOAD_STATUS (1 nothing connected/fatal, 3 error budget exceeded)" >&2
+  echo "==> tail of the node's log ($NODE_LOG):" >&2
+  tail -n 60 "$NODE_LOG" >&2
   exit "$LOAD_STATUS"
 fi
 
 # The contract the run cannot see from inside: the node it hammered must still
-# answer an ordinary health check.
+# answer an ordinary health check. If it does not, say why from the node log.
 echo "==> Checking /health after the run"
+set +e
 curl -fsS "http://localhost:$NODE_PORT/health" >/dev/null
+HEALTH_STATUS=$?
+set -e
+if [ "$HEALTH_STATUS" -ne 0 ]; then
+  echo "==> node stopped answering /health after the run; tail of its log:" >&2
+  tail -n 60 "$NODE_LOG" >&2
+  exit 1
+fi
 
 echo "==> Load run passed"

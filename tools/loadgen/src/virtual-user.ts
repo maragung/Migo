@@ -39,7 +39,13 @@ export class VirtualUser {
 
   constructor(index: number, deps: VirtualUserDeps) {
     this.index = index;
-    this.username = `${deps.config.usernamePrefix}-${deps.runTag}-${index}`;
+    // Underscores, never hyphens: the server's username validator (migo-auth's
+    // credential rules) admits only letters, digits, dots and underscores, and
+    // a hyphenated name is refused with VALIDATION_FAILED before the run ever
+    // opens a session. The run tag is base36 by construction and the default
+    // prefix "loadgen" is legal, so the separators are the only place an
+    // illegal character can sneak in.
+    this.username = `${deps.config.usernamePrefix}_${deps.runTag}_${index}`;
     this.#config = deps.config;
     this.#passphrase = deps.passphrase;
     this.client = MigoClient.create({

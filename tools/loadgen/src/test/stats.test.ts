@@ -16,7 +16,7 @@ import test from 'node:test';
 
 import { RemoteError, SdkError, TimeoutError, TransportError } from '@migo/sdk';
 
-import { classifyError, LatencyDigest, Metrics } from '../stats.js';
+import { classifyError, describeError, LatencyDigest, Metrics } from '../stats.js';
 
 function digestOf(samples: readonly number[]): ReturnType<LatencyDigest['snapshot']> {
   const digest = new LatencyDigest();
@@ -153,6 +153,56 @@ test('Metrics breaks errors out by class, most frequent first', () => {
     ['transport', 2],
     ['remote:RATE_LIMITED', 1],
   ]);
+});
+
+test('Metrics keeps the first sample per error class for the report', () => {
+  const metrics = new Metrics();
+  metrics.recordError(
+    'connect',
+    'remote:VALIDATION_FAILED',
+    'username: the server blamed the name',
+  );
+  metrics.recordError('connect', 'remote:VALIDATION_FAILED', 'a later, different message');
+  metrics.recordError('connect', 'transport', 'socket hang up');
+  metrics.recordError('send', 'transport'); // no sample at all
+  const connect = metrics.operation('connect');
+  assert.deepEqual(connect.errorSamples, [
+    ['remote:VALIDATION_FAILED', 'username: the server blamed the name'],
+    ['transport', 'socket hang up'],
+  ]);
+  assert.deepEqual(metrics.operation('send').errorSamples, []);
+});
+
+test('describeError leads with the field a server refusal blamed', () => {
+  const refusal = new RemoteError(
+    1605,
+    'VALIDATION_FAILED',
+    'VALIDATION_FAILED: username may contain only letters, digits, dots, and underscores',
+    undefined,
+    'username',
+  );
+  assert.equal(
+    describeError(refusal),
+    'username: VALIDATION_FAILED: username may contain only letters, digits, dots, and underscores',
+  );
+  // No field, and the SDK's symbol-prefixed message stands on its own.
+  const fieldless = new RemoteError(1603, 'RATE_LIMITED', 'RATE_LIMITED: slow down');
+  assert.equal(describeError(fieldless), 'RATE_LIMITED: slow down');
+});
+
+test('describeError caps, redacts, and stays undefined when there is nothing to say', () => {
+  const long = describeError(new Error(`x: ${'a'.repeat(400)}`));
+  assert.ok(
+    long !== undefined && long.length <= 201,
+    'a runaway message is capped, not carried whole',
+  );
+  assert.ok(long.endsWith('…'), 'the cap marks the cut with an ellipsis');
+  assert.equal(
+    describeError(new Error('Authorization: Bearer abc123 rejected')),
+    'Authorization: Bearer [redacted] rejected',
+  );
+  assert.equal(describeError(new Error('')), undefined);
+  assert.equal(describeError(42), undefined);
 });
 
 test('Metrics.latency memoizes one digest per label', () => {

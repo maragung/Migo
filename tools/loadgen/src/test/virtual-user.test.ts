@@ -61,10 +61,17 @@ function buildWithStubbedClient(
   }
 }
 
-test('the throwaway username is prefix-runTag-index', () => {
-  assert.equal(buildWithStubbedClient(3, CONFIG).vu.username, 'loadgen-tag42-3');
+test('the throwaway username is prefix_runTag_index and server-legal', () => {
+  assert.equal(buildWithStubbedClient(3, CONFIG).vu.username, 'loadgen_tag42_3');
   const custom: Config = { ...CONFIG, usernamePrefix: 'stress' };
-  assert.equal(buildWithStubbedClient(7, custom).vu.username, 'stress-tag42-7');
+  assert.equal(buildWithStubbedClient(7, custom).vu.username, 'stress_tag42_7');
+  // The server's credential validator refuses any username outside
+  // [a-z0-9_.] (starting with a letter, 3-32 chars, no trailing separator),
+  // so a hyphen here would sink every VU with VALIDATION_FAILED before a
+  // single session opens. Pin the charset, not just the exact strings.
+  for (const { vu } of [buildWithStubbedClient(3, CONFIG), buildWithStubbedClient(7, custom)]) {
+    assert.match(vu.username, /^[a-z][a-z0-9_]{1,30}[a-z0-9]$/);
+  }
 });
 
 test('a fresh VU is not yet connected and has no partner or conversation', () => {

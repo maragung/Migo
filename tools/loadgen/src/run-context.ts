@@ -11,7 +11,7 @@
 import { RemoteError } from '@migo/sdk';
 
 import type { Logger } from './logger.js';
-import { classifyError } from './stats.js';
+import { classifyError, describeError } from './stats.js';
 import type { Metrics } from './stats.js';
 
 /** Resolves after `ms` milliseconds. */
@@ -75,7 +75,7 @@ export class RunContext {
       this.metrics.latency(label).record(performance.now() - started);
       this.metrics.recordOk(label);
     } catch (error) {
-      this.metrics.recordError(label, classifyError(error));
+      this.metrics.recordError(label, classifyError(error), describeError(error));
       if (error instanceof RemoteError && error.retryAfterMs !== undefined) {
         await this.#sleepBounded(error.retryAfterMs);
       }

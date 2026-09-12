@@ -128,6 +128,27 @@ test('renderJson carries the expected shape and per-operation fields', () => {
   assert.equal(connect.throughputPerSec, null, 'a lifecycle phase has no throughput');
 });
 
+test('an error class carries its sample into both renderings', () => {
+  const metrics = new Metrics();
+  metrics.recordOk('connect');
+  metrics.recordError(
+    'connect',
+    'remote:VALIDATION_FAILED',
+    'username: VALIDATION_FAILED: no hyphens',
+  );
+  const outcome = makeOutcome(makeConfig(), metrics);
+  const text = renderText(outcome);
+  assert.match(text, /e\.g\. remote:VALIDATION_FAILED: username: VALIDATION_FAILED: no hyphens/);
+  const doc = JSON.parse(renderJson(outcome)) as {
+    operations: Array<{ label: string; errorSamples: Record<string, string> }>;
+  };
+  const connect = doc.operations.find((op) => op.label === 'connect');
+  assert.ok(connect, 'connect operation is present');
+  assert.deepEqual(connect.errorSamples, {
+    'remote:VALIDATION_FAILED': 'username: VALIDATION_FAILED: no hyphens',
+  });
+});
+
 test('computeErrorRate and isOk read the budget correctly', () => {
   const metrics = new Metrics();
   for (let i = 0; i < 9; i += 1) metrics.recordOk('send');
