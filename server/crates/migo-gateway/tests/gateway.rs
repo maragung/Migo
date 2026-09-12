@@ -1188,6 +1188,93 @@ async fn a_second_hello_after_the_handshake_closes_the_connection() {
 }
 
 #[tokio::test]
+async fn a_reserved_opcode_is_refused_and_closes_the_connection() {
+    // Section 146: the never-allocated span of the reserved range is policed at the
+    // gateway. 250 carries no enum variant and must not fall into the tolerant
+    // unknown-opcode path — a merely unknown verb is a newer client, but a reserved
+    // number is one this build has a written opinion about, so the peer is not
+    // speaking this protocol and the session ends as a violation.
+    let h = Harness::new();
+    let pipe = Pipe::new();
+    pipe.client(Opcode::Hello, 1, &hello());
+    // A raw frame, because the enum deliberately has no variant at 250.
+    let frame = to_frame(250, 2, &Ping::default()).expect("a scripted frame must encode");
+    pipe.push_bytes(frame.encode().expect("a scripted frame must encode"));
+
+    h.serve(&pipe).await;
+
+    let frames = pipe.sent();
+    let _welcome = welcome_in(&frames);
+    let error = sole_error(&frames);
+    assert_eq!(
+        error.code,
+        codes::UNKNOWN_OPCODE,
+        "a reserved opcode is refused under the unknown-opcode code, the same code an \
+         unallocated number already answers with — the reserved range is a promise about \
+         allocation, not a third error taxonomy"
+    );
+    assert_eq!(
+        error.message.as_deref(),
+        Some("reserved opcode"),
+        "the public hint names the reserved range without disclosing the internal rule"
+    );
+    assert_eq!(
+        h.sessions_closed("protocol_violation"),
+        1,
+        "the session closes as a protocol violation, unlike the tolerant unknown-opcode path"
+    );
+    assert_eq!(
+        h.sessions_live(),
+        0,
+        "the live-session gauge is balanced after the violation close"
+    );
+    assert!(
+        pipe.was_closed(),
+        "the socket is closed after the reserved-opcode refusal"
+    );
+}
+
+#[tokio::test]
+async fn an_allocated_opcode_at_the_reserved_head_is_not_caught_by_the_range_gate() {
+    // 240 is ENTITLEMENTS — the last number ever carved from the reserved head (section
+    // 145). The range gate must police 241-255 and leave the allocated head alone.
+    let h = Harness::new();
+    let pipe = Pipe::new();
+    pipe.client(Opcode::Hello, 1, &hello());
+    // An Entitlements request out of session state: the phase gate answers it, which is
+    // exactly the proof that the range gate did not intercept it first.
+    pipe.client(Opcode::Entitlements, 2, &migo_protocol::EntitlementsReq {});
+
+    h.serve(&pipe).await;
+
+    let frames = pipe.sent();
+    let _welcome = welcome_in(&frames);
+    let error = sole_error(&frames);
+    assert_eq!(
+        error.code,
+        codes::UNEXPECTED_OPCODE,
+        "240 reaches the phase gate and is answered for its phase, not its range"
+    );
+    // The proof that the range gate let 240 through is what the refusal does *not* carry:
+    // disclosure is opt-in (`Error::public`, and `fault::error` leaves the detail unset), so
+    // the phase gate's internal "the session is not authenticated" never reaches the wire —
+    // the one refusal on this path that says anything is the range gate's, and its hint is
+    // the literal "reserved opcode" under UNKNOWN_OPCODE, as the test above pins. A hint
+    // here would mean the range gate had intercepted an allocated opcode.
+    assert_ne!(
+        error.message.as_deref(),
+        Some("reserved opcode"),
+        "the refusal is the phase gate's — proof the range gate let 240 through"
+    );
+    assert_eq!(
+        h.sessions_closed("protocol_violation"),
+        1,
+        "the phase gate is terminal, but for the session's phase, not its opcode number"
+    );
+    assert_eq!(h.sessions_live(), 0);
+}
+
+#[tokio::test]
 async fn a_clean_client_hangup_closes_the_session_as_a_client_request() {
     let h = Harness::new();
     let pipe = Pipe::new();
