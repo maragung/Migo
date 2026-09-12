@@ -143,6 +143,14 @@ export {
   CallDeclineReason,
 } from './domains/calls.js';
 export type { ActiveCall } from './domains/calls.js';
+export { GroupCallDomain } from './domains/group-calls.js';
+export type {
+  GroupCallRoster,
+  GroupCallJoinedEvent,
+  GroupCallLeftEvent,
+  GroupCallJoinResult,
+  CallSfuParticipant,
+} from './domains/group-calls.js';
 export { ProfileDomain } from './domains/profile.js';
 export { MediaDomain, MediaKind } from './domains/media.js';
 export type { UploadOptions, UploadResult } from './domains/media.js';

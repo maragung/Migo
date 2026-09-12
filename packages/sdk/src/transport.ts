@@ -68,7 +68,14 @@ import { CODE, RemoteError, TimeoutError, TransportError } from './errors.js';
 import { gatewayUrl } from './server-endpoint.js';
 import type { ServerEndpoint } from './server-endpoint.js';
 
-/** The feature bits a stock client offers; the server intersects this with its own. */
+/**
+ * The feature bits a stock client offers; the server intersects this with its own.
+ *
+ * `FEATURE.GROUP_CALL` is deliberately absent: the SFU group-call opcodes are opt-in by the
+ * application (a client that offers the bit should be one that has a group-call UI), and the
+ * server does not gate `CALL_SFU_JOIN`/`CALL_SFU_EVENT` on the bit — a client wanting in offers
+ * it explicitly via {@link HelloParams.features}.
+ */
 export const DEFAULT_CLIENT_FEATURES =
   FEATURE.COMPRESSION |
   FEATURE.BATCHING |

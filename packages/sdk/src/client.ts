@@ -109,6 +109,7 @@ import { TypingDomain } from './domains/typing.js';
 import { PresenceDomain } from './domains/presence.js';
 import { RoomsDomain } from './domains/rooms.js';
 import { CallsDomain } from './domains/calls.js';
+import { GroupCallDomain } from './domains/group-calls.js';
 import { ProfileDomain } from './domains/profile.js';
 import { MediaDomain } from './domains/media.js';
 import { NotificationsDomain } from './domains/notifications.js';
@@ -204,6 +205,7 @@ interface Connected {
   presence: PresenceDomain;
   rooms: RoomsDomain;
   calls: CallsDomain;
+  groupCalls: GroupCallDomain;
   profile: ProfileDomain;
   media: MediaDomain;
   notifications: NotificationsDomain;
@@ -405,6 +407,11 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     return this.#requireConnected().calls;
   }
 
+  /** Join, leave, and observe SFU group calls. */
+  get groupCalls(): GroupCallDomain {
+    return this.#requireConnected().groupCalls;
+  }
+
   /** Look up public account profiles. */
   get profile(): ProfileDomain {
     return this.#requireConnected().profile;
@@ -536,6 +543,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     ctx.rooms.stop();
     ctx.conversations.stop();
     ctx.calls.stop();
+    ctx.groupCalls.stop();
     ctx.notifications.stop();
     ctx.social.stop();
     ctx.games.stop();
@@ -1334,6 +1342,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
       presence: new PresenceDomain(rpc, this.#options.onEventError),
       rooms: new RoomsDomain(rpc, this.#options.onEventError),
       calls: new CallsDomain(rpc, grant.deviceId, this.#options.onEventError),
+      groupCalls: new GroupCallDomain(rpc, grant.deviceId, this.#options.onEventError),
       profile: new ProfileDomain(rpc),
       media: new MediaDomain(rpc, this.#options.fetch),
       notifications: new NotificationsDomain(rpc, this.#options.onEventError),
@@ -1350,6 +1359,7 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
     ctx.rooms.start();
     ctx.conversations.start();
     ctx.calls.start();
+    ctx.groupCalls.start();
     ctx.notifications.start();
     ctx.social.start();
     ctx.games.start();
