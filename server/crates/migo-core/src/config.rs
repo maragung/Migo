@@ -671,6 +671,26 @@ impl Default for CallsConfig {
     }
 }
 
+/// Staged rollout of the feature bits the node advertises (section 175).
+///
+/// A protocol change ships additive: the server learns the feature first, then advertises the
+/// bit, then clients that ask for it negotiate it. This section is the operator's control over
+/// the middle step — which bits a node advertises at all, and to what share of its sessions.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct FeaturesConfig {
+    /// Bits this node must not advertise, by feature name — the per-feature kill switch
+    /// (section 175: switching a feature off means the node stops advertising the bit; a
+    /// session that already negotiated it keeps it until it ends). The `QUIC` and
+    /// `TCP_TRANSPORT` bits are only ever advertised while their listeners are bound, so
+    /// listing them here only removes the promise, never the listener itself.
+    #[serde(deserialize_with = "comma_separated_strings")]
+    pub disabled: Vec<String>,
+    /// Bits admitted to a share of sessions, by feature name and percent 0..=100. A bit not
+    /// listed runs at 100 percent. A percent of 0 is equivalent to disabling the bit.
+    pub rollout: BTreeMap<String, u8>,
+}
+
 /// The whole configuration.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -703,6 +723,8 @@ pub struct Config {
     pub captcha: CaptchaConfig,
     /// Call signaling.
     pub calls: CallsConfig,
+    /// Staged rollout of advertised feature bits.
+    pub features: FeaturesConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -1111,6 +1133,32 @@ impl Config {
             );
         }
 
+        // --- staged feature rollout (section 175) ---
+        // The kill switch and the percentages are validated here so a typo cannot silently
+        // leave a feature fully on (or fully off). The names themselves are resolved against
+        // the protocol registry where the bits live, in the composition root, which refuses
+        // to start on a name it does not know.
+        for name in self
+            .features
+            .disabled
+            .iter()
+            .chain(self.features.rollout.keys())
+        {
+            if name.trim().is_empty() {
+                problems.push(
+                    "features: an empty feature name is a configuration mistake, not a no-op"
+                        .to_string(),
+                );
+            }
+        }
+        for (name, percent) in &self.features.rollout {
+            if *percent > 100 {
+                problems.push(format!(
+                    "features.rollout.{name} is {percent}: a rollout percent must be 0..=100"
+                ));
+            }
+        }
+
         if problems.is_empty() {
             Ok(())
         } else {
@@ -1398,6 +1446,55 @@ mod tests {
         let error = Config::from_sources(&[], &env(&[("MIGO_NODE__ROLES", "api,teapot")]))
             .expect_err("bad role must fail");
         assert!(error.to_string().contains("teapot"), "{error}");
+    }
+
+    #[test]
+    fn feature_rollout_defaults_to_everything_advertised() {
+        let config = Config::from_sources(&[], &[]).expect("builds");
+        config.validate().expect("defaults are valid");
+        assert!(config.features.disabled.is_empty());
+        assert!(config.features.rollout.is_empty());
+    }
+
+    #[test]
+    fn feature_kill_switch_accepts_a_list_or_a_comma_separated_env_value() {
+        let from_file = Config::from_toml_str(
+            "[features]\ndisabled = [\"group_call\", \"rich_presence\"]\n",
+            &[],
+        )
+        .expect("builds");
+        assert_eq!(
+            from_file.features.disabled,
+            vec!["group_call".to_string(), "rich_presence".to_string()]
+        );
+
+        let from_env = Config::from_sources(
+            &[],
+            &env(&[("MIGO_FEATURES__DISABLED", "calls, translation")]),
+        )
+        .expect("builds");
+        assert_eq!(
+            from_env.features.disabled,
+            vec!["calls".to_string(), "translation".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_rollout_percent_above_one_hundred_is_refused() {
+        let config =
+            Config::from_toml_str("[features.rollout]\ngroup_call = 101\n", &[]).expect("builds");
+        let error = config.validate().expect_err("101 percent is not a share");
+        assert!(
+            error.to_string().contains("features.rollout.group_call"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_empty_feature_name_is_refused() {
+        let config = Config::from_toml_str("[features.rollout]\n\"\" = 50\n", &[]).expect("builds");
+        let error = config.validate().expect_err("an empty name is a mistake");
+        assert!(error.to_string().contains("empty feature name"), "{error}");
     }
 
     #[test]

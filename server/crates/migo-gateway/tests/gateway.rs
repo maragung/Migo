@@ -51,8 +51,8 @@ use migo_protocol::{
 use migo_ratelimit::{CacheRateLimiter, Policies, SharedRateLimiter, TrustTier};
 
 use migo_gateway::{
-    ClientContext, Dispatcher, Gateway, GatewayServices, NoopDispatcher, TopicRequest, Transport,
-    TransportError,
+    ClientContext, Dispatcher, FeatureGate, FullRollout, Gateway, GatewayServices, NoopDispatcher,
+    TopicRequest, Transport, TransportError,
 };
 
 // ---------------------------------------------------------------------------
@@ -642,6 +642,7 @@ struct HarnessBuilder {
     auth: FakeAuth,
     dispatcher: Arc<dyn Dispatcher>,
     features: u64,
+    feature_gate: Arc<dyn FeatureGate>,
     clock: ManualClock,
     shutdown: Shutdown,
 }
@@ -655,6 +656,7 @@ impl HarnessBuilder {
             // Advertise every feature bit so a client's requested features pass the mask
             // unchanged unless a test narrows this on purpose.
             features: u64::MAX,
+            feature_gate: Arc::new(FullRollout),
             clock: ManualClock::new(ts(NOW)),
             shutdown: Shutdown::new(),
         }
@@ -684,6 +686,7 @@ impl HarnessBuilder {
                 shutdown: shutdown.clone(),
                 node: NodeInfo::default(),
                 features: self.features,
+                feature_gate: self.feature_gate,
             },
         );
         Harness {
@@ -2893,6 +2896,69 @@ async fn a_session_that_did_not_ask_keeps_bare_frames() {
         .filter(|frame| Opcode::from_wire(frame.header.opcode) == Some(Opcode::PresenceEvent))
         .count();
     assert!(presence >= 8, "the burst still arrives, bare: {presence}");
+    assert_eq!(
+        h.counter("migo_gateway_batches_out_total", &[]),
+        0,
+        "no envelope, no batch metric"
+    );
+}
+
+/// Section 175's staged rollout in its simplest shape: a gate that withholds one bit from
+/// every session. The WELCOME mask and the writer's batching decision must come from the
+/// same admitted set, so a client can never be denied the bit in the mask and then spoken
+/// to in the envelope shape it never negotiated — or the reverse.
+struct WithholdBatching;
+
+impl FeatureGate for WithholdBatching {
+    fn admit(&self, base: u64, _account: Option<Id>, _session: Id) -> u64 {
+        base & !migo_protocol::features::BATCHING
+    }
+}
+
+#[tokio::test]
+async fn a_rollout_that_withholds_batching_keeps_the_whole_session_bare() {
+    let mut builder = HarnessBuilder::new();
+    builder.dispatcher = Arc::new(Burst {
+        topic: Topic {
+            kind: TopicKind::User,
+            id: id(ACCOUNT),
+        },
+    });
+    builder.feature_gate = Arc::new(WithholdBatching);
+    let h = builder.build();
+    let pipe = Pipe::new();
+    // The client asks for BATCHING; the node's advertised set has it; the rollout gate is
+    // what says no — the shape a staged feature takes while it rolls out.
+    pipe.client(
+        Opcode::Hello,
+        1,
+        &hello_with_features(migo_protocol::features::BATCHING),
+    );
+    pipe.client(
+        Opcode::Subscribe,
+        2,
+        &SubscribeRequest {
+            topics: vec![Topic {
+                kind: TopicKind::User,
+                id: id(ACCOUNT),
+            }],
+        },
+    );
+    use migo_protocol::ProfileRequest;
+    pipe.client(Opcode::ProfileFetch, 100, &ProfileRequest::default());
+    h.serve(&pipe).await;
+
+    let sent = pipe.sent();
+    let welcome = welcome_in(&sent);
+    assert_eq!(
+        welcome.features & migo_protocol::features::BATCHING,
+        0,
+        "the mask the session negotiates is the admitted set, not the advertised set"
+    );
+    assert!(
+        sent.iter().all(|frame| !frame.header.is_batch()),
+        "the writer must take its batching decision from the same admitted set"
+    );
     assert_eq!(
         h.counter("migo_gateway_batches_out_total", &[]),
         0,

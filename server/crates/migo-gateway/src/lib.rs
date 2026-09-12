@@ -65,6 +65,7 @@
 //!         shutdown,
 //!         node,
 //!         features: 0,
+//!         feature_gate: Arc::new(migo_gateway::FullRollout),
 //!     },
 //! );
 //! // Per accepted connection, on its own task:
@@ -146,6 +147,8 @@ pub(crate) struct GatewayInner {
     pub(crate) node: NodeInfo,
     /// The feature bits this node supports; a client's requested features are masked against it.
     pub(crate) features: u64,
+    /// Trims the advertised set for one session at the handshake (section 175).
+    pub(crate) feature_gate: Arc<dyn FeatureGate>,
     /// The cooperative shutdown signal every driver races against.
     pub(crate) shutdown: Shutdown,
     /// Every metric series this crate publishes.
@@ -247,6 +250,33 @@ pub struct GatewayServices {
     pub node: NodeInfo,
     /// The feature bits this node advertises.
     pub features: u64,
+    /// Decides which advertised bits one session may negotiate (section 175). The composition
+    /// root installs a staged rollout here; pass [`FullRollout`] when every session gets the
+    /// node's full advertised set.
+    pub feature_gate: Arc<dyn FeatureGate>,
+}
+
+/// Decides which of the node's advertised feature bits a single session may negotiate.
+///
+/// The negotiation mask in `WELCOME` is `client_features & admitted`, where `admitted` is the
+/// node's advertised set as this gate trims it for one session. A staged rollout (section 175)
+/// admits a feature to a share of sessions — decided once at the handshake, so a session's
+/// frames keep one shape for its whole life, and switching a feature off means new sessions stop
+/// negotiating it while running sessions keep what they have.
+pub trait FeatureGate: Send + Sync {
+    /// Returns the bits this session may negotiate. `base` is the node's advertised set,
+    /// `account` the identity the handshake proved when the greeting carried a token, and
+    /// `session` the freshly minted session id otherwise.
+    fn admit(&self, base: u64, account: Option<Id>, session: Id) -> u64;
+}
+
+/// The pass-through gate: every session negotiates the node's full advertised set.
+pub struct FullRollout;
+
+impl FeatureGate for FullRollout {
+    fn admit(&self, base: u64, _account: Option<Id>, _session: Id) -> u64 {
+        base
+    }
 }
 
 impl Gateway {
@@ -267,6 +297,7 @@ impl Gateway {
             random: Mutex::new(services.random),
             node: services.node,
             features: services.features,
+            feature_gate: services.feature_gate,
             shutdown: services.shutdown,
             meters,
             hub,
@@ -732,6 +763,7 @@ mod tests {
                 shutdown: Shutdown::new(),
                 node: NodeInfo::default(),
                 features: 0,
+                feature_gate: Arc::new(crate::FullRollout),
             },
         )
     }

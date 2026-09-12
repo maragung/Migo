@@ -199,17 +199,29 @@ impl<T: Transport> Connection<'_, T> {
             .inline_auth(hello.access_token.as_deref(), hello.device_id, now)
             .await;
 
+        // Section 175: a staged rollout trims the advertised set for this one session before
+        // the mask is cut, decided here and only here so a session's frames keep one shape for
+        // its whole life. The account is the bucket key when the greeting carried a token — the
+        // same account lands in the same bucket across reconnects — and the fresh session id
+        // otherwise.
+        let admitted = self.gateway.feature_gate.admit(
+            self.gateway.features,
+            identity.as_ref().map(Identity::account_id),
+            session_id,
+        );
+
         // Section 154 is opt-in on both sides: the envelope leaves this node only for a client
         // that asked for it in its HELLO and a node that offers it. Decided here, once, so the
         // writer never re-derives it and a session's frames keep one shape for its whole life.
         self.batching = hello.features & migo_protocol::features::BATCHING != 0
-            && self.gateway.features & migo_protocol::features::BATCHING != 0;
+            && admitted & migo_protocol::features::BATCHING != 0;
 
         if !self
             .send_welcome(
                 session_id,
                 correlation,
                 hello.features,
+                admitted,
                 now,
                 resumed,
                 resume_from_seq,
@@ -442,6 +454,7 @@ impl<T: Transport> Connection<'_, T> {
         session_id: Id,
         correlation: u32,
         client_features: u64,
+        admitted: u64,
         now: Timestamp,
         resumed: Option<bool>,
         resume_from_seq: Option<u64>,
@@ -451,7 +464,7 @@ impl<T: Transport> Connection<'_, T> {
         let welcome = Welcome {
             session_id,
             node: gateway.node.clone(),
-            features: client_features & gateway.features,
+            features: client_features & admitted,
             server_time: now,
             limits: Limits {
                 max_frame_bytes: u32::try_from(migo_wire::limits::MAX_FRAME_BYTES)
