@@ -1648,7 +1648,43 @@ fn subscribe_response_in(frames: &[Frame]) -> SubscribeResponse {
         .find(|frame| {
             frame.header.opcode == Opcode::Subscribe.to_wire() && !frame.header.is_error()
         })
-        .expect("a SUBSCRIBE request must be answered with a SUBSCRIBE response");
+        .unwrap_or_else(|| {
+            // Naming what the session answered instead of only that it did not
+            // answer: an error reply and a silent close look identical to the
+            // old message, and telling them apart by hand costs a CI round.
+            let answered: Vec<String> = frames
+                .iter()
+                .map(|frame| {
+                    if frame.header.is_error() {
+                        match from_frame::<ErrorMessage>(frame) {
+                            Ok(error) => format!(
+                                "error {} [{}] ({}), payload {} bytes",
+                                error.code,
+                                error.symbol,
+                                error.message.as_deref().unwrap_or("no detail"),
+                                frame.payload.len()
+                            ),
+                            Err(error) => format!("error frame that does not decode: {error}"),
+                        }
+                    } else {
+                        format!(
+                            "opcode {} ({}), error flag {}, payload {} bytes",
+                            frame.header.opcode,
+                            Opcode::from_wire(frame.header.opcode)
+                                .map_or("unknown".to_string(), |op| format!("{op:?}")),
+                            frame.header.is_error(),
+                            frame.payload.len()
+                        )
+                    }
+                })
+                .collect();
+            let what = if answered.is_empty() {
+                "nothing (the session closed or stayed silent)".to_string()
+            } else {
+                answered.join("; ")
+            };
+            panic!("a SUBSCRIBE request must be answered with a SUBSCRIBE response, but the session answered: {what}");
+        });
     from_frame::<SubscribeResponse>(frame).expect("the SUBSCRIBE response must decode")
 }
 
@@ -2047,6 +2083,40 @@ async fn a_subscribe_keeps_only_the_topics_that_belong_to_the_caller() {
         rejected.contains(&a_strangers_conversation),
         "a conversation that is not the caller's is rejected"
     );
+}
+
+#[test]
+fn a_compressed_subscribe_request_survives_the_round_trip() {
+    // The surplus test's request is the one payload in this suite that crosses a
+    // decoder chunk boundary: 513 topics of 16-byte ids are ~10 KB of plain
+    // bytes, which `to_frame`'s compression policy definitely compresses. This
+    // is that round trip in isolation — encode to wire bytes, decode back, same
+    // topics — so a defect in the codec and a refusal in the session handling
+    // cannot hide behind each other: if the surplus test fails while this one
+    // passes, the request decode is innocent.
+    let topics: Vec<Topic> = (0_u32..513)
+        .map(|i| Topic {
+            kind: TopicKind::User,
+            id: id(ACCOUNT + i as u128),
+        })
+        .collect();
+    let frame = to_frame(
+        Opcode::Subscribe.to_wire(),
+        4,
+        &SubscribeRequest {
+            topics: topics.clone(),
+        },
+    )
+    .expect("a subscribe encodes");
+    assert!(
+        frame.header.is_compressed(),
+        "513 topics must trip the compression policy, or this test guards nothing"
+    );
+    let bytes = frame.encode().expect("a compressed frame encodes");
+    let decoded = Frame::decode(bytes).expect("the encoded frame decodes");
+    let restored: SubscribeRequest =
+        from_frame(&decoded).expect("the request inflates and decodes");
+    assert_eq!(restored.topics, topics);
 }
 
 #[tokio::test]
