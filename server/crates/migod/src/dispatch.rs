@@ -251,6 +251,18 @@ impl AppDispatcher {
         );
     }
 
+    /// The read-only gate of section 173's scenario 2, for the handlers that
+    /// mutate an existing room from the admin module.
+    ///
+    /// A room whose home node is partitioned away is read-only on this node:
+    /// the write would need a second sequencer that must not exist (section
+    /// 170). The inline handlers call the relay directly; this thin wrapper
+    /// exists so the admin handlers do not reach into the relay field
+    /// themselves, keeping the one-call-per-opcode shape the module promises.
+    pub(crate) async fn ensure_room_writable(&self, room_id: Id) -> Result<(), Error> {
+        self.room_relay.ensure_writable(room_id).await
+    }
+
     /// Publishes a rooms [`Fanout`](RoomFanout) and then, when it removed a
     /// member, takes the room away from the removed account's live sockets.
     ///
@@ -415,6 +427,13 @@ impl Dispatcher for AppDispatcher {
                     now,
                 );
                 let request: MessageSend = from_frame(frame).map_err(fault::from_wire)?;
+                // Section 173's scenario 2: a room whose home node is partitioned away is
+                // read-only on this node, because the write would need a second sequencer
+                // that must not exist. A direct or group conversation passes: it has no
+                // home node to be partitioned from.
+                self.room_relay
+                    .ensure_conversation_writable(request.conversation_id)
+                    .await?;
                 let (accepted, fanout) = self.messaging.send(&caller, request).await?;
                 context.reply(&accepted)?;
                 if let Some(fanout) = fanout {
@@ -431,6 +450,12 @@ impl Dispatcher for AppDispatcher {
                     now,
                 );
                 let request: MessageEdit = from_frame(frame).map_err(fault::from_wire)?;
+                // The same read-only gate as the send: an edit reorders nothing, but it
+                // still writes the room's conversation, whose order belongs to the home
+                // node's sequencer.
+                self.room_relay
+                    .ensure_conversation_writable(request.conversation_id)
+                    .await?;
                 // The envelope is ciphertext the client sealed; the server never sees the
                 // text. What the service enforces is ownership and membership, and the
                 // edit lands under the message's original seq.
@@ -461,6 +486,10 @@ impl Dispatcher for AppDispatcher {
                     now,
                 );
                 let request: ReactionSet = from_frame(frame).map_err(fault::from_wire)?;
+                // A reaction rides the send path, so it rides the send gate too.
+                self.room_relay
+                    .ensure_conversation_writable(request.conversation_id)
+                    .await?;
                 // The message id is derived, not minted. A client that retries a
                 // REACTION_SET after a timeout re-sends byte-identical fields, and a
                 // fresh random id would store the reaction twice — the send path's
@@ -527,6 +556,11 @@ impl Dispatcher for AppDispatcher {
                     now,
                 );
                 let request: MessageDelete = from_frame(frame).map_err(fault::from_wire)?;
+                // And the delete, for the same reason as the edit: it mutates the
+                // conversation a partitioned home node owns the order of.
+                self.room_relay
+                    .ensure_conversation_writable(request.conversation_id)
+                    .await?;
                 let (accepted, fanout) = self.messaging.delete(&caller, request).await?;
                 context.reply(&accepted)?;
                 if let Some(fanout) = fanout {
@@ -755,6 +789,10 @@ impl Dispatcher for AppDispatcher {
                     now,
                 );
                 let request: RoomJoinRequest = from_frame(frame).map_err(fault::from_wire)?;
+                // Membership is room state, and room state is ordered by the home node's
+                // sequencer: joining a room whose home node is partitioned away would
+                // fork that order, so the join is refused while the partition stands.
+                self.room_relay.ensure_writable(request.room_id).await?;
                 let (mut response, fanout) = self.rooms.join(&caller, request).await?;
                 // The rooms crate leaves `online_count` at `view::ONLINE_COUNT_UNSET`; fill it from
                 // the in-memory session tally — the joiner themselves is now online and a member, so
@@ -775,6 +813,9 @@ impl Dispatcher for AppDispatcher {
                     now,
                 );
                 let request: RoomLeaveRequest = from_frame(frame).map_err(fault::from_wire)?;
+                // Leaving is room state too: the member list the home node sequences is
+                // the one every node must agree on, partition or not.
+                self.room_relay.ensure_writable(request.room_id).await?;
                 let fanout = self.rooms.leave(&caller, request).await?;
                 // Reply before the fanout, and unconditionally: the service returns Ok(None)
                 // for an idempotent no-op leave (not a member, or already gone), which is a
@@ -815,7 +856,7 @@ impl Dispatcher for AppDispatcher {
                 rooms_admin::handle_room_update(context, frame, &self.rooms, self).await
             }
             Opcode::RoomArchive => {
-                rooms_admin::handle_room_archive(context, frame, &self.rooms).await
+                rooms_admin::handle_room_archive(context, frame, &self.rooms, self).await
             }
             Opcode::RoomSanction => {
                 rooms_admin::handle_sanction(context, frame, &self.rooms, self).await
