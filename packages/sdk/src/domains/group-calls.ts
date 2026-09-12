@@ -59,6 +59,16 @@ import { CallEndReason, CallMediaKind, CallState } from './calls.js';
 export type { CallSfuParticipant } from '@migo/protocol';
 
 /**
+ * The wire's `CallStateEvent.state` is a bare number, and the group-call shapes ride two of its
+ * values: a roster snapshot and a join announcement are `Connected`, a departure is `Ended`. The
+ * SDK's {@link CallState} enum mirrors those numbers; reading through `number` is what keeps the
+ * classification a number-to-number comparison rather than an enum compared against a field a
+ * future schema version could widen.
+ */
+const STATE_CONNECTED: number = CallState.Connected;
+const STATE_ENDED: number = CallState.Ended;
+
+/**
  * The roster snapshot a joiner's own user topic receives: everything a call screen builds its
  * participant list from, in one frame.
  *
@@ -160,9 +170,9 @@ export class GroupCallDomain {
       this.#rpc.on(OP.CALL_SFU_EVENT, decodeCallStateEvent, (event) => {
         if (event.participants !== undefined) {
           this.#deliverRoster(event);
-        } else if (event.state === CallState.Connected) {
+        } else if (event.state === STATE_CONNECTED) {
           this.#deliverJoined(event);
-        } else if (event.state === CallState.Ended) {
+        } else if (event.state === STATE_ENDED) {
           this.#deliverLeft(event);
         }
         // Any other shape is a future server's; this version has nothing honest to hand a
