@@ -1446,7 +1446,7 @@ fn wire_profile(card: ProfileCard) -> UserProfile {
         presence: None,
         badges: None,
         verified: None,
-        custom_status: None,
+        custom_status: card.custom_status,
         birth_year: card.birth_year.map(|year| year as u32),
     }
 }

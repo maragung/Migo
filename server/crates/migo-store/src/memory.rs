@@ -557,6 +557,7 @@ impl AccountStore for MemoryStore {
         patch.bio.apply(&mut profile.bio);
         patch.avatar_media_id.apply(&mut profile.avatar_media_id);
         patch.birth_year.apply(&mut profile.birth_year);
+        patch.custom_status.apply(&mut profile.custom_status);
         if let Some(v) = patch.show_last_seen {
             profile.show_last_seen = v;
         }
@@ -3147,6 +3148,7 @@ impl BotStore for MemoryStore {
             who_can_message: Visibility::Friends,
             who_can_add: Visibility::Everyone,
             searchable: true,
+            custom_status: None,
             updated_at: new.created_at,
         };
         let bot = Bot {

@@ -225,6 +225,14 @@ impl<T: Transport> Connection<'_, T> {
         self.batching = hello.features & migo_protocol::features::BATCHING != 0
             && admitted & migo_protocol::features::BATCHING != 0;
 
+        // Section 148: the session's feature set is the intersection of what the client asked
+        // for and what this node advertised *to this session* — the rollout-trimmed `admitted`
+        // set, so a session the staged rollout held back never negotiates what it withheld. It
+        // is the same value WELCOME reports back. Decided once here and stored on the session
+        // handle, because the intersection is fixed for the session's lifetime and every later
+        // frame's feature gate reads it rather than re-deriving it.
+        let negotiated = hello.features & admitted;
+
         if !self
             .send_welcome(
                 session_id,
@@ -242,7 +250,12 @@ impl<T: Transport> Connection<'_, T> {
             return None;
         }
 
-        let handle = SessionHandle::new(session_id, Arc::clone(&outbound), hello.bandwidth_mode);
+        let handle = SessionHandle::new(
+            session_id,
+            Arc::clone(&outbound),
+            hello.bandwidth_mode,
+            negotiated,
+        );
         self.gateway.hub.register(handle.clone());
         self.gateway.meters.session_opened();
 
@@ -458,6 +471,11 @@ impl<T: Transport> Connection<'_, T> {
     /// Builds and sends `WELCOME`, the first frame out (section 139: it reuses the `HELLO` opcode
     /// and correlation). Returns whether it was sent; on failure the admission slot is released
     /// and the socket closed, and the caller returns `None`.
+    ///
+    /// `client_features` is what the greeting asked for and `admitted` is what this node offers
+    /// this session after the staged rollout trimmed it (section 175); the feature set reported
+    /// back is their intersection, and `admitted` is passed rather than re-derived so the value in
+    /// the frame and the value the session gate later reads cannot drift apart.
     #[allow(clippy::too_many_arguments)]
     async fn send_welcome(
         &mut self,
@@ -1012,6 +1030,22 @@ impl<T: Transport> Connection<'_, T> {
                 self.compression,
             );
             return FrameOutcome::Close(Closed::ProtocolViolation);
+        }
+
+        // Section 148 feature gate: an opcode the registry ties to a feature bit may only be
+        // dispatched on a session that negotiated that bit. The refusal is answered, not fatal —
+        // the session keeps serving every frame the negotiated set does allow.
+        if let Some(error) = feature_refusal(opcode, established.handle.features()) {
+            push_error(
+                outbound,
+                meters,
+                opcode_raw,
+                correlation,
+                &error,
+                now,
+                self.compression,
+            );
+            return FrameOutcome::Continue;
         }
 
         match opcode {
@@ -1632,5 +1666,68 @@ fn push_error(
         Err(inner) => {
             tracing::warn!(?inner, "failed to encode an error reply");
         }
+    }
+}
+
+/// Section 148's answer for an opcode the registry ties to a feature bit the session did not
+/// negotiate: `Some(FEATURE_NOT_NEGOTIATED)` when the opcode carries a bit the negotiated set
+/// lacks, `None` when the opcode is untagged or the bit is present.
+///
+/// Pure, so the rule is pinned by a unit test rather than a socket script. The registry decides
+/// which opcodes carry a bit; this decides what a session without the bit hears — error 1007,
+/// answered on the connection, which continues, because a client asking for a feature it never
+/// negotiated is misinformed rather than hostile, and the next frame may be perfectly legal.
+///
+/// The only tagged opcodes today are the FED_* range, which a client socket cannot reach at all
+/// (`AuthLevel::Server` is refused before this gate), so the gate is the enforcement the registry
+/// promises, held ready for the first client-facing opcode the registry ties to a bit.
+fn feature_refusal(opcode: Opcode, negotiated: u64) -> Option<CoreError> {
+    let bit = opcode.feature()?;
+    (negotiated & bit == 0).then(|| {
+        fault::error(
+            codes::FEATURE_NOT_NEGOTIATED,
+            format!(
+                "{} requires a feature this session did not negotiate",
+                opcode.name()
+            ),
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::feature_refusal;
+    use migo_protocol::features;
+    use migo_protocol::{codes, Opcode};
+
+    #[test]
+    fn an_untagged_opcode_passes_the_feature_gate_whatever_the_session_negotiated() {
+        // The overwhelming majority of the registry is untagged, so the gate must be a
+        // no-op for it — even a session that negotiated nothing at all.
+        assert!(feature_refusal(Opcode::Ping, 0).is_none());
+        assert!(feature_refusal(Opcode::ProfileUpdate, 0).is_none());
+        assert!(feature_refusal(Opcode::ProfileUpdate, u64::MAX).is_none());
+    }
+
+    #[test]
+    fn a_tagged_opcode_is_refused_on_a_session_without_the_bit() {
+        let refusal = feature_refusal(Opcode::FedHello, 0).expect("FED_HELLO carries a bit");
+        assert_eq!(refusal.code(), codes::FEATURE_NOT_NEGOTIATED);
+
+        // A session that negotiated a different bit is still refused: the intersection is
+        // per-bit, not a blanket "some features were agreed".
+        let refusal = feature_refusal(Opcode::FedForward, features::BATCHING)
+            .expect("FED_FORWARD carries a bit");
+        assert_eq!(refusal.code(), codes::FEATURE_NOT_NEGOTIATED);
+    }
+
+    #[test]
+    fn a_tagged_opcode_passes_once_the_session_negotiated_its_bit() {
+        assert!(feature_refusal(Opcode::FedHello, features::FEDERATION).is_none());
+        assert!(feature_refusal(
+            Opcode::FedDirectory,
+            features::FEDERATION | features::BATCHING
+        )
+        .is_none());
     }
 }

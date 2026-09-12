@@ -969,7 +969,8 @@
    "response": "FedHello",
    "auth": "Server",
    "cost": 5,
-   "class": "Critical"
+   "class": "Critical",
+   "feature": "FEDERATION"
   },
   {
    "name": "FED_AUTH",
@@ -979,7 +980,8 @@
    "response": "Acknowledged",
    "auth": "Server",
    "cost": 5,
-   "class": "Critical"
+   "class": "Critical",
+   "feature": "FEDERATION"
   },
   {
    "name": "FED_PING",
@@ -989,7 +991,8 @@
    "response": "FedPong",
    "auth": "Server",
    "cost": 1,
-   "class": "Critical"
+   "class": "Critical",
+   "feature": "FEDERATION"
   },
   {
    "name": "FED_FORWARD",
@@ -999,7 +1002,8 @@
    "response": "Acknowledged",
    "auth": "Server",
    "cost": 1,
-   "class": "Critical"
+   "class": "Critical",
+   "feature": "FEDERATION"
   },
   {
    "name": "FED_ACK",
@@ -1009,7 +1013,8 @@
    "response": "Acknowledged",
    "auth": "Server",
    "cost": 0,
-   "class": "Critical"
+   "class": "Critical",
+   "feature": "FEDERATION"
   },
   {
    "name": "FED_ROOM_SUBSCRIBE",
@@ -1019,7 +1024,8 @@
    "response": "Acknowledged",
    "auth": "Server",
    "cost": 2,
-   "class": "Critical"
+   "class": "Critical",
+   "feature": "FEDERATION"
   },
   {
    "name": "FED_ROOM_EVENT",
@@ -1029,7 +1035,8 @@
    "response": "Acknowledged",
    "auth": "Server",
    "cost": 0,
-   "class": "Critical"
+   "class": "Critical",
+   "feature": "FEDERATION"
   },
   {
    "name": "FED_PRESENCE_DIGEST",
@@ -1040,7 +1047,8 @@
    "auth": "Server",
    "cost": 0,
    "class": "Coalescable",
-   "coalesce_key": "region"
+   "coalesce_key": "region",
+   "feature": "FEDERATION"
   },
   {
    "name": "FED_KEY_ROTATE",
@@ -1050,7 +1058,8 @@
    "response": "Acknowledged",
    "auth": "Server",
    "cost": 5,
-   "class": "Critical"
+   "class": "Critical",
+   "feature": "FEDERATION"
   },
   {
    "name": "FED_HEALTH",
@@ -1060,7 +1069,8 @@
    "response": "FedHealth",
    "auth": "Server",
    "cost": 1,
-   "class": "Critical"
+   "class": "Critical",
+   "feature": "FEDERATION"
   },
   {
    "name": "FED_SHARD_MAP",
@@ -1070,7 +1080,8 @@
    "response": "Acknowledged",
    "auth": "Server",
    "cost": 2,
-   "class": "Critical"
+   "class": "Critical",
+   "feature": "FEDERATION"
   },
   {
    "name": "FED_ERROR",
@@ -1080,7 +1091,8 @@
    "response": "Acknowledged",
    "auth": "Server",
    "cost": 0,
-   "class": "Critical"
+   "class": "Critical",
+   "feature": "FEDERATION"
   },
   {
    "name": "FED_CALL_RELAY",
@@ -1090,7 +1102,8 @@
    "response": "Acknowledged",
    "auth": "Server",
    "cost": 1,
-   "class": "Critical"
+   "class": "Critical",
+   "feature": "FEDERATION"
   },
   {
    "name": "FED_DIRECTORY",
@@ -1100,7 +1113,8 @@
    "response": "FedDirectory",
    "auth": "Server",
    "cost": 2,
-   "class": "Critical"
+   "class": "Critical",
+   "feature": "FEDERATION"
   },
   {
    "name": "CALL_INVITE",

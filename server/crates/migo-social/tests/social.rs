@@ -193,6 +193,7 @@ impl Harness {
                 who_can_message,
                 who_can_add,
                 searchable,
+                custom_status: None,
                 updated_at: ts(SECOND),
             })
             .await

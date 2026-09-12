@@ -80,6 +80,8 @@ for (const op of opcodesDoc.opcodes) {
   if (typeof op.cost !== 'number')
     problems.push(`opcode ${op.name}: missing rate-limit cost (ADR-0006)`);
   if (!op.class) problems.push(`opcode ${op.name}: missing delivery class (ADR-0008)`);
+  if (op.feature && !meta.features.some((f) => f.name === op.feature))
+    problems.push(`opcode ${op.name}: unknown feature bit "${op.feature}"`);
   if (!structNames.has(op.payload))
     problems.push(`opcode ${op.name}: unknown payload struct "${op.payload}"`);
   if (op.response && !structNames.has(op.response))
@@ -487,6 +489,23 @@ ${opcodesDoc.opcodes.map((o) => `            Self::${pascal(o.name.toLowerCase()
         }
     }
 
+    /// The negotiable feature bit this opcode is gated on, if any (section 148).
+    ///
+    /// \`None\` for an opcode any authenticated client may send. \`Some(bit)\` names the
+    /// feature the registry ties the opcode to, so the dispatcher refuses it with
+    /// FEATURE_NOT_NEGOTIATED on a session whose negotiated set does not carry the bit —
+    /// the client asks for the feature in its HELLO rather than guessing at support.
+    #[must_use]
+    pub const fn feature(self) -> Option<u64> {
+        match self {
+${opcodesDoc.opcodes
+  .filter((o) => o.feature)
+  .map((o) => `            Self::${pascal(o.name.toLowerCase())} => Some(features::${o.feature}),`)
+  .join('\n')}
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub const fn direction(self) -> Direction {
         match self {
@@ -668,8 +687,8 @@ function genTs() {
 
   out += `export type DeliveryClass = ${meta.delivery_classes.map((c) => `'${c.name}'`).join(' | ')};\nexport type AuthLevel = ${meta.auth_levels.map((a) => `'${a.name}'`).join(' | ')};\nexport type Direction = 'client_to_server' | 'server_to_client' | 'both';\n\n`;
   out += `export const OP = {\n${opcodesDoc.opcodes.map((o) => `${o.doc ? `  /** ${o.doc} */\n` : ''}  ${o.name}: ${o.code},`).join('\n')}\n} as const;\nexport type OpcodeValue = (typeof OP)[keyof typeof OP];\n\n`;
-  out += `export interface OpcodeMeta {\n  readonly code: number;\n  readonly name: string;\n  readonly cost: number;\n  readonly cls: DeliveryClass;\n  readonly auth: AuthLevel;\n  readonly direction: Direction;\n  readonly ackRequired: boolean;\n  readonly payload: string;\n  readonly response?: string;\n  readonly coalesceKey?: string;\n  readonly paced: boolean;\n  readonly suppressOn: ReadonlyArray<'Unknown' | 'Auto' | 'Normal' | 'LowData' | 'UltraLowData'>;\n}\n\n`;
-  out += `export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {\n${opcodesDoc.opcodes.map((o) => `  ${o.code}: { code: ${o.code}, name: '${o.name}', cost: ${o.cost}, cls: '${o.class}', auth: '${o.auth}', direction: '${o.direction}', ackRequired: ${!!o.ack_required}, payload: '${o.payload}'${o.response ? `, response: '${o.response}'` : ''}${o.coalesce_key ? `, coalesceKey: '${o.coalesce_key}'` : ''}, paced: ${!!o.paced}, suppressOn: [${(o.suppress_on || []).map((m) => `'${m}'`).join(', ')}] },`).join('\n')}\n};\n\n`;
+  out += `export interface OpcodeMeta {\n  readonly code: number;\n  readonly name: string;\n  readonly cost: number;\n  readonly cls: DeliveryClass;\n  readonly auth: AuthLevel;\n  readonly direction: Direction;\n  readonly ackRequired: boolean;\n  readonly payload: string;\n  readonly response?: string;\n  readonly coalesceKey?: string;\n  readonly paced: boolean;\n  readonly suppressOn: ReadonlyArray<'Unknown' | 'Auto' | 'Normal' | 'LowData' | 'UltraLowData'>;\n  readonly feature?: string;\n}\n\n`;
+  out += `export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {\n${opcodesDoc.opcodes.map((o) => `  ${o.code}: { code: ${o.code}, name: '${o.name}', cost: ${o.cost}, cls: '${o.class}', auth: '${o.auth}', direction: '${o.direction}', ackRequired: ${!!o.ack_required}, payload: '${o.payload}'${o.response ? `, response: '${o.response}'` : ''}${o.coalesce_key ? `, coalesceKey: '${o.coalesce_key}'` : ''}, paced: ${!!o.paced}, suppressOn: [${(o.suppress_on || []).map((m) => `'${m}'`).join(', ')}]${o.feature ? `, feature: '${o.feature}'` : ''} },`).join('\n')}\n};\n\n`;
   out += `export function opcodeName(code: number): string {\n  return OPCODES[code]?.name ?? \`UNKNOWN(0x\${code.toString(16)})\`;\n}\n`;
   return out;
 }
@@ -1019,7 +1038,7 @@ function genKotlin() {
   out += kdoc(
     'Static metadata for one opcode: its rate-limit cost, delivery class, required auth, and shape.',
   );
-  out += `data class OpcodeMeta(\n    val code: Long,\n    val name: String,\n    val cost: Int,\n    val cls: DeliveryClass,\n    val auth: AuthLevel,\n    val direction: Direction,\n    val ackRequired: Boolean,\n    val payload: String,\n    val response: String? = null,\n    val coalesceKey: String? = null,\n    val paced: Boolean = false,\n    val suppressOn: List<String> = emptyList(),\n)\n\n`;
+  out += `data class OpcodeMeta(\n    val code: Long,\n    val name: String,\n    val cost: Int,\n    val cls: DeliveryClass,\n    val auth: AuthLevel,\n    val direction: Direction,\n    val ackRequired: Boolean,\n    val payload: String,\n    val response: String? = null,\n    val coalesceKey: String? = null,\n    val paced: Boolean = false,\n    val suppressOn: List<String> = emptyList(),\n    val feature: String? = null,\n)\n\n`;
 
   out += `val OPCODES: Map<Long, OpcodeMeta> = mapOf(\n`;
   for (const o of opcodesDoc.opcodes) {
@@ -1036,6 +1055,7 @@ function genKotlin() {
       o.coalesce_key ? `"${o.coalesce_key}"` : 'null',
       `${!!o.paced}`,
       `listOf(${(o.suppress_on || []).map((m) => `"${m}"`).join(', ')})`,
+      o.feature ? `"${o.feature}"` : 'null',
     ];
     out += `    ${o.code}L to OpcodeMeta(${parts.join(', ')}),\n`;
   }

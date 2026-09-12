@@ -80,6 +80,7 @@ async fn seed_account(store: &SharedStore, value: u128, username: &str) -> Id {
             who_can_message: Visibility::Everyone,
             who_can_add: Visibility::Everyone,
             searchable: true,
+            custom_status: None,
             updated_at: ts(1_000),
         })
         .await
@@ -402,6 +403,49 @@ pub async fn a_patch_tells_keep_apart_from_clear(store: &SharedStore) {
         .await
         .unwrap();
     assert_eq!(cleared.bio, None);
+
+    // The custom status follows the same three-state rule, and it is the one field a
+    // patch can exercise end to end here: set, keep through a patch that names other
+    // fields, then clear.
+    let with_status = store
+        .update_profile(
+            account_id,
+            ProfilePatch {
+                custom_status: Patch::Set("sedang meeting".to_string()),
+                ..Default::default()
+            },
+            ts(1_800),
+        )
+        .await
+        .unwrap();
+    assert_eq!(with_status.custom_status.as_deref(), Some("sedang meeting"));
+
+    let kept = store
+        .update_profile(
+            account_id,
+            ProfilePatch {
+                bio: Patch::Set("bio baru".to_string()),
+                ..Default::default()
+            },
+            ts(1_900),
+        )
+        .await
+        .unwrap();
+    assert_eq!(kept.custom_status.as_deref(), Some("sedang meeting"));
+    assert_eq!(kept.bio.as_deref(), Some("bio baru"));
+
+    let cleared_status = store
+        .update_profile(
+            account_id,
+            ProfilePatch {
+                custom_status: Patch::Clear,
+                ..Default::default()
+            },
+            ts(2_000),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleared_status.custom_status, None);
 }
 
 pub async fn search_obeys_privacy_before_relevance(store: &SharedStore) {
