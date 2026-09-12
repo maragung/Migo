@@ -471,7 +471,8 @@ async fn config_lists_this_node_first_then_peers() {
     });
     let resp = h.send(get("/v1/config")).await;
     assert_eq!(resp.status, StatusCode::OK);
-    let nodes = resp.json()["nodes"].as_array().expect("nodes is a list");
+    let doc = resp.json();
+    let nodes = doc["nodes"].as_array().expect("nodes is a list");
     assert_eq!(nodes.len(), 3, "this node plus both peers");
     assert_eq!(nodes[0]["id"], NODE_ID);
     assert_eq!(nodes[0]["public_url"], "http://localhost:8080");
@@ -489,7 +490,8 @@ async fn config_still_lists_this_node_when_alone() {
     // a client reading the list does not need a special case for one node.
     let h = Harness::new();
     let resp = h.send(get("/v1/config")).await;
-    let nodes = resp.json()["nodes"].as_array().expect("nodes is a list");
+    let doc = resp.json();
+    let nodes = doc["nodes"].as_array().expect("nodes is a list");
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0]["id"], NODE_ID);
     assert_eq!(nodes[0]["region"], NODE_REGION);
