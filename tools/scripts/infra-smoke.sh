@@ -156,8 +156,12 @@ expect_eq "the readiness probe" \
 
 note "checking /metrics renders the Prometheus exposition"
 metrics="$(curl -fsS "$SERVER_URL/metrics")"
-echo "$metrics" | grep -q '^# TYPE ' \
-  || die "/metrics answered but rendered no metric families: $(echo "$metrics" | head -3)"
+# The text is fed with a here-string on purpose: `echo | grep -q` under
+# pipefail fails even on a match, because grep -q exits at the first hit and
+# echo then dies on the broken pipe. A here-string lands in a temp file, so
+# there is no pipe to break.
+grep -q '^# TYPE ' <<<"$metrics" \
+  || die "/metrics answered but rendered no metric families: $(head -3 <<<"$metrics")"
 
 note "checking /v1/config reports the node identity the compose file sets"
 config="$(curl -fsS "$SERVER_URL/v1/config")"
