@@ -12,6 +12,7 @@
         "correlation": 0,
         "trace": null,
         "fragment": null,
+        "metadata": null,
         "payload": ""
       },
       "hex": "01000100"
@@ -25,6 +26,7 @@
         "correlation": 300,
         "trace": null,
         "fragment": null,
+        "metadata": null,
         "payload": "deadbeef"
       },
       "hex": "01008101ac02deadbeef"
@@ -38,6 +40,7 @@
         "correlation": 7,
         "trace": null,
         "fragment": null,
+        "metadata": null,
         "payload": ""
       },
       "hex": "01080207"
@@ -51,6 +54,7 @@
         "correlation": 1,
         "trace": null,
         "fragment": null,
+        "metadata": null,
         "payload": "01"
       },
       "hex": "0110100101"
@@ -64,6 +68,7 @@
         "correlation": 2,
         "trace": null,
         "fragment": null,
+        "metadata": null,
         "payload": "cafebabe"
       },
       "hex": "01011402cafebabe"
@@ -80,6 +85,7 @@
           "span_id": "1011121314151617"
         },
         "fragment": null,
+        "metadata": null,
         "payload": ""
       },
       "hex": "01020100000102030405060708090a0b0c0d0e0f1011121314151617"
@@ -96,6 +102,7 @@
           "index": 1,
           "total": 3
         },
+        "metadata": null,
         "payload": "aa"
       },
       "hex": "012005090103aa"
@@ -115,6 +122,7 @@
           "index": 0,
           "total": 2
         },
+        "metadata": null,
         "payload": ""
       },
       "hex": "01220500000102030405060708090a0b0c0d0e0f10111213141516170002"
@@ -131,6 +139,7 @@
           "index": 199,
           "total": 200
         },
+        "metadata": null,
         "payload": "bb"
       },
       "hex": "01200509c701c801bb"
@@ -144,9 +153,103 @@
         "correlation": 0,
         "trace": null,
         "fragment": null,
+        "metadata": null,
         "payload": ""
       },
       "hex": "0100ffffffff0f00"
+    },
+    {
+      "name": "metadata_block",
+      "frame": {
+        "version": 1,
+        "flags": 64,
+        "opcode": 40,
+        "correlation": 12,
+        "trace": null,
+        "fragment": null,
+        "metadata": {
+          "frame_seq": 7,
+          "sent_at_delta": 300
+        },
+        "payload": "0011"
+      },
+      "hex": "0140280c07ac02000011"
+    },
+    {
+      "name": "metadata_block_with_payload_len",
+      "frame": {
+        "version": 1,
+        "flags": 64,
+        "opcode": 40,
+        "correlation": 12,
+        "trace": null,
+        "fragment": null,
+        "metadata": {
+          "frame_seq": 7,
+          "sent_at_delta": 300,
+          "payload_len": 2
+        },
+        "payload": "0011"
+      },
+      "hex": "0140280c07ac02020011"
+    },
+    {
+      "name": "metadata_block_with_multi_byte_fields",
+      "frame": {
+        "version": 1,
+        "flags": 64,
+        "opcode": 1,
+        "correlation": 0,
+        "trace": null,
+        "fragment": null,
+        "metadata": {
+          "frame_seq": 4294967295,
+          "sent_at_delta": 86400000
+        },
+        "payload": ""
+      },
+      "hex": "01400100ffffffff0f80b8992900"
+    },
+    {
+      "name": "metadata_with_trace_and_fragment",
+      "frame": {
+        "version": 1,
+        "flags": 98,
+        "opcode": 5,
+        "correlation": 3,
+        "trace": {
+          "trace_id": "000102030405060708090a0b0c0d0e0f",
+          "span_id": "1011121314151617"
+        },
+        "fragment": {
+          "index": 1,
+          "total": 2
+        },
+        "metadata": {
+          "frame_seq": 9001,
+          "sent_at_delta": 65535,
+          "payload_len": 128
+        },
+        "payload": "cc"
+      },
+      "hex": "01620503000102030405060708090a0b0c0d0e0f10111213141516170102a946ffff038001cc"
+    },
+    {
+      "name": "metadata_with_ack_required",
+      "frame": {
+        "version": 1,
+        "flags": 80,
+        "opcode": 16,
+        "correlation": 4,
+        "trace": null,
+        "fragment": null,
+        "metadata": {
+          "frame_seq": 1,
+          "sent_at_delta": 15
+        },
+        "payload": "01"
+      },
+      "hex": "01501004010f0001"
     }
   ],
   "length_prefixed": [
@@ -164,6 +267,11 @@
       "name": "traced",
       "frame_hex": "01020100000102030405060708090a0b0c0d0e0f1011121314151617",
       "hex": "0000001c01020100000102030405060708090a0b0c0d0e0f1011121314151617"
+    },
+    {
+      "name": "metadata_block",
+      "frame_hex": "0140280c07ac02000011",
+      "hex": "0000000a0140280c07ac02000011"
     }
   ],
   "invalid": [
@@ -192,22 +300,46 @@
       "why": "there is no version 0"
     },
     {
-      "name": "reserved_bit_6",
-      "hex": "01400100",
-      "error": "ReservedFlags",
-      "why": "ignoring the bit now makes it unusable forever"
-    },
-    {
       "name": "flags_ext_bit",
       "hex": "01800100",
       "error": "ReservedFlags",
       "why": "the second flags byte is a MWP/2 feature"
     },
     {
-      "name": "both_reserved_bits",
-      "hex": "01c00100",
-      "error": "ReservedFlags",
-      "why": "reported as a mask, not one bit at a time"
+      "name": "metadata_frame_seq_truncated",
+      "hex": "0140010080",
+      "error": "UnexpectedEnd",
+      "why": "the metadata block promises a varint and cuts it mid-byte"
+    },
+    {
+      "name": "metadata_sent_at_delta_missing",
+      "hex": "01400100",
+      "error": "UnexpectedEnd",
+      "why": "the flag promises a metadata block and zero bytes of it are present"
+    },
+    {
+      "name": "metadata_payload_len_missing",
+      "hex": "0140010007ac02",
+      "error": "UnexpectedEnd",
+      "why": "the block is always three varints, so a block that stops at two is truncated"
+    },
+    {
+      "name": "metadata_frame_seq_past_u32",
+      "hex": "014001008080808010",
+      "error": "FieldOverflow",
+      "why": "frame_seq is a u32; the varint decodes as u64 and is then narrowed"
+    },
+    {
+      "name": "metadata_payload_len_past_u32",
+      "hex": "0140010001018080808010",
+      "error": "FieldOverflow",
+      "why": "a payload_len that does not fit u32 cannot describe a frame under the limit"
+    },
+    {
+      "name": "metadata_frame_seq_non_minimal",
+      "hex": "01400100800001",
+      "error": "NonMinimalVarint",
+      "why": "canonicality applies to the metadata block too"
     },
     {
       "name": "traced_but_trace_block_truncated",

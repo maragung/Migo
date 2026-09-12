@@ -45,7 +45,7 @@ FLAG_BATCH = 0x04
 FLAG_ERROR = 0x08
 FLAG_ACK_REQUIRED = 0x10
 FLAG_FRAGMENT = 0x20
-FLAG_RESERVED_6 = 0x40
+FLAG_METADATA = 0x40
 FLAG_FLAGS_EXT = 0x80
 
 
@@ -114,12 +114,14 @@ def encode_ops(ops: list[dict]) -> bytes:
 
 def encode_frame(frame: dict) -> bytes:
     """MWP/1 header then payload, per docs/02-protocol.md section 3."""
-    flags = frame["flags"] & ~(FLAG_TRACED | FLAG_FRAGMENT)
+    flags = frame["flags"] & ~(FLAG_TRACED | FLAG_FRAGMENT | FLAG_METADATA)
     if frame.get("trace"):
         flags |= FLAG_TRACED
     if frame.get("fragment"):
         flags |= FLAG_FRAGMENT
-    if flags & (FLAG_RESERVED_6 | FLAG_FLAGS_EXT):
+    if frame.get("metadata"):
+        flags |= FLAG_METADATA
+    if flags & FLAG_FLAGS_EXT:
         raise ValueError("a valid frame cannot set a reserved flag bit")
 
     out = bytearray([frame["version"], flags])
@@ -133,6 +135,14 @@ def encode_frame(frame: dict) -> bytes:
     if fragment := frame.get("fragment"):
         assert fragment["total"] != 0 and fragment["index"] < fragment["total"]
         out += leb128(fragment["index"]) + leb128(fragment["total"])
+    if metadata := frame.get("metadata"):
+        out += leb128(metadata["frame_seq"]) + leb128(metadata["sent_at_delta"])
+        # The block is always three varints. A trailing optional varint cannot
+        # be decoded unambiguously — nothing on the wire would distinguish "the
+        # block ended" from "the block continues" — so payload_len is always
+        # written and a value of zero means "not stated". The semantic presence
+        # is carried by the value, not by the byte's existence.
+        out += leb128(metadata.get("payload_len", 0))
     out += bytes.fromhex(frame["payload"])
     return bytes(out)
 
@@ -247,6 +257,7 @@ def frames_file() -> dict:
                 "correlation": 0,
                 "trace": None,
                 "fragment": None,
+                "metadata": None,
                 "payload": "",
             },
         ),
@@ -259,6 +270,7 @@ def frames_file() -> dict:
                 "correlation": 300,
                 "trace": None,
                 "fragment": None,
+                "metadata": None,
                 "payload": "deadbeef",
             },
         ),
@@ -271,6 +283,7 @@ def frames_file() -> dict:
                 "correlation": 7,
                 "trace": None,
                 "fragment": None,
+                "metadata": None,
                 "payload": "",
             },
         ),
@@ -283,6 +296,7 @@ def frames_file() -> dict:
                 "correlation": 1,
                 "trace": None,
                 "fragment": None,
+                "metadata": None,
                 "payload": "01",
             },
         ),
@@ -295,6 +309,7 @@ def frames_file() -> dict:
                 "correlation": 2,
                 "trace": None,
                 "fragment": None,
+                "metadata": None,
                 "payload": "cafebabe",
             },
         ),
@@ -307,6 +322,7 @@ def frames_file() -> dict:
                 "correlation": 0,
                 "trace": {"trace_id": TRACE_ID, "span_id": SPAN_ID},
                 "fragment": None,
+                "metadata": None,
                 "payload": "",
             },
         ),
@@ -319,6 +335,7 @@ def frames_file() -> dict:
                 "correlation": 9,
                 "trace": None,
                 "fragment": {"index": 1, "total": 3},
+                "metadata": None,
                 "payload": "aa",
             },
         ),
@@ -331,6 +348,7 @@ def frames_file() -> dict:
                 "correlation": 0,
                 "trace": {"trace_id": TRACE_ID, "span_id": SPAN_ID},
                 "fragment": {"index": 0, "total": 2},
+                "metadata": None,
                 "payload": "",
             },
         ),
@@ -343,6 +361,7 @@ def frames_file() -> dict:
                 "correlation": 9,
                 "trace": None,
                 "fragment": {"index": 199, "total": 200},
+                "metadata": None,
                 "payload": "bb",
             },
         ),
@@ -355,7 +374,73 @@ def frames_file() -> dict:
                 "correlation": 0,
                 "trace": None,
                 "fragment": None,
+                "metadata": None,
                 "payload": "",
+            },
+        ),
+        (
+            "metadata_block",
+            {
+                "version": 1,
+                "flags": 0,
+                "opcode": 40,
+                "correlation": 12,
+                "trace": None,
+                "fragment": None,
+                "metadata": {"frame_seq": 7, "sent_at_delta": 300},
+                "payload": "0011",
+            },
+        ),
+        (
+            "metadata_block_with_payload_len",
+            {
+                "version": 1,
+                "flags": 0,
+                "opcode": 40,
+                "correlation": 12,
+                "trace": None,
+                "fragment": None,
+                "metadata": {"frame_seq": 7, "sent_at_delta": 300, "payload_len": 2},
+                "payload": "0011",
+            },
+        ),
+        (
+            "metadata_block_with_multi_byte_fields",
+            {
+                "version": 1,
+                "flags": 0,
+                "opcode": 1,
+                "correlation": 0,
+                "trace": None,
+                "fragment": None,
+                "metadata": {"frame_seq": 4294967295, "sent_at_delta": 86400000},
+                "payload": "",
+            },
+        ),
+        (
+            "metadata_with_trace_and_fragment",
+            {
+                "version": 1,
+                "flags": 0,
+                "opcode": 5,
+                "correlation": 3,
+                "trace": {"trace_id": TRACE_ID, "span_id": SPAN_ID},
+                "fragment": {"index": 1, "total": 2},
+                "metadata": {"frame_seq": 9001, "sent_at_delta": 65535, "payload_len": 128},
+                "payload": "cc",
+            },
+        ),
+        (
+            "metadata_with_ack_required",
+            {
+                "version": 1,
+                "flags": FLAG_ACK_REQUIRED,
+                "opcode": 16,
+                "correlation": 4,
+                "trace": None,
+                "fragment": None,
+                "metadata": {"frame_seq": 1, "sent_at_delta": 15},
+                "payload": "01",
             },
         ),
     ]
@@ -369,7 +454,7 @@ def frames_file() -> dict:
         cases.append({"name": name, "frame": expected, "hex": encoded.hex()})
 
     length_prefixed = []
-    for name in ("minimal", "multi_byte_opcode_and_correlation", "traced"):
+    for name in ("minimal", "multi_byte_opcode_and_correlation", "traced", "metadata_block"):
         frame = next(f for n, f in frames if n == name)
         body = encode_frame(frame)
         length_prefixed.append(
@@ -396,22 +481,52 @@ def frames_file() -> dict:
             "why": "there is no version 0",
         },
         {
-            "name": "reserved_bit_6",
-            "hex": "01" + f"{FLAG_RESERVED_6:02x}" + "01" + "00",
-            "error": "ReservedFlags",
-            "why": "ignoring the bit now makes it unusable forever",
-        },
-        {
             "name": "flags_ext_bit",
             "hex": "01" + f"{FLAG_FLAGS_EXT:02x}" + "01" + "00",
             "error": "ReservedFlags",
             "why": "the second flags byte is a MWP/2 feature",
         },
         {
-            "name": "both_reserved_bits",
-            "hex": "01" + f"{FLAG_RESERVED_6 | FLAG_FLAGS_EXT:02x}" + "01" + "00",
-            "error": "ReservedFlags",
-            "why": "reported as a mask, not one bit at a time",
+            "name": "metadata_frame_seq_truncated",
+            "hex": "01" + f"{FLAG_METADATA:02x}" + "01" + "00" + "80",
+            "error": "UnexpectedEnd",
+            "why": "the metadata block promises a varint and cuts it mid-byte",
+        },
+        {
+            "name": "metadata_sent_at_delta_missing",
+            "hex": "01" + f"{FLAG_METADATA:02x}" + "01" + "00",
+            "error": "UnexpectedEnd",
+            "why": "the flag promises a metadata block and zero bytes of it are present",
+        },
+        {
+            "name": "metadata_payload_len_missing",
+            "hex": "01" + f"{FLAG_METADATA:02x}" + "01" + "00" + "07" + leb128(300).hex(),
+            "error": "UnexpectedEnd",
+            "why": "the block is always three varints, so a block that stops at two is truncated",
+        },
+        {
+            "name": "metadata_frame_seq_past_u32",
+            "hex": "01" + f"{FLAG_METADATA:02x}" + "01" + "00" + leb128(1 << 32).hex(),
+            "error": "FieldOverflow",
+            "why": "frame_seq is a u32; the varint decodes as u64 and is then narrowed",
+        },
+        {
+            "name": "metadata_payload_len_past_u32",
+            "hex": "01"
+            + f"{FLAG_METADATA:02x}"
+            + "01"
+            + "00"
+            + leb128(1).hex()
+            + leb128(1).hex()
+            + leb128(1 << 32).hex(),
+            "error": "FieldOverflow",
+            "why": "a payload_len that does not fit u32 cannot describe a frame under the limit",
+        },
+        {
+            "name": "metadata_frame_seq_non_minimal",
+            "hex": "01" + f"{FLAG_METADATA:02x}" + "01" + "00" + "8000" + "01",
+            "error": "NonMinimalVarint",
+            "why": "canonicality applies to the metadata block too",
         },
         {
             "name": "traced_but_trace_block_truncated",
