@@ -6035,6 +6035,39 @@ impl FederationStore for PostgresStore {
         self.peer(node_id).await
     }
 
+    async fn transition_peer_status(
+        &self,
+        node_id: &str,
+        from: i16,
+        to: i16,
+    ) -> Result<Option<PeerRecord>> {
+        // The status precondition is part of the UPDATE's predicate, so a status
+        // that changed between the caller's read and this write cannot be
+        // overwritten: the update simply matches no row and the read below hands
+        // back the row as the other writer left it.
+        entity::node_peer::Entity::update_many()
+            .filter(entity::node_peer::Column::NodeId.eq(node_id))
+            .filter(entity::node_peer::Column::Status.eq(from))
+            .set(entity::node_peer::ActiveModel {
+                status: Set(to),
+                ..Default::default()
+            })
+            .exec(&self.db)
+            .await
+            .context("transition_peer_status")?;
+        self.peer(node_id).await
+    }
+
+    async fn pending_depth(&self, target_node: &str) -> Result<u64> {
+        let owed = entity::federation_outbox::Entity::find()
+            .filter(entity::federation_outbox::Column::TargetNode.eq(target_node))
+            .filter(entity::federation_outbox::Column::DeliveredAt.is_null())
+            .count(&self.db)
+            .await
+            .context("pending_depth")?;
+        Ok(owed)
+    }
+
     async fn touch_peer(&self, node_id: &str, seen_at: Timestamp) -> Result<Option<PeerRecord>> {
         let result = entity::node_peer::Entity::update_many()
             .filter(entity::node_peer::Column::NodeId.eq(node_id))
