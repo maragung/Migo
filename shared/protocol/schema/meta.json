@@ -28,7 +28,7 @@
     { "name": "ERROR",        "bit": 3, "description": "Payload is Error instead of the opcode response type" },
     { "name": "ACK_REQUIRED", "bit": 4, "description": "Receiver must acknowledge by cumulative watermark" },
     { "name": "FRAGMENT",     "bit": 5, "description": "varint index, varint total follow; payload is a slice" },
-    { "name": "RESERVED_6",   "bit": 6, "description": "Reserved. MUST be zero. Reserved in MWP/1 for a future METADATA block (section 141); a frame that sets it is rejected." },
+    { "name": "METADATA",      "bit": 6, "description": "varint frame_seq, varint sent_at_delta, and optional varint payload_len precede the payload (section 141)" },
     { "name": "FLAGS_EXT",    "bit": 7, "description": "A second flags byte follows (reserved for MWP/2)" }
   ],
   "features": [

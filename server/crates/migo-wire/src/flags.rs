@@ -21,16 +21,16 @@ pub const ERROR: u8 = 1 << 3;
 pub const ACK_REQUIRED: u8 = 1 << 4;
 /// varint index, varint total follow; payload is a slice
 pub const FRAGMENT: u8 = 1 << 5;
-/// Reserved. MUST be zero. Reserved in MWP/1 for a future METADATA block (section 141); a frame that sets it is rejected.
-pub const RESERVED_6: u8 = 1 << 6;
+/// varint frame_seq, varint sent_at_delta, and optional varint payload_len precede the payload (section 141)
+pub const METADATA: u8 = 1 << 6;
 /// A second flags byte follows (reserved for MWP/2)
 pub const FLAGS_EXT: u8 = 1 << 7;
 
 /// Bits a MWP/1 receiver must reject.
-pub const RESERVED_MASK: u8 = RESERVED_6 | FLAGS_EXT;
+pub const RESERVED_MASK: u8 = FLAGS_EXT;
 
 /// Every bit this build understands.
-pub const KNOWN_MASK: u8 = COMPRESSED | TRACED | BATCH | ERROR | ACK_REQUIRED | FRAGMENT;
+pub const KNOWN_MASK: u8 = COMPRESSED | TRACED | BATCH | ERROR | ACK_REQUIRED | FRAGMENT | METADATA;
 
 /// Renders the set bits as a stable, comma-separated list for logs.
 #[must_use]
@@ -54,8 +54,8 @@ pub fn describe(bits: u8) -> String {
     if bits & FRAGMENT != 0 {
         parts.push("FRAGMENT");
     }
-    if bits & RESERVED_6 != 0 {
-        parts.push("RESERVED_6");
+    if bits & METADATA != 0 {
+        parts.push("METADATA");
     }
     if bits & FLAGS_EXT != 0 {
         parts.push("FLAGS_EXT");

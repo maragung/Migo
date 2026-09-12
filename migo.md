@@ -3844,7 +3844,7 @@ Panjang frame maksimum MAX_FRAME_BYTES yaitu 262144 byte, diperiksa sebelum alok
 
 139. PACKET ENVELOPE
 
-STATUS: BUILT untuk header dasar. STATUS: SPEC untuk metadata block pada section 141.
+STATUS: BUILT. Header dasar dan metadata block section 141 ada di migo-wire, packages/wire, dan client Android.
 
 Layout frame:
 
@@ -3924,7 +3924,7 @@ Penerima WAJIB mengirim ACK berisi watermark. Lihat section 151.
 Sebelum payload ada varint index dan varint total. Payload adalah potongan dari frame logis yang lebih besar.
 
 0x40 METADATA
-STATUS: SPEC. Sebelum payload ada metadata block sesuai section 141. Pada MWP/1 versi sekarang bit ini masih reserved dan WAJIB bernilai 0 sampai section 141 diimplementasikan. Di meta.json bit ini masih bernama RESERVED_6, dan nama METADATA baru dipakai pada saat implementasi, bersamaan dengan perubahan meta.json, migo-wire, dan conformance vector.
+STATUS: BUILT. Sebelum payload ada metadata block sesuai section 141: varint frame_seq, varint sent_at_delta, lalu varint payload_len. Block selalu tiga varint, karena varint opsional di akhir block tidak bisa didekode secara tidak ambigu (tidak ada yang membedakan block yang selesai dari block yang berlanjut, dan dekoder rakus akan memakan byte pertama payload sebagai panjang), sehingga kehadiran payload_len dibawa oleh nilainya: nol berarti tidak dinyatakan dan didekode sebagai tidak hadir. Bit ini bernama METADATA di meta.json dan flags.rs, dan conformance vector di shared/protocol/vectors/wire/frames.json menguji block dengan payload_len nol dan tidak nol, kombinasi dengan trace dan fragment, serta penolakan block yang terpotong dan field yang melebihi u32.
 
 0x80 FLAGS_EXT
 Ada byte flags kedua. Direservasi untuk MWP/2. Pada MWP/1 WAJIB bernilai 0.
@@ -3934,7 +3934,7 @@ Bit flag yang tidak dikenal WAJIB ditolak dengan ERROR UNSUPPORTED_FLAG. Ini dis
 
 141. OPTIONAL METADATA BLOCK
 
-STATUS: SPEC. Belum ada di migo-wire. Bit 0x40 masih reserved sampai bagian ini diimplementasikan dan test vector-nya ditambahkan.
+STATUS: BUILT untuk codec. MetadataBlock ada di migo-wire (frame.rs, dengan with_metadata dan uji roundtrip, truncation, field overflow, dan properti proptest), di packages/wire (frame.ts), dan di client Android (Frame.kt). Flag bit 0x40 bernama METADATA di meta.json dan flags.rs, dan conformance vector-nya ditambahkan di shared/protocol/vectors/wire/frames.json pada perubahan yang sama. Layout block: selalu tiga varint (frame_seq, sent_at_delta, payload_len), dengan nilai payload_len nol berarti tidak dinyatakan, karena varint opsional di akhir block tidak dapat didekode secara tidak ambigu. Yang belum dibangun adalah pengirimnya: tidak ada feature bit untuk metadata di handshake (features 0 sampai 21 tidak memilikinya), dan gateway belum melacak frame_seq atau sent_at_delta per sesi, sehingga belum ada frame produksi yang membawa block ini.
 
 Requirement meminta sequence number dan timestamp sebagai bagian dari envelope. Migo menyediakannya dalam dua tingkat.
 
@@ -3956,8 +3956,8 @@ Nomor urut frame per arah per session. Naik satu untuk setiap frame yang dikirim
 sent_at_delta, varint
 Selisih milidetik dari server_time yang diberikan pada Welcome untuk arah server ke client, atau dari waktu HELLO untuk arah client ke server. Delta dipilih daripada timestamp absolut karena delta pada sesi yang berjalan hanya butuh 2 sampai 3 byte, sedangkan timestamp absolut butuh 6 byte.
 
-payload_len, varint, opsional di dalam block
-Hadir hanya bila frame perlu menyatakan panjangnya sendiri, misalnya saat frame disimpan atau diteruskan tanpa pembungkus.
+payload_len, varint
+Selalu ditulis sebagai varint ketiga block; nilai nol berarti tidak dinyatakan. Varint opsional di akhir block tidak dapat didekode secara tidak ambigu — tidak ada di kabel yang membedakan block yang selesai dari block yang berlanjut — sehingga kehadiran dibawa oleh nilai, bukan oleh ada-tidaknya byte. Nilai tidak nol dipakai hanya bila frame perlu menyatakan panjangnya sendiri, misalnya saat frame disimpan atau diteruskan tanpa pembungkus.
 
 Aturan:
 
@@ -4180,7 +4180,7 @@ Biaya harga kick. Opcode 47 dan 48 di atas adalah biaya rate-limit ADR-0006, buk
 
 Opcode store ditempatkan di kepala range reserved, bukan di range economy, karena range economy 160 sampai 175 sudah terisi penuh oleh opcode yang lebih dulu; nomor 239 dan 240 terkirim bersama v0.16.4 sehingga tidak dinomori ulang.
 
-Opcode yang direncanakan. STATUS: BUILT untuk seluruh range yang tercantum di atas, termasuk call 224 sampai 238 (SFU join 237 kini berjalan di server; lihat section 165). STATUS: SCHEMA untuk metadata block section 141 dan flag bit 0x40 yang belum masuk registri. STATUS: BUILT untuk UI roster web di client web (tombol join di header conversation Group, overlay roster dengan urutan join, tanda peserta sendiri, dan penanganan seat replacement, tanpa plane media; lihat section 165). STATUS: SPEC untuk kunci frame antar peserta; permukaan SDK-nya (domain group-call di @migo/sdk: join 237, event 238, leave lewat CALL_END) sudah BUILT. Setiap opcode ditambahkan ke opcodes.json bersamaan dengan implementasi handler-nya, sesuai aturan alokasi section 146.
+Opcode yang direncanakan. STATUS: BUILT untuk seluruh range yang tercantum di atas, termasuk call 224 sampai 238 (SFU join 237 kini berjalan di server; lihat section 165). Metadata block section 141 dan flag bit 0x40 kini BUILT di codec dan registri flag. STATUS: BUILT untuk UI roster web di client web (tombol join di header conversation Group, overlay roster dengan urutan join, tanda peserta sendiri, dan penanganan seat replacement, tanpa plane media; lihat section 165). STATUS: SPEC untuk kunci frame antar peserta; permukaan SDK-nya (domain group-call di @migo/sdk: join 237, event 238, leave lewat CALL_END) sudah BUILT. Setiap opcode ditambahkan ke opcodes.json bersamaan dengan implementasi handler-nya, sesuai aturan alokasi section 146.
 
 Messaging:
 
@@ -4478,7 +4478,7 @@ Boleh dibuang tanpa suara saat tekanan tinggi, tetapi WAJIB dihitung sebagai met
 ACK:
 
 Frame yang diberi flag ACK_REQUIRED ditahan di redelivery buffer sampai client mengirim ACK
-ACK membawa watermark kumulatif, sehingga satu ACK melunasi ratusan frame. Ukurannya maksimum 10 byte
+ACK membawa watermark kumulatif, sehingga satu ACK melunasi ratusan frame. Ukurannya maksimum 10 byte. Nomor urut yang dirujuk watermark dibawa oleh metadata block section 141 (field frame_seq), yang kini BUILT di codec; sampai feature bit negosiasinya ada dan gateway melacak urutan per sesi, ACK memakai seq yang dibawa payload sebagaimana sekarang
 Client SEBAIKNYA mengirim ACK dengan batching, misalnya setiap 200 ms atau setiap 32 frame, mana yang lebih dulu
 Server TIDAK BOLEH menunggu ACK per frame sebelum mengirim frame berikutnya. ACK bersifat kumulatif dan asinkron
 
@@ -5301,7 +5301,7 @@ Test bahwa migod menolak start pada production dengan secret kosong atau default
 
 173. MULTI-NODE FAILURE TESTING
 
-STATUS: SPEC. migod sudah ada dan tools/2node sudah menjalankan dua node berdampingan, tetapi skenario kegagalan node di bawah ini belum pernah dijalankan, dan bagian ini menuntut harapan yang eksplisit per skenario alih-alih smoke test dua node. Skenario ini tidak membutuhkan topology multi-region nyata: beberapa node berdampingan pada satu host atau di CI, mengikuti pola tools/2node, cukup untuk menjalankan semuanya.
+STATUS: SEBAGIAN. Skenario 1, 2, 3, 7, 8, 9, dan 10 kini berjalan sebagai test otomatis deterministik di server/crates/migod/tests/node_failures.rs: node berdampingan di loopback mengikuti pola tools/2node, kunci dan randomness seeded, setiap pengiriman digerakkan test lewat drain_once pada timestamp yang disebut eksplisit, dan setiap skenario punya harapan yang diassert. Skenario 1: event untuk node mati bertahan di outbox, backoff tidak mengulang panas, dan setelah pemulihan semua tiba sekali masing-masing dalam urutan antrean. Skenario 2 (sisi pengiriman): partisi menahan outbox tanpa kehilangan dan urutan FIFO bertahan lintas pemadaman. Skenario 3: peer yang handshake tapi tidak pernah ack hanya menahan satu batch selama budget watermark, lalu gagal dengan backoff yang menggandakan; redelivery setelah link pulih adalah at-least-once sesuai §153. Skenario 7: proof dari jam 61 detik di belakang ditolak di wire, dengan kontrol in-window yang lulus. Skenario 8: frame dengan optional field dari versi protocol yang lebih baru melintasi link dan diingest, karena reader melewati field tak dikenal berdasarkan panjang. Skenario 9: epok routing yang basi ditolak di handshake dan event bertahan sampai tampilan disegarkan. Skenario 10: backlog 300 event terkirim dalam batch 128/128/44 tanpa hilang, ganda, atau urutan yang pecah. Skenario 4, 5, dan 6 bukan kegagalan link dan diuji di tempat seam-nya: STORAGE_UNAVAILABLE dan idempotensi outbox di suite migo-federation, kehilangan cache di kontrak migo-cache, MEDIA_UNAVAILABLE di migo-media. Yang masih SPEC: kode error ROOM_READ_ONLY_PARTITION (1702) ada di generated.rs tetapi belum pernah dipakai runtime sehingga sisi read-only skenario 2 belum bisa diuji; status peer degraded belum ada (hanya Allowed/Paused/Blocked) sehingga penandaan node lambat sebelum kehabisan memori belum ada; handshake mesh tidak punya timeout sehingga peer yang menerima TCP tapi tidak pernah bicara bisa menggantung satu drain; transport belum menyegarkan tampilan routing secara otomatis ketika ditolak ROUTING_EPOCH_STALE (test menyegarkan lewat bump_epoch seperti tooling operator); RECONNECT_HINT untuk anggota room yang pindah node belum diterbitkan; dan resume session lintas node belum ada sehingga skenario 1 diuji pada lapisan outbox, bukan pada reconnect client lintas node.
 
 Skenario yang WAJIB diuji, masing-masing dengan harapan yang eksplisit:
 
@@ -5469,7 +5469,7 @@ Bagian ini ada supaya dokumen tidak pernah mengklaim sesuatu yang belum dibangun
 BUILT, sudah ada kode dan test yang lulus:
 
 migo-core, yaitu error type, config, id, timestamp, secret, dan clock
-migo-wire, yaitu frame encode dan decode, flags, varint, MSE codec, dan limits
+migo-wire, yaitu frame encode dan decode, flags (termasuk METADATA bit 0x40 dan MetadataBlock section 141), varint, MSE codec, dan limits
 migo-protocol, yaitu hasil generate untuk struct, enum, opcode, error code, dan helper fault
 migo-crypto, yaitu primitive terenkapsulasi, HKDF label, AEAD, Argon2id, token HMAC, dan mesh signature, ditambah group_key_epoch pada state sender key yang naik satu setiap rotasi dan tidak pernah mundur sehingga setiap perubahan keanggotaan yang memicu re-key membawa nomor generasinya, serta kunci media panggilan section 163 yang diturunkan dari session E2E dengan label HKDF sendiri, diikat pada call id, dan dirotasi tersegel di bawah kunci epoch yang berjalan sesuai bentuk CallKeyUpdate dengan penolakan terhadap update yang tidak menaikkan epoch, replay, maupun pemindahan antar panggilan, dilengkapi frame media yang menyegel dan membuka di bawah kunci epoch tersebut dengan associated data yang mengikat call id dan epoch
 migo-account, yaitu crate referensi akun tunggal section 182: root secret 32 byte dengan zeroize-on-drop, lima label domain HKDF, kunci identitas ML-DSA-65 dari seed FIPS 204 (SigningKey::from_seed, tanda tangan deterministik agar tiga port menghasilkan byte identik), kredensial perangkat ber-seed acak, dompet EVM BIP-32/BIP-44 m/44'/60'/0'/0/i dengan Keccak-256 dan EIP-55 yang dipatok vector resmi BIP-32 dan EIP-55, serta container .migo MIGOACCT1 ber-Argon2id lalu HKDF MIGO/BACKUP/V1 lalu XChaCha20-Poly1305 dengan seluruh header sebagai associated data dan satu error OpenFailed untuk kredensial salah maupun file yang diutak-atik; 30 unit test, test conformance vector di tests, dan dua file vector rust-reference yang ditulis example binary-nya sendiri
@@ -5555,7 +5555,10 @@ jawaban NOT_FOUND untuk bukan anggota), join yang di-idempotensi-kan per device
 (retry = roster yang sama, device baru akun yang sama menggantikan kursi), plafon 25 peserta
 yang dijawab VALIDATION_FAILED, roster penuh dikirim ke user topic joiner sebagai CALL_SFU_EVENT,
 pengumuman join dan leave diterbitkan ke topic conversation, CALL_END pada id group call
-diteruskan ke group_leave yang memensiunkan panggilan saat kursi terakhir kosong, dan
+diteruskan ke group_leave yang memensiunkan panggilan saat kursi terakhir kosong, leave yang
+tidak menemukan kursi milik caller (retry setelah kursi digantikan, atau anggota yang tidak
+pernah join) tetap dijawab Acknowledged sebagai no-op idempoten persis seperti ROOM_LEAVE,
+dan
 group_relay yang memindahkan blob tersegel hanya antar device yang duduk di roster tanpa
 pernah membukanya — janji mail-slot relay 1-on-1 yang diperluas dari dua device bernama
 menjadi satu roster. Tidak ada bidang media yang melintasi crate ini dan tidak ada byte
@@ -5584,7 +5587,6 @@ Feature bit yang behavioral pada node ini adalah CALLS yang selalu diiklankan be
 
 SPEC, baru ada di dokumen:
 
-Metadata block pada section 141 dan flag bit 0x40
 Requirement produk voice note pada section 179 dan requirement produk call pada section 180
 
 Sudah meninggalkan SPEC dan menyentuh kabel: opcode messaging 40 sampai 42 (edit, reaksi), profile 111 dan 112, social 113 sampai 119 (termasuk suggestions dan search), room 80 sampai 89 (termasuk create, roster, role, update, archive), media 128 sampai 133, economy 160 sampai 167 (termasuk catalogue, ledger, progression, badges, leaderboard), games 176 sampai 186 (termasuk start, view, abandon, catalogue), dan call 224 sampai 238 (kini dengan data plane HTTP di migo-api untuk backend filesystem dan scan inline pada commit sehingga media non-E2E tidak lagi terkunci Pending), notification 145 dan 146 beserta penerbitnya, economy 160 sampai 162, bot 178 sampai 180, moderation 192 sampai 194, dan federation 208 sampai 221 dengan transport mesh di migod; feature bit 16 sampai 20 dinegosiasikan dan federasi memakainya
