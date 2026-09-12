@@ -21,7 +21,7 @@
 //!   hundred bytes of crafted DEFLATE can otherwise expand to gigabytes, which
 //!   makes an unbounded decompressor a remote kill switch.
 
-use std::io::{Read, Write};
+use std::io::Write;
 
 use bytes::Bytes;
 use flate2::write::DeflateEncoder;
@@ -67,17 +67,69 @@ pub fn maybe_deflate(payload: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Decompresses raw DEFLATE, refusing to produce more than `max` bytes.
+///
+/// Two properties that a `read_to_end`-shaped decoder cannot give, both found by
+/// the `compress.json` conformance vectors:
+///
+/// * **Truncation is refusal, not short output.** `read_to_end` returns `Ok`
+///   when the *reader* is exhausted, and a DEFLATE reader cut mid-block reports
+///   `Ok(0)` — indistinguishable from a clean end — so a truncated stream came
+///   back as the partial bytes and the caller never learned the message was cut.
+///   The web and Android ports already refuse that input (the platform's
+///   `DecompressionStream` errors on it; the Kotlin loop exits only on
+///   `finished()`), which made this crate the odd one out in a 3-vs-1. The fix
+///   is to demand proof the stream ended: [`flate2::Status::StreamEnd`].
+/// * **A bomb costs one chunk, not its full expansion.** Output is produced into
+///   an 8 KiB scratch buffer and the limit is checked after every chunk, so the
+///   `Vec` never holds more than `limit + CHUNK` bytes and a stream that expands
+///   past the limit is detected on its first overflowing chunk.
+///
+/// When a stream is both over the limit and truncated, the size error wins: it
+/// is the more specific fault, and it is checked first so the decision is
+/// visible in the code rather than implied by ordering elsewhere.
 pub fn inflate_raw(compressed: &[u8], max: usize) -> Result<Bytes> {
     let limit = max.min(MAX_FRAME_BYTES);
+    const CHUNK: usize = 8 * 1024;
+    let mut scratch = vec![0u8; CHUNK];
     let mut out = Vec::with_capacity(compressed.len().saturating_mul(4).min(limit));
-    // Read one byte past the limit so an oversized payload is detected rather
-    // than silently truncated.
-    let mut decoder = flate2::read::DeflateDecoder::new(compressed).take(limit as u64 + 1);
-    decoder
-        .read_to_end(&mut out)
-        .map_err(|_| WireError::DecompressFailed)?;
-    if out.len() > limit {
-        return Err(WireError::DecompressedTooLarge { max: limit });
+    // Raw DEFLATE: no zlib header, no Adler-32 trailer.
+    let mut inflater = flate2::Decompress::new(true);
+
+    loop {
+        let before_in = inflater.total_in() as usize;
+        let before_out = inflater.total_out() as usize;
+        let status = inflater
+            .decompress(
+                &compressed[before_in..],
+                &mut scratch,
+                flate2::FlushDecompress::Finish,
+            )
+            .map_err(|_| WireError::DecompressFailed)?;
+        let consumed = inflater.total_in() as usize - before_in;
+        let produced = inflater.total_out() as usize - before_out;
+        out.extend_from_slice(&scratch[..produced]);
+        if out.len() > limit {
+            return Err(WireError::DecompressedTooLarge { max: limit });
+        }
+        match status {
+            flate2::Status::StreamEnd => {
+                // Bytes after the final block are ignored rather than refused.
+                // That is a deliberate three-way agreement, not an oversight:
+                // the web port decompresses through `DecompressionStream`,
+                // whose API reports no consumed-count, so it cannot see them,
+                // and one port accepting what another refuses is the divergence
+                // this crate's own vectors exist to catch.
+                break;
+            }
+            _ if consumed == 0 && produced == 0 => {
+                // No progress in either direction with the input gone means the
+                // stream was cut before its final block. The reader running out
+                // is not the stream ending, and returning the partial bytes
+                // would pass a truncated message off as a whole one.
+                return Err(WireError::DecompressFailed);
+            }
+            _ => {}
+        }
     }
     Ok(Bytes::from(out))
 }
@@ -150,6 +202,25 @@ mod tests {
                 "accepted a {gain}% gain"
             );
         }
+    }
+
+    #[test]
+    fn a_truncated_stream_is_refused() {
+        // A stream cut before its final block must not come back as the partial
+        // bytes: the reader running out is not the stream ending. The web and
+        // Android ports already refuse this input, and the `truncated_fixed_block`
+        // case in compress.json pins all three to the same answer.
+        let payload = "ab".repeat(24).into_bytes();
+        let whole = deflate_raw(&payload);
+        assert_eq!(
+            inflate_raw(&whole, MAX_FRAME_BYTES).expect("whole inflates"),
+            payload
+        );
+        let cut = &whole[..whole.len() - 1];
+        assert_eq!(
+            inflate_raw(cut, MAX_FRAME_BYTES),
+            Err(WireError::DecompressFailed)
+        );
     }
 
     #[test]
