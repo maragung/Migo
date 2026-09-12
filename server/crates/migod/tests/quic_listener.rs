@@ -397,24 +397,14 @@ async fn the_datagram_binding_round_trips_and_oversized_frames_stay_on_the_strea
     .expect("the test server config builds");
     let server = quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap())
         .expect("the test endpoint binds");
+    let server_addr = server
+        .local_addr()
+        .expect("the test endpoint reports its address");
 
-    let client = connect(
-        server
-            .local_addr()
-            .expect("the test endpoint reports its address"),
-    )
-    .await
-    .expect("the client connects to the test endpoint");
-
-    // One stream, opened by the client exactly the way a session's is: the server's transport
-    // writes to its half, the client reads from its half, and datagrams ride the connection
-    // alongside.
-    let (mut client_send, mut client_recv) = tokio::time::timeout(STEP, client.open_bi())
-        .await
-        .expect("opening a stream does not stall")
-        .expect("the stream opens");
-    let _ = &mut client_send;
-
+    // The server side has to be accepting before the client dials: quinn buffers a client's
+    // Initial packet in an `IncomingBuffer` and only mints the connection -- and the handshake
+    // reply -- once `accept()` is polled, so a connect that races ahead of the accept loop
+    // stalls instead of shaking hands.
     let server_task = tokio::spawn(async move {
         let incoming = server.accept().await.expect("a connection arrives");
         let connection = incoming.await.expect("the handshake completes");
@@ -430,6 +420,19 @@ async fn the_datagram_binding_round_trips_and_oversized_frames_stay_on_the_strea
             .expect("the datagram is a frame");
         (transport, received)
     });
+
+    let client = connect(server_addr)
+        .await
+        .expect("the client connects to the test endpoint");
+
+    // One stream, opened by the client exactly the way a session's is: the server's transport
+    // writes to its half, the client reads from its half, and datagrams ride the connection
+    // alongside.
+    let (mut client_send, mut client_recv) = tokio::time::timeout(STEP, client.open_bi())
+        .await
+        .expect("opening a stream does not stall")
+        .expect("the stream opens");
+    let _ = &mut client_send;
 
     // One bare frame as one datagram from the client -- no length prefix anywhere.
     let ping = migo_protocol::Ping {

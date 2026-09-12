@@ -271,26 +271,44 @@ impl QuicGateway {
                     }
                 };
             }
-            tokio::select! {
-                read = self.recv.read(&mut scratch) => {
-                    match read {
-                        None => return Err(QuicError::Closed),
-                        Some(0) => continue,
-                        Some(n) => self.buf.extend_from_slice(&scratch[..n]),
-                    }
-                }
-                datagram = self.connection.read_datagram() => {
-                    match datagram {
-                        Ok(bytes) => {
-                            return Frame::decode(bytes).map_err(|_| QuicError::Malformed);
-                        }
-                        // The connection is gone and the datagram reader will keep erroring
-                        // instantly, so retire it and let the stream read report the end.
-                        Err(_) => {
-                            self.datagrams_dead = true;
+            // The step budget covers the whole race, the same budget a stream-only read had:
+            // a silent server on both bindings is a dead connection, and the caller's answer
+            // to that is the reconnect ladder, not patience.
+            let raced = tokio::time::timeout(STEP, async {
+                tokio::select! {
+                    read = self.recv.read(&mut scratch) => {
+                        match read {
+                            Err(_) => Err(QuicError::Transport),
+                            Ok(None) => Err(QuicError::Closed),
+                            // Stream bytes banked: no whole frame yet, keep reading.
+                            Ok(Some(0)) => Ok(None),
+                            Ok(Some(n)) => {
+                                self.buf.extend_from_slice(&scratch[..n]);
+                                Ok(None)
+                            }
                         }
                     }
+                    datagram = self.connection.read_datagram() => {
+                        match datagram {
+                            Ok(bytes) => Ok(Some(Frame::decode(bytes).map_err(|_| QuicError::Malformed)?)),
+                            // The connection is gone and the datagram reader will keep erroring
+                            // instantly, so retire it and let the stream read report the end.
+                            Err(_) => {
+                                self.datagrams_dead = true;
+                                Ok(None)
+                            }
+                        }
+                    }
                 }
+            })
+            .await
+            .map_err(|_| QuicError::Timeout)??;
+            match raced {
+                // A whole datagram arrived as one frame: the loop's next turn hands it over.
+                Some(frame) => return Ok(frame),
+                // Progress without a frame (stream bytes banked, or the datagram reader
+                // retired): keep reading.
+                None => continue,
             }
         }
     }
