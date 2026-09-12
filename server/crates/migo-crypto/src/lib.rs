@@ -47,6 +47,7 @@
 //! | [`x3dh`] | Asynchronous session establishment against a published bundle |
 //! | [`ratchet`] | Double Ratchet for 1:1 conversations |
 //! | [`sender_key`] | Sender-key ratchet for groups: encrypt once, fan out |
+//! | [`call_key`] | Call media keys: derived from the session, rotated under seal |
 //! | [`passphrase`] | Argon2id hashing and verification |
 //! | [`mac`] | HMAC-SHA256 for session tokens, cursors, and signed URLs |
 //! | [`node`] | Server node identity and the mesh handshake |
@@ -70,6 +71,7 @@
 #![warn(missing_docs, clippy::all)]
 
 pub mod aead;
+pub mod call_key;
 pub mod error;
 pub mod identity;
 pub mod kdf;
@@ -81,6 +83,7 @@ pub mod sender_key;
 pub mod x3dh;
 
 pub use crate::aead::{open, seal, SymmetricKey, KEY_LEN, NONCE_LEN, TAG_LEN};
+pub use crate::call_key::CallKeyState;
 pub use crate::error::{CryptoError, Result};
 pub use crate::identity::{
     IdentityPublic, IdentitySecret, KeyPair, SignedPrekey, IDENTITY_PUBLIC_LEN, PUBLIC_KEY_LEN,
@@ -92,5 +95,6 @@ pub use crate::passphrase::Verification;
 pub use crate::ratchet::{RatchetHeader, RatchetSession};
 pub use crate::sender_key::{
     ReceiverKeyState, SenderKeyDistribution, SenderKeyHeader, SenderKeyMessage, SenderKeyState,
+    MAX_CHAIN_GAP, MAX_MESSAGES_PER_CHAIN,
 };
 pub use crate::x3dh::{InitialMessage, PrekeyBundle, SessionSeed};

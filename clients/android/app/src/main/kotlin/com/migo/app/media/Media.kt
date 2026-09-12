@@ -3,10 +3,9 @@ package com.migo.app.media
 import android.graphics.BitmapFactory
 import com.migo.core.crypto.AEAD_KEY_LEN
 import com.migo.core.crypto.AEAD_NONCE_LEN
-import com.migo.core.crypto.Aead
 import com.migo.core.crypto.Content
-import com.migo.core.crypto.CryptoError
-import com.migo.core.crypto.SymmetricKey
+import com.migo.core.crypto.SealedContent
+import com.migo.core.crypto.Sealing
 import com.migo.core.domain.MediaDomain
 import com.migo.core.domain.MediaKinds
 import com.migo.core.wire.Id
@@ -61,29 +60,11 @@ const val VOICE_NOTE_MAX_MS: Long = 300_000L
 class AttachmentRefusal(message: String) : Exception(message)
 
 /**
- * A fresh per-object seal: the travelling key and nonce for the message's slots, and the
- * `nonce || ciphertext || tag` bytes to upload.
- *
- * The key is drawn inside [sealMedia] and never accepted from a caller, for the same reason the
- * web module refuses it: per-object sealing only means anything if no two objects can ever share
- * key material by accident.
+ * Seals [plaintext] under [domain] with a fresh random key -- :core's [Sealing], the same
+ * primitive the web client's `media.ts` reaches through `@migo/sdk`, so the sealed layout and the
+ * travelling-slot discipline can only be implemented once per build.
  */
-class SealedMedia internal constructor(
-    val key: ByteArray,
-    val nonce: ByteArray,
-    val sealed: ByteArray,
-)
-
-/** Seals [plaintext] under [domain] with a fresh random key. */
-fun sealMedia(plaintext: ByteArray, domain: ByteArray): SealedMedia {
-    val key = SymmetricKey.generate()
-    val sealed = Aead.seal(key, domain, plaintext)
-    // The travelling copy is made before the key's own buffer is destroyed: what leaves this
-    // function is the copy alone, exactly the discipline the web module keeps.
-    val travelling = key.expose().copyOf()
-    key.destroy()
-    return SealedMedia(travelling, sealed.copyOfRange(0, AEAD_NONCE_LEN), sealed)
-}
+fun sealMedia(plaintext: ByteArray, domain: ByteArray): SealedContent = Sealing.seal(plaintext, domain)
 
 /**
  * Whether a message's key slot is the zero-filled placeholder of a legacy plaintext upload: bytes
@@ -102,17 +83,8 @@ fun isLegacyPlaintext(key: ByteArray): Boolean =
  * different object than its bytes fails here as a decryption failure -- the same refusal for
  * every cause, telling a wrong key from edited bytes apart is a fact the caller must never learn.
  */
-fun openMedia(key: ByteArray, nonce: ByteArray, domain: ByteArray, stored: ByteArray): ByteArray {
-    if (stored.size < AEAD_NONCE_LEN) {
-        throw CryptoError.badLength("sealed content", AEAD_NONCE_LEN, stored.size)
-    }
-    for (i in 0 until AEAD_NONCE_LEN) {
-        if (stored[i] != nonce[i]) {
-            throw CryptoError.decryptionFailed()
-        }
-    }
-    return Aead.open(SymmetricKey.fromBytes(key), domain, stored)
-}
+fun openMedia(key: ByteArray, nonce: ByteArray, domain: ByteArray, stored: ByteArray): ByteArray =
+    Sealing.open(key, nonce, domain, stored)
 
 /**
  * The pixel bounds of an image, read from the bytes' header alone -- [BitmapFactory] with
@@ -151,6 +123,50 @@ fun formatBytes(sizeBytes: Long): String {
     val kb = sizeBytes / 1024.0
     if (kb < 1024) return String.format("%.0f KB", kb)
     return String.format("%.1f MB", kb / 1024.0)
+}
+
+/** How many bars a recorded waveform folds into, and what a bubble renders at most. */
+const val WAVEFORM_BARS: Int = 50
+
+/**
+ * One sampled amplitude as the 0–255 bar byte a waveform carries: [MediaRecorder.getMaxAmplitude]
+ * tops out at 32767, and the fold below and the receiver's renderer both speak bytes.
+ */
+fun amplitudeToBar(amplitude: Int): Int {
+    val clamped = if (amplitude in 0..32767) amplitude else 0
+    return clamped * 255 / 32767
+}
+
+/**
+ * Folds a stream of sampled amplitudes into the fixed-width bar chart a bubble renders — the same
+ * fold the web client's `downsampleWaveform` keeps, so a note recorded on either client carries
+ * the same shape of preview.
+ *
+ * Each output bar is the *maximum* sample in its slice, because a peak — not an average — is what
+ * a waveform bar is drawn from: a syllable landing inside a bucket must show, and averaging would
+ * flatten it into the silence around it. The output is always exactly `barCount` bytes: an input
+ * shorter than the bar count pads with silence at the tail, an empty input is all silence, and
+ * values are clamped to the 0–255 byte. The fold also runs over hostile receiver-supplied
+ * waveforms at render time, so it degrades gracefully rather than throwing.
+ */
+fun downsampleWaveform(samples: IntArray, barCount: Int = WAVEFORM_BARS): ByteArray {
+    val bars = ByteArray(barCount)
+    if (samples.isEmpty() || barCount <= 0) {
+        return bars
+    }
+    val bucketSize = maxOf(1, (samples.size + barCount - 1) / barCount)
+    for (i in samples.indices) {
+        val value = samples[i]
+        val clamped = if (value in 0..255) value else 0
+        val barIndex = minOf(barCount - 1, i / bucketSize)
+        // The stored bar reads back signed — a 200 is a -56 as a Byte — so the comparison
+        // unwraps it to its unsigned value first; compared raw, the tail's quiet samples would
+        // overwrite every peak above 127 the fold had already kept.
+        if (clamped > (bars[barIndex].toInt() and 0xFF)) {
+            bars[barIndex] = clamped.toByte()
+        }
+    }
+    return bars
 }
 
 /** The neutral claim an upload whose real type is unknown falls back to. */
@@ -284,6 +300,7 @@ suspend fun uploadVoiceNote(
     containerMime: String,
     durationMs: Long,
     endToEnd: Boolean,
+    waveform: ByteArray? = null,
 ): Content.VoiceNoteRef {
     if (durationMs > VOICE_NOTE_MAX_MS) {
         throw AttachmentRefusal("Voice notes are capped at 5 minutes.")
@@ -301,7 +318,7 @@ suspend fun uploadVoiceNote(
         )
         return voiceContent(
             mediaId, claim, bytes.size.toLong(), durationMs,
-            LEGACY_PLAINTEXT_KEY, LEGACY_PLAINTEXT_NONCE,
+            LEGACY_PLAINTEXT_KEY, LEGACY_PLAINTEXT_NONCE, waveform,
         )
     }
 
@@ -317,7 +334,7 @@ suspend fun uploadVoiceNote(
     )
     return voiceContent(
         mediaId, claim, bytes.size.toLong(), durationMs,
-        sealed.key, sealed.nonce,
+        sealed.key, sealed.nonce, waveform,
     )
 }
 
@@ -329,6 +346,7 @@ private fun voiceContent(
     durationMs: Long,
     key: ByteArray,
     nonce: ByteArray,
+    waveform: ByteArray? = null,
 ): Content.VoiceNoteRef = Content.VoiceNoteRef(
     mediaId = mediaId,
     mimeType = mimeType,
@@ -336,4 +354,5 @@ private fun voiceContent(
     durationMs = durationMs,
     key = key,
     nonce = nonce,
+    waveform = waveform,
 )

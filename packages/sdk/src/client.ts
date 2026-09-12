@@ -362,6 +362,19 @@ export class MigoClient implements DeviceDirectory, PeerBundleSource {
   }
 
   /**
+   * Resolves when the page is visible, immediately if it already is.
+   *
+   * Section 158 asks that sync still running when the application goes to the background be
+   * stopped *neatly*, not killed: an in-flight page finishes, and the next one does not start
+   * until the page returns. The outbox drain parks on its own; this is the same parking spot
+   * for every other piece of client sync work that pages — a catch-up loop, a history walk —
+   * which awaits it between pages, costing a hidden page no timer and no request.
+   */
+  whenVisible(): Promise<void> {
+    return this.#syncGate.wait();
+  }
+
+  /**
    * The offline outbox, when one is running.
    *
    * Null when the client was built with {@link MigoClientOptions.outboxEnabled} false or while
