@@ -93,6 +93,7 @@ use migo_rooms::{
 use migo_social::{Caller as SocialCaller, Interaction, ProfileCard, SharedSocial};
 
 use crate::room_presence::{GatewayHandle, GatewayPublisher, RoomPresence};
+use crate::room_relay::{FederatedPublisher, RoomRelay};
 
 /// The dispatcher that routes the client-facing application opcodes into the domain services.
 ///
@@ -152,6 +153,12 @@ pub struct AppDispatcher {
     /// on the connection edges the gateway reports through [`Dispatcher::session_started`] and
     /// [`Dispatcher::session_ended`].
     gateway: Arc<GatewayHandle>,
+    /// The tiered-fanout relay (section 170): which peer nodes hold subscribers of which
+    /// rooms, and the one federated copy per node that a room publish owes them. Built by
+    /// the composition root rather than here, because the mesh transport's ingest path
+    /// shares the same table — the home node's watchers and the subscriber's asks are two
+    /// halves of one bookkeeping, not two components that happen to talk.
+    room_relay: Arc<RoomRelay>,
 }
 
 impl AppDispatcher {
@@ -178,14 +185,20 @@ impl AppDispatcher {
         bots: SharedBots,
         calls: SharedCallkeeper,
         gateway: Arc<GatewayHandle>,
+        room_relay: Arc<RoomRelay>,
     ) -> Self {
         // The room-presence component reads the same store and rooms handle and publishes through
         // the same gateway handle, so it is assembled from what this call already holds rather
-        // than threaded through as one more argument.
+        // than threaded through as one more argument. Its publisher is wrapped in the
+        // federated one, so an out-of-band room event owes its federated copy — the tiered
+        // fanout of section 170 — without the room-presence component knowing a mesh exists.
         let room_presence = Arc::new(RoomPresence::new(
             migo_store::SharedStore::clone(&store),
             SharedRooms::clone(&rooms),
-            Arc::new(GatewayPublisher::new(Arc::clone(&gateway))),
+            Arc::new(FederatedPublisher::new(
+                Arc::new(GatewayPublisher::new(Arc::clone(&gateway))),
+                Arc::clone(&room_relay),
+            )),
         ));
         Self {
             store,
@@ -204,6 +217,7 @@ impl AppDispatcher {
             calls,
             room_presence,
             gateway,
+            room_relay,
         }
     }
 
@@ -267,7 +281,21 @@ impl AppDispatcher {
             _ => None,
         };
         let room_id = fanout.room_id;
+        // The federated half is captured before the local publish takes the fanout by
+        // value: the home node owes each watching node one copy of the same event
+        // (section 170), and a failure to enqueue it is logged rather than failed —
+        // the local delivery already happened, and retrying the request would
+        // publish the event twice.
+        let federated = fanout.clone();
+        let now = context.now();
         publish_room_fanout(context, fanout)?;
+        if let Err(error) = self.room_relay.forward(&federated, now).await {
+            tracing::warn!(
+                %error,
+                room = %room_id.to_text(),
+                "cannot enqueue the federated half of a room fanout"
+            );
+        }
         if let Some(account_id) = removed {
             self.revoke_room_audience(room_id, account_id).await;
         }
@@ -1132,7 +1160,26 @@ impl AppDispatcher {
                     identity.tier,
                     now,
                 );
-                self.rooms.authorize(&caller, topic.id, 0).await.is_ok()
+                let granted = self.rooms.authorize(&caller, topic.id, 0).await.is_ok();
+                // The granted subscription is the moment this node first has a reason to
+                // hear the room's federated stream: tiered fanout (section 170) asks the
+                // room's home node to watch it, once per room. Best-effort for the same
+                // reason every other half here is — the local subscription already
+                // succeeded, and the ask is retried by the next granted `SUBSCRIBE` if it
+                // could not be made.
+                let watch = if granted {
+                    self.room_relay.subscribe_to(topic.id, now).await
+                } else {
+                    Ok(())
+                };
+                if let Err(error) = watch {
+                    tracing::warn!(
+                        %error,
+                        room = %topic.id.to_text(),
+                        "cannot ask the home node to watch this room"
+                    );
+                }
+                granted
             }
             // A user topic is a presence stream. The caller's own presence is theirs by right; a
             // peer's is theirs only when the peer's own `show_last_seen` rule says so — the very

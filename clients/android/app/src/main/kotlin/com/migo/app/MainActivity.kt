@@ -21,12 +21,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.migo.app.model.AppState
 import com.migo.app.ui.AdminsScreen
@@ -175,6 +179,23 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
             model.stageVoiceNote()
             microphone.launch(Manifest.permission.RECORD_AUDIO)
         }
+    }
+
+    // The interruption rule a recording keeps: the app going to the background — a lock, a
+    // switch, a pocket — pauses the note, and coming back resumes it. The lifecycle observer is
+    // the shell's own ears; audio focus covers the interruptions the lifecycle cannot hear (a
+    // call, another app's playback) on the model's side.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, model) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> model.recordingWentToBackground()
+                Lifecycle.Event.ON_START -> model.recordingReturnedToForeground()
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     MigoTheme(dark = dark) {
@@ -405,7 +426,12 @@ private fun ShellScreen(
                         null
                     },
                     onVoiceNote = onRequestVoiceNote,
+                    onPauseVoiceNote = model::pauseVoiceNote,
+                    onResumeVoiceNote = model::resumeVoiceNote,
                     onStopVoiceNote = model::stopVoiceNote,
+                    onSendVoiceNote = model::sendVoiceNote,
+                    onDeleteVoiceNote = model::deleteVoiceNoteDraft,
+                    onUndoVoiceNoteDiscard = model::undoVoiceNoteDiscard,
                     onCancelVoiceNote = model::cancelVoiceNote,
                     onReact = model::react,
                     // The sender's own two acts on their line, from the long-press bar: the edit
