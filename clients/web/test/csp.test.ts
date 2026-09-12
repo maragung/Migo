@@ -14,7 +14,9 @@
  *     would become it) because Next's App Router embeds build-dependent inline hydration scripts
  *     a static file cannot hash-pin, and `frame-ancestors`, which the spec ignores in a meta; and
  *   * neither policy ever says `unsafe-eval`, and the script policy never says `unsafe-inline` —
- *     the two concessions the brief forbids outright.
+ *     the two concessions the brief forbids outright. The header's `wasm-unsafe-eval` is not one
+ *     of them: it admits WebAssembly compilation only (the seal's Argon2id needs it), never the
+ *     string evaluation `unsafe-eval` would unlock.
  *
  * The digest scan itself is pinned against a hand-built bundle directory: inline scripts hashed
  * byte for byte, external scripts and nested pages handled, and importing serve.mjs must not
@@ -116,21 +118,34 @@ test('no policy ships the two concessions the brief forbids', async () => {
   for (const [name, sources] of [...header, ...meta]) {
     assert.equal(sources.includes("'unsafe-eval'"), false, `${name} must never allow unsafe-eval`);
   }
+  // The narrow word is required, not a concession: Chrome gates WebAssembly compilation under
+  // script-src, and the account-file seal's Argon2id compiles its WASM at runtime. Without this
+  // token every seal and every key-file sign-in fails on every memory cost.
+  assert.equal(
+    (header.get('script-src') ?? []).includes("'wasm-unsafe-eval'"),
+    true,
+    'script-src must allow wasm-unsafe-eval for the Argon2id seal',
+  );
 });
 
 test('script-src is self plus one sha256 per inline script, and nothing else', async () => {
   const serve = (await import(serveUrl.href)) as Serve;
 
-  // No digests (a hypothetical bundle with no inline scripts): self, alone.
+  // No digests (a hypothetical bundle with no inline scripts): self and the wasm word, alone.
   assert.equal(serve.buildContentSecurityPolicy(), serve.buildContentSecurityPolicy([]));
-  assert.ok(serve.buildContentSecurityPolicy().includes("script-src 'self';"));
+  assert.ok(serve.buildContentSecurityPolicy().includes("script-src 'self' 'wasm-unsafe-eval';"));
 
-  // With digests: self first, then quoted hash tokens, deduplicated. A hash source is only valid
-  // CSP when quoted ('sha256-…') — unquoted, the browser drops it with a console warning and
-  // every inline script it was meant to allow comes back blocked.
+  // With digests: self first, then the wasm word, then quoted hash tokens, deduplicated. A hash
+  // source is only valid CSP when quoted ('sha256-…') — unquoted, the browser drops it with a
+  // console warning and every inline script it was meant to allow comes back blocked.
   const withHashes = serve.buildContentSecurityPolicy(['digest-a', 'digest-a', 'digest-b']);
   const tokens = parsePolicy(withHashes).get('script-src') ?? [];
-  assert.deepEqual(tokens, ["'self'", "'sha256-digest-a'", "'sha256-digest-b'"]);
+  assert.deepEqual(tokens, [
+    "'self'",
+    "'wasm-unsafe-eval'",
+    "'sha256-digest-a'",
+    "'sha256-digest-b'",
+  ]);
 });
 
 test('the digest scan hashes inline scripts byte for byte and ignores external ones', async () => {

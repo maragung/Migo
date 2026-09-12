@@ -76,7 +76,7 @@ const CONTENT_TYPES = new Map(
  *
  *   * `default-src 'self'` — the baseline: everything same-origin unless a directive below says
  *     otherwise, and nothing from a data: URL by accident.
- *   * `script-src 'self'` plus one `'sha256-…'` per inline script — the one exception the framework
+ *   * `script-src 'self'` plus one `'sha256-…'` per inline script — the exception the framework
  *     forces. Next's App Router embeds its hydration payload as inline
  *     `<script>self.__next_f.push(...)</script>` chunks (server/app-render/use-flight-response.js
  *     writes them) whose bytes differ per build, so they cannot be listed ahead of time. Each one
@@ -84,7 +84,11 @@ const CONTENT_TYPES = new Map(
  *     this server hands out — the same strictness as 'self', with none of 'unsafe-inline'. The
  *     client's own code carries no inline script at all: the pre-paint theme restore is a
  *     same-origin file (public/theme-init.js) for exactly this reason. And there is no
- *     'unsafe-eval' anywhere, because nothing in the bundle evaluates strings.
+ *     'unsafe-eval' anywhere, because nothing in the bundle evaluates strings — the one word that
+ *     looks like it, 'wasm-unsafe-eval', is narrower than it sounds: it admits WebAssembly
+ *     compilation and nothing else, which the account-file seal's Argon2id (hash-wasm compiles
+ *     its WASM at runtime) cannot run without. Chrome refuses the compilation outright when the
+ *     word is missing — every memory cost fails, not just the large ones.
  *   * `style-src 'self' 'unsafe-inline'` — the one concession, and an honest one: the components
  *     position context menus, presence dots and progress bars through `style={{}}` props, which
  *     the DOM turns into `style` attributes and CSP3 gates under style-src; React cannot move
@@ -131,11 +135,15 @@ const STATIC_DIRECTIVES = [
  * Builds the policy string for the inline-script digests of the bundle being served.
  *
  * `script-src` sits immediately after `default-src`: the order states the argument — a same-origin
- * baseline, and the single, hash-scoped exception the framework's hydration payload forces onto it.
+ * baseline, the hash-scoped exception the framework's hydration payload forces onto it, and the
+ * wasm-scoped exception the account-file seal needs, because Chrome gates WebAssembly compilation
+ * under script-src and the Argon2id KDF compiles its WASM at runtime.
  */
 export function buildContentSecurityPolicy(inlineScriptDigests = []) {
   const digests = [...new Set(inlineScriptDigests)].map((digest) => `'sha256-${digest}'`);
-  const scriptSrc = `script-src 'self'${digests.length === 0 ? '' : ` ${digests.join(' ')}`}`;
+  const scriptSrc = `script-src 'self' 'wasm-unsafe-eval'${
+    digests.length === 0 ? '' : ` ${digests.join(' ')}`
+  }`;
   const [baseline, ...rest] = STATIC_DIRECTIVES;
   return [baseline, scriptSrc, ...rest].join('; ');
 }
