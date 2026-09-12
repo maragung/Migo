@@ -24,7 +24,11 @@ use bytes::Bytes;
 use migo_core::{Id, Timestamp};
 use migo_wire::error::WireError;
 use migo_wire::frame::{Fragment, FrameHeader, MetadataBlock, TraceContext};
-use migo_wire::{varint, Frame, Reader, Writer};
+use migo_wire::limits::MAX_FRAME_BYTES;
+use migo_wire::{
+    decode_batch, deflate_raw, encode_batch, inflate_raw, maybe_deflate, varint, Frame, Reader,
+    Writer,
+};
 use serde_json::Value;
 
 // --- loading ----------------------------------------------------------------
@@ -507,6 +511,205 @@ fn malformed_mse_is_rejected() {
     }
 }
 
+// --- batch --------------------------------------------------------------------
+
+/// Builds the elements of a batch case, one frame per spec.
+fn elements_of(case: &Value) -> Vec<Frame> {
+    case["elements"]
+        .as_array()
+        .unwrap_or_else(|| panic!("case `{}` has no elements", name(case)))
+        .iter()
+        .map(|spec| {
+            Frame::new(
+                header_from_case(spec),
+                Bytes::from(bytes_of(spec, "payload")),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn batches_encode_and_decode_as_the_vectors_say() {
+    let file = load("batch.json");
+    for case in section(&file, "cases", "batch.json") {
+        let elements = elements_of(case);
+        let expected = bytes_of(case, "hex");
+
+        let packed = encode_batch(&elements)
+            .unwrap_or_else(|e| panic!("case `{}` must pack: {e}", name(case)));
+        let encoded = packed
+            .encode()
+            .unwrap_or_else(|e| panic!("case `{}` must encode: {e}", name(case)));
+        assert_eq!(
+            hex::encode(&encoded),
+            hex::encode(&expected),
+            "packing case `{}`",
+            name(case)
+        );
+
+        let decoded = Frame::decode(Bytes::from(expected.clone()))
+            .unwrap_or_else(|e| panic!("case `{}` must decode: {e}", name(case)));
+        assert_eq!(
+            decoded.header,
+            header_from_case(&case["frame"]),
+            "envelope header for case `{}`",
+            name(case)
+        );
+        let unpacked = decode_batch(&decoded)
+            .unwrap_or_else(|e| panic!("case `{}` must unpack: {e}", name(case)));
+        assert_eq!(
+            unpacked,
+            elements,
+            "unpacked elements for case `{}`",
+            name(case)
+        );
+    }
+}
+
+#[test]
+fn compressed_batches_unpack_as_the_vectors_say() {
+    // Decode-only by design: the payload is raw DEFLATE, whose exact bytes are not
+    // pinned across implementations (see compress.json). What is pinned is that the
+    // envelope carries both flags, and that it unpacks to exactly these elements.
+    let file = load("batch.json");
+    for case in section(&file, "compressed_cases", "batch.json") {
+        let elements = elements_of(case);
+        let expected = bytes_of(case, "hex");
+
+        let decoded = Frame::decode(Bytes::from(expected.clone()))
+            .unwrap_or_else(|e| panic!("case `{}` must decode: {e}", name(case)));
+        assert!(
+            decoded.header.is_batch() && decoded.header.is_compressed(),
+            "case `{}` must carry both flags",
+            name(case)
+        );
+        let unpacked = decode_batch(&decoded)
+            .unwrap_or_else(|e| panic!("case `{}` must unpack: {e}", name(case)));
+        assert_eq!(
+            unpacked,
+            elements,
+            "unpacked elements for case `{}`",
+            name(case)
+        );
+    }
+}
+
+#[test]
+fn malformed_batches_are_rejected() {
+    let file = load("batch.json");
+    for case in section(&file, "invalid", "batch.json") {
+        // The headers of these frames are well-formed; it is the payload that is
+        // hostile, so the frame decodes and the envelope does not.
+        let input = Bytes::from(bytes_of(case, "hex"));
+        let frame = Frame::decode(input)
+            .unwrap_or_else(|e| panic!("case `{}` must decode as a frame: {e}", name(case)));
+        expect_error(case, decode_batch(&frame), "batch");
+    }
+}
+
+// --- compress -----------------------------------------------------------------
+
+#[test]
+fn deflate_streams_inflate_as_the_vectors_say() {
+    let file = load("compress.json");
+    for case in section(&file, "cases", "compress.json") {
+        let compressed = bytes_of(case, "compressed_hex");
+        let plain = bytes_of(case, "plain_hex");
+
+        let inflated = inflate_raw(&compressed, MAX_FRAME_BYTES)
+            .unwrap_or_else(|e| panic!("case `{}` must inflate: {e}", name(case)));
+        assert_eq!(
+            hex::encode(&inflated),
+            hex::encode(&plain),
+            "inflating case `{}`",
+            name(case)
+        );
+
+        // The encode direction is not byte-pinned — two conforming DEFLATE encoders
+        // may differ — but this implementation's own output must still inflate back
+        // to the same plain bytes, or its compressor and decompressor disagree.
+        let own = deflate_raw(&plain);
+        let restored = inflate_raw(&own, MAX_FRAME_BYTES)
+            .unwrap_or_else(|e| panic!("case `{}` must re-inflate: {e}", name(case)));
+        assert_eq!(
+            hex::encode(&restored),
+            hex::encode(&plain),
+            "own round trip for case `{}`",
+            name(case)
+        );
+    }
+}
+
+#[test]
+fn compressed_frames_inflate_to_their_payloads() {
+    let file = load("compress.json");
+    for case in section(&file, "frames", "compress.json") {
+        let expected = bytes_of(case, "hex");
+        let plain = bytes_of(case, "plain_hex");
+
+        let decoded = Frame::decode(Bytes::from(expected.clone()))
+            .unwrap_or_else(|e| panic!("case `{}` must decode: {e}", name(case)));
+        assert!(
+            decoded.header.is_compressed(),
+            "case `{}` must carry the COMPRESSED flag",
+            name(case)
+        );
+        assert_eq!(
+            decoded.header,
+            header_from_case(&case["frame"]),
+            "header for case `{}`",
+            name(case)
+        );
+        let inflated = decoded
+            .payload_inflated()
+            .unwrap_or_else(|e| panic!("case `{}` must inflate: {e}", name(case)));
+        assert_eq!(
+            hex::encode(&inflated),
+            hex::encode(&plain),
+            "inflated payload for case `{}`",
+            name(case)
+        );
+    }
+}
+
+#[test]
+fn the_compression_policy_decides_as_the_vectors_say() {
+    let file = load("compress.json");
+    for case in section(&file, "policy", "compress.json") {
+        let plain = bytes_of(case, "plain_hex");
+        let expected = case["compresses"]
+            .as_bool()
+            .unwrap_or_else(|| panic!("case `{}` must say whether it compresses", name(case)));
+
+        let decision = maybe_deflate(&plain);
+        assert_eq!(
+            decision.is_some(),
+            expected,
+            "policy decision for case `{}`",
+            name(case)
+        );
+        if let Some(compressed) = decision {
+            let restored = inflate_raw(&compressed, MAX_FRAME_BYTES)
+                .unwrap_or_else(|e| panic!("case `{}` must re-inflate: {e}", name(case)));
+            assert_eq!(
+                hex::encode(&restored),
+                hex::encode(&plain),
+                "compressed round trip for case `{}`",
+                name(case)
+            );
+        }
+    }
+}
+
+#[test]
+fn malformed_deflate_is_rejected() {
+    let file = load("compress.json");
+    for case in section(&file, "invalid", "compress.json") {
+        let input = bytes_of(case, "hex");
+        expect_error(case, inflate_raw(&input, MAX_FRAME_BYTES), "compress");
+    }
+}
+
 // --- the suite is present at all --------------------------------------------
 
 #[test]
@@ -515,10 +718,12 @@ fn every_vector_file_is_present_and_populated() {
     // itself defeated by a missing file: without this, deleting `mse.json` turns
     // three tests into three panics that a `--no-fail-fast` run could bury, and
     // renaming a section turns them into silent no-ops.
-    let expected: [(&str, &[&str]); 3] = [
+    let expected: [(&str, &[&str]); 5] = [
         ("varint.json", &["cases", "zigzag", "invalid"]),
         ("frames.json", &["cases", "length_prefixed", "invalid"]),
         ("mse.json", &["cases", "invalid"]),
+        ("batch.json", &["cases", "compressed_cases", "invalid"]),
+        ("compress.json", &["cases", "frames", "policy", "invalid"]),
     ];
     let mut total = 0;
     for (file, sections) in expected {

@@ -2126,6 +2126,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "dashmap",
+ "flate2",
  "migo-auth",
  "migo-cache",
  "migo-captcha",
