@@ -62,6 +62,7 @@ async fn person(store: &Arc<MemoryStore>, account: u128, username: &str) {
             who_can_message: Visibility::Everyone,
             who_can_add: Visibility::Everyone,
             searchable: true,
+            custom_status: None,
             updated_at: Timestamp::from_millis(NOW),
         })
         .await

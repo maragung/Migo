@@ -36,7 +36,7 @@ use migo_core::metrics::Registry;
 use migo_core::{Id, Random, Result, Timestamp};
 use migo_protocol::{fault, NotificationKind, Platform};
 use migo_ratelimit::{BucketKey, RateLimiter, SharedRateLimiter, TrustTier};
-use migo_store::model::{notification_kind, Notification, PushTarget};
+use migo_store::model::{notification_kind, Notification, NotificationPosition, PushTarget};
 use migo_store::{SharedStore, Store};
 use parking_lot::Mutex;
 
@@ -537,12 +537,18 @@ where
         Ok(total)
     }
 
-    async fn inbox(&self, caller: &Caller, limit: u16) -> Result<Inbox> {
+    async fn inbox(
+        &self,
+        caller: &Caller,
+        limit: u16,
+        after: Option<NotificationPosition>,
+    ) -> Result<Inbox> {
         Self::require_identity(caller)?;
         self.charge(caller, INBOX_COST).await?;
+        let page = limit.min(MAX_INBOX_PAGE);
         let rows = self
             .store
-            .notifications(caller.account_id, limit.min(MAX_INBOX_PAGE))
+            .notifications(caller.account_id, after, page)
             .await?;
         let unread = self.store.unread_notifications(caller.account_id).await?;
         self.meters.inbox_read();

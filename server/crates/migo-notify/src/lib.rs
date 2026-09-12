@@ -123,6 +123,7 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
+pub mod cursor;
 mod metrics;
 pub mod model;
 pub mod service;

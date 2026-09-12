@@ -4360,6 +4360,8 @@ export interface ProfileUpdate {
   whoCanAdd?: number;
   /** New search visibility. */
   searchable?: boolean;
+  /** New custom status, the RICH_PRESENCE bit's own field; present only on a session that negotiated the bit. */
+  customStatus?: string;
 }
 
 export function encodeProfileUpdate(w: Writer, v: ProfileUpdate): void {
@@ -4373,6 +4375,7 @@ export function encodeProfileUpdate(w: Writer, v: ProfileUpdate): void {
   if (v.whoCanMessage !== undefined) present++;
   if (v.whoCanAdd !== undefined) present++;
   if (v.searchable !== undefined) present++;
+  if (v.customStatus !== undefined) present++;
   w.u32(present);
   if (v.displayName !== undefined) { const value = v.displayName; w.optional(1, (w) => { w.str(value); }); }
   if (v.bio !== undefined) { const value = v.bio; w.optional(2, (w) => { w.str(value); }); }
@@ -4382,6 +4385,7 @@ export function encodeProfileUpdate(w: Writer, v: ProfileUpdate): void {
   if (v.whoCanMessage !== undefined) { const value = v.whoCanMessage; w.optional(6, (w) => { w.u32(value); }); }
   if (v.whoCanAdd !== undefined) { const value = v.whoCanAdd; w.optional(7, (w) => { w.u32(value); }); }
   if (v.searchable !== undefined) { const value = v.searchable; w.optional(8, (w) => { w.bool(value); }); }
+  if (v.customStatus !== undefined) { const value = v.customStatus; w.optional(9, (w) => { w.str(value); }); }
   w.leave();
 }
 
@@ -4400,6 +4404,7 @@ export function decodeProfileUpdate(r: Reader): ProfileUpdate {
       case 6: out.whoCanMessage = sub.u32(); break;
       case 7: out.whoCanAdd = sub.u32(); break;
       case 8: out.searchable = sub.bool(); break;
+      case 9: out.customStatus = sub.str(); break;
       default: break; // unknown optional field: skipped by length
     }
   }
@@ -5248,17 +5253,20 @@ export function decodeGiftCatalogueResponse(r: Reader): GiftCatalogueResponse {
   return out;
 }
 
-/** Reads the caller's statement. */
+/** Reads one keyset page of the caller's statement; the cursor is the position of the last entry a previous page returned. */
 export interface LedgerReq {
   limit?: number;
+  cursor?: string;
 }
 
 export function encodeLedgerReq(w: Writer, v: LedgerReq): void {
   w.enter();
   let present = 0;
   if (v.limit !== undefined) present++;
+  if (v.cursor !== undefined) present++;
   w.u32(present);
   if (v.limit !== undefined) { const value = v.limit; w.optional(1, (w) => { w.u32(value); }); }
+  if (v.cursor !== undefined) { const value = v.cursor; w.optional(2, (w) => { w.str(value); }); }
   w.leave();
 }
 
@@ -5270,6 +5278,7 @@ export function decodeLedgerReq(r: Reader): LedgerReq {
     const [fieldId, sub] = r.optional();
     switch (fieldId) {
       case 1: out.limit = sub.u32(); break;
+      case 2: out.cursor = sub.str(); break;
       default: break; // unknown optional field: skipped by length
     }
   }
@@ -5322,15 +5331,19 @@ export function decodeLedgerEntryWire(r: Reader): LedgerEntryWire {
   return out;
 }
 
-/** A page of the caller's statement. */
+/** A page of the caller's statement, with the cursor of the next page whenever this one was full. */
 export interface LedgerResponse {
   entries: LedgerEntryWire[];
+  nextCursor?: string;
 }
 
 export function encodeLedgerResponse(w: Writer, v: LedgerResponse): void {
   w.enter();
   { w.listLen(v.entries.length); for (const item of v.entries) { encodeLedgerEntryWire(w, item); } }
-  w.u32(0);
+  let present = 0;
+  if (v.nextCursor !== undefined) present++;
+  w.u32(present);
+  if (v.nextCursor !== undefined) { const value = v.nextCursor; w.optional(1, (w) => { w.str(value); }); }
   w.leave();
 }
 
@@ -5339,9 +5352,13 @@ export function decodeLedgerResponse(r: Reader): LedgerResponse {
   const entries = ((): LedgerEntryWire[] => { const n = r.listLen(); const v: LedgerEntryWire[] = []; for (let i = 0; i < n; i++) v.push(decodeLedgerEntryWire(r)); return v; })();
   const out: LedgerResponse = { entries } as LedgerResponse;
   const optionalCount = r.u32();
-  // No optional fields in this version of the struct. Each entry is length-delimited,
-  // so reading it is skipping it, and a newer peer may well have sent one.
-  for (let i = 0; i < optionalCount; i++) r.optional();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.nextCursor = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
   r.leave();
   return out;
 }
@@ -6781,13 +6798,20 @@ export function decodeKickPointsBuyResult(r: Reader): KickPointsBuyResult {
   return out;
 }
 
-/** Empty; the caller's own entitlements are the session's. */
+/** Reads one keyset page of the caller's own entitlements; the cursor is the position of the last row a previous page returned. */
 export interface EntitlementsReq {
+  limit?: number;
+  cursor?: string;
 }
 
-export function encodeEntitlementsReq(w: Writer, _v: EntitlementsReq): void {
+export function encodeEntitlementsReq(w: Writer, v: EntitlementsReq): void {
   w.enter();
-  w.u32(0);
+  let present = 0;
+  if (v.limit !== undefined) present++;
+  if (v.cursor !== undefined) present++;
+  w.u32(present);
+  if (v.limit !== undefined) { const value = v.limit; w.optional(1, (w) => { w.u32(value); }); }
+  if (v.cursor !== undefined) { const value = v.cursor; w.optional(2, (w) => { w.str(value); }); }
   w.leave();
 }
 
@@ -6795,9 +6819,14 @@ export function decodeEntitlementsReq(r: Reader): EntitlementsReq {
   r.enter();
   const out: EntitlementsReq = {  } as EntitlementsReq;
   const optionalCount = r.u32();
-  // No optional fields in this version of the struct. Each entry is length-delimited,
-  // so reading it is skipping it, and a newer peer may well have sent one.
-  for (let i = 0; i < optionalCount; i++) r.optional();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.limit = sub.u32(); break;
+      case 2: out.cursor = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
   r.leave();
   return out;
 }
@@ -6829,15 +6858,19 @@ export function decodeEntitlement(r: Reader): Entitlement {
   return out;
 }
 
-/** Everything the caller owns, oldest first. */
+/** One page of what the caller owns, oldest first, with the cursor of the next page whenever this one was full. */
 export interface EntitlementsResponse {
   items: Entitlement[];
+  nextCursor?: string;
 }
 
 export function encodeEntitlementsResponse(w: Writer, v: EntitlementsResponse): void {
   w.enter();
   { w.listLen(v.items.length); for (const item of v.items) { encodeEntitlement(w, item); } }
-  w.u32(0);
+  let present = 0;
+  if (v.nextCursor !== undefined) present++;
+  w.u32(present);
+  if (v.nextCursor !== undefined) { const value = v.nextCursor; w.optional(1, (w) => { w.str(value); }); }
   w.leave();
 }
 
@@ -6846,9 +6879,13 @@ export function decodeEntitlementsResponse(r: Reader): EntitlementsResponse {
   const items = ((): Entitlement[] => { const n = r.listLen(); const v: Entitlement[] = []; for (let i = 0; i < n; i++) v.push(decodeEntitlement(r)); return v; })();
   const out: EntitlementsResponse = { items } as EntitlementsResponse;
   const optionalCount = r.u32();
-  // No optional fields in this version of the struct. Each entry is length-delimited,
-  // so reading it is skipping it, and a newer peer may well have sent one.
-  for (let i = 0; i < optionalCount; i++) r.optional();
+  for (let i = 0; i < optionalCount; i++) {
+    const [fieldId, sub] = r.optional();
+    switch (fieldId) {
+      case 1: out.nextCursor = sub.str(); break;
+      default: break; // unknown optional field: skipped by length
+    }
+  }
   r.leave();
   return out;
 }
@@ -7053,6 +7090,7 @@ export interface OpcodeMeta {
   readonly coalesceKey?: string;
   readonly paced: boolean;
   readonly suppressOn: ReadonlyArray<'Unknown' | 'Auto' | 'Normal' | 'LowData' | 'UltraLowData'>;
+  readonly feature?: string;
 }
 
 export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
@@ -7142,20 +7180,20 @@ export const OPCODES: Readonly<Record<number, OpcodeMeta>> = {
   192: { code: 192, name: 'REPORT_CREATE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ReportFile', response: 'Acknowledged', paced: false, suppressOn: [] },
   193: { code: 193, name: 'MODERATION_ACTION', cost: 10, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'ModAction', response: 'Acknowledged', paced: false, suppressOn: [] },
   194: { code: 194, name: 'MODERATION_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'ModerationEvent', paced: false, suppressOn: [] },
-  208: { code: 208, name: 'FED_HELLO', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedHello', response: 'FedHello', paced: false, suppressOn: [] },
-  209: { code: 209, name: 'FED_AUTH', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedAuth', response: 'Acknowledged', paced: false, suppressOn: [] },
-  210: { code: 210, name: 'FED_PING', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedPing', response: 'FedPong', paced: false, suppressOn: [] },
-  211: { code: 211, name: 'FED_FORWARD', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedForward', response: 'Acknowledged', paced: false, suppressOn: [] },
-  212: { code: 212, name: 'FED_ACK', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedAck', response: 'Acknowledged', paced: false, suppressOn: [] },
-  213: { code: 213, name: 'FED_ROOM_SUBSCRIBE', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedRouting', response: 'Acknowledged', paced: false, suppressOn: [] },
-  214: { code: 214, name: 'FED_ROOM_EVENT', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedRoomEvent', response: 'Acknowledged', paced: false, suppressOn: [] },
-  215: { code: 215, name: 'FED_PRESENCE_DIGEST', cost: 0, cls: 'Coalescable', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedPresenceDigest', response: 'Acknowledged', coalesceKey: 'region', paced: false, suppressOn: [] },
-  216: { code: 216, name: 'FED_KEY_ROTATE', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedKeyRotate', response: 'Acknowledged', paced: false, suppressOn: [] },
-  217: { code: 217, name: 'FED_HEALTH', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedHealth', response: 'FedHealth', paced: false, suppressOn: [] },
-  218: { code: 218, name: 'FED_SHARD_MAP', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedShardMap', response: 'Acknowledged', paced: false, suppressOn: [] },
-  219: { code: 219, name: 'FED_ERROR', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedError', response: 'Acknowledged', paced: false, suppressOn: [] },
-  220: { code: 220, name: 'FED_CALL_RELAY', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedForward', response: 'Acknowledged', paced: false, suppressOn: [] },
-  221: { code: 221, name: 'FED_DIRECTORY', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedDirectoryReq', response: 'FedDirectory', paced: false, suppressOn: [] },
+  208: { code: 208, name: 'FED_HELLO', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedHello', response: 'FedHello', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  209: { code: 209, name: 'FED_AUTH', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedAuth', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  210: { code: 210, name: 'FED_PING', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedPing', response: 'FedPong', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  211: { code: 211, name: 'FED_FORWARD', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedForward', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  212: { code: 212, name: 'FED_ACK', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedAck', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  213: { code: 213, name: 'FED_ROOM_SUBSCRIBE', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedRouting', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  214: { code: 214, name: 'FED_ROOM_EVENT', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedRoomEvent', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  215: { code: 215, name: 'FED_PRESENCE_DIGEST', cost: 0, cls: 'Coalescable', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedPresenceDigest', response: 'Acknowledged', coalesceKey: 'region', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  216: { code: 216, name: 'FED_KEY_ROTATE', cost: 5, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedKeyRotate', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  217: { code: 217, name: 'FED_HEALTH', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedHealth', response: 'FedHealth', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  218: { code: 218, name: 'FED_SHARD_MAP', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedShardMap', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  219: { code: 219, name: 'FED_ERROR', cost: 0, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedError', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  220: { code: 220, name: 'FED_CALL_RELAY', cost: 1, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedForward', response: 'Acknowledged', paced: false, suppressOn: [], feature: 'FEDERATION' },
+  221: { code: 221, name: 'FED_DIRECTORY', cost: 2, cls: 'Critical', auth: 'Server', direction: 'both', ackRequired: false, payload: 'FedDirectoryReq', response: 'FedDirectory', paced: false, suppressOn: [], feature: 'FEDERATION' },
   224: { code: 224, name: 'CALL_INVITE', cost: 20, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallInvite', response: 'CallInviteResult', paced: false, suppressOn: [] },
   225: { code: 225, name: 'CALL_INVITE_EVENT', cost: 0, cls: 'Critical', auth: 'User', direction: 'server_to_client', ackRequired: false, payload: 'CallInviteEvent', paced: false, suppressOn: [] },
   226: { code: 226, name: 'CALL_ANSWER', cost: 5, cls: 'Critical', auth: 'User', direction: 'client_to_server', ackRequired: false, payload: 'CallAnswer', response: 'Acknowledged', paced: false, suppressOn: [] },

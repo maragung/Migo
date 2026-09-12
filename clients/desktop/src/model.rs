@@ -680,18 +680,21 @@ pub struct OwnProfile {
     /// The shareable MGO-… form, drawn for copying rather than for parsing.
     pub public_id: String,
     pub bio: Option<String>,
-    /// The custom status line, as the presence wire last published it. The server this build
-    /// talks to declines to store one, so this is what the wire said, not a promise the save
-    /// will stick — the refusal arrives as the toast the presence wire already raises.
+    /// The custom status line, as the profile card carries it. The pane's field seeds from it
+    /// and saves back through the profile patch — the RICH_PRESENCE bit's own field, not the
+    /// presence wire, which refuses a status because a presence entry evaporates with the
+    /// cache and a status is not supposed to.
     pub custom_status: Option<String>,
     /// The year of birth its owner disclosed, as the profile wire echoes it back. Year only;
     /// `None` is "not disclosed", a statement the pane draws as an empty field rather than
     /// a guessed one.
     pub birth_year: Option<u32>,
-    /// The state the status line rode the last time it was published. The worker keeps its own
-    /// seed for the status save; this copy is the pane's record of where the account stood
-    /// when the card was read.
-    #[expect(dead_code, reason = "the pane draws the status, not the state it rode")]
+    /// The state the account stood in when the card was read — the pane's record, for the day
+    /// a surface wants to draw the two beside each other.
+    #[expect(
+        dead_code,
+        reason = "carried for future surfaces; no pane draws it today"
+    )]
     pub presence: Presence,
 }
 

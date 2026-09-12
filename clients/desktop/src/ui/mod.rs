@@ -146,6 +146,13 @@ pub struct Context<'a> {
     ///
     /// Read-only: changing servers is an auth-form concern, because it means no session exists.
     pub server: &'a ServerEndpoint,
+    /// Whether this session negotiated the RICH_PRESENCE bit, as WELCOME stated it.
+    ///
+    /// Read-only: the bit is the server's to grant, not a setting — the desktop asks for it in
+    /// every HELLO, and a node that does not carry it (a kill switch, an older server) must
+    /// find no client surface asking for what it did not agree to. The profile pane's status
+    /// field is the one reader today.
+    pub rich_presence: bool,
     /// Intent pushed here is forwarded to the worker after the frame.
     pub commands: &'a mut Vec<Command>,
     /// A screen change requested by a link on the screen, applied after the frame.

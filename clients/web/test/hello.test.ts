@@ -47,6 +47,15 @@ test('the hello offers the stock features plus the group-call bit this client ha
       true,
       'GROUP_CALL is offered',
     );
+    // RICH_PRESENCE is the one bit the server gates a *field* on: `custom_status` in the profile
+    // patch, which this client writes from the profile panel and the me bar and reads back from
+    // the profile it renders. A session that did not offer the bit would have every one of those
+    // writes answered FEATURE_NOT_NEGOTIATED, so the bit and the field have to travel together.
+    assert.equal(
+      (features & protocol.FEATURE.RICH_PRESENCE) === protocol.FEATURE.RICH_PRESENCE,
+      true,
+      'RICH_PRESENCE is offered',
+    );
     // And every stock bit still is: the opt-in is an addition, not a replacement.
     assert.equal(
       (features & DEFAULT_CLIENT_FEATURES) === DEFAULT_CLIENT_FEATURES,

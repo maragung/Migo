@@ -9,7 +9,9 @@
  *      audience was explicitly chosen. A regression that pre-filled the selects with a default, or
  *      that sent the whole form object, would rewrite `who_can_message` for a user who only came to
  *      fix their display name — invisible to any rendering test, because the display name would
- *      still look right.
+ *      still look right. The custom status rides the same rule and the same wire, so it is pinned
+ *      here too: it joins the patch only when the box moved, and clearing it sends the empty string
+ *      the server reads as "erase" rather than dropping the field, which would mean "keep".
  *   2. **A freshly joined room has no unread history.** `joinedRoomSummary` sets `readSeq` to the
  *      join handle's `lastSeq`. A projection that left `readSeq` at zero would badge every joined
  *      room as unread and send the user hunting for messages they have not missed.
@@ -94,6 +96,54 @@ test('a birth year is sent only when it differs from the one the profile carries
     buildProfilePatch(PROFILE, { displayName: 'Ada', bio: '' }, UNCHANGED, {
       birthYear: 'carbuncle',
     }),
+    {},
+  );
+});
+
+test('a custom status joins the patch only when the box moved, on the profile wire', () => {
+  // The status is a profile column now, not a presence publish: the panel saves it in the same
+  // patch as everything else, and the profile the panel loaded carries the current value, so a
+  // save that only changed the display name must not re-state it. The presence wire would refuse
+  // the field outright, so a patch that omitted it would be a save that silently did nothing.
+  const withStatus = { ...PROFILE, customStatus: 'in a meeting' };
+  assert.deepEqual(
+    buildProfilePatch(withStatus, { displayName: 'Ada', bio: '' }, UNCHANGED, {
+      customStatus: 'in a meeting',
+    }),
+    {},
+  );
+  // Surrounding whitespace is the same status, trimmed the way the server stores it.
+  assert.deepEqual(
+    buildProfilePatch(withStatus, { displayName: 'Ada', bio: '' }, UNCHANGED, {
+      customStatus: '  in a meeting  ',
+    }),
+    {},
+  );
+  assert.deepEqual(
+    buildProfilePatch(withStatus, { displayName: 'Ada', bio: '' }, UNCHANGED, {
+      customStatus: 'heading out',
+    }),
+    { customStatus: 'heading out' },
+  );
+  // An absent option and an absent field are both "leave it alone".
+  assert.deepEqual(
+    buildProfilePatch(withStatus, { displayName: 'Ada', bio: '' }, UNCHANGED, {}),
+    {},
+  );
+});
+
+test('emptying the status box is an edit that clears it, not a no-op', () => {
+  // The wire reads an absent field as "keep", so a clear has to send the empty string. A patch
+  // builder that treated empty as "nothing to say" would leave the old status on the server and
+  // the box would refill on the next load.
+  const withStatus = { ...PROFILE, customStatus: 'in a meeting' };
+  assert.deepEqual(
+    buildProfilePatch(withStatus, { displayName: 'Ada', bio: '' }, UNCHANGED, { customStatus: '' }),
+    { customStatus: '' },
+  );
+  // And clearing a status that was already empty changes nothing.
+  assert.deepEqual(
+    buildProfilePatch(PROFILE, { displayName: 'Ada', bio: '' }, UNCHANGED, { customStatus: '  ' }),
     {},
   );
 });

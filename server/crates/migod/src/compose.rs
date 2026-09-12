@@ -176,11 +176,26 @@ fn bucket_admits(key: Id, bit: u64, percent: u8) -> bool {
 /// the listener (or refuses to start) on the same condition, which keeps the advertised set and
 /// the served set from ever disagreeing. The WebSocket route on the HTTP listener is always
 /// bound and always serves the web client; TCP is the native clients' default transport, QUIC
-/// the second option (section 138). `disabled` can only remove bits: a feature the build does
-/// not advertise cannot be switched on by configuration.
+/// the second option (section 138).
+///
+/// `FEDERATION` follows the same listener-conditional rule for the same reason: the bit says
+/// "this node speaks the server-to-server mesh", and a node with no `node.mesh_bind` has no mesh
+/// listener to speak it with, so it must not promise the bit (section 169).
+///
+/// `VOICE_NOTE`, `GROUP_CALL`, and `RICH_PRESENCE` are advertised unconditionally: the surfaces
+/// they describe are part of this build and not tied to a listener. The three are informational
+/// or field-level gates rather than opcode gates — voice notes ride the MEDIA opcodes and
+/// MESSAGE_SEND every deployed client already uses, the SFU opcodes are deliberately not gated
+/// on GROUP_CALL (the calls section records that server decision), and RICH_PRESENCE's own
+/// surface is `PROFILE_UPDATE.custom_status`, which the profile handler refuses unless the
+/// session negotiated the bit.
+///
+/// `disabled` can only remove bits: a feature the build does not advertise cannot be switched on
+/// by configuration.
 fn advertised_features(
     quic_enabled: bool,
     tcp_enabled: bool,
+    mesh_enabled: bool,
     disabled: &[String],
 ) -> anyhow::Result<u64> {
     let mut features = FEATURES;
@@ -189,11 +204,17 @@ fn advertised_features(
     // web and Android transports inflate a batch on arrival. Advertising it here is what turns
     // the writer's coalescing on; a client that did not ask keeps one frame per send.
     features |= migo_protocol::features::BATCHING;
+    features |= migo_protocol::features::VOICE_NOTE
+        | migo_protocol::features::GROUP_CALL
+        | migo_protocol::features::RICH_PRESENCE;
     if quic_enabled {
         features |= migo_protocol::features::QUIC;
     }
     if tcp_enabled {
         features |= migo_protocol::features::TCP_TRANSPORT;
+    }
+    if mesh_enabled {
+        features |= migo_protocol::features::FEDERATION;
     }
     for name in disabled {
         let bit = feature_bit(name).with_context(|| {
@@ -300,9 +321,11 @@ pub struct App {
     /// exact instance at `/metrics`. Held here so an integration test can render it directly and
     /// assert that nothing sensitive ever reached a metric, without driving an HTTP request.
     pub registry: Arc<Registry>,
-    /// The feature set this node advertises in the handshake and `/v1/config`: `CALLS` always,
-    /// plus `QUIC` exactly when the optional second listener is bound. Held here so a test can
-    /// assert the advertised set and the served set never disagree.
+    /// The feature set this node advertises in the handshake and `/v1/config`, as the private
+    /// `advertised_features` helper settles it: `CALLS`, `BATCHING`, `VOICE_NOTE`, `GROUP_CALL`, and
+    /// `RICH_PRESENCE` always, `QUIC` and `TCP_TRANSPORT` exactly when their listeners are bound,
+    /// and `FEDERATION` exactly while the mesh listener is. Held here so a test can assert the
+    /// advertised set and the served set never disagree.
     pub features: u64,
     /// The socket address the server binds, taken from the HTTP configuration.
     pub bind: String,
@@ -667,13 +690,14 @@ impl App {
         ));
 
         // The advertised feature set must be settled before the gateway opens: the QUIC and
-        // TCP_TRANSPORT bits are only there when their listeners are configured, the kill
-        // switch (section 175) removes the bits the operator switched off, and the gateway
-        // masks every client's requested features against exactly this set — trimmed per
-        // session by the staged rollout below when one is configured.
+        // TCP_TRANSPORT bits are only there when their listeners are configured, FEDERATION only
+        // while the mesh listener is, the kill switch (section 175) removes the bits the operator
+        // switched off, and the gateway masks every client's requested features against exactly
+        // this set — trimmed per session by the staged rollout below when one is configured.
         let features = advertised_features(
             config.quic.bind.is_some(),
             config.tcp.bind.is_some(),
+            config.node.mesh_bind.is_some(),
             &config.features.disabled,
         )
         .context("features: the advertised set cannot be built")?;
@@ -975,15 +999,15 @@ mod tests {
     #[test]
     fn the_kill_switch_removes_named_bits_and_refuses_unknown_names() {
         use migo_protocol::features;
-        let base = advertised_features(true, true, &[]).expect("no kill switch builds");
+        let base = advertised_features(true, true, true, &[]).expect("no kill switch builds");
         assert!(base & features::QUIC != 0, "the QUIC listener is on");
         assert!(base & features::BATCHING != 0);
 
-        let killed = advertised_features(true, true, &["quic".into(), "calls".into()])
+        let killed = advertised_features(true, true, true, &["quic".into(), "calls".into()])
             .expect("known names build");
         assert_eq!(killed, base & !features::QUIC & !features::CALLS);
 
-        let error = advertised_features(true, true, &["teapot".into()])
+        let error = advertised_features(true, true, true, &["teapot".into()])
             .expect_err("an unknown name must stop the node");
         assert!(
             error.to_string().contains("teapot"),

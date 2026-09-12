@@ -95,12 +95,13 @@ use crate::model::{
     advanced_token, game_status, notification_kind, Account, AccountStatus, AdvanceGame, Appended,
     AuditEntry, BadgeAward, Bot, CappedXpAward, Conversation, ConversationMember,
     ConversationPosition, ConversationSummary, Currency, Cursor, Device, DeviceStatus, Entitlement,
-    GameSession, Gender, GiftReceipt, GiftSent, GlobalAdmin, IdentityKeyStatus, KeyBundle,
-    LedgerAccount, LedgerAccountKind, LedgerLeg, LedgerTransaction, MediaObject, NewAccount,
-    NewBot, NewDevice, NewGame, NewMessage, NewModerationAction, NewOutboxEvent, NewPeer, NewRoom,
-    NewSession, NewTransaction, NewXpAward, Notification, OutboxRecord, Patch, PeerRecord, Posted,
-    Profile, ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Receipt,
-    Relationship, Report, RevokeReason, Room, RoomMember, RoomNetworkBan, Scope, Session, Standing,
+    EntitlementPosition, GameSession, Gender, GiftReceipt, GiftSent, GlobalAdmin,
+    IdentityKeyStatus, KeyBundle, LedgerAccount, LedgerAccountKind, LedgerLeg, LedgerPosition,
+    LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice, NewGame, NewMessage,
+    NewModerationAction, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward,
+    Notification, NotificationPosition, OutboxRecord, Patch, PeerRecord, Posted, Profile,
+    ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship,
+    Report, RevokeReason, Room, RoomMember, RoomNetworkBan, RoomPosition, Scope, Session, Standing,
     StoredMessage, Visibility, WalletStatus, XpCaps, XpChange,
 };
 use crate::traits::{
@@ -372,6 +373,7 @@ impl From<entity::profile::Model> for Profile {
             who_can_message: Visibility::from_i16(row.who_can_message),
             who_can_add: Visibility::from_i16(row.who_can_add),
             searchable: row.searchable,
+            custom_status: row.custom_status,
             updated_at: instant_of(row.updated_at),
         }
     }
@@ -988,6 +990,7 @@ impl AccountStore for PostgresStore {
             who_can_message: Set(profile.who_can_message.to_i16()),
             who_can_add: Set(profile.who_can_add.to_i16()),
             searchable: Set(profile.searchable),
+            custom_status: Set(profile.custom_status),
             updated_at: Set(stamp_of(profile.updated_at)),
         })
         .exec_with_returning(&self.db)
@@ -1065,6 +1068,12 @@ impl AccountStore for PostgresStore {
         }
         if let Some(value) = patch.searchable {
             update = update.col_expr(entity::profile::Column::Searchable, Expr::val(value));
+        }
+        if !patch.custom_status.is_keep() {
+            update = update.col_expr(
+                entity::profile::Column::CustomStatus,
+                Expr::val(patch_value(&patch.custom_status).cloned()),
+            );
         }
 
         update
@@ -1915,6 +1924,70 @@ fn keyset_after(position: ConversationPosition) -> Condition {
             .add(entity::conversation::Column::LastMessageAt.is_null())
             .add(tie),
     }
+}
+
+/// The inbox keyset: strictly after `position` in creation-descending, id-descending
+/// order — the SQL restatement of [`crate::model::NotificationPosition::precedes`].
+fn notification_keyset_after(position: NotificationPosition) -> Condition {
+    let created = stamp_of(position.created_at);
+    let id = uuid_of(position.notification_id);
+    Condition::any()
+        .add(entity::notification::Column::CreatedAt.lt(created))
+        .add(
+            Condition::all()
+                .add(entity::notification::Column::CreatedAt.eq(created))
+                .add(entity::notification::Column::NotificationId.lt(id)),
+        )
+}
+
+/// The browse keyset: strictly after `position` in member-count-descending,
+/// creation-ascending, id-ascending order — the SQL restatement of
+/// [`crate::model::RoomPosition::precedes`].
+fn room_keyset_after(position: RoomPosition) -> Condition {
+    let created = stamp_of(position.created_at);
+    let id = uuid_of(position.room_id);
+    Condition::any()
+        .add(entity::room::Column::MemberCount.lt(position.member_count))
+        .add(
+            Condition::all()
+                .add(entity::room::Column::MemberCount.eq(position.member_count))
+                .add(entity::room::Column::CreatedAt.gt(created)),
+        )
+        .add(
+            Condition::all()
+                .add(entity::room::Column::MemberCount.eq(position.member_count))
+                .add(entity::room::Column::CreatedAt.eq(created))
+                .add(entity::room::Column::RoomId.gt(id)),
+        )
+}
+
+/// The statement keyset: strictly after `position` in posting-descending,
+/// id-descending order — the SQL restatement of
+/// [`crate::model::LedgerPosition::precedes`].
+fn ledger_keyset_after(position: LedgerPosition) -> Condition {
+    let created = stamp_of(position.created_at);
+    let id = uuid_of(position.tx_id);
+    Condition::any()
+        .add(entity::ledger_entry::Column::CreatedAt.lt(created))
+        .add(
+            Condition::all()
+                .add(entity::ledger_entry::Column::CreatedAt.eq(created))
+                .add(entity::ledger_entry::Column::TxId.lt(id)),
+        )
+}
+
+/// The entitlements keyset: strictly after `position` in acquisition-ascending,
+/// code-ascending order — the SQL restatement of
+/// [`crate::model::EntitlementPosition::precedes`].
+fn entitlement_keyset_after(position: EntitlementPosition) -> Condition {
+    let acquired = stamp_of(position.acquired_at);
+    Condition::any()
+        .add(entity::entitlement::Column::AcquiredAt.gt(acquired))
+        .add(
+            Condition::all()
+                .add(entity::entitlement::Column::AcquiredAt.eq(acquired))
+                .add(entity::entitlement::Column::Sku.gt(position.sku)),
+        )
 }
 
 #[async_trait]
@@ -3127,7 +3200,12 @@ impl RoomStore for PostgresStore {
         Ok(())
     }
 
-    async fn browse_rooms(&self, kind: Option<RoomKindFilter>, limit: u16) -> Result<Vec<Room>> {
+    async fn browse_rooms(
+        &self,
+        kind: Option<RoomKindFilter>,
+        after: Option<RoomPosition>,
+        limit: u16,
+    ) -> Result<Vec<Room>> {
         // Busiest first, which is what a directory is for; then oldest, then by id
         // so the order is total. `archived_at is null` and the kind together are the
         // partial index `room_browse_idx` was built for.
@@ -3141,6 +3219,9 @@ impl RoomStore for PostgresStore {
             query = query.filter(entity::room::Column::Kind.eq(wire_i16(wanted.to_wire())));
         }
         let rows = query
+            .apply_if(after, |query, position| {
+                query.filter(room_keyset_after(position))
+            })
             .order_by_desc(entity::room::Column::MemberCount)
             .order_by_asc(entity::room::Column::CreatedAt)
             .order_by_asc(entity::room::Column::RoomId)
@@ -4794,16 +4875,21 @@ impl EconomyStore for PostgresStore {
     async fn ledger_history(
         &self,
         ledger_account_id: Id,
+        after: Option<LedgerPosition>,
         limit: u16,
     ) -> Result<Vec<(LedgerTransaction, i64)>> {
         // Three bounded queries rather than one join: the page is at most `MAX_PAGE`
         // entries, and a join that repeats every transaction once per leg would have
         // to be de-duplicated here anyway.
-        let statement: Vec<(Uuid, i64)> = entity::ledger_entry::Entity::find()
+        let mut statement = entity::ledger_entry::Entity::find()
             .select_only()
             .column(entity::ledger_entry::Column::TxId)
             .column(entity::ledger_entry::Column::Amount)
-            .filter(entity::ledger_entry::Column::AccountId.eq(uuid_of(ledger_account_id)))
+            .filter(entity::ledger_entry::Column::AccountId.eq(uuid_of(ledger_account_id)));
+        if let Some(position) = after {
+            statement = statement.filter(ledger_keyset_after(position));
+        }
+        let statement: Vec<(Uuid, i64)> = statement
             .order_by_desc(entity::ledger_entry::Column::CreatedAt)
             .order_by_desc(entity::ledger_entry::Column::TxId)
             .order_by_desc(entity::ledger_entry::Column::LegIndex)
@@ -4956,11 +5042,20 @@ impl EconomyStore for PostgresStore {
             .collect())
     }
 
-    async fn entitlements(&self, account_id: Id) -> Result<Vec<Entitlement>> {
+    async fn entitlements(
+        &self,
+        account_id: Id,
+        after: Option<EntitlementPosition>,
+        limit: u16,
+    ) -> Result<Vec<Entitlement>> {
         Ok(entity::entitlement::Entity::find()
             .filter(entity::entitlement::Column::AccountId.eq(uuid_of(account_id)))
+            .apply_if(after, |query, position| {
+                query.filter(entitlement_keyset_after(position))
+            })
             .order_by_asc(entity::entitlement::Column::AcquiredAt)
             .order_by_asc(entity::entitlement::Column::Sku)
+            .limit(clamp_limit(limit) as u64)
             .all(&self.db)
             .await
             .context("entitlements")?
@@ -5615,6 +5710,7 @@ impl BotStore for PostgresStore {
             who_can_message: Set(Visibility::Friends.to_i16()),
             who_can_add: Set(Visibility::Everyone.to_i16()),
             searchable: Set(true),
+            custom_status: Set(None),
             updated_at: Set(created_at),
         })
         .exec_without_returning(&transaction)
@@ -6104,13 +6200,21 @@ impl NotifyStore for PostgresStore {
         Ok(row.into())
     }
 
-    async fn notifications(&self, account_id: Id, limit: u16) -> Result<Vec<Notification>> {
+    async fn notifications(
+        &self,
+        account_id: Id,
+        after: Option<NotificationPosition>,
+        limit: u16,
+    ) -> Result<Vec<Notification>> {
         // Newest first, matching `notification_inbox_idx`. The tie-break on the id is
         // not decoration: two notifications can share a millisecond, and a page
         // boundary that falls between them would otherwise show one of them twice or
         // neither.
         Ok(entity::notification::Entity::find()
             .filter(entity::notification::Column::AccountId.eq(uuid_of(account_id)))
+            .apply_if(after, |query, position| {
+                query.filter(notification_keyset_after(position))
+            })
             .order_by_desc(entity::notification::Column::CreatedAt)
             .order_by_desc(entity::notification::Column::NotificationId)
             .limit(clamp_limit(limit) as u64)
