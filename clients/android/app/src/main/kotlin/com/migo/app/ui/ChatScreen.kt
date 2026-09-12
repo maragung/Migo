@@ -320,6 +320,7 @@ fun ChatScreen(
         Column(modifier = Modifier.fillMaxSize()) {
             ChatHeader(
                 chat = chat,
+                avatarBytes = avatarBytes,
                 onLeave = onLeave,
                 onOpenMembers = onOpenMembers,
                 onOpenGames = { gamesOpen.value = true },
@@ -509,6 +510,7 @@ fun ChatScreen(
 @Composable
 private fun ChatHeader(
     chat: ChatState,
+    avatarBytes: Map<Id, ByteArray>,
     onLeave: (() -> Unit)?,
     onOpenMembers: (() -> Unit)?,
     onOpenGames: () -> Unit,
