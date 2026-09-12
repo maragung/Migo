@@ -125,6 +125,50 @@ fun formatBytes(sizeBytes: Long): String {
     return String.format("%.1f MB", kb / 1024.0)
 }
 
+/** How many bars a recorded waveform folds into, and what a bubble renders at most. */
+const val WAVEFORM_BARS: Int = 50
+
+/**
+ * One sampled amplitude as the 0–255 bar byte a waveform carries: [MediaRecorder.getMaxAmplitude]
+ * tops out at 32767, and the fold below and the receiver's renderer both speak bytes.
+ */
+fun amplitudeToBar(amplitude: Int): Int {
+    val clamped = if (amplitude in 0..32767) amplitude else 0
+    return clamped * 255 / 32767
+}
+
+/**
+ * Folds a stream of sampled amplitudes into the fixed-width bar chart a bubble renders — the same
+ * fold the web client's `downsampleWaveform` keeps, so a note recorded on either client carries
+ * the same shape of preview.
+ *
+ * Each output bar is the *maximum* sample in its slice, because a peak — not an average — is what
+ * a waveform bar is drawn from: a syllable landing inside a bucket must show, and averaging would
+ * flatten it into the silence around it. The output is always exactly `barCount` bytes: an input
+ * shorter than the bar count pads with silence at the tail, an empty input is all silence, and
+ * values are clamped to the 0–255 byte. The fold also runs over hostile receiver-supplied
+ * waveforms at render time, so it degrades gracefully rather than throwing.
+ */
+fun downsampleWaveform(samples: IntArray, barCount: Int = WAVEFORM_BARS): ByteArray {
+    val bars = ByteArray(barCount)
+    if (samples.isEmpty() || barCount <= 0) {
+        return bars
+    }
+    val bucketSize = maxOf(1, (samples.size + barCount - 1) / barCount)
+    for (i in samples.indices) {
+        val value = samples[i]
+        val clamped = if (value in 0..255) value else 0
+        val barIndex = minOf(barCount - 1, i / bucketSize)
+        // The stored bar reads back signed — a 200 is a -56 as a Byte — so the comparison
+        // unwraps it to its unsigned value first; compared raw, the tail's quiet samples would
+        // overwrite every peak above 127 the fold had already kept.
+        if (clamped > (bars[barIndex].toInt() and 0xFF)) {
+            bars[barIndex] = clamped.toByte()
+        }
+    }
+    return bars
+}
+
 /** The neutral claim an upload whose real type is unknown falls back to. */
 private fun claimMime(mimeType: String): String = mimeType.ifBlank { "application/octet-stream" }
 
@@ -256,6 +300,7 @@ suspend fun uploadVoiceNote(
     containerMime: String,
     durationMs: Long,
     endToEnd: Boolean,
+    waveform: ByteArray? = null,
 ): Content.VoiceNoteRef {
     if (durationMs > VOICE_NOTE_MAX_MS) {
         throw AttachmentRefusal("Voice notes are capped at 5 minutes.")
@@ -273,7 +318,7 @@ suspend fun uploadVoiceNote(
         )
         return voiceContent(
             mediaId, claim, bytes.size.toLong(), durationMs,
-            LEGACY_PLAINTEXT_KEY, LEGACY_PLAINTEXT_NONCE,
+            LEGACY_PLAINTEXT_KEY, LEGACY_PLAINTEXT_NONCE, waveform,
         )
     }
 
@@ -289,7 +334,7 @@ suspend fun uploadVoiceNote(
     )
     return voiceContent(
         mediaId, claim, bytes.size.toLong(), durationMs,
-        sealed.key, sealed.nonce,
+        sealed.key, sealed.nonce, waveform,
     )
 }
 
@@ -301,6 +346,7 @@ private fun voiceContent(
     durationMs: Long,
     key: ByteArray,
     nonce: ByteArray,
+    waveform: ByteArray? = null,
 ): Content.VoiceNoteRef = Content.VoiceNoteRef(
     mediaId = mediaId,
     mimeType = mimeType,
@@ -308,4 +354,5 @@ private fun voiceContent(
     durationMs = durationMs,
     key = key,
     nonce = nonce,
+    waveform = waveform,
 )

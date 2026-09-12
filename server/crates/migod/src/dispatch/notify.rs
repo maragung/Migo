@@ -80,10 +80,7 @@ pub(crate) async fn handle_list(
         ctx.now(),
     );
     let request: InboxReq = from_frame(frame).map_err(fault::from_wire)?;
-    let after = match request.cursor.as_deref() {
-        Some(text) => Some(cursor::decode(text)?),
-        None => None,
-    };
+    let after = request.cursor.as_deref().map(cursor::decode).transpose()?;
     let limit = request.limit as u16;
     let inbox = svc.inbox(&caller, limit, after).await?;
     let items: Vec<InboxItem> = inbox
@@ -104,16 +101,16 @@ pub(crate) async fn handle_list(
     // makes: it may turn out to name the end of the inbox, which costs the client
     // one request that comes back empty, rather than fetching one row past the
     // page on every request to answer a question most callers never ask.
-    let next_cursor = (items.len() == usize::from(limit.min(MAX_INBOX_PAGE)))
-        .then(|| {
-            inbox.items.last().map(|item| {
-                cursor::encode(NotificationPosition {
-                    created_at: item.at,
-                    notification_id: item.notification_id,
-                })
+    let next_cursor = if items.len() == usize::from(limit.min(MAX_INBOX_PAGE)) {
+        inbox.items.last().map(|item| {
+            cursor::encode(NotificationPosition {
+                created_at: item.at,
+                notification_id: item.notification_id,
             })
         })
-        .flatten();
+    } else {
+        None
+    };
     ctx.reply(&InboxResponse { items, next_cursor })
 }
 

@@ -58,6 +58,7 @@ export {
   type Fragment,
   type Frame,
   type FrameHeader,
+  type MetadataBlock,
   type TraceContext,
 } from './frame.js';
 

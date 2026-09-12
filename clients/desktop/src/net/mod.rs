@@ -5502,7 +5502,10 @@ impl Worker {
     /// Fires the wallet's whole economy: six reads, each arriving as its own event.
     async fn request_wallet(&mut self) {
         self.request(Opcode::BalanceFetch, &WalletReq {}).await;
-        let ledger = LedgerReq { limit: Some(10) };
+        let ledger = LedgerReq {
+            limit: Some(10),
+            cursor: None,
+        };
         self.request(Opcode::LedgerHistory, &ledger).await;
         if let Some(signed) = self.signed.as_ref() {
             let me = signed.account.account_id;

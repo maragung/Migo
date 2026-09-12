@@ -58,6 +58,12 @@ pub fn encode(position: NotificationPosition) -> String {
 /// which is a client bug rather than an attack: the cursor names a position in
 /// the caller's own inbox, and every row that comes back is a row that was
 /// already theirs.
+///
+/// # Errors
+///
+/// `VALIDATION_FAILED` naming `cursor`: a version this build did not issue, a
+/// missing field, trailing data, a time that is not a number, or an identifier
+/// that is not one. The reason reaches the server's logs and not the client.
 pub fn decode(cursor: &str) -> Result<NotificationPosition> {
     let mut parts = cursor.split(SEPARATOR);
     let version = parts.next().unwrap_or_default();

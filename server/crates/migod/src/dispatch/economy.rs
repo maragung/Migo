@@ -244,10 +244,11 @@ pub(crate) async fn handle_entitlements(
     let limit = request
         .limit
         .map_or(MAX_PAGE, |limit| limit.clamp(1, u32::from(MAX_PAGE)) as u16);
-    let after = match request.cursor.as_deref() {
-        Some(text) => Some(cursor::entitlements::decode(text)?),
-        None => None,
-    };
+    let after = request
+        .cursor
+        .as_deref()
+        .map(cursor::entitlements::decode)
+        .transpose()?;
     let owned = svc.entitlements(&caller, limit, after).await?;
     let items: Vec<Entitlement> = owned
         .into_iter()
@@ -258,16 +259,16 @@ pub(crate) async fn handle_entitlements(
         .collect();
     // A cursor whenever the page was full — the shelf may continue past it, and
     // the client knows to ask again without requesting an empty page.
-    let next_cursor = (items.len() == usize::from(limit))
-        .then(|| {
-            items.last().map(|item| {
-                cursor::entitlements::encode(&EntitlementPosition {
-                    acquired_at: item.acquired_at,
-                    sku: item.sku.clone(),
-                })
+    let next_cursor = if items.len() == usize::from(limit) {
+        items.last().map(|item| {
+            cursor::entitlements::encode(&EntitlementPosition {
+                acquired_at: item.acquired_at,
+                sku: item.sku.clone(),
             })
         })
-        .flatten();
+    } else {
+        None
+    };
     ctx.reply(&EntitlementsResponse { items, next_cursor })
 }
 

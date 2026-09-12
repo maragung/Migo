@@ -54,6 +54,12 @@ pub mod statement {
 
     /// Parses a cursor a client handed back, refusing anything that is not
     /// exactly this layout.
+    ///
+    /// # Errors
+    ///
+    /// `VALIDATION_FAILED` naming `cursor`: a version this build did not issue, a
+    /// missing field, trailing data, a time that is not a number, or an
+    /// identifier that is not one.
     pub fn decode(cursor: &str) -> Result<LedgerPosition> {
         let mut parts = cursor.split(SEPARATOR);
         let version = parts.next().unwrap_or_default();
@@ -100,6 +106,12 @@ pub mod entitlements {
 
     /// Parses a cursor a client handed back, refusing anything that is not
     /// exactly this layout.
+    ///
+    /// # Errors
+    ///
+    /// `VALIDATION_FAILED` naming `cursor`: a version this build did not issue, a
+    /// missing field, trailing data, a time that is not a number, an empty code,
+    /// or anything else that could not have been issued here.
     pub fn decode(cursor: &str) -> Result<EntitlementPosition> {
         let mut parts = cursor.split(SEPARATOR);
         let version = parts.next().unwrap_or_default();

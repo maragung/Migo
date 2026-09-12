@@ -6201,7 +6201,7 @@ impl NotifyStore for PostgresStore {
         // not decoration: two notifications can share a millisecond, and a page
         // boundary that falls between them would otherwise show one of them twice or
         // neither.
-        entity::notification::Entity::find()
+        Ok(entity::notification::Entity::find()
             .filter(entity::notification::Column::AccountId.eq(uuid_of(account_id)))
             .apply_if(after, |query, position| {
                 query.filter(notification_keyset_after(position))
@@ -6214,7 +6214,7 @@ impl NotifyStore for PostgresStore {
             .context("notifications")?
             .into_iter()
             .map(Into::into)
-            .collect()
+            .collect())
     }
 
     async fn unread_notifications(&self, account_id: Id) -> Result<u32> {

@@ -19,12 +19,12 @@ export const ERROR = 0x08;
 export const ACK_REQUIRED = 0x10;
 /** A fragment index and total precede the payload. */
 export const FRAGMENT = 0x20;
-/** Reserved for a future version. Setting it is a decode error today. */
-export const RESERVED_6 = 0x40;
+/** varint frame_seq, varint sent_at_delta, and optional varint payload_len precede the payload. */
+export const METADATA = 0x40;
 /** Reserved as a flags-extension escape. Setting it is a decode error today. */
 export const FLAGS_EXT = 0x80;
 
 /** Bits that must be zero in MWP/1. */
-export const RESERVED_MASK = RESERVED_6 | FLAGS_EXT;
+export const RESERVED_MASK = FLAGS_EXT;
 /** Bits this version defines. */
-export const KNOWN_MASK = COMPRESSED | TRACED | BATCH | ERROR | ACK_REQUIRED | FRAGMENT;
+export const KNOWN_MASK = COMPRESSED | TRACED | BATCH | ERROR | ACK_REQUIRED | FRAGMENT | METADATA;
