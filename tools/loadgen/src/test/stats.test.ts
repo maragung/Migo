@@ -188,7 +188,7 @@ test('describeError leads with the field a server refusal blamed', () => {
     'username: VALIDATION_FAILED: username may contain only letters, digits, dots, and underscores',
   );
   // No field, and the SDK's symbol-prefixed message stands on its own.
-  const fieldless = new RemoteError(1603, 'RATE_LIMITED', 'RATE_LIMITED: slow down');
+  const fieldless = new RemoteError(1603, 'RATE_LIMITED', 'slow down');
   assert.equal(describeError(fieldless), 'RATE_LIMITED: slow down');
 });
 
