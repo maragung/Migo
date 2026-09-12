@@ -14,8 +14,8 @@
 //! whose home node sits behind that link (sections 170, 173). And a
 //! **producer** — the rooms or messaging layer with an event bound for another region — uses
 //! the outbox: [`enqueue`](Mesh::enqueue) to hand it over, then a drainer walks
-//! [`due`](Mesh::due), [`mark_delivered`](Mesh::mark_delivered) and
-//! [`mark_failed`](Mesh::mark_failed).
+//! [`due`](Mesh::due), [`mark_delivered`](Mesh::mark_delivered),
+//! [`mark_failed`](Mesh::mark_failed), and [`observe_peer_lag`](Mesh::observe_peer_lag).
 //!
 //! There is deliberately no method that opens a socket, no method that reads a payload, and
 //! no method by which a peer admits itself. The transport is the gateway's; the payload is a
@@ -59,6 +59,26 @@ pub trait Mesh: Send + Sync {
     /// row survives every state so a block is reversible without a fresh key exchange. Fails
     /// as [`not_found`](migo_protocol::fault::not_found) if the peer is not in the allow-list.
     async fn set_peer_status(&self, node_id: Id, status: PeerStatus) -> Result<PeerView>;
+
+    /// Reads how far a peer has fallen behind and moves its status accordingly.
+    ///
+    /// The drainer calls this once per peer after a drain pass settles, because a pass is
+    /// the moment the outbox's depth is a fact about the link rather than a guess. An
+    /// allowed peer whose undelivered events aimed at it exceed the configured watermark
+    /// becomes [`Degraded`](PeerStatus::Degraded); a degraded peer that has caught up to
+    /// half the watermark becomes [`Allowed`](PeerStatus::Allowed) again — half, so a depth
+    /// hovering at the threshold cannot flap the status. The transitions are
+    /// compare-and-set, so an operator's pause or block is never overwritten by them, and
+    /// they are the only automatic ones: this method never touches a paused or blocked
+    /// row.
+    ///
+    /// Degraded is signalling, not policy (section 173): a degraded peer still federates
+    /// and still receives everything owed to it, because section 153's at-least-once
+    /// guarantee is not the marking's to bend. The transition is written to the peer's row
+    /// so the operator surfaces — the allow-list view, the directory — carry it, and the
+    /// drainer's log names the peer and the depth when it fires. Fails as
+    /// [`not_found`](migo_protocol::fault::not_found) if the peer is not in the allow-list.
+    async fn observe_peer_lag(&self, node_id: Id) -> Result<PeerView>;
 
     /// Every peer in the allow-list, newest first, bounded by the shared page clamp.
     async fn peers(&self, limit: u16) -> Result<Vec<PeerView>>;

@@ -39,6 +39,7 @@ import com.migo.app.ui.CallOverlay
 import com.migo.app.ui.ChatScreen
 import com.migo.app.ui.ErrorBanner
 import com.migo.app.ui.GamesScreen
+import com.migo.app.ui.GroupCallOverlay
 import com.migo.app.ui.GroupInviteCandidate
 import com.migo.app.ui.LocalCallEglContext
 import com.migo.app.ui.MigoTheme
@@ -98,6 +99,7 @@ class MainActivity : ComponentActivity() {
 private fun MigoApp(model: AppViewModel = viewModel()) {
     val state by model.state.collectAsState()
     val callState by model.callState.collectAsState()
+    val groupCallState by model.groupCallState.collectAsState()
     // The theme preference is collected here — the composition root, the one place that both
     // holds the view model and wraps everything the theme colours. "System" is the system's own
     // dark fact; the other two choices are the person's word over it.
@@ -256,6 +258,19 @@ private fun MigoApp(model: AppViewModel = viewModel()) {
                     remoteVideo = remoteVideo,
                 )
             }
+
+            // The group-call overlay renders above the call overlay — the web layout's own order —
+            // and renders nothing at all when this device holds no group-call seat, lost one
+            // without a note, or failed to join. The roster's names are resolved here at the
+            // composition root, the same place the call overlay resolves its peer's, and the
+            // "you" mark is the signed-in account's own id.
+            GroupCallOverlay(
+                state = groupCallState,
+                names = model::displayName,
+                meId = (state as? AppState.SignedIn)?.accountId,
+                onLeave = model::leaveGroupCall,
+                onDismiss = model::dismissGroupCall,
+            )
         }
     }
 }
@@ -414,6 +429,14 @@ private fun ShellScreen(
                     selfId = state.accountId,
                     onAcknowledgeSafety = model::acknowledgeSafetyChange,
                     onStartCall = { peerId, video -> onRequestCall(open.conversationId, peerId, video) },
+                    // The group-call join rides the same header: offered only for a group, the
+                    // web client's own gate — a direct chat has the 1:1 buttons and a room has
+                    // no group call to join.
+                    onJoinGroupCall = if (open.kind == ConversationKind.Group) {
+                        { model.joinGroupCall(open.conversationId) }
+                    } else {
+                        null
+                    },
                     onExportLog = { model.shareChatLog(open.conversationId) },
                     onToggleSearch = model::toggleChatSearch,
                     onSearchQuery = model::setChatSearchQuery,

@@ -13,6 +13,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.migo.app.call.CallManager
 import com.migo.app.call.CallUiState
+import com.migo.app.call.GroupCallManager
+import com.migo.app.call.GroupCallUiState
 import com.migo.app.call.MICROPHONE_UNAVAILABLE
 import com.migo.app.media.MEDIA_SEAL_DOMAIN
 import com.migo.app.media.VOICE_NOTE_MAX_MS
@@ -195,6 +197,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      * sessions changing underneath it.
      */
     val callState: StateFlow<CallUiState> = _callState.asStateFlow()
+
+    /**
+     * The live session's group-call manager: one per session, bridged in [attach] and closed in
+     * [detach]. The same one-object discipline the 1:1 manager keeps -- the screens see only the
+     * [groupCallState] it is projected into and the action methods below.
+     */
+    private var groupCallManager: GroupCallManager? = null
+
+    private val _groupCallState = MutableStateFlow(GroupCallUiState())
+
+    /** The group-call overlay's state, forwarded from the session's group-call manager. */
+    val groupCallState: StateFlow<GroupCallUiState> = _groupCallState.asStateFlow()
+
+    private var groupCallStateJob: Job? = null
 
     /**
      * The user's preferences, as a stable flow of the store's own snapshots.
@@ -929,6 +945,26 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** Dismisses the ended screen (or a placement error), leaving no call tracked. */
     fun dismissCallScreen() {
         callManager?.dismissCall()
+    }
+
+    // --- group calls ---
+
+    /**
+     * Joins the conversation's group call: the roster overlay comes up and the seat is requested
+     * with the sealed placeholder offer, exactly the web client's own flow.
+     */
+    fun joinGroupCall(conversationId: Id) {
+        groupCallManager?.joinGroupCall(conversationId)
+    }
+
+    /** Leaves the tracked group call, turning its screen to the "left" note. */
+    fun leaveGroupCall() {
+        groupCallManager?.leaveGroupCall()
+    }
+
+    /** Dismisses the ended group-call screen (or its failure card), leaving nothing tracked. */
+    fun dismissGroupCall() {
+        groupCallManager?.dismissGroupCall()
     }
 
     /** This side's camera track on the live call, for the call screen's self-view. Null off one. */
@@ -4520,6 +4556,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+        // The group-call manager: one per session, the same shape as the 1:1 one. It owns the
+        // tracked roster and the four end notes; its overlay state is forwarded into this class's
+        // stable flow for the same reason the call's is. The device id is the manager's own half
+        // of the moved-to-another-device test, taken from the session it will observe.
+        val groups = GroupCallManager(
+            client = opened.client,
+            accountId = opened.client.accountId,
+            ownDeviceId = opened.client.deviceId,
+            scope = viewModelScope,
+            closingScope = getApplication<MigoApplication>().scope,
+        )
+        groupCallManager = groups
+        subscriptions.addAll(groups.attach())
+        groupCallStateJob?.cancel()
+        groupCallStateJob = viewModelScope.launch {
+            groups.state.collect { _groupCallState.value = it }
+        }
         refreshConversations()
         // The wallet's combined read also fills the banner's $MIG balance, so the session starts
         // with it -- the desktop client issues its wallet command at sign-in for the same reason.
@@ -4583,11 +4636,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun detach() {
         callStateJob?.cancel()
         callStateJob = null
+        groupCallStateJob?.cancel()
+        groupCallStateJob = null
         // The manager's close does more than the subscriptions below: it tears down the microphone
         // and the peer connection, and fires the session's last CALL_END on the application's
         // scope -- the one still alive when the view model is being cleared.
         callManager?.close()
         callManager = null
+        // The group-call manager's close fires the session's last best-effort leave on the same
+        // outliving scope, for the same reason.
+        groupCallManager?.close()
+        groupCallManager = null
         stagedCall = null
         // A recording in flight dies with the session it was for; its bytes deliberately do not.
         // The draft store owns them now — brief 179's rule is that a recording survives the app
@@ -4602,6 +4661,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         abandonNoteFocus()
         stagedVoiceNote = null
         _callState.value = CallUiState()
+        _groupCallState.value = GroupCallUiState()
         subscriptions.forEach { it.cancel() }
         subscriptions.clear()
     }
@@ -4613,6 +4673,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             // Reconnecting session does not end anything -- media keeps flowing peer to peer while
             // the signaling reconnects.
             callManager?.onConnectionState(next)
+            groupCallManager?.onConnectionState(next)
             signedIn { it.copy(connection = next) }
         },
         onError = { failure ->

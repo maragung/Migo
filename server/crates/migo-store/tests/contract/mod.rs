@@ -3690,6 +3690,138 @@ pub async fn a_game_token_moves_even_within_one_millisecond(store: &SharedStore)
     );
 }
 
+// --- federation -----------------------------------------------------------
+//
+// The allow-list is the mesh's boundary, and the two contracts here pin the
+// pieces the runtime drives itself: a status transition that carries its own
+// precondition, so an operator's decision cannot be overwritten by a stale one,
+// and a per-peer backlog count that treats a backoff wait and a fresh queue
+// entry exactly the same — both are owed.
+
+/// One allow-list row the federation cases share, admitted allowed.
+async fn admitted_peer(store: &SharedStore, node: u128) {
+    store
+        .add_peer(NewPeer {
+            node_id: id(node).to_string(),
+            public_key: vec![u8::try_from(node % 0x80).expect("in range"); 32],
+            base_url: format!("wss://node-{node}.example:19090"),
+            region: format!("region-{node}"),
+            status: 0,
+            added_at: ts(1_000),
+        })
+        .await
+        .expect("a fresh allow-list admits the peer");
+}
+
+/// A status transition lands only from the status it names, and never overwrites
+/// the one an operator set in between.
+pub async fn a_status_transition_lands_only_from_the_status_it_names(store: &SharedStore) {
+    admitted_peer(store, 7_100).await;
+    // The transition the runtime would make: allowed (0) to degraded (3).
+    let moved = store
+        .transition_peer_status(&id(7_100).to_string(), 0, 3)
+        .await
+        .expect("the store answers")
+        .expect("the peer exists");
+    assert_eq!(
+        moved.status, 3,
+        "the matching precondition lets the write land"
+    );
+    // The precondition that no longer holds: the row is degraded now, so a
+    // second allowed-to-degraded move is a no-op, not a resurrected flag.
+    let unchanged = store
+        .transition_peer_status(&id(7_100).to_string(), 0, 3)
+        .await
+        .expect("the store answers")
+        .expect("the peer still exists");
+    assert_eq!(unchanged.status, 3, "a stale precondition writes nothing");
+    // The race the compare-and-set exists for: an operator paused the peer (1)
+    // after the runtime read it as degraded, so the runtime's
+    // degraded-to-allowed clear must leave the pause standing.
+    store
+        .set_peer_status(&id(7_100).to_string(), 1)
+        .await
+        .expect("the operator pauses the peer");
+    let paused = store
+        .transition_peer_status(&id(7_100).to_string(), 3, 0)
+        .await
+        .expect("the store answers")
+        .expect("the peer still exists");
+    assert_eq!(
+        paused.status, 1,
+        "an operator's decision is never overwritten"
+    );
+    // An unknown peer is None, exactly as every other peer write reports it.
+    assert!(
+        store
+            .transition_peer_status(&id(7_199).to_string(), 0, 3)
+            .await
+            .expect("the store answers")
+            .is_none(),
+        "a peer the allow-list never held has no status to move"
+    );
+}
+
+/// The depth a peer is owed counts undelivered events alone, whatever their
+/// retry schedule, and no other peer's events.
+pub async fn pending_depth_counts_what_one_peer_is_owed(store: &SharedStore) {
+    admitted_peer(store, 7_101).await;
+    admitted_peer(store, 7_102).await;
+    // Four events: three owed to one peer, one to the other.
+    for (event, peer) in [
+        (8_000u128, 7_101u128),
+        (8_001, 7_101),
+        (8_002, 7_101),
+        (8_003, 7_102),
+    ] {
+        store
+            .enqueue_event(NewOutboxEvent {
+                event_id: id(event),
+                target_node: id(peer).to_string(),
+                opcode: 208,
+                payload: vec![event as u8; 8],
+                created_at: ts(1_000),
+                next_attempt_at: ts(1_000),
+            })
+            .await
+            .expect("an outbox event enqueues");
+    }
+    // A failed attempt reschedules the event; it is still owed.
+    store
+        .mark_failed(id(8_000), ts(10_000), "a link that would not ack")
+        .await
+        .expect("the failure is recorded");
+    assert_eq!(
+        store
+            .pending_depth(&id(7_101).to_string())
+            .await
+            .expect("the store answers"),
+        3,
+        "three undelivered events are owed, backoff or not"
+    );
+    assert_eq!(
+        store
+            .pending_depth(&id(7_102).to_string())
+            .await
+            .expect("the store answers"),
+        1,
+        "each peer's depth counts only its own events"
+    );
+    // Delivery is the only thing that shrinks what a peer is owed.
+    store
+        .mark_delivered(id(8_001), ts(20_000))
+        .await
+        .expect("the delivery is recorded");
+    assert_eq!(
+        store
+            .pending_depth(&id(7_101).to_string())
+            .await
+            .expect("the store answers"),
+        2,
+        "a delivered event leaves the count for good"
+    );
+}
+
 /// Names every case in the suite, so a backend file lists none of them.
 ///
 /// A test that exists but is only wired into one backend is worse than no test:
@@ -3756,5 +3888,7 @@ macro_rules! for_each_contract_case {
         $case!(the_moderation_queue_is_oldest_first_and_resolves_once);
         $case!(the_audit_log_is_newest_first_and_scoped_to_one_target);
         $case!(a_game_token_moves_even_within_one_millisecond);
+        $case!(a_status_transition_lands_only_from_the_status_it_names);
+        $case!(pending_depth_counts_what_one_peer_is_owed);
     };
 }

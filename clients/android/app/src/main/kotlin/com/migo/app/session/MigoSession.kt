@@ -3,6 +3,7 @@ package com.migo.app.session
 import android.content.Context
 import android.os.Build
 import com.migo.core.ConnectionState
+import com.migo.core.DEFAULT_CLIENT_FEATURES
 import com.migo.core.MigoClient
 import com.migo.core.MigoClientOptions
 import com.migo.core.account.AccountError
@@ -19,6 +20,7 @@ import com.migo.core.domain.KeyStore
 import com.migo.core.domain.SdkError
 import com.migo.core.domain.withRotatedIdentityFrom
 import com.migo.core.net.CaptchaProof
+import com.migo.core.protocol.Feature
 import com.migo.core.store.DeviceKeys
 import com.migo.core.store.GatewayScheme
 import com.migo.core.store.RestScheme
@@ -593,6 +595,13 @@ class MigoSession private constructor(
          * The device description is the model and the Android release and nothing more. A device list
          * is a security feature -- it is how someone spots a session they do not recognise -- and the
          * build fingerprint would serve only whoever is fingerprinting.
+         *
+         * The feature set is the SDK's honest default plus the group-call bit. GROUP_CALL is an
+         * opt-in bit outside the SDK's DEFAULT_CLIENT_FEATURES (the same rule the web client's own
+         * HELLO follows): the SDK stays neutral because the bit is a statement about what *this*
+         * client can render, and this app now carries the group-call roster UI -- so it says so.
+         * The server does not gate the SFU opcodes on the bit; announcing it is a claim about this
+         * build, and the negotiated truth is the WELCOME's intersection, not this mask.
          */
         private fun build(
             endpoint: ServerEndpoint,
@@ -610,6 +619,7 @@ class MigoSession private constructor(
                 osVersion = "Android ${Build.VERSION.RELEASE}",
                 deviceModel = Build.MODEL,
                 deviceId = deviceId,
+                features = DEFAULT_CLIENT_FEATURES or Feature.GROUP_CALL,
                 keyStore = keyStore,
                 sessionPersistence = store,
                 groupPersistence = store,

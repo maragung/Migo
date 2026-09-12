@@ -14,7 +14,10 @@
 //!   naming the epoch its view is current at, the runner adopts that epoch
 //!   ([`Mesh::refresh_routing`](migo_federation::Mesh::refresh_routing)) and dials the same
 //!   batch again in the same drain, so a rebalance on the far side costs one refused
-//!   session rather than an operator's manual bump.
+//!   session rather than an operator's manual bump. Every settled pass also observes the
+//!   peer's backlog (`Mesh::observe_peer_lag`), which is where a peer falling behind is
+//!   marked degraded, and one that caught up is allowed again: section 173's slow-link
+//!   signal, recorded without changing a thing the loop delivers.
 //!
 //! # The wire
 //!
@@ -66,7 +69,7 @@ use migo_crypto::node::NONCE_LEN;
 use migo_crypto::{NodeHello, NodeProof};
 #[cfg(test)]
 use migo_federation::model::FederatedEvent;
-use migo_federation::model::{PeerStatus, PendingEvent};
+use migo_federation::model::PendingEvent;
 use migo_federation::{PeerView, SharedMesh};
 use migo_gateway::Gateway;
 use migo_protocol::{fault, from_frame, to_frame, Encode, Frame, Opcode};
@@ -1311,7 +1314,7 @@ impl MeshTransport {
         }
         for (target, events) in groups {
             let peer = match self.mesh.peer(target).await {
-                Ok(peer) if peer.status == PeerStatus::Allowed => peer,
+                Ok(peer) if peer.status.is_allowed() => peer,
                 Ok(_) => continue, // paused or blocked: the events stay queued, unsent
                 Err(error) => {
                     tracing::warn!(%error, "cannot resolve the mesh peer an event names");
@@ -1322,6 +1325,7 @@ impl MeshTransport {
                 Ok(endpoint) => endpoint,
                 Err(error) => {
                     self.settle_failure(&events, now, &error.to_string()).await;
+                    self.observe_lag(target).await;
                     continue;
                 }
             };
@@ -1370,6 +1374,12 @@ impl MeshTransport {
                     self.settle_failure(&events, now, &error.to_string()).await;
                 }
             }
+            // A settled pass is the moment the outbox's depth is a fact about the link
+            // rather than a guess, so the slow-link marking rides it: a peer whose backlog
+            // crossed the watermark is marked degraded here, and one that caught up is
+            // allowed again. Signalling only — the marking never changes what this loop
+            // delivers (section 153), which is why it sits after the delivery, not in it.
+            self.observe_lag(target).await;
         }
         Ok(())
     }
@@ -1403,6 +1413,17 @@ impl MeshTransport {
             }
         };
         deliver_batch(stream, &self.mesh, &self.router, peer, events, now).await
+    }
+
+    /// Reads one peer's backlog depth and records the slow-link marking it implies.
+    ///
+    /// Tolerant by design: a depth the drainer cannot read must not fail a drain that
+    /// already delivered, so the failure is logged and the pass moves on — the next tick
+    /// observes again.
+    async fn observe_lag(&self, target: Id) {
+        if let Err(error) = self.mesh.observe_peer_lag(target).await {
+            tracing::warn!(%error, "cannot observe the mesh peer's backlog");
+        }
     }
 
     /// Reschedules a batch that did not arrive, with the failure the next backoff grows from.

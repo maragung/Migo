@@ -48,6 +48,16 @@
 //! event's next attempt out on an exponential backoff, so a dead region costs a decaying
 //! trickle of retries rather than a hot loop.
 //!
+//! # A slow peer is marked before it is a lost one
+//!
+//! The outbox's depth per peer is also the mesh's slow-link detector. When the events a node
+//! still owes one peer grow past a watermark, [`Mesh::observe_peer_lag`] moves that peer to
+//! [`PeerStatus::Degraded`], and when the peer catches up it moves back — section 173's
+//! demand that a slow node be marked before its backlog exhausts anything. The marking is a signal and only a
+//! signal: a degraded peer still handshakes and still receives every event owed to it,
+//! because the at-least-once promise above is absolute, and the two automatic transitions
+//! never touch a paused or blocked row, which are the operator's alone.
+//!
 //! # What this crate will not do
 //!
 //! It opens no sockets and frames no bytes: the handshake methods take and return the
@@ -76,7 +86,8 @@ pub mod traits;
 
 pub use crate::model::{
     FederatedEvent, MeshConfig, NewPeerSpec, PeerIdentity, PeerStatus, PeerView, PendingEvent,
-    SequenceVerdict, FEDERATION_OPCODE_MAX, FEDERATION_OPCODE_MIN,
+    SequenceVerdict, DEFAULT_DEGRADED_OUTBOX_WATERMARK, FEDERATION_OPCODE_MAX,
+    FEDERATION_OPCODE_MIN,
 };
 pub use crate::service::{open, MeshService};
 pub use crate::traits::{Mesh, SharedMesh};
