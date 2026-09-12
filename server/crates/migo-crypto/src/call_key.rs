@@ -138,8 +138,9 @@ impl CallKeyState {
         )?;
         let next: [u8; CALL_KEY_LEN] =
             material
+                .as_slice()
                 .try_into()
-                .map_err(|material| CryptoError::BadLength {
+                .map_err(|_| CryptoError::BadLength {
                     what: "call key material",
                     expected: CALL_KEY_LEN,
                     actual: material.len(),
@@ -322,7 +323,8 @@ mod tests {
         let mut random = SeededRandom::new(9);
         let mut state = CallKeyState::from_session(SESSION, call_id());
         let mut sealed = state.rotate(&mut random).expect("rotates");
-        sealed[sealed.len() - 1] ^= 1;
+        let last = sealed.len() - 1;
+        sealed[last] ^= 1;
         let mut peer = CallKeyState::from_session(SESSION, call_id());
         assert_eq!(peer.adopt(1, &sealed), Err(CryptoError::DecryptionFailed));
     }
