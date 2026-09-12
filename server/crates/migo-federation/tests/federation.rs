@@ -27,6 +27,13 @@
 //! exponential backoff without losing the event or blocking the queue; an id for a queued
 //! event is minted locally, never taken from a caller; an unbounded batch is clamped.
 //!
+//! **A slow peer is marked, not muted.** When the undelivered events aimed at one peer grow
+//! past a watermark, the peer is marked degraded — section 173's demand that slowness be
+//! visible before it exhausts anything — and the marking changes nothing about delivery:
+//! the peer still handshakes, still receives every event owed to it, and the marking clears
+//! by itself once the peer catches up. The operator's paused and blocked are never touched
+//! by the automatic transitions, in either direction.
+//!
 //! **No series and no error names a node.** Section 174 forbids a metric labelled by account,
 //! and this crate widens that to node, peer, and region: one test renders the whole registry
 //! and reads it for any id, URL, region, or fingerprint, and asserts every refusal reason is
@@ -39,8 +46,8 @@ use migo_core::{Id, Result, SeededRandom, Timestamp};
 use migo_crypto::node::{self, MAX_CLOCK_SKEW_MS, MESH_DOMAIN, MESH_PROTOCOL_VERSION, NONCE_LEN};
 use migo_crypto::{NodeHello, NodeProof, NodeSecret};
 use migo_federation::model::{
-    DEFAULT_BACKOFF_BASE_MS, DEFAULT_BACKOFF_CAP_MS, DEFAULT_DUE_BATCH, DEFAULT_MAX_ATTEMPTS,
-    DEFAULT_NONCE_WINDOW_MS,
+    DEFAULT_BACKOFF_BASE_MS, DEFAULT_BACKOFF_CAP_MS, DEFAULT_DEGRADED_OUTBOX_WATERMARK,
+    DEFAULT_DUE_BATCH, DEFAULT_MAX_ATTEMPTS, DEFAULT_NONCE_WINDOW_MS,
 };
 use migo_federation::{
     FederatedEvent, Mesh, MeshConfig, MeshService, NewPeerSpec, PeerIdentity, PeerStatus, PeerView,
@@ -1612,4 +1619,276 @@ async fn a_single_drain_pass_is_bounded_by_the_due_batch() {
             .expect("enqueues");
     }
     assert_eq!(h.mesh.due(ts(NOW)).await.expect("readable").len(), 2);
+}
+
+// ===========================================================================
+// Invariant 10: the slow-link marking. A peer whose undelivered backlog crosses the
+// degradation watermark is marked degraded — a signal, never a policy change — and the
+// marking clears by itself once the peer has caught up to half the watermark. The
+// operator's paused and blocked are outside the automatic transitions entirely.
+// ===========================================================================
+
+/// A harness with the degradation watermark pinned low, so a handful of queued events is
+/// enough to cross it. The watermark's default is pinned separately, below.
+fn degraded_harness(watermark: u32) -> Harness {
+    Harness::with_config(MeshConfig {
+        degraded_outbox_watermark: watermark,
+        ..MeshConfig::default()
+    })
+}
+
+/// Queues `count` events for `target`, returning them in queue order.
+async fn queue_for(mesh: &MeshService<MemoryStore>, target: Id, count: usize) -> Vec<PendingEvent> {
+    let mut queued = Vec::with_capacity(count);
+    for n in 0..count {
+        let payload = [u8::try_from(n).expect("a test payload stays in range"); 8];
+        let pending = mesh
+            .enqueue(event(target, FEDERATION_OPCODE_MIN, &payload), ts(NOW))
+            .await
+            .expect("a federation-band event enqueues");
+        queued.push(pending);
+    }
+    queued
+}
+
+#[test]
+fn the_default_watermark_sits_above_the_largest_backlog_the_brief_tests() {
+    // Section 173's scenario 10 drains a 300-event backlog as a matter of course — a mass
+    // sync after an outage is traffic, not a fault — so the default watermark must sit
+    // above it or every recovery burst would cry degraded. The pin is a const assertion:
+    // lowering the default past the brief's own scale is a compile error, not a red test.
+    const _: () = assert!(
+        DEFAULT_DEGRADED_OUTBOX_WATERMARK > 300,
+        "the default watermark must clear the brief's 300-event mass-sync backlog"
+    );
+}
+
+#[tokio::test]
+async fn a_zero_degradation_watermark_is_refused_at_construction() {
+    let config = MeshConfig {
+        degraded_outbox_watermark: 0,
+        ..MeshConfig::default()
+    };
+    expect_code(build(config, OUR_REGION), codes::INTERNAL_ERROR);
+}
+
+#[tokio::test]
+async fn a_peer_whose_backlog_crosses_the_watermark_is_marked_degraded() {
+    let h = degraded_harness(4);
+    let slow = peer(41);
+    let brisk = peer(42);
+    h.admit(&slow).await;
+    h.admit(&brisk).await;
+
+    // The control: a backlog at the watermark is a busy peer, not a degraded one. The
+    // marking fires only past it.
+    queue_for(&h.mesh, brisk.node_id, 4).await;
+    let brisk_view = h
+        .mesh
+        .observe_peer_lag(brisk.node_id)
+        .await
+        .expect("the observation reads");
+    assert_eq!(
+        brisk_view.status,
+        PeerStatus::Allowed,
+        "a busy peer is not degraded"
+    );
+
+    // One event further and the peer has fallen behind by more than the sender is willing
+    // to hold quietly: the marking fires, and the view an operator reads carries it.
+    queue_for(&h.mesh, slow.node_id, 5).await;
+    let slow_view = h
+        .mesh
+        .observe_peer_lag(slow.node_id)
+        .await
+        .expect("the observation reads");
+    assert_eq!(slow_view.status, PeerStatus::Degraded);
+
+    // The marking is on the row, not just the answer: the plain peer read says the same.
+    assert_eq!(
+        h.peer_view(slow.node_id)
+            .await
+            .expect("the peer reads")
+            .status,
+        PeerStatus::Degraded,
+        "the degraded marking survives into the operator's view"
+    );
+    assert_eq!(
+        PeerStatus::Degraded.slug(),
+        "degraded",
+        "the slug the directory carries is stable"
+    );
+}
+
+#[tokio::test]
+async fn a_degraded_peer_is_allowed_again_once_it_has_caught_up() {
+    let h = degraded_harness(4);
+    let slow = peer(43);
+    h.admit(&slow).await;
+    // Six owed, not five: the marking, the band, and the clear line below must each see a
+    // distinct depth — six past the watermark (4), three inside the band, two at half.
+    let queued = queue_for(&h.mesh, slow.node_id, 6).await;
+    let view = h
+        .mesh
+        .observe_peer_lag(slow.node_id)
+        .await
+        .expect("the observation reads");
+    assert_eq!(view.status, PeerStatus::Degraded);
+
+    // Catching up to just inside the watermark is not enough: half, not the watermark
+    // itself, is the clear line, so a depth hovering at the threshold cannot flap the
+    // status drain by drain. Three still owed sits between half (2) and the watermark (4).
+    for pending in &queued[..3] {
+        h.mesh
+            .mark_delivered(pending.event_id, ts(NOW + 1_000))
+            .await
+            .expect("the delivery is recorded");
+    }
+    let still_degraded = h
+        .mesh
+        .observe_peer_lag(slow.node_id)
+        .await
+        .expect("the observation reads");
+    assert_eq!(
+        still_degraded.status,
+        PeerStatus::Degraded,
+        "a backlog inside the hysteresis band keeps the marking"
+    );
+
+    // Two owed — half the watermark — is a peer that has caught up.
+    h.mesh
+        .mark_delivered(queued[3].event_id, ts(NOW + 2_000))
+        .await
+        .expect("the delivery is recorded");
+    let recovered = h
+        .mesh
+        .observe_peer_lag(slow.node_id)
+        .await
+        .expect("the observation reads");
+    assert_eq!(
+        recovered.status,
+        PeerStatus::Allowed,
+        "the marking clears by itself when the peer catches up"
+    );
+}
+
+#[tokio::test]
+async fn a_degraded_peer_still_handshakes_and_nothing_it_is_owed_is_dropped() {
+    let h = degraded_harness(4);
+    let slow = peer(44);
+    h.admit(&slow).await;
+    let queued = queue_for(&h.mesh, slow.node_id, 5).await;
+    let view = h
+        .mesh
+        .observe_peer_lag(slow.node_id)
+        .await
+        .expect("the observation reads");
+    assert_eq!(view.status, PeerStatus::Degraded);
+
+    // The handshake gate is the operator's alone: a degraded peer's proof still
+    // authenticates, because degraded is a signal about the link, not a suspension of it.
+    h.authenticate(&slow, 0x44, ts(NOW))
+        .await
+        .expect("a degraded peer's handshake proceeds exactly as an allowed peer's");
+
+    // And the outbox holds the degraded peer to nothing less than an allowed one: every
+    // event is still owed, still due, and still delivered on ack. At-least-once (section
+    // 153) is not the marking's to bend.
+    let due = h.mesh.due(ts(NOW)).await.expect("the outbox reads");
+    assert_eq!(
+        due.len(),
+        5,
+        "a degraded peer's events are neither dropped nor held back"
+    );
+    for pending in &queued {
+        h.mesh
+            .mark_delivered(pending.event_id, ts(NOW + 1_000))
+            .await
+            .expect("the delivery is recorded");
+    }
+    assert!(
+        h.mesh
+            .due(ts(NOW + DEFAULT_BACKOFF_CAP_MS))
+            .await
+            .expect("the outbox reads")
+            .is_empty(),
+        "a degraded peer's queue settles like anyone else's"
+    );
+}
+
+#[tokio::test]
+async fn the_automatic_transitions_never_touch_an_operators_paused_or_blocked() {
+    let h = degraded_harness(4);
+    let paused = peer(45);
+    let blocked = peer(46);
+    h.admit_as(&paused, PeerStatus::Paused).await;
+    h.admit_as(&blocked, PeerStatus::Blocked).await;
+
+    // A backlog that would mark an allowed peer degraded must not move a peer the
+    // operator took off the mesh: the observation is for the operator's benefit, and
+    // overwriting the operator's own decision is the opposite of that.
+    for p in [&paused, &blocked] {
+        queue_for(&h.mesh, p.node_id, 5).await;
+        let view = h
+            .mesh
+            .observe_peer_lag(p.node_id)
+            .await
+            .expect("the observation reads");
+        assert_eq!(
+            view.status,
+            if p.node_id == paused.node_id {
+                PeerStatus::Paused
+            } else {
+                PeerStatus::Blocked
+            },
+            "an operator's status survives a crossing backlog"
+        );
+    }
+
+    // The same protection on the way down: a degraded peer the operator paused keeps the
+    // pause, so the runtime's catch-up clear can never quietly re-open the link.
+    let degraded = peer(47);
+    h.admit(&degraded).await;
+    queue_for(&h.mesh, degraded.node_id, 5).await;
+    let view = h
+        .mesh
+        .observe_peer_lag(degraded.node_id)
+        .await
+        .expect("the observation reads");
+    assert_eq!(view.status, PeerStatus::Degraded);
+    h.mesh
+        .set_peer_status(degraded.node_id, PeerStatus::Paused)
+        .await
+        .expect("the operator pauses the degraded peer");
+    let view = h
+        .mesh
+        .observe_peer_lag(degraded.node_id)
+        .await
+        .expect("the observation reads");
+    assert_eq!(
+        view.status,
+        PeerStatus::Paused,
+        "the catch-up clear leaves a peer the operator paused alone"
+    );
+}
+
+#[tokio::test]
+async fn observing_the_lag_of_an_unknown_peer_is_not_found() {
+    let h = Harness::new();
+    expect_code(h.mesh.observe_peer_lag(id(48)).await, codes::NOT_FOUND);
+}
+
+#[test]
+fn the_four_statuses_round_trip_and_the_unknown_still_decodes_blocked() {
+    // The store's integers and the operator's slugs both have to survive the round trip,
+    // and the one value nothing writes (4 and up, or negative) must still land on the
+    // safe side of the gate — a corrupt or hostile row closes a link, never opens one.
+    for status in PeerStatus::NAMED {
+        assert_eq!(PeerStatus::from_i16(status.0.to_i16()), status.0);
+        assert_eq!(PeerStatus::from_slug(status.1), Some(status.0));
+        assert_eq!(status.0.slug(), status.1);
+    }
+    assert_eq!(PeerStatus::from_i16(4), PeerStatus::Blocked);
+    assert_eq!(PeerStatus::from_i16(-1), PeerStatus::Blocked);
+    assert_eq!(PeerStatus::from_slug("sluggish"), None);
 }

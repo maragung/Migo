@@ -25,7 +25,10 @@
 //!   never acknowledges holds a batch for exactly the watermark budget, then fails it:
 //!   the events are rescheduled on the doubling backoff, nothing piles up beyond one
 //!   bounded batch, and the redelivery after the link recovers is the at-least-once
-//!   semantics section 153 promises.
+//!   semantics section 153 promises. The scenario's other expectation — the degraded
+//!   marking — runs as its own test below: a peer whose undelivered backlog crosses the
+//!   degradation watermark is marked degraded while it still receives everything owed to
+//!   it, and is allowed again once it has caught up.
 //! * **the handshake budget (section 173's closing gap)** — a peer that accepts the TCP
 //!   connection but never speaks fails exactly when `federation.handshake_timeout_ms`
 //!   runs out, measured on the node's injected clock: still waiting one millisecond
@@ -48,9 +51,9 @@
 //! Scenarios 4, 5 and 6 are not link failures and live where their seams are:
 //! storage-unavailable and outbox idempotency in `migo-federation`'s suite, cache loss
 //! in `migo-cache`'s contracts, media unavailability in `migo-media`'s. The gaps this
-//! file cannot close — the missing degraded-peer marking, no automatic directory
-//! refetch on a stale epoch, and no `RECONNECT_HINT` to members of a rebalanced room —
-//! are recorded in the brief rather than papered over here.
+//! file cannot close — no automatic directory refetch on a stale epoch, and no
+//! `RECONNECT_HINT` to members of a rebalanced room — are recorded in the brief rather
+//! than papered over here.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -94,10 +97,17 @@ fn node_id(name: u8) -> Id {
 /// Nothing is shared with the other nodes in a test — each is a whole `migod` mesh
 /// service the way the composition root would build it.
 async fn node(name: u8, region: &str) -> (SharedMesh, NodeSecret) {
+    node_with_config(name, region, MeshConfig::default()).await
+}
+
+/// The same node, with the mesh policy knobs the test names — the degraded-marking test
+/// pins the watermark low so a handful of queued events is a crossing backlog, without
+/// asking the default configuration to cry degraded at traffic the brief calls normal.
+async fn node_with_config(name: u8, region: &str, config: MeshConfig) -> (SharedMesh, NodeSecret) {
     let secret = NodeSecret::from_seed(&[name; 32]).expect("a 32-byte seed builds a key");
     let mesh = MeshService::new(
         Arc::new(MemoryStore::new()),
-        MeshConfig::default(),
+        config,
         node_id(name),
         region.to_string(),
         NodeSecret::from_seed(&[name; 32]).expect("a 32-byte seed builds a key"),
@@ -845,6 +855,122 @@ async fn a_peer_that_never_acks_fails_the_batch_backs_off_and_loses_nothing() {
     );
 }
 
+/// Section 173, scenario 3's slow-link marking: a peer that answers but falls behind is
+/// marked degraded before anything is exhausted, and the marking is a signal only. The
+/// sender's watermark is pinned at four, five events are owed, and the drain that fails
+/// against the never-acking peer marks it degraded; when the link recovers, the very same
+/// drain still dials the degraded peer and redelivers everything — at-least-once, nothing
+/// dropped (section 153) — and once the backlog is gone the marking clears by itself. The
+/// default watermark sits far above this on purpose: a mass sync is traffic, not a fault
+/// (the backlog test below pins that side of the line).
+#[tokio::test]
+async fn a_slow_peer_is_marked_degraded_and_still_receives_everything_it_is_owed() {
+    let (mesh_slow, _) = node(4, "region-d").await;
+    let (mesh_b, _) = node_with_config(
+        5,
+        "region-e",
+        MeshConfig {
+            degraded_outbox_watermark: 4,
+            ..MeshConfig::default()
+        },
+    )
+    .await;
+    admit(
+        &mesh_slow,
+        node_id(5),
+        &key_bytes(5),
+        "wss://b.invalid:1".to_string(),
+        "region-e",
+    )
+    .await;
+    let (slow_addr, ack_gate, log) = spawn_slow_peer(Arc::clone(&mesh_slow)).await;
+    admit(
+        &mesh_b,
+        node_id(4),
+        &key_bytes(4),
+        format!("wss://{slow_addr}"),
+        "region-d",
+    )
+    .await;
+    let transport_b = transport(&mesh_b);
+
+    let now = Timestamp::now();
+    for note_len in 0..5usize {
+        queue(&mesh_b, node_id(4), note_len, now).await;
+    }
+
+    // The drain dials the slow peer, the handshake completes, the batch goes out — and no
+    // ack comes. The batch fails as a unit, the drain's lag observation reads five owed
+    // against a watermark of four, and the peer is marked degraded: slowness made visible
+    // before it becomes backlog without end.
+    tokio::time::timeout(WAIT_LIMIT, transport_b.drain_once(now))
+        .await
+        .expect("the drain returns within the ack budget and a margin")
+        .expect("an unacknowledged batch is a settled failure, not a drain error");
+    let first: Vec<u32> = eventually("the slow peer recorded the unacknowledged session", || {
+        let sessions = log.lock().expect("the session log is not held").clone();
+        sessions.first().cloned()
+    })
+    .await;
+    assert_eq!(first, vec![1, 2, 3, 4, 5], "the batch went out complete");
+    let peer_view = mesh_b
+        .peer(node_id(4))
+        .await
+        .expect("node B resolves the slow peer in its allow-list");
+    assert_eq!(
+        peer_view.status,
+        PeerStatus::Degraded,
+        "the crossing backlog marked the peer degraded"
+    );
+    // And nothing was dropped for it: every event is still owed, on the backoff.
+    let owed: Vec<_> = mesh_b
+        .due(now.saturating_add_millis(1_000))
+        .await
+        .expect("the outbox reads");
+    assert_eq!(
+        owed.len(),
+        5,
+        "a degraded peer's events are neither dropped nor held back"
+    );
+
+    // The link recovers, and delivery to a degraded peer is delivery all the same: the
+    // drain still dials it, resends the whole batch — at-least-once, so the peer sees it
+    // twice and that is correct — and the watermark covers it this time.
+    ack_gate.store(true, Ordering::SeqCst);
+    tokio::time::timeout(
+        WAIT_LIMIT,
+        transport_b.drain_once(now.saturating_add_millis(1_000)),
+    )
+    .await
+    .expect("the recovered drain completes")
+    .expect("the drain against a degraded but acking peer completes");
+    let sessions = eventually("the slow peer recorded the redelivering session", || {
+        let sessions = log.lock().expect("the session log is not held").clone();
+        (sessions.len() >= 2).then_some(sessions)
+    })
+    .await;
+    assert_eq!(
+        sessions[1],
+        vec![1, 2, 3, 4, 5],
+        "the degraded peer was redelivered everything, in order — section 153 unchanged"
+    );
+    assert!(
+        everything_owed(&mesh_b).await.is_empty(),
+        "the queue settled against the degraded peer"
+    );
+    // Caught up, the marking clears by itself: the same drain pass that emptied the
+    // backlog observed the depth at zero and allowed the peer again.
+    let peer_view = mesh_b
+        .peer(node_id(4))
+        .await
+        .expect("node B resolves the slow peer in its allow-list");
+    assert_eq!(
+        peer_view.status,
+        PeerStatus::Allowed,
+        "a peer that caught up is allowed again"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The handshake budget — a peer that accepts but never speaks
 // ---------------------------------------------------------------------------
@@ -1425,7 +1551,9 @@ async fn a_mass_backlog_drains_in_bounded_batches_without_loss_or_duplication() 
     );
 
     // The peer never left the allow-list over 300 events: a mass sync is traffic, not
-    // a fault.
+    // a fault, and the default degradation watermark sits above this backlog on purpose
+    // — the slow-link test above fires at five owed against a watermark of four, while
+    // three hundred owed against the default is a recovery, not a degradation.
     let peer_view = mesh_b
         .peer(node_id(1))
         .await

@@ -192,6 +192,12 @@ fun ChatScreen(
      */
     onStartCall: ((Id, Boolean) -> Unit)? = null,
     /**
+     * Joins the group call of this conversation: the roster overlay comes up and the seat is
+     * requested with a sealed placeholder offer. Offered only for a group -- the web client's own
+     * gate, its single button's -- and null when the shell cannot join group calls.
+     */
+    onJoinGroupCall: (() -> Unit)? = null,
+    /**
      * Shares this conversation's transcript as a log, from the header. Null when the shell has no
      * share route; the transcript itself is the model's to build, because the log is the same
      * plaintext the auto-saved snapshots are written from.
@@ -349,6 +355,7 @@ fun ChatScreen(
                     null
                 },
                 onStartCall = onStartCall,
+                onJoinGroupCall = onJoinGroupCall,
                 onExportLog = onExportLog,
                 onToggleSearch = onToggleSearch,
                 onOpenGroupMembers = onOpenGroupMembers,
@@ -566,6 +573,7 @@ private fun ChatHeader(
     onOpenGames: () -> Unit,
     onOpenSafety: (() -> Unit)? = null,
     onStartCall: ((Id, Boolean) -> Unit)? = null,
+    onJoinGroupCall: (() -> Unit)? = null,
     onExportLog: (() -> Unit)? = null,
     onToggleSearch: () -> Unit = {},
     onOpenGroupMembers: (() -> Unit)? = null,
@@ -652,7 +660,16 @@ private fun ChatHeader(
                     Text("Leave", color = MaterialTheme.colorScheme.error)
                 }
             }
-            // The group's member sheet door: the same word the room's control uses, because the
+            // The group's call door: one button, joining the roster, exactly the web client's own
+            // single control. The glyph is the direct chat's own phone -- the web button's glyph --
+            // and the kind gate keeps the two controls from ever sharing a header, because the
+            // direct chat dials a person and the group joins a conversation.
+            if (chat.kind == ConversationKind.Group && onJoinGroupCall != null) {
+                TextButton(onClick = onJoinGroupCall) {
+                    Text("📞")
+                }
+            }
+            // The group's member-sheet door: the same word the room's control uses, because the
             // question it answers -- who is in here -- is the same question. Gated on the kind
             // rather than the roster's presence, so a group the sheet has not read yet still
             // offers the door that reads it.
