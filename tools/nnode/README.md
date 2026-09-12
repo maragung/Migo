@@ -52,11 +52,16 @@ non-zero and prints everything observed, including both nodes' logs and
 
 1. **The link forms from configuration alone.** Each node's
    `federation.peers` names every other node completely — node id, public
-   key, mesh address, region — and the runner waits until every node has
-   completed at least one mesh handshake. `migo_federation_peers_added_total`
-   is reported per node (it is `NODES-1` on a fresh database; on a reused one
-   it is lower, because admission is idempotent and the counter only ticks
-   for fresh admissions — the handshake count is the live proof).
+   key, mesh address, region — and the runner verifies that each node
+   admitted its peers at boot, then that every node completed at least one
+   mesh handshake once the sync check has generated cross-node traffic.
+   The mesh is lazy by design: a node only dials a peer when its outbox
+   holds an event for that peer, so handshake counters are meaningfully
+   non-zero only after traffic has flowed, never on an idle mesh.
+   `migo_federation_peers_added_total` is reported per node (it is
+   `NODES-1` on a fresh database; on a reused one it is lower, because
+   admission is idempotent and the counter only ticks for fresh
+   admissions — the handshake count is the live proof).
 
 2. **A room join crosses the link.** bob joins a room on node 2 whose home
    node is node 1; alice's subscriber on node 1 sees the join event. This
