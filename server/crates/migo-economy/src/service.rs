@@ -878,27 +878,44 @@ where
             let mint = self
                 .account_for(None, LedgerAccountKind::Mint, Currency::KickPoints, at)
                 .await?;
-            self.post(NewTransaction {
-                tx_id: self.new_id(at),
-                reason: Reason::KickSpend.to_i16(),
-                ref_id: Some(conversation_id),
-                idempotency_key: format!("kick:{kicker}:{conversation_id}:{target_id}"),
-                created_by: Some(kicker),
-                currency: Currency::KickPoints,
-                legs: vec![
-                    LedgerLeg {
-                        ledger_account_id: points,
-                        amount: -1,
-                    },
-                    LedgerLeg {
-                        ledger_account_id: mint,
-                        amount: 1,
-                    },
-                ],
-                receipt: None,
-                created_at: at,
-            })
-            .await?;
+            let posted = self
+                .post(NewTransaction {
+                    tx_id: self.new_id(at),
+                    reason: Reason::KickSpend.to_i16(),
+                    ref_id: Some(conversation_id),
+                    idempotency_key: format!("kick:{kicker}:{conversation_id}:{target_id}"),
+                    created_by: Some(kicker),
+                    currency: Currency::KickPoints,
+                    legs: vec![
+                        LedgerLeg {
+                            ledger_account_id: points,
+                            amount: -1,
+                        },
+                        LedgerLeg {
+                            ledger_account_id: mint,
+                            amount: 1,
+                        },
+                    ],
+                    receipt: None,
+                    created_at: at,
+                })
+                .await;
+            match posted {
+                Ok(_) => {}
+                // The kick's key names the triple, not the currency, and a mismatch
+                // can only mean the coin branch already spent it on this same triple:
+                // the second removal of a returning member stays free, as it always
+                // was. The client's idempotency key is not involved — this one is
+                // ours, and its mismatch is an answer we interpret, not a client bug
+                // we report.
+                Err(error) if error.code() == codes::IDEMPOTENCY_MISMATCH => {
+                    return Ok(KickCharge {
+                        spent_kick_point: false,
+                        paid_coins: 0,
+                    });
+                }
+                Err(error) => return Err(error),
+            }
             return Ok(KickCharge {
                 spent_kick_point: true,
                 paid_coins: 0,
@@ -948,6 +965,15 @@ where
                 codes::INSUFFICIENT_BALANCE,
                 "a kick needs a Kick Point or 1 MGO",
             )),
+            // The mirror of the point branch above: this key was spent on the same
+            // triple in Kick Points, and the second removal of a returning member
+            // stays free. The store was right to refuse a different payload under a
+            // spent key; this key is ours, and here the refusal is the answer to a
+            // question we asked.
+            Err(error) if error.code() == codes::IDEMPOTENCY_MISMATCH => Ok(KickCharge {
+                spent_kick_point: false,
+                paid_coins: 0,
+            }),
             Err(error) => Err(error),
         }
     }

@@ -13,6 +13,18 @@
 //! of its own, so the framing is the brief's stream binding — a `u32` big-endian length prefix
 //! followed by one MWP frame — the same framing the server's [`QuicStreamTransport`] peels off.
 //!
+//! # Datagrams, when the server offers them
+//!
+//! The brief's second QUIC binding (section 138): one MWP frame per QUIC datagram, no length
+//! prefix — the datagram's own boundary is the length. A datagram belongs to the *connection*,
+//! not the stream, so `next_frame` races `read_datagram` against the stream read and decodes the
+//! winner: a datagram's bytes are exactly one frame and never touch the stream buffer, so a
+//! datagram can neither corrupt nor delay the stream's own framing. Sends mirror this: a record
+//! that fits `max_datagram_size` rides one bare datagram, anything larger stays on the
+//! length-prefixed stream. The handshake itself always rides the stream — HELLO and WELCOME must
+//! be ordered before any datagram use is meaningful, and the datagram path can only ever be an
+//! optimization the stream path backs up.
+//!
 //! # TLS and who the server is
 //!
 //! QUIC mandates TLS 1.3. The server's listener presents a self-signed leaf minted at boot; the
@@ -54,7 +66,8 @@ const KEEP_ALIVE: Duration = Duration::from_secs(15);
 /// `migo-node`; the session's real identity proof is the access token in the HELLO.
 const SERVER_NAME: &str = "migo-node";
 
-/// A live QUIC realtime connection: one bidirectional stream carrying length-prefixed frames.
+/// A live QUIC realtime connection: one bidirectional stream carrying length-prefixed frames,
+/// plus the connection's datagrams — one bare frame each — whenever the server supports them.
 pub struct QuicGateway {
     connection: quinn::Connection,
     send: quinn::SendStream,
@@ -62,6 +75,10 @@ pub struct QuicGateway {
     buf: BytesMut,
     /// Correlation ids for request frames. Zero means "not a reply to anything", so ids start at one.
     next_correlation: u32,
+    /// Set once the connection is gone, as reported by the datagram reader — which errors
+    /// instantly and forever after that, so polling it again would spin. The stream read is
+    /// the authority on session lifetime; this flag only retires the loser of the race.
+    datagrams_dead: bool,
 }
 
 /// Builds a client endpoint that accepts the server's self-signed leaf, bound to the loopback of
@@ -140,9 +157,12 @@ pub async fn connect(
         recv,
         buf: BytesMut::new(),
         next_correlation: 1,
+        datagrams_dead: false,
     };
 
-    // HELLO rides the stream framing: length prefix, then the frame. The HELLO carries the
+    // HELLO rides the stream framing — always, even on a datagram-capable connection: the
+    // handshake must be ordered before any datagram use is meaningful, and the WELCOME's
+    // negotiated features govern what the client sends afterwards. The HELLO carries the
     // transport's own feature bit: the negotiated set is the intersection, so a client that does
     // not ask for QUIC gets a WELCOME without it even from a node that serves it — which is the
     // contract, not a fault.
@@ -153,11 +173,12 @@ pub async fn connect(
     let wire = frame
         .encode_length_prefixed()
         .map_err(|_| QuicError::Malformed)?;
-    gateway.send_raw(&wire).await?;
+    gateway.write_stream(&wire).await?;
 
     // The WELCOME — or the ERROR-flagged refusal — comes back under the HELLO opcode; the flag is
-    // the discriminator, exactly as on the WebSocket path.
-    let frame = gateway.next_frame().await?;
+    // the discriminator, exactly as on the WebSocket path. The server keeps the handshake on the
+    // stream too, so the first reply the reader here sees arrives by the stream framing.
+    let frame = gateway.next_stream_frame().await?;
     if super::gateway::is_error(&frame) {
         return Err(QuicError::Refused(super::gateway::refusal(&frame)));
     }
@@ -178,7 +199,11 @@ impl QuicGateway {
         id
     }
 
-    /// Encodes and sends one frame as one length-prefixed record.
+    /// Encodes and sends one frame, on whichever binding the record fits: a datagram when the
+    /// server supports them, the frame fits the reported path MTU, and the opcode's delivery
+    /// class already tolerates a lossy ride (section 138 — one bare frame per datagram); the
+    /// length-prefixed stream otherwise. The stream path is always available, so no record ever
+    /// depends on datagram support to arrive.
     pub async fn send<T: migo_protocol::Encode>(
         &mut self,
         opcode: Opcode,
@@ -187,14 +212,23 @@ impl QuicGateway {
     ) -> Result<(), QuicError> {
         let frame =
             to_frame(opcode.to_wire(), correlation, value).map_err(|_| QuicError::Malformed)?;
+        if datagram_eligible(&self.connection, &frame, opcode) {
+            // One bare frame per datagram: the datagram's own boundary is the length, so
+            // no prefix, and the frame must be whole or it never arrives.
+            let bytes = frame.encode().map_err(|_| QuicError::Malformed)?;
+            return self
+                .connection
+                .send_datagram(bytes)
+                .map_err(|_| QuicError::Transport);
+        }
         let wire = frame
             .encode_length_prefixed()
             .map_err(|_| QuicError::Malformed)?;
-        self.send_raw(&wire).await
+        self.write_stream(&wire).await
     }
 
     /// Writes one already-framed record to the stream.
-    async fn send_raw(&mut self, wire: &[u8]) -> Result<(), QuicError> {
+    async fn write_stream(&mut self, wire: &[u8]) -> Result<(), QuicError> {
         self.send
             .write_all(wire)
             .await
@@ -202,11 +236,87 @@ impl QuicGateway {
         Ok(())
     }
 
-    /// Reads the next protocol frame off the stream, reassembling partial records in `buf`.
+    /// Reads the next protocol frame, from whichever binding delivered one: a datagram is one
+    /// whole bare frame (section 138), while the stream reassembles partial records in `buf`.
     pub async fn next_frame(&mut self) -> Result<Frame, QuicError> {
         // Reads land in a fixed scratch buffer first, then are banked in `buf` — `read` is the
         // cancel-safe primitive, and bytes move to `buf` the moment the read resolves, so a
-        // future dropped while pending loses nothing.
+        // future dropped while pending loses nothing. Datagrams race the stream read because
+        // they arrive on the connection, not the stream: one whole bare frame per datagram
+        // (section 138), decoded and returned without ever touching `buf` — a datagram must not
+        // be able to corrupt or delay the stream's own framing. Both futures are cancel-safe,
+        // so losing the race loses nothing.
+        let mut scratch = [0u8; 4 * 1024];
+        loop {
+            if let Some(frame) = take_frame(&mut self.buf)? {
+                return Ok(frame);
+            }
+            if self.datagrams_dead {
+                // The datagram reader already reported the connection gone (and would error
+                // instantly and forever, so it is no longer polled); the stream read — the
+                // authority on session lifetime — reports the end through the path that owns
+                // it.
+                let read = tokio::time::timeout(STEP, self.recv.read(&mut scratch))
+                    .await
+                    .map_err(|_| QuicError::Timeout)?
+                    .map_err(|_| QuicError::Transport)?;
+                match read {
+                    None => return Err(QuicError::Closed),
+                    // quinn never hands back a zero-length read on a non-empty buffer; keep the
+                    // loop shape identical to the racing branch either way.
+                    Some(0) => continue,
+                    Some(n) => {
+                        self.buf.extend_from_slice(&scratch[..n]);
+                        continue;
+                    }
+                };
+            }
+            // The step budget covers the whole race, the same budget a stream-only read had:
+            // a silent server on both bindings is a dead connection, and the caller's answer
+            // to that is the reconnect ladder, not patience.
+            let raced = tokio::time::timeout(STEP, async {
+                tokio::select! {
+                    read = self.recv.read(&mut scratch) => {
+                        match read {
+                            Err(_) => Err(QuicError::Transport),
+                            Ok(None) => Err(QuicError::Closed),
+                            // Stream bytes banked: no whole frame yet, keep reading.
+                            Ok(Some(0)) => Ok(None),
+                            Ok(Some(n)) => {
+                                self.buf.extend_from_slice(&scratch[..n]);
+                                Ok(None)
+                            }
+                        }
+                    }
+                    datagram = self.connection.read_datagram() => {
+                        match datagram {
+                            Ok(bytes) => Ok(Some(Frame::decode(bytes).map_err(|_| QuicError::Malformed)?)),
+                            // The connection is gone and the datagram reader will keep erroring
+                            // instantly, so retire it and let the stream read report the end.
+                            Err(_) => {
+                                self.datagrams_dead = true;
+                                Ok(None)
+                            }
+                        }
+                    }
+                }
+            })
+            .await
+            .map_err(|_| QuicError::Timeout)??;
+            match raced {
+                // A whole datagram arrived as one frame: the loop's next turn hands it over.
+                Some(frame) => return Ok(frame),
+                // Progress without a frame (stream bytes banked, or the datagram reader
+                // retired): keep reading.
+                None => continue,
+            }
+        }
+    }
+
+    /// Reads the next protocol frame off the stream alone, ignoring datagrams. The handshake
+    /// lives here: HELLO and WELCOME must be ordered before datagram use is meaningful, and the
+    /// server answers the handshake on the stream it received it on.
+    async fn next_stream_frame(&mut self) -> Result<Frame, QuicError> {
         let mut scratch = [0u8; 4 * 1024];
         loop {
             if let Some(frame) = take_frame(&mut self.buf)? {
@@ -231,6 +341,24 @@ impl QuicGateway {
         let _ = self.send.finish();
         self.connection.close(0u32.into(), b"bye");
     }
+}
+
+/// Whether one frame may ride a QUIC datagram on `connection`.
+///
+/// All of section 138's conditions must hold: the server's datagram support and the path MTU
+/// leave room for the whole frame, and the opcode's delivery class already tolerates an
+/// unreliable, unordered ride — a Critical request (a message, a call setup) is never sent on a
+/// path that may drop it, exactly as the server holds Critical replies back to the stream.
+fn datagram_eligible(connection: &quinn::Connection, frame: &Frame, opcode: Opcode) -> bool {
+    let Some(max) = connection.max_datagram_size() else {
+        return false;
+    };
+    frame.encoded_len() <= max && class_may_ride_datagram(opcode)
+}
+
+/// Whether an opcode's delivery class tolerates a datagram's unreliable, unordered ride.
+fn class_may_ride_datagram(opcode: Opcode) -> bool {
+    !matches!(opcode.class(), migo_protocol::DeliveryClass::Critical)
 }
 
 /// Peels one whole length-prefixed frame off the front of `buf`, or `None` when the buffer holds
@@ -344,6 +472,25 @@ mod tests {
         let body = frame.encode().expect("encodes");
         let wire = frame.encode_length_prefixed().expect("encodes");
         (body, wire)
+    }
+
+    #[test]
+    fn a_critical_request_never_rides_a_datagram() {
+        // A message send is the one request the session cannot afford to lose; the wire says so
+        // with its class, and the send path must agree.
+        assert!(
+            !class_may_ride_datagram(Opcode::MessageSend),
+            "a Critical request must stay on the reliable stream"
+        );
+    }
+
+    #[test]
+    fn a_coalescable_request_may_ride_a_datagram() {
+        // Typing is the ephemeral, high-frequency signal the datagram binding exists for.
+        assert!(
+            class_may_ride_datagram(Opcode::Typing),
+            "a Coalescable request may take the lossy ride"
+        );
     }
 
     #[test]

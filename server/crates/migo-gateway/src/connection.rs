@@ -32,6 +32,7 @@
 
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::time::{interval, timeout, MissedTickBehavior};
 
@@ -161,7 +162,11 @@ impl<T: Transport> Connection<'_, T> {
                 // Hand the buffer back so a later, less loaded moment can still resume it.
                 self.gateway.store_resume(session_id, buffer);
             }
-            let error = fault::error(codes::TOO_MANY_SESSIONS, "node session ceiling reached")
+            // Section 160: a node past its ceiling answers OVERLOADED, not a silent drop. The
+            // 1600 class tells the client to retry with backoff — the honest instruction for a
+            // ceiling that other sessions' disconnects will relieve — and the resume buffer was
+            // handed back above so a returning client can still bridge its gap.
+            let error = fault::error(codes::OVERLOADED, "node session ceiling reached")
                 .public("server overloaded");
             self.reject(
                 HandshakeReject::Overloaded,
@@ -496,6 +501,13 @@ impl<T: Transport> Connection<'_, T> {
             .unwrap_or(u64::MAX)
             .saturating_mul(2);
         let lagging_deadline_ms = self.gateway.settings.lagging_deadline_ms;
+        // The hard bound on one drain attempt (section 160). A drain that completes but took
+        // longer than `lagging_deadline_ms` is judged at the loop head below; a drain that never
+        // completes at all is abandoned at twice the deadline, because abandoning it mid-write
+        // leaves a partial record on the wire and the socket is closed either way.
+        let drain_bound = Duration::from_millis(
+            u64::try_from(lagging_deadline_ms.saturating_mul(2)).unwrap_or(u64::MAX),
+        );
         let mut ticker = interval(self.gateway.settings.tick);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut last_seen = self.gateway.now();
@@ -504,8 +516,37 @@ impl<T: Transport> Connection<'_, T> {
         let mut probed = false;
 
         loop {
-            if !self.flush(&outbound).await {
-                return Closed::TransportError;
+            // The slow-consumer deadline, measured where a slow consumer is actually observable:
+            // the writer's handoff to the socket. The mailbox's own fullness cannot serve as the
+            // signal, because `take_ready` drains it — and the writer is the only party that can
+            // notice the drain stalled. Frames accepted by the mailbox but not handed to the
+            // socket within the deadline are exactly the "queue stays full past
+            // LAGGING_DEADLINE_MS" of section 160, and the answer is the same: close as
+            // `SessionLagging`, retain the resume buffer, let the client resume.
+            let drain_started = self.gateway.now();
+            let drained = timeout(drain_bound, self.flush(&outbound)).await;
+            match drained {
+                Ok(true) => {
+                    let drained_for = self
+                        .gateway
+                        .now()
+                        .as_unix_ms()
+                        .saturating_sub(drain_started.as_unix_ms());
+                    if drained_for > lagging_deadline_ms {
+                        // A completed drain is a clean record boundary, so the client can still
+                        // be told why it is being closed — and to come back now and resume.
+                        self.lagged_quiet().await;
+                        return Closed::SessionLagging;
+                    }
+                }
+                Ok(false) => return Closed::TransportError,
+                Err(_) => {
+                    // The socket never finished the write at all. No hint is attempted: a send
+                    // after an abandoned mid-record write would only corrupt the stream, and a
+                    // client that far behind learns of the close from the FIN — the retained
+                    // resume buffer is what makes that recoverable.
+                    return Closed::SessionLagging;
+                }
             }
             tokio::select! {
                 () = shutdown.cancelled() => {
@@ -576,9 +617,6 @@ impl<T: Transport> Connection<'_, T> {
                         self.probe_quiet(&outbound, now);
                         probed = true;
                     }
-                    if outbound.lagging_expired(now, lagging_deadline_ms) {
-                        return Closed::SessionLagging;
-                    }
                     if let Some(identity) = established.identity.as_ref() {
                         if !identity.claims.is_live(now) {
                             return Closed::AuthExpired;
@@ -619,14 +657,31 @@ impl<T: Transport> Connection<'_, T> {
     /// rather than crowding the node.
     async fn expired_quiet(&mut self, outbound: &Outbound) {
         let _ = self.flush(outbound).await;
+        self.send_lag_hint(CloseReason::Unknown).await;
+    }
+
+    /// Tells a session the writer could not keep up with it why it is being closed: a
+    /// `RECONNECT_HINT` carrying `SessionLagging`, sent directly as the last frame out (section
+    /// 160 — the client's answer to a lagging close is to resume, and the retained resume
+    /// buffer is what makes that possible).
+    ///
+    /// Called only after a drain that completed, so the hint lands on a clean record boundary —
+    /// never after a write that was abandoned mid-record, which would only corrupt the stream.
+    async fn lagged_quiet(&mut self) {
+        self.send_lag_hint(CloseReason::SessionLagging).await;
+    }
+
+    /// Encodes and sends one last-frame-out `RECONNECT_HINT`, server-initiated so correlation 0
+    /// (section 139). Shared by every close that can still reach the client.
+    async fn send_lag_hint(&mut self, reason: CloseReason) {
         let hint = ReconnectHint {
-            reason: CloseReason::Unknown,
+            reason,
             after_ms: 0,
             endpoint: None,
         };
-        // Server-initiated, so correlation 0 (section 139). Sent directly as the last frame out,
-        // mirroring graceful_shutdown: a mailbox push here could sit behind queued frames on a
-        // connection whose client is demonstrably not reading.
+        // Sent directly rather than through the mailbox, mirroring the other last-frame-out
+        // paths: a mailbox push here could sit behind queued frames on a connection whose
+        // client is demonstrably not reading.
         match encode_message(Opcode::ReconnectHint.to_wire(), 0, &hint, self.compression) {
             Ok(bytes) => {
                 if self.transport.send(bytes).await.is_ok() {

@@ -27,12 +27,25 @@
 //! fronted by a self-signed certificate asks no new trust of the client the protocol does not
 //! already demand.
 //!
+//! # Datagrams, when the peer offers them
+//!
+//! The brief's second QUIC binding (section 138): one MWP frame per QUIC datagram, no length
+//! prefix — the datagram's own boundary is the length. A datagram belongs to the *connection*,
+//! not the stream, so [`QuicStreamTransport`] holds the `quinn::Connection` alongside the stream
+//! halves and merges `read_datagram` into the same `recv` the session driver already races. A
+//! datagram's bytes are decoded as exactly one frame and returned directly; they never touch the
+//! stream buffer, so a datagram can neither corrupt nor delay the stream's own framing. Sends
+//! mirror this: a frame that fits `max_datagram_size` rides one bare datagram, and anything
+//! larger — or a peer with no datagram support — stays on the length-prefixed stream, so the
+//! peer always has a reader for every record it receives.
+//!
 //! # Cancel safety
 //!
 //! [`recv`](Transport::recv) is cancel-safe the way the trait requires: every partial read lands
 //! in a buffer owned by the transport, so a `recv` future dropped mid-frame (the driver races it
 //! against outbound wakeups on every loop turn) loses nothing — the next `recv` resumes from the
-//! bytes already banked.
+//! bytes already banked. A dropped `read_datagram` future has consumed nothing either: quinn only
+//! dequeues the datagram when the future resolves.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -44,6 +57,7 @@ use tokio::io::AsyncReadExt;
 use migo_auth::RequestContext;
 use migo_core::{Clock, Shutdown};
 use migo_gateway::{Gateway, Transport, TransportError};
+use migo_protocol::DeliveryClass;
 use migo_wire::limits::MAX_FRAME_BYTES;
 
 /// The minimum bytes the read buffer grows by when it is full. 4 KiB keeps a small frame
@@ -51,28 +65,46 @@ use migo_wire::limits::MAX_FRAME_BYTES;
 /// peer that may never send.
 const READ_CHUNK: usize = 4096;
 
-/// A gateway [`Transport`] over one bidirectional QUIC stream.
+/// A gateway [`Transport`] over one bidirectional QUIC stream, plus the connection's datagrams.
 ///
 /// The stream carries the brief's stream framing — `u32` big-endian length, then one MWP frame —
 /// which this adapter strips: the gateway sees exactly the frame bytes, as it does over
 /// WebSocket. Partial frames stay in `buf`, which is what makes a dropped `recv` future lose
 /// nothing (see the module doc).
+///
+/// The connection carries the brief's datagram binding when the peer supports it: one bare MWP
+/// frame per datagram, no prefix. Both bindings feed the same [`recv`](Transport::recv), so the
+/// session driver stays one session no matter which path a record arrived on.
 pub struct QuicStreamTransport {
+    connection: quinn::Connection,
     write: quinn::SendStream,
     read: quinn::RecvStream,
     buf: BytesMut,
     eof: bool,
+    /// Set once the connection is gone, as reported by the datagram reader — which errors
+    /// instantly and forever after that, so polling it again would spin. The stream read is
+    /// the transport's authority on session lifetime; this flag only retires the loser of
+    /// the race to report the same end.
+    datagrams_dead: bool,
 }
 
 impl QuicStreamTransport {
-    /// Wraps the two halves of one accepted bidirectional stream.
+    /// Wraps the connection and the two halves of one accepted bidirectional stream. The
+    /// connection is what datagrams arrive on and are sent by, so every transport holds a clone
+    /// of the handle.
     #[must_use]
-    pub fn new(write: quinn::SendStream, read: quinn::RecvStream) -> Self {
+    pub fn new(
+        connection: quinn::Connection,
+        write: quinn::SendStream,
+        read: quinn::RecvStream,
+    ) -> Self {
         Self {
+            connection,
             write,
             read,
             buf: BytesMut::new(),
             eof: false,
+            datagrams_dead: false,
         }
     }
 }
@@ -93,21 +125,80 @@ impl Transport for QuicStreamTransport {
             }
             // Read straight into the transport's own buffer so cancellation cannot strand bytes
             // in a dropped future's stack: `read_buf` lands its bytes in `buf` the moment the
-            // read resolves, and a future dropped while pending has consumed nothing.
+            // read resolves, and a future dropped while pending has consumed nothing. Datagrams
+            // race the stream read because they arrive on the connection, not the stream: one
+            // whole bare frame per datagram (section 138), returned without ever touching `buf`
+            // — a datagram must not be able to corrupt or delay the stream's own framing. Both
+            // futures are cancel-safe, so losing the race loses nothing.
             if self.buf.len() == self.buf.capacity() {
                 self.buf.reserve(READ_CHUNK);
             }
-            match self.read.read_buf(&mut self.buf).await {
-                // Zero from a buffer that always has spare capacity is the stream's FIN: the
-                // same clean end a WebSocket close reads back as.
+            let read = if self.datagrams_dead {
+                // The datagram reader already reported the connection gone (and would error
+                // instantly and forever, so it is no longer polled); the stream read — the
+                // transport's authority on session lifetime — reports the end through the path
+                // that owns it.
+                self.read
+                    .read_buf(&mut self.buf)
+                    .await
+                    .map_err(|_| TransportError::Io("the QUIC connection ended".to_string()))
+            } else {
+                tokio::select! {
+                    read = self.read.read_buf(&mut self.buf) => {
+                        read.map_err(|error| TransportError::Io(error.to_string()))
+                    }
+                    datagram = self.connection.read_datagram() => {
+                        match datagram {
+                            Ok(bytes) => {
+                                // A datagram bigger than the frame ceiling is refused the
+                                // moment it is whole — the same rule the stream reader applies
+                                // to a hostile length prefix, without ever copying it into
+                                // `buf`.
+                                if bytes.len() > MAX_FRAME_BYTES {
+                                    return Err(TransportError::Protocol(format!(
+                                        "datagram of {} bytes exceeds the {MAX_FRAME_BYTES}-byte ceiling",
+                                        bytes.len()
+                                    )));
+                                }
+                                return Ok(Some(bytes));
+                            }
+                            // Every failure here is a ConnectionError: the connection is gone,
+                            // and the datagram reader will keep erroring instantly, so retire
+                            // it and let the stream read report the end.
+                            Err(_) => {
+                                self.datagrams_dead = true;
+                                self.read
+                                    .read_buf(&mut self.buf)
+                                    .await
+                                    .map_err(|_| TransportError::Io("the QUIC connection ended".to_string()))
+                            }
+                        }
+                    }
+                }
+            };
+            // Zero from a buffer that always has spare capacity is the stream's FIN: the same
+            // clean end a WebSocket close reads back as.
+            match read {
                 Ok(0) => self.eof = true,
                 Ok(_) => {}
-                Err(error) => return Err(TransportError::Io(error.to_string())),
+                Err(error) => return Err(error),
             }
         }
     }
 
     async fn send(&mut self, frame: Bytes) -> Result<(), TransportError> {
+        // The datagram binding when the record fits it: one bare MWP frame per datagram, bounded
+        // by the path MTU the connection reports (section 138). But a datagram is unreliable —
+        // it may be lost or arrive out of order — so only a frame whose delivery class already
+        // tolerates that may ride one. A Critical frame (a message, a reply, anything the
+        // session cannot afford to lose) always takes the length-prefixed stream, whose reader
+        // is always listening, so no record ever depends on datagram support to arrive.
+        if datagram_eligible(&self.connection, &frame) {
+            return self
+                .connection
+                .send_datagram(frame)
+                .map_err(|error| TransportError::Io(error.to_string()));
+        }
         // One frame out as one length-prefixed record: the mirror of the receive path, and the
         // reason the peer's reader never has to guess where a frame ends.
         let len = u32::try_from(frame.len()).map_err(|_| {
@@ -155,6 +246,47 @@ fn take_frame(buf: &mut BytesMut) -> Result<Option<Bytes>, TransportError> {
     }
     buf.advance(4);
     Ok(Some(buf.split_to(len).freeze()))
+}
+
+/// Whether one already-encoded frame may ride a QUIC datagram on `connection`.
+///
+/// Both conditions from section 138 must hold: the peer's datagram support and the path MTU
+/// leave room for the whole frame, and the frame's own delivery class tolerates an unreliable,
+/// unordered ride (see [`frame_may_ride_datagram`]).
+fn datagram_eligible(connection: &quinn::Connection, frame: &[u8]) -> bool {
+    let Some(max) = connection.max_datagram_size() else {
+        return false;
+    };
+    frame.len() <= max && frame_may_ride_datagram(frame)
+}
+
+/// Whether one already-encoded frame's content may take a datagram's unreliable, unordered ride
+/// at all, independent of any connection's MTU.
+///
+/// A Critical frame is never eligible — the class is the wire's own statement that the session
+/// cannot afford to lose the record, and a datagram may be lost. A malformed frame is not
+/// eligible either, though it should be unreachable here (the transport is only ever handed
+/// frames this build encoded); letting it fall to the stream path keeps a decode bug from
+/// turning into silent loss.
+fn frame_may_ride_datagram(frame: &[u8]) -> bool {
+    match migo_wire::Frame::decode(Bytes::copy_from_slice(frame)) {
+        Ok(decoded) => {
+            // An ERROR-flagged frame is a reply the caller is waiting on, whatever opcode it
+            // rides under — the flag outranks the opcode's class.
+            if decoded.header.is_error() {
+                return false;
+            }
+            match migo_protocol::Opcode::from_wire(decoded.header.opcode) {
+                // Only a class that already tolerates loss may take a lossy ride. Typing,
+                // reactions, presence — the ephemeral, high-frequency signals where skipping
+                // head-of-line blocking pays — are exactly the ones the wire marks
+                // Coalescable or Droppable.
+                Some(opcode) => !matches!(opcode.class(), DeliveryClass::Critical),
+                None => false,
+            }
+        }
+        Err(_) => false,
+    }
 }
 
 /// Binds the optional QUIC listener and serves it until `shutdown` fires.
@@ -227,7 +359,14 @@ pub async fn spawn_listener(
                                         let context =
                                             RequestContext::at(clock.now()).from_ip(remote.ip());
                                         gateway
-                                            .serve(QuicStreamTransport::new(write, read), context)
+                                            .serve(
+                                                QuicStreamTransport::new(
+                                                    connection.clone(),
+                                                    write,
+                                                    read,
+                                                ),
+                                                context,
+                                            )
                                             .await;
                                     }
                                     Err(quinn::ConnectionError::LocallyClosed) => break,
@@ -320,5 +459,80 @@ mod tests {
         buf.extend_from_slice(&second_wire);
         assert_eq!(take_frame(&mut buf).unwrap().unwrap(), first_body);
         assert_eq!(take_frame(&mut buf).unwrap().unwrap(), second_body);
+    }
+
+    /// One encoded frame for an opcode, so the datagram-eligibility tests speak the real wire
+    /// bytes the transport is actually handed.
+    fn opcode_frame(opcode: migo_protocol::Opcode, payload: &[u8]) -> Bytes {
+        Frame::simple(opcode.to_wire(), 0, Bytes::copy_from_slice(payload))
+            .encode()
+            .expect("encodes")
+    }
+
+    #[test]
+    fn a_critical_frame_never_rides_a_datagram() {
+        // A message is the one record the session cannot afford to lose: the wire says so with
+        // its class, and the transport must agree.
+        let frame = opcode_frame(migo_protocol::Opcode::MessageSend, b"payload");
+        assert!(
+            !frame_may_ride_datagram(&frame),
+            "a Critical frame must stay on the reliable stream"
+        );
+    }
+
+    #[test]
+    fn a_coalescable_frame_may_ride_a_datagram() {
+        // Typing is the ephemeral, high-frequency signal the datagram binding exists for: an
+        // old one landing late (or never) is the outcome the class already promises.
+        let frame = opcode_frame(migo_protocol::Opcode::Typing, b"payload");
+        assert!(
+            frame_may_ride_datagram(&frame),
+            "a Coalescable frame may take the lossy ride"
+        );
+    }
+
+    #[test]
+    fn an_error_reply_never_rides_a_datagram() {
+        // An ERROR-flagged frame is a reply the caller is waiting on, whatever opcode it rides
+        // under — the flag must outrank the opcode's class.
+        let header =
+            migo_wire::FrameHeader::new(migo_protocol::Opcode::Typing.to_wire(), 0).error();
+        let frame = migo_wire::Frame::new(header, Bytes::new())
+            .encode()
+            .expect("encodes");
+        assert!(
+            !frame_may_ride_datagram(&frame),
+            "an ERROR reply must stay on the reliable stream"
+        );
+    }
+
+    #[test]
+    fn a_droppable_frame_may_ride_a_datagram() {
+        let frame = opcode_frame(migo_protocol::Opcode::CallStats, b"payload");
+        assert!(
+            frame_may_ride_datagram(&frame),
+            "a Droppable frame may take the lossy ride"
+        );
+    }
+
+    #[test]
+    fn a_malformed_frame_falls_back_to_the_stream() {
+        assert!(
+            !frame_may_ride_datagram(b"not a frame"),
+            "bytes that do not decode must not take a lossy ride"
+        );
+    }
+
+    #[test]
+    fn an_unknown_opcode_falls_back_to_the_stream() {
+        // A future opcode this build does not know cannot have its class judged, so it must
+        // take the reliable path rather than guess.
+        let frame = migo_wire::Frame::simple(9_999, 0, Bytes::new())
+            .encode()
+            .expect("encodes");
+        assert!(
+            !frame_may_ride_datagram(&frame),
+            "an unknown opcode must stay on the reliable stream"
+        );
     }
 }

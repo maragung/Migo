@@ -71,8 +71,8 @@ use async_trait::async_trait;
 use migo_core::config::StoreConfig;
 use migo_core::{Error, Id, Result, Secret, Timestamp};
 use migo_protocol::{
-    fault, ConversationKind, ConversationRole, EncryptionMode, MessageKind, MlDsaPurpose, Platform,
-    RelationshipKind, RoomKind, RoomRole,
+    codes, fault, ConversationKind, ConversationRole, EncryptionMode, MessageKind, MlDsaPurpose,
+    Platform, RelationshipKind, RoomKind, RoomRole,
 };
 use sea_orm::sea_query::{
     Alias, Expr, ExprTrait, Func, IntoCondition, LikeExpr, LockBehavior, LockType, NullOrdering,
@@ -95,14 +95,14 @@ use crate::model::{
     advanced_token, game_status, notification_kind, Account, AccountStatus, AdvanceGame, Appended,
     AuditEntry, BadgeAward, Bot, CappedXpAward, Conversation, ConversationMember,
     ConversationPosition, ConversationSummary, Currency, Cursor, Device, DeviceStatus, Entitlement,
-    EntitlementPosition, GameSession, Gender, GiftSent, GlobalAdmin, IdentityKeyStatus, KeyBundle,
-    LedgerAccount, LedgerAccountKind, LedgerLeg, LedgerPosition, LedgerTransaction, MediaObject,
-    NewAccount, NewBot, NewDevice, NewGame, NewMessage, NewModerationAction, NewOutboxEvent,
-    NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward, Notification, NotificationPosition,
-    OutboxRecord, Patch, PeerRecord, Posted, Profile, ProfilePatch, Progression, PublishedKeys,
-    PushRegistration, PushTarget, Receipt, Relationship, Report, RevokeReason, Room, RoomMember,
-    RoomNetworkBan, RoomPosition, Scope, Session, Standing, StoredMessage, Visibility,
-    WalletStatus, XpCaps, XpChange,
+    EntitlementPosition, GameSession, Gender, GiftReceipt, GiftSent, GlobalAdmin,
+    IdentityKeyStatus, KeyBundle, LedgerAccount, LedgerAccountKind, LedgerLeg, LedgerPosition,
+    LedgerTransaction, MediaObject, NewAccount, NewBot, NewDevice, NewGame, NewMessage,
+    NewModerationAction, NewOutboxEvent, NewPeer, NewRoom, NewSession, NewTransaction, NewXpAward,
+    Notification, NotificationPosition, OutboxRecord, Patch, PeerRecord, Posted, Profile,
+    ProfilePatch, Progression, PublishedKeys, PushRegistration, PushTarget, Receipt, Relationship,
+    Report, RevokeReason, Room, RoomMember, RoomNetworkBan, RoomPosition, Scope, Session, Standing,
+    StoredMessage, Visibility, WalletStatus, XpCaps, XpChange,
 };
 use crate::traits::{
     canonical_country, clamp_limit, AccountStore, BotStore, CaptchaRow, CaptchaStore,
@@ -4462,6 +4462,56 @@ impl PostgresStore {
         let legs = legs_of(&self.db, row.tx_id).await?;
         Ok(Some(transaction_of(row, legs)))
     }
+
+    /// The delivery a transaction wrote, read back from the rows it wrote.
+    ///
+    /// Section 153's mismatch rule compares a retry against what the original did,
+    /// and the parts of a purchase that are not money — which gift, which item —
+    /// live in the receipt rows, not in the legs. One transaction delivers at most
+    /// one thing, so the gift probe short-circuits the entitlement read.
+    async fn delivery_of(&self, tx_id: Id) -> Result<Option<Receipt>> {
+        let gift = entity::gift_sent::Entity::find()
+            .filter(entity::gift_sent::Column::TxId.eq(uuid_of(tx_id)))
+            .one(&self.db)
+            .await
+            .context("delivery_of: read gift")?;
+        if let Some(row) = gift {
+            return Ok(Some(Receipt::Gift(GiftReceipt {
+                gift_id: id_of(row.gift_id),
+                sender_id: id_of(row.sender_id),
+                recipient_id: id_of(row.recipient_id),
+                gift_code: row.gift_code,
+                conversation_id: row.conversation_id.map(id_of),
+            })));
+        }
+        let entitlement = entity::entitlement::Entity::find()
+            .filter(entity::entitlement::Column::TxId.eq(uuid_of(tx_id)))
+            .one(&self.db)
+            .await
+            .context("delivery_of: read entitlement")?;
+        Ok(entitlement.map(|row| Receipt::Entitlement { sku: row.sku }))
+    }
+
+    /// Refuses a retry whose key was already spent on a different payload.
+    ///
+    /// [`NewTransaction::replays`] decides what "the same payload" is; this reads
+    /// back what the original delivered and answers for the store. Called on both
+    /// paths that return a duplicate — the key found up front, and the race loser
+    /// that discovers the winner through the unique constraint — so no route to a
+    /// duplicate can skip the comparison.
+    async fn refuse_a_reused_key(
+        &self,
+        new: &NewTransaction,
+        stored: &LedgerTransaction,
+    ) -> Result<()> {
+        if new.replays(stored, self.delivery_of(stored.tx_id).await?.as_ref()) {
+            return Ok(());
+        }
+        Err(fault::error(
+            codes::IDEMPOTENCY_MISMATCH,
+            "this idempotency key was already used for a different transaction",
+        ))
+    }
 }
 
 #[async_trait]
@@ -4546,8 +4596,11 @@ impl EconomyStore for PostgresStore {
     async fn post_transaction(&self, new: NewTransaction) -> Result<Posted> {
         // The retry key is checked before anything else. A retry of a transaction
         // that was already accepted has to read back the original, not be judged
-        // again against rules that may have moved since.
+        // again against rules that may have moved since — and a key that names a
+        // different payload never gets that far: section 153 answers
+        // IDEMPOTENCY_MISMATCH rather than letting one key stand for two payloads.
         if let Some(existing) = self.transaction_by_key(&new.idempotency_key).await? {
+            self.refuse_a_reused_key(&new, &existing).await?;
             return Ok(Posted::Duplicate(existing));
         }
         if new.legs.len() < 2 {
@@ -4692,11 +4745,15 @@ impl EconomyStore for PostgresStore {
                     .rollback()
                     .await
                     .context("post_transaction: rollback")?;
-                return self
+                let stored = self
                     .transaction_by_key(&new.idempotency_key)
                     .await?
-                    .map(Posted::Duplicate)
-                    .ok_or_else(|| fault::internal("retry key conflicted with nothing"));
+                    .ok_or_else(|| fault::internal("retry key conflicted with nothing"))?;
+                // The race loser is still a retry, so it still faces the mismatch
+                // rule: losing the race to a different payload under the same key
+                // is the bug section 153 exists to report.
+                self.refuse_a_reused_key(&new, &stored).await?;
+                return Ok(Posted::Duplicate(stored));
             }
             return Err(on_conflict(error, "transaction", |name| match name {
                 "ledger_transaction_pkey" => Some(fault::already_exists("transaction")),

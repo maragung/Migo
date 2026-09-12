@@ -153,6 +153,18 @@ export class MessagingDomain {
   /** Messages we could not open yet, keyed by `${conversationId}|${senderDevice}`. */
   readonly #pending = new Map<string, MessageEvent[]>();
 
+  /**
+   * The highest contiguous sequence number held per conversation: section 158's local `last_seq`.
+   *
+   * Every message routes through the same path — live delivery and sync replay both — so this map
+   * advances exactly when the client becomes entitled to claim a prefix: a sequence one past the
+   * watermark extends it, anything at or below is a redelivery, and anything further ahead is a gap
+   * that holds the watermark where it stands until the missing pages arrive. The first message a
+   * conversation ever delivers becomes the floor (history below it may be gone — the server's
+   * `Truncated` — or simply unfetched, which is the caller's floor to choose, not this map's).
+   */
+  readonly #watermarks = new Map<Id, number>();
+
   #unsubscribes: Array<() => void> = [];
 
   constructor(
@@ -206,6 +218,20 @@ export class MessagingDomain {
   onReceipt(handler: Listener<MessageReceipt>): () => void {
     this.#receiptListeners.add(handler);
     return () => this.#receiptListeners.delete(handler);
+  }
+
+  /**
+   * The highest sequence number this client holds contiguously for a conversation.
+   *
+   * Section 158's reconnect order asks the client to compare the server's `last_seq` against its
+   * own and sync *only* the gap; this is the local half of that comparison. `undefined` means
+   * nothing has been ingested for the conversation yet, so the caller picks its own floor (a
+   * fresh thread replays from the beginning; one whose history is gone replays from whatever the
+   * server can still serve). A reconnect where this survives says exactly where to resume: one
+   * past this number.
+   */
+  watermark(conversationId: Id): number | undefined {
+    return this.#watermarks.get(conversationId);
   }
 
   /**
@@ -360,6 +386,7 @@ export class MessagingDomain {
 
   /** Routes one inbound message event by kind. */
   #onMessageEvent(event: MessageEvent): void {
+    this.#trackWatermark(event);
     if (event.deleted === true) {
       this.#deliver(this.#deletionListeners, {
         messageId: event.messageId,
@@ -376,6 +403,23 @@ export class MessagingDomain {
       return;
     }
     this.#onContent(event);
+  }
+
+  /**
+   * Advances the conversation's contiguous watermark, or notes a gap by standing still.
+   *
+   * Tombstones count: a deletion occupies a sequence number like any message, so the prefix this
+   * map describes is of *events*, not of content. Called before dispatch so both listeners and
+   * the crypto layers below see the same accounting a later `watermark` read reports.
+   */
+  #trackWatermark(event: MessageEvent): void {
+    const held = this.#watermarks.get(event.conversationId);
+    if (held === undefined || event.seq === held + 1) {
+      // The floor, or the next brick on top of it.
+      this.#watermarks.set(event.conversationId, event.seq);
+    }
+    // At or below: a redelivery the caller's own dedup handles. Above held + 1: a gap — the
+    // watermark waits for the missing pages, so a reconnect resyncs from what is truly held.
   }
 
   /**
