@@ -66,7 +66,7 @@
 //! counter the composition root bumps, so it can answer
 //! [`routing_epoch_stale`](migo_protocol::fault::routing_epoch_stale) for a request made
 //! against a stale view, and adopt the newer epoch a refusing peer names through
-//! [`Mesh::refresh_routing`](traits::Mesh::refresh_routing); the table those requests route
+//! [`Mesh::refresh_routing`]; the table those requests route
 //! against lives above. And it never reads a message: a federated payload is a sealed
 //! envelope, opaque bytes it stores and forwards without opening.
 //!
