@@ -1032,11 +1032,19 @@ mod tests {
             "fifty percent of two hundred accounts is about a hundred, got {admitted}"
         );
 
-        // A bit the node does not advertise is not the rollout's to grant.
+        // The gate only ever trims; it never grants. A base set that does not carry
+        // the staged feature passes through untouched, and the staged feature cannot
+        // sneak into a base that never advertised it.
+        let unadvertised = migo_protocol::features::RICH_PRESENCE;
         assert_eq!(
-            half.admit(migo_protocol::features::RICH_PRESENCE, Some(key), session),
+            half.admit(unadvertised, Some(key), session),
+            unadvertised,
+            "a bit the node advertised but did not stage passes through untouched"
+        );
+        assert_eq!(
+            half.admit(0, Some(key), session),
             0,
-            "the gate only trims advertised bits; it never grants unadvertised ones"
+            "a bit the node never advertised is not the rollout's to grant"
         );
 
         let error = StagedRollout::build(&rollout("teapot", 50))
