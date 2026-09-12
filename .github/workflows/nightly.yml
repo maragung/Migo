@@ -14,10 +14,17 @@
 # edit ci.yml, and the point of this file is to *watch* that one, not to refactor it.
 # When a job appears there, it belongs here too; the duplication is the contract.
 #
-# Beyond what CI runs, this workflow adds the two-node smoke (`make smoke-2node`):
-# two real migod instances, each with its own PostgreSQL database, driving the
-# TypeScript chatbot through register → conversation → ten sealed round-trips over
-# the gateway. No unit test exercises the binary end to end; this one does.
+# Beyond what CI runs, this workflow adds two smoke tests. The two-node smoke
+# (`make smoke-2node`): two real migod instances, each with its own PostgreSQL
+# database, driving the TypeScript chatbot through register → conversation → ten
+# sealed round-trips over the gateway. No unit test exercises the binary end to
+# end; this one does. And the infra stack smoke (`make infra-smoke`): the
+# compose stack from infra/, built and booted exactly as its README says a
+# person would, then asserted on what it serves — the one test that can catch a
+# Dockerfile or compose regression, because nothing else in the repository ever
+# starts these containers. Both live here rather than in ci.yml on purpose: each
+# costs a cold build of the whole workspace, and the nightly cadence matches the
+# failure classes they watch (protocol paths, image drift, deployment rot).
 
 name: Nightly
 
@@ -443,3 +450,38 @@ jobs:
           name: 2node-logs
           path: tools/2node/logs/
           retention-days: 7
+
+  # ------------------------------------------------------------------ infra smoke
+  # The one surface nothing else in the repository runs: the containers. `make
+  # infra-smoke` builds the two images from this tree (a release artifact could
+  # only vouch for the commit it was tagged from, never for the tree under test)
+  # and boots the full compose stack — server, PostgreSQL, Redis, web — with the
+  # README's own quick-start command, waits for it to be healthy, and asserts on
+  # behaviour: the probes and /v1/config answer, an account registered through
+  # REST lands as a row in the Postgres container (not in a silent in-memory
+  # fallback), server-written keys appear in the Redis container (the rate
+  # limiter degrades silently when the cache is unreachable, so only that
+  # proves the backend), and the web container serves the exported bundle on
+  # its published port. The script dumps the container logs before teardown on
+  # the failure path only, and always tears down.
+  #
+  # Not in ci.yml, deliberately. This job pays a cold in-container compile of
+  # the whole Rust workspace plus a Next.js build, twenty-plus minutes that
+  # share no cache with any other job, and `make ci` gates every pull request.
+  # The failures it exists for — a Dockerfile that rotted as the workspace
+  # grew, a base image that quietly moved, a compose wiring regression —
+  # surface within a day, which is this workflow's cadence. It also runs on
+  # workflow_dispatch, so a failure can be reproduced by hand without waiting
+  # for 03:17.
+  infra-smoke:
+    name: Infra stack smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner's Docker daemon and compose v2 are preinstalled; the script
+      # checks the daemon is reachable before it starts, so a broken runner
+      # fails in seconds with a nameable cause rather than after the build.
+      - name: Build, boot and prove the compose stack
+        run: make infra-smoke
