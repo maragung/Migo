@@ -2269,6 +2269,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "migo-sfu"
+version = "0.1.0"
+dependencies = [
+ "migo-core",
+ "migo-protocol",
+ "parking_lot",
+]
+
+[[package]]
 name = "migo-social"
 version = "0.1.0"
 dependencies = [

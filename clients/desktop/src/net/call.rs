@@ -427,8 +427,10 @@ impl Calls {
     }
 
     /// Whether a call occupies this device — an ended call still on screen does not block a new
-    /// one, but a placement, an accept, or a ring does.
-    fn busy(&self) -> bool {
+    /// one, but a placement, an accept, or a ring does. `pub(crate)` because the worker asks
+    /// it before opening the microphone for a recording: a call owns the device while it
+    /// runs, and section 179 answers that with a pause, not a fight.
+    pub(crate) fn busy(&self) -> bool {
         self.active
             .as_ref()
             .is_some_and(|call| call.state != CallState::Ended)
@@ -613,6 +615,9 @@ impl Worker {
             kind: CallMediaKind::Audio,
             key,
         });
+        // A recording answers a call being placed with a pause — section 179's interruption
+        // rule — and the pause lifts itself when the call is over.
+        self.pause_recording(true);
         self.calls.emit(&self.sink);
         self.calls.pending_turn = Some(call_id);
         arm_later(&self.calls.tick_tx, CallTick::TurnTimeout, TURN_WAIT);
@@ -1219,6 +1224,8 @@ impl Worker {
             return;
         };
         self.calls.keys.remove(&ring.call_id);
+        // The interruption passed: a recording the ring paused picks itself back up.
+        self.resume_recording(true);
         let decline = migo_protocol::CallDecline {
             call_id: ring.call_id,
             reason: CallDeclineReason::Declined.to_wire(),
@@ -1237,12 +1244,16 @@ impl Worker {
         if let Some(place) = self.calls.placing.take() {
             // Nothing was invited yet; there is nothing to cancel on the wire.
             self.calls.keys.remove(&place.call_id);
+            // The call that paused the recording never happened; the pause lifts with it.
+            self.resume_recording(true);
             self.calls.emit(&self.sink);
             return;
         }
         if let Some(answer) = self.calls.answering.take() {
             // The answer never went out; retiring the accept retires the call.
             self.calls.keys.remove(&answer.call_id);
+            // The ring this answer belonged to paused the recording; the retirement lifts it.
+            self.resume_recording(true);
             self.calls.emit(&self.sink);
             return;
         }
@@ -1383,6 +1394,9 @@ impl Worker {
                     kind: CallMediaKind::from_wire(event.media_kind),
                     sealed_offer: event.sealed_offer,
                 });
+                // The ring is the interruption: a recording pauses rather than talking over
+                // the phone, and lifts when the ring is answered one way or the other.
+                self.pause_recording(true);
                 self.calls.emit(&self.sink);
             }
         }
@@ -1716,6 +1730,9 @@ impl Worker {
                     if let Some(ring) = ring {
                         self.calls.keys.remove(&ring.call_id);
                     }
+                    // The ring expired unanswered — the interruption passed, and a recording
+                    // it paused picks itself back up beside the missed-call line.
+                    self.resume_recording(true);
                     self.sink.toast(MISSED_CALL_MESSAGE, ToastKind::Info);
                     self.calls.emit(&self.sink);
                 }
@@ -1893,6 +1910,9 @@ impl Worker {
         call.release_media();
         let id = call.call_id;
         self.calls.keys.remove(&id);
+        // The interruption passed: a recording the call paused picks itself back up. The
+        // ended overlay still waits for its human dismissal — the note does not.
+        self.resume_recording(true);
         self.calls.emit(&self.sink);
     }
 

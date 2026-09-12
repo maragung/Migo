@@ -189,6 +189,18 @@ jobs:
         with:
           node-version: 22
 
+      - name: The lockfile matches the manifests
+        run: cargo metadata --locked --manifest-path server/Cargo.toml --format-version 1 >/dev/null
+        # `--locked` makes cargo refuse rather than rewrite, so a manifest whose
+        # dependency set has moved ahead of server/Cargo.lock fails here instead of
+        # passing every other gate. That hole is not hypothetical: when migo-sfu
+        # joined the workspace its manifest landed without the lock entry, and
+        # nothing on a pull request could see it — the only job that notices is
+        # `vectors-regen`, which is main-only because it pushes. The cost of
+        # missing it there is a red main after the merge, which is exactly the
+        # failure this step moves onto the PR that caused it. Resolution only:
+        # no compilation, so it is seconds, not minutes.
+
       # The -rust half only. This job has a Rust toolchain and no pnpm, so the Prettier
       # half of the same gate runs in `web` — see the note above `fmt-check-rust`.
       - name: Formatting
@@ -464,7 +476,15 @@ jobs:
           # generator change that quietly drops it is the one way the case
           # count can shrink with every other gate green.
           grep -q 'container_root_a_rotated' shared/protocol/vectors/crypto/account-container.json
-          if git diff --quiet; then
+          # The pathspec has to match what the commit below stages, and it is not
+          # decoration: `make vectors` runs the generators through cargo, and a
+          # cargo run rewrites server/Cargo.lock whenever the workspace manifests
+          # have moved ahead of it. A bare `git diff --quiet` sees that unrelated
+          # file, skips the "nothing to commit" exit, and lands on a `git commit`
+          # with an empty index — which fails, and reports a stale-vectors-looking
+          # error for a run whose vectors were in fact current. Naming the pathspec
+          # keeps the guard about the vectors, which is the only thing this job owns.
+          if git diff --quiet -- shared/protocol/vectors; then
             echo 'vectors are current — nothing to commit'
             echo 'committed=false' >> "$GITHUB_OUTPUT"
             exit 0

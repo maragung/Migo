@@ -79,9 +79,16 @@ pub enum Body {
         height: Option<u32>,
         caption: Option<String>,
     },
-    /// A voice note: the media id for the fetch flow, and the playing time the sender
-    /// measured, which is all the bubble can show before anyone presses play.
-    VoiceNote { media_id: Id, duration_ms: u32 },
+    /// A voice note: the media id for the fetch flow, the playing time the sender measured,
+    /// and the sender's own waveform — coarse amplitude bars sampled before the seal, so the
+    /// bubble can draw the note's shape before anyone presses play.
+    VoiceNote {
+        media_id: Id,
+        duration_ms: u32,
+        /// The folded waveform, when the sender sampled one — `None` for a note recorded by
+        /// a client that never sampled, which draws its length alone.
+        waveform: Option<Vec<u8>>,
+    },
     /// An emoji reaction to another message.
     Reaction { emoji: String, target: Id },
     /// A withdrawn message: the row stays so the sequence numbering has no hole, and the
